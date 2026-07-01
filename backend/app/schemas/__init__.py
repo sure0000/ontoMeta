@@ -1,0 +1,528 @@
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+# --- DataHub Input Models ---
+
+
+class DomainInput(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    owner: str | None = None
+
+
+class FieldInput(BaseModel):
+    name: str
+    display_name: str | None = None
+    description: str | None = None
+    data_type: str | None = None
+    is_primary_key: bool = False
+    is_foreign_key: bool = False
+    foreign_key_target: str | None = None
+
+
+class DatasetInput(BaseModel):
+    urn: str
+    name: str
+    display_name: str | None = None
+    description: str | None = None
+    platform: str | None = None
+    container: str | None = None
+    fields: list[FieldInput] = Field(default_factory=list)
+
+
+class LineageInput(BaseModel):
+    source_urn: str
+    target_urn: str
+    lineage_type: str = "table"
+
+
+class LogicEvidenceInput(BaseModel):
+    source_type: str
+    source_ref: str
+    name: str
+    expression: str | None = None
+    description: str | None = None
+
+
+class DataHubDomainBundle(BaseModel):
+    domain: DomainInput
+    datasets: list[DatasetInput] = Field(default_factory=list)
+    lineages: list[LineageInput] = Field(default_factory=list)
+    logic_evidences: list[LogicEvidenceInput] = Field(default_factory=list)
+
+
+class DataHubDatasetOption(BaseModel):
+    """DataHub dataset 搜索结果（含已映射的 ObjectType 信息）。"""
+    urn: str
+    name: str
+    display_name: str | None = None
+    description: str | None = None
+    platform: str | None = None
+    container: str | None = None
+    object_type_id: str | None = None
+    object_type_display_name: str | None = None
+    datahub_url: str | None = None
+
+
+class EnsureObjectTypeRequest(BaseModel):
+    ontology_id: str
+    dataset_urn: str
+    operator: str | None = None
+
+
+# --- Evidence Pack Models ---
+
+
+class ObjectTypeEvidencePack(BaseModel):
+    candidate_name: str
+    display_name: str
+    description: str | None = None
+    source_dataset_urn: str
+    confidence: float = 0.5
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class PropertyEvidencePack(BaseModel):
+    object_candidate_name: str
+    field_name: str
+    display_name: str
+    description: str | None = None
+    data_type: str | None = None
+    semantic_type: str | None = None
+    confidence: float = 0.5
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class RelationEvidencePack(BaseModel):
+    name: str
+    display_name: str
+    source_object: str
+    target_object: str
+    cardinality: str | None = None
+    structure_type: str | None = None
+    description: str | None = None
+    confidence: float = 0.5
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class LogicEvidencePack(BaseModel):
+    name: str
+    display_name: str
+    logic_type: str
+    description: str | None = None
+    expression_summary: str | None = None
+    source_type: str | None = None
+    source_ref: str | None = None
+    confidence: float = 0.5
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class EvidenceBundle(BaseModel):
+    object_types: list[ObjectTypeEvidencePack] = Field(default_factory=list)
+    properties: list[PropertyEvidencePack] = Field(default_factory=list)
+    relations: list[RelationEvidencePack] = Field(default_factory=list)
+    business_logics: list[LogicEvidencePack] = Field(default_factory=list)
+
+
+# --- LLM Draft Output ---
+
+
+class DraftObjectType(BaseModel):
+    name: str
+    display_name: str
+    description: str | None = None
+    source_ref: str | None = None
+    confidence: float = 0.5
+
+
+class DraftProperty(BaseModel):
+    object_type_name: str
+    name: str
+    display_name: str
+    description: str | None = None
+    data_type: str | None = None
+    semantic_type: str | None = None
+    source_field_ref: str | None = None
+    required: bool = False
+    confidence: float = 0.5
+
+
+class DraftRelationType(BaseModel):
+    name: str
+    display_name: str
+    description: str | None = None
+    source_object_type_name: str
+    target_object_type_name: str
+    cardinality: str | None = None
+    structure_type: str | None = None
+    source_evidence: str | None = None
+    confidence: float = 0.5
+
+
+class DraftBusinessLogic(BaseModel):
+    name: str
+    display_name: str
+    logic_type: str
+    description: str | None = None
+    expression_summary: str | None = None
+    source_type: str | None = None
+    source_ref: str | None = None
+    confidence: float = 0.5
+
+
+class DraftBusinessLogicObjectBinding(BaseModel):
+    logic_name: str
+    object_type_name: str
+    role: str = "subject"
+    confidence: float = 0.5
+
+
+class DraftBusinessLogicPropertyBinding(BaseModel):
+    logic_name: str
+    object_type_name: str
+    field_name: str
+    role: str = "input"
+    confidence: float = 0.5
+
+
+class OntologyDraftOutput(BaseModel):
+    object_types: list[DraftObjectType] = Field(default_factory=list)
+    properties: list[DraftProperty] = Field(default_factory=list)
+    relation_types: list[DraftRelationType] = Field(default_factory=list)
+    business_logics: list[DraftBusinessLogic] = Field(default_factory=list)
+    business_logic_object_bindings: list[DraftBusinessLogicObjectBinding] = Field(default_factory=list)
+    business_logic_property_bindings: list[DraftBusinessLogicPropertyBinding] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+# --- API Response Schemas ---
+
+
+class DomainContextSummary(BaseModel):
+    id: str
+    datahub_domain_id: str
+    name: str
+    description: str | None = None
+    owner: str | None = None
+    status: str
+    draft_count: int = 0
+    published_count: int = 0
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DomainContextDetail(DomainContextSummary):
+    datahub_url: str | None = None
+    latest_ontology_id: str | None = None
+    latest_ontology_status: str | None = None
+    published_ontology_id: str | None = None
+    published_ontology_version: int | None = None
+
+
+class OntologySummary(BaseModel):
+    id: str
+    domain_context_id: str
+    version: int
+    status: str
+    generated_at: datetime | None = None
+    published_at: datetime | None = None
+    object_type_count: int = 0
+    relation_type_count: int = 0
+    business_logic_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class PropertyOut(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    description: str | None = None
+    data_type: str | None = None
+    semantic_type: str | None = None
+    source_field_ref: str | None = None
+    required: bool
+    source_confidence: float | None = None
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
+class ObjectTypeSummary(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    description: str | None = None
+    status: str
+    property_count: int = 0
+    relation_count: int = 0
+    business_logic_count: int = 0
+    bound_logic_count: int = 0
+    source_confidence: float | None = None
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ObjectTypeLogicBindingOut(BaseModel):
+    """对象视角下：这个对象作为什么角色参与了哪条业务逻辑。"""
+
+    binding_id: str
+    role: str
+    source: str
+    confidence: float | None = None
+    logic_id: str
+    logic_name: str
+    logic_display_name: str
+    logic_type: str
+    logic_status: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ObjectTypeDetail(ObjectTypeSummary):
+    ontology_id: str | None = None
+    domain_context_id: str | None = None
+    domain_name: str | None = None
+    source_ref: str | None = None
+    datahub_url: str | None = None
+    properties: list[PropertyOut] = Field(default_factory=list)
+    outgoing_relations: list["RelationTypeOut"] = Field(default_factory=list)
+    incoming_relations: list["RelationTypeOut"] = Field(default_factory=list)
+    business_logics: list["BusinessLogicOut"] = Field(default_factory=list)
+    business_logic_bindings: list[ObjectTypeLogicBindingOut] = Field(default_factory=list)
+    version_records: list["VersionRecordOut"] = Field(default_factory=list)
+
+
+class RelationTypeOut(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    description: str | None = None
+    source_object_type_id: str
+    target_object_type_id: str
+    source_object_name: str | None = None
+    target_object_name: str | None = None
+    cardinality: str | None = None
+    structure_type: str | None = None
+    mapping_object_type_id: str | None = None
+    mapping_object_name: str | None = None
+    source_evidence: str | None = None
+    status: str
+    source_confidence: float | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class RelationObjectRef(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    source_ref: str | None = None
+    datahub_url: str | None = None
+
+
+class RelationTypeDetail(RelationTypeOut):
+    ontology_id: str
+    source_object: RelationObjectRef | None = None
+    target_object: RelationObjectRef | None = None
+    mapping_object: RelationObjectRef | None = None
+
+
+class BusinessLogicObjectBindingOut(BaseModel):
+    id: str
+    business_logic_id: str
+    object_type_id: str
+    object_type_name: str | None = None
+    object_type_display_name: str | None = None
+    role: str
+    source: str
+    confidence: float | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BusinessLogicPropertyBindingOut(BaseModel):
+    id: str
+    business_logic_id: str
+    property_id: str
+    property_name: str | None = None
+    property_display_name: str | None = None
+    object_type_id: str | None = None
+    object_type_name: str | None = None
+    role: str
+    source: str
+    confidence: float | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BusinessLogicObjectBindingCreate(BaseModel):
+    business_logic_id: str
+    object_type_id: str
+    role: str = "subject"
+    operator: str | None = None
+
+
+class BusinessLogicPropertyBindingCreate(BaseModel):
+    business_logic_id: str
+    property_id: str
+    role: str = "input"
+    operator: str | None = None
+
+
+class BusinessLogicOut(BaseModel):
+    id: str
+    name: str
+    display_name: str
+    logic_type: str
+    description: str | None = None
+    expression_summary: str | None = None
+    source_type: str | None = None
+    source_ref: str | None = None
+    status: str
+    source_confidence: float | None = None
+    domain_context_id: str | None = None
+    domain_name: str | None = None
+    bound_object_count: int = 0
+    bound_property_count: int = 0
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BusinessLogicDetail(BusinessLogicOut):
+    related_object_types: list[ObjectTypeSummary] = Field(default_factory=list)
+    related_properties: list[PropertyOut] = Field(default_factory=list)
+    object_bindings: list[BusinessLogicObjectBindingOut] = Field(default_factory=list)
+    property_bindings: list[BusinessLogicPropertyBindingOut] = Field(default_factory=list)
+    version_records: list["VersionRecordOut"] = Field(default_factory=list)
+
+
+class VersionRecordOut(BaseModel):
+    id: str
+    entity_type: str
+    entity_id: str
+    version: int
+    diff_summary: str | None = None
+    operator: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DraftProgressOut(BaseModel):
+    task_id: str
+    status: str
+    progress: int
+    message: str | None = None
+    ontology_id: str | None = None
+
+
+class TaskRecordOut(BaseModel):
+    id: str
+    status: str
+    progress: int
+    message: str | None = None
+    ontology_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChangeLogOut(BaseModel):
+    id: str
+    entity_type: str
+    entity_id: str
+    action: str
+    operator: str | None = None
+    change_summary: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ReviewUpdate(BaseModel):
+    status: str
+    operator: str | None = None
+
+
+class ObjectTypeUpdate(BaseModel):
+    name: str | None = None
+    display_name: str | None = None
+    description: str | None = None
+    operator: str | None = None
+
+
+class PropertyUpdate(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    data_type: str | None = None
+    semantic_type: str | None = None
+    operator: str | None = None
+
+
+class RelationTypeUpdate(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    cardinality: str | None = None
+    structure_type: str | None = None
+    mapping_object_type_id: str | None = None
+    source_object_type_id: str | None = None
+    target_object_type_id: str | None = None
+    operator: str | None = None
+
+
+class ConfirmationCreate(BaseModel):
+    ontology_id: str
+    target_type: str
+    target_id: str | None = None
+    action_type: str
+    operator: str | None = None
+    reason: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+class ConfirmationOut(BaseModel):
+    id: str
+    ontology_id: str
+    target_type: str
+    target_id: str | None = None
+    action_type: str
+    confirmation_status: str
+    operator: str | None = None
+    reason: str | None = None
+    confirmed_at: datetime | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class GraphNode(BaseModel):
+    id: str
+    label: str
+    display_name: str
+    status: str
+
+
+class GraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    label: str
+    cardinality: str | None = None
+    relation_id: str | None = None
+
+
+class OntologyGraph(BaseModel):
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)

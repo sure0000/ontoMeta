@@ -1,0 +1,208 @@
+import type {
+  BusinessLogic,
+  BusinessLogicDetail,
+  BusinessLogicObjectBinding,
+  ChangeLog,
+  Confirmation,
+  DataHubDatasetOption,
+  DomainContext,
+  DomainContextDetail,
+  DraftProgress,
+  ObjectTypeDetail,
+  ObjectTypeSummary,
+  OntologyGraph,
+  OntologySummary,
+  Property,
+  RelationType,
+  RelationTypeDetail,
+  TaskRecord,
+} from "./types";
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    try {
+      const parsed = JSON.parse(detail) as { detail?: string | Array<{ msg?: string }> };
+      if (typeof parsed.detail === "string") {
+        throw new Error(parsed.detail);
+      }
+      if (Array.isArray(parsed.detail)) {
+        throw new Error(parsed.detail.map((item) => item.msg).filter(Boolean).join("；") || detail);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message !== detail) {
+        throw err;
+      }
+    }
+    throw new Error(detail || `Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+export const api = {
+  listDomains: () => request<DomainContext[]>("/api/domains"),
+  getDomain: (id: string) => request<DomainContextDetail>(`/api/domains/${id}`),
+  generateDraft: (domainId: string) =>
+    request<DraftProgress>(`/api/domains/${domainId}/generate-draft`, { method: "POST" }),
+  getProgress: (domainId: string) => request<DraftProgress>(`/api/domains/${domainId}/progress`),
+  listTasks: (domainId: string) => request<TaskRecord[]>(`/api/domains/${domainId}/tasks`),
+  getTaskLogs: (domainId: string, taskId: string) =>
+    request<ChangeLog[]>(`/api/domains/${domainId}/tasks/${taskId}/logs`),
+
+  getConfig: () => request<{ datahub_gms_url: string }>("/api/config"),
+
+  searchDatahubDatasets: (params?: { query?: string; ontologyId?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.query) query.set("query", params.query);
+    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
+    const qs = query.toString();
+    return request<DataHubDatasetOption[]>(
+      `/api/datahub/datasets${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  ensureObjectTypeFromDataset: (body: {
+    ontology_id: string;
+    dataset_urn: string;
+    operator?: string;
+  }) =>
+    request<ObjectTypeSummary>("/api/object-types/ensure", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateObjectType: (
+    objectTypeId: string,
+    body: { name?: string; display_name?: string; description?: string },
+  ) =>
+    request<ObjectTypeDetail>(`/api/object-types/${objectTypeId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  prePublishObjectType: (objectTypeId: string) =>
+    request<ObjectTypeSummary>(`/api/object-types/${objectTypeId}/pre-publish`, {
+      method: "PATCH",
+    }),
+
+  updateProperty: (
+    propertyId: string,
+    body: {
+      display_name?: string;
+      description?: string;
+      data_type?: string;
+      semantic_type?: string;
+    },
+  ) =>
+    request<Property>(`/api/properties/${propertyId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  updateRelationType: (
+    relationTypeId: string,
+    body: {
+      display_name?: string;
+      description?: string;
+      cardinality?: string;
+      structure_type?: string;
+      mapping_object_type_id?: string | null;
+      source_object_type_id?: string;
+      target_object_type_id?: string;
+    },
+  ) =>
+    request<RelationType>(`/api/relation-types/${relationTypeId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  prePublishRelationType: (relationTypeId: string) =>
+    request<RelationType>(`/api/relation-types/${relationTypeId}/pre-publish`, {
+      method: "PATCH",
+    }),
+
+  listRelationTypes: (params?: {
+    ontologyId?: string;
+    domainId?: string;
+    publishedOnly?: boolean;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
+    if (params?.domainId) query.set("domain_id", params.domainId);
+    if (params?.publishedOnly) query.set("published_only", "true");
+    const qs = query.toString();
+    return request<RelationType[]>(`/api/relation-types${qs ? `?${qs}` : ""}`);
+  },
+
+  getRelationType: (id: string) => request<RelationTypeDetail>(`/api/relation-types/${id}`),
+
+  listOntologies: (params?: { domainId?: string; publishedOnly?: boolean }) => {
+    const query = new URLSearchParams();
+    if (params?.domainId) query.set("domain_id", params.domainId);
+    if (params?.publishedOnly) query.set("published_only", "true");
+    const qs = query.toString();
+    return request<OntologySummary[]>(`/api/ontologies${qs ? `?${qs}` : ""}`);
+  },
+  getOntology: (id: string) => request<OntologySummary>(`/api/ontologies/${id}`),
+  getOntologyGraph: (id: string) => request<OntologyGraph>(`/api/ontologies/${id}/graph`),
+
+  listObjectTypes: (params?: {
+    ontologyId?: string;
+    domainId?: string;
+    publishedOnly?: boolean;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
+    if (params?.domainId) query.set("domain_id", params.domainId);
+    if (params?.publishedOnly) query.set("published_only", "true");
+    const qs = query.toString();
+    return request<ObjectTypeSummary[]>(`/api/object-types${qs ? `?${qs}` : ""}`);
+  },
+  getObjectType: (id: string) => request<ObjectTypeDetail>(`/api/object-types/${id}`),
+
+  listBusinessLogics: (params?: {
+    ontologyId?: string;
+    domainId?: string;
+    publishedOnly?: boolean;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
+    if (params?.domainId) query.set("domain_id", params.domainId);
+    if (params?.publishedOnly) query.set("published_only", "true");
+    const qs = query.toString();
+    return request<BusinessLogic[]>(`/api/business-logics${qs ? `?${qs}` : ""}`);
+  },
+  getBusinessLogic: (id: string) => request<BusinessLogicDetail>(`/api/business-logics/${id}`),
+
+  bindObjectToLogic: (
+    logicId: string,
+    body: { object_type_id: string; role?: string; operator?: string },
+  ) =>
+    request<BusinessLogicObjectBinding>(
+      `/api/business-logics/${logicId}/object-bindings`,
+      { method: "POST", body: JSON.stringify({ ...body, business_logic_id: logicId }) },
+    ),
+  unbindObjectFromLogic: (bindingId: string) =>
+    request<{ id: string; deleted: boolean }>(
+      `/api/business-logics/object-bindings/${bindingId}`,
+      { method: "DELETE" },
+    ),
+
+  createConfirmation: (body: {
+    ontology_id: string;
+    target_type: string;
+    action_type: string;
+    target_id?: string;
+    reason?: string;
+  }) =>
+    request<Confirmation>("/api/confirmations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  confirmAction: (id: string) =>
+    request<Confirmation>(`/api/confirmations/${id}/confirm`, { method: "POST" }),
+};

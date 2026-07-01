@@ -1,0 +1,440 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database import get_db
+from app.models import ObjectType
+from app.schemas import (
+    BusinessLogicDetail,
+    BusinessLogicObjectBindingCreate,
+    BusinessLogicObjectBindingOut,
+    BusinessLogicOut,
+    BusinessLogicPropertyBindingCreate,
+    BusinessLogicPropertyBindingOut,
+    ChangeLogOut,
+    ConfirmationCreate,
+    ConfirmationOut,
+    DataHubDatasetOption,
+    DomainContextDetail,
+    DomainContextSummary,
+    DraftProgressOut,
+    EnsureObjectTypeRequest,
+    ObjectTypeDetail,
+    ObjectTypeSummary,
+    ObjectTypeUpdate,
+    OntologyGraph,
+    OntologySummary,
+    PropertyOut,
+    PropertyUpdate,
+    RelationTypeDetail,
+    RelationTypeOut,
+    RelationTypeUpdate,
+    TaskRecordOut,
+    VersionRecordOut,
+)
+from app.services.edit import EditService
+from app.services.publish import ConfirmationService
+from app.services.query import OntologyQueryService, WorkspaceService
+
+router = APIRouter()
+workspace = WorkspaceService()
+query = OntologyQueryService()
+confirmation_service = ConfirmationService()
+edit_service = EditService()
+
+
+@router.get("/config")
+def get_app_config():
+    return {"datahub_gms_url": settings.datahub_gms_url}
+
+
+@router.get("/datahub/datasets", response_model=list[DataHubDatasetOption])
+async def search_datahub_datasets(
+    query: str = Query(""),
+    ontology_id: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """搜索 DataHub datasets，未接入时使用 mock 数据。
+
+    若提供 ontology_id，会在结果中标注该 dataset 是否已映射为本体下的 ObjectType。
+    """
+    from app.connectors.datahub import DataHubConnector
+
+    connector = DataHubConnector()
+    datasets = await connector.search_datasets(query)
+
+    options: list[DataHubDatasetOption] = []
+    for ds in datasets:
+        object_type_id = None
+        object_type_display_name = None
+        if ontology_id:
+            existing = (
+                db.query(ObjectType)
+                .filter(
+                    ObjectType.ontology_id == ontology_id,
+                    ObjectType.source_ref == ds.urn,
+                )
+                .first()
+            )
+            if existing:
+                object_type_id = existing.id
+                object_type_display_name = existing.display_name
+        options.append(
+            DataHubDatasetOption(
+                urn=ds.urn,
+                name=ds.name,
+                display_name=ds.display_name,
+                description=ds.description,
+                platform=ds.platform,
+                container=ds.container,
+                object_type_id=object_type_id,
+                object_type_display_name=object_type_display_name,
+                datahub_url=connector.get_dataset_url(ds.urn),
+            )
+        )
+    return options
+
+
+@router.post("/object-types/ensure", response_model=ObjectTypeSummary)
+async def ensure_object_type_from_dataset(
+    data: EnsureObjectTypeRequest,
+    db: Session = Depends(get_db),
+):
+    """根据 DataHub dataset urn 查找或创建对应 ObjectType。"""
+    try:
+        return await edit_service.ensure_object_type_from_dataset(
+            db,
+            ontology_id=data.ontology_id,
+            dataset_urn=data.dataset_urn,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/domains", response_model=list[DomainContextSummary])
+async def list_domains(db: Session = Depends(get_db)):
+    return await workspace.sync_domains(db)
+
+
+@router.get("/domains/{domain_id}", response_model=DomainContextDetail)
+def get_domain(domain_id: str, db: Session = Depends(get_db)):
+    detail = workspace.get_domain(db, domain_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    return detail
+
+
+@router.post("/domains/{domain_id}/generate-draft", response_model=DraftProgressOut)
+async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
+    try:
+        return await workspace.start_draft_generation(db, domain_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/domains/{domain_id}/progress", response_model=DraftProgressOut)
+def get_progress(domain_id: str, db: Session = Depends(get_db)):
+    progress = workspace.get_progress(db, domain_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="No generation task found")
+    return progress
+
+
+@router.get("/domains/{domain_id}/tasks", response_model=list[TaskRecordOut])
+def list_domain_tasks(domain_id: str, db: Session = Depends(get_db)):
+    domain = workspace.get_domain(db, domain_id)
+    if not domain:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    return workspace.list_tasks(db, domain_id)
+
+
+@router.get("/domains/{domain_id}/tasks/{task_id}/logs", response_model=list[ChangeLogOut])
+def get_task_logs(domain_id: str, task_id: str, db: Session = Depends(get_db)):
+    try:
+        return workspace.get_task_logs(db, domain_id, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/ontologies", response_model=list[OntologySummary])
+def list_ontologies(
+    domain_id: str | None = Query(None),
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    return query.list_ontologies(db, domain_context_id=domain_id, published_only=published_only)
+
+
+@router.get("/ontologies/{ontology_id}", response_model=OntologySummary)
+def get_ontology(ontology_id: str, db: Session = Depends(get_db)):
+    ontology = query.get_ontology(db, ontology_id)
+    if not ontology:
+        raise HTTPException(status_code=404, detail="Ontology not found")
+    return ontology
+
+
+@router.get("/ontologies/{ontology_id}/object-types", response_model=list[ObjectTypeSummary])
+def list_object_types_by_ontology(ontology_id: str, db: Session = Depends(get_db)):
+    return query.list_object_types(db, ontology_id=ontology_id)
+
+
+@router.get("/ontologies/{ontology_id}/graph", response_model=OntologyGraph)
+def get_ontology_graph(ontology_id: str, db: Session = Depends(get_db)):
+    return query.get_ontology_graph(db, ontology_id)
+
+
+@router.get("/ontologies/{ontology_id}/versions", response_model=list[VersionRecordOut])
+def list_ontology_versions(ontology_id: str, db: Session = Depends(get_db)):
+    return query.list_versions(db, ontology_id)
+
+
+@router.get("/object-types", response_model=list[ObjectTypeSummary])
+def list_object_types(
+    ontology_id: str | None = Query(None),
+    domain_id: str | None = Query(None),
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    return query.list_object_types(
+        db,
+        ontology_id=ontology_id,
+        domain_context_id=domain_id,
+        published_only=published_only,
+    )
+
+
+@router.get("/object-types/{object_type_id}", response_model=ObjectTypeDetail)
+def get_object_type(object_type_id: str, db: Session = Depends(get_db)):
+    obj = query.get_object_type(db, object_type_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object type not found")
+    return obj
+
+
+@router.patch("/object-types/{object_type_id}", response_model=ObjectTypeDetail)
+def update_object_type(
+    object_type_id: str,
+    data: ObjectTypeUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.update_object_type(
+            db,
+            object_type_id,
+            name=data.name,
+            display_name=data.display_name,
+            description=data.description,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/object-types/{object_type_id}/pre-publish", response_model=ObjectTypeSummary)
+def pre_publish_object_type(
+    object_type_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.pre_publish_object_type(db, object_type_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/properties/{property_id}", response_model=PropertyOut)
+def update_property(
+    property_id: str,
+    data: PropertyUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.update_property(
+            db,
+            property_id,
+            display_name=data.display_name,
+            description=data.description,
+            data_type=data.data_type,
+            semantic_type=data.semantic_type,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ontologies/{ontology_id}/relation-types", response_model=list[RelationTypeOut])
+def list_relation_types_by_ontology(ontology_id: str, db: Session = Depends(get_db)):
+    return query.list_relation_types(db, ontology_id=ontology_id)
+
+
+@router.get("/relation-types", response_model=list[RelationTypeOut])
+def list_relation_types(
+    ontology_id: str | None = Query(None),
+    domain_id: str | None = Query(None),
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    return query.list_relation_types(
+        db,
+        ontology_id=ontology_id,
+        domain_context_id=domain_id,
+        published_only=published_only,
+    )
+
+
+@router.get("/relation-types/{relation_type_id}", response_model=RelationTypeDetail)
+def get_relation_type(relation_type_id: str, db: Session = Depends(get_db)):
+    rel = query.get_relation_type(db, relation_type_id)
+    if not rel:
+        raise HTTPException(status_code=404, detail="Relation type not found")
+    return rel
+
+
+@router.patch("/relation-types/{relation_type_id}", response_model=RelationTypeOut)
+def update_relation_type(
+    relation_type_id: str,
+    data: RelationTypeUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.update_relation_type(
+            db,
+            relation_type_id,
+            display_name=data.display_name,
+            description=data.description,
+            cardinality=data.cardinality,
+            structure_type=data.structure_type,
+            mapping_object_type_id=data.mapping_object_type_id,
+            source_object_type_id=data.source_object_type_id,
+            target_object_type_id=data.target_object_type_id,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/relation-types/{relation_type_id}/pre-publish", response_model=RelationTypeOut)
+def pre_publish_relation_type(
+    relation_type_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.pre_publish_relation_type(db, relation_type_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/business-logics", response_model=list[BusinessLogicOut])
+def list_business_logics(
+    ontology_id: str | None = Query(None),
+    domain_id: str | None = Query(None),
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    return query.list_business_logics(
+        db,
+        ontology_id=ontology_id,
+        domain_context_id=domain_id,
+        published_only=published_only,
+    )
+
+
+@router.get("/business-logics/{logic_id}", response_model=BusinessLogicDetail)
+def get_business_logic(logic_id: str, db: Session = Depends(get_db)):
+    logic = query.get_business_logic(db, logic_id)
+    if not logic:
+        raise HTTPException(status_code=404, detail="Business logic not found")
+    return logic
+
+
+@router.post(
+    "/business-logics/{logic_id}/object-bindings",
+    response_model=BusinessLogicObjectBindingOut,
+)
+def create_object_binding(
+    logic_id: str,
+    data: BusinessLogicObjectBindingCreate,
+    db: Session = Depends(get_db),
+):
+    if data.business_logic_id != logic_id:
+        raise HTTPException(status_code=400, detail="business_logic_id mismatch")
+    try:
+        return edit_service.bind_object_to_logic(
+            db,
+            logic_id,
+            data.object_type_id,
+            role=data.role,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/business-logics/object-bindings/{binding_id}")
+def delete_object_binding(binding_id: str, db: Session = Depends(get_db)):
+    try:
+        return edit_service.unbind_object_from_logic(db, binding_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/business-logics/{logic_id}/property-bindings",
+    response_model=BusinessLogicPropertyBindingOut,
+)
+def create_property_binding(
+    logic_id: str,
+    data: BusinessLogicPropertyBindingCreate,
+    db: Session = Depends(get_db),
+):
+    if data.business_logic_id != logic_id:
+        raise HTTPException(status_code=400, detail="business_logic_id mismatch")
+    try:
+        return edit_service.bind_property_to_logic(
+            db,
+            logic_id,
+            data.property_id,
+            role=data.role,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/business-logics/property-bindings/{binding_id}")
+def delete_property_binding(binding_id: str, db: Session = Depends(get_db)):
+    try:
+        return edit_service.unbind_property_from_logic(db, binding_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/confirmations", response_model=ConfirmationOut)
+def create_confirmation(data: ConfirmationCreate, db: Session = Depends(get_db)):
+    return confirmation_service.create(db, data)
+
+
+@router.get("/confirmations/{confirmation_id}", response_model=ConfirmationOut)
+def get_confirmation(confirmation_id: str, db: Session = Depends(get_db)):
+    item = confirmation_service.get(db, confirmation_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Confirmation not found")
+    return item
+
+
+@router.post("/confirmations/{confirmation_id}/confirm", response_model=ConfirmationOut)
+def confirm_action(confirmation_id: str, db: Session = Depends(get_db)):
+    try:
+        return confirmation_service.confirm(db, confirmation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/confirmations/{confirmation_id}/cancel", response_model=ConfirmationOut)
+def cancel_action(confirmation_id: str, db: Session = Depends(get_db)):
+    try:
+        return confirmation_service.cancel(db, confirmation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
