@@ -6,7 +6,7 @@ export function resolveDataHubDatasetUrl(
   if (datahubUrl) return datahubUrl;
   if (!sourceRef) return undefined;
 
-  const base = (datahubBase || "http://localhost:8080").replace(/\/$/, "");
+  const base = (datahubBase || "http://localhost:9002").replace(/\/$/, "");
   const urn = sourceRef.startsWith("urn:")
     ? sourceRef
     : `urn:li:dataset:(urn:li:dataPlatform:hive,${sourceRef},PROD)`;

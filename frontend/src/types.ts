@@ -254,3 +254,35 @@ export interface Confirmation {
   confirmed_at?: string;
   created_at: string;
 }
+
+export interface LlmModelOption {
+  id: string;
+  label: string;
+  description: string;
+  deprecated?: boolean;
+}
+
+export interface LlmServiceConfig {
+  id: string;
+  name: string;
+  provider: string;
+  api_base_url: string;
+  model: string;
+  is_default: boolean;
+  enabled: boolean;
+  use_mock: boolean;
+  api_key_set: boolean;
+  api_key_hint?: string;
+  api_key?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DatahubSettings {
+  gms_url: string;
+  frontend_url: string;
+  token_set: boolean;
+  token_hint?: string;
+  use_mock: boolean;
+  updated_at: string;
+}

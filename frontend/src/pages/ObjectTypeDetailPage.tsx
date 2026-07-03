@@ -152,7 +152,9 @@ export function ObjectTypeDetailPage() {
           setDatahubBase(extractDataHubBase(domain.datahub_url));
         } else {
           const config = await api.getConfig();
-          setDatahubBase(config.datahub_gms_url);
+          setDatahubBase(
+            config.datahub_frontend_url ?? config.datahub_gms_url,
+          );
         }
         if (detail?.ontology_id) {
           try {

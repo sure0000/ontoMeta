@@ -109,10 +109,22 @@ def _infer_property_bindings(
 class OntologyDraftGenerator:
     """调用 LLM 分步生成本体草稿，Mock 模式下基于证据包规则生成。"""
 
-    def __init__(self) -> None:
-        self.use_mock = settings.use_mock_llm or not settings.openai_api_key
-        self.client = OpenAI(api_key=settings.openai_api_key) if not self.use_mock else None
-        self.model = settings.openai_model
+    def __init__(self, runtime_config=None) -> None:
+        if runtime_config is None:
+            self.use_mock = settings.use_mock_llm or not settings.openai_api_key
+            self.client = OpenAI(api_key=settings.openai_api_key) if not self.use_mock else None
+            self.model = settings.openai_model
+        else:
+            self.use_mock = runtime_config.use_mock or not runtime_config.api_key
+            self.client = (
+                OpenAI(
+                    api_key=runtime_config.api_key,
+                    base_url=runtime_config.api_base_url,
+                )
+                if not self.use_mock
+                else None
+            )
+            self.model = runtime_config.model
 
     async def generate(self, evidence: EvidenceBundle) -> OntologyDraftOutput:
         if self.use_mock:

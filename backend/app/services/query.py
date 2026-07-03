@@ -739,8 +739,9 @@ class OntologyQueryService:
         self, db: Session, obj: ObjectType
     ) -> tuple[str | None, str | None]:
         from app.connectors.datahub import DataHubConnector
+        from app.services.settings_service import SettingsService
 
-        datahub = DataHubConnector()
+        datahub = DataHubConnector(SettingsService().get_datahub_runtime(db))
         if obj.source_ref:
             return obj.source_ref, datahub.get_dataset_url(obj.source_ref)
 
@@ -773,18 +774,26 @@ class WorkspaceService:
     """工作区：数据域同步与草稿生成。"""
 
     def __init__(self) -> None:
-        from app.connectors.datahub import DataHubConnector
-        from app.services.draft_generator import OntologyDraftGenerator
         from app.services.evidence_builder import EvidenceBuilder
         from app.services.publish import DraftPersistenceService
+        from app.services.settings_service import SettingsService
 
-        self.datahub = DataHubConnector()
+        self.settings_service = SettingsService()
         self.evidence_builder = EvidenceBuilder()
-        self.draft_generator = OntologyDraftGenerator()
         self.persistence = DraftPersistenceService()
 
+    def _datahub(self, db: Session):
+        from app.connectors.datahub import DataHubConnector
+
+        return DataHubConnector(self.settings_service.get_datahub_runtime(db))
+
+    def _draft_generator(self, db: Session):
+        from app.services.draft_generator import OntologyDraftGenerator
+
+        return OntologyDraftGenerator(self.settings_service.get_llm_runtime(db))
+
     async def sync_domains(self, db: Session) -> list[DomainContextSummary]:
-        domains = await self.datahub.list_domains()
+        domains = await self._datahub(db).list_domains()
         for domain in domains:
             existing = (
                 db.query(DomainContext)
@@ -856,9 +865,10 @@ class WorkspaceService:
             .first()
         )
         published = OntologyQueryService().get_published_ontology(db, domain_id)
+        datahub = self._datahub(db)
         return DomainContextDetail(
             **summary.model_dump(),
-            datahub_url=self.datahub.get_domain_url(domain.datahub_domain_id),
+            datahub_url=datahub.get_domain_url(domain.datahub_domain_id),
             latest_ontology_id=latest.id if latest else None,
             latest_ontology_status=latest.status if latest else None,
             published_ontology_id=published.id if published else None,
@@ -881,7 +891,7 @@ class WorkspaceService:
         db.refresh(task)
 
         try:
-            bundle = await self.datahub.fetch_domain_bundle(domain.datahub_domain_id)
+            bundle = await self._datahub(db).fetch_domain_bundle(domain.datahub_domain_id)
             task.progress = 30
             task.message = "正在组装证据包..."
             db.commit()
@@ -891,7 +901,7 @@ class WorkspaceService:
             task.message = "正在生成本体草稿..."
             db.commit()
 
-            draft = await self.draft_generator.generate(evidence)
+            draft = await self._draft_generator(db).generate(evidence)
             task.progress = 80
             task.message = "正在持久化草稿..."
             db.commit()

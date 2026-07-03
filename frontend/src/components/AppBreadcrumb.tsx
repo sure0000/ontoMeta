@@ -84,6 +84,10 @@ async function resolveBreadcrumbs(
     ];
   }
 
+  if (pathname === "/settings") {
+    return [{ label: "设置" }];
+  }
+
   return [{ label: "首页", path: "/workspace" }];
 }
 

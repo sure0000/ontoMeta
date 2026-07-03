@@ -65,9 +65,10 @@ npm run dev
 
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
-| `USE_MOCK_DATAHUB` | 使用 Mock 数据 | `true` |
+| `USE_MOCK_DATAHUB` | 使用 Mock 数据 | `false` |
 | `USE_MOCK_LLM` | 使用规则引擎代替 LLM | `true` |
-| `DATAHUB_GMS_URL` | DataHub GMS 地址 | `http://localhost:8080` |
+| `DATAHUB_GMS_URL` | DataHub GMS API 地址（GraphQL） | `http://localhost:8080` |
+| `DATAHUB_FRONTEND_URL` | DataHub 前端地址（页面链接） | `http://localhost:9002` |
 | `OPENAI_API_KEY` | OpenAI API Key | - |
 | `DATABASE_URL` | 数据库连接 | `sqlite:///./ontometa.db` |
 

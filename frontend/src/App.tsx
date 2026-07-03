@@ -7,6 +7,7 @@ import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
 import { RelationTypeDetailPage } from "./pages/RelationTypeDetailPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/ontology/:objectId" element={<ObjectTypeDetailPage />} />
         <Route path="/business-logic" element={<BusinessLogicPage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   );

@@ -27,8 +27,12 @@ def init_db() -> None:
 
     from app import models  # noqa: F401
     from app.services.relation_structure import infer_relation_structure_type
+    from app.services.settings_service import SettingsService
 
     Base.metadata.create_all(bind=engine)
+
+    with SessionLocal() as db:
+        SettingsService().ensure_defaults(db)
 
     inspector = inspect(engine)
     if "relation_types" not in inspector.get_table_names():

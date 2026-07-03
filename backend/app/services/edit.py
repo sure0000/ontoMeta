@@ -98,6 +98,7 @@ class EditService:
         from app.connectors.datahub import DataHubConnector
         from app.services.evidence_builder import _infer_object_name
         from app.services.query import OntologyQueryService
+        from app.services.settings_service import SettingsService
 
         ontology = db.get(Ontology, ontology_id)
         if not ontology:
@@ -114,11 +115,8 @@ class EditService:
         if existing:
             return OntologyQueryService()._to_object_summary(db, existing)
 
-        connector = DataHubConnector()
-        datasets = await connector.search_datasets("")
-        dataset = next((ds for ds in datasets if ds.urn == dataset_urn), None)
-        if not dataset:
-            raise ValueError("DataHub dataset not found: " + dataset_urn)
+        connector = DataHubConnector(SettingsService().get_datahub_runtime(db))
+        dataset = await connector.get_dataset_by_urn(dataset_urn)
 
         object_name = _infer_object_name(dataset.name)
         candidate_name = object_name

@@ -5,9 +5,12 @@ import type {
   ChangeLog,
   Confirmation,
   DataHubDatasetOption,
+  DatahubSettings,
   DomainContext,
   DomainContextDetail,
   DraftProgress,
+  LlmModelOption,
+  LlmServiceConfig,
   ObjectTypeDetail,
   ObjectTypeSummary,
   OntologyGraph,
@@ -53,7 +56,8 @@ export const api = {
   getTaskLogs: (domainId: string, taskId: string) =>
     request<ChangeLog[]>(`/api/domains/${domainId}/tasks/${taskId}/logs`),
 
-  getConfig: () => request<{ datahub_gms_url: string }>("/api/config"),
+  getConfig: () =>
+    request<{ datahub_gms_url: string; datahub_frontend_url?: string }>("/api/config"),
 
   searchDatahubDatasets: (params?: { query?: string; ontologyId?: string }) => {
     const query = new URLSearchParams();
@@ -205,4 +209,62 @@ export const api = {
     }),
   confirmAction: (id: string) =>
     request<Confirmation>(`/api/confirmations/${id}/confirm`, { method: "POST" }),
+
+  listLlmModels: () => request<LlmModelOption[]>("/api/settings/llm-models"),
+
+  listLlmServices: () => request<LlmServiceConfig[]>("/api/settings/llm-services"),
+
+  getLlmService: (id: string) =>
+    request<LlmServiceConfig>(`/api/settings/llm-services/${id}`),
+
+  createLlmService: (body: {
+    name: string;
+    provider?: string;
+    api_base_url?: string;
+    api_key?: string;
+    model: string;
+    is_default?: boolean;
+    enabled?: boolean;
+    use_mock?: boolean;
+  }) =>
+    request<LlmServiceConfig>("/api/settings/llm-services", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateLlmService: (
+    id: string,
+    body: {
+      name?: string;
+      provider?: string;
+      api_base_url?: string;
+      api_key?: string;
+      model?: string;
+      is_default?: boolean;
+      enabled?: boolean;
+      use_mock?: boolean;
+    },
+  ) =>
+    request<LlmServiceConfig>(`/api/settings/llm-services/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  deleteLlmService: (id: string) =>
+    request<{ id: string; deleted: boolean }>(`/api/settings/llm-services/${id}`, {
+      method: "DELETE",
+    }),
+
+  getDatahubSettings: () => request<DatahubSettings>("/api/settings/datahub"),
+
+  updateDatahubSettings: (body: {
+    gms_url: string;
+    frontend_url: string;
+    token?: string;
+    use_mock?: boolean;
+  }) =>
+    request<DatahubSettings>("/api/settings/datahub", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 };

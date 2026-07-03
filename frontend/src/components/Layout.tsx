@@ -4,6 +4,7 @@ import {
   FolderOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import { Avatar, Layout, Menu, Tooltip } from "antd";
 import { useMemo, useState } from "react";
@@ -16,12 +17,14 @@ const menuItems = [
   { key: "/workspace", icon: <FolderOutlined />, label: "工作区" },
   { key: "/ontology", icon: <ApartmentOutlined />, label: "本体" },
   { key: "/business-logic", icon: <FunctionOutlined />, label: "业务逻辑" },
+  { key: "/settings", icon: <SettingOutlined />, label: "设置" },
 ];
 
 function getSelectedKey(pathname: string) {
   if (pathname.startsWith("/workspace")) return "/workspace";
   if (pathname.startsWith("/ontology")) return "/ontology";
   if (pathname.startsWith("/business-logic")) return "/business-logic";
+  if (pathname.startsWith("/settings")) return "/settings";
   return "/workspace";
 }
 

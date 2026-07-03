@@ -179,23 +179,27 @@ body {
   justify-content: space-between;
   gap: 16px;
   height: var(--om-header-h);
+  line-height: normal;
   padding: 0 28px !important;
   background: var(--om-surface) !important;
   border-bottom: 1px solid var(--om-border);
   position: sticky;
   top: 0;
   z-index: 10;
+  overflow: hidden;
 }
 .app-header-left {
   display: flex;
   align-items: center;
   gap: 14px;
   min-width: 0;
+  flex: 1;
 }
 .app-header-right {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .app-env-badge {
@@ -209,6 +213,8 @@ body {
   background: var(--om-primary-soft);
   color: var(--om-primary);
   border: 1px solid var(--om-primary-border);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .app-env-badge .app-env-dot {
   width: 6px;
@@ -225,17 +231,14 @@ body {
   border-radius: 999px;
   border: 1px solid var(--om-border);
   background: var(--om-surface);
-  cursor: pointer;
+  flex-shrink: 0;
   transition: border-color 0.15s, background 0.15s;
-}
-.app-user:hover {
-  border-color: var(--om-border-strong);
-  background: var(--om-surface-muted);
 }
 .app-user-name {
   font-size: 13px;
   color: var(--om-text);
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .app-content {
@@ -615,8 +618,15 @@ body {
 }
 
 /* ---------- Breadcrumb tweak ---------- */
+.app-breadcrumb {
+  min-width: 0;
+  overflow: hidden;
+}
 .app-breadcrumb .ant-breadcrumb {
   font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .app-breadcrumb .ant-breadcrumb-separator {
   color: var(--om-text-disabled);
@@ -917,6 +927,16 @@ body {
   }
   .app-header {
     padding: 0 16px !important;
+    gap: 8px;
+  }
+  .app-header-right {
+    gap: 8px;
+  }
+  .app-user-name {
+    display: none;
+  }
+  .app-user {
+    padding: 4px;
   }
   .page-header {
     align-items: stretch;

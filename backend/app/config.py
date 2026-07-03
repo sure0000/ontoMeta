@@ -9,8 +9,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./ontometa.db"
 
     datahub_gms_url: str = "http://localhost:8080"
+    datahub_frontend_url: str = "http://localhost:9002"
     datahub_token: str | None = None
-    use_mock_datahub: bool = True
+    use_mock_datahub: bool = False
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"

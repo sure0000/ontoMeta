@@ -137,14 +137,229 @@ MOCK_LOGIC: dict[str, list[LogicEvidenceInput]] = {
     ],
 }
 
+_DATASET_ENTITY_FRAGMENT = """
+fragment DatasetDetails on Dataset {
+  urn
+  name
+  properties { description }
+  platform { name }
+  container { properties { name } }
+  schemaMetadata {
+    fields { fieldPath type nativeDataType description }
+    primaryKeys
+    foreignKeys {
+      name
+      sourceFields { fieldPath }
+      foreignFields { fieldPath }
+      foreignDataset { urn name }
+    }
+  }
+  lineage(input: { direction: DOWNSTREAM, start: 0, count: 50 }) {
+    relationships {
+      entity { urn type ... on Dataset { name } }
+    }
+  }
+}
+"""
+
+_ENTITY_BATCH_SIZE = 20
+_DOMAIN_ENTITY_PAGE_SIZE = 100
+
+
+def _field_path(field_path: str) -> str:
+    return field_path.split(".")[-1] if field_path else field_path
+
+
+def _parse_owner(raw: dict | None) -> str | None:
+    if not raw:
+        return None
+    owners = raw.get("owners") or []
+    for owner in owners:
+        owner_entity = owner.get("owner") or {}
+        props = owner_entity.get("properties") or {}
+        display_name = props.get("displayName") or props.get("fullName")
+        if display_name:
+            return display_name
+        if owner_entity.get("username"):
+            return owner_entity["username"]
+    return None
+
+
+def _parse_domain(raw: dict) -> DomainInput:
+    props = raw.get("properties") or {}
+    return DomainInput(
+        id=raw["urn"],
+        name=props.get("name") or raw["urn"],
+        description=props.get("description"),
+        owner=_parse_owner(raw.get("ownership")),
+    )
+
+
+def _parse_schema_fields(schema_metadata: dict | None) -> list[FieldInput]:
+    if not schema_metadata:
+        return []
+
+    primary_keys = set(schema_metadata.get("primaryKeys") or [])
+    foreign_key_by_source: dict[str, tuple[str, str]] = {}
+    for fk in schema_metadata.get("foreignKeys") or []:
+        source_fields = fk.get("sourceFields") or []
+        foreign_fields = fk.get("foreignFields") or []
+        foreign_dataset = fk.get("foreignDataset") or {}
+        target_table = foreign_dataset.get("name") or _extract_dataset_name(foreign_dataset.get("urn", ""))
+        for idx, source_field in enumerate(source_fields):
+            source_name = _field_path(source_field.get("fieldPath", ""))
+            foreign_name = _field_path(
+                foreign_fields[idx].get("fieldPath", "") if idx < len(foreign_fields) else source_name
+            )
+            if source_name and target_table:
+                foreign_key_by_source[source_name] = (target_table, foreign_name)
+
+    fields: list[FieldInput] = []
+    for field in schema_metadata.get("fields") or []:
+        name = _field_path(field.get("fieldPath", ""))
+        if not name:
+            continue
+        fk_target = None
+        is_foreign_key = False
+        if name in foreign_key_by_source:
+            is_foreign_key = True
+            target_table, target_field = foreign_key_by_source[name]
+            fk_target = f"{target_table}.{target_field}"
+        fields.append(
+            FieldInput(
+                name=name,
+                display_name=field.get("description") or name,
+                description=field.get("description"),
+                data_type=field.get("nativeDataType") or field.get("type"),
+                is_primary_key=name in primary_keys,
+                is_foreign_key=is_foreign_key,
+                foreign_key_target=fk_target,
+            )
+        )
+    return fields
+
+
+def _extract_dataset_name(urn: str) -> str:
+    if not urn:
+        return urn
+    if urn.startswith("urn:li:dataset:"):
+        inner = urn[len("urn:li:dataset:") :]
+        if inner.startswith("(") and inner.endswith(")"):
+            parts = inner[1:-1].split(",")
+            if len(parts) >= 2:
+                return parts[-2]
+    return urn
+
+
+def _extract_container_name(raw: dict) -> str | None:
+    container = raw.get("container") or {}
+    props = container.get("properties") or {}
+    if props.get("name"):
+        return props["name"]
+    urn = raw.get("urn", "")
+    table_ref = _extract_dataset_name(urn)
+    if "." in table_ref:
+        return table_ref.split(".", 1)[0]
+    return None
+
+
+def _parse_dataset_entity(raw: dict) -> DatasetInput:
+    props = raw.get("properties") or {}
+    platform = (raw.get("platform") or {}).get("name")
+    container = _extract_container_name(raw)
+    name = raw.get("name") or _extract_dataset_name(raw.get("urn", ""))
+    return DatasetInput(
+        urn=raw["urn"],
+        name=name,
+        display_name=name,
+        description=props.get("description"),
+        platform=platform,
+        container=container,
+        fields=_parse_schema_fields(raw.get("schemaMetadata")),
+    )
+
+
+def _parse_lineages_from_entities(
+    entities: list[dict],
+    domain_dataset_urns: set[str],
+) -> list[LineageInput]:
+    seen: set[tuple[str, str]] = set()
+    lineages: list[LineageInput] = []
+    for entity in entities:
+        source_urn = entity.get("urn")
+        if not source_urn or source_urn not in domain_dataset_urns:
+            continue
+        lineage = entity.get("lineage") or {}
+        for rel in lineage.get("relationships") or []:
+            target_entity = rel.get("entity") or {}
+            target_urn = target_entity.get("urn")
+            if not target_urn or target_entity.get("type") != "DATASET":
+                continue
+            if target_urn not in domain_dataset_urns:
+                continue
+            key = (source_urn, target_urn)
+            if key in seen:
+                continue
+            seen.add(key)
+            lineages.append(LineageInput(source_urn=source_urn, target_urn=target_urn))
+    return lineages
+
+
+def _parse_query_logic_evidences(dataset: DatasetInput, queries: list[dict]) -> list[LogicEvidenceInput]:
+    source_ref = f"{dataset.container}.{dataset.name}" if dataset.container else dataset.name
+    evidences: list[LogicEvidenceInput] = []
+    for query in queries:
+        props = query.get("properties") or {}
+        statement = props.get("statement") or {}
+        expression = statement.get("value")
+        if not expression:
+            continue
+        if "information_schema" in source_ref or "CREATE ALGORITHM" in expression[:200]:
+            continue
+        name = props.get("name") or query.get("urn", "query")
+        evidences.append(
+            LogicEvidenceInput(
+                source_type=(statement.get("language") or "sql").lower(),
+                source_ref=source_ref,
+                name=name,
+                expression=expression[:2000],
+                description=props.get("description"),
+            )
+        )
+    return evidences
+
+
+def _parse_search_dataset(item: dict) -> DatasetInput:
+    entity = item.get("entity") or item
+    props = entity.get("properties") or {}
+    platform = (entity.get("platform") or {}).get("name")
+    name = entity.get("name") or _extract_dataset_name(entity.get("urn", ""))
+    return DatasetInput(
+        urn=entity["urn"],
+        name=name,
+        display_name=name,
+        description=props.get("description"),
+        platform=platform,
+        container=_extract_container_name(entity),
+    )
+
 
 class DataHubConnector:
-    """对接 DataHub GraphQL / OpenAPI，输出统一内部输入模型。"""
+    """对接 DataHub GraphQL API，输出统一内部输入模型。"""
 
-    def __init__(self) -> None:
-        self.base_url = settings.datahub_gms_url.rstrip("/")
-        self.token = settings.datahub_token
-        self.use_mock = settings.use_mock_datahub
+    def __init__(self, runtime_config=None) -> None:
+        from app.config import settings as env_settings
+
+        if runtime_config is None:
+            self.api_url = env_settings.datahub_gms_url.rstrip("/")
+            self.frontend_url = env_settings.datahub_frontend_url.rstrip("/")
+            self.token = env_settings.datahub_token
+            self.use_mock = env_settings.use_mock_datahub
+        else:
+            self.api_url = runtime_config.gms_url.rstrip("/")
+            self.frontend_url = runtime_config.frontend_url.rstrip("/")
+            self.token = runtime_config.token
+            self.use_mock = runtime_config.use_mock
 
     async def list_domains(self) -> list[DomainInput]:
         if self.use_mock:
@@ -164,8 +379,21 @@ class DataHubConnector:
             )
         return await self._fetch_domain_bundle_from_api(datahub_domain_id)
 
+    async def get_dataset_by_urn(self, dataset_urn: str) -> DatasetInput:
+        if self.use_mock:
+            for items in MOCK_DATASETS.values():
+                for dataset in items:
+                    if dataset.urn == dataset_urn:
+                        return dataset
+            raise ValueError(f"DataHub dataset not found: {dataset_urn}")
+
+        entities = await self._fetch_dataset_entities([dataset_urn])
+        if not entities:
+            raise ValueError(f"DataHub dataset not found: {dataset_urn}")
+        return _parse_dataset_entity(entities[0])
+
     def get_domain_url(self, datahub_domain_id: str) -> str:
-        return f"{self.base_url}/domain/{datahub_domain_id}"
+        return f"{self.frontend_url}/domain/{datahub_domain_id}"
 
     def get_dataset_url(self, dataset_ref: str) -> str:
         from urllib.parse import quote
@@ -173,10 +401,9 @@ class DataHubConnector:
         urn = dataset_ref
         if not dataset_ref.startswith("urn:"):
             urn = f"urn:li:dataset:(urn:li:dataPlatform:hive,{dataset_ref},PROD)"
-        return f"{self.base_url}/dataset/{quote(urn, safe='')}"
+        return f"{self.frontend_url}/dataset/{quote(urn, safe='')}"
 
     async def search_datasets(self, query: str = "") -> list[DatasetInput]:
-        """按关键字搜索 DataHub datasets，未接入时返回 mock 全量。"""
         if self.use_mock:
             keyword = query.strip().lower()
             all_datasets: list[DatasetInput] = []
@@ -198,29 +425,22 @@ class DataHubConnector:
         graphql_query = """
         query searchDatasets($keyword: String!) {
           search(input: { type: DATASET, query: $keyword, start: 0, count: 50 }) {
-            entities {
-              urn
-              ... on Dataset {
-                name
-                properties { description }
-                platform { name }
+            searchResults {
+              entity {
+                urn
+                ... on Dataset {
+                  name
+                  properties { description }
+                  platform { name }
+                }
               }
             }
           }
         }
         """
         data = await self._graphql(graphql_query, {"keyword": query})
-        entities = data.get("search", {}).get("entities", [])
-        return [
-            DatasetInput(
-                urn=item["urn"],
-                name=item.get("name", item["urn"]),
-                display_name=item.get("name"),
-                description=item.get("properties", {}).get("description"),
-                platform=item.get("platform", {}).get("name"),
-            )
-            for item in entities
-        ]
+        results = data.get("search", {}).get("searchResults", [])
+        return [_parse_search_dataset(item) for item in results]
 
     async def _fetch_domains_from_api(self) -> list[DomainInput]:
         query = """
@@ -229,36 +449,164 @@ class DataHubConnector:
             domains {
               urn
               properties { name description }
+              ownership {
+                owners {
+                  owner {
+                    ... on CorpUser {
+                      username
+                      properties { displayName fullName }
+                    }
+                  }
+                }
+              }
             }
           }
         }
         """
         data = await self._graphql(query)
         domains = data.get("listDomains", {}).get("domains", [])
-        return [
-            DomainInput(
-                id=item["urn"],
-                name=item.get("properties", {}).get("name", item["urn"]),
-                description=item.get("properties", {}).get("description"),
-            )
-            for item in domains
-        ]
+        return [_parse_domain(item) for item in domains]
 
     async def _fetch_domain_bundle_from_api(self, datahub_domain_id: str) -> DataHubDomainBundle:
-        # 简化实现：真实环境需扩展 GraphQL 查询
-        domains = await self._fetch_domains_from_api()
-        domain = next((d for d in domains if d.id == datahub_domain_id), None)
-        if not domain:
+        domain_raw = await self._fetch_domain_raw(datahub_domain_id)
+        if not domain_raw:
             raise ValueError(f"Domain not found: {datahub_domain_id}")
-        return DataHubDomainBundle(domain=domain)
+
+        domain = _parse_domain(domain_raw)
+        dataset_urns = await self._fetch_domain_dataset_urns(datahub_domain_id)
+        dataset_entities = await self._fetch_dataset_entities(dataset_urns)
+        datasets = [_parse_dataset_entity(item) for item in dataset_entities]
+
+        domain_urn_set = set(dataset_urns)
+        lineages = _parse_lineages_from_entities(dataset_entities, domain_urn_set)
+
+        logic_evidences: list[LogicEvidenceInput] = []
+        for dataset in datasets:
+            queries = await self._fetch_dataset_queries(dataset.urn)
+            logic_evidences.extend(_parse_query_logic_evidences(dataset, queries))
+
+        return DataHubDomainBundle(
+            domain=domain,
+            datasets=datasets,
+            lineages=lineages,
+            logic_evidences=logic_evidences,
+        )
+
+    async def _fetch_domain_raw(self, datahub_domain_id: str) -> dict | None:
+        query = """
+        query getDomain($urn: String!) {
+          domain(urn: $urn) {
+            urn
+            properties { name description }
+            ownership {
+              owners {
+                owner {
+                  ... on CorpUser {
+                    username
+                    properties { displayName fullName }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        data = await self._graphql(query, {"urn": datahub_domain_id})
+        return data.get("domain")
+
+    async def _fetch_domain_dataset_urns(self, datahub_domain_id: str) -> list[str]:
+        query = """
+        query domainEntities($urn: String!, $start: Int!, $count: Int!) {
+          domain(urn: $urn) {
+            entities(input: { start: $start, count: $count }) {
+              start
+              count
+              total
+              searchResults {
+                entity { urn type }
+              }
+            }
+          }
+        }
+        """
+        urns: list[str] = []
+        start = 0
+        while True:
+            data = await self._graphql(
+                query,
+                {"urn": datahub_domain_id, "start": start, "count": _DOMAIN_ENTITY_PAGE_SIZE},
+            )
+            entities_page = (data.get("domain") or {}).get("entities") or {}
+            results = entities_page.get("searchResults") or []
+            for item in results:
+                entity = item.get("entity") or {}
+                if entity.get("type") == "DATASET" and entity.get("urn"):
+                    urns.append(entity["urn"])
+            total = entities_page.get("total", 0)
+            start += entities_page.get("count", len(results))
+            if start >= total or not results:
+                break
+        return urns
+
+    async def _fetch_dataset_entities(self, urns: list[str]) -> list[dict]:
+        if not urns:
+            return []
+
+        query = _DATASET_ENTITY_FRAGMENT + """
+        query fetchDatasets($urns: [String!]!) {
+          entities(urns: $urns) {
+            ...DatasetDetails
+          }
+        }
+        """
+        entities: list[dict] = []
+        for idx in range(0, len(urns), _ENTITY_BATCH_SIZE):
+            batch = urns[idx : idx + _ENTITY_BATCH_SIZE]
+            data = await self._graphql(query, {"urns": batch})
+            entities.extend(data.get("entities") or [])
+        return [item for item in entities if item.get("urn")]
+
+    async def _fetch_dataset_queries(self, dataset_urn: str) -> list[dict]:
+        query = """
+        query listDatasetQueries($datasetUrn: String!, $start: Int!, $count: Int!) {
+          listQueries(input: { datasetUrn: $datasetUrn, start: $start, count: $count }) {
+            total
+            queries {
+              urn
+              properties {
+                name
+                description
+                source
+                statement { value language }
+              }
+            }
+          }
+        }
+        """
+        queries: list[dict] = []
+        start = 0
+        page_size = 50
+        while True:
+            data = await self._graphql(
+                query,
+                {"datasetUrn": dataset_urn, "start": start, "count": page_size},
+            )
+            page = data.get("listQueries") or {}
+            batch = page.get("queries") or []
+            queries.extend(batch)
+            total = page.get("total", 0)
+            start += len(batch)
+            if start >= total or not batch:
+                break
+        return queries
 
     async def _graphql(self, query: str, variables: dict | None = None) -> dict:
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
             response = await client.post(
-                f"{self.base_url}/api/graphql",
+                f"{self.api_url}/api/graphql",
                 json={"query": query, "variables": variables or {}},
                 headers=headers,
             )

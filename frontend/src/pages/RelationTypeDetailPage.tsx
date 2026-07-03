@@ -270,7 +270,11 @@ export function RelationTypeDetailPage() {
             ? extractDataHubBase(
                 (domainOrConfig as { datahub_url?: string }).datahub_url,
               )
-            : (domainOrConfig as { datahub_gms_url: string }).datahub_gms_url,
+            : (
+                (domainOrConfig as { datahub_frontend_url?: string; datahub_gms_url: string })
+                  .datahub_frontend_url ??
+                (domainOrConfig as { datahub_gms_url: string }).datahub_gms_url
+              ),
         );
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载失败");
