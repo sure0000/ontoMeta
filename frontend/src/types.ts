@@ -192,12 +192,49 @@ export interface BusinessLogicPropertyBinding {
   created_at: string;
 }
 
+export interface BusinessLogicPropertyOption {
+  property_id: string;
+  property_name: string;
+  property_display_name?: string;
+  object_type_id: string;
+  object_type_name: string;
+  object_type_display_name?: string;
+}
+
+export interface BusinessLogicCreateInput {
+  domain_id: string;
+  name: string;
+  display_name: string;
+  logic_type: string;
+  description?: string;
+  expression_summary?: string;
+  operator?: string;
+}
+
+export interface BusinessLogicUpdateInput {
+  display_name?: string;
+  description?: string;
+  logic_type?: string;
+  expression_summary?: string;
+  operator?: string;
+}
+
+export interface BusinessLogicImportInput {
+  domain_id: string;
+  code: string;
+  source_type?: string;
+  operator?: string;
+}
+
 export interface BusinessLogicDetail extends BusinessLogic {
   related_object_types: ObjectTypeSummary[];
   related_properties?: Property[];
   object_bindings?: BusinessLogicObjectBinding[];
   property_bindings?: BusinessLogicPropertyBinding[];
   version_records?: VersionRecord[];
+  ontology_id?: string;
+  available_object_types: ObjectTypeSummary[];
+  available_properties: BusinessLogicPropertyOption[];
 }
 
 export interface VersionRecord {

@@ -5,14 +5,17 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import ObjectType
+from app.models import BusinessLogic, ObjectType
 from app.schemas import (
+    BusinessLogicCreate,
     BusinessLogicDetail,
+    BusinessLogicImportRequest,
     BusinessLogicObjectBindingCreate,
     BusinessLogicObjectBindingOut,
     BusinessLogicOut,
     BusinessLogicPropertyBindingCreate,
     BusinessLogicPropertyBindingOut,
+    BusinessLogicUpdate,
     ChangeLogOut,
     ConfirmationCreate,
     ConfirmationOut,
@@ -43,6 +46,7 @@ from app.schemas import (
     VersionRecordOut,
 )
 from app.services.edit import EditService
+from app.services.logic_import import LogicImportService
 from app.services.publish import ConfirmationService
 from app.services.query import OntologyQueryService, WorkspaceService
 from app.services.settings_service import SettingsService, mask_secret
@@ -53,6 +57,7 @@ query = OntologyQueryService()
 confirmation_service = ConfirmationService()
 edit_service = EditService()
 settings_service = SettingsService()
+logic_import_service = LogicImportService()
 
 
 def _llm_service_out(service) -> LlmServiceConfigOut:
@@ -536,6 +541,101 @@ def delete_property_binding(binding_id: str, db: Session = Depends(get_db)):
         return edit_service.unbind_property_from_logic(db, binding_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/business-logics", response_model=BusinessLogicDetail)
+def create_business_logic(data: BusinessLogicCreate, db: Session = Depends(get_db)):
+    try:
+        return edit_service.create_business_logic(
+            db,
+            domain_id=data.domain_id,
+            name=data.name,
+            display_name=data.display_name,
+            logic_type=data.logic_type,
+            description=data.description,
+            expression_summary=data.expression_summary,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/business-logics/import", response_model=BusinessLogicDetail)
+async def import_business_logic(data: BusinessLogicImportRequest, db: Session = Depends(get_db)):
+    try:
+        return await logic_import_service.import_from_code(
+            db,
+            domain_id=data.domain_id,
+            code=data.code,
+            source_type=data.source_type,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/business-logics/{logic_id}", response_model=BusinessLogicDetail)
+def update_business_logic(
+    logic_id: str, data: BusinessLogicUpdate, db: Session = Depends(get_db)
+):
+    try:
+        return edit_service.update_business_logic(
+            db,
+            logic_id,
+            display_name=data.display_name,
+            description=data.description,
+            logic_type=data.logic_type,
+            expression_summary=data.expression_summary,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/business-logics/{logic_id}/pre-publish", response_model=BusinessLogicOut)
+def pre_publish_business_logic(logic_id: str, db: Session = Depends(get_db)):
+    try:
+        return edit_service.pre_publish_business_logic(db, logic_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/business-logics/{logic_id}/publish", response_model=ConfirmationOut)
+def publish_business_logic(logic_id: str, db: Session = Depends(get_db)):
+    logic = db.get(BusinessLogic, logic_id)
+    if not logic:
+        raise HTTPException(status_code=404, detail="Business logic not found")
+    confirmation = confirmation_service.create(
+        db,
+        ConfirmationCreate(
+            ontology_id=logic.ontology_id,
+            target_type="business_logic",
+            target_id=logic.id,
+            action_type="publish",
+        ),
+    )
+    return confirmation_service.confirm(db, confirmation.id)
+
+
+@router.delete("/business-logics/{logic_id}")
+def delete_business_logic(logic_id: str, db: Session = Depends(get_db)):
+    logic = db.get(BusinessLogic, logic_id)
+    if not logic:
+        raise HTTPException(status_code=404, detail="Business logic not found")
+    try:
+        confirmation = confirmation_service.create(
+            db,
+            ConfirmationCreate(
+                ontology_id=logic.ontology_id,
+                target_type="business_logic",
+                target_id=logic.id,
+                action_type="delete",
+            ),
+        )
+        confirmation_service.confirm(db, confirmation.id)
+        return {"id": logic_id, "deleted": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/confirmations", response_model=ConfirmationOut)

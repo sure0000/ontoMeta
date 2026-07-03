@@ -16,7 +16,6 @@ import {
   Form,
   Input,
   Modal,
-  Popconfirm,
   Row,
   Select,
   Space,
@@ -66,12 +65,6 @@ const OBJECT_ROLE_LABEL: Record<string, string> = {
   dimension: "维度对象",
   output: "产出对象",
 };
-
-const OBJECT_ROLE_OPTIONS = [
-  { label: "主对象", value: "subject" },
-  { label: "维度对象", value: "dimension" },
-  { label: "产出对象", value: "output" },
-];
 
 interface BasicForm {
   name: string;
@@ -124,11 +117,6 @@ export function ObjectTypeDetailPage() {
   const [obj, setObj] = useState<ObjectTypeDetail | null>(null);
   const [datahubBase, setDatahubBase] = useState<string | undefined>();
   const [properties, setProperties] = useState<Property[]>([]);
-  const [availableLogics, setAvailableLogics] = useState<BusinessLogic[]>([]);
-  const [bindingLogicId, setBindingLogicId] = useState<string | undefined>();
-  const [bindingRole, setBindingRole] = useState<string>("subject");
-  const [bindingLoading, setBindingLoading] = useState(false);
-  const [unbindingId, setUnbindingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [prePublishing, setPrePublishing] = useState(false);
@@ -178,14 +166,9 @@ export function ObjectTypeDetailPage() {
         }
         if (detail?.ontology_id) {
           try {
-            const [logics, peers] = await Promise.all([
-              api.listBusinessLogics({ ontologyId: detail.ontology_id }),
-              api.listObjectTypes({ ontologyId: detail.ontology_id }),
-            ]);
-            setAvailableLogics(logics);
+            const peers = await api.listObjectTypes({ ontologyId: detail.ontology_id });
             setPeerObjects(peers);
           } catch {
-            setAvailableLogics([]);
             setPeerObjects([]);
           }
         }
@@ -260,48 +243,6 @@ export function ObjectTypeDetailPage() {
 
   const updateProperty = (id: string, patch: Partial<Property>) => {
     setProperties((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
-  };
-
-  const handleAddBinding = () => {
-    if (!bindingLogicId) {
-      message.warning("请选择要绑定的业务逻辑");
-      return;
-    }
-    Modal.confirm({
-      title: "确认添加绑定",
-      content: `将该对象作为「${OBJECT_ROLE_LABEL[bindingRole] || bindingRole}」绑定到所选业务逻辑。`,
-      okText: "确认绑定",
-      cancelText: "取消",
-      onOk: async () => {
-        setBindingLoading(true);
-        try {
-          await api.bindObjectToLogic(bindingLogicId, {
-            object_type_id: objectId!,
-            role: bindingRole,
-          });
-          message.success("已绑定业务逻辑");
-          setBindingLogicId(undefined);
-          await loadObject();
-        } catch (err) {
-          message.error(err instanceof Error ? err.message : "绑定失败");
-        } finally {
-          setBindingLoading(false);
-        }
-      },
-    });
-  };
-
-  const handleUnbind = async (bindingId: string) => {
-    setUnbindingId(bindingId);
-    try {
-      await api.unbindObjectFromLogic(bindingId);
-      message.success("已解除绑定");
-      await loadObject();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "解绑失败");
-    } finally {
-      setUnbindingId(null);
-    }
   };
 
   const searchDatasets = (keyword: string) => {
@@ -689,26 +630,6 @@ export function ObjectTypeDetailPage() {
       width: 110,
       render: (status) => <StatusBadge status={status} />,
     },
-    ...(inWorkspace
-      ? [
-          {
-            title: "操作",
-            key: "action",
-            width: 100,
-            render: (_: unknown, record: ObjectTypeLogicBinding) => (
-              <Popconfirm
-                title="确认解除该业务逻辑绑定？"
-                onConfirm={() => handleUnbind(record.binding_id)}
-                okButtonProps={{ loading: unbindingId === record.binding_id }}
-              >
-                <Button type="link" danger size="small">
-                  解绑
-                </Button>
-              </Popconfirm>
-            ),
-          } as ColumnsType<ObjectTypeLogicBinding>[number],
-        ]
-      : []),
   ];
 
   const versionColumns: ColumnsType<VersionRecord> = [
@@ -1041,14 +962,8 @@ export function ObjectTypeDetailPage() {
       >
         {(obj.business_logic_bindings?.length ?? 0) === 0 ? (
           <EmptyState
-            title={
-              inWorkspace ? "该对象尚未绑定业务逻辑" : "暂无绑定业务逻辑"
-            }
-            description={
-              inWorkspace
-                ? "可在下方手动添加绑定，将对象作为主对象 / 维度对象 / 产出对象关联到业务逻辑。"
-                : undefined
-            }
+            title="暂无引用该对象的业务逻辑"
+            description="业务逻辑在「业务逻辑」页独立管理,发布后引用本对象的逻辑会在此展示。"
           />
         ) : (
           <Table
@@ -1059,52 +974,6 @@ export function ObjectTypeDetailPage() {
             dataSource={obj.business_logic_bindings}
             pagination={false}
           />
-        )}
-
-        {inWorkspace && (
-          <div
-            style={{
-              padding: "16px 20px",
-              borderTop: "1px dashed var(--om-border)",
-              background: "var(--om-surface-muted)",
-            }}
-          >
-            <Space wrap>
-              <Select
-                style={{ minWidth: 260 }}
-                placeholder="选择要绑定的业务逻辑"
-                value={bindingLogicId}
-                onChange={setBindingLogicId}
-                showSearch
-                optionFilterProp="label"
-                options={availableLogics.map((l) => ({
-                  label: `${l.display_name}（${l.logic_type}）`,
-                  value: l.id,
-                }))}
-                notFoundContent={
-                  availableLogics.length === 0 ? "本本体下暂无业务逻辑" : undefined
-                }
-              />
-              <Select
-                style={{ width: 150 }}
-                value={bindingRole}
-                onChange={setBindingRole}
-                options={OBJECT_ROLE_OPTIONS}
-              />
-              <Button
-                type="primary"
-                loading={bindingLoading}
-                onClick={handleAddBinding}
-              >
-                添加绑定
-              </Button>
-            </Space>
-            <div style={{ marginTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                将该对象作为所选角色绑定到业务逻辑，类似于数仓中表绑定到指标 / 标签。
-              </Text>
-            </div>
-          </div>
         )}
       </SectionCard>
 

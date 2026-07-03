@@ -24,6 +24,7 @@ from app.schemas import (
     BusinessLogicObjectBindingOut,
     BusinessLogicOut,
     BusinessLogicPropertyBindingOut,
+    BusinessLogicPropertyOption,
     ChangeLogOut,
     DomainContextDetail,
     DomainContextSummary,
@@ -625,6 +626,8 @@ class OntologyQueryService:
         versions = self.list_versions(db, logic.id)
         ontology_versions = self.list_versions(db, logic.ontology_id)
 
+        available_object_types, available_properties = self._available_targets_for_logic(db, logic)
+
         return BusinessLogicDetail(
             **self._to_business_logic_out(db, logic).model_dump(),
             related_object_types=[
@@ -634,7 +637,44 @@ class OntologyQueryService:
             object_bindings=object_bindings,
             property_bindings=property_bindings,
             version_records=versions + ontology_versions,
+            ontology_id=logic.ontology_id,
+            available_object_types=available_object_types,
+            available_properties=available_properties,
         )
+
+    def _available_targets_for_logic(
+        self, db: Session, logic: BusinessLogic
+    ) -> tuple[list[ObjectTypeSummary], list[BusinessLogicPropertyOption]]:
+        """从业务逻辑所属本体(应为已发布本体)中取出可被引用的对象与字段候选。"""
+        objects = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == logic.ontology_id)
+            .order_by(ObjectType.name)
+            .all()
+        )
+        object_summaries = [self._to_object_summary(db, obj) for obj in objects]
+        if not objects:
+            return [], []
+
+        obj_by_id = {obj.id: obj for obj in objects}
+        properties = (
+            db.query(Property)
+            .filter(Property.object_type_id.in_(list(obj_by_id.keys())))
+            .order_by(Property.object_type_id, Property.name)
+            .all()
+        )
+        property_options = [
+            BusinessLogicPropertyOption(
+                property_id=prop.id,
+                property_name=prop.name,
+                property_display_name=prop.display_name,
+                object_type_id=prop.object_type_id,
+                object_type_name=obj_by_id[prop.object_type_id].name,
+                object_type_display_name=obj_by_id[prop.object_type_id].display_name,
+            )
+            for prop in properties
+        ]
+        return object_summaries, property_options
 
     def get_ontology_graph(self, db: Session, ontology_id: str) -> OntologyGraph:
         objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()

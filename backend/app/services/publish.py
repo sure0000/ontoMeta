@@ -221,6 +221,32 @@ class PublishService:
         db.refresh(ontology)
         return ontology
 
+    def publish_business_logic(
+        self, db: Session, logic_id: str, operator: str | None = None
+    ) -> BusinessLogic:
+        """发布单条业务逻辑:置为 published,引用绑定即固化为与已发布本体的正式绑定。"""
+        logic = db.get(BusinessLogic, logic_id)
+        if not logic:
+            raise ValueError("Business logic not found")
+
+        logic.status = EntityStatus.PUBLISHED.value
+        # 版本号沿用其所属本体当前版本,作为该逻辑的发布快照记录
+        ontology = db.get(Ontology, logic.ontology_id)
+        version = ontology.version if ontology else 0
+        db.add(
+            VersionRecord(
+                entity_type="business_logic",
+                entity_id=logic.id,
+                version=version,
+                diff_summary=f"发布业务逻辑:{logic.display_name}",
+                operator=operator,
+            )
+        )
+        _log_change(db, "business_logic", logic.id, "publish", operator, "发布业务逻辑")
+        db.commit()
+        db.refresh(logic)
+        return logic
+
 
 class ConfirmationService:
     """重要操作二次确认。"""
@@ -262,8 +288,17 @@ class ConfirmationService:
             confirmation.operator = operator
 
         if confirmation.action_type == "publish":
-            self.publish_service.publish(db, confirmation.ontology_id, confirmation.operator)
+            if confirmation.target_type == "business_logic" and confirmation.target_id:
+                self.publish_service.publish_business_logic(
+                    db, confirmation.target_id, confirmation.operator
+                )
+            else:
+                self.publish_service.publish(db, confirmation.ontology_id, confirmation.operator)
         elif confirmation.action_type == "delete" and confirmation.target_id:
+            if confirmation.target_type == "business_logic":
+                logic = db.get(BusinessLogic, confirmation.target_id)
+                if logic:
+                    db.delete(logic)
             _log_change(
                 db,
                 confirmation.target_type,

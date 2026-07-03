@@ -4,6 +4,7 @@ from app.models import (
     BusinessLogic,
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
+    DomainContext,
     EntityStatus,
     ObjectType,
     Ontology,
@@ -12,8 +13,10 @@ from app.models import (
 )
 from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.schemas import (
+    BusinessLogicDetail,
     BusinessLogicObjectBindingOut,
     BusinessLogicPropertyBindingOut,
+    BusinessLogicOut,
     ObjectTypeDetail,
     ObjectTypeSummary,
     PropertyOut,
@@ -365,6 +368,136 @@ class EditService:
         db.commit()
         db.refresh(obj)
         return OntologyQueryService()._to_object_summary(db, obj)
+
+    # --- 业务逻辑本体编辑(定义 / 预发布)---
+    # 注:对象/字段引用绑定复用下方 bind_object_to_logic / bind_property_to_logic,
+    # 由用户在业务逻辑详情页从已发布本体中主动挑选。
+
+    def _resolve_published_ontology(self, db: Session, domain_id: str) -> Ontology:
+        from app.services.query import OntologyQueryService
+
+        domain = db.get(DomainContext, domain_id)
+        if not domain:
+            raise ValueError("数据域不存在")
+        ontology = OntologyQueryService().get_published_ontology(db, domain_id)
+        if not ontology:
+            raise ValueError("该数据域尚无已发布本体,无法创建业务逻辑")
+        return ontology
+
+    def _ensure_unique_logic_name(self, db: Session, ontology_id: str, name: str) -> str:
+        base = name or "business_logic"
+        candidate = base
+        suffix = 1
+        while (
+            db.query(BusinessLogic)
+            .filter(
+                BusinessLogic.ontology_id == ontology_id,
+                BusinessLogic.name == candidate,
+            )
+            .first()
+        ):
+            suffix += 1
+            candidate = f"{base}_{suffix}"
+        return candidate
+
+    def create_business_logic(
+        self,
+        db: Session,
+        *,
+        domain_id: str,
+        name: str,
+        display_name: str,
+        logic_type: str,
+        description: str | None = None,
+        expression_summary: str | None = None,
+        operator: str | None = None,
+    ) -> BusinessLogicDetail:
+        from app.services.query import OntologyQueryService
+
+        ontology = self._resolve_published_ontology(db, domain_id)
+        if logic_type not in {"metric", "tag", "rule"}:
+            raise ValueError("logic_type 必须是 metric / tag / rule 之一")
+        unique_name = self._ensure_unique_logic_name(db, ontology.id, name)
+
+        logic = BusinessLogic(
+            ontology_id=ontology.id,
+            name=unique_name,
+            display_name=display_name,
+            logic_type=logic_type,
+            description=description,
+            expression_summary=expression_summary,
+            source_type="manual",
+            source_ref=None,
+            source_confidence=0.5,
+            status=EntityStatus.SUGGESTED.value,
+        )
+        db.add(logic)
+        db.flush()
+        _log_change(db, "business_logic", logic.id, "create", operator, f"新建业务逻辑:{display_name}")
+        db.commit()
+
+        detail = OntologyQueryService().get_business_logic(db, logic.id)
+        if not detail:
+            raise ValueError("Business logic not found")
+        return detail
+
+    def update_business_logic(
+        self,
+        db: Session,
+        logic_id: str,
+        *,
+        display_name: str | None = None,
+        description: str | None = None,
+        logic_type: str | None = None,
+        expression_summary: str | None = None,
+        operator: str | None = None,
+    ) -> BusinessLogicDetail:
+        from app.services.query import OntologyQueryService
+
+        logic = db.get(BusinessLogic, logic_id)
+        if not logic:
+            raise ValueError("Business logic not found")
+
+        if logic_type is not None:
+            if logic_type not in {"metric", "tag", "rule"}:
+                raise ValueError("logic_type 必须是 metric / tag / rule 之一")
+            logic.logic_type = logic_type
+        if display_name is not None:
+            logic.display_name = display_name
+        if description is not None:
+            logic.description = description
+        if expression_summary is not None:
+            logic.expression_summary = expression_summary
+
+        if logic.status != EntityStatus.PRE_PUBLISHED.value:
+            logic.status = EntityStatus.EDITED.value
+
+        _log_change(db, "business_logic", logic.id, "edit", operator, "更新业务逻辑")
+        db.commit()
+
+        detail = OntologyQueryService().get_business_logic(db, logic_id)
+        if not detail:
+            raise ValueError("Business logic not found")
+        return detail
+
+    def pre_publish_business_logic(
+        self,
+        db: Session,
+        logic_id: str,
+        operator: str | None = None,
+    ) -> BusinessLogicOut:
+        logic = db.get(BusinessLogic, logic_id)
+        if not logic:
+            raise ValueError("Business logic not found")
+
+        logic.status = EntityStatus.PRE_PUBLISHED.value
+        _log_change(db, "business_logic", logic.id, "pre_publish", operator, "预发布业务逻辑")
+        db.commit()
+        db.refresh(logic)
+
+        from app.services.query import OntologyQueryService
+
+        return OntologyQueryService()._to_business_logic_out(db, logic)
 
     # --- 业务逻辑绑定（对象 / 字段）---
 

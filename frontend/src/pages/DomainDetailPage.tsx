@@ -221,7 +221,7 @@ export function DomainDetailPage() {
                   <Button icon={<ApartmentOutlined />}>查看已发布本体</Button>
                 </Link>
                 <Link to={`/business-logic?domain=${domainId}`}>
-                  <Button>查看业务逻辑</Button>
+                  <Button>业务逻辑</Button>
                 </Link>
               </>
             )}
@@ -271,14 +271,12 @@ export function DomainDetailPage() {
           icon={<ApartmentOutlined />}
           label="业务对象"
           value={objects.length}
-          hint="当前草稿"
         />
         <StatCard
           tone="success"
           icon={<DeploymentUnitOutlined />}
           label="关系数量"
           value={relations.length}
-          hint="显式关系"
         />
         <StatCard
           tone={domain.latest_ontology_status === "published" ? "success" : "warning"}
@@ -291,14 +289,12 @@ export function DomainDetailPage() {
                 : "未生成"}
             </span>
           }
-          hint={publishedVersion ? `已发布版本 v${publishedVersion}` : "尚未发布"}
         />
         <StatCard
           tone="neutral"
           icon={<PlayCircleOutlined />}
           label="发布版本"
           value={publishedVersion ? `v${publishedVersion}` : "—"}
-          hint={domain.published_ontology_id ? "对外可见" : "尚未对外发布"}
         />
       </div>
 

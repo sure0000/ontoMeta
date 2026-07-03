@@ -5,9 +5,6 @@ from openai import OpenAI
 
 from app.config import settings
 from app.schemas import (
-    DraftBusinessLogic,
-    DraftBusinessLogicObjectBinding,
-    DraftBusinessLogicPropertyBinding,
     DraftObjectType,
     DraftProperty,
     DraftRelationType,
@@ -16,99 +13,6 @@ from app.schemas import (
 )
 from app.services.relation_terms import compact_relation_term, infer_relation_term
 from app.services.relation_structure import infer_relation_structure_type
-
-
-def _logic_blob(item) -> str:
-    parts = [
-        item.name,
-        item.display_name,
-        item.description or "",
-        item.expression_summary or "",
-        item.source_ref or "",
-    ]
-    return " ".join(parts).lower()
-
-
-def _dataset_table_from_urn(urn: str) -> str | None:
-    """从 DataHub dataset urn 中提取表名（如 order.fact_order）。"""
-    if not urn:
-        return None
-    parts = urn.split(",")
-    if len(parts) >= 2:
-        return parts[1].rstrip(")")
-    return None
-
-
-def _object_match_tokens(ot) -> list[str]:
-    tokens = [ot.candidate_name, ot.display_name]
-    table = _dataset_table_from_urn(ot.source_dataset_urn)
-    if table:
-        tokens.append(table)
-        # 也加入去掉前缀的简表名（fact_order / dim_customer / ads_xxx）
-        for prefix in ("dim_", "fact_", "dwd_", "dws_", "ads_", "ods_"):
-            if table.startswith(prefix):
-                tokens.append(table[len(prefix):])
-                break
-    return [t for t in tokens if t]
-
-
-def _infer_object_bindings(
-    evidence: EvidenceBundle,
-    obj_name_map: dict[str, str] | None = None,
-) -> list[DraftBusinessLogicObjectBinding]:
-    bindings: list[DraftBusinessLogicObjectBinding] = []
-    seen: set[tuple[str, str]] = set()
-    for logic in evidence.business_logics:
-        blob = _logic_blob(logic)
-        for ot in evidence.object_types:
-            key = (logic.name, ot.candidate_name)
-            if key in seen:
-                continue
-            tokens = _object_match_tokens(ot)
-            if not tokens:
-                continue
-            if any(t.lower() in blob for t in tokens):
-                seen.add(key)
-                semantic_name = (obj_name_map or {}).get(ot.candidate_name, ot.candidate_name)
-                bindings.append(
-                    DraftBusinessLogicObjectBinding(
-                        logic_name=logic.name,
-                        object_type_name=semantic_name,
-                        role="subject",
-                        confidence=min(0.6, logic.confidence),
-                    )
-                )
-    return bindings
-
-
-def _infer_property_bindings(
-    evidence: EvidenceBundle,
-    obj_name_map: dict[str, str] | None = None,
-) -> list[DraftBusinessLogicPropertyBinding]:
-    bindings: list[DraftBusinessLogicPropertyBinding] = []
-    seen: set[tuple[str, str, str]] = set()
-    for logic in evidence.business_logics:
-        blob = _logic_blob(logic)
-        for prop in evidence.properties:
-            key = (logic.name, prop.object_candidate_name, prop.field_name)
-            if key in seen:
-                continue
-            tokens = [t for t in (prop.field_name, prop.display_name) if t]
-            if not tokens:
-                continue
-            if any(t.lower() in blob for t in tokens):
-                seen.add(key)
-                identifier_obj_name = (obj_name_map or {}).get(prop.object_candidate_name, prop.object_candidate_name)
-                bindings.append(
-                    DraftBusinessLogicPropertyBinding(
-                        logic_name=logic.name,
-                        object_type_name=identifier_obj_name,
-                        field_name=prop.field_name,
-                        role="input",
-                        confidence=min(0.55, logic.confidence),
-                    )
-                )
-    return bindings
 
 
 class OntologyDraftGenerator:
@@ -192,22 +96,8 @@ class OntologyDraftGenerator:
             for item in evidence.relations
         ]
 
-        business_logics = [
-            DraftBusinessLogic(
-                name=item.name,
-                display_name=item.display_name,
-                logic_type=item.logic_type,
-                description=item.description,
-                expression_summary=item.expression_summary,
-                source_type=item.source_type,
-                source_ref=item.source_ref,
-                confidence=item.confidence,
-            )
-            for item in evidence.business_logics
-        ]
-
-        object_bindings = _infer_object_bindings(evidence, obj_identifier_map)
-        property_bindings = _infer_property_bindings(evidence, obj_identifier_map)
+        # 业务逻辑与本体草稿解耦:不再在草稿生成阶段产出 business_logics 及其绑定,
+        # 业务逻辑改为在「业务逻辑」页通过代码导入或人工新建独立管理。
 
         evidence_refs = sorted(
             {
@@ -216,7 +106,6 @@ class OntologyDraftGenerator:
                     evidence.object_types,
                     evidence.properties,
                     evidence.relations,
-                    evidence.business_logics,
                 )
                 for item in pack
                 for ref in item.evidence_refs
@@ -227,9 +116,9 @@ class OntologyDraftGenerator:
             object_types=object_types,
             properties=properties,
             relation_types=relation_types,
-            business_logics=business_logics,
-            business_logic_object_bindings=object_bindings,
-            business_logic_property_bindings=property_bindings,
+            business_logics=[],
+            business_logic_object_bindings=[],
+            business_logic_property_bindings=[],
             evidence_refs=evidence_refs,
         )
 
@@ -359,15 +248,11 @@ class OntologyDraftGenerator:
                     rt.get("kind", "foreign_key"), rt.get("name")
                 )
 
-        if not normalized.get("business_logic_object_bindings") and not normalized.get(
-            "business_logic_property_bindings"
-        ):
-            normalized["business_logic_object_bindings"] = [
-                b.model_dump() for b in _infer_object_bindings(evidence, obj_identifier_map)
-            ]
-            normalized["business_logic_property_bindings"] = [
-                b.model_dump() for b in _infer_property_bindings(evidence, obj_identifier_map)
-            ]
+        # 业务逻辑与本体草稿解耦:忽略 LLM 返回的 businessLogics 及绑定,
+        # 始终返回空,逻辑改由独立的业务逻辑页管理。
+        normalized["business_logics"] = []
+        normalized["business_logic_object_bindings"] = []
+        normalized["business_logic_property_bindings"] = []
         return OntologyDraftOutput.model_validate(normalized)
 
     def _build_prompt(self, evidence: EvidenceBundle) -> str:

@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "./components/Layout";
+import { BusinessLogicCreatePage } from "./pages/BusinessLogicCreatePage";
 import { BusinessLogicDetailPage } from "./pages/BusinessLogicDetailPage";
 import { BusinessLogicPage } from "./pages/BusinessLogicPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/ontology/relations/:relationId" element={<RelationTypeDetailPage />} />
         <Route path="/ontology/:objectId" element={<ObjectTypeDetailPage />} />
         <Route path="/business-logic" element={<BusinessLogicPage />} />
+        <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>

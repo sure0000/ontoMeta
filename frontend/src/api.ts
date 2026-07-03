@@ -1,7 +1,11 @@
 import type {
   BusinessLogic,
+  BusinessLogicCreateInput,
   BusinessLogicDetail,
+  BusinessLogicImportInput,
   BusinessLogicObjectBinding,
+  BusinessLogicPropertyBinding,
+  BusinessLogicUpdateInput,
   ChangeLog,
   Confirmation,
   DataHubDatasetOption,
@@ -200,6 +204,37 @@ export const api = {
   },
   getBusinessLogic: (id: string) => request<BusinessLogicDetail>(`/api/business-logics/${id}`),
 
+  createBusinessLogic: (body: BusinessLogicCreateInput) =>
+    request<BusinessLogicDetail>("/api/business-logics", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  importBusinessLogic: (body: BusinessLogicImportInput) =>
+    request<BusinessLogicDetail>("/api/business-logics/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateBusinessLogic: (id: string, body: BusinessLogicUpdateInput) =>
+    request<BusinessLogicDetail>(`/api/business-logics/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  prePublishBusinessLogic: (id: string) =>
+    request<BusinessLogic>(`/api/business-logics/${id}/pre-publish`, {
+      method: "PATCH",
+    }),
+
+  publishBusinessLogic: (id: string) =>
+    request<Confirmation>(`/api/business-logics/${id}/publish`, { method: "POST" }),
+
+  deleteBusinessLogic: (id: string) =>
+    request<{ id: string; deleted: boolean }>(`/api/business-logics/${id}`, {
+      method: "DELETE",
+    }),
+
   bindObjectToLogic: (
     logicId: string,
     body: { object_type_id: string; role?: string; operator?: string },
@@ -211,6 +246,20 @@ export const api = {
   unbindObjectFromLogic: (bindingId: string) =>
     request<{ id: string; deleted: boolean }>(
       `/api/business-logics/object-bindings/${bindingId}`,
+      { method: "DELETE" },
+    ),
+
+  bindPropertyToLogic: (
+    logicId: string,
+    body: { property_id: string; role?: string; operator?: string },
+  ) =>
+    request<BusinessLogicPropertyBinding>(
+      `/api/business-logics/${logicId}/property-bindings`,
+      { method: "POST", body: JSON.stringify({ ...body, business_logic_id: logicId }) },
+    ),
+  unbindPropertyFromLogic: (bindingId: string) =>
+    request<{ id: string; deleted: boolean }>(
+      `/api/business-logics/property-bindings/${bindingId}`,
       { method: "DELETE" },
     ),
 

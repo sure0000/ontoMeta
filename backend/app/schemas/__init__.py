@@ -381,6 +381,44 @@ class BusinessLogicPropertyBindingCreate(BaseModel):
     operator: str | None = None
 
 
+class BusinessLogicPropertyOption(BaseModel):
+    """业务逻辑编辑器中可挑选的已发布字段候选(含所属对象信息)。"""
+
+    property_id: str
+    property_name: str
+    property_display_name: str | None = None
+    object_type_id: str
+    object_type_name: str
+    object_type_display_name: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class BusinessLogicCreate(BaseModel):
+    domain_id: str
+    name: str
+    display_name: str
+    logic_type: str
+    description: str | None = None
+    expression_summary: str | None = None
+    operator: str | None = None
+
+
+class BusinessLogicUpdate(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    logic_type: str | None = None
+    expression_summary: str | None = None
+    operator: str | None = None
+
+
+class BusinessLogicImportRequest(BaseModel):
+    domain_id: str
+    code: str
+    source_type: str = "sql"
+    operator: str | None = None
+
+
 class BusinessLogicOut(BaseModel):
     id: str
     name: str
@@ -407,6 +445,9 @@ class BusinessLogicDetail(BusinessLogicOut):
     object_bindings: list[BusinessLogicObjectBindingOut] = Field(default_factory=list)
     property_bindings: list[BusinessLogicPropertyBindingOut] = Field(default_factory=list)
     version_records: list["VersionRecordOut"] = Field(default_factory=list)
+    ontology_id: str | None = None
+    available_object_types: list[ObjectTypeSummary] = Field(default_factory=list)
+    available_properties: list[BusinessLogicPropertyOption] = Field(default_factory=list)
 
 
 class VersionRecordOut(BaseModel):
