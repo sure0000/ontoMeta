@@ -5,7 +5,7 @@ export const RELATION_STRUCTURE_OPTIONS = [
   { label: "外键关系", value: "foreign_key" },
   { label: "桥表", value: "bridge_table" },
   { label: "事实表", value: "fact_table" },
-  { label: "其他", value: "other" },
+  { label: "外键映射", value: "other" },
 ] as const;
 
 export type RelationStructureType = (typeof RELATION_STRUCTURE_OPTIONS)[number]["value"];
@@ -14,7 +14,7 @@ const RELATION_STRUCTURE_LABELS: Record<RelationStructureType, string> = {
   foreign_key: "外键关系",
   bridge_table: "桥表",
   fact_table: "事实表",
-  other: "其他",
+  other: "外键映射",
 };
 
 export function getRelationStructureLabel(value?: string | null): string {

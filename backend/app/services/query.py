@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
     BusinessLogic,
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
+    ChangeConfirmation,
     DomainContext,
     DraftEvidence,
     DraftGenerationTask,
@@ -836,6 +838,31 @@ class WorkspaceService:
                 )
                 .count()
             )
+            latest_draft = (
+                db.query(Ontology)
+                .filter(
+                    Ontology.domain_context_id == domain.id,
+                    Ontology.status.in_([OntologyStatus.DRAFT.value, OntologyStatus.IN_REVIEW.value]),
+                )
+                .order_by(Ontology.updated_at.desc())
+                .first()
+            )
+            latest_published = (
+                db.query(Ontology)
+                .filter(
+                    Ontology.domain_context_id == domain.id,
+                    Ontology.status == OntologyStatus.PUBLISHED.value,
+                )
+                .order_by(Ontology.published_at.desc())
+                .first()
+            )
+            latest = (
+                db.query(Ontology)
+                .filter(Ontology.domain_context_id == domain.id)
+                .order_by(Ontology.updated_at.desc())
+                .first()
+            )
+            domain_status = latest.status if latest else "active"
             result.append(
                 DomainContextSummary(
                     id=domain.id,
@@ -843,9 +870,11 @@ class WorkspaceService:
                     name=domain.name,
                     description=domain.description,
                     owner=domain.owner,
-                    status=domain.status,
+                    status=domain_status,
                     draft_count=draft_count,
                     published_count=published_count,
+                    latest_draft_at=latest_draft.updated_at if latest_draft else None,
+                    latest_published_at=latest_published.published_at if latest_published else None,
                     updated_at=domain.updated_at,
                 )
             )
@@ -875,7 +904,7 @@ class WorkspaceService:
             published_ontology_version=published.version if published else None,
         )
 
-    async def start_draft_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
+    def start_draft_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
         domain = db.get(DomainContext, domain_id)
         if not domain:
             raise ValueError("Domain not found")
@@ -883,14 +912,34 @@ class WorkspaceService:
         task = DraftGenerationTask(
             domain_context_id=domain_id,
             status="running",
-            progress=5,
-            message="正在从 DataHub 拉取元数据...",
+            progress=0,
+            message="准备生成本体草稿...",
         )
         db.add(task)
         db.commit()
         db.refresh(task)
 
+        progress = DraftProgressOut(
+            task_id=task.id,
+            status=task.status,
+            progress=task.progress,
+            message=task.message,
+        )
+
+        return progress
+
+    async def _run_draft_generation(self, domain_id: str, task_id: str) -> None:
+        from app.database import SessionLocal
+
+        db = SessionLocal()
         try:
+            task = db.get(DraftGenerationTask, task_id)
+            domain = db.get(DomainContext, domain_id)
+
+            task.progress = 5
+            task.message = "正在从 DataHub 拉取元数据..."
+            db.commit()
+
             bundle = await self._datahub(db).fetch_domain_bundle(domain.datahub_domain_id)
             task.progress = 30
             task.message = "正在组装证据包..."
@@ -905,6 +954,16 @@ class WorkspaceService:
             task.progress = 80
             task.message = "正在持久化草稿..."
             db.commit()
+
+            purged = self._purge_draft_ontologies(db, domain_id)
+            if purged:
+                _log_change(
+                    db,
+                    "ontology",
+                    domain_id,
+                    "purge_draft",
+                    summary=f"重新生成草稿前清理 {purged} 个旧草稿本体",
+                )
 
             ontology = Ontology(
                 domain_context_id=domain_id,
@@ -922,20 +981,118 @@ class WorkspaceService:
             task.progress = 100
             task.message = "草稿生成完成"
             db.commit()
-            db.refresh(task)
-
-            return DraftProgressOut(
-                task_id=task.id,
-                status=task.status,
-                progress=task.progress,
-                message=task.message,
-                ontology_id=task.ontology_id,
-            )
         except Exception as exc:
-            task.status = "failed"
-            task.message = str(exc)
-            db.commit()
-            raise
+            task = db.get(DraftGenerationTask, task_id)
+            if task:
+                task.status = "failed"
+                task.message = str(exc)
+                db.commit()
+        finally:
+            db.close()
+
+    def _purge_draft_ontologies(self, db: Session, domain_id: str) -> int:
+        """删除同域所有 draft 状态本体及其关联数据，返回删除的本体数。
+
+        重新生成草稿时调用，确保每个数据域同一时刻至多一个 draft 本体，
+        避免工作区卡片"草稿 N"数字随历史草稿生成次数累加。
+        in_review / published / archived 状态的本体不受影响。
+        """
+        drafts = (
+            db.query(Ontology)
+            .filter(
+                Ontology.domain_context_id == domain_id,
+                Ontology.status == OntologyStatus.DRAFT.value,
+            )
+            .all()
+        )
+        if not drafts:
+            return 0
+        return self._delete_ontologies_cascade(db, [o.id for o in drafts])
+
+    def _delete_ontologies_cascade(self, db: Session, ontology_ids: list[str]) -> int:
+        """按依赖顺序级联删除指定本体及其所有关联数据，返回删除的本体数。
+
+        EntityChangeLog 通过 entity_id 字符串（非外键）引用本体，保留作为审计历史。
+        """
+        if not ontology_ids:
+            return 0
+
+        object_type_ids = [
+            ot.id
+            for ot in db.query(ObjectType)
+            .filter(ObjectType.ontology_id.in_(ontology_ids))
+            .all()
+        ]
+        property_ids = (
+            [
+                p.id
+                for p in db.query(Property)
+                .filter(Property.object_type_id.in_(object_type_ids))
+                .all()
+            ]
+            if object_type_ids
+            else []
+        )
+        business_logic_ids = [
+            bl.id
+            for bl in db.query(BusinessLogic)
+            .filter(BusinessLogic.ontology_id.in_(ontology_ids))
+            .all()
+        ]
+
+        if property_ids or business_logic_ids:
+            db.query(BusinessLogicPropertyBinding).filter(
+                or_(
+                    BusinessLogicPropertyBinding.property_id.in_(property_ids),
+                    BusinessLogicPropertyBinding.business_logic_id.in_(business_logic_ids),
+                )
+            ).delete(synchronize_session=False)
+
+        if object_type_ids or business_logic_ids:
+            db.query(BusinessLogicObjectBinding).filter(
+                or_(
+                    BusinessLogicObjectBinding.object_type_id.in_(object_type_ids),
+                    BusinessLogicObjectBinding.business_logic_id.in_(business_logic_ids),
+                )
+            ).delete(synchronize_session=False)
+
+        db.query(BusinessLogic).filter(
+            BusinessLogic.ontology_id.in_(ontology_ids)
+        ).delete(synchronize_session=False)
+
+        if object_type_ids:
+            db.query(Property).filter(
+                Property.object_type_id.in_(object_type_ids)
+            ).delete(synchronize_session=False)
+
+        db.query(RelationType).filter(
+            RelationType.ontology_id.in_(ontology_ids)
+        ).delete(synchronize_session=False)
+
+        db.query(ObjectType).filter(
+            ObjectType.ontology_id.in_(ontology_ids)
+        ).delete(synchronize_session=False)
+
+        db.query(DraftEvidence).filter(
+            DraftEvidence.ontology_id.in_(ontology_ids)
+        ).delete(synchronize_session=False)
+
+        db.query(ChangeConfirmation).filter(
+            ChangeConfirmation.ontology_id.in_(ontology_ids)
+        ).delete(synchronize_session=False)
+
+        db.query(DraftGenerationTask).filter(
+            DraftGenerationTask.ontology_id.in_(ontology_ids)
+        ).update(
+            {DraftGenerationTask.ontology_id: None},
+            synchronize_session=False,
+        )
+
+        db.query(Ontology).filter(Ontology.id.in_(ontology_ids)).delete(
+            synchronize_session=False
+        )
+        db.flush()
+        return len(ontology_ids)
 
     def get_progress(self, db: Session, domain_id: str) -> DraftProgressOut | None:
         task = (

@@ -191,6 +191,75 @@ class EditService:
         db.refresh(prop)
         return PropertyOut.model_validate(prop)
 
+    def create_relation_type(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        display_name: str,
+        source_object_type_id: str,
+        target_object_type_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        cardinality: str | None = None,
+        structure_type: str | None = None,
+        mapping_object_type_id: str | None = None,
+        operator: str | None = None,
+    ) -> RelationTypeOut:
+        from app.services.query import OntologyQueryService
+        from app.services.relation_structure import validate_relation_structure_type
+        from app.services.relation_terms import compact_relation_term, validate_relation_term
+
+        ontology = db.get(Ontology, ontology_id)
+        if not ontology:
+            raise ValueError("Ontology not found")
+
+        source = db.get(ObjectType, source_object_type_id)
+        if not source or source.ontology_id != ontology_id:
+            raise ValueError("Invalid source object type")
+        target = db.get(ObjectType, target_object_type_id)
+        if not target or target.ontology_id != ontology_id:
+            raise ValueError("Invalid target object type")
+        if source_object_type_id == target_object_type_id:
+            raise ValueError("Source and target object cannot be the same")
+
+        term_error = validate_relation_term(display_name)
+        if term_error:
+            raise ValueError(term_error)
+        compacted = compact_relation_term(display_name)
+
+        if structure_type is not None:
+            structure_error = validate_relation_structure_type(structure_type)
+            if structure_error:
+                raise ValueError(structure_error)
+
+        if mapping_object_type_id is not None:
+            mapping_obj = db.get(ObjectType, mapping_object_type_id)
+            if not mapping_obj or mapping_obj.ontology_id != ontology_id:
+                raise ValueError("Invalid mapping object type")
+            if mapping_object_type_id in {source_object_type_id, target_object_type_id}:
+                raise ValueError("Mapping object cannot be the same as source or target")
+
+        rel_name = name or compacted
+        rel = RelationType(
+            ontology_id=ontology_id,
+            name=rel_name,
+            display_name=compacted,
+            description=description,
+            source_object_type_id=source_object_type_id,
+            target_object_type_id=target_object_type_id,
+            cardinality=cardinality,
+            structure_type=structure_type,
+            mapping_object_type_id=mapping_object_type_id,
+            source_confidence=0.5,
+            status=EntityStatus.SUGGESTED.value,
+        )
+        db.add(rel)
+        db.flush()
+        _log_change(db, "relation_type", rel.id, "create", operator, f"新建关系：{compacted}")
+        db.commit()
+        return OntologyQueryService()._to_relation_out(db, rel)
+
     def update_relation_type(
         self,
         db: Session,

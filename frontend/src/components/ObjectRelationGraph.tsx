@@ -8,6 +8,7 @@ interface Props {
   relationDetailPath?: (relationId: string) => string;
   onEdgeClick?: (relationId: string, sourceObjectId: string) => void;
   height?: number;
+  defaultLayout?: "dagre" | "center" | "circular";
 }
 
 export function ObjectRelationGraph({
@@ -16,6 +17,7 @@ export function ObjectRelationGraph({
   relationDetailPath,
   onEdgeClick,
   height = 400,
+  defaultLayout,
 }: Props) {
   const graph = useMemo(() => buildRelationGraph(obj), [obj]);
 
@@ -26,6 +28,8 @@ export function ObjectRelationGraph({
     }
   };
 
+  const layout = defaultLayout ?? (obj.id ? "center" : "dagre");
+
   return (
     <OntologyGraphView
       graph={graph}
@@ -34,7 +38,7 @@ export function ObjectRelationGraph({
       relationDetailPath={relationDetailPath}
       onEdgeClick={onEdgeClick ? handleEdgeClick : undefined}
       height={height}
-      defaultLayout="center"
+      defaultLayout={layout}
     />
   );
 }

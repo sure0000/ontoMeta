@@ -7,6 +7,8 @@ export interface DomainContext {
   status: string;
   draft_count: number;
   published_count: number;
+  latest_draft_at?: string;
+  latest_published_at?: string;
   updated_at: string;
 }
 

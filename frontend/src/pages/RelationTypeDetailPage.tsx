@@ -14,6 +14,7 @@ import {
   Descriptions,
   Form,
   Input,
+  Modal,
   Row,
   Select,
   Space,
@@ -48,7 +49,7 @@ import type {
   RelationTypeDetail,
 } from "../types";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 interface RelationForm {
   display_name: string;
@@ -102,20 +103,7 @@ function ObjectTableCard({
             <Text type="secondary" style={{ fontSize: 12 }}>
               {objectRef.name}
             </Text>
-            {objectRef.source_ref ? (
-              <Text
-                code
-                copyable
-                style={{ wordBreak: "break-all", fontSize: 12 }}
-              >
-                {objectRef.source_ref}
-              </Text>
-            ) : (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                无关联 DataHub 表
-              </Text>
-            )}
-            {url && (
+            {url ? (
               <Button
                 type="link"
                 href={url}
@@ -126,6 +114,10 @@ function ObjectTableCard({
               >
                 在 DataHub 中查看表
               </Button>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                无关联 DataHub 表
+              </Text>
             )}
           </Space>
         )}
@@ -313,52 +305,60 @@ export function RelationTypeDetailPage() {
     [ontologyId],
   );
 
-  const handleDatasetSelect = async (option: DataHubDatasetOption) => {
+  const handleDatasetSelect = (option: DataHubDatasetOption) => {
     if (!ontologyId) return;
     if (option.object_type_id) {
       form.setFieldValue("mapping_object_type_id", option.object_type_id);
       return;
     }
-    setEnsuringDataset(true);
-    try {
-      const obj = await api.ensureObjectTypeFromDataset({
-        ontology_id: ontologyId,
-        dataset_urn: option.urn,
-      });
-      form.setFieldValue("mapping_object_type_id", obj.id);
-      setDatasetOptions((prev) =>
-        prev.map((item) =>
-          item.urn === option.urn
-            ? {
-                ...item,
-                object_type_id: obj.id,
-                object_type_display_name: obj.display_name,
-              }
-            : item,
-        ),
-      );
-      const newPeer: ObjectTypeSummary = {
-        id: obj.id,
-        name: obj.name,
-        display_name: obj.display_name,
-        description: obj.description,
-        status: obj.status,
-        property_count: obj.property_count,
-        relation_count: obj.relation_count,
-        business_logic_count: obj.business_logic_count,
-        source_confidence: obj.source_confidence,
-        updated_at: obj.updated_at,
-      };
-      setPeerObjects((prev) =>
-        prev.some((p) => p.id === obj.id) ? prev : [...prev, newPeer],
-      );
-    } catch (err) {
-      message.error(
-        err instanceof Error ? err.message : "创建承载表对象失败",
-      );
-    } finally {
-      setEnsuringDataset(false);
-    }
+    Modal.confirm({
+      title: "确认创建承载表对象",
+      content: `将基于 DataHub 数据表「${option.display_name || option.name}」创建新的对象类型作为承载表。`,
+      okText: "确认创建",
+      cancelText: "取消",
+      onOk: async () => {
+        setEnsuringDataset(true);
+        try {
+          const obj = await api.ensureObjectTypeFromDataset({
+            ontology_id: ontologyId,
+            dataset_urn: option.urn,
+          });
+          form.setFieldValue("mapping_object_type_id", obj.id);
+          setDatasetOptions((prev) =>
+            prev.map((item) =>
+              item.urn === option.urn
+                ? {
+                    ...item,
+                    object_type_id: obj.id,
+                    object_type_display_name: obj.display_name,
+                  }
+                : item,
+            ),
+          );
+          const newPeer: ObjectTypeSummary = {
+            id: obj.id,
+            name: obj.name,
+            display_name: obj.display_name,
+            description: obj.description,
+            status: obj.status,
+            property_count: obj.property_count,
+            relation_count: obj.relation_count,
+            business_logic_count: obj.business_logic_count,
+            source_confidence: obj.source_confidence,
+            updated_at: obj.updated_at,
+          };
+          setPeerObjects((prev) =>
+            prev.some((p) => p.id === obj.id) ? prev : [...prev, newPeer],
+          );
+        } catch (err) {
+          message.error(
+            err instanceof Error ? err.message : "创建承载表对象失败",
+          );
+        } finally {
+          setEnsuringDataset(false);
+        }
+      },
+    });
   };
 
   const objectDetailPath = useMemo(() => {
@@ -366,51 +366,67 @@ export function RelationTypeDetailPage() {
     return (id: string) => `/workspace/${domainId}/objects/${id}`;
   }, [domainId]);
 
-  const handleSave = async () => {
+  const handleSave = () => {
     if (!relationId || !inWorkspace) return;
-    setSaving(true);
-    try {
-      const values = await form.validateFields();
-      const payload: typeof values = {
-        ...values,
-        mapping_object_type_id:
-          typeof values.mapping_object_type_id === "string" &&
-          values.mapping_object_type_id.startsWith("dataset:")
-            ? null
-            : values.mapping_object_type_id,
-      };
-      await api.updateRelationType(relationId, payload);
-      await loadRelation();
-      message.success("保存成功");
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "保存失败");
-    } finally {
-      setSaving(false);
-    }
+    Modal.confirm({
+      title: "确认保存",
+      content: "将保存当前关系类型的修改。",
+      okText: "确认保存",
+      cancelText: "取消",
+      onOk: async () => {
+        setSaving(true);
+        try {
+          const values = await form.validateFields();
+          const payload: typeof values = {
+            ...values,
+            mapping_object_type_id:
+              typeof values.mapping_object_type_id === "string" &&
+              values.mapping_object_type_id.startsWith("dataset:")
+                ? null
+                : values.mapping_object_type_id,
+          };
+          await api.updateRelationType(relationId, payload);
+          await loadRelation();
+          message.success("保存成功");
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : "保存失败");
+        } finally {
+          setSaving(false);
+        }
+      },
+    });
   };
 
-  const handlePrePublish = async () => {
+  const handlePrePublish = () => {
     if (!relationId || !inWorkspace) return;
-    setPrePublishing(true);
-    try {
-      const values = await form.validateFields();
-      const payload: typeof values = {
-        ...values,
-        mapping_object_type_id:
-          typeof values.mapping_object_type_id === "string" &&
-          values.mapping_object_type_id.startsWith("dataset:")
-            ? null
-            : values.mapping_object_type_id,
-      };
-      await api.updateRelationType(relationId, payload);
-      const updated = await api.prePublishRelationType(relationId);
-      setRel((prev) => (prev ? { ...prev, status: updated.status } : prev));
-      message.success("关系已预发布");
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "预发布失败");
-    } finally {
-      setPrePublishing(false);
-    }
+    Modal.confirm({
+      title: "确认预发布",
+      content: "预发布后将把当前关系草稿固化为预发布状态，对外可见。此操作需要二次确认。",
+      okText: "确认预发布",
+      cancelText: "取消",
+      onOk: async () => {
+        setPrePublishing(true);
+        try {
+          const values = await form.validateFields();
+          const payload: typeof values = {
+            ...values,
+            mapping_object_type_id:
+              typeof values.mapping_object_type_id === "string" &&
+              values.mapping_object_type_id.startsWith("dataset:")
+                ? null
+                : values.mapping_object_type_id,
+          };
+          await api.updateRelationType(relationId, payload);
+          const updated = await api.prePublishRelationType(relationId);
+          setRel((prev) => (prev ? { ...prev, status: updated.status } : prev));
+          message.success("关系已预发布");
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : "预发布失败");
+        } finally {
+          setPrePublishing(false);
+        }
+      },
+    });
   };
 
   const graph = useMemo(() => (rel ? buildRelationGraph(rel) : null), [rel]);
@@ -655,19 +671,9 @@ export function RelationTypeDetailPage() {
                 <Space direction="vertical" size={10}>
                   <Tag color="blue">{evidenceType}</Tag>
                   {rel.source_evidence ? (
-                    <Paragraph style={{ marginBottom: 0 }}>
-                      <Text
-                        code
-                        copyable
-                        style={{
-                          wordBreak: "break-all",
-                          whiteSpace: "pre-wrap",
-                          fontSize: 12,
-                        }}
-                      >
-                        {rel.source_evidence}
-                      </Text>
-                    </Paragraph>
+                    <Text type="secondary" style={{ fontSize: 13 }}>
+                      证据类型：{evidenceType}
+                    </Text>
                   ) : (
                     <Text type="secondary" style={{ fontSize: 13 }}>
                       暂无 DataHub 证据引用，请通过语义描述补充业务依据

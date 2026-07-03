@@ -8,8 +8,8 @@ import {
   PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Modal, Space, Spin, message } from "antd";
-import { useCallback, useEffect, useState } from "react";
+import { Alert, Button, Modal, Progress, Space, Spin, message } from "antd";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -21,6 +21,7 @@ import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
 import type {
   DomainContextDetail,
+  DraftProgress,
   ObjectTypeSummary,
   OntologyGraph,
   RelationType,
@@ -33,9 +34,11 @@ export function DomainDetailPage() {
   const [relations, setRelations] = useState<RelationType[]>([]);
   const [graph, setGraph] = useState<OntologyGraph | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [draftProgress, setDraftProgress] = useState<DraftProgress | null>(null);
   const [loading, setLoading] = useState(true);
   const [ontologyLoading, setOntologyLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadOntology = useCallback(async (ontologyId: string) => {
     setOntologyLoading(true);
@@ -55,6 +58,43 @@ export function DomainDetailPage() {
     }
   }, []);
 
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const pollProgress = useCallback(
+    (taskId: string) => {
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const p = await api.getProgress(domainId!);
+          if (p.task_id !== taskId) return;
+          setDraftProgress(p);
+          if (p.status === "completed" || p.status === "failed") {
+            stopPolling();
+            setGenerating(false);
+            if (p.status === "completed" && p.ontology_id) {
+              const updated = await api.getDomain(domainId!);
+              setDomain(updated);
+              await loadOntology(p.ontology_id);
+              message.success("本体草稿生成完成");
+            } else if (p.status === "failed") {
+              setError(p.message || "生成失败");
+            }
+          }
+        } catch {
+          stopPolling();
+          setGenerating(false);
+          setError("获取进度失败");
+        }
+      }, 2000);
+    },
+    [domainId, loadOntology, stopPolling],
+  );
+
   useEffect(() => {
     if (!domainId) return;
     setLoading(true);
@@ -73,23 +113,29 @@ export function DomainDetailPage() {
       .finally(() => setLoading(false));
   }, [domainId, loadOntology]);
 
-  const handleGenerate = async () => {
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const handleGenerate = () => {
     if (!domainId) return;
-    setGenerating(true);
-    setError(null);
-    try {
-      const result = await api.generateDraft(domainId);
-      const updated = await api.getDomain(domainId);
-      setDomain(updated);
-      if (result.ontology_id) {
-        await loadOntology(result.ontology_id);
-      }
-      message.success("本体草稿生成完成");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "生成失败");
-    } finally {
-      setGenerating(false);
-    }
+    Modal.confirm({
+      title: "确认生成本体草稿",
+      content: "将根据 DataHub 元数据重新生成本体草稿，已有草稿内容将被覆盖。",
+      okText: "确认生成",
+      cancelText: "取消",
+      onOk: async () => {
+        setGenerating(true);
+        setError(null);
+        setDraftProgress(null);
+        try {
+          const result = await api.generateDraft(domainId);
+          setDraftProgress(result);
+          pollProgress(result.task_id);
+        } catch (err) {
+          setGenerating(false);
+          setError(err instanceof Error ? err.message : "生成失败");
+        }
+      },
+    });
   };
 
   const handlePublish = () => {
@@ -204,6 +250,19 @@ export function DomainDetailPage() {
           closable
           onClose={() => setError(null)}
         />
+      )}
+
+      {generating && draftProgress && (
+        <div style={{ margin: "16px 0", padding: "16px 24px", background: "#f6f8fa", borderRadius: 8 }}>
+          <Progress
+            percent={draftProgress.progress}
+            status={draftProgress.status === "failed" ? "exception" : "active"}
+            strokeColor={{ from: "#108ee9", to: "#87d068" }}
+          />
+          <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+            {draftProgress.message || "处理中..."}
+          </div>
+        </div>
       )}
 
       <div className="stat-row">

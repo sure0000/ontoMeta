@@ -528,6 +528,11 @@ body {
   color: var(--om-text);
   font-weight: 600;
 }
+.entity-card-foot-time {
+  font-size: 11px;
+  color: var(--om-text-tertiary);
+  font-weight: 400;
+}
 
 /* ---------- Status badge (pill) ---------- */
 .status-pill {

@@ -211,6 +211,8 @@ class DomainContextSummary(BaseModel):
     status: str
     draft_count: int = 0
     published_count: int = 0
+    latest_draft_at: datetime | None = None
+    latest_published_at: datetime | None = None
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -468,6 +470,19 @@ class PropertyUpdate(BaseModel):
     description: str | None = None
     data_type: str | None = None
     semantic_type: str | None = None
+    operator: str | None = None
+
+
+class RelationTypeCreate(BaseModel):
+    ontology_id: str
+    display_name: str
+    source_object_type_id: str
+    target_object_type_id: str
+    name: str | None = None
+    description: str | None = None
+    cardinality: str | None = None
+    structure_type: str | None = None
+    mapping_object_type_id: str | None = None
     operator: str | None = None
 
 

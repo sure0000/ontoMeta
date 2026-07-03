@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -33,6 +35,7 @@ from app.schemas import (
     OntologySummary,
     PropertyOut,
     PropertyUpdate,
+    RelationTypeCreate,
     RelationTypeDetail,
     RelationTypeOut,
     RelationTypeUpdate,
@@ -230,7 +233,9 @@ def get_domain(domain_id: str, db: Session = Depends(get_db)):
 @router.post("/domains/{domain_id}/generate-draft", response_model=DraftProgressOut)
 async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
     try:
-        return await workspace.start_draft_generation(db, domain_id)
+        progress = workspace.start_draft_generation(db, domain_id)
+        asyncio.create_task(workspace._run_draft_generation(domain_id, progress.task_id))
+        return progress
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -369,6 +374,26 @@ def update_property(
 @router.get("/ontologies/{ontology_id}/relation-types", response_model=list[RelationTypeOut])
 def list_relation_types_by_ontology(ontology_id: str, db: Session = Depends(get_db)):
     return query.list_relation_types(db, ontology_id=ontology_id)
+
+
+@router.post("/relation-types", response_model=RelationTypeOut)
+def create_relation_type(data: RelationTypeCreate, db: Session = Depends(get_db)):
+    try:
+        return edit_service.create_relation_type(
+            db,
+            data.ontology_id,
+            display_name=data.display_name,
+            source_object_type_id=data.source_object_type_id,
+            target_object_type_id=data.target_object_type_id,
+            name=data.name,
+            description=data.description,
+            cardinality=data.cardinality,
+            structure_type=data.structure_type,
+            mapping_object_type_id=data.mapping_object_type_id,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/relation-types", response_model=list[RelationTypeOut])

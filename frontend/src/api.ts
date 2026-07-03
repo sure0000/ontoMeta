@@ -107,6 +107,24 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  createRelationType: (
+    body: {
+      ontology_id: string;
+      display_name: string;
+      source_object_type_id: string;
+      target_object_type_id: string;
+      name?: string;
+      description?: string;
+      cardinality?: string;
+      structure_type?: string;
+      mapping_object_type_id?: string | null;
+    },
+  ) =>
+    request<RelationType>("/api/relation-types", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   updateRelationType: (
     relationTypeId: string,
     body: {

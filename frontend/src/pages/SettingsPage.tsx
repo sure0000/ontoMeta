@@ -21,6 +21,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -180,24 +181,32 @@ export function SettingsPage() {
     }
   };
 
-  const handleDatahubSave = async () => {
-    try {
-      const values = await datahubForm.validateFields();
-      setDatahubSaving(true);
-      const updated = await api.updateDatahubSettings({
-        gms_url: values.gms_url.trim(),
-        frontend_url: values.frontend_url.trim(),
-        token: values.token?.trim() ? values.token.trim() : undefined,
-        use_mock: values.use_mock,
-      });
-      setDatahubSettings(updated);
-      message.success("DataHub 配置已保存");
-      datahubForm.setFieldValue("token", "");
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "保存失败");
-    } finally {
-      setDatahubSaving(false);
-    }
+  const handleDatahubSave = () => {
+    Modal.confirm({
+      title: "确认保存 DataHub 配置",
+      content: "将更新 DataHub 连接地址与 Token 配置。",
+      okText: "确认保存",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const values = await datahubForm.validateFields();
+          setDatahubSaving(true);
+          const updated = await api.updateDatahubSettings({
+            gms_url: values.gms_url.trim(),
+            frontend_url: values.frontend_url.trim(),
+            token: values.token?.trim() ? values.token.trim() : undefined,
+            use_mock: values.use_mock,
+          });
+          setDatahubSettings(updated);
+          message.success("DataHub 配置已保存");
+          datahubForm.setFieldValue("token", "");
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : "保存失败");
+        } finally {
+          setDatahubSaving(false);
+        }
+      },
+    });
   };
 
   const llmColumns: ColumnsType<LlmServiceConfig> = [
@@ -252,24 +261,25 @@ export function SettingsPage() {
     {
       title: "操作",
       key: "actions",
-      width: 200,
+      width: 120,
+      fixed: "right",
       render: (_, record) => (
-        <Space size={4}>
-          <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openViewLlm(record)}>
-            查看
-          </Button>
-          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEditLlm(record)}>
-            编辑
-          </Button>
+        <Space size={8}>
+          <Tooltip title="查看">
+            <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => openViewLlm(record)} />
+          </Tooltip>
+          <Tooltip title="编辑">
+            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEditLlm(record)} />
+          </Tooltip>
           <Popconfirm
             title="确认删除该 LLM 配置？"
             onConfirm={() => handleDeleteLlm(record.id)}
             okText="删除"
             cancelText="取消"
           >
-            <Button type="link" size="small" danger icon={<DeleteOutlined />}>
-              删除
-            </Button>
+            <Tooltip title="删除">
+              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+            </Tooltip>
           </Popconfirm>
         </Space>
       ),
@@ -313,6 +323,7 @@ export function SettingsPage() {
                     columns={llmColumns}
                     dataSource={llmServices}
                     pagination={false}
+                    scroll={{ x: 800 }}
                     locale={{ emptyText: "暂无 LLM 配置，请点击「新增配置」" }}
                   />
                 </div>
@@ -340,7 +351,6 @@ export function SettingsPage() {
                   form={datahubForm}
                   layout="vertical"
                   style={{ maxWidth: 640 }}
-                  onFinish={handleDatahubSave}
                 >
                   <Form.Item
                     label="GMS 地址"
@@ -378,7 +388,7 @@ export function SettingsPage() {
                     <Switch />
                   </Form.Item>
                   <Form.Item>
-                    <Button type="primary" htmlType="submit" loading={datahubSaving}>
+                    <Button type="primary" onClick={handleDatahubSave} loading={datahubSaving}>
                       保存 DataHub 配置
                     </Button>
                   </Form.Item>

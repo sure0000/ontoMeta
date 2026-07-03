@@ -12,12 +12,12 @@ export function OntologyGraphNode({ data }: NodeProps) {
 
   return (
     <div className={`ontology-flow-node${nodeData.isCenter ? " ontology-flow-node--center" : ""}`}>
-      <Handle type="target" position={Position.Top} className="ontology-flow-handle" />
+      <Handle type="target" position={Position.Left} className="ontology-flow-handle" />
       <div className="ontology-flow-node-title" title={nodeData.label}>
         {nodeData.label}
       </div>
       <StatusBadge status={nodeData.status} />
-      <Handle type="source" position={Position.Bottom} className="ontology-flow-handle" />
+      <Handle type="source" position={Position.Right} className="ontology-flow-handle" />
     </div>
   );
 }
