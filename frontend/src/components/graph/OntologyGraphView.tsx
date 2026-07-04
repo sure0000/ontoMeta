@@ -17,7 +17,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Button, Space, Tooltip as AntTooltip } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { OntologyGraph } from "../../types";
 import { OntologyGraphNode, type OntologyNodeData } from "./OntologyGraphNode";
@@ -78,7 +78,9 @@ function buildFlowElements(
   return { nodes, edges };
 }
 
-export function OntologyGraphView({
+// 使用 React.memo 包裹，避免父组件渲染但 props 引用稳定时，
+// 整个 ReactFlow 子树被无谓地重新渲染。
+function OntologyGraphViewInner({
   graph,
   height = 520,
   centerNodeId,
@@ -218,3 +220,5 @@ export function OntologyGraphView({
     </div>
   );
 }
+
+export const OntologyGraphView = memo(OntologyGraphViewInner);

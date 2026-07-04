@@ -6,7 +6,7 @@ import {
 } from "@ant-design/icons";
 import { Alert, Button, Modal, Space, Spin, Table, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -15,41 +15,42 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
 import { StatusBadge } from "../components/StatusBadge";
+import { useApi } from "../hooks/useApi";
 import type { ChangeLog, TaskRecord } from "../types";
 
 const { Text } = Typography;
 
+interface TasksBundle {
+  tasks: TaskRecord[];
+  logsByTask: Record<string, ChangeLog[]>;
+}
+
 export function ExecutionRecordsPage() {
   const { domainId } = useParams<{ domainId: string }>();
-  const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [logs, setLogs] = useState<ChangeLog[]>([]);
-  const [loading, setLoading] = useState(true);
   const [logsLoading, setLogsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [activeTask, setActiveTask] = useState<TaskRecord | null>(null);
-  const [taskLogsMap, setTaskLogsMap] = useState<Record<string, ChangeLog[]>>({});
 
-  useEffect(() => {
-    if (!domainId) return;
-    setLoading(true);
-    api
-      .listTasks(domainId)
-      .then(async (items) => {
-        setTasks(items);
-        const entries = await Promise.all(
-          items.map((t) =>
-            api
-              .getTaskLogs(domainId, t.id)
-              .then((logs) => [t.id, logs] as const)
-              .catch(() => [t.id, [] as ChangeLog[]] as const),
-          ),
-        );
-        setTaskLogsMap(Object.fromEntries(entries));
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [domainId]);
+  const { data: bundle, loading, error } = useApi<TasksBundle>(
+    async () => {
+      if (!domainId) return { tasks: [], logsByTask: {} };
+      const items = await api.listTasks(domainId);
+      const entries = await Promise.all(
+        items.map((t) =>
+          api
+            .getTaskLogs(domainId, t.id)
+            .then((logs) => [t.id, logs] as const)
+            .catch(() => [t.id, [] as ChangeLog[]] as const),
+        ),
+      );
+      return { tasks: items, logsByTask: Object.fromEntries(entries) };
+    },
+    [domainId],
+  );
+
+  const tasks = bundle?.tasks ?? [];
+  const taskLogsMap = bundle?.logsByTask ?? {};
 
   const openLogModal = (task: TaskRecord) => {
     setActiveTask(task);
@@ -186,8 +187,6 @@ export function ExecutionRecordsPage() {
           type="error"
           message={error}
           showIcon
-          closable
-          onClose={() => setError(null)}
         />
       )}
 

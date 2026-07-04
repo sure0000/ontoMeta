@@ -26,6 +26,7 @@ import type {
   RelationTypeDetail,
   TaskRecord,
 } from "./types";
+import { buildQuery } from "./utils/format";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -85,15 +86,13 @@ export const api = {
   getConfig: () =>
     request<{ datahub_gms_url: string; datahub_frontend_url?: string }>("/api/config"),
 
-  searchDatahubDatasets: (params?: { query?: string; ontologyId?: string }) => {
-    const query = new URLSearchParams();
-    if (params?.query) query.set("query", params.query);
-    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
-    const qs = query.toString();
-    return request<DataHubDatasetOption[]>(
-      `/api/datahub/datasets${qs ? `?${qs}` : ""}`,
-    );
-  },
+  searchDatahubDatasets: (params?: { query?: string; ontologyId?: string }) =>
+    request<DataHubDatasetOption[]>(
+      `/api/datahub/datasets${buildQuery({
+        query: params?.query,
+        ontology_id: params?.ontologyId,
+      })}`,
+    ),
 
   ensureObjectTypeFromDataset: (body: {
     ontology_id: string;
@@ -177,24 +176,24 @@ export const api = {
     ontologyId?: string;
     domainId?: string;
     publishedOnly?: boolean;
-  }) => {
-    const query = new URLSearchParams();
-    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
-    if (params?.domainId) query.set("domain_id", params.domainId);
-    if (params?.publishedOnly) query.set("published_only", "true");
-    const qs = query.toString();
-    return request<RelationType[]>(`/api/relation-types${qs ? `?${qs}` : ""}`);
-  },
+  }) =>
+    request<RelationType[]>(
+      `/api/relation-types${buildQuery({
+        ontology_id: params?.ontologyId,
+        domain_id: params?.domainId,
+        published_only: params?.publishedOnly,
+      })}`,
+    ),
 
   getRelationType: (id: string) => request<RelationTypeDetail>(`/api/relation-types/${id}`),
 
-  listOntologies: (params?: { domainId?: string; publishedOnly?: boolean }) => {
-    const query = new URLSearchParams();
-    if (params?.domainId) query.set("domain_id", params.domainId);
-    if (params?.publishedOnly) query.set("published_only", "true");
-    const qs = query.toString();
-    return request<OntologySummary[]>(`/api/ontologies${qs ? `?${qs}` : ""}`);
-  },
+  listOntologies: (params?: { domainId?: string; publishedOnly?: boolean }) =>
+    request<OntologySummary[]>(
+      `/api/ontologies${buildQuery({
+        domain_id: params?.domainId,
+        published_only: params?.publishedOnly,
+      })}`,
+    ),
   getOntology: (id: string) => request<OntologySummary>(`/api/ontologies/${id}`),
   getOntologyGraph: (id: string) => request<OntologyGraph>(`/api/ontologies/${id}/graph`),
 
@@ -202,28 +201,28 @@ export const api = {
     ontologyId?: string;
     domainId?: string;
     publishedOnly?: boolean;
-  }) => {
-    const query = new URLSearchParams();
-    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
-    if (params?.domainId) query.set("domain_id", params.domainId);
-    if (params?.publishedOnly) query.set("published_only", "true");
-    const qs = query.toString();
-    return request<ObjectTypeSummary[]>(`/api/object-types${qs ? `?${qs}` : ""}`);
-  },
+  }) =>
+    request<ObjectTypeSummary[]>(
+      `/api/object-types${buildQuery({
+        ontology_id: params?.ontologyId,
+        domain_id: params?.domainId,
+        published_only: params?.publishedOnly,
+      })}`,
+    ),
   getObjectType: (id: string) => request<ObjectTypeDetail>(`/api/object-types/${id}`),
 
   listBusinessLogics: (params?: {
     ontologyId?: string;
     domainId?: string;
     publishedOnly?: boolean;
-  }) => {
-    const query = new URLSearchParams();
-    if (params?.ontologyId) query.set("ontology_id", params.ontologyId);
-    if (params?.domainId) query.set("domain_id", params.domainId);
-    if (params?.publishedOnly) query.set("published_only", "true");
-    const qs = query.toString();
-    return request<BusinessLogic[]>(`/api/business-logics${qs ? `?${qs}` : ""}`);
-  },
+  }) =>
+    request<BusinessLogic[]>(
+      `/api/business-logics${buildQuery({
+        ontology_id: params?.ontologyId,
+        domain_id: params?.domainId,
+        published_only: params?.publishedOnly,
+      })}`,
+    ),
   getBusinessLogic: (id: string) => request<BusinessLogicDetail>(`/api/business-logics/${id}`),
 
   createBusinessLogic: (body: BusinessLogicCreateInput) =>

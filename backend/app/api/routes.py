@@ -175,7 +175,10 @@ async def search_datahub_datasets(
     from app.connectors.datahub import DataHubConnector
 
     connector = DataHubConnector(settings_service.get_datahub_runtime(db))
-    datasets = await connector.search_datasets(query)
+    try:
+        datasets = await connector.search_datasets(query)
+    finally:
+        await connector.aclose()
 
     options: list[DataHubDatasetOption] = []
     for ds in datasets:
@@ -251,7 +254,9 @@ def get_domain(domain_id: str, db: Session = Depends(get_db)):
 async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
     try:
         progress = workspace.start_draft_generation(db, domain_id)
-        asyncio.create_task(workspace._run_draft_generation(domain_id, progress.task_id))
+        task = asyncio.create_task(workspace._run_draft_generation(domain_id, progress.task_id))
+        # 持有强引用避免被 GC；任务完成或失败后自动清理
+        workspace._track_background_task(task)
         return progress
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

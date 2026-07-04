@@ -60,6 +60,11 @@ def mask_secret(value: str | None) -> str | None:
 
 
 class SettingsService:
+    # 进程级缓存：标记默认配置已在数据库中初始化过。
+    # 一旦确认存在，后续请求可跳过 ensure_defaults 的探针查询；
+    # 当唯一 LLM 行被删除时由 delete_llm_service 重置。
+    _defaults_initialized: bool = False
+
     def list_llm_models(self) -> list[dict]:
         return DEEPSEEK_MODELS
 
@@ -111,7 +116,11 @@ class SettingsService:
         was_default = service.is_default
         db.delete(service)
         db.commit()
-        if was_default:
+        remaining = db.query(LlmServiceConfig).count()
+        if remaining == 0:
+            # 全部 LLM 配置被删除：下次访问需重新初始化默认项
+            SettingsService._defaults_initialized = False
+        elif was_default:
             fallback = db.query(LlmServiceConfig).order_by(LlmServiceConfig.updated_at.desc()).first()
             if fallback:
                 fallback.is_default = True
@@ -168,6 +177,10 @@ class SettingsService:
         )
 
     def ensure_defaults(self, db: Session) -> None:
+        # 进程级缓存命中时直接跳过，避免每个请求都跑两个探针查询。
+        if SettingsService._defaults_initialized:
+            return
+
         if not db.get(DatahubSetting, "default"):
             db.add(
                 DatahubSetting(
@@ -194,6 +207,8 @@ class SettingsService:
                 )
             )
             db.commit()
+
+        SettingsService._defaults_initialized = True
 
     def _clear_default_llm(self, db: Session) -> None:
         for item in db.query(LlmServiceConfig).filter(LlmServiceConfig.is_default.is_(True)).all():

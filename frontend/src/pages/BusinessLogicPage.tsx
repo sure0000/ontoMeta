@@ -1,4 +1,4 @@
-import { EditOutlined, FunctionOutlined, PlusOutlined, ImportOutlined } from "@ant-design/icons";
+import { EditOutlined, FunctionOutlined, PlusOutlined, ImportOutlined, SearchOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
@@ -9,11 +9,10 @@ import {
   Space,
   Spin,
   Table,
-  Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -21,9 +20,8 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
-import type { BusinessLogic, DomainContext } from "../types";
-
-const { Text } = Typography;
+import { useApi } from "../hooks/useApi";
+import type { BusinessLogic, DomainContext, DomainContextDetail } from "../types";
 
 const SOURCE_TYPE_OPTIONS = [
   { label: "SQL", value: "sql" },
@@ -39,61 +37,90 @@ const STATUS_FILTER_OPTIONS = [
 
 const DRAFT_STATUSES = new Set(["suggested", "edited", "pre_published"]);
 
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const DEFAULT_PAGE_SIZE = 20;
+
+interface BusinessLogicBundle {
+  domains: DomainContext[];
+  domain: DomainContextDetail | null;
+  logics: BusinessLogic[];
+}
+
 export function BusinessLogicPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const domainId = searchParams.get("domain") || undefined;
   const statusFilter = searchParams.get("status") || "all";
-  const [domains, setDomains] = useState<DomainContext[]>([]);
-  const [logics, setLogics] = useState<BusinessLogic[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   const [importOpen, setImportOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [importForm] = Form.useForm();
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
-  useEffect(() => {
-    api.listDomains().then(setDomains).catch((err) => setError(err.message));
-  }, []);
+  const { data: bundle, loading, error } = useApi<BusinessLogicBundle>(
+    async () => {
+      const domains = await api.listDomains();
+      if (domains.length === 0) {
+        return { domains, domain: null, logics: [] };
+      }
+      const targetDomainId = domainId ?? domains[0]?.id;
+      if (!targetDomainId) {
+        return { domains, domain: null, logics: [] };
+      }
+      const [domain, logics] = await Promise.all([
+        api.getDomain(targetDomainId),
+        api.listBusinessLogics({ domainId: targetDomainId }),
+      ]);
+      return { domains, domain, logics };
+    },
+    [domainId],
+  );
 
-  useEffect(() => {
-    if (domains.length === 0) {
-      setLoading(false);
-      return;
-    }
+  const domains = bundle?.domains ?? [];
+  const domain = bundle?.domain ?? null;
+  const logics = bundle?.logics ?? [];
 
-    const targetDomainId = domainId ?? domains[0]?.id;
-    if (!targetDomainId) {
-      setLoading(false);
-      return;
-    }
-
-    if (!domainId && targetDomainId) {
+  // URL 同步默认域
+  const syncedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (syncedRef.current) return;
+    if (!domainId && domains.length > 0 && domains[0]?.id) {
+      syncedRef.current = true;
       setSearchParams(
-        { domain: targetDomainId, status: statusFilter },
+        { domain: domains[0].id, status: statusFilter },
         { replace: true },
       );
-      return;
     }
+  }, [domainId, domains, statusFilter, setSearchParams]);
 
-    setLoading(true);
-    api
-      .listBusinessLogics({ domainId: targetDomainId })
-      .then((list) => setLogics(list))
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [domainId, domains, setSearchParams, statusFilter]);
+  useEffect(() => {
+    syncedRef.current = Boolean(domainId);
+  }, [domainId]);
+
+  // 搜索/筛选变化时重置分页
+  useEffect(() => {
+    setPage(1);
+  }, [query, statusFilter, domainId]);
 
   const domainsWithPublished = domains.filter((d) => d.published_count > 0);
   const targetDomainId = domainId ?? domains[0]?.id;
   const targetDomainHasPublished = domains.find((d) => d.id === targetDomainId)?.published_count ?? 0;
 
-  const filteredLogics = logics.filter((l) => {
-    if (statusFilter === "draft") return DRAFT_STATUSES.has(l.status);
-    if (statusFilter === "published") return l.status === "published";
-    return true;
-  });
+  const filteredLogics = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return logics.filter((l) => {
+      if (statusFilter === "draft" && !DRAFT_STATUSES.has(l.status)) return false;
+      if (statusFilter === "published" && l.status !== "published") return false;
+      if (!q) return true;
+      if (l.name?.toLowerCase().includes(q)) return true;
+      if (l.display_name?.toLowerCase().includes(q)) return true;
+      if (l.description?.toLowerCase().includes(q)) return true;
+      if (l.logic_type?.toLowerCase().includes(q)) return true;
+      return false;
+    });
+  }, [logics, statusFilter, query]);
 
   const openCreate = () => {
     navigate(`/business-logic/create?domain=${targetDomainId ?? ""}`);
@@ -183,20 +210,16 @@ export function BusinessLogicPage() {
     <PageContainer full>
       <PageHeader
         icon={<FunctionOutlined />}
-        title="业务逻辑"
-        description="独立于工作区的指标、标签与规则管理。引用已发布本体的对象与字段作为计算逻辑;支持代码导入与人工编辑。"
+        title={domain?.name ?? "业务逻辑"}
         extra={
           <Space wrap>
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              数据域
-            </Text>
-            <Select
-              style={{ minWidth: 220 }}
-              value={targetDomainId}
-              onChange={(value) =>
-                setSearchParams({ domain: value, status: statusFilter }, { replace: true })
-              }
-              options={domains.map((d) => ({ label: d.name, value: d.id }))}
+            <Input
+              allowClear
+              prefix={<SearchOutlined style={{ color: "var(--om-text-secondary, #94a3b8)" }} />}
+              placeholder="搜索逻辑名称、类型、描述"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              style={{ width: 220 }}
             />
             <Select
               style={{ minWidth: 180 }}
@@ -225,8 +248,6 @@ export function BusinessLogicPage() {
           message="加载失败"
           description={error}
           showIcon
-          closable
-          onClose={() => setError(null)}
         />
       )}
 
@@ -241,9 +262,9 @@ export function BusinessLogicPage() {
       )}
 
       <Spin spinning={loading}>
-        {filteredLogics.length === 0 ? (
+        {logics.length === 0 ? (
           <EmptyState
-            title={logics.length === 0 ? "暂无业务逻辑" : "当前筛选下无业务逻辑"}
+            title="暂无业务逻辑"
             description="业务逻辑独立于工作区管理。可选择「导入业务逻辑」从代码解析草稿,或「新建业务逻辑」手动创建。"
             action={
               <Link to="/workspace">
@@ -251,27 +272,31 @@ export function BusinessLogicPage() {
               </Link>
             }
           />
+        ) : filteredLogics.length === 0 ? (
+          <EmptyState
+            title="未匹配到业务逻辑"
+            description="尝试调整搜索关键词或状态筛选。"
+          />
         ) : (
-          <div className="section-card">
-            <div className="section-card-head">
-              <div className="section-card-head-title">
-                <span>业务逻辑列表</span>
-                <span className="section-card-count section-card-count--primary">
-                  {filteredLogics.length}
-                </span>
-              </div>
-            </div>
-            <div className="section-card-body section-card-body--flush">
-              <Table
-                className="om-table"
-                rowKey="id"
-                size="middle"
-                columns={columns}
-                dataSource={filteredLogics}
-                pagination={false}
-              />
-            </div>
-          </div>
+          <Table
+            className="om-table"
+            rowKey="id"
+            size="middle"
+            columns={columns}
+            dataSource={filteredLogics}
+            pagination={{
+              current: page,
+              pageSize,
+              total: filteredLogics.length,
+              showSizeChanger: true,
+              pageSizeOptions: PAGE_SIZE_OPTIONS,
+              showTotal: (total) => `共 ${total} 条`,
+              onChange: (p, ps) => {
+                setPage(p);
+                setPageSize(ps);
+              },
+            }}
+          />
         )}
       </Spin>
 

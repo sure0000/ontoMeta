@@ -4,6 +4,7 @@ import {
   EditOutlined,
   EyeOutlined,
   PlusOutlined,
+  RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import {
@@ -299,14 +300,21 @@ export function SettingsPage() {
       {error && <Alert type="error" message="加载失败" description={error} showIcon />}
 
       <Tabs
+        className="om-tabs"
         defaultActiveKey="llm"
-        items={[
-          {
-            key: "llm",
-            label: "LLM 服务",
-            children: (
+          items={[
+            {
+              key: "llm",
+              label: (
+                <span>
+                  <RobotOutlined style={{ marginRight: 6 }} />
+                  LLM 服务
+                </span>
+              ),
+              children: (
               <SectionCard
                 title="LLM 服务配置"
+                icon={<RobotOutlined />}
                 extra={
                   <Button type="primary" icon={<PlusOutlined />} onClick={openCreateLlm}>
                     新增配置
@@ -314,28 +322,33 @@ export function SettingsPage() {
                 }
                 bodyFlush
               >
-                <div style={{ padding: "0 0 4px" }}>
-                  <Text type="secondary" style={{ display: "block", padding: "0 20px 12px", fontSize: 13 }}>
-                    配置 DeepSeek 等模型服务，默认配置将用于本体草稿生成
-                  </Text>
-                  <Table
-                    rowKey="id"
-                    columns={llmColumns}
-                    dataSource={llmServices}
-                    pagination={false}
-                    scroll={{ x: 800 }}
-                    locale={{ emptyText: "暂无 LLM 配置，请点击「新增配置」" }}
-                  />
+                <div className="om-table-hint">
+                  配置 DeepSeek 等模型服务，默认配置将用于本体草稿生成
                 </div>
+                <Table
+                  className="om-table"
+                  rowKey="id"
+                  columns={llmColumns}
+                  dataSource={llmServices}
+                  pagination={false}
+                  scroll={{ x: 800 }}
+                  locale={{ emptyText: "暂无 LLM 配置，请点击「新增配置」" }}
+                />
               </SectionCard>
             ),
           },
           {
             key: "datahub",
-            label: "DataHub",
+            label: (
+              <span>
+                <CloudServerOutlined style={{ marginRight: 6 }} />
+                DataHub
+              </span>
+            ),
             children: (
               <SectionCard
                 title="DataHub 连接配置"
+                icon={<CloudServerOutlined />}
                 extra={
                   datahubSettings ? (
                     <Text type="secondary" style={{ fontSize: 12 }}>

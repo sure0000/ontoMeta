@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
@@ -23,7 +23,7 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    from sqlalchemy import inspect, text
+    from sqlalchemy import inspect
 
     from app import models  # noqa: F401
     from app.services.relation_structure import infer_relation_structure_type
@@ -39,28 +39,35 @@ def init_db() -> None:
         return
 
     columns = {column["name"] for column in inspector.get_columns("relation_types")}
-    if "structure_type" not in columns:
-        with engine.begin() as conn:
-            conn.execute(
-                text("ALTER TABLE relation_types ADD COLUMN structure_type VARCHAR(50)")
-            )
-    if "mapping_object_type_id" not in columns:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "ALTER TABLE relation_types ADD COLUMN mapping_object_type_id "
-                    "VARCHAR(36) REFERENCES object_types(id)"
-                )
-            )
-
+    bl_columns: set[str] = set()
     if "business_logics" in inspector.get_table_names():
         bl_columns = {column["name"] for column in inspector.get_columns("business_logics")}
-        if "expression_draft" not in bl_columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE business_logics ADD COLUMN expression_draft TEXT"))
-        if "expression_json" not in bl_columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE business_logics ADD COLUMN expression_json TEXT"))
+
+    # 将所有需要的 ALTER 合并到同一个事务中执行，减少连接/提交开销。
+    alter_statements: list[str] = []
+    if "structure_type" not in columns:
+        alter_statements.append(
+            "ALTER TABLE relation_types ADD COLUMN structure_type VARCHAR(50)"
+        )
+    if "mapping_object_type_id" not in columns:
+        alter_statements.append(
+            "ALTER TABLE relation_types ADD COLUMN mapping_object_type_id "
+            "VARCHAR(36) REFERENCES object_types(id)"
+        )
+    if "expression_draft" not in bl_columns:
+        alter_statements.append(
+            "ALTER TABLE business_logics ADD COLUMN expression_draft TEXT"
+        )
+    if "expression_json" not in bl_columns:
+        alter_statements.append(
+            "ALTER TABLE business_logics ADD COLUMN expression_json TEXT"
+        )
+    if alter_statements:
+        with engine.begin() as conn:
+            for stmt in alter_statements:
+                conn.execute(text(stmt))
+
+    _ensure_secondary_indexes(inspector)
 
     with SessionLocal() as db:
         from app.models import RelationType
@@ -68,3 +75,45 @@ def init_db() -> None:
         for rel in db.query(RelationType).filter(RelationType.structure_type.is_(None)).all():
             rel.structure_type = infer_relation_structure_type(rel.description, rel.source_evidence)
         db.commit()
+
+
+# 表名 -> 列名，对应 models 中新增的 index=True 列。
+# SQLite/SQLAlchemy 在 create_all 时会为新表自动建索引，
+# 但对历史已存在的表不会补建，这里显式 CREATE INDEX IF NOT EXISTS。
+_SECONDARY_INDEXES: dict[str, list[str]] = {
+    "ontologies": ["domain_context_id", "status"],
+    "object_types": ["ontology_id", "source_ref", "status"],
+    "properties": ["object_type_id", "status"],
+    "relation_types": [
+        "ontology_id",
+        "source_object_type_id",
+        "target_object_type_id",
+        "mapping_object_type_id",
+        "status",
+    ],
+    "business_logics": ["ontology_id", "status"],
+    "draft_evidences": ["ontology_id", "source_ref"],
+    "change_confirmations": ["ontology_id", "target_id", "confirmation_status"],
+    "version_records": ["entity_id", "created_at"],
+    "entity_change_logs": ["entity_id", "created_at"],
+    "draft_generation_tasks": ["domain_context_id", "ontology_id", "status"],
+}
+
+
+def _ensure_secondary_indexes(inspector) -> None:
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table, columns in _SECONDARY_INDEXES.items():
+            if table not in existing_tables:
+                continue
+            existing_columns = {c["name"] for c in inspector.get_columns(table)}
+            for col in columns:
+                if col not in existing_columns:
+                    continue
+                idx_name = f"ix_{table}_{col}"
+                conn.execute(
+                    text(
+                        f"CREATE INDEX IF NOT EXISTS {idx_name} "
+                        f"ON {table} ({col})"
+                    )
+                )

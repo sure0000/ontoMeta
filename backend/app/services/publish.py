@@ -10,7 +10,6 @@ from app.models import (
     ChangeConfirmation,
     ConfirmationStatus,
     DraftEvidence,
-    EntityChangeLog,
     EntityStatus,
     ObjectType,
     Ontology,
@@ -20,6 +19,7 @@ from app.models import (
     VersionRecord,
 )
 from app.schemas import ConfirmationCreate, OntologyDraftOutput
+from app.services.common import log_change
 
 
 def _log_change(
@@ -30,15 +30,7 @@ def _log_change(
     operator: str | None = None,
     summary: str | None = None,
 ) -> None:
-    db.add(
-        EntityChangeLog(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            operator=operator,
-            change_summary=summary,
-        )
-    )
+    log_change(db, entity_type, entity_id, action, operator, summary)
 
 
 class DraftPersistenceService:

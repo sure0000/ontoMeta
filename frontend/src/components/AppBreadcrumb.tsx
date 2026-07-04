@@ -19,11 +19,11 @@ async function resolveBreadcrumbs(
   },
 ): Promise<Crumb[]> {
   if (pathname === "/workspace" || pathname === "/workspace/") {
-    return [{ label: "工作区" }];
+    return [{ label: "本体建模" }];
   }
 
   if (pathname.startsWith("/workspace/")) {
-    const crumbs: Crumb[] = [{ label: "工作区", path: "/workspace" }];
+    const crumbs: Crumb[] = [{ label: "本体建模", path: "/workspace" }];
     if (!params.domainId) return crumbs;
 
     const domain = await api.getDomain(params.domainId);
@@ -59,17 +59,17 @@ async function resolveBreadcrumbs(
   }
 
   if (pathname === "/ontology") {
-    return [{ label: "本体" }];
+    return [{ label: "本体浏览" }];
   }
 
   if (pathname.startsWith("/ontology/relations/") && params.relationId) {
     const rel = await api.getRelationType(params.relationId);
-    return [{ label: "本体", path: "/ontology" }, { label: rel.display_name }];
+    return [{ label: "本体浏览", path: "/ontology" }, { label: rel.display_name }];
   }
 
   if (pathname.startsWith("/ontology/") && params.objectId) {
     const obj = await api.getObjectType(params.objectId);
-    return [{ label: "本体", path: "/ontology" }, { label: obj.display_name }];
+    return [{ label: "本体浏览", path: "/ontology" }, { label: obj.display_name }];
   }
 
   if (pathname === "/business-logic") {
@@ -95,7 +95,7 @@ async function resolveBreadcrumbs(
     return [{ label: "设置" }];
   }
 
-  return [{ label: "首页", path: "/workspace" }];
+  return [{ label: "首页", path: "/ontology" }];
 }
 
 export function AppBreadcrumb() {
@@ -122,7 +122,7 @@ export function AppBreadcrumb() {
       })
       .catch(() => {
         if (!cancelled) {
-          setItems([{ title: <Link to="/workspace">工作区</Link> }]);
+          setItems([{ title: <Link to="/ontology">本体浏览</Link> }]);
         }
       })
       .finally(() => {

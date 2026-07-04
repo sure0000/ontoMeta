@@ -65,9 +65,13 @@ class Ontology(Base):
     __tablename__ = "ontologies"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    domain_context_id: Mapped[str] = mapped_column(ForeignKey("domain_contexts.id"))
+    domain_context_id: Mapped[str] = mapped_column(
+        ForeignKey("domain_contexts.id"), index=True
+    )
     version: Mapped[int] = mapped_column(Integer, default=0)
-    status: Mapped[str] = mapped_column(String(50), default=OntologyStatus.DRAFT.value)
+    status: Mapped[str] = mapped_column(
+        String(50), default=OntologyStatus.DRAFT.value, index=True
+    )
     generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     generated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -91,14 +95,14 @@ class ObjectType(Base):
     __tablename__ = "object_types"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"))
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     canonical_term_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value)
+    source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -120,7 +124,7 @@ class Property(Base):
     __tablename__ = "properties"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    object_type_id: Mapped[str] = mapped_column(ForeignKey("object_types.id"))
+    object_type_id: Mapped[str] = mapped_column(ForeignKey("object_types.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -129,7 +133,7 @@ class Property(Base):
     semantic_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     required: Mapped[bool] = mapped_column(Boolean, default=False)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value)
+    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -142,20 +146,24 @@ class RelationType(Base):
     __tablename__ = "relation_types"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"))
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_object_type_id: Mapped[str] = mapped_column(ForeignKey("object_types.id"))
-    target_object_type_id: Mapped[str] = mapped_column(ForeignKey("object_types.id"))
+    source_object_type_id: Mapped[str] = mapped_column(
+        ForeignKey("object_types.id"), index=True
+    )
+    target_object_type_id: Mapped[str] = mapped_column(
+        ForeignKey("object_types.id"), index=True
+    )
     cardinality: Mapped[str | None] = mapped_column(String(50), nullable=True)
     structure_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     mapping_object_type_id: Mapped[str | None] = mapped_column(
-        ForeignKey("object_types.id"), nullable=True
+        ForeignKey("object_types.id"), nullable=True, index=True
     )
     source_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value)
+    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -179,7 +187,7 @@ class BusinessLogic(Base):
     __tablename__ = "business_logics"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"))
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     logic_type: Mapped[str] = mapped_column(String(100))
@@ -190,7 +198,7 @@ class BusinessLogic(Base):
     source_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value)
+    status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -285,10 +293,10 @@ class DraftEvidence(Base):
     __tablename__ = "draft_evidences"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"))
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     evidence_type: Mapped[str] = mapped_column(String(100))
     source_system: Mapped[str] = mapped_column(String(100), default="datahub")
-    source_ref: Mapped[str] = mapped_column(String(512))
+    source_ref: Mapped[str] = mapped_column(String(512), index=True)
     payload_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -300,12 +308,12 @@ class ChangeConfirmation(Base):
     __tablename__ = "change_confirmations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"))
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     target_type: Mapped[str] = mapped_column(String(100))
-    target_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     action_type: Mapped[str] = mapped_column(String(100))
     confirmation_status: Mapped[str] = mapped_column(
-        String(50), default=ConfirmationStatus.PENDING.value
+        String(50), default=ConfirmationStatus.PENDING.value, index=True
     )
     operator: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -321,11 +329,11 @@ class VersionRecord(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     entity_type: Mapped[str] = mapped_column(String(100))
-    entity_id: Mapped[str] = mapped_column(String(36))
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
     version: Mapped[int] = mapped_column(Integer)
     diff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
 class EntityChangeLog(Base):
@@ -333,20 +341,24 @@ class EntityChangeLog(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     entity_type: Mapped[str] = mapped_column(String(100))
-    entity_id: Mapped[str] = mapped_column(String(36))
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
     action: Mapped[str] = mapped_column(String(100))
     operator: Mapped[str | None] = mapped_column(String(255), nullable=True)
     change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
 class DraftGenerationTask(Base):
     __tablename__ = "draft_generation_tasks"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    domain_context_id: Mapped[str] = mapped_column(ForeignKey("domain_contexts.id"))
-    ontology_id: Mapped[str | None] = mapped_column(ForeignKey("ontologies.id"), nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="pending")
+    domain_context_id: Mapped[str] = mapped_column(
+        ForeignKey("domain_contexts.id"), index=True
+    )
+    ontology_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ontologies.id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(50), default="pending", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

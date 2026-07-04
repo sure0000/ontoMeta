@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 import json
+import logging
 
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -45,6 +46,12 @@ from app.schemas import (
     VersionRecordOut,
 )
 from app.services.relation_structure import infer_relation_structure_type
+from app.services.common import log_change
+
+logger = logging.getLogger("ontometa.workspace")
+
+# 持有后台草稿生成任务的强引用，避免 asyncio 在任务完成前将其 GC 回收。
+_background_tasks: set = set()
 
 
 def _loads_json(value: str | None) -> dict | None:
@@ -64,15 +71,8 @@ def _log_change(
     operator: str | None = None,
     summary: str | None = None,
 ) -> None:
-    db.add(
-        EntityChangeLog(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            operator=operator,
-            change_summary=summary,
-        )
-    )
+    # 保留以兼容内部调用，统一委托到 app.services.common.log_change
+    log_change(db, entity_type, entity_id, action, operator, summary)
 
 
 def _logic_text_blob(logic: BusinessLogic) -> str:
@@ -95,6 +95,51 @@ def _logic_relates_to_object(logic: BusinessLogic, obj: ObjectType) -> bool:
 
 def _object_relates_to_logic(obj: ObjectType, logic: BusinessLogic) -> bool:
     return _logic_relates_to_object(logic, obj)
+
+
+def _logic_referenced_ids(logic: BusinessLogic) -> tuple[set[str], set[str]]:
+    """从业务逻辑的表达式中解析出引用过的 (object_type_ids, property_ids)。
+
+    判定来源优先级：expression_json > expression_draft。两者都会扫描。
+    - expression_json: {"refs": [{"object_type_id": ..., "property_id": ...}, ...]}
+    - expression_draft: {"segments": [{"type": "ref", "object_type_id": ..., "property_id": ...}, ...]}
+
+    业务逻辑计算中引用过该本体下的对象/字段，即视为"绑定"。
+    """
+    obj_ids: set[str] = set()
+    prop_ids: set[str] = set()
+    for raw in (logic.expression_json, logic.expression_draft):
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        refs = data.get("refs")
+        if isinstance(refs, list):
+            for r in refs:
+                if not isinstance(r, dict):
+                    continue
+                oid = r.get("object_type_id")
+                pid = r.get("property_id")
+                if oid:
+                    obj_ids.add(oid)
+                if pid:
+                    prop_ids.add(pid)
+        segments = data.get("segments")
+        if isinstance(segments, list):
+            for seg in segments:
+                if not isinstance(seg, dict) or seg.get("type") != "ref":
+                    continue
+                oid = seg.get("object_type_id")
+                pid = seg.get("property_id")
+                if oid:
+                    obj_ids.add(oid)
+                if pid:
+                    prop_ids.add(pid)
+    return obj_ids, prop_ids
 
 
 def _normalize_cardinality(cardinality: str | None) -> str | None:
@@ -143,6 +188,22 @@ class OntologyQueryService:
             return ontology.domain_context_id, None
         return domain.id, domain.name
 
+    def _bulk_resolve_domain_context(
+        self, db: Session, ontology_ids: list[str]
+    ) -> dict[str, tuple[str | None, str | None]]:
+        """一次性解析多个 ontology_id -> (domain_id, domain_name)。"""
+        if not ontology_ids:
+            return {}
+        rows = (
+            db.query(Ontology.id, Ontology.domain_context_id, DomainContext.id, DomainContext.name)
+            .outerjoin(DomainContext, Ontology.domain_context_id == DomainContext.id)
+            .filter(Ontology.id.in_(ontology_ids))
+            .all()
+        )
+        return {
+            oid: (did or None, dname) for oid, _, did, dname in rows
+        }
+
     def _apply_ontology_scope(
         self,
         db: Session,
@@ -180,22 +241,22 @@ class OntologyQueryService:
         return query
 
     def _to_business_logic_out(
-        self, db: Session, logic: BusinessLogic
+        self,
+        db: Session,
+        logic: BusinessLogic,
+        *,
+        domain: tuple[str | None, str | None] | None = None,
+        binding_counts: tuple[int, int] | None = None,
     ) -> BusinessLogicOut:
-        domain_id, domain_name = self._resolve_domain_context(db, logic.ontology_id)
-        bound_object_count = (
-            db.query(BusinessLogicObjectBinding)
-            .filter(BusinessLogicObjectBinding.business_logic_id == logic.id)
-            .distinct(BusinessLogicObjectBinding.object_type_id)
-            .count()
-        )
-        bound_property_count = (
-            db.query(BusinessLogicPropertyBinding)
-            .filter(BusinessLogicPropertyBinding.property_id.isnot(None))
-            .filter(BusinessLogicPropertyBinding.business_logic_id == logic.id)
-            .distinct(BusinessLogicPropertyBinding.property_id)
-            .count()
-        )
+        if domain is None:
+            domain_id, domain_name = self._resolve_domain_context(db, logic.ontology_id)
+        else:
+            domain_id, domain_name = domain
+        if binding_counts is None:
+            binding_counts = self._bulk_business_logic_binding_counts(db, [logic.id]).get(
+                logic.id, (0, 0)
+            )
+        bound_object_count, bound_property_count = binding_counts
         return BusinessLogicOut(
             id=logic.id,
             name=logic.name,
@@ -215,6 +276,62 @@ class OntologyQueryService:
             bound_property_count=bound_property_count,
             updated_at=logic.updated_at,
         )
+
+    def _bulk_business_logic_binding_counts(
+        self, db: Session, logic_ids: list[str]
+    ) -> dict[str, tuple[int, int]]:
+        """批量计算每个 business_logic 的 (bound_object_count, bound_property_count)。
+
+        计数 = 显式绑定 ∪ 表达式引用（expression_json/expression_draft 中的 refs）
+        去重后的对象/字段数。
+        """
+        if not logic_ids:
+            return {}
+        logics = (
+            db.query(BusinessLogic)
+            .filter(BusinessLogic.id.in_(logic_ids))
+            .all()
+        )
+        obj_binding_rows = (
+            db.query(
+                BusinessLogicObjectBinding.business_logic_id,
+                BusinessLogicObjectBinding.object_type_id,
+            )
+            .filter(BusinessLogicObjectBinding.business_logic_id.in_(logic_ids))
+            .distinct()
+            .all()
+        )
+        prop_binding_rows = (
+            db.query(
+                BusinessLogicPropertyBinding.business_logic_id,
+                BusinessLogicPropertyBinding.property_id,
+            )
+            .filter(
+                BusinessLogicPropertyBinding.business_logic_id.in_(logic_ids),
+                BusinessLogicPropertyBinding.property_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        obj_bound: dict[str, set[str]] = {lid: set() for lid in logic_ids}
+        prop_bound: dict[str, set[str]] = {lid: set() for lid in logic_ids}
+        for lid, oid in obj_binding_rows:
+            obj_bound[lid].add(oid)
+        for lid, pid in prop_binding_rows:
+            prop_bound[lid].add(pid)
+        ref_obj: dict[str, set[str]] = {lid: set() for lid in logic_ids}
+        ref_prop: dict[str, set[str]] = {lid: set() for lid in logic_ids}
+        for logic in logics:
+            oids, pids = _logic_referenced_ids(logic)
+            ref_obj[logic.id] |= oids
+            ref_prop[logic.id] |= pids
+        return {
+            lid: (
+                len(obj_bound[lid] | ref_obj[lid]),
+                len(prop_bound[lid] | ref_prop[lid]),
+            )
+            for lid in logic_ids
+        }
 
     def _logic_object_binding_ids(
         self, db: Session, logic: BusinessLogic
@@ -239,92 +356,72 @@ class OntologyQueryService:
     def _related_logics_for_object(
         self, db: Session, obj: ObjectType
     ) -> list[BusinessLogic]:
-        logic_ids = self._object_logic_ids(db, obj)
-        if logic_ids:
-            return (
-                db.query(BusinessLogic)
-                .filter(BusinessLogic.id.in_(logic_ids))
-                .order_by(BusinessLogic.updated_at.desc())
-                .all()
-            )
+        """返回与该对象关联的业务逻辑。
 
-        # 历史数据兜底：无显式绑定时回落到文本命中
+        关联判定 = 显式绑定（BusinessLogicObjectBinding）
+                ∪ 表达式引用（expression_json/expression_draft 中 refs 引用了该对象）。
+        """
+        bound_ids = set(self._object_logic_ids(db, obj))
+        referenced_ids = self._object_referenced_logic_map(db, [obj.id]).get(obj.id, set())
+        all_ids = bound_ids | referenced_ids
+        if not all_ids:
+            return []
+        return (
+            db.query(BusinessLogic)
+            .filter(BusinessLogic.id.in_(all_ids))
+            .order_by(BusinessLogic.updated_at.desc())
+            .all()
+        )
+
+    def _object_referenced_logic_map(
+        self, db: Session, object_ids: list[str]
+    ) -> dict[str, set[str]]:
+        """返回 object_type_id -> {business_logic_id} 基于表达式引用。
+
+        仅扫描传入对象所属本体下的业务逻辑，避免全表扫描。
+        """
+        if not object_ids:
+            return {}
+        rows = (
+            db.query(ObjectType.id, ObjectType.ontology_id)
+            .filter(ObjectType.id.in_(object_ids))
+            .all()
+        )
+        obj_to_ontology = {oid: oid_ for oid, oid_ in rows}
+        if not obj_to_ontology:
+            return {oid: set() for oid in object_ids}
+        ontology_ids = set(obj_to_ontology.values())
         logics = (
             db.query(BusinessLogic)
-            .filter(BusinessLogic.ontology_id == obj.ontology_id)
+            .filter(BusinessLogic.ontology_id.in_(list(ontology_ids)))
             .all()
         )
-        related = [logic for logic in logics if _logic_relates_to_object(logic, obj)]
-        if related:
-            return related
-
-        relation_peer_ids: set[str] = set()
-        relations = (
-            db.query(RelationType)
-            .filter(
-                (RelationType.source_object_type_id == obj.id)
-                | (RelationType.target_object_type_id == obj.id)
-            )
-            .all()
-        )
-        for rel in relations:
-            peer_id = (
-                rel.target_object_type_id
-                if rel.source_object_type_id == obj.id
-                else rel.source_object_type_id
-            )
-            relation_peer_ids.add(peer_id)
-
-        if relation_peer_ids:
-            peers = db.query(ObjectType).filter(ObjectType.id.in_(relation_peer_ids)).all()
-            for logic in logics:
-                if any(_logic_relates_to_object(logic, peer) for peer in peers):
-                    related.append(logic)
-        # 去重
-        seen: set[str] = set()
-        unique: list[BusinessLogic] = []
-        for logic in related:
-            if logic.id not in seen:
-                seen.add(logic.id)
-                unique.append(logic)
-        return unique
-
-    def _count_related_logics(self, db: Session, obj: ObjectType) -> int:
-        return len(self._related_logics_for_object(db, obj))
+        result: dict[str, set[str]] = {oid: set() for oid in object_ids}
+        for logic in logics:
+            ref_obj_ids, _ = _logic_referenced_ids(logic)
+            for oid in ref_obj_ids:
+                if oid in result:
+                    result[oid].add(logic.id)
+        return result
 
     def _related_objects_for_logic(
         self, db: Session, logic: BusinessLogic
     ) -> list[ObjectType]:
-        object_ids = self._logic_object_binding_ids(db, logic)
-        if object_ids:
-            return (
-                db.query(ObjectType)
-                .filter(ObjectType.id.in_(object_ids))
-                .order_by(ObjectType.display_name.asc())
-                .all()
-            )
+        """返回与该业务逻辑关联的对象。
 
-        # 历史数据兜底
-        objects = (
-            db.query(ObjectType).filter(ObjectType.ontology_id == logic.ontology_id).all()
+        关联判定 = 显式绑定 ∪ 表达式引用（refs 中提到的对象）。
+        """
+        bound_ids = set(self._logic_object_binding_ids(db, logic))
+        ref_obj_ids, _ = _logic_referenced_ids(logic)
+        all_ids = bound_ids | ref_obj_ids
+        if not all_ids:
+            return []
+        return (
+            db.query(ObjectType)
+            .filter(ObjectType.id.in_(all_ids))
+            .order_by(ObjectType.display_name.asc())
+            .all()
         )
-        related = [obj for obj in objects if _object_relates_to_logic(obj, logic)]
-        if related:
-            return related
-
-        relations = (
-            db.query(RelationType).filter(RelationType.ontology_id == logic.ontology_id).all()
-        )
-        seen: set[str] = set()
-        unique: list[ObjectType] = []
-        for rel in relations:
-            source = db.get(ObjectType, rel.source_object_type_id)
-            target = db.get(ObjectType, rel.target_object_type_id)
-            for cand in (source, target):
-                if cand and _object_relates_to_logic(cand, logic) and cand.id not in seen:
-                    seen.add(cand.id)
-                    unique.append(cand)
-        return unique
 
     def _logic_bindings_for_object(
         self, db: Session, obj: ObjectType
@@ -332,37 +429,41 @@ class OntologyQueryService:
         from app.schemas import ObjectTypeLogicBindingOut
 
         rows = (
-            db.query(BusinessLogicObjectBinding)
+            db.query(BusinessLogicObjectBinding, BusinessLogic)
+            .join(
+                BusinessLogic,
+                BusinessLogic.id == BusinessLogicObjectBinding.business_logic_id,
+            )
             .filter(BusinessLogicObjectBinding.object_type_id == obj.id)
             .order_by(BusinessLogicObjectBinding.created_at.desc())
             .all()
         )
-        out: list[ObjectTypeLogicBindingOut] = []
-        for b in rows:
-            logic = db.get(BusinessLogic, b.business_logic_id)
-            if not logic:
-                continue
-            out.append(
-                ObjectTypeLogicBindingOut(
-                    binding_id=b.id,
-                    role=b.role,
-                    source=b.source,
-                    confidence=b.confidence,
-                    logic_id=logic.id,
-                    logic_name=logic.name,
-                    logic_display_name=logic.display_name,
-                    logic_type=logic.logic_type,
-                    logic_status=logic.status,
-                    created_at=b.created_at,
-                )
+        return [
+            ObjectTypeLogicBindingOut(
+                binding_id=b.id,
+                role=b.role,
+                source=b.source,
+                confidence=b.confidence,
+                logic_id=logic.id,
+                logic_name=logic.name,
+                logic_display_name=logic.display_name,
+                logic_type=logic.logic_type,
+                logic_status=logic.status,
+                created_at=b.created_at,
             )
-        return out
+            for b, logic in rows
+            if logic is not None
+        ]
 
     def _related_properties_for_logic(
         self, db: Session, logic: BusinessLogic, objects: list[ObjectType]
     ) -> list[Property]:
-        # 优先：显式字段绑定
-        prop_ids = [
+        """返回与该业务逻辑关联的字段。
+
+        关联判定 = 显式绑定（BusinessLogicPropertyBinding）∪ 表达式引用。
+        objects 参数保留以兼容调用方签名，不再参与计算。
+        """
+        bound_ids = {
             r[0]
             for r in (
                 db.query(BusinessLogicPropertyBinding.property_id)
@@ -370,73 +471,70 @@ class OntologyQueryService:
                 .distinct()
                 .all()
             )
-        ]
-        if prop_ids:
-            return db.query(Property).filter(Property.id.in_(prop_ids)).all()
-
-        # 兜底：文本命中
-        blob = _logic_text_blob(logic)
-        props: list[Property] = []
-        for obj in objects:
-            for prop in obj.properties:
-                if prop.name.lower() in blob or prop.display_name.lower() in blob:
-                    props.append(prop)
-        return props
+        }
+        _, ref_prop_ids = _logic_referenced_ids(logic)
+        all_ids = bound_ids | ref_prop_ids
+        if not all_ids:
+            return []
+        return db.query(Property).filter(Property.id.in_(all_ids)).all()
 
     def _object_bindings_for_logic(
         self, db: Session, logic: BusinessLogic
     ) -> list[BusinessLogicObjectBindingOut]:
         rows = (
-            db.query(BusinessLogicObjectBinding)
+            db.query(BusinessLogicObjectBinding, ObjectType)
+            .outerjoin(
+                ObjectType,
+                ObjectType.id == BusinessLogicObjectBinding.object_type_id,
+            )
             .filter(BusinessLogicObjectBinding.business_logic_id == logic.id)
+            .order_by(BusinessLogicObjectBinding.created_at.desc())
             .all()
         )
-        out: list[BusinessLogicObjectBindingOut] = []
-        for b in rows:
-            obj = db.get(ObjectType, b.object_type_id)
-            out.append(
-                BusinessLogicObjectBindingOut(
-                    id=b.id,
-                    business_logic_id=b.business_logic_id,
-                    object_type_id=b.object_type_id,
-                    object_type_name=obj.name if obj else None,
-                    object_type_display_name=obj.display_name if obj else None,
-                    role=b.role,
-                    source=b.source,
-                    confidence=b.confidence,
-                    created_at=b.created_at,
-                )
+        return [
+            BusinessLogicObjectBindingOut(
+                id=b.id,
+                business_logic_id=b.business_logic_id,
+                object_type_id=b.object_type_id,
+                object_type_name=obj.name if obj else None,
+                object_type_display_name=obj.display_name if obj else None,
+                role=b.role,
+                source=b.source,
+                confidence=b.confidence,
+                created_at=b.created_at,
             )
-        return out
+            for b, obj in rows
+        ]
 
     def _property_bindings_for_logic(
         self, db: Session, logic: BusinessLogic
     ) -> list[BusinessLogicPropertyBindingOut]:
         rows = (
-            db.query(BusinessLogicPropertyBinding)
+            db.query(BusinessLogicPropertyBinding, Property, ObjectType)
+            .outerjoin(
+                Property, Property.id == BusinessLogicPropertyBinding.property_id
+            )
+            .outerjoin(ObjectType, ObjectType.id == Property.object_type_id)
             .filter(BusinessLogicPropertyBinding.business_logic_id == logic.id)
+            .order_by(BusinessLogicPropertyBinding.created_at.desc())
             .all()
         )
-        out: list[BusinessLogicPropertyBindingOut] = []
-        for b in rows:
-            prop = db.get(Property, b.property_id)
-            obj = db.get(ObjectType, prop.object_type_id) if prop else None
-            out.append(
-                BusinessLogicPropertyBindingOut(
-                    id=b.id,
-                    business_logic_id=b.business_logic_id,
-                    property_id=b.property_id,
-                    property_name=prop.name if prop else None,
-                    property_display_name=prop.display_name if prop else None,
-                    object_type_id=obj.id if obj else None,
-                    object_type_name=obj.name if obj else None,
-                    role=b.role,
-                    source=b.source,
-                    confidence=b.confidence,
-                    created_at=b.created_at,
-                )
+        return [
+            BusinessLogicPropertyBindingOut(
+                id=b.id,
+                business_logic_id=b.business_logic_id,
+                property_id=b.property_id,
+                property_name=prop.name if prop else None,
+                property_display_name=prop.display_name if prop else None,
+                object_type_id=obj.id if obj else None,
+                object_type_name=obj.name if obj else None,
+                role=b.role,
+                source=b.source,
+                confidence=b.confidence,
+                created_at=b.created_at,
             )
-        return out
+            for b, prop, obj in rows
+        ]
 
     def list_versions_for_entity(self, db: Session, entity_id: str) -> list[VersionRecordOut]:
         return self.list_versions(db, entity_id)
@@ -453,13 +551,51 @@ class OntologyQueryService:
         if published_only:
             query = query.filter(Ontology.status == OntologyStatus.PUBLISHED.value)
         ontologies = query.order_by(Ontology.updated_at.desc()).all()
-        return [self._to_ontology_summary(db, o) for o in ontologies]
+        if not ontologies:
+            return []
+        counts = self._bulk_ontology_entity_counts(db, [o.id for o in ontologies])
+        return [
+            self._to_ontology_summary(db, o, counts=counts.get(o.id, (0, 0, 0)))
+            for o in ontologies
+        ]
+
+    def _bulk_ontology_entity_counts(
+        self, db: Session, ontology_ids: list[str]
+    ) -> dict[str, tuple[int, int, int]]:
+        """批量返回 ontology_id -> (object_type_count, relation_type_count, business_logic_count)。"""
+        if not ontology_ids:
+            return {}
+        object_rows = (
+            db.query(ObjectType.ontology_id, func.count(ObjectType.id))
+            .filter(ObjectType.ontology_id.in_(ontology_ids))
+            .group_by(ObjectType.ontology_id)
+            .all()
+        )
+        relation_rows = (
+            db.query(RelationType.ontology_id, func.count(RelationType.id))
+            .filter(RelationType.ontology_id.in_(ontology_ids))
+            .group_by(RelationType.ontology_id)
+            .all()
+        )
+        logic_rows = (
+            db.query(BusinessLogic.ontology_id, func.count(BusinessLogic.id))
+            .filter(BusinessLogic.ontology_id.in_(ontology_ids))
+            .group_by(BusinessLogic.ontology_id)
+            .all()
+        )
+        omap = {oid: c for oid, c in object_rows}
+        rmap = {oid: c for oid, c in relation_rows}
+        lmap = {oid: c for oid, c in logic_rows}
+        return {oid: (omap.get(oid, 0), rmap.get(oid, 0), lmap.get(oid, 0)) for oid in ontology_ids}
 
     def get_ontology(self, db: Session, ontology_id: str) -> OntologySummary | None:
         ontology = db.get(Ontology, ontology_id)
         if not ontology:
             return None
-        return self._to_ontology_summary(db, ontology)
+        counts = self._bulk_ontology_entity_counts(db, [ontology_id]).get(
+            ontology_id, (0, 0, 0)
+        )
+        return self._to_ontology_summary(db, ontology, counts=counts)
 
     def list_object_types(
         self,
@@ -477,7 +613,67 @@ class OntologyQueryService:
             published_only=published_only,
         )
         objects = query.order_by(ObjectType.updated_at.desc()).all()
-        return [self._to_object_summary(db, obj) for obj in objects]
+        if not objects:
+            return []
+        stats = self._bulk_object_stats(db, [o.id for o in objects])
+        return [
+            self._to_object_summary(db, obj, stats=stats.get(obj.id))
+            for obj in objects
+        ]
+
+    def _bulk_object_stats(
+        self, db: Session, object_ids: list[str]
+    ) -> dict[str, tuple[int, int, int]]:
+        """批量返回 object_type_id -> (property_count, relation_count, bound_logic_count)。
+
+        bound_logic_count = 显式绑定（BusinessLogicObjectBinding）∪ 表达式引用
+        （business_logic 的 expression_json/expression_draft 中 refs 提到该对象）
+        的去重 logic 数。
+        """
+        if not object_ids:
+            return {}
+        property_rows = (
+            db.query(Property.object_type_id, func.count(Property.id))
+            .filter(Property.object_type_id.in_(object_ids))
+            .group_by(Property.object_type_id)
+            .all()
+        )
+        # 关联关系数：source 或 target 任一命中
+        source_rows = (
+            db.query(RelationType.source_object_type_id, func.count(RelationType.id))
+            .filter(RelationType.source_object_type_id.in_(object_ids))
+            .group_by(RelationType.source_object_type_id)
+            .all()
+        )
+        target_rows = (
+            db.query(RelationType.target_object_type_id, func.count(RelationType.id))
+            .filter(RelationType.target_object_type_id.in_(object_ids))
+            .group_by(RelationType.target_object_type_id)
+            .all()
+        )
+        binding_rows = (
+            db.query(
+                BusinessLogicObjectBinding.object_type_id,
+                BusinessLogicObjectBinding.business_logic_id,
+            )
+            .filter(BusinessLogicObjectBinding.object_type_id.in_(object_ids))
+            .all()
+        )
+        pmap = {oid: c for oid, c in property_rows}
+        smap = {oid: c for oid, c in source_rows}
+        tmap = {oid: c for oid, c in target_rows}
+        binding_map: dict[str, set[str]] = {oid: set() for oid in object_ids}
+        for oid, lid in binding_rows:
+            binding_map[oid].add(lid)
+        referenced_map = self._object_referenced_logic_map(db, object_ids)
+        return {
+            oid: (
+                pmap.get(oid, 0),
+                smap.get(oid, 0) + tmap.get(oid, 0),
+                len(binding_map[oid] | referenced_map.get(oid, set())),
+            )
+            for oid in object_ids
+        }
 
     def list_relation_types(
         self,
@@ -486,7 +682,11 @@ class OntologyQueryService:
         domain_context_id: str | None = None,
         published_only: bool = False,
     ) -> list[RelationTypeOut]:
-        query = db.query(RelationType)
+        query = db.query(RelationType).options(
+            joinedload(RelationType.source_object_type),
+            joinedload(RelationType.target_object_type),
+            joinedload(RelationType.mapping_object_type),
+        )
         query = self._apply_ontology_scope(
             db,
             query,
@@ -510,18 +710,38 @@ class OntologyQueryService:
 
         outgoing = (
             db.query(RelationType)
+            .options(
+                joinedload(RelationType.source_object_type),
+                joinedload(RelationType.target_object_type),
+                joinedload(RelationType.mapping_object_type),
+            )
             .filter(RelationType.source_object_type_id == object_type_id)
             .all()
         )
         incoming = (
             db.query(RelationType)
+            .options(
+                joinedload(RelationType.source_object_type),
+                joinedload(RelationType.target_object_type),
+                joinedload(RelationType.mapping_object_type),
+            )
             .filter(RelationType.target_object_type_id == object_type_id)
             .all()
         )
         related_logics = self._related_logics_for_object(db, obj)
         logic_bindings = self._logic_bindings_for_object(db, obj)
 
-        summary = self._to_object_summary(db, obj)
+        # 详情与列表都基于显式绑定计数，二者保持一致。
+        base_stats = self._bulk_object_stats(db, [obj.id]).get(obj.id, (0, 0, 0))
+        full_stats = (base_stats[0], base_stats[1], len(related_logics))
+        summary = self._to_object_summary(db, obj, stats=full_stats)
+        related_logic_ids = [logic.id for logic in related_logics]
+        related_domain_map = self._bulk_resolve_domain_context(
+            db, [logic.ontology_id for logic in related_logics]
+        )
+        related_binding_map = self._bulk_business_logic_binding_counts(
+            db, related_logic_ids
+        )
         source_ref, datahub_url = self._resolve_object_datahub(db, obj)
         domain_id, domain_name = self._resolve_domain_context(db, obj.ontology_id)
         versions = self.list_versions(db, obj.id)
@@ -537,7 +757,13 @@ class OntologyQueryService:
             outgoing_relations=[self._to_relation_out(db, r) for r in outgoing],
             incoming_relations=[self._to_relation_out(db, r) for r in incoming],
             business_logics=[
-                self._to_business_logic_out(db, logic) for logic in related_logics
+                self._to_business_logic_out(
+                    db,
+                    logic,
+                    domain=related_domain_map.get(logic.ontology_id, (None, None)),
+                    binding_counts=related_binding_map.get(logic.id, (0, 0)),
+                )
+                for logic in related_logics
             ],
             business_logic_bindings=logic_bindings,
             version_records=versions + ontology_versions,
@@ -560,7 +786,20 @@ class OntologyQueryService:
             ontology_model=BusinessLogic,
         )
         items = query.order_by(BusinessLogic.updated_at.desc()).all()
-        return [self._to_business_logic_out(db, item) for item in items]
+        if not items:
+            return []
+        logic_ids = [it.id for it in items]
+        domain_map = self._bulk_resolve_domain_context(db, [it.ontology_id for it in items])
+        binding_map = self._bulk_business_logic_binding_counts(db, logic_ids)
+        return [
+            self._to_business_logic_out(
+                db,
+                it,
+                domain=domain_map.get(it.ontology_id, (None, None)),
+                binding_counts=binding_map.get(it.id, (0, 0)),
+            )
+            for it in items
+        ]
 
     def get_relation_type(self, db: Session, relation_type_id: str) -> RelationTypeDetail | None:
         rel = db.get(RelationType, relation_type_id)
@@ -614,11 +853,7 @@ class OntologyQueryService:
         )
 
     def get_business_logic(self, db: Session, logic_id: str) -> BusinessLogicDetail | None:
-        logic = (
-            db.query(BusinessLogic)
-            .filter(BusinessLogic.id == logic_id)
-            .first()
-        )
+        logic = db.get(BusinessLogic, logic_id)
         if not logic:
             return None
 
@@ -751,7 +986,18 @@ class OntologyQueryService:
         )
         return [VersionRecordOut.model_validate(r) for r in records]
 
-    def _to_ontology_summary(self, db: Session, ontology: Ontology) -> OntologySummary:
+    def _to_ontology_summary(
+        self,
+        db: Session,
+        ontology: Ontology,
+        *,
+        counts: tuple[int, int, int] | None = None,
+    ) -> OntologySummary:
+        if counts is None:
+            counts = self._bulk_ontology_entity_counts(db, [ontology.id]).get(
+                ontology.id, (0, 0, 0)
+            )
+        object_type_count, relation_type_count, business_logic_count = counts
         return OntologySummary(
             id=ontology.id,
             domain_context_id=ontology.domain_context_id,
@@ -759,32 +1005,22 @@ class OntologyQueryService:
             status=ontology.status,
             generated_at=ontology.generated_at,
             published_at=ontology.published_at,
-            object_type_count=db.query(ObjectType).filter(ObjectType.ontology_id == ontology.id).count(),
-            relation_type_count=db.query(RelationType)
-            .filter(RelationType.ontology_id == ontology.id)
-            .count(),
-            business_logic_count=db.query(BusinessLogic)
-            .filter(BusinessLogic.ontology_id == ontology.id)
-            .count(),
+            object_type_count=object_type_count,
+            relation_type_count=relation_type_count,
+            business_logic_count=business_logic_count,
         )
 
-    def _to_object_summary(self, db: Session, obj: ObjectType) -> ObjectTypeSummary:
-        property_count = db.query(Property).filter(Property.object_type_id == obj.id).count()
-        relation_count = (
-            db.query(RelationType)
-            .filter(
-                (RelationType.source_object_type_id == obj.id)
-                | (RelationType.target_object_type_id == obj.id)
-            )
-            .count()
-        )
-        logic_count = self._count_related_logics(db, obj)
-        bound_logic_count = (
-            db.query(BusinessLogicObjectBinding)
-            .filter(BusinessLogicObjectBinding.object_type_id == obj.id)
-            .distinct(BusinessLogicObjectBinding.business_logic_id)
-            .count()
-        )
+    def _to_object_summary(
+        self,
+        db: Session,
+        obj: ObjectType,
+        *,
+        stats: tuple[int, int, int] | None = None,
+    ) -> ObjectTypeSummary:
+        if stats is None:
+            stats = self._bulk_object_stats(db, [obj.id]).get(obj.id, (0, 0, 0))
+        property_count, relation_count, bound_logic_count = stats
+        logic_count = bound_logic_count
         return ObjectTypeSummary(
             id=obj.id,
             name=obj.name,
@@ -800,8 +1036,12 @@ class OntologyQueryService:
         )
 
     def _to_relation_out(self, db: Session, rel: RelationType) -> RelationTypeOut:
-        source = db.get(ObjectType, rel.source_object_type_id)
-        target = db.get(ObjectType, rel.target_object_type_id)
+        # 优先使用已加载的关系属性，避免 N+1；未加载时回落到 db.get
+        source = rel.source_object_type if "source_object_type" in rel.__dict__ else db.get(ObjectType, rel.source_object_type_id)
+        target = rel.target_object_type if "target_object_type" in rel.__dict__ else db.get(ObjectType, rel.target_object_type_id)
+        mapping = None
+        if rel.mapping_object_type_id:
+            mapping = rel.mapping_object_type if "mapping_object_type" in rel.__dict__ else db.get(ObjectType, rel.mapping_object_type_id)
         return RelationTypeOut(
             id=rel.id,
             name=rel.name,
@@ -815,9 +1055,7 @@ class OntologyQueryService:
             structure_type=rel.structure_type
             or infer_relation_structure_type(rel.description, rel.source_evidence),
             mapping_object_type_id=rel.mapping_object_type_id,
-            mapping_object_name=rel.mapping_object_type.display_name
-            if rel.mapping_object_type
-            else None,
+            mapping_object_name=mapping.display_name if mapping else None,
             source_evidence=rel.source_evidence,
             status=rel.status,
             source_confidence=rel.source_confidence,
@@ -880,8 +1118,22 @@ class WorkspaceService:
 
         return OntologyDraftGenerator(self.settings_service.get_llm_runtime(db))
 
+    @staticmethod
+    def _track_background_task(task) -> None:
+        """持有后台 asyncio 任务强引用并在完成后自动清理。"""
+        _background_tasks.add(task)
+
+        def _done(_t, *_args):
+            _background_tasks.discard(_t)
+
+        task.add_done_callback(_done)
+
     async def sync_domains(self, db: Session) -> list[DomainContextSummary]:
-        domains = await self._datahub(db).list_domains()
+        connector = self._datahub(db)
+        try:
+            domains = await connector.list_domains()
+        finally:
+            await connector.aclose()
         for domain in domains:
             existing = (
                 db.query(DomainContext)
@@ -906,49 +1158,65 @@ class WorkspaceService:
 
     def list_domains(self, db: Session) -> list[DomainContextSummary]:
         domains = db.query(DomainContext).order_by(DomainContext.updated_at.desc()).all()
+        if not domains:
+            return []
+        domain_ids = [d.id for d in domains]
+
+        draft_statuses = [OntologyStatus.DRAFT.value, OntologyStatus.IN_REVIEW.value]
+
+        # 一次性聚合 draft / published 数量
+        draft_rows = (
+            db.query(
+                Ontology.domain_context_id,
+                func.count(Ontology.id),
+                func.max(Ontology.updated_at),
+            )
+            .filter(
+                Ontology.domain_context_id.in_(domain_ids),
+                Ontology.status.in_(draft_statuses),
+            )
+            .group_by(Ontology.domain_context_id)
+            .all()
+        )
+        published_rows = (
+            db.query(
+                Ontology.domain_context_id,
+                func.count(Ontology.id),
+                func.max(Ontology.published_at),
+            )
+            .filter(
+                Ontology.domain_context_id.in_(domain_ids),
+                Ontology.status == OntologyStatus.PUBLISHED.value,
+            )
+            .group_by(Ontology.domain_context_id)
+            .all()
+        )
+        draft_map = {did: (cnt, latest) for did, cnt, latest in draft_rows}
+        published_map = {did: (cnt, latest) for did, cnt, latest in published_rows}
+
+        # 每个 domain 的最新本体状态：单查询取所有域的本体，Python 端取最大 updated_at
+        status_by_domain: dict[str, str] = {}
+        status_rows = (
+            db.query(
+                Ontology.domain_context_id,
+                Ontology.updated_at,
+                Ontology.status,
+            )
+            .filter(Ontology.domain_context_id.in_(domain_ids))
+            .all()
+        )
+        best: dict[str, tuple] = {}
+        for did, updated_at, status in status_rows:
+            prev = best.get(did)
+            if prev is None or updated_at > prev[0]:
+                best[did] = (updated_at, status)
+        status_by_domain = {did: st for did, (_, st) in best.items()}
+
         result: list[DomainContextSummary] = []
         for domain in domains:
-            draft_count = (
-                db.query(Ontology)
-                .filter(
-                    Ontology.domain_context_id == domain.id,
-                    Ontology.status.in_([OntologyStatus.DRAFT.value, OntologyStatus.IN_REVIEW.value]),
-                )
-                .count()
-            )
-            published_count = (
-                db.query(Ontology)
-                .filter(
-                    Ontology.domain_context_id == domain.id,
-                    Ontology.status == OntologyStatus.PUBLISHED.value,
-                )
-                .count()
-            )
-            latest_draft = (
-                db.query(Ontology)
-                .filter(
-                    Ontology.domain_context_id == domain.id,
-                    Ontology.status.in_([OntologyStatus.DRAFT.value, OntologyStatus.IN_REVIEW.value]),
-                )
-                .order_by(Ontology.updated_at.desc())
-                .first()
-            )
-            latest_published = (
-                db.query(Ontology)
-                .filter(
-                    Ontology.domain_context_id == domain.id,
-                    Ontology.status == OntologyStatus.PUBLISHED.value,
-                )
-                .order_by(Ontology.published_at.desc())
-                .first()
-            )
-            latest = (
-                db.query(Ontology)
-                .filter(Ontology.domain_context_id == domain.id)
-                .order_by(Ontology.updated_at.desc())
-                .first()
-            )
-            domain_status = latest.status if latest else "active"
+            draft_count, latest_draft_at = draft_map.get(domain.id, (0, None))
+            published_count, latest_published_at = published_map.get(domain.id, (0, None))
+            domain_status = status_by_domain.get(domain.id, "active")
             result.append(
                 DomainContextSummary(
                     id=domain.id,
@@ -959,8 +1227,8 @@ class WorkspaceService:
                     status=domain_status,
                     draft_count=draft_count,
                     published_count=published_count,
-                    latest_draft_at=latest_draft.updated_at if latest_draft else None,
-                    latest_published_at=latest_published.published_at if latest_published else None,
+                    latest_draft_at=latest_draft_at,
+                    latest_published_at=latest_published_at,
                     updated_at=domain.updated_at,
                 )
             )
@@ -1018,15 +1286,28 @@ class WorkspaceService:
         from app.database import SessionLocal
 
         db = SessionLocal()
+        task: DraftGenerationTask | None = None
         try:
             task = db.get(DraftGenerationTask, task_id)
+            if not task:
+                logger.exception("DraftGenerationTask %s not found", task_id)
+                return
             domain = db.get(DomainContext, domain_id)
+            if not domain:
+                task.status = "failed"
+                task.message = "数据域不存在"
+                db.commit()
+                return
 
             task.progress = 5
             task.message = "正在从 DataHub 拉取元数据..."
             db.commit()
 
-            bundle = await self._datahub(db).fetch_domain_bundle(domain.datahub_domain_id)
+            connector = self._datahub(db)
+            try:
+                bundle = await connector.fetch_domain_bundle(domain.datahub_domain_id)
+            finally:
+                await connector.aclose()
             task.progress = 30
             task.message = "正在组装证据包..."
             db.commit()
@@ -1068,11 +1349,16 @@ class WorkspaceService:
             task.message = "草稿生成完成"
             db.commit()
         except Exception as exc:
-            task = db.get(DraftGenerationTask, task_id)
-            if task:
-                task.status = "failed"
-                task.message = str(exc)
-                db.commit()
+            logger.exception("Draft generation failed for task %s: %s", task_id, exc)
+            try:
+                # task 可能在 db.get 之前就抛错，此时重新加载
+                current = task if task is not None else db.get(DraftGenerationTask, task_id)
+                if current is not None:
+                    current.status = "failed"
+                    current.message = str(exc)
+                    db.commit()
+            except Exception:
+                logger.exception("Failed to mark task %s as failed", task_id)
         finally:
             db.close()
 

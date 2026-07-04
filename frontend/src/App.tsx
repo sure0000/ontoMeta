@@ -15,7 +15,7 @@ export default function App() {
   return (
     <Routes>
       <Route element={<AppLayout />}>
-        <Route path="/" element={<Navigate to="/workspace" replace />} />
+        <Route path="/" element={<Navigate to="/ontology" replace />} />
         <Route path="/workspace" element={<WorkspacePage />} />
         <Route path="/workspace/:domainId" element={<DomainDetailPage />} />
         <Route path="/workspace/:domainId/executions" element={<ExecutionRecordsPage />} />

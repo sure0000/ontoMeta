@@ -1,6 +1,6 @@
 import { ApartmentOutlined } from "@ant-design/icons";
-import { Alert, Select, Space, Spin, Typography } from "antd";
-import { useEffect, useState } from "react";
+import { Alert, Spin } from "antd";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -8,79 +8,103 @@ import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { useApi } from "../hooks/useApi";
 import type {
   DomainContext,
+  DomainContextDetail,
   ObjectTypeSummary,
   OntologyGraph,
   RelationType,
 } from "../types";
 
-const { Text } = Typography;
+interface OntologyBundle {
+  domains: DomainContext[];
+  domain: DomainContextDetail | null;
+  objects: ObjectTypeSummary[];
+  relations: RelationType[];
+  graph: OntologyGraph | null;
+  publishedOntologyId: string | null;
+}
 
 export function OntologyPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const domainId = searchParams.get("domain") || undefined;
-  const [domains, setDomains] = useState<DomainContext[]>([]);
-  const [objects, setObjects] = useState<ObjectTypeSummary[]>([]);
-  const [relations, setRelations] = useState<RelationType[]>([]);
-  const [graph, setGraph] = useState<OntologyGraph | null>(null);
-  const [publishedOntologyId, setPublishedOntologyId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    api.listDomains().then(setDomains).catch((err) => setError(err.message));
-  }, []);
+  const { data: bundle, loading, error } = useApi<OntologyBundle>(
+    async () => {
+      const domains = await api.listDomains();
+      if (domains.length === 0) {
+        return {
+          domains,
+          domain: null,
+          objects: [],
+          relations: [],
+          graph: null,
+          publishedOntologyId: null,
+        };
+      }
+      const targetDomainId = domainId ?? domains[0]?.id;
+      if (!targetDomainId) {
+        return {
+          domains,
+          domain: null,
+          objects: [],
+          relations: [],
+          graph: null,
+          publishedOntologyId: null,
+        };
+      }
+      const domain = await api.getDomain(targetDomainId);
+      const ontologyId = domain.published_ontology_id;
+      if (!ontologyId) {
+        return {
+          domains,
+          domain,
+          objects: [],
+          relations: [],
+          graph: null,
+          publishedOntologyId: null,
+        };
+      }
+      const [objectList, graphData, relationList] = await Promise.all([
+        api.listObjectTypes({ ontologyId, publishedOnly: true }),
+        api.getOntologyGraph(ontologyId),
+        api.listRelationTypes({ ontologyId, publishedOnly: true }),
+      ]);
+      return {
+        domains,
+        domain,
+        objects: objectList,
+        relations: relationList,
+        graph: graphData,
+        publishedOntologyId: ontologyId,
+      };
+    },
+    [domainId],
+  );
 
-  useEffect(() => {
-    if (domains.length === 0) {
-      setLoading(false);
-      return;
+  const domains = bundle?.domains ?? [];
+  const domain = bundle?.domain ?? null;
+  const objects = bundle?.objects ?? [];
+  const relations = bundle?.relations ?? [];
+  const graph = bundle?.graph ?? null;
+  const publishedOntologyId = bundle?.publishedOntologyId ?? null;
+
+  // 首次进入且未在 URL 中带 domain 参数时，把默认域写入 URL（replace，不污染历史）。
+  // 必须放在 effect 中，不能在 render 期间调用 setSearchParams。
+  const syncedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (syncedRef.current) return;
+    if (!domainId && domains.length > 0 && domains[0]?.id) {
+      syncedRef.current = true;
+      setSearchParams({ domain: domains[0].id }, { replace: true });
     }
-
-    const targetDomainId = domainId ?? domains[0]?.id;
-    if (!targetDomainId) {
-      setLoading(false);
-      return;
-    }
-
-    if (!domainId && targetDomainId) {
-      setSearchParams({ domain: targetDomainId }, { replace: true });
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    api
-      .getDomain(targetDomainId)
-      .then(async (domain) => {
-        const ontologyId = domain.published_ontology_id;
-        setPublishedOntologyId(ontologyId ?? null);
-
-        if (!ontologyId) {
-          setObjects([]);
-          setRelations([]);
-          setGraph(null);
-          return;
-        }
-
-        const [objectList, graphData, relationList] = await Promise.all([
-          api.listObjectTypes({ ontologyId, publishedOnly: true }),
-          api.getOntologyGraph(ontologyId),
-          api.listRelationTypes({ ontologyId, publishedOnly: true }),
-        ]);
-        setObjects(objectList);
-        setRelations(relationList);
-        setGraph(graphData);
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
   }, [domainId, domains, setSearchParams]);
 
-  const handleDomainChange = (value: string) => {
-    setSearchParams({ domain: value });
-  };
+  // domainId 变化时重置 sync 标记
+  useEffect(() => {
+    syncedRef.current = Boolean(domainId);
+  }, [domainId]);
 
   if (loading && domains.length === 0) return <PageSkeleton type="cards" />;
 
@@ -96,23 +120,7 @@ export function OntologyPage() {
     <PageContainer full>
       <PageHeader
         icon={<ApartmentOutlined />}
-        title="本体"
-        description="已发布本体的语义结果展示（只读），可切换数据域浏览对象、关系与图谱。"
-        extra={
-          domains.length > 0 ? (
-            <Space>
-              <Text type="secondary" style={{ fontSize: 13 }}>
-                数据域
-              </Text>
-              <Select
-                style={{ minWidth: 220 }}
-                value={domainId ?? domains[0]?.id}
-                onChange={handleDomainChange}
-                options={domains.map((d) => ({ label: d.name, value: d.id }))}
-              />
-            </Space>
-          ) : undefined
-        }
+        title={domain?.name ?? "本体浏览"}
       />
 
       {error && (
@@ -120,8 +128,6 @@ export function OntologyPage() {
           type="error"
           message={error}
           showIcon
-          closable
-          onClose={() => setError(null)}
         />
       )}
 

@@ -14,6 +14,7 @@ from app.models import (
     RelationType,
 )
 from app.services.relation_terms import compact_relation_term, validate_relation_term
+from app.services.common import log_change
 from app.schemas import (
     BusinessLogicDetail,
     BusinessLogicObjectBindingOut,
@@ -37,21 +38,23 @@ def _log_change(
     operator: str | None = None,
     summary: str | None = None,
 ) -> None:
-    from app.models import EntityChangeLog
-
-    db.add(
-        EntityChangeLog(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            operator=operator,
-            change_summary=summary,
-        )
-    )
+    log_change(db, entity_type, entity_id, action, operator, summary)
 
 
 class EditService:
     """工作区本体编辑与预发布。"""
+
+    def __init__(self) -> None:
+        # 延迟加载以避免循环导入；OntologyQueryService 无状态，可安全缓存于实例。
+        self._query_service = None
+
+    @property
+    def query(self):
+        if self._query_service is None:
+            from app.services.query import OntologyQueryService
+
+            self._query_service = OntologyQueryService()
+        return self._query_service
 
     def update_object_type(
         self,
@@ -63,8 +66,6 @@ class EditService:
         description: str | None = None,
         operator: str | None = None,
     ) -> ObjectTypeDetail:
-        from app.services.query import OntologyQueryService
-
         obj = db.get(ObjectType, object_type_id)
         if not obj:
             raise ValueError("Object type not found")
@@ -82,7 +83,7 @@ class EditService:
         _log_change(db, "object_type", obj.id, "edit", operator, "更新对象类型")
         db.commit()
 
-        detail = OntologyQueryService().get_object_type(db, object_type_id)
+        detail = self.query.get_object_type(db, object_type_id)
         if not detail:
             raise ValueError("Object type not found")
         return detail
@@ -102,7 +103,6 @@ class EditService:
         """
         from app.connectors.datahub import DataHubConnector
         from app.services.evidence_builder import _infer_object_name
-        from app.services.query import OntologyQueryService
         from app.services.settings_service import SettingsService
 
         ontology = db.get(Ontology, ontology_id)
@@ -118,10 +118,13 @@ class EditService:
             .first()
         )
         if existing:
-            return OntologyQueryService()._to_object_summary(db, existing)
+            return self.query._to_object_summary(db, existing)
 
         connector = DataHubConnector(SettingsService().get_datahub_runtime(db))
-        dataset = await connector.get_dataset_by_urn(dataset_urn)
+        try:
+            dataset = await connector.get_dataset_by_urn(dataset_urn)
+        finally:
+            await connector.aclose()
 
         object_name = _infer_object_name(dataset.name)
         candidate_name = object_name
@@ -158,7 +161,7 @@ class EditService:
         )
         db.commit()
         db.refresh(obj)
-        return OntologyQueryService()._to_object_summary(db, obj)
+        return self.query._to_object_summary(db, obj)
 
     def update_property(
         self,
@@ -211,7 +214,6 @@ class EditService:
         mapping_object_type_id: str | None = None,
         operator: str | None = None,
     ) -> RelationTypeOut:
-        from app.services.query import OntologyQueryService
         from app.services.relation_structure import validate_relation_structure_type
         from app.services.relation_terms import compact_relation_term, validate_relation_term
 
@@ -263,7 +265,7 @@ class EditService:
         db.flush()
         _log_change(db, "relation_type", rel.id, "create", operator, f"新建关系：{compacted}")
         db.commit()
-        return OntologyQueryService()._to_relation_out(db, rel)
+        return self.query._to_relation_out(db, rel)
 
     def update_relation_type(
         self,
@@ -279,7 +281,6 @@ class EditService:
         target_object_type_id: str | None = None,
         operator: str | None = None,
     ) -> RelationTypeOut:
-        from app.services.query import OntologyQueryService
         from app.services.relation_structure import validate_relation_structure_type
 
         rel = db.get(RelationType, relation_type_id)
@@ -333,7 +334,7 @@ class EditService:
 
         _log_change(db, "relation_type", rel.id, "edit", operator, "更新关系")
         db.commit()
-        return OntologyQueryService()._to_relation_out(db, rel)
+        return self.query._to_relation_out(db, rel)
 
     def pre_publish_relation_type(
         self,
@@ -341,7 +342,6 @@ class EditService:
         relation_type_id: str,
         operator: str | None = None,
     ) -> RelationTypeOut:
-        from app.services.query import OntologyQueryService
 
         rel = db.get(RelationType, relation_type_id)
         if not rel:
@@ -351,7 +351,7 @@ class EditService:
         _log_change(db, "relation_type", rel.id, "pre_publish", operator, "预发布关系")
         db.commit()
         db.refresh(rel)
-        return OntologyQueryService()._to_relation_out(db, rel)
+        return self.query._to_relation_out(db, rel)
 
     def pre_publish_object_type(
         self,
@@ -359,7 +359,6 @@ class EditService:
         object_type_id: str,
         operator: str | None = None,
     ) -> ObjectTypeSummary:
-        from app.services.query import OntologyQueryService
 
         obj = db.get(ObjectType, object_type_id)
         if not obj:
@@ -369,19 +368,18 @@ class EditService:
         _log_change(db, "object_type", obj.id, "pre_publish", operator, "预发布")
         db.commit()
         db.refresh(obj)
-        return OntologyQueryService()._to_object_summary(db, obj)
+        return self.query._to_object_summary(db, obj)
 
     # --- 业务逻辑本体编辑(定义 / 预发布)---
     # 注:对象/字段引用绑定复用下方 bind_object_to_logic / bind_property_to_logic,
     # 由用户在业务逻辑详情页从已发布本体中主动挑选。
 
     def _resolve_published_ontology(self, db: Session, domain_id: str) -> Ontology:
-        from app.services.query import OntologyQueryService
 
         domain = db.get(DomainContext, domain_id)
         if not domain:
             raise ValueError("数据域不存在")
-        ontology = OntologyQueryService().get_published_ontology(db, domain_id)
+        ontology = self.query.get_published_ontology(db, domain_id)
         if not ontology:
             raise ValueError("该数据域尚无已发布本体,无法创建业务逻辑")
         return ontology
@@ -416,7 +414,6 @@ class EditService:
         expression_json: dict | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
-        from app.services.query import OntologyQueryService
 
         ontology = self._resolve_published_ontology(db, domain_id)
         if logic_type not in {"metric", "tag", "rule"}:
@@ -450,7 +447,7 @@ class EditService:
         _log_change(db, "business_logic", logic.id, "create", operator, f"新建业务逻辑:{display_name}")
         db.commit()
 
-        detail = OntologyQueryService().get_business_logic(db, logic.id)
+        detail = self.query.get_business_logic(db, logic.id)
         if not detail:
             raise ValueError("Business logic not found")
         return detail
@@ -468,7 +465,6 @@ class EditService:
         expression_json: dict | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
-        from app.services.query import OntologyQueryService
 
         logic = db.get(BusinessLogic, logic_id)
         if not logic:
@@ -499,7 +495,7 @@ class EditService:
         _log_change(db, "business_logic", logic.id, "edit", operator, "更新业务逻辑")
         db.commit()
 
-        detail = OntologyQueryService().get_business_logic(db, logic_id)
+        detail = self.query.get_business_logic(db, logic_id)
         if not detail:
             raise ValueError("Business logic not found")
         return detail
@@ -534,9 +530,8 @@ class EditService:
         db.commit()
         db.refresh(logic)
 
-        from app.services.query import OntologyQueryService
 
-        return OntologyQueryService()._to_business_logic_out(db, logic)
+        return self.query._to_business_logic_out(db, logic)
 
     # --- 业务逻辑绑定（对象 / 字段）---
 

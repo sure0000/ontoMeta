@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { OntologyGraphView } from "./graph";
 import type { ObjectTypeDetail, OntologyGraph } from "../types";
 
@@ -11,7 +11,7 @@ interface Props {
   defaultLayout?: "dagre" | "center" | "circular";
 }
 
-export function ObjectRelationGraph({
+function ObjectRelationGraphInner({
   obj,
   objectDetailPath,
   relationDetailPath,
@@ -42,6 +42,8 @@ export function ObjectRelationGraph({
     />
   );
 }
+
+export const ObjectRelationGraph = memo(ObjectRelationGraphInner);
 
 function buildRelationGraph(obj: ObjectTypeDetail): OntologyGraph {
   const nodeMap = new Map<string, OntologyGraph["nodes"][number]>();

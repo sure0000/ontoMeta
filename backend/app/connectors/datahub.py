@@ -361,6 +361,21 @@ class DataHubConnector:
             self.token = runtime_config.token
             self.use_mock = runtime_config.use_mock
 
+        # 懒初始化的复用 httpx 客户端，连接池跨多次 GraphQL 请求复用。
+        # mock 模式下不会发起任何 HTTP 请求，无需创建。
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0, trust_env=False)
+        return self._client
+
+    async def aclose(self) -> None:
+        """显式释放底层 httpx 连接池。调用方在请求结束时调用。"""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     async def list_domains(self) -> list[DomainInput]:
         if self.use_mock:
             return MOCK_DOMAINS
@@ -604,14 +619,14 @@ class DataHubConnector:
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            response = await client.post(
-                f"{self.api_url}/api/graphql",
-                json={"query": query, "variables": variables or {}},
-                headers=headers,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if "errors" in payload:
-                raise RuntimeError(str(payload["errors"]))
-            return payload.get("data", {})
+        client = self._get_client()
+        response = await client.post(
+            f"{self.api_url}/api/graphql",
+            json={"query": query, "variables": variables or {}},
+            headers=headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if "errors" in payload:
+            raise RuntimeError(str(payload["errors"]))
+        return payload.get("data", {})

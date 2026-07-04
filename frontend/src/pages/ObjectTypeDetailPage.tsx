@@ -4,9 +4,11 @@ import {
   FunctionOutlined,
   HistoryOutlined,
   LinkOutlined,
+  NodeIndexOutlined,
   PlusOutlined,
   SaveOutlined,
   SendOutlined,
+  ShareAltOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -36,6 +38,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
 import { StatusBadge } from "../components/StatusBadge";
+import { useDebouncedCallback } from "../hooks/useApi";
 import { extractDataHubBase, resolveDataHubDatasetUrl } from "../utils/datahub";
 import {
   CARDINALITY_OPTIONS,
@@ -238,14 +241,14 @@ export function ObjectTypeDetailPage() {
     setProperties((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   };
 
-  const searchDatasets = (keyword: string) => {
+  const searchDatasets = useDebouncedCallback((keyword: string) => {
     if (!obj?.ontology_id) return;
     setDatasetSearching(true);
     api.searchDatahubDatasets({ query: keyword, ontologyId: obj.ontology_id })
       .then(setDatasetOptions)
       .catch((err) => message.error(err instanceof Error ? err.message : "搜索 DataHub 表失败"))
       .finally(() => setDatasetSearching(false));
-  };
+  }, 300);
 
   const handleDatasetSelect = (option: DataHubDatasetOption) => {
     if (!obj?.ontology_id) return;
@@ -736,16 +739,22 @@ export function ObjectTypeDetailPage() {
 
       <section className="section-card">
         <Tabs
+          className="om-tabs om-tabs--inset"
           activeKey={relationTab}
           onChange={setRelationTab}
           items={[
             {
               key: "list",
-              label: `关系列表${relationCount > 0 ? ` (${relationCount})` : ""}`,
+              label: (
+                <span>
+                  <ShareAltOutlined style={{ marginRight: 6 }} />
+                  关系列表{relationCount > 0 ? ` (${relationCount})` : ""}
+                </span>
+              ),
               children: (
                 <>
                   {inWorkspace && (
-                    <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--om-border)" }}>
+                    <div className="om-tab-toolbar">
                       <Button type="primary" icon={<PlusOutlined />} onClick={openAddRelationModal}>
                         新增关系
                       </Button>
@@ -768,7 +777,12 @@ export function ObjectTypeDetailPage() {
             },
             {
               key: "graph",
-              label: "关系图谱",
+              label: (
+                <span>
+                  <NodeIndexOutlined style={{ marginRight: 6 }} />
+                  关系图谱
+                </span>
+              ),
               children: (
                 relationCount === 0 ? (
                   <EmptyState title="暂无关系图谱" description="该对象尚未建立与其他对象的关系。" />

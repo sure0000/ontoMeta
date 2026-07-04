@@ -73,7 +73,7 @@ createRoot(document.getElementById("root")!).render(
             rowHoverBg: "#f6f8fb",
             borderColor: "#eef1f6",
             cellPaddingBlock: 12,
-            cellPaddingInline: 14,
+            cellPaddingInline: 16,
           },
           Button: {
             controlHeight: 34,

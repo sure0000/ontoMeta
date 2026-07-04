@@ -7,35 +7,158 @@ import {
   SettingOutlined,
 } from "@ant-design/icons";
 import { Avatar, Layout, Menu, Tooltip } from "antd";
+import type { MenuProps } from "antd";
 import { useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { AppBreadcrumb } from "./AppBreadcrumb";
+import { api } from "../api";
+import { useApi } from "../hooks/useApi";
+import type { BusinessLogic, DomainContext } from "../types";
 
 const { Sider, Content, Header } = Layout;
 
-const menuItems = [
-  { key: "/workspace", icon: <FolderOutlined />, label: "工作区" },
-  { key: "/ontology", icon: <ApartmentOutlined />, label: "本体" },
-  { key: "/business-logic", icon: <FunctionOutlined />, label: "业务逻辑" },
-  { key: "/settings", icon: <SettingOutlined />, label: "设置" },
-];
+function ontologyChildKey(domainId: string) {
+  return `/ontology?domain=${domainId}`;
+}
 
-function getSelectedKey(pathname: string) {
+function logicChildKey(domainId: string) {
+  return `/business-logic?domain=${domainId}`;
+}
+
+function readDomainFromSearch(search: string) {
+  return new URLSearchParams(search).get("domain") || undefined;
+}
+
+function getSelectedKey(pathname: string, search: string) {
   if (pathname.startsWith("/workspace")) return "/workspace";
-  if (pathname.startsWith("/ontology")) return "/ontology";
-  if (pathname.startsWith("/business-logic")) return "/business-logic";
+  if (pathname.startsWith("/ontology")) {
+    const domainId = readDomainFromSearch(search);
+    return domainId ? ontologyChildKey(domainId) : "/ontology";
+  }
+  if (pathname.startsWith("/business-logic")) {
+    const domainId = readDomainFromSearch(search);
+    return domainId ? logicChildKey(domainId) : "/business-logic";
+  }
   if (pathname.startsWith("/settings")) return "/settings";
-  return "/workspace";
+  return "/ontology";
+}
+
+function getOpenKeys(pathname: string) {
+  if (pathname.startsWith("/ontology")) return ["/ontology"];
+  if (pathname.startsWith("/business-logic")) return ["/business-logic"];
+  return [];
+}
+
+function countLabel(count: number) {
+  return (
+    <span
+      style={{
+        marginLeft: 8,
+        color: "var(--om-text-secondary, #94a3b8)",
+        fontSize: 12,
+      }}
+    >
+      {count}
+    </span>
+  );
 }
 
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
-  const selectedKey = useMemo(
-    () => getSelectedKey(location.pathname),
-    [location.pathname],
+
+  const { data: domains } = useApi<DomainContext[]>(
+    async () => api.listDomains(),
+    [],
   );
+
+  const { data: allLogics } = useApi<BusinessLogic[]>(
+    async () => api.listBusinessLogics(),
+    [],
+  );
+
+  const selectedKey = useMemo(
+    () => getSelectedKey(location.pathname, location.search),
+    [location.pathname, location.search],
+  );
+
+  const defaultOpenKeys = useMemo(
+    () => getOpenKeys(location.pathname),
+    // 仅在首次挂载时使用，避免手动折叠后被强行撑开
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const menuItems = useMemo<MenuProps["items"]>(() => {
+    const domainList = domains ?? [];
+
+    const ontologyChildren = domainList.map((d) => ({
+      key: ontologyChildKey(d.id),
+      label: (
+        <span>
+          <span>{d.name}</span>
+          {countLabel(d.published_count)}
+        </span>
+      ),
+    }));
+
+    const logicCountByDomain = new Map<string, number>();
+    for (const logic of allLogics ?? []) {
+      if (!logic.domain_context_id) continue;
+      logicCountByDomain.set(
+        logic.domain_context_id,
+        (logicCountByDomain.get(logic.domain_context_id) ?? 0) + 1,
+      );
+    }
+    const logicChildren = domainList.map((d) => ({
+      key: logicChildKey(d.id),
+      label: (
+        <span>
+          <span>{d.name}</span>
+          {countLabel(logicCountByDomain.get(d.id) ?? 0)}
+        </span>
+      ),
+    }));
+
+    return [
+      {
+        key: "/ontology",
+        icon: <ApartmentOutlined />,
+        label: "本体浏览",
+        children:
+          ontologyChildren.length > 0
+            ? ontologyChildren
+            : [{ key: "/ontology-empty", label: "暂无数据域", disabled: true }],
+      },
+      { key: "/workspace", icon: <FolderOutlined />, label: "本体建模" },
+      {
+        key: "/business-logic",
+        icon: <FunctionOutlined />,
+        label: "业务逻辑",
+        children:
+          logicChildren.length > 0
+            ? logicChildren
+            : [{ key: "/business-logic-empty", label: "暂无数据域", disabled: true }],
+      },
+      { key: "/settings", icon: <SettingOutlined />, label: "设置" },
+    ];
+  }, [domains, allLogics]);
+
+  const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
+    if (key === "/ontology-empty" || key === "/business-logic-empty") return;
+    if (key.startsWith("/ontology?") || key.startsWith("/business-logic?")) {
+      const [, query] = key.split("?");
+      const params = new URLSearchParams(query);
+      const domainId = params.get("domain");
+      if (domainId) {
+        const base = key.startsWith("/ontology?") ? "/ontology" : "/business-logic";
+        navigate(`${base}?domain=${domainId}`);
+      }
+      return;
+    }
+    navigate(key);
+  };
 
   return (
     <Layout className="app-shell">
@@ -61,8 +184,9 @@ export function AppLayout() {
           className="app-sider-menu"
           mode="inline"
           selectedKeys={[selectedKey]}
+          defaultOpenKeys={defaultOpenKeys}
           items={menuItems}
-          onClick={({ key }) => navigate(key)}
+          onClick={handleMenuClick}
         />
         <div className="app-sider-footer">
           {!collapsed ? (

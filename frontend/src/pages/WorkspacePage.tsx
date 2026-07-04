@@ -1,6 +1,5 @@
 import { FolderOpenOutlined } from "@ant-design/icons";
 import { Alert, Col, Row } from "antd";
-import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -8,28 +7,15 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
+import { useApi } from "../hooks/useApi";
+import { formatDateTime } from "../utils/format";
 import type { DomainContext } from "../types";
 
-function formatDateTime(value: string) {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(
-    d.getHours(),
-  ).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
 export function WorkspacePage() {
-  const [domains, setDomains] = useState<DomainContext[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    api
-      .listDomains()
-      .then(setDomains)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
+  const { data: domains, loading, error } = useApi<DomainContext[]>(
+    () => api.listDomains(),
+    [],
+  );
 
   if (loading) return <PageSkeleton type="cards" />;
 
@@ -43,7 +29,7 @@ export function WorkspacePage() {
 
       {error ? (
         <Alert type="error" message="加载失败" description={error} showIcon />
-      ) : domains.length === 0 ? (
+      ) : !domains || domains.length === 0 ? (
         <EmptyState
           title="暂无数据域"
           description="尚未从 DataHub 同步任何数据域，请联系管理员配置数据域后开始建模。"
