@@ -76,6 +76,13 @@ async function resolveBreadcrumbs(
     return [{ label: "业务逻辑" }];
   }
 
+  if (pathname === "/business-logic/create") {
+    return [
+      { label: "业务逻辑", path: "/business-logic" },
+      { label: "新建" },
+    ];
+  }
+
   if (pathname.startsWith("/business-logic/") && params.logicId) {
     const logic = await api.getBusinessLogic(params.logicId);
     return [

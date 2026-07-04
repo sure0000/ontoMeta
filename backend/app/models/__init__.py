@@ -185,6 +185,8 @@ class BusinessLogic(Base):
     logic_type: Mapped[str] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     expression_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expression_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expression_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)

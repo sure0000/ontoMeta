@@ -13,6 +13,8 @@ import type {
   DomainContext,
   DomainContextDetail,
   DraftProgress,
+  ExpressionDraft,
+  ExpressionJson,
   LlmModelOption,
   LlmServiceConfig,
   ObjectTypeDetail,
@@ -26,28 +28,48 @@ import type {
 } from "./types";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    try {
-      const parsed = JSON.parse(detail) as { detail?: string | Array<{ msg?: string }> };
-      if (typeof parsed.detail === "string") {
-        throw new Error(parsed.detail);
-      }
-      if (Array.isArray(parsed.detail)) {
-        throw new Error(parsed.detail.map((item) => item.msg).filter(Boolean).join("；") || detail);
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message !== detail) {
-        throw err;
-      }
-    }
-    throw new Error(detail || `Request failed: ${response.status}`);
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+  } catch (err) {
+    throw new Error(
+      `无法连接服务端 (${path})：${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  return response.json() as Promise<T>;
+
+  if (!response.ok) {
+    const raw = await response.text();
+    let detail = raw || `请求失败：HTTP ${response.status}`;
+    try {
+      const parsed = JSON.parse(raw) as {
+        detail?: string | Array<{ msg?: string }>;
+      };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+        detail = parsed.detail;
+      } else if (Array.isArray(parsed.detail)) {
+        const joined = parsed.detail
+          .map((item) => item.msg)
+          .filter(Boolean)
+          .join("；");
+        if (joined) detail = joined;
+      }
+    } catch {
+      // 响应不是 JSON（例如纯文本 "Internal Server Error"）
+      detail = `服务端返回了非 JSON 响应（HTTP ${response.status}）：${raw.slice(0, 120)}`;
+    }
+    throw new Error(detail);
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch (err) {
+    throw new Error(
+      `服务端响应解析失败（${path}）：${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 export const api = {
@@ -209,6 +231,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  formatExpression: (body: {
+    domain_id: string;
+    expression_draft: ExpressionDraft;
+    logic_type?: string;
+    description?: string;
+  }) =>
+    request<{ expression_json: ExpressionJson; expression_summary: string }>(
+      "/api/business-logics/format-expression",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 
   importBusinessLogic: (body: BusinessLogicImportInput) =>
     request<BusinessLogicDetail>("/api/business-logics/import", {

@@ -401,6 +401,8 @@ class BusinessLogicCreate(BaseModel):
     logic_type: str
     description: str | None = None
     expression_summary: str | None = None
+    expression_draft: dict | None = None
+    expression_json: dict | None = None
     operator: str | None = None
 
 
@@ -409,6 +411,8 @@ class BusinessLogicUpdate(BaseModel):
     description: str | None = None
     logic_type: str | None = None
     expression_summary: str | None = None
+    expression_draft: dict | None = None
+    expression_json: dict | None = None
     operator: str | None = None
 
 
@@ -419,6 +423,18 @@ class BusinessLogicImportRequest(BaseModel):
     operator: str | None = None
 
 
+class ExpressionFormatRequest(BaseModel):
+    domain_id: str
+    expression_draft: dict
+    logic_type: str | None = None
+    description: str | None = None
+
+
+class ExpressionFormatResponse(BaseModel):
+    expression_json: dict
+    expression_summary: str
+
+
 class BusinessLogicOut(BaseModel):
     id: str
     name: str
@@ -426,6 +442,8 @@ class BusinessLogicOut(BaseModel):
     logic_type: str
     description: str | None = None
     expression_summary: str | None = None
+    expression_draft: dict | None = None
+    expression_json: dict | None = None
     source_type: str | None = None
     source_ref: str | None = None
     status: str
@@ -439,8 +457,21 @@ class BusinessLogicOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BusinessLogicRef(BaseModel):
+    """关联对象上绑定的业务逻辑简要引用。"""
+
+    id: str
+    name: str
+    display_name: str
+    logic_type: str
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
 class BusinessLogicDetail(BusinessLogicOut):
     related_object_types: list[ObjectTypeSummary] = Field(default_factory=list)
+    related_object_logics: dict[str, list[BusinessLogicRef]] = Field(default_factory=dict)
     related_properties: list[PropertyOut] = Field(default_factory=list)
     object_bindings: list[BusinessLogicObjectBindingOut] = Field(default_factory=list)
     property_bindings: list[BusinessLogicPropertyBindingOut] = Field(default_factory=list)

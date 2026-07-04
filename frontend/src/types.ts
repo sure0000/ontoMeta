@@ -12,6 +12,30 @@ export interface DomainContext {
   updated_at: string;
 }
 
+export interface ExpressionTextSegment {
+  type: "text";
+  value: string;
+}
+
+export interface ExpressionRefSegment {
+  type: "ref";
+  ref_id: string;
+  object_type_id: string;
+  object_name: string;
+  object_display_name: string;
+  property_id?: string;
+  property_name?: string;
+  property_display_name?: string;
+}
+
+export type ExpressionSegment = ExpressionTextSegment | ExpressionRefSegment;
+
+export interface ExpressionDraft {
+  segments: ExpressionSegment[];
+}
+
+export type ExpressionJson = Record<string, unknown>;
+
 export interface DomainContextDetail extends DomainContext {
   datahub_url?: string;
   latest_ontology_id?: string;
@@ -142,6 +166,8 @@ export interface BusinessLogic {
   logic_type: string;
   description?: string;
   expression_summary?: string;
+  expression_draft?: ExpressionDraft;
+  expression_json?: ExpressionJson;
   source_type?: string;
   source_ref?: string;
   status: string;
@@ -208,6 +234,8 @@ export interface BusinessLogicCreateInput {
   logic_type: string;
   description?: string;
   expression_summary?: string;
+  expression_draft?: ExpressionDraft;
+  expression_json?: ExpressionJson;
   operator?: string;
 }
 
@@ -216,6 +244,8 @@ export interface BusinessLogicUpdateInput {
   description?: string;
   logic_type?: string;
   expression_summary?: string;
+  expression_draft?: ExpressionDraft;
+  expression_json?: ExpressionJson;
   operator?: string;
 }
 
@@ -226,8 +256,17 @@ export interface BusinessLogicImportInput {
   operator?: string;
 }
 
+export interface BusinessLogicRef {
+  id: string;
+  name: string;
+  display_name: string;
+  logic_type: string;
+  status: string;
+}
+
 export interface BusinessLogicDetail extends BusinessLogic {
   related_object_types: ObjectTypeSummary[];
+  related_object_logics?: Record<string, BusinessLogicRef[]>;
   related_properties?: Property[];
   object_bindings?: BusinessLogicObjectBinding[];
   property_bindings?: BusinessLogicPropertyBinding[];

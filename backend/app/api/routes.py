@@ -26,6 +26,8 @@ from app.schemas import (
     DomainContextSummary,
     DraftProgressOut,
     EnsureObjectTypeRequest,
+    ExpressionFormatRequest,
+    ExpressionFormatResponse,
     LlmModelOption,
     LlmServiceConfigCreate,
     LlmServiceConfigDetail,
@@ -46,6 +48,7 @@ from app.schemas import (
     VersionRecordOut,
 )
 from app.services.edit import EditService
+from app.services.expression_formatter import ExpressionFormatterService
 from app.services.logic_import import LogicImportService
 from app.services.publish import ConfirmationService
 from app.services.query import OntologyQueryService, WorkspaceService
@@ -58,6 +61,7 @@ confirmation_service = ConfirmationService()
 edit_service = EditService()
 settings_service = SettingsService()
 logic_import_service = LogicImportService()
+expression_formatter_service = ExpressionFormatterService()
 
 
 def _llm_service_out(service) -> LlmServiceConfigOut:
@@ -224,7 +228,15 @@ async def ensure_object_type_from_dataset(
 
 @router.get("/domains", response_model=list[DomainContextSummary])
 async def list_domains(db: Session = Depends(get_db)):
-    return await workspace.sync_domains(db)
+    try:
+        return await workspace.sync_domains(db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"无法从 DataHub 同步数据域，请检查 DataHub 连接配置：{exc}",
+        ) from exc
 
 
 @router.get("/domains/{domain_id}", response_model=DomainContextDetail)
@@ -554,7 +566,26 @@ def create_business_logic(data: BusinessLogicCreate, db: Session = Depends(get_d
             logic_type=data.logic_type,
             description=data.description,
             expression_summary=data.expression_summary,
+            expression_draft=data.expression_draft,
+            expression_json=data.expression_json,
             operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/business-logics/format-expression",
+    response_model=ExpressionFormatResponse,
+)
+def format_expression(data: ExpressionFormatRequest, db: Session = Depends(get_db)):
+    try:
+        return expression_formatter_service.format(
+            db,
+            domain_id=data.domain_id,
+            expression_draft=data.expression_draft,
+            logic_type=data.logic_type,
+            description=data.description,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -586,6 +617,8 @@ def update_business_logic(
             description=data.description,
             logic_type=data.logic_type,
             expression_summary=data.expression_summary,
+            expression_draft=data.expression_draft,
+            expression_json=data.expression_json,
             operator=data.operator,
         )
     except ValueError as exc:

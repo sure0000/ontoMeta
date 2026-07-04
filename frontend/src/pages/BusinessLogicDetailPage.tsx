@@ -2,12 +2,12 @@ import {
   ApartmentOutlined,
   CodeOutlined,
   DeleteOutlined,
+  EditOutlined,
   FunctionOutlined,
-  HistoryOutlined,
   LinkOutlined,
   SaveOutlined,
   SendOutlined,
-  TableOutlined,
+
 } from "@ant-design/icons";
 import {
   Alert,
@@ -21,16 +21,17 @@ import {
   Row,
   Select,
   Space,
-  Table,
   Tag,
   Typography,
   message,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
-import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import { ExpressionJsonPreview } from "../components/ExpressionJsonPreview";
+import { ExpressionRichEditor } from "../components/ExpressionRichEditor";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -38,15 +39,10 @@ import { SectionCard } from "../components/SectionCard";
 import { StatusBadge } from "../components/StatusBadge";
 import type {
   BusinessLogicDetail,
-  BusinessLogicObjectBinding,
-  BusinessLogicPropertyBinding,
-  BusinessLogicPropertyOption,
-  ObjectTypeSummary,
-  Property,
-  VersionRecord,
+  ExpressionDraft,
+  ExpressionJson,
 } from "../types";
 
-const { Text } = Typography;
 
 const OBJECT_ROLE_LABEL: Record<string, string> = {
   subject: "主对象",
@@ -54,25 +50,7 @@ const OBJECT_ROLE_LABEL: Record<string, string> = {
   output: "产出对象",
 };
 
-const PROPERTY_ROLE_LABEL: Record<string, string> = {
-  input: "输入",
-  output: "输出",
-  filter: "过滤",
-  group: "分组",
-};
-
-const OBJECT_ROLE_OPTIONS = [
-  { label: "主对象", value: "subject" },
-  { label: "维度对象", value: "dimension" },
-  { label: "产出对象", value: "output" },
-];
-
-const PROPERTY_ROLE_OPTIONS = [
-  { label: "输入", value: "input" },
-  { label: "输出", value: "output" },
-  { label: "过滤", value: "filter" },
-  { label: "分组", value: "group" },
-];
+const { Text } = Typography;
 
 const LOGIC_TYPE_OPTIONS = [
   { label: "指标 metric", value: "metric" },
@@ -80,27 +58,23 @@ const LOGIC_TYPE_OPTIONS = [
   { label: "规则 rule", value: "rule" },
 ];
 
-const EDITABLE_STATUSES = new Set(["suggested", "edited", "pre_published"]);
-
 export function BusinessLogicDetailPage() {
   const { logicId } = useParams<{ logicId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const editable = searchParams.get("edit") === "true";
   const [logic, setLogic] = useState<BusinessLogicDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [basicForm] = Form.useForm();
   const [saving, setSaving] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewJson, setPreviewJson] = useState<ExpressionJson | null>(null);
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [prePublishing, setPrePublishing] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [deleting, setDeleting] = useState(false);
-
-  const [addObjectId, setAddObjectId] = useState<string | undefined>();
-  const [addObjectRole, setAddObjectRole] = useState<string>("subject");
-  const [bindingLoading, setBindingLoading] = useState(false);
-
-  const [addPropertyId, setAddPropertyId] = useState<string | undefined>();
-  const [addPropertyRole, setAddPropertyRole] = useState<string>("input");
 
   const load = () => {
     if (!logicId) return;
@@ -109,12 +83,19 @@ export function BusinessLogicDetailPage() {
       .getBusinessLogic(logicId)
       .then((detail) => {
         setLogic(detail);
+        const draft: ExpressionDraft =
+          detail.expression_draft && detail.expression_draft.segments
+            ? detail.expression_draft
+            : detail.expression_summary
+              ? { segments: [{ type: "text", value: detail.expression_summary }] }
+              : { segments: [] };
         basicForm.setFieldsValue({
           display_name: detail.display_name,
           logic_type: detail.logic_type,
           description: detail.description,
-          expression_summary: detail.expression_summary,
+          expression_draft: draft,
         });
+        setPreviewJson(detail.expression_json ?? null);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -125,25 +106,65 @@ export function BusinessLogicDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logicId]);
 
-  const editable = logic ? EDITABLE_STATUSES.has(logic.status) : false;
-
   const handleSaveBasic = async () => {
     if (!logicId) return;
     const values = await basicForm.validateFields();
+    const draft = values.expression_draft as ExpressionDraft | undefined;
     setSaving(true);
     try {
+      let expressionJson: ExpressionJson | undefined;
+      let expressionSummary: string | undefined;
+      if (draft && draft.segments && draft.segments.length > 0) {
+        const formatted = await api.formatExpression({
+          domain_id: logic!.domain_context_id!,
+          expression_draft: draft,
+          logic_type: values.logic_type,
+          description: values.description,
+        });
+        expressionJson = formatted.expression_json;
+        expressionSummary = formatted.expression_summary;
+      }
       const updated = await api.updateBusinessLogic(logicId, {
         display_name: values.display_name,
         logic_type: values.logic_type,
         description: values.description ?? undefined,
-        expression_summary: values.expression_summary ?? undefined,
+        expression_draft: draft,
+        expression_json: expressionJson,
+        expression_summary: expressionSummary,
       });
       setLogic(updated);
+      setPreviewJson(updated.expression_json ?? expressionJson ?? null);
       message.success("已保存");
     } catch (err) {
       message.error(err instanceof Error ? err.message : "保存失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handlePreview = async () => {
+    if (!logicId || !logic?.domain_context_id) return;
+    const values = await basicForm.validateFields();
+    const draft = values.expression_draft as ExpressionDraft | undefined;
+    if (!draft || !draft.segments || draft.segments.length === 0) {
+      message.warning("请先填写表达式");
+      return;
+    }
+    setPreviewing(true);
+    setPreviewModalOpen(true);
+    try {
+      const res = await api.formatExpression({
+        domain_id: logic.domain_context_id,
+        expression_draft: draft,
+        logic_type: values.logic_type,
+        description: values.description,
+      });
+      setPreviewJson(res.expression_json);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "预览失败");
+      setPreviewModalOpen(false);
+    } finally {
+      setPreviewing(false);
     }
   };
 
@@ -206,292 +227,79 @@ export function BusinessLogicDetailPage() {
     }
   };
 
-  // --- 对象引用绑定 ---
+  // 合并所有关联对象 (来自 object_bindings / property_bindings / related_object_types)
+  const mergedObjects = useMemo(() => {
+    if (!logic) return [];
+    const map = new Map<string, {
+      id: string;
+      display_name: string;
+      name: string;
+      description?: string;
+      status: string;
+      roles: Set<string>;
+      sources: Set<string>;
+      propertyCount: number;
+    }>();
 
-  const handleAddObjectBinding = async () => {
-    if (!logicId || !addObjectId) {
-      message.warning("请选择要引用的对象");
-      return;
-    }
-    setBindingLoading(true);
-    try {
-      await api.bindObjectToLogic(logicId, {
-        object_type_id: addObjectId,
-        role: addObjectRole,
+    const addRole = (id: string, role: string) => {
+      const entry = map.get(id);
+      if (entry && role) entry.roles.add(role);
+    };
+
+    // From related_object_types (most complete data)
+    for (const obj of logic.related_object_types ?? []) {
+      map.set(obj.id, {
+        id: obj.id,
+        display_name: obj.display_name,
+        name: obj.name,
+        description: obj.description,
+        status: obj.status,
+        roles: new Set(),
+        sources: new Set(),
+        propertyCount: 0,
       });
-      setAddObjectId(undefined);
-      message.success("已添加引用对象");
-      load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "添加失败");
-    } finally {
-      setBindingLoading(false);
     }
-  };
 
-  const handleRemoveObjectBinding = async (bindingId: string) => {
-    setBindingLoading(true);
-    try {
-      await api.unbindObjectFromLogic(bindingId);
-      message.success("已移除引用对象");
-      load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "移除失败");
-    } finally {
-      setBindingLoading(false);
+    // Enrich with object_bindings
+    for (const b of logic.object_bindings ?? []) {
+      const oid = b.object_type_id;
+      if (!map.has(oid)) {
+        map.set(oid, {
+          id: oid,
+          display_name: b.object_type_display_name ?? b.object_type_name ?? oid,
+          name: b.object_type_name ?? oid,
+          status: "published",
+          roles: new Set(),
+          sources: new Set(),
+          propertyCount: 0,
+        });
+      }
+      addRole(oid, b.role);
+      if (b.source) map.get(oid)!.sources.add(b.source);
     }
-  };
 
-  const handleChangeObjectRole = async (
-    binding: BusinessLogicObjectBinding,
-    newRole: string,
-  ) => {
-    if (newRole === binding.role) return;
-    setBindingLoading(true);
-    try {
-      await api.unbindObjectFromLogic(binding.id);
-      await api.bindObjectToLogic(logicId!, {
-        object_type_id: binding.object_type_id,
-        role: newRole,
-      });
-      message.success("已更新角色");
-      load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "更新失败");
-      load();
-    } finally {
-      setBindingLoading(false);
+    // Enrich with property_bindings
+    for (const b of logic.property_bindings ?? []) {
+      const oid = b.object_type_id;
+      if (!oid) continue;
+      if (!map.has(oid)) {
+        map.set(oid, {
+          id: oid,
+          display_name: b.object_type_name ?? oid,
+          name: b.object_type_name ?? oid,
+          status: "published",
+          roles: new Set(),
+          sources: new Set(),
+          propertyCount: 0,
+        });
+      }
+      map.get(oid)!.propertyCount += 1;
+      addRole(oid, b.role);
+      if (b.source) map.get(oid)!.sources.add(b.source);
     }
-  };
 
-  // --- 字段引用绑定 ---
-
-  const handleAddPropertyBinding = async () => {
-    if (!logicId || !addPropertyId) {
-      message.warning("请选择要引用的字段");
-      return;
-    }
-    setBindingLoading(true);
-    try {
-      await api.bindPropertyToLogic(logicId, {
-        property_id: addPropertyId,
-        role: addPropertyRole,
-      });
-      setAddPropertyId(undefined);
-      message.success("已添加引用字段");
-      load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "添加失败");
-    } finally {
-      setBindingLoading(false);
-    }
-  };
-
-  const handleRemovePropertyBinding = async (bindingId: string) => {
-    setBindingLoading(true);
-    try {
-      await api.unbindPropertyFromLogic(bindingId);
-      message.success("已移除引用字段");
-      load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "移除失败");
-    } finally {
-      setBindingLoading(false);
-    }
-  };
-
-  const handleChangePropertyRole = async (
-    binding: BusinessLogicPropertyBinding,
-    newRole: string,
-  ) => {
-    if (newRole === binding.role) return;
-    setBindingLoading(true);
-    try {
-      await api.unbindPropertyFromLogic(binding.id);
-      await api.bindPropertyToLogic(logicId!, {
-        property_id: binding.property_id,
-        role: newRole,
-      });
-      message.success("已更新角色");
-      load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "更新失败");
-      load();
-    } finally {
-      setBindingLoading(false);
-    }
-  };
-
-  const propertyColumns: ColumnsType<Property> = [
-    {
-      title: "属性",
-      dataIndex: "display_name",
-      key: "display_name",
-      render: (v, r) => (
-        <span className="id-link">
-          <span>{v}</span>
-          <span className="id-link-sub">{r.name}</span>
-        </span>
-      ),
-    },
-    {
-      title: "类型",
-      dataIndex: "data_type",
-      key: "data_type",
-      width: 140,
-      render: (v) => v || <span className="om-muted">-</span>,
-    },
-  ];
-
-  const objectBindingColumns: ColumnsType<BusinessLogicObjectBinding> = [
-    {
-      title: "对象",
-      dataIndex: "object_type_display_name",
-      key: "object_type_display_name",
-      render: (v, r) => (
-        <Link to={`/ontology/${r.object_type_id}`}>
-          {v || r.object_type_name || r.object_type_id}
-        </Link>
-      ),
-    },
-    {
-      title: "标识名",
-      dataIndex: "object_type_name",
-      key: "object_type_name",
-      render: (v) => <span className="id-link-sub">{v}</span>,
-    },
-    {
-      title: "角色",
-      dataIndex: "role",
-      key: "role",
-      width: editable ? 160 : 120,
-      render: (v, r) =>
-        editable ? (
-          <Select
-            size="small"
-            value={v}
-            onChange={(newRole) => handleChangeObjectRole(r, newRole)}
-            options={OBJECT_ROLE_OPTIONS}
-            style={{ width: 140 }}
-          />
-        ) : (
-          OBJECT_ROLE_LABEL[v] || v
-        ),
-    },
-    {
-      title: "来源",
-      dataIndex: "source",
-      key: "source",
-      width: 110,
-      render: (v) => (v === "manual" ? <Tag color="blue">人工</Tag> : <Tag>推断</Tag>),
-    },
-    {
-      title: "操作",
-      key: "action",
-      width: 90,
-      render: (_, r) =>
-        editable ? (
-          <Popconfirm
-            title="确认移除该引用对象?"
-            onConfirm={() => handleRemoveObjectBinding(r.id)}
-          >
-            <Button type="link" size="small" danger>
-              移除
-            </Button>
-          </Popconfirm>
-        ) : null,
-    },
-  ];
-
-  const propertyBindingColumns: ColumnsType<BusinessLogicPropertyBinding> = [
-    {
-      title: "字段",
-      dataIndex: "property_display_name",
-      key: "property_display_name",
-      render: (v, r) => v || r.property_name || r.property_id,
-    },
-    {
-      title: "标识名",
-      dataIndex: "property_name",
-      key: "property_name",
-      render: (v) => <span className="id-link-sub">{v}</span>,
-    },
-    {
-      title: "所属对象",
-      dataIndex: "object_type_name",
-      key: "object_type_name",
-    },
-    {
-      title: "角色",
-      dataIndex: "role",
-      key: "role",
-      width: editable ? 160 : 110,
-      render: (v, r) =>
-        editable ? (
-          <Select
-            size="small"
-            value={v}
-            onChange={(newRole) => handleChangePropertyRole(r, newRole)}
-            options={PROPERTY_ROLE_OPTIONS}
-            style={{ width: 140 }}
-          />
-        ) : (
-          PROPERTY_ROLE_LABEL[v] || v
-        ),
-    },
-    {
-      title: "来源",
-      dataIndex: "source",
-      key: "source",
-      width: 110,
-      render: (v) => (v === "manual" ? <Tag color="blue">人工</Tag> : <Tag>推断</Tag>),
-    },
-    {
-      title: "操作",
-      key: "action",
-      width: 90,
-      render: (_, r) =>
-        editable ? (
-          <Popconfirm
-            title="确认移除该引用字段?"
-            onConfirm={() => handleRemovePropertyBinding(r.id)}
-          >
-            <Button type="link" size="small" danger>
-              移除
-            </Button>
-          </Popconfirm>
-        ) : null,
-    },
-  ];
-
-  const versionColumns: ColumnsType<VersionRecord> = [
-    {
-      title: "版本",
-      dataIndex: "version",
-      key: "version",
-      width: 90,
-      render: (v) => `v${v}`,
-    },
-    {
-      title: "类型",
-      dataIndex: "entity_type",
-      key: "entity_type",
-      width: 130,
-    },
-    {
-      title: "摘要",
-      dataIndex: "diff_summary",
-      key: "diff_summary",
-      render: (v) => v || <span className="om-muted">-</span>,
-    },
-    {
-      title: "时间",
-      dataIndex: "created_at",
-      key: "created_at",
-      width: 180,
-      render: (v) => new Date(v).toLocaleString(),
-    },
-  ];
+    return Array.from(map.values());
+  }, [logic]);
 
   if (loading) return <PageSkeleton type="detail" />;
 
@@ -502,19 +310,6 @@ export function BusinessLogicDetailPage() {
       </PageContainer>
     );
   }
-
-  const objectOptions: { label: string; value: string }[] = (logic.available_object_types ?? []).map(
-    (o: ObjectTypeSummary) => ({
-      label: `${o.display_name}（${o.name}）`,
-      value: o.id,
-    }),
-  );
-  const propertyOptions: { label: string; value: string }[] = (logic.available_properties ?? []).map(
-    (p: BusinessLogicPropertyOption) => ({
-      label: `${p.object_type_display_name || p.object_type_name}.${p.property_display_name || p.property_name}`,
-      value: p.property_id,
-    }),
-  );
 
   const workspacePath = logic.domain_context_id
     ? `/workspace/${logic.domain_context_id}`
@@ -529,29 +324,25 @@ export function BusinessLogicDetailPage() {
         extra={
           <Space wrap>
             <StatusBadge status={logic.status} />
-            {editable && (
-              <>
-                <Button
-                  icon={<SendOutlined />}
-                  loading={prePublishing}
-                  onClick={handlePrePublish}
-                >
-                  预发布
-                </Button>
-                <Button type="primary" icon={<SendOutlined />} loading={publishing} onClick={handlePublish}>
-                  发布
-                </Button>
-                <Popconfirm
-                  title="确认删除该业务逻辑?此操作需要二次确认。"
-                  onConfirm={handleDelete}
-                  disabled={deleting}
-                >
-                  <Button danger icon={<DeleteOutlined />} loading={deleting}>
-                    删除
-                  </Button>
-                </Popconfirm>
-              </>
-            )}
+            <Button
+              icon={<SendOutlined />}
+              loading={prePublishing}
+              onClick={handlePrePublish}
+            >
+              预发布
+            </Button>
+            <Button type="primary" icon={<SendOutlined />} loading={publishing} onClick={handlePublish}>
+              发布
+            </Button>
+            <Popconfirm
+              title="确认删除该业务逻辑?此操作需要二次确认。"
+              onConfirm={handleDelete}
+              disabled={deleting}
+            >
+              <Button danger icon={<DeleteOutlined />} loading={deleting}>
+                删除
+              </Button>
+            </Popconfirm>
           </Space>
         }
       />
@@ -564,16 +355,6 @@ export function BusinessLogicDetailPage() {
           closable
           onClose={() => setError(null)}
           style={{ marginBottom: 12 }}
-        />
-      )}
-
-      {editable && (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="该业务逻辑处于草稿/编辑状态"
-          description="可编辑定义、从已发布本体挑选引用对象与字段;发布后引用将固化为与已发布本体的正式绑定。"
         />
       )}
 
@@ -593,7 +374,15 @@ export function BusinessLogicDetailPage() {
                 >
                   保存
                 </Button>
-              ) : null
+              ) : (
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={() => navigate(`/business-logic/${logicId}?edit=true`, { replace: true })}
+                >
+                  编辑
+                </Button>
+              )
             }
           >
             {editable ? (
@@ -634,14 +423,43 @@ export function BusinessLogicDetailPage() {
         </Col>
 
         <Col xs={24} lg={12}>
-          <SectionCard title="计算规则" icon={<CodeOutlined />}>
+          <SectionCard
+            title="计算规则"
+            icon={<CodeOutlined />}
+            extra={
+              editable ? (
+                <Space>
+                  <Button size="small" onClick={handlePreview} loading={previewing}>
+                    JSON 预览
+                  </Button>
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<SaveOutlined />}
+                    loading={saving}
+                    onClick={handleSaveBasic}
+                  >
+                    保存
+                  </Button>
+                </Space>
+              ) : null
+            }
+          >
             {editable ? (
               <Form form={basicForm} layout="vertical">
-                <Form.Item label="表达式摘要" name="expression_summary">
-                  <Input.TextArea
-                    rows={8}
-                    style={{ fontFamily: "monospace" }}
-                    placeholder="如 SUM(amount) WHERE status='paid'"
+                <Form.Item
+                  label="表达式"
+                  name="expression_draft"
+                  extra={
+                    <span style={{ fontSize: 12 }}>
+                      用自然语言书写,输入 <code>@</code> 引用对象,紧接 <code>.</code> 引用其字段
+                    </span>
+                  }
+                >
+                  <ExpressionRichEditor
+                    domainId={logic.domain_context_id}
+                    placeholder="例如:统计 SUM(@订单.金额) 万元,其中 @订单.状态 为「已支付」"
+                    minHeight={220}
                   />
                 </Form.Item>
               </Form>
@@ -654,135 +472,28 @@ export function BusinessLogicDetailPage() {
         </Col>
       </Row>
 
-      <SectionCard
-        title="引用对象"
-        count={logic.object_bindings?.length ?? 0}
-        icon={<TableOutlined />}
-        bodyFlush
-      >
-        {(logic.object_bindings?.length ?? 0) === 0 ? (
-          <EmptyState title="暂无引用对象" />
-        ) : (
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={objectBindingColumns}
-            dataSource={logic.object_bindings}
-            pagination={false}
-          />
-        )}
-
-        {editable && (
-          <div
-            style={{
-              padding: "16px 20px",
-              borderTop: "1px dashed var(--om-border)",
-              background: "var(--om-surface-muted)",
-            }}
-          >
-            <Space wrap>
-              <Select
-                style={{ minWidth: 280 }}
-                placeholder="从已发布本体选择对象"
-                value={addObjectId}
-                onChange={setAddObjectId}
-                showSearch
-                optionFilterProp="label"
-                options={objectOptions}
-                notFoundContent={
-                  objectOptions.length === 0 ? "已发布本体下暂无对象" : undefined
-                }
-              />
-              <Select
-                style={{ width: 150 }}
-                value={addObjectRole}
-                onChange={setAddObjectRole}
-                options={OBJECT_ROLE_OPTIONS}
-              />
-              <Button type="primary" loading={bindingLoading} onClick={handleAddObjectBinding}>
-                添加引用对象
-              </Button>
-            </Space>
-            <div style={{ marginTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                从已发布本体中挑选对象作为主对象 / 维度对象 / 产出对象;发布后固化为绑定。
-              </Text>
-            </div>
-          </div>
-        )}
-      </SectionCard>
-
-      <SectionCard
-        title="引用字段"
-        count={logic.property_bindings?.length ?? 0}
-        icon={<TableOutlined />}
-        bodyFlush
-      >
-        {(logic.property_bindings?.length ?? 0) === 0 ? (
-          <EmptyState title="暂无引用字段" />
-        ) : (
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={propertyBindingColumns}
-            dataSource={logic.property_bindings}
-            pagination={false}
-          />
-        )}
-
-        {editable && (
-          <div
-            style={{
-              padding: "16px 20px",
-              borderTop: "1px dashed var(--om-border)",
-              background: "var(--om-surface-muted)",
-            }}
-          >
-            <Space wrap>
-              <Select
-                style={{ minWidth: 320 }}
-                placeholder="从已发布本体选择字段"
-                value={addPropertyId}
-                onChange={setAddPropertyId}
-                showSearch
-                optionFilterProp="label"
-                options={propertyOptions}
-                notFoundContent={
-                  propertyOptions.length === 0 ? "已发布本体下暂无字段" : undefined
-                }
-              />
-              <Select
-                style={{ width: 150 }}
-                value={addPropertyRole}
-                onChange={setAddPropertyRole}
-                options={PROPERTY_ROLE_OPTIONS}
-              />
-              <Button type="primary" loading={bindingLoading} onClick={handleAddPropertyBinding}>
-                添加引用字段
-              </Button>
-            </Space>
-            <div style={{ marginTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                引用字段角色:输入 / 输出 / 过滤 / 分组。
-              </Text>
-            </div>
-          </div>
-        )}
+      <SectionCard title="表达式 JSON" icon={<CodeOutlined />}>
+        <ExpressionJsonPreview
+          json={logic.expression_json}
+          loading={false}
+          title="已保存的 JSON"
+          emptyHint="暂未保存格式化结果,点击「JSON 预览」可先查看,或直接「保存」生成"
+        />
       </SectionCard>
 
       <SectionCard
         title="关联对象"
-        count={logic.related_object_types.length}
+        count={mergedObjects.length}
         icon={<ApartmentOutlined />}
       >
-        {logic.related_object_types.length === 0 ? (
+        {mergedObjects.length === 0 ? (
           <EmptyState title="暂无关联对象" />
         ) : (
-          <Row gutter={[16, 16]}>
-            {logic.related_object_types.map((obj) => (
-              <Col key={obj.id} xs={24} sm={12} md={8}>
+          <Row gutter={[12, 12]}>
+            {mergedObjects.map((obj) => {
+              const objLogics = logic.related_object_logics?.[obj.id] ?? [];
+              return (
+              <Col key={obj.id} xs={24} sm={12} md={8} lg={6}>
                 <Link to={`/ontology/${obj.id}`} className="om-card-link">
                   <div className="entity-card" style={{ padding: 14 }}>
                     <div className="entity-card-head">
@@ -790,60 +501,90 @@ export function BusinessLogicDetailPage() {
                         <div className="entity-card-title">{obj.display_name}</div>
                         <div className="entity-card-subtitle">{obj.name}</div>
                       </div>
-                      <StatusBadge status={obj.status} />
+                      {obj.status && <StatusBadge status={obj.status} />}
                     </div>
                     <div className="entity-card-desc">
                       {obj.description || "暂无描述"}
                     </div>
+                    {(obj.roles.size > 0 || obj.sources.size > 0 || obj.propertyCount > 0) && (
+                      <div className="entity-card-foot">
+                        {Array.from(obj.roles).map((r) => (
+                          <Tag key={r} color="blue">{OBJECT_ROLE_LABEL[r] || r}</Tag>
+                        ))}
+                        {obj.propertyCount > 0 && (
+                          <span className="entity-card-foot-item">
+                            {obj.propertyCount} 字段
+                          </span>
+                        )}
+                        {Array.from(obj.sources).map((s) => (
+                          <Tag key={s} color={s === "manual" ? "blue" : undefined}>
+                            {s === "manual" ? "人工" : "推断"}
+                          </Tag>
+                        ))}
+                      </div>
+                    )}
+                    {objLogics.length > 0 && (
+                      <div className="entity-card-foot" style={{ marginTop: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 11, color: "#8c8c8c", marginRight: 4, lineHeight: "22px" }}>
+                          业务逻辑:
+                        </span>
+                        {objLogics.map((bl) => {
+                          const typeColor =
+                            bl.logic_type === "metric" ? "blue" :
+                            bl.logic_type === "tag" ? "green" : "orange";
+                          return (
+                            <Link
+                              key={bl.id}
+                              to={`/business-logic/${bl.id}`}
+                              onClick={(e) => e.stopPropagation()}
+                              style={{ maxWidth: "100%" }}
+                            >
+                              <Tag
+                                color={typeColor}
+                                style={{ marginBottom: 2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}
+                              >
+                                {bl.display_name || bl.name}
+                              </Tag>
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </Link>
               </Col>
-            ))}
+              );
+            })}
           </Row>
         )}
+
       </SectionCard>
-
-      {(logic.related_properties?.length ?? 0) > 0 && (
-        <SectionCard
-          title="依赖字段"
-          count={logic.related_properties?.length ?? 0}
-          icon={<TableOutlined />}
-          bodyFlush
-        >
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={propertyColumns}
-            dataSource={logic.related_properties}
-            pagination={false}
-          />
-        </SectionCard>
-      )}
-
-      {(logic.version_records?.length ?? 0) > 0 && (
-        <SectionCard
-          title="版本记录"
-          count={logic.version_records?.length ?? 0}
-          icon={<HistoryOutlined />}
-          bodyFlush
-        >
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={versionColumns}
-            dataSource={logic.version_records}
-            pagination={false}
-          />
-        </SectionCard>
-      )}
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <Link to={workspacePath}>
           <Button icon={<LinkOutlined />}>查看所属数据域</Button>
         </Link>
       </div>
+
+      <Modal
+        title="表达式 JSON 预览"
+        open={previewModalOpen}
+        onCancel={() => setPreviewModalOpen(false)}
+        footer={[
+          <Button key="close" onClick={() => setPreviewModalOpen(false)}>
+            关闭
+          </Button>,
+        ]}
+        width={720}
+        destroyOnClose
+      >
+        <ExpressionJsonPreview
+          json={previewJson}
+          loading={previewing}
+          title="AST 结构"
+          emptyHint="LLM 正在将自然语言 + 引用格式化为统一的 AST JSON…"
+        />
+      </Modal>
     </PageContainer>
   );
 }

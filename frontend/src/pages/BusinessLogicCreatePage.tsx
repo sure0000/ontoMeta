@@ -1,12 +1,14 @@
 import { FunctionOutlined } from "@ant-design/icons";
-import { Alert, Button, Form, Input, Select, Spin, message } from "antd";
+import { Alert, Button, Col, Form, Input, Modal, Row, Select, Spin, message } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { ExpressionJsonPreview } from "../components/ExpressionJsonPreview";
+import { ExpressionRichEditor } from "../components/ExpressionRichEditor";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import type { DomainContext } from "../types";
+import type { DomainContext, ExpressionDraft, ExpressionJson } from "../types";
 
 const LOGIC_TYPE_OPTIONS = [
   { label: "指标 metric", value: "metric" },
@@ -23,7 +25,11 @@ export function BusinessLogicCreatePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewJson, setPreviewJson] = useState<ExpressionJson | null>(null);
+  const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [form] = Form.useForm();
+  const watchedDomainId = Form.useWatch("domain_id", form);
 
   useEffect(() => {
     api
@@ -57,11 +63,65 @@ export function BusinessLogicCreatePage() {
     );
   }
 
+  const formatDraft = async (
+    draft: ExpressionDraft,
+    logicType: string,
+    description: string | undefined,
+  ) => {
+    if (!watchedDomainId) throw new Error("请先选择数据域");
+    return api.formatExpression({
+      domain_id: watchedDomainId,
+      expression_draft: draft,
+      logic_type: logicType,
+      description,
+    });
+  };
+
+  const handlePreview = async () => {
+    const values = await form.validateFields();
+    const draft = values.expression_draft as ExpressionDraft | undefined;
+    if (!draft || !draft.segments || draft.segments.length === 0) {
+      message.warning("请先填写表达式");
+      return;
+    }
+    setPreviewing(true);
+    setPreviewModalOpen(true);
+    try {
+      const res = await formatDraft(
+        draft,
+        values.logic_type,
+        values.description,
+      );
+      setPreviewJson(res.expression_json);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "预览失败");
+      setPreviewModalOpen(false);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   const handleCreate = async () => {
     const values = await form.validateFields();
+    const draft = values.expression_draft as ExpressionDraft | undefined;
+    if (!draft || !draft.segments || draft.segments.length === 0) {
+      message.warning("请先填写表达式");
+      return;
+    }
     setSubmitting(true);
     try {
-      const created = await api.createBusinessLogic(values);
+      // 保存前先调 LLM 格式化
+      const formatted = await formatDraft(
+        draft,
+        values.logic_type,
+        values.description,
+      );
+      const created = await api.createBusinessLogic({
+        ...values,
+        expression_draft: draft,
+        expression_json: formatted.expression_json,
+        expression_summary: formatted.expression_summary,
+      });
       message.success("已创建业务逻辑草稿");
       navigate(`/business-logic/${created.id}`);
     } catch (err) {
@@ -76,7 +136,7 @@ export function BusinessLogicCreatePage() {
       <PageHeader
         icon={<FunctionOutlined />}
         title="新建业务逻辑"
-        description="创建指标、标签或规则草稿,引用已发布本体的对象与字段。"
+        description="用自然语言描述计算/规则,用 @ 引用已发布本体的对象与字段。保存时由 LLM 格式化为统一 JSON。"
         extra={
           <Button onClick={() => navigate("/business-logic")}>取消</Button>
         }
@@ -106,49 +166,103 @@ export function BusinessLogicCreatePage() {
                 logic_type: "metric",
               }}
             >
+              <Row gutter={[16, 8]}>
+                <Col xs={24} md={12}>
+                  <Form.Item
+                    label="所属数据域"
+                    name="domain_id"
+                    rules={[{ required: true, message: "请选择数据域" }]}
+                    extra="业务逻辑将归属该域的已发布本体"
+                  >
+                    <Select
+                      options={domainsWithPublished.map((d) => ({ label: d.name, value: d.id }))}
+                      placeholder="选择已发布本体的数据域"
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item
+                    label="逻辑类型"
+                    name="logic_type"
+                    rules={[{ required: true }]}
+                  >
+                    <Select options={LOGIC_TYPE_OPTIONS} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item
+                    label="标识名(英文)"
+                    name="name"
+                    rules={[{ required: true, message: "请输入标识名" }]}
+                  >
+                    <Input placeholder="如 order_gmv_metric" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item
+                    label="显示名"
+                    name="display_name"
+                    rules={[{ required: true, message: "请输入显示名" }]}
+                  >
+                    <Input placeholder="如 订单 GMV" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24}>
+                  <Form.Item label="描述" name="description">
+                    <Input.TextArea rows={2} placeholder="一句话说明业务含义" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
               <Form.Item
-                label="所属数据域"
-                name="domain_id"
-                rules={[{ required: true, message: "请选择数据域" }]}
-                extra="业务逻辑将归属该域的已发布本体"
+                label="表达式"
+                name="expression_draft"
+                extra={
+                  <span style={{ fontSize: 12 }}>
+                    用自然语言书写即可,输入 <code>@</code> 选择已发布本体的对象,选中后紧接
+                    <code>.</code> 引用其字段;其余文字可任意描述
+                  </span>
+                }
               >
-                <Select
-                  options={domainsWithPublished.map((d) => ({ label: d.name, value: d.id }))}
-                  placeholder="选择已发布本体的数据域"
+                <ExpressionRichEditor
+                  domainId={watchedDomainId}
+                  placeholder="例如:统计 SUM(@订单.金额) 万元,其中 @订单.状态 为「已支付」,按 @订单.城市 分组"
+                  minHeight={200}
                 />
               </Form.Item>
-              <Form.Item
-                label="标识名(英文)"
-                name="name"
-                rules={[{ required: true, message: "请输入标识名" }]}
-              >
-                <Input placeholder="如 order_gmv_metric" />
-              </Form.Item>
-              <Form.Item
-                label="显示名"
-                name="display_name"
-                rules={[{ required: true, message: "请输入显示名" }]}
-              >
-                <Input placeholder="如 订单 GMV" />
-              </Form.Item>
-              <Form.Item label="逻辑类型" name="logic_type" rules={[{ required: true }]}>
-                <Select options={LOGIC_TYPE_OPTIONS} />
-              </Form.Item>
-              <Form.Item label="描述" name="description">
-                <Input.TextArea rows={2} placeholder="一句话说明业务含义" />
-              </Form.Item>
-              <Form.Item label="表达式摘要" name="expression_summary">
-                <Input.TextArea rows={3} placeholder="如 SUM(amount) WHERE status='paid'" />
-              </Form.Item>
-              <Form.Item>
+
+              <Form.Item style={{ marginBottom: 0 }}>
+                <Button onClick={handlePreview} loading={previewing} style={{ marginRight: 8 }}>
+                  JSON 预览
+                </Button>
                 <Button type="primary" onClick={handleCreate} loading={submitting}>
-                  创建
+                  保存
                 </Button>
               </Form.Item>
             </Form>
           </div>
         </div>
       </Spin>
+
+      <Modal
+        title="表达式 JSON 预览"
+        open={previewModalOpen}
+        onCancel={() => setPreviewModalOpen(false)}
+        footer={[
+          <Button key="close" onClick={() => setPreviewModalOpen(false)}>
+            关闭
+          </Button>,
+        ]}
+        width={720}
+        destroyOnClose
+      >
+        <ExpressionJsonPreview
+          json={previewJson}
+          loading={previewing}
+          title="AST 结构"
+          emptyHint="LLM 正在将自然语言 + 引用格式化为统一的 AST JSON…"
+        />
+      </Modal>
     </PageContainer>
   );
 }

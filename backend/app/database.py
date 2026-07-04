@@ -53,6 +53,15 @@ def init_db() -> None:
                 )
             )
 
+    if "business_logics" in inspector.get_table_names():
+        bl_columns = {column["name"] for column in inspector.get_columns("business_logics")}
+        if "expression_draft" not in bl_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE business_logics ADD COLUMN expression_draft TEXT"))
+        if "expression_json" not in bl_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE business_logics ADD COLUMN expression_json TEXT"))
+
     with SessionLocal() as db:
         from app.models import RelationType
 

@@ -51,7 +51,6 @@ import type {
   BusinessLogic,
   DataHubDatasetOption,
   ObjectTypeDetail,
-  ObjectTypeLogicBinding,
   ObjectTypeSummary,
   Property,
   RelationType,
@@ -59,12 +58,6 @@ import type {
 } from "../types";
 
 const { Text } = Typography;
-
-const OBJECT_ROLE_LABEL: Record<string, string> = {
-  subject: "主对象",
-  dimension: "维度对象",
-  output: "产出对象",
-};
 
 interface BasicForm {
   name: string;
@@ -586,52 +579,6 @@ export function ObjectTypeDetailPage() {
     },
   ];
 
-  const logicBindingColumns: ColumnsType<ObjectTypeLogicBinding> = [
-    {
-      title: "业务逻辑",
-      dataIndex: "logic_display_name",
-      key: "logic_display_name",
-      render: (_, record) => (
-        <Link to={`/business-logic/${record.logic_id}`}>
-          {record.logic_display_name}
-        </Link>
-      ),
-    },
-    {
-      title: "标识名",
-      dataIndex: "logic_name",
-      key: "logic_name",
-      render: (v) => <span className="id-link-sub">{v}</span>,
-    },
-    {
-      title: "类型",
-      dataIndex: "logic_type",
-      key: "logic_type",
-      width: 100,
-    },
-    {
-      title: "本对象角色",
-      dataIndex: "role",
-      key: "role",
-      width: 120,
-      render: (v) => OBJECT_ROLE_LABEL[v] || v,
-    },
-    {
-      title: "绑定来源",
-      dataIndex: "source",
-      key: "source",
-      width: 110,
-      render: (v) => (v === "manual" ? <Tag color="blue">人工</Tag> : <Tag>推断</Tag>),
-    },
-    {
-      title: "状态",
-      dataIndex: "logic_status",
-      key: "logic_status",
-      width: 110,
-      render: (status) => <StatusBadge status={status} />,
-    },
-  ];
-
   const versionColumns: ColumnsType<VersionRecord> = [
     {
       title: "版本",
@@ -955,49 +902,24 @@ export function ObjectTypeDetailPage() {
       </Modal>
 
       <SectionCard
-        title="绑定的业务逻辑"
-        count={obj.business_logic_bindings?.length ?? 0}
+        title="关联业务逻辑"
+        count={obj.business_logics.length}
         icon={<FunctionOutlined />}
         bodyFlush
       >
-        {(obj.business_logic_bindings?.length ?? 0) === 0 ? (
-          <EmptyState
-            title="暂无引用该对象的业务逻辑"
-            description="业务逻辑在「业务逻辑」页独立管理,发布后引用本对象的逻辑会在此展示。"
-          />
+        {obj.business_logics.length === 0 ? (
+          <EmptyState title="暂无关联业务逻辑" />
         ) : (
           <Table
             className="om-table"
-            rowKey="binding_id"
+            rowKey="id"
             size="middle"
-            columns={logicBindingColumns}
-            dataSource={obj.business_logic_bindings}
+            columns={logicColumns}
+            dataSource={obj.business_logics}
             pagination={false}
           />
         )}
       </SectionCard>
-
-      {!inWorkspace && (
-        <SectionCard
-          title="关联业务逻辑"
-          count={obj.business_logics.length}
-          icon={<FunctionOutlined />}
-          bodyFlush
-        >
-          {obj.business_logics.length === 0 ? (
-            <EmptyState title="暂无关联业务逻辑" />
-          ) : (
-            <Table
-              className="om-table"
-              rowKey="id"
-              size="middle"
-              columns={logicColumns}
-              dataSource={obj.business_logics}
-              pagination={false}
-            />
-          )}
-        </SectionCard>
-      )}
 
       {!inWorkspace && versionRecords.length > 0 && (
         <SectionCard

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -25,6 +26,7 @@ from app.schemas import (
     BusinessLogicOut,
     BusinessLogicPropertyBindingOut,
     BusinessLogicPropertyOption,
+    BusinessLogicRef,
     ChangeLogOut,
     DomainContextDetail,
     DomainContextSummary,
@@ -43,6 +45,15 @@ from app.schemas import (
     VersionRecordOut,
 )
 from app.services.relation_structure import infer_relation_structure_type
+
+
+def _loads_json(value: str | None) -> dict | None:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _log_change(
@@ -192,6 +203,8 @@ class OntologyQueryService:
             logic_type=logic.logic_type,
             description=logic.description,
             expression_summary=logic.expression_summary,
+            expression_draft=_loads_json(logic.expression_draft),
+            expression_json=_loads_json(logic.expression_json),
             source_type=logic.source_type,
             source_ref=logic.source_ref,
             status=logic.status,
@@ -628,11 +641,14 @@ class OntologyQueryService:
 
         available_object_types, available_properties = self._available_targets_for_logic(db, logic)
 
+        related_object_logics = self._batch_object_logic_refs(db, [o.id for o in related_objects], exclude_logic_id=logic.id)
+
         return BusinessLogicDetail(
             **self._to_business_logic_out(db, logic).model_dump(),
             related_object_types=[
                 self._to_object_summary(db, obj) for obj in related_objects
             ],
+            related_object_logics=related_object_logics,
             related_properties=[PropertyOut.model_validate(p) for p in related_properties],
             object_bindings=object_bindings,
             property_bindings=property_bindings,
@@ -675,6 +691,36 @@ class OntologyQueryService:
             for prop in properties
         ]
         return object_summaries, property_options
+
+    def _batch_object_logic_refs(
+        self,
+        db: Session,
+        object_type_ids: list[str],
+        exclude_logic_id: str | None = None,
+    ) -> dict[str, list[BusinessLogicRef]]:
+        """批量获取多个对象上绑定的业务逻辑引用，按 object_type_id 分组。"""
+        if not object_type_ids:
+            return {}
+        rows = (
+            db.query(BusinessLogicObjectBinding, BusinessLogic)
+            .join(BusinessLogic, BusinessLogic.id == BusinessLogicObjectBinding.business_logic_id)
+            .filter(BusinessLogicObjectBinding.object_type_id.in_(object_type_ids))
+            .all()
+        )
+        result: dict[str, list[BusinessLogicRef]] = {oid: [] for oid in object_type_ids}
+        for binding, logic in rows:
+            if exclude_logic_id and logic.id == exclude_logic_id:
+                continue
+            ref = BusinessLogicRef(
+                id=logic.id,
+                name=logic.name,
+                display_name=logic.display_name,
+                logic_type=logic.logic_type,
+                status=logic.status,
+            )
+            if ref not in result[binding.object_type_id]:
+                result[binding.object_type_id].append(ref)
+        return result
 
     def get_ontology_graph(self, db: Session, ontology_id: str) -> OntologyGraph:
         objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()

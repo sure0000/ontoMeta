@@ -1,4 +1,4 @@
-import { FunctionOutlined, PlusOutlined, ImportOutlined } from "@ant-design/icons";
+import { EditOutlined, FunctionOutlined, PlusOutlined, ImportOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
@@ -128,6 +128,8 @@ export function BusinessLogicPage() {
       title: "逻辑名称",
       dataIndex: "display_name",
       key: "display_name",
+      width: 240,
+      ellipsis: true,
       render: (_, record) => (
         <Link to={`/business-logic/${record.id}`} className="id-link">
           <span>{record.display_name}</span>
@@ -139,53 +141,34 @@ export function BusinessLogicPage() {
       title: "类型",
       dataIndex: "logic_type",
       key: "logic_type",
-      width: 130,
+      width: 100,
     },
     {
       title: "数据域",
       dataIndex: "domain_name",
       key: "domain_name",
-      width: 160,
+      width: 140,
       render: (v) => v || <span className="om-muted">-</span>,
-    },
-    {
-      title: "来源",
-      dataIndex: "source_type",
-      key: "source_type",
-      width: 130,
-      render: (v) => v || <span className="om-muted">-</span>,
-    },
-    {
-      title: "引用对象",
-      dataIndex: "bound_object_count",
-      key: "bound_object_count",
-      width: 100,
-      align: "right",
-      render: (v) => v ?? <span className="om-muted">-</span>,
-    },
-    {
-      title: "引用字段",
-      dataIndex: "bound_property_count",
-      key: "bound_property_count",
-      width: 100,
-      align: "right",
-      render: (v) => v ?? <span className="om-muted">-</span>,
     },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 110,
+      width: 120,
       render: (status) => <StatusBadge status={status} />,
     },
     {
-      title: "置信度",
-      dataIndex: "source_confidence",
-      key: "source_confidence",
-      width: 100,
-      align: "right",
-      render: (value?: number) =>
-        value?.toFixed(2) ?? <span className="om-muted">-</span>,
+      title: "操作",
+      key: "action",
+      width: 80,
+      render: (_, record) => (
+        <Button
+          type="link"
+          size="small"
+          icon={<EditOutlined />}
+          onClick={() => navigate(`/business-logic/${record.id}?edit=true`)}
+        />
+      ),
     },
   ];
 

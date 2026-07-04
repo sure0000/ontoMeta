@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -410,6 +412,8 @@ class EditService:
         logic_type: str,
         description: str | None = None,
         expression_summary: str | None = None,
+        expression_draft: dict | None = None,
+        expression_json: dict | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
         from app.services.query import OntologyQueryService
@@ -419,13 +423,23 @@ class EditService:
             raise ValueError("logic_type 必须是 metric / tag / rule 之一")
         unique_name = self._ensure_unique_logic_name(db, ontology.id, name)
 
+        summary = expression_summary
+        if summary is None and expression_draft:
+            summary = self._derive_summary_from_draft(expression_draft)
+
         logic = BusinessLogic(
             ontology_id=ontology.id,
             name=unique_name,
             display_name=display_name,
             logic_type=logic_type,
             description=description,
-            expression_summary=expression_summary,
+            expression_summary=summary,
+            expression_draft=(
+                json.dumps(expression_draft, ensure_ascii=False) if expression_draft else None
+            ),
+            expression_json=(
+                json.dumps(expression_json, ensure_ascii=False) if expression_json else None
+            ),
             source_type="manual",
             source_ref=None,
             source_confidence=0.5,
@@ -450,6 +464,8 @@ class EditService:
         description: str | None = None,
         logic_type: str | None = None,
         expression_summary: str | None = None,
+        expression_draft: dict | None = None,
+        expression_json: dict | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
         from app.services.query import OntologyQueryService
@@ -468,6 +484,14 @@ class EditService:
             logic.description = description
         if expression_summary is not None:
             logic.expression_summary = expression_summary
+        if expression_draft is not None:
+            logic.expression_draft = json.dumps(expression_draft, ensure_ascii=False)
+            if expression_summary is None:
+                derived = self._derive_summary_from_draft(expression_draft)
+                if derived is not None:
+                    logic.expression_summary = derived
+        if expression_json is not None:
+            logic.expression_json = json.dumps(expression_json, ensure_ascii=False)
 
         if logic.status != EntityStatus.PRE_PUBLISHED.value:
             logic.status = EntityStatus.EDITED.value
@@ -479,6 +503,21 @@ class EditService:
         if not detail:
             raise ValueError("Business logic not found")
         return detail
+
+    @staticmethod
+    def _derive_summary_from_draft(expression_draft: dict) -> str | None:
+        try:
+            from app.services.expression_formatter import (
+                _parse_draft,
+                _segments_to_summary,
+            )
+
+            segments, refs = _parse_draft(expression_draft)
+            if not segments:
+                return None
+            return _segments_to_summary(segments, refs)
+        except Exception:
+            return None
 
     def pre_publish_business_logic(
         self,
