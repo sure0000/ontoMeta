@@ -62,6 +62,21 @@ def init_db() -> None:
         alter_statements.append(
             "ALTER TABLE business_logics ADD COLUMN expression_json TEXT"
         )
+    chatbi_conv_columns: set[str] = set()
+    if "chat_bi_conversations" in inspector.get_table_names():
+        chatbi_conv_columns = {c["name"] for c in inspector.get_columns("chat_bi_conversations")}
+    if "category" not in chatbi_conv_columns:
+        alter_statements.append(
+            "ALTER TABLE chat_bi_conversations ADD COLUMN category VARCHAR(100)"
+        )
+    if "is_pinned" not in chatbi_conv_columns:
+        alter_statements.append(
+            "ALTER TABLE chat_bi_conversations ADD COLUMN is_pinned BOOLEAN DEFAULT 0"
+        )
+    if "is_archived" not in chatbi_conv_columns:
+        alter_statements.append(
+            "ALTER TABLE chat_bi_conversations ADD COLUMN is_archived BOOLEAN DEFAULT 0"
+        )
     if alter_statements:
         with engine.begin() as conn:
             for stmt in alter_statements:
@@ -97,6 +112,8 @@ _SECONDARY_INDEXES: dict[str, list[str]] = {
     "version_records": ["entity_id", "created_at"],
     "entity_change_logs": ["entity_id", "created_at"],
     "draft_generation_tasks": ["domain_context_id", "ontology_id", "status"],
+    "chat_bi_conversations": ["domain_id", "category"],
+    "chat_bi_messages": ["conversation_id"],
 }
 
 

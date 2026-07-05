@@ -3,6 +3,7 @@ import { AppLayout } from "./components/Layout";
 import { BusinessLogicCreatePage } from "./pages/BusinessLogicCreatePage";
 import { BusinessLogicDetailPage } from "./pages/BusinessLogicDetailPage";
 import { BusinessLogicPage } from "./pages/BusinessLogicPage";
+import { ChatBiPage } from "./pages/ChatBiPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="/business-logic" element={<BusinessLogicPage />} />
         <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
+        <Route path="/chat-bi" element={<ChatBiPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>

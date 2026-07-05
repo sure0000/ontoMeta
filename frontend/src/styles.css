@@ -94,7 +94,12 @@ body {
 
 /* ---------- App shell ---------- */
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-shell > .ant-layout {
+  overflow: hidden;
 }
 
 .app-sider {
@@ -244,6 +249,10 @@ body {
 .app-content {
   padding: 28px 32px 40px;
   background: var(--om-bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 /* ---------- Page container ---------- */
@@ -253,9 +262,14 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  overflow-y: auto;
+  min-height: 0;
 }
 .page-container--full {
   max-width: none;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
 }
 
 /* ---------- Page header ---------- */
@@ -1381,4 +1395,1023 @@ body {
   align-items: center;
   gap: 8px;
   padding: 12px 0;
+}
+
+/* ============================================================
+ * ChatBI · 智能问数 — Modern ChatGPT-inspired design
+ * ============================================================ */
+
+/* ---------- Layout ---------- */
+
+.chatbi-layout {
+  display: flex;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--om-border);
+  background: var(--om-surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* ---------- Sidebar ---------- */
+
+.chatbi-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--om-border);
+  background: #f8f9fb;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+
+.chatbi-sidebar-header {
+  padding: 12px;
+  border-bottom: 1px solid var(--om-border);
+  background: #f8f9fb;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chatbi-sidebar-header .chatbi-new-chat-btn {
+  height: 38px;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 13px;
+  transition: all 0.15s ease;
+}
+
+.chatbi-sidebar-header .chatbi-new-chat-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.2);
+}
+
+.chatbi-sidebar-search {
+  /* Ant Design input override */
+}
+
+.chatbi-sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 8px 4px;
+  scroll-behavior: smooth;
+}
+
+.chatbi-sidebar-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.chatbi-sidebar-list::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
+}
+
+.chatbi-sidebar-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--om-text-tertiary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.chatbi-sidebar-footer {
+  padding: 8px 12px;
+  border-top: 1px solid var(--om-border);
+  background: #f8f9fb;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- Category folder ---- */
+
+.chatbi-category-folder {
+  margin-bottom: 4px;
+}
+
+.chatbi-category-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+}
+
+.chatbi-category-folder-header:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.chatbi-category-folder-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--om-text-tertiary);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.chatbi-category-folder-chevron--expanded {
+  transform: rotate(90deg);
+}
+
+.chatbi-category-folder-icon {
+  font-size: 13px;
+  color: var(--om-text-tertiary);
+  flex-shrink: 0;
+}
+
+.chatbi-category-folder-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatbi-category-folder-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--om-text-tertiary);
+  background: var(--om-neutral-soft);
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.chatbi-category-folder-menu {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatbi-category-folder-header:hover .chatbi-category-folder-menu {
+  opacity: 1;
+}
+
+.chatbi-category-folder-items {
+  padding-left: 12px;
+  position: relative;
+  margin-left: 11px;
+  border-left: 1px solid var(--om-border-strong);
+}
+
+/* Nested conversations inside a category — more compact & clearly subordinate */
+.chatbi-category-folder-items .chatbi-conv-item {
+  padding: 4px 8px;
+  border-radius: 6px;
+  margin-bottom: 0;
+}
+
+.chatbi-category-folder-items .chatbi-conv-title {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.chatbi-category-folder-items .chatbi-conv-preview {
+  font-size: 10px;
+}
+
+.chatbi-category-folder-items .chatbi-conv-time {
+  font-size: 9px;
+}
+
+.chatbi-category-folder-items .chatbi-conv-icon {
+  font-size: 11px;
+}
+
+/* ---- Time group ---- */
+
+.chatbi-time-group {
+  margin-bottom: 2px;
+}
+
+.chatbi-time-group-label {
+  padding: 8px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--om-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+
+/* ---- Conversation item ---- */
+
+.chatbi-conv-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+  position: relative;
+  border-radius: 8px;
+  margin-bottom: 1px;
+}
+
+.chatbi-conv-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.chatbi-conv-item--active {
+  background: var(--om-primary-soft) !important;
+}
+
+.chatbi-conv-item--active:hover {
+  background: var(--om-primary-soft) !important;
+}
+
+.chatbi-conv-item:focus-visible {
+  outline: 2px solid var(--om-primary);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.chatbi-conv-icon {
+  font-size: 14px;
+  color: var(--om-text-tertiary);
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.chatbi-conv-item--active .chatbi-conv-icon {
+  color: var(--om-primary);
+  opacity: 1;
+}
+
+.chatbi-conv-pin-icon {
+  font-size: 10px;
+  color: var(--om-primary);
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.chatbi-conv-body {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chatbi-conv-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--om-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+
+.chatbi-conv-item--active .chatbi-conv-title {
+  color: var(--om-primary);
+  font-weight: 600;
+}
+
+.chatbi-conv-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.chatbi-conv-preview {
+  font-size: 11px;
+  color: var(--om-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.chatbi-conv-time {
+  font-size: 10px;
+  color: var(--om-text-tertiary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.chatbi-conv-category-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--om-neutral-soft);
+  color: var(--om-text-tertiary);
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chatbi-conv-menu {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chatbi-conv-item:hover .chatbi-conv-menu {
+  opacity: 1;
+}
+
+/* ---- Archived section ---- */
+
+.chatbi-archived-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 8px;
+  margin: 4px 0;
+  transition: background 0.12s ease;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-archived-header:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.chatbi-archived-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--om-text-tertiary);
+  background: var(--om-neutral-soft);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- Chat Shell ---------- */
+
+.chatbi-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.chatbi-shell-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--om-border);
+  background: #ffffff;
+  min-height: 48px;
+}
+
+.chatbi-shell-topbar-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--om-text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatbi-shell-domain {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ---------- Messages area ---------- */
+
+.chatbi-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  background: #fafbfc;
+  scroll-behavior: smooth;
+}
+
+.chatbi-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chatbi-messages::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+}
+
+/* ---------- Loading bar ---------- */
+
+.chatbi-loading-bar {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+  opacity: 0.7;
+}
+
+/* ---------- Welcome screen ---------- */
+
+.chatbi-welcome {
+  margin: auto;
+  max-width: 680px;
+  width: 100%;
+  text-align: center;
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.chatbi-welcome-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  color: #3b82f6;
+  font-size: 28px;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.12);
+}
+
+.chatbi-welcome-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--om-text);
+  letter-spacing: -0.02em;
+}
+
+.chatbi-welcome-desc {
+  font-size: 14px;
+  color: var(--om-text-secondary);
+  line-height: 1.7;
+}
+
+.chatbi-suggestions {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.chatbi-suggestion-chip {
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid var(--om-border-strong);
+  border-radius: 12px;
+  padding: 12px 18px;
+  font-size: 13px;
+  color: var(--om-text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
+  line-height: 1.4;
+}
+
+.chatbi-suggestion-chip:hover:not(:disabled) {
+  border-color: #93c5fd;
+  background: #f0f7ff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.08);
+}
+
+.chatbi-suggestion-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- Chat bubbles ---------- */
+
+.chatbi-bubble {
+  display: flex;
+  gap: 14px;
+  max-width: 820px;
+  width: 100%;
+  animation: chatbi-fade-in 0.25s ease;
+}
+
+@keyframes chatbi-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.chatbi-bubble--user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.chatbi-bubble--assistant {
+  align-self: flex-start;
+}
+
+.chatbi-bubble-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.chatbi-bubble--assistant .chatbi-bubble-avatar {
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  color: #3b82f6;
+}
+
+.chatbi-bubble--user .chatbi-bubble-avatar {
+  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+  color: #6b7280;
+}
+
+.chatbi-bubble-body {
+  flex: 1;
+  background: #ffffff;
+  border: 1px solid var(--om-border);
+  border-radius: 14px;
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--om-text);
+  min-width: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.chatbi-bubble--user .chatbi-bubble-body {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.chatbi-bubble-pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--om-text-secondary);
+  font-size: 14px;
+}
+
+/* typing dots */
+.chatbi-typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.chatbi-typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--om-text-tertiary);
+  animation: chatbi-dot-bounce 1.4s infinite ease-in-out both;
+}
+
+.chatbi-typing-dots span:nth-child(1) { animation-delay: -0.32s; }
+.chatbi-typing-dots span:nth-child(2) { animation-delay: -0.16s; }
+.chatbi-typing-dots span:nth-child(3) { animation-delay: 0s; }
+
+@keyframes chatbi-dot-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* ---------- Markdown ---------- */
+
+.chatbi-md {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chatbi-md-line {
+  min-height: 1em;
+}
+
+.chatbi-md-h1,
+.chatbi-md-h2,
+.chatbi-md-h3,
+.chatbi-md-h4 {
+  font-weight: 650;
+  color: var(--om-text);
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.chatbi-md-h1 { font-size: 17px; }
+.chatbi-md-h2 { font-size: 15px; }
+.chatbi-md-h3 { font-size: 14px; }
+.chatbi-md-h4 { font-size: 14px; }
+
+.chatbi-md-listitem {
+  display: flex;
+  gap: 8px;
+  padding-left: 4px;
+}
+
+.chatbi-md-bullet {
+  color: var(--om-text-secondary);
+  flex-shrink: 0;
+}
+
+.chatbi-md-quote {
+  margin: 4px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #93c5fd;
+  background: #f0f7ff;
+  color: var(--om-text-secondary);
+  border-radius: 0 8px 8px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chatbi-md-inline-code {
+  font-family: var(--om-font-mono);
+  background: var(--om-neutral-soft);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--om-text);
+}
+
+.chatbi-codeblock {
+  margin: 8px 0 4px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 14px 16px;
+  border-radius: 10px;
+  font-family: var(--om-font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.chatbi-codeblock code {
+  font-family: inherit;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+/* ---------- Reference tags ---------- */
+
+.chatbi-refs {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chatbi-mock-hint {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--om-text-secondary);
+  font-size: 12px;
+}
+
+/* ---------- Composer ---------- */
+
+.chatbi-composer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  padding: 16px 20px;
+  background: #ffffff;
+  border-top: 1px solid var(--om-border);
+}
+
+.chatbi-composer-inner {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  background: #ffffff;
+  border: 1px solid var(--om-border-strong);
+  border-radius: 14px;
+  padding: 6px 6px 6px 16px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.chatbi-composer-inner:focus-within {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.chatbi-input {
+  flex: 1;
+  resize: none;
+  border: none;
+  padding: 8px 0;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--om-text);
+  background: transparent;
+  outline: none;
+  line-height: 1.5;
+  max-height: 160px;
+}
+
+.chatbi-input::placeholder {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-input:disabled {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-send-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chatbi-send-btn--active {
+  background: #3b82f6;
+  color: #ffffff;
+}
+
+.chatbi-send-btn--active:hover {
+  background: #2563eb;
+  transform: scale(1.05);
+}
+
+.chatbi-send-btn--disabled {
+  background: var(--om-neutral-soft);
+  color: var(--om-text-tertiary);
+  cursor: not-allowed;
+}
+
+/* ---------- Caliber decomposition ---------- */
+
+.chatbi-caliber {
+  margin: 12px 0 6px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: #fafbfc;
+  overflow: hidden;
+}
+
+.chatbi-caliber-title {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  color: var(--om-text-secondary);
+  padding: 10px 14px;
+  background: #ffffff;
+  border-bottom: 1px solid var(--om-border);
+}
+
+.chatbi-caliber-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.chatbi-caliber-item {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--om-border);
+  transition: background 0.1s;
+}
+
+.chatbi-caliber-item:hover {
+  background: #ffffff;
+}
+
+.chatbi-caliber-item:last-child {
+  border-bottom: none;
+}
+
+.chatbi-caliber-item-index {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--om-primary-soft);
+  color: var(--om-primary);
+  font-size: 12px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.chatbi-caliber-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.chatbi-caliber-item-label {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--om-text);
+}
+
+.chatbi-caliber-item-desc {
+  font-size: 12.5px;
+  color: var(--om-text-secondary);
+  line-height: 1.55;
+}
+
+.chatbi-caliber-item-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.chatbi-caliber-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 6px;
+  background: #ffffff;
+  border: 1px solid var(--om-border-strong);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--om-text);
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+
+.chatbi-caliber-chip:hover {
+  border-color: var(--om-primary);
+  background: var(--om-primary-soft);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.08);
+}
+
+.chatbi-caliber-chip--static {
+  cursor: default;
+}
+
+.chatbi-caliber-chip--static:hover {
+  border-color: var(--om-border-strong);
+  background: #ffffff;
+  transform: none;
+  box-shadow: none;
+}
+
+.chatbi-caliber-chip-label {
+  font-weight: 500;
+}
+
+.chatbi-caliber-chip-arrow {
+  color: var(--om-text-tertiary);
+  font-size: 11px;
+}
+
+/* ---------- SQL block ---------- */
+
+.chatbi-sql {
+  margin: 12px 0 6px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+}
+
+.chatbi-sql-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #1e293b;
+  color: #94a3b8;
+}
+
+.chatbi-sql-head-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  font-family: var(--om-font-mono);
+}
+
+.chatbi-sql-copy {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 3px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-weight: 500;
+}
+
+.chatbi-sql-copy:hover {
+  background: #334155;
+  color: #f8fafc;
+}
+
+.chatbi-sql-pre {
+  margin: 0;
+  padding: 16px 18px;
+  overflow-x: auto;
+  font-family: var(--om-font-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  color: #e2e8f0;
+}
+
+.chatbi-sql-line {
+  white-space: pre;
+}
+
+.chatbi-sql-keyword {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.chatbi-sql-string {
+  color: #fcd34d;
+}
+
+.chatbi-sql-number {
+  color: #f0abfc;
+}
+
+.chatbi-sql-comment {
+  color: #64748b;
+  font-style: italic;
+}
+
+.chatbi-sql-punct {
+  color: #94a3b8;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 768px) {
+  .chatbi-layout {
+    position: relative;
+    border-radius: 0;
+    border: none;
+  }
+
+  .chatbi-sidebar {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    width: 100%;
+    border-right: none;
+    border-radius: 0;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
+  }
+
+  .chatbi-composer {
+    padding: 12px;
+  }
+
+  .chatbi-messages {
+    padding: 16px 12px;
+  }
 }

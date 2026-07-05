@@ -7,6 +7,12 @@ import type {
   BusinessLogicPropertyBinding,
   BusinessLogicUpdateInput,
   ChangeLog,
+  ChatBiAnswer,
+  ChatBiCategoryList,
+  ChatBiConversation,
+  ChatBiHistoryItem,
+  ChatBiMessageItem,
+  ChatBiSuggestions,
   Confirmation,
   DataHubDatasetOption,
   DatahubSettings,
@@ -364,6 +370,85 @@ export const api = {
   }) =>
     request<DatahubSettings>("/api/settings/datahub", {
       method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  askChatBi: (body: {
+    domain_id: string;
+    question: string;
+    history?: ChatBiHistoryItem[];
+    conversation_id?: string;
+  }) =>
+    request<ChatBiAnswer>("/api/chat-bi/ask", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  chatBiSuggestions: (domainId: string) =>
+    request<ChatBiSuggestions>(
+      `/api/chat-bi/suggestions${buildQuery({ domain_id: domainId })}`,
+    ),
+
+  listChatBiConversations: (
+    domainId: string,
+    q?: string,
+    includeArchived?: boolean,
+  ) =>
+    request<ChatBiConversation[]>(
+      `/api/chat-bi/conversations${buildQuery({ domain_id: domainId, q, include_archived: includeArchived ? "true" : undefined })}`,
+    ),
+
+  createChatBiConversation: (body: {
+    domain_id: string;
+    title?: string;
+    category?: string | null;
+  }) =>
+    request<ChatBiConversation>("/api/chat-bi/conversations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  updateChatBiConversation: (
+    id: string,
+    body: {
+      title?: string;
+      category?: string | null;
+      is_pinned?: boolean;
+      is_archived?: boolean;
+    },
+  ) =>
+    request<ChatBiConversation>(`/api/chat-bi/conversations/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  deleteChatBiConversation: (id: string) =>
+    request<{ id: string; deleted: boolean }>(
+      `/api/chat-bi/conversations/${id}`,
+      { method: "DELETE" },
+    ),
+
+  getChatBiMessages: (id: string) =>
+    request<ChatBiMessageItem[]>(`/api/chat-bi/conversations/${id}/messages`),
+
+  listChatBiCategories: (domainId: string) =>
+    request<ChatBiCategoryList>(
+      `/api/chat-bi/categories${buildQuery({ domain_id: domainId })}`,
+    ),
+
+  renameChatBiCategory: (body: {
+    domain_id: string;
+    old_name: string;
+    new_name: string;
+  }) =>
+    request<{ success: boolean }>("/api/chat-bi/categories/rename", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  deleteChatBiCategory: (body: { domain_id: string; name: string }) =>
+    request<{ success: boolean }>("/api/chat-bi/categories/delete", {
+      method: "POST",
       body: JSON.stringify(body),
     }),
 };

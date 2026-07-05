@@ -1132,6 +1132,9 @@ class WorkspaceService:
         connector = self._datahub(db)
         try:
             domains = await connector.list_domains()
+        except Exception:
+            logger.warning("无法连接 DataHub 同步数据域，将返回本地缓存数据", exc_info=True)
+            return self.list_domains(db)
         finally:
             await connector.aclose()
         for domain in domains:

@@ -364,3 +364,83 @@ export interface DatahubSettings {
   use_mock: boolean;
   updated_at: string;
 }
+
+export interface ChatBiConversation {
+  id: string;
+  domain_id: string;
+  title: string;
+  category?: string | null;
+  is_pinned: boolean;
+  is_archived: boolean;
+  message_count: number;
+  last_message_preview?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatBiCategoryItem {
+  name: string;
+  conversation_count: number;
+}
+
+export interface ChatBiCategoryList {
+  categories: ChatBiCategoryItem[];
+}
+
+export interface ChatBiMessageItem {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant";
+  content: string;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ChatBiReference {
+  id?: string | null;
+  name?: string | null;
+  display_name?: string | null;
+}
+
+export type ChatBiCaliberKind =
+  | "object_type"
+  | "property"
+  | "relation_type"
+  | "business_logic";
+
+export interface ChatBiCaliberReference {
+  kind: ChatBiCaliberKind;
+  id?: string | null;
+  name?: string | null;
+  display_name?: string | null;
+}
+
+export interface ChatBiCaliberItem {
+  label: string;
+  description?: string | null;
+  references: ChatBiCaliberReference[];
+}
+
+export interface ChatBiAnswer {
+  domain_id: string;
+  domain_name: string;
+  ontology_id?: string | null;
+  answer: string;
+  suggested_sql?: string | null;
+  caliber_decomposition?: ChatBiCaliberItem[];
+  referenced_objects?: ChatBiReference[];
+  referenced_logics?: ChatBiReference[];
+  used_mock: boolean;
+  conversation_id?: string | null;
+  conversation_title?: string | null;
+}
+
+export interface ChatBiSuggestions {
+  domain_id: string;
+  suggestions: string[];
+}
+
+export interface ChatBiHistoryItem {
+  role: "user" | "assistant";
+  content: string;
+}

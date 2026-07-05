@@ -95,6 +95,10 @@ async function resolveBreadcrumbs(
     return [{ label: "设置" }];
   }
 
+  if (pathname.startsWith("/chat-bi")) {
+    return [{ label: "智能问数" }];
+  }
+
   return [{ label: "首页", path: "/ontology" }];
 }
 

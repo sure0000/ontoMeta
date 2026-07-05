@@ -4,6 +4,7 @@ import {
   FolderOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { Avatar, Layout, Menu, Tooltip } from "antd";
@@ -39,6 +40,7 @@ function getSelectedKey(pathname: string, search: string) {
     const domainId = readDomainFromSearch(search);
     return domainId ? logicChildKey(domainId) : "/business-logic";
   }
+  if (pathname.startsWith("/chat-bi")) return "/chat-bi";
   if (pathname.startsWith("/settings")) return "/settings";
   return "/ontology";
 }
@@ -141,6 +143,7 @@ export function AppLayout() {
             ? logicChildren
             : [{ key: "/business-logic-empty", label: "暂无数据域", disabled: true }],
       },
+      { key: "/chat-bi", icon: <RobotOutlined />, label: "智能问数" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ];
   }, [domains, allLogics]);
