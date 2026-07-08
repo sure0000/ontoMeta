@@ -31,11 +31,9 @@ import {
   Tooltip,
 } from "antd";
 import {
-  forwardRef,
   memo,
   useCallback,
   useEffect,
-  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -142,13 +140,38 @@ export function ChatBiPage() {
   const [archivedConversations, setArchivedConversations] = useState<ChatBiConversation[]>([]);
   const [categories, setCategories] = useState<ChatBiCategoryItem[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(false);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
 
-  // ---- detail ref (imperative handle to ChatBiDetail) ----
-  const detailRef = useRef<ChatBiDetailHandle>(null);
+  const patchConversation = useCallback(
+    (id: string, patch: Partial<ChatBiConversation>) => {
+      const apply = (list: ChatBiConversation[]) =>
+        list.map((c) => (c.id === id ? { ...c, ...patch } : c));
+      setConversations(apply);
+      setArchivedConversations(apply);
+    },
+    [],
+  );
+
+  const removeConversationFromLists = useCallback((id: string) => {
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    setArchivedConversations((prev) => prev.filter((c) => c.id !== id));
+  }, []);
+
+  const prependConversation = useCallback((conv: ChatBiConversation) => {
+    if (conv.is_archived) {
+      setArchivedConversations((prev) =>
+        prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev],
+      );
+    } else {
+      setConversations((prev) =>
+        prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev],
+      );
+    }
+  }, []);
 
   // ---- modals (parent owns, can be triggered from sidebar or detail) ----
   const [renameModalOpen, setRenameModalOpen] = useState(false);
@@ -161,29 +184,27 @@ export function ChatBiPage() {
   const [catDialogNewName, setCatDialogNewName] = useState("");
   const [catDialogMoveConv, setCatDialogMoveConv] = useState<ChatBiConversation | null>(null);
 
-  // ---- conversation refresh trigger ----
-  const [conversationRefresh, setConversationRefresh] = useState(0);
-  const refreshConversations = useCallback(
-    () => setConversationRefresh((n) => n + 1),
-    [],
-  );
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasConversationDataRef = useRef(false);
 
-  // ---- Reset detail when domain changes ----
+  // ---- Reset active conversation when domain changes ----
   useEffect(() => {
-    detailRef.current?.reset();
+    setActiveConversationId(null);
+    hasConversationDataRef.current = false;
   }, [domainId]);
 
-  // ---- Load conversations ----
-  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ---- Load conversations (initial + search only; sidebar ops use local updates) ----
   useEffect(() => {
     if (!domainId) {
       setConversations([]);
       setArchivedConversations([]);
       setCategories([]);
       setLoadingConversations(false);
+      hasConversationDataRef.current = false;
       return;
     }
-    setLoadingConversations(true);
+    const showLoading = !hasConversationDataRef.current;
+    if (showLoading) setLoadingConversations(true);
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
       try {
@@ -196,6 +217,7 @@ export function ChatBiPage() {
         setConversations(active.filter((c) => !c.is_archived));
         setArchivedConversations(archivedOnly);
         setCategories(cats.categories);
+        hasConversationDataRef.current = true;
       } catch {
         // ignore
       } finally {
@@ -205,11 +227,11 @@ export function ChatBiPage() {
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [domainId, searchQuery, conversationRefresh]);
+  }, [domainId, searchQuery]);
 
-  // ---- Conversation actions (stable callbacks, no activeConversationId dep) ----
+  // ---- Conversation actions ----
   const handleSelectConversation = useCallback((id: string) => {
-    detailRef.current?.selectConversation(id);
+    setActiveConversationId(id);
     setShowArchived(false);
   }, []);
 
@@ -218,12 +240,12 @@ export function ChatBiPage() {
     setShowArchived(false);
     try {
       const conv = await api.createChatBiConversation({ domain_id: domainId });
-      detailRef.current?.selectConversation(conv.id);
-      refreshConversations();
+      prependConversation(conv);
+      setActiveConversationId(conv.id);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "创建对话失败");
     }
-  }, [domainId, refreshConversations]);
+  }, [domainId, prependConversation]);
 
   const handleOpenRename = useCallback((conv: ChatBiConversation) => {
     setRenameTarget(conv);
@@ -234,57 +256,73 @@ export function ChatBiPage() {
   const handleConfirmRename = useCallback(async () => {
     if (!renameTarget || !renameValue.trim()) return;
     try {
-      await api.updateChatBiConversation(renameTarget.id, {
+      const updated = await api.updateChatBiConversation(renameTarget.id, {
         title: renameValue.trim(),
+      });
+      patchConversation(renameTarget.id, {
+        title: updated.title,
+        updated_at: updated.updated_at,
       });
       setRenameModalOpen(false);
       setRenameTarget(null);
       setRenameValue("");
-      refreshConversations();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "重命名失败");
     }
-  }, [renameTarget, renameValue, refreshConversations]);
+  }, [renameTarget, renameValue, patchConversation]);
 
   const handleTogglePin = useCallback(
     async (conv: ChatBiConversation) => {
       try {
-        await api.updateChatBiConversation(conv.id, {
+        const updated = await api.updateChatBiConversation(conv.id, {
           is_pinned: !conv.is_pinned,
         });
-        refreshConversations();
+        patchConversation(conv.id, {
+          is_pinned: updated.is_pinned,
+          updated_at: updated.updated_at,
+        });
       } catch (err) {
         message.error(err instanceof Error ? err.message : "操作失败");
       }
     },
-    [refreshConversations],
+    [patchConversation],
   );
 
   const handleToggleArchive = useCallback(
     async (conv: ChatBiConversation) => {
       try {
-        await api.updateChatBiConversation(conv.id, {
+        const updated = await api.updateChatBiConversation(conv.id, {
           is_archived: !conv.is_archived,
         });
-        detailRef.current?.clearIfActive(conv.id);
-        refreshConversations();
+        removeConversationFromLists(conv.id);
+        if (updated.is_archived) {
+          setArchivedConversations((prev) => [updated, ...prev]);
+        } else {
+          setConversations((prev) => [updated, ...prev]);
+        }
+        if (activeConversationId === conv.id) {
+          setActiveConversationId(null);
+        }
       } catch (err) {
         message.error(err instanceof Error ? err.message : "操作失败");
       }
     },
-    [refreshConversations],
+    [activeConversationId, removeConversationFromLists],
   );
 
   const handleMoveConversation = useCallback(
     async (conv: ChatBiConversation, category: string | null) => {
       try {
-        await api.updateChatBiConversation(conv.id, { category });
-        refreshConversations();
+        const updated = await api.updateChatBiConversation(conv.id, { category });
+        patchConversation(conv.id, {
+          category: updated.category,
+          updated_at: updated.updated_at,
+        });
       } catch (err) {
         message.error(err instanceof Error ? err.message : "操作失败");
       }
     },
-    [refreshConversations],
+    [patchConversation],
   );
 
   const handleDeleteConversation = useCallback(
@@ -298,15 +336,17 @@ export function ChatBiPage() {
         onOk: async () => {
           try {
             await api.deleteChatBiConversation(conv.id);
-            detailRef.current?.clearIfActive(conv.id);
-            refreshConversations();
+            removeConversationFromLists(conv.id);
+            if (activeConversationId === conv.id) {
+              setActiveConversationId(null);
+            }
           } catch (err) {
             message.error(err instanceof Error ? err.message : "删除失败");
           }
         },
       });
     },
-    [refreshConversations],
+    [activeConversationId, removeConversationFromLists],
   );
 
   // ---- Category dialog ----
@@ -332,39 +372,88 @@ export function ChatBiPage() {
         const name = catDialogName.trim();
         if (!name) return;
         if (catDialogMoveConv) {
-          await api.updateChatBiConversation(catDialogMoveConv.id, { category: name });
+          const updated = await api.updateChatBiConversation(catDialogMoveConv.id, {
+            category: name,
+          });
+          patchConversation(catDialogMoveConv.id, {
+            category: updated.category,
+            updated_at: updated.updated_at,
+          });
         } else {
           const conv = await api.createChatBiConversation({
             domain_id: domainId,
             category: name,
           });
-          detailRef.current?.selectConversation(conv.id);
+          prependConversation(conv);
+          setActiveConversationId(conv.id);
         }
+        setCategories((prev) =>
+          prev.some((c) => c.name === name)
+            ? prev
+            : [...prev, { name, conversation_count: 1 }],
+        );
         setExpandedCategories((prev) => new Set(prev).add(name));
         setCatDialogOpen(false);
-        refreshConversations();
       } else if (catDialogMode === "rename") {
         if (!catDialogNewName.trim() || !catDialogName) return;
+        const newName = catDialogNewName.trim();
         await api.renameChatBiCategory({
           domain_id: domainId,
           old_name: catDialogName,
-          new_name: catDialogNewName.trim(),
+          new_name: newName,
+        });
+        const renameCategory = (list: ChatBiConversation[]) =>
+          list.map((c) =>
+            c.category === catDialogName ? { ...c, category: newName } : c,
+          );
+        setConversations(renameCategory);
+        setArchivedConversations(renameCategory);
+        setCategories((prev) =>
+          prev.map((c) =>
+            c.name === catDialogName ? { ...c, name: newName } : c,
+          ),
+        );
+        setExpandedCategories((prev) => {
+          const next = new Set(prev);
+          if (next.has(catDialogName)) {
+            next.delete(catDialogName);
+            next.add(newName);
+          }
+          return next;
         });
         setCatDialogOpen(false);
-        refreshConversations();
       } else if (catDialogMode === "delete") {
         if (!catDialogName) return;
         await api.deleteChatBiCategory({
           domain_id: domainId,
           name: catDialogName,
         });
+        const clearCategory = (list: ChatBiConversation[]) =>
+          list.map((c) =>
+            c.category === catDialogName ? { ...c, category: null } : c,
+          );
+        setConversations(clearCategory);
+        setArchivedConversations(clearCategory);
+        setCategories((prev) => prev.filter((c) => c.name !== catDialogName));
+        setExpandedCategories((prev) => {
+          const next = new Set(prev);
+          next.delete(catDialogName);
+          return next;
+        });
         setCatDialogOpen(false);
-        refreshConversations();
       }
     } catch (err) {
       message.error(err instanceof Error ? err.message : "操作失败");
     }
-  }, [domainId, catDialogMode, catDialogName, catDialogNewName, catDialogMoveConv, refreshConversations]);
+  }, [
+    domainId,
+    catDialogMode,
+    catDialogName,
+    catDialogNewName,
+    catDialogMoveConv,
+    patchConversation,
+    prependConversation,
+  ]);
 
   const handleNewCategory = useCallback(
     (conv: ChatBiConversation) => openCategoryDialog("create", "", conv),
@@ -378,12 +467,46 @@ export function ChatBiPage() {
         domain_id: domainId,
         category: catName,
       });
-      detailRef.current?.selectConversation(conv.id);
-      refreshConversations();
+      prependConversation(conv);
+      setActiveConversationId(conv.id);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "创建对话失败");
     }
-  }, [domainId, refreshConversations]);
+  }, [domainId, prependConversation]);
+
+  const handleConversationActivity = useCallback(
+    (update: {
+      id: string;
+      title?: string | null;
+      last_message_preview?: string;
+      isNew?: boolean;
+    }) => {
+      const now = new Date().toISOString();
+      if (update.isNew) {
+        prependConversation({
+          id: update.id,
+          domain_id: domainId!,
+          title: update.title || "新对话",
+          is_pinned: false,
+          is_archived: false,
+          message_count: 1,
+          last_message_preview: update.last_message_preview ?? null,
+          created_at: now,
+          updated_at: now,
+        });
+        setActiveConversationId(update.id);
+        return;
+      }
+      patchConversation(update.id, {
+        ...(update.title ? { title: update.title } : {}),
+        ...(update.last_message_preview
+          ? { last_message_preview: update.last_message_preview }
+          : {}),
+        updated_at: now,
+      });
+    },
+    [domainId, patchConversation, prependConversation],
+  );
 
   const handleToggleCategory = useCallback((name: string) => {
     setExpandedCategories((prev) => {
@@ -466,6 +589,7 @@ export function ChatBiPage() {
               domainList={domainList}
               conversations={conversations}
               archivedConversations={archivedConversations}
+              activeConversationId={activeConversationId}
               loadingConversations={loadingConversations}
               searchQuery={searchQuery}
               showArchived={showArchived}
@@ -493,14 +617,14 @@ export function ChatBiPage() {
             />
           )}
           <ChatBiDetail
-            ref={detailRef}
             domainId={domainId}
             activeDomain={activeDomain!}
+            activeConversationId={activeConversationId}
             conversations={conversations}
             archivedConversations={archivedConversations}
             sidebarVisible={sidebarVisible}
             onToggleSidebar={() => setSidebarVisible((v) => !v)}
-            onRefreshConversations={refreshConversations}
+            onConversationActivity={handleConversationActivity}
           />
         </div>
       )}
@@ -581,7 +705,7 @@ export function ChatBiPage() {
 }
 
 /* ============================================================
- * ChatBiSidebar — memoized, owns local selectedId for highlight
+ * ChatBiSidebar — memoized conversation list
  * ============================================================ */
 
 interface SidebarProps {
@@ -589,6 +713,7 @@ interface SidebarProps {
   domainList: DomainContext[];
   conversations: ChatBiConversation[];
   archivedConversations: ChatBiConversation[];
+  activeConversationId: string | null;
   loadingConversations: boolean;
   searchQuery: string;
   showArchived: boolean;
@@ -620,6 +745,7 @@ const ChatBiSidebar = memo(function ChatBiSidebar({
   domainList,
   conversations,
   archivedConversations,
+  activeConversationId,
   loadingConversations,
   searchQuery,
   showArchived,
@@ -645,17 +771,6 @@ const ChatBiSidebar = memo(function ChatBiSidebar({
   onSetSearchParams,
   onSetShowArchived,
 }: SidebarProps) {
-  // Local highlight state — does NOT cause parent re-render
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const handleSelect = useCallback(
-    (id: string) => {
-      setSelectedId(id);
-      onSelectConversation(id);
-    },
-    [onSelectConversation],
-  );
-
   return (
     <aside className="chatbi-sidebar">
       <div className="chatbi-sidebar-header">
@@ -735,8 +850,8 @@ const ChatBiSidebar = memo(function ChatBiSidebar({
                 <ConversationItem
                   key={conv.id}
                   conversation={conv}
-                  isActive={conv.id === selectedId}
-                  onSelect={handleSelect}
+                  isActive={conv.id === activeConversationId}
+                  onSelect={onSelectConversation}
                   onRename={onOpenRename}
                   onMove={onMoveConversation}
                   onDelete={onDeleteConversation}
@@ -819,8 +934,8 @@ const ChatBiSidebar = memo(function ChatBiSidebar({
                         <ConversationItem
                           key={conv.id}
                           conversation={conv}
-                          isActive={conv.id === selectedId}
-                          onSelect={handleSelect}
+                          isActive={conv.id === activeConversationId}
+                          onSelect={onSelectConversation}
                           onRename={onOpenRename}
                           onMove={onMoveConversation}
                           onDelete={onDeleteConversation}
@@ -848,8 +963,8 @@ const ChatBiSidebar = memo(function ChatBiSidebar({
                     <ConversationItem
                       key={conv.id}
                       conversation={conv}
-                      isActive={conv.id === selectedId}
-                      onSelect={handleSelect}
+                      isActive={conv.id === activeConversationId}
+                      onSelect={onSelectConversation}
                       onRename={onOpenRename}
                       onMove={onMoveConversation}
                       onDelete={onDeleteConversation}
@@ -893,39 +1008,36 @@ const ChatBiSidebar = memo(function ChatBiSidebar({
 });
 
 /* ============================================================
- * ChatBiDetail — owns activeConversationId + messages + chat state
+ * ChatBiDetail — owns messages + chat state; active id from parent
  * ============================================================ */
-
-interface ChatBiDetailHandle {
-  selectConversation: (id: string) => void;
-  clearIfActive: (id: string) => void;
-  reset: () => void;
-}
 
 interface DetailProps {
   domainId: string;
   activeDomain: DomainContext;
+  activeConversationId: string | null;
   conversations: ChatBiConversation[];
   archivedConversations: ChatBiConversation[];
   sidebarVisible: boolean;
   onToggleSidebar: () => void;
-  onRefreshConversations: () => void;
+  onConversationActivity: (update: {
+    id: string;
+    title?: string | null;
+    last_message_preview?: string;
+    isNew?: boolean;
+  }) => void;
 }
 
-const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBiDetail(
-  {
-    domainId,
-    activeDomain,
-    conversations,
-    archivedConversations,
-    sidebarVisible,
-    onToggleSidebar,
-    onRefreshConversations,
-  },
-  ref,
-) {
+const ChatBiDetail = memo(function ChatBiDetail({
+  domainId,
+  activeDomain,
+  activeConversationId,
+  conversations,
+  archivedConversations,
+  sidebarVisible,
+  onToggleSidebar,
+  onConversationActivity,
+}: DetailProps) {
   // ---- chat state (local to this component) ----
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [input, setInput] = useState("");
@@ -933,26 +1045,8 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-
-  // ---- imperative handle (called by parent without re-rendering it) ----
-  const activeIdRef = useRef<string | null>(null);
-  activeIdRef.current = activeConversationId;
-
-  useImperativeHandle(ref, () => ({
-    selectConversation(id: string) {
-      setActiveConversationId(id);
-    },
-    clearIfActive(id: string) {
-      if (activeIdRef.current === id) {
-        setActiveConversationId(null);
-        setMessages([]);
-      }
-    },
-    reset() {
-      setActiveConversationId(null);
-      setMessages([]);
-    },
-  }), []);
+  const loadingConversationRef = useRef<string | null>(null);
+  const skipLoadForIdRef = useRef<string | null>(null);
 
   // ---- Load suggestions ----
   useEffect(() => {
@@ -967,16 +1061,26 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
   // ---- Load messages when activeConversationId changes ----
   useEffect(() => {
     if (!activeConversationId) {
+      loadingConversationRef.current = null;
       setMessages([]);
       setLoadingMessages(false);
       return;
     }
-    let cancelled = false;
+    const conversationId = activeConversationId;
+    if (skipLoadForIdRef.current === conversationId) {
+      skipLoadForIdRef.current = null;
+      loadingConversationRef.current = conversationId;
+      setLoadingMessages(false);
+      return;
+    }
+    loadingConversationRef.current = conversationId;
+    setMessages([]);
     setLoadingMessages(true);
+    let cancelled = false;
     (async () => {
       try {
-        const data = await api.getChatBiMessages(activeConversationId);
-        if (cancelled) return;
+        const data = await api.getChatBiMessages(conversationId);
+        if (cancelled || loadingConversationRef.current !== conversationId) return;
         const chatMessages: ChatMessage[] = data.map(
           (m: ChatBiMessageItem) => ({
             role: m.role as "user" | "assistant",
@@ -992,9 +1096,13 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
         );
         setMessages(chatMessages);
       } catch {
-        if (!cancelled) setMessages([]);
+        if (!cancelled && loadingConversationRef.current === conversationId) {
+          setMessages([]);
+        }
       } finally {
-        if (!cancelled) setLoadingMessages(false);
+        if (!cancelled && loadingConversationRef.current === conversationId) {
+          setLoadingMessages(false);
+        }
       }
     })();
     return () => {
@@ -1046,7 +1154,19 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
         });
 
         if (!activeConversationId && answer.conversation_id) {
-          setActiveConversationId(answer.conversation_id);
+          skipLoadForIdRef.current = answer.conversation_id;
+          onConversationActivity({
+            id: answer.conversation_id,
+            title: answer.conversation_title,
+            last_message_preview: trimmed.slice(0, 80),
+            isNew: true,
+          });
+        } else if (answer.conversation_id) {
+          onConversationActivity({
+            id: answer.conversation_id,
+            title: answer.conversation_title,
+            last_message_preview: trimmed.slice(0, 80),
+          });
         }
 
         setMessages((prev) => {
@@ -1058,8 +1178,6 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
           };
           return next;
         });
-
-        onRefreshConversations();
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         setMessages((prev) => {
@@ -1075,7 +1193,7 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
         setSubmitting(false);
       }
     },
-    [domainId, activeConversationId, messages, submitting, onRefreshConversations],
+    [domainId, activeConversationId, messages, submitting, onConversationActivity],
   );
 
   // ---- Render ----
@@ -1100,12 +1218,9 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
       </div>
 
       <div className="chatbi-messages" ref={scrollRef}>
-        {loadingMessages && messages.length === 0 ? (
-          <div className="chatbi-welcome">
+        {loadingMessages && messages.length === 0 && activeConversationId ? (
+          <div className="chatbi-messages-loading">
             <Spin size="large" />
-            <div className="chatbi-welcome-desc" style={{ marginTop: 12 }}>
-              加载对话中…
-            </div>
           </div>
         ) : messages.length === 0 ? (
           <div className="chatbi-welcome">
@@ -1138,16 +1253,9 @@ const ChatBiDetail = forwardRef<ChatBiDetailHandle, DetailProps>(function ChatBi
             ) : null}
           </div>
         ) : (
-          <>
-            {loadingMessages && (
-              <div className="chatbi-loading-bar">
-                <Spin size="small" />
-              </div>
-            )}
-            {messages.map((msg, idx) => (
-              <ChatBubble key={idx} message={msg} />
-            ))}
-          </>
+          messages.map((msg, idx) => (
+            <ChatBubble key={idx} message={msg} />
+          ))
         )}
       </div>
 

@@ -300,7 +300,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       }
       value={query}
       onChange={handleQueryChange}
-      style={{ width: 260 }}
+      className="ontology-workspace-search"
     />
   ) : null;
 
@@ -344,9 +344,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         <div className="toolbar-left">
           {entitySwitcher}
           {searchInput}
-          {objectViewSwitcher}
         </div>
         <div className="toolbar-right">
+          {objectViewSwitcher}
           {entityTab === "objects" && objectView === "graph" && (
             <span className="toolbar-text">
               {graph ? `${graph.nodes.length} 节点 · ${graph.edges.length} 关系` : "图谱生成中"}
@@ -381,6 +381,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
               size="middle"
               columns={relationColumns}
               dataSource={filteredRelations}
+              scroll={{ x: "max-content" }}
               pagination={{
                 current: relationPage,
                 pageSize: relationPageSize,
@@ -433,6 +434,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
               size="middle"
               columns={objectColumns}
               dataSource={filteredObjects}
+              scroll={{ x: "max-content" }}
               pagination={{
                 current: objectPage,
                 pageSize: objectPageSize,
