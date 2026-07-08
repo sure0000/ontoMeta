@@ -417,6 +417,7 @@ body {
 }
 .section-card-body {
   padding: 20px;
+  min-width: 0;
 }
 .section-card-body--flush {
   padding: 0;
@@ -564,7 +565,8 @@ body {
   border-top: 1px dashed var(--om-border);
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px;
   font-size: 12px;
   color: var(--om-text-tertiary);
   flex-wrap: wrap;
@@ -742,6 +744,10 @@ body {
   color: var(--om-text);
   border: 1px solid var(--om-border);
 }
+.code-block--bounded {
+  max-height: 360px;
+  overflow: auto;
+}
 
 /* ---------- Empty state ---------- */
 .empty-state {
@@ -892,7 +898,7 @@ body {
 
 /* 嵌入 section-card 内的 Tabs：tab bar 视觉上充当卡片头部 */
 .om-tabs--inset.ant-tabs {
-  height: 100%;
+  height: auto;
 }
 .om-tabs--inset .ant-tabs-nav {
   padding: 0 16px;
@@ -901,6 +907,19 @@ body {
 }
 .om-tabs--inset .ant-tabs-nav-list {
   gap: 0;
+}
+.om-tabs--inset .ant-tabs-content-holder {
+  overflow: visible;
+}
+.om-tabs--inset .ant-tabs-tabpane {
+  overflow: hidden;
+}
+/* Tab 内表格：与卡片边缘对齐，支持横向滚动 */
+.om-tabs--inset .ant-tabs-tabpane .ant-table-wrapper {
+  overflow-x: auto;
+}
+.om-tabs--inset .ant-tabs-tabpane .om-table.ant-table {
+  margin-top: 0;
 }
 
 /* Tabs 内容区上方的工具条 */
@@ -978,7 +997,20 @@ body {
   flex-direction: column;
 }
 .om-stack > * + * {
-  margin-top: 16px;
+  margin-top: 20px;
+}
+/* 相邻 section-card 默认 margin-top:0，在 om-stack 内恢复垂直间距 */
+.om-stack > .section-card + .section-card {
+  margin-top: 20px;
+}
+/* 详情页：防止栅格列撑破容器 */
+.page-container--full .om-stack .ant-col {
+  min-width: 0;
+}
+.om-detail-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 4px;
 }
 .om-card-link {
   display: block;
@@ -1006,6 +1038,13 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+/* 嵌入卡片 / Tabs 内时去除重复边框 */
+.ontology-graph-view--embedded,
+.section-card-body--flush .ontology-graph-view,
+.om-tabs--inset .ontology-graph-view {
+  border: none;
+  border-radius: 0;
 }
 .ontology-graph-toolbar {
   display: flex;
@@ -1442,6 +1481,18 @@ body {
 }
 .expression-json-preview__body {
   min-height: 60px;
+  min-width: 0;
+}
+.expression-json-preview--embedded {
+  padding: 16px 20px;
+}
+.expression-json-preview__toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.expression-json-preview--embedded .code-block--bounded {
+  max-height: 420px;
 }
 .expression-json-preview__loading {
   display: flex;

@@ -1087,9 +1087,12 @@ const ChatBiDetail = memo(function ChatBiDetail({
             content: m.content,
             payload: m.payload
               ? ({
-                  ...(m.payload as Record<string, unknown>),
-                  domain_id: "",
-                  domain_name: "",
+                  ...m.payload,
+                  domain_id:
+                    (m.payload.domain_id as string | undefined) || domainId,
+                  domain_name:
+                    (m.payload.domain_name as string | undefined) ||
+                    activeDomain.name,
                 } as ChatBiAnswer)
               : undefined,
           }),
@@ -1108,7 +1111,7 @@ const ChatBiDetail = memo(function ChatBiDetail({
     return () => {
       cancelled = true;
     };
-  }, [activeConversationId]);
+  }, [activeConversationId, domainId, activeDomain.name]);
 
   // ---- Auto-scroll ----
   useEffect(() => {
@@ -1462,7 +1465,6 @@ function ChatBubble({ message }: { message: ChatMessage }) {
               message.payload.caliber_decomposition.length > 0 && (
                 <CaliberDecomposition
                   items={message.payload.caliber_decomposition}
-                  domainId={message.payload.domain_id}
                 />
               )}
             {message.payload?.suggested_sql && (
@@ -1630,10 +1632,8 @@ const CALIBER_KIND_COLOR: Record<ChatBiCaliberKind, string> = {
 
 function CaliberDecomposition({
   items,
-  domainId,
 }: {
   items: ChatBiCaliberItem[];
-  domainId: string;
 }) {
   return (
     <div className="chatbi-caliber">
@@ -1652,11 +1652,7 @@ function CaliberDecomposition({
               {item.references.length > 0 && (
                 <div className="chatbi-caliber-item-refs">
                   {item.references.map((ref, ri) => (
-                    <CaliberRefChip
-                      key={ri}
-                      ref={ref}
-                      domainId={domainId}
-                    />
+                    <CaliberRefChip key={ri} ref={ref} />
                   ))}
                 </div>
               )}
@@ -1668,15 +1664,9 @@ function CaliberDecomposition({
   );
 }
 
-function CaliberRefChip({
-  ref,
-  domainId,
-}: {
-  ref: ChatBiCaliberReference;
-  domainId: string;
-}) {
+function CaliberRefChip({ ref }: { ref: ChatBiCaliberReference }) {
   const label = ref.display_name ?? ref.name ?? "—";
-  const href = refToPath(ref, domainId);
+  const href = refToPath(ref);
   const kindLabel = CALIBER_KIND_LABEL[ref.kind] ?? ref.kind;
   const color = CALIBER_KIND_COLOR[ref.kind] ?? "default";
   if (href) {
@@ -1700,14 +1690,11 @@ function CaliberRefChip({
   );
 }
 
-function refToPath(
-  ref: ChatBiCaliberReference,
-  domainId: string,
-): string | null {
+function refToPath(ref: ChatBiCaliberReference): string | null {
   if (!ref.id) return null;
   switch (ref.kind) {
     case "object_type":
-      return `/workspace/${domainId}/objects/${ref.id}`;
+      return `/ontology/${ref.id}`;
     case "relation_type":
       return `/ontology/relations/${ref.id}`;
     case "business_logic":

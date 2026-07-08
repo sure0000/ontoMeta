@@ -9,6 +9,7 @@ interface Props {
   onEdgeClick?: (relationId: string, sourceObjectId: string) => void;
   height?: number;
   defaultLayout?: "dagre" | "center" | "circular";
+  embedded?: boolean;
 }
 
 function ObjectRelationGraphInner({
@@ -16,8 +17,9 @@ function ObjectRelationGraphInner({
   objectDetailPath,
   relationDetailPath,
   onEdgeClick,
-  height = 400,
+  height = 480,
   defaultLayout,
+  embedded = false,
 }: Props) {
   const graph = useMemo(() => buildRelationGraph(obj), [obj]);
 
@@ -39,6 +41,7 @@ function ObjectRelationGraphInner({
       onEdgeClick={onEdgeClick ? handleEdgeClick : undefined}
       height={height}
       defaultLayout={layout}
+      embedded={embedded}
     />
   );
 }

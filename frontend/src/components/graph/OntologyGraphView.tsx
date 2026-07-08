@@ -34,6 +34,8 @@ export interface OntologyGraphViewProps {
   onEdgeClick?: (edge: OntologyGraph["edges"][number]) => void;
   hint?: string;
   defaultLayout?: LayoutMode;
+  /** 嵌入 SectionCard / Tabs 时使用，去除外层重复边框 */
+  embedded?: boolean;
 }
 
 function resolveRelationId(edge: OntologyGraph["edges"][number]): string {
@@ -89,6 +91,7 @@ function OntologyGraphViewInner({
   onEdgeClick,
   hint,
   defaultLayout,
+  embedded = false,
 }: OntologyGraphViewProps) {
   const navigate = useNavigate();
   const flowRef = useRef<ReactFlowInstance | null>(null);
@@ -187,7 +190,10 @@ function OntologyGraphViewInner({
   );
 
   return (
-    <div className="ontology-graph-view" style={{ height }}>
+    <div
+      className={`ontology-graph-view${embedded ? " ontology-graph-view--embedded" : ""}`}
+      style={{ height }}
+    >
       <div className="ontology-graph-toolbar">
         <span className="ontology-graph-hint">{hint ?? defaultHint}</span>
         {layoutButtons}

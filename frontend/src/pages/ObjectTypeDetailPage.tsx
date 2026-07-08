@@ -616,6 +616,7 @@ export function ObjectTypeDetailPage() {
 
   return (
     <PageContainer full>
+      <div className="om-stack">
       <PageHeader
         icon={<ApartmentOutlined />}
         title={obj.display_name}
@@ -769,6 +770,7 @@ export function ObjectTypeDetailPage() {
                       size="middle"
                       columns={relationColumns}
                       dataSource={allRelations}
+                      scroll={{ x: "max-content" }}
                       pagination={false}
                     />
                   )}
@@ -792,6 +794,7 @@ export function ObjectTypeDetailPage() {
                     objectDetailPath={objectDetailPath}
                     relationDetailPath={relationDetailPath}
                     defaultLayout="dagre"
+                    embedded
                   />
                 )
               ),
@@ -952,6 +955,7 @@ export function ObjectTypeDetailPage() {
           />
         </SectionCard>
       )}
+      </div>
     </PageContainer>
   );
 }

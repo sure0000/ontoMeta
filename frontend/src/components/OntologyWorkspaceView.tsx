@@ -413,6 +413,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
             graph={graph}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
+            embedded
           />
         </SectionCard>
       ) : objectView === "list" ? (

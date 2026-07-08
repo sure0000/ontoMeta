@@ -317,6 +317,7 @@ export function BusinessLogicDetailPage() {
 
   return (
     <PageContainer full>
+      <div className="om-stack">
       <PageHeader
         icon={<FunctionOutlined />}
         title={logic.display_name}
@@ -354,7 +355,6 @@ export function BusinessLogicDetailPage() {
           showIcon
           closable
           onClose={() => setError(null)}
-          style={{ marginBottom: 12 }}
         />
       )}
 
@@ -464,7 +464,7 @@ export function BusinessLogicDetailPage() {
                 </Form.Item>
               </Form>
             ) : (
-              <pre className="code-block">
+              <pre className="code-block code-block--bounded">
                 {logic.expression_summary || "暂无规则表达式"}
               </pre>
             )}
@@ -472,12 +472,12 @@ export function BusinessLogicDetailPage() {
         </Col>
       </Row>
 
-      <SectionCard title="表达式 JSON" icon={<CodeOutlined />}>
+      <SectionCard title="表达式 JSON" icon={<CodeOutlined />} bodyFlush>
         <ExpressionJsonPreview
           json={logic.expression_json}
           loading={false}
-          title="已保存的 JSON"
           emptyHint="暂未保存格式化结果,点击「JSON 预览」可先查看,或直接「保存」生成"
+          embedded
         />
       </SectionCard>
 
@@ -560,10 +560,11 @@ export function BusinessLogicDetailPage() {
 
       </SectionCard>
 
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div className="om-detail-footer">
         <Link to={workspacePath}>
           <Button icon={<LinkOutlined />}>查看所属数据域</Button>
         </Link>
+      </div>
       </div>
 
       <Modal
