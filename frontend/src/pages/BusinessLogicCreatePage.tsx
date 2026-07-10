@@ -172,16 +172,16 @@ export function BusinessLogicCreatePage() {
               initialValues={{ logic_type: "metric" }}
             >
               <Row gutter={[16, 8]}>
-                <Col xs={24} md={12}>
+                <Col xs={24} sm={8}>
                   <Form.Item
                     label="逻辑类型"
                     name="logic_type"
-                    rules={[{ required: true }]}
+                    rules={[{ required: true, message: "请选择逻辑类型" }]}
                   >
                     <Select options={LOGIC_TYPE_OPTIONS} />
                   </Form.Item>
                 </Col>
-                <Col xs={24} md={12}>
+                <Col xs={24} sm={8}>
                   <Form.Item
                     label="标识名(英文)"
                     name="name"
@@ -190,7 +190,7 @@ export function BusinessLogicCreatePage() {
                     <Input placeholder="如 order_gmv_metric" />
                   </Form.Item>
                 </Col>
-                <Col xs={24} md={12}>
+                <Col xs={24} sm={8}>
                   <Form.Item
                     label="显示名"
                     name="display_name"
@@ -199,8 +199,12 @@ export function BusinessLogicCreatePage() {
                     <Input placeholder="如 订单 GMV" />
                   </Form.Item>
                 </Col>
-                <Col xs={24} md={12}>
-                  <Form.Item label="描述" name="description">
+                <Col xs={24}>
+                  <Form.Item
+                    label="描述"
+                    name="description"
+                    rules={[{ required: true, message: "请输入描述" }]}
+                  >
                     <Input.TextArea rows={2} placeholder="一句话说明业务含义" />
                   </Form.Item>
                 </Col>
@@ -209,6 +213,7 @@ export function BusinessLogicCreatePage() {
               <Form.Item
                 label="表达式"
                 name="expression_draft"
+                rules={[{ required: true, message: "请输入表达式" }]}
                 extra={
                   <span style={{ fontSize: 12 }}>
                     用自然语言书写即可,输入 <code>@</code> 选择已发布本体的对象,选中后紧接
