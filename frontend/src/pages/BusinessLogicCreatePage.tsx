@@ -1,6 +1,6 @@
 import { FunctionOutlined } from "@ant-design/icons";
 import { Alert, Button, Col, Form, Input, Modal, Row, Select, Spin, message } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { ExpressionJsonPreview } from "../components/ExpressionJsonPreview";
@@ -19,7 +19,7 @@ const LOGIC_TYPE_OPTIONS = [
 export function BusinessLogicCreatePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const domainId = searchParams.get("domain") || undefined;
+  const categoryId = searchParams.get("category") || undefined;
 
   const [domains, setDomains] = useState<DomainContext[]>([]);
   const [loading, setLoading] = useState(true);
@@ -29,7 +29,6 @@ export function BusinessLogicCreatePage() {
   const [previewJson, setPreviewJson] = useState<ExpressionJson | null>(null);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [form] = Form.useForm();
-  const watchedDomainId = Form.useWatch("domain_id", form);
 
   useEffect(() => {
     api
@@ -41,9 +40,17 @@ export function BusinessLogicCreatePage() {
 
   const domainsWithPublished = domains.filter((d) => d.published_count > 0);
 
+  const domainId = useMemo(() => {
+    const urlDomainId = searchParams.get("domain");
+    if (urlDomainId && domainsWithPublished.find((d) => d.id === urlDomainId)) {
+      return urlDomainId;
+    }
+    return domainsWithPublished[0]?.id ?? "";
+  }, [domainsWithPublished, searchParams]);
+
   if (loading) return <PageSkeleton type="detail" />;
 
-  if (domainsWithPublished.length === 0) {
+  if (!domainId) {
     return (
       <PageContainer full>
         <PageHeader
@@ -68,9 +75,8 @@ export function BusinessLogicCreatePage() {
     logicType: string,
     description: string | undefined,
   ) => {
-    if (!watchedDomainId) throw new Error("请先选择数据域");
     return api.formatExpression({
-      domain_id: watchedDomainId,
+      domain_id: domainId,
       expression_draft: draft,
       logic_type: logicType,
       description,
@@ -110,17 +116,21 @@ export function BusinessLogicCreatePage() {
     }
     setSubmitting(true);
     try {
-      // 保存前先调 LLM 格式化
       const formatted = await formatDraft(
         draft,
         values.logic_type,
         values.description,
       );
       const created = await api.createBusinessLogic({
-        ...values,
+        domain_id: domainId,
+        name: values.name,
+        display_name: values.display_name,
+        logic_type: values.logic_type,
+        description: values.description,
         expression_draft: draft,
         expression_json: formatted.expression_json,
         expression_summary: formatted.expression_summary,
+        category_id: categoryId ?? null,
       });
       message.success("已创建业务逻辑草稿");
       navigate(`/business-logic/${created.id}`);
@@ -159,27 +169,9 @@ export function BusinessLogicCreatePage() {
             <Form
               form={form}
               layout="vertical"
-              initialValues={{
-                domain_id: domainId && domainsWithPublished.find((d) => d.id === domainId)
-                  ? domainId
-                  : domainsWithPublished[0]?.id,
-                logic_type: "metric",
-              }}
+              initialValues={{ logic_type: "metric" }}
             >
               <Row gutter={[16, 8]}>
-                <Col xs={24} md={12}>
-                  <Form.Item
-                    label="所属数据域"
-                    name="domain_id"
-                    rules={[{ required: true, message: "请选择数据域" }]}
-                    extra="业务逻辑将归属该域的已发布本体"
-                  >
-                    <Select
-                      options={domainsWithPublished.map((d) => ({ label: d.name, value: d.id }))}
-                      placeholder="选择已发布本体的数据域"
-                    />
-                  </Form.Item>
-                </Col>
                 <Col xs={24} md={12}>
                   <Form.Item
                     label="逻辑类型"
@@ -207,7 +199,7 @@ export function BusinessLogicCreatePage() {
                     <Input placeholder="如 订单 GMV" />
                   </Form.Item>
                 </Col>
-                <Col xs={24}>
+                <Col xs={24} md={12}>
                   <Form.Item label="描述" name="description">
                     <Input.TextArea rows={2} placeholder="一句话说明业务含义" />
                   </Form.Item>
@@ -225,7 +217,7 @@ export function BusinessLogicCreatePage() {
                 }
               >
                 <ExpressionRichEditor
-                  domainId={watchedDomainId}
+                  domainId={domainId}
                   placeholder="例如:统计 SUM(@订单.金额) 万元,其中 @订单.状态 为「已支付」,按 @订单.城市 分组"
                   minHeight={200}
                 />

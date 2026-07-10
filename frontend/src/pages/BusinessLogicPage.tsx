@@ -1,244 +1,113 @@
-import { EditOutlined, FunctionOutlined, PlusOutlined, ImportOutlined, SearchOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, FunctionOutlined, PlusOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
+  Card,
+  Col,
+  Empty,
   Form,
   Input,
   Modal,
-  Select,
-  Space,
+  Popconfirm,
+  Row,
   Spin,
-  Table,
+  Typography,
   message,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { EmptyState } from "../components/EmptyState";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { StatusBadge } from "../components/StatusBadge";
-import { useApi } from "../hooks/useApi";
-import type { BusinessLogic, DomainContext, DomainContextDetail } from "../types";
+import type { BusinessLogicCategory } from "../types";
 
-const SOURCE_TYPE_OPTIONS = [
-  { label: "SQL", value: "sql" },
-  { label: "Python", value: "python" },
-  { label: "其它", value: "other" },
-];
-
-const STATUS_FILTER_OPTIONS = [
-  { label: "全部", value: "all" },
-  { label: "草稿(suggested/edited/pre_published)", value: "draft" },
-  { label: "已发布", value: "published" },
-];
-
-const DRAFT_STATUSES = new Set(["suggested", "edited", "pre_published"]);
-
-const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
-const DEFAULT_PAGE_SIZE = 20;
-
-interface BusinessLogicBundle {
-  domains: DomainContext[];
-  domain: DomainContextDetail | null;
-  logics: BusinessLogic[];
-}
+const { Paragraph } = Typography;
 
 export function BusinessLogicPage() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const domainId = searchParams.get("domain") || undefined;
-  const statusFilter = searchParams.get("status") || "all";
+  const [categories, setCategories] = useState<BusinessLogicCategory[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const [importOpen, setImportOpen] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [importForm] = Form.useForm();
-  const [query, setQuery] = useState("");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<BusinessLogicCategory | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [form] = Form.useForm();
 
-  const { data: bundle, loading, error } = useApi<BusinessLogicBundle>(
-    async () => {
-      const domains = await api.listDomains();
-      if (domains.length === 0) {
-        return { domains, domain: null, logics: [] };
-      }
-      const targetDomainId = domainId ?? domains[0]?.id;
-      if (!targetDomainId) {
-        return { domains, domain: null, logics: [] };
-      }
-      const [domain, logics] = await Promise.all([
-        api.getDomain(targetDomainId),
-        api.listBusinessLogics({ domainId: targetDomainId }),
-      ]);
-      return { domains, domain, logics };
-    },
-    [domainId],
-  );
-
-  const domains = bundle?.domains ?? [];
-  const domain = bundle?.domain ?? null;
-  const logics = bundle?.logics ?? [];
-
-  // URL 同步默认域
-  const syncedRef = useRef(false);
-  useLayoutEffect(() => {
-    if (syncedRef.current) return;
-    if (!domainId && domains.length > 0 && domains[0]?.id) {
-      syncedRef.current = true;
-      setSearchParams(
-        { domain: domains[0].id, status: statusFilter },
-        { replace: true },
-      );
-    }
-  }, [domainId, domains, statusFilter, setSearchParams]);
+  const load = () => {
+    setLoading(true);
+    api
+      .listBusinessLogicCategories()
+      .then(setCategories)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
-    syncedRef.current = Boolean(domainId);
-  }, [domainId]);
-
-  // 搜索/筛选变化时重置分页
-  useEffect(() => {
-    setPage(1);
-  }, [query, statusFilter, domainId]);
-
-  const domainsWithPublished = domains.filter((d) => d.published_count > 0);
-  const targetDomainId = domainId ?? domains[0]?.id;
-  const targetDomainHasPublished = domains.find((d) => d.id === targetDomainId)?.published_count ?? 0;
-
-  const filteredLogics = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return logics.filter((l) => {
-      if (statusFilter === "draft" && !DRAFT_STATUSES.has(l.status)) return false;
-      if (statusFilter === "published" && l.status !== "published") return false;
-      if (!q) return true;
-      if (l.name?.toLowerCase().includes(q)) return true;
-      if (l.display_name?.toLowerCase().includes(q)) return true;
-      if (l.description?.toLowerCase().includes(q)) return true;
-      if (l.logic_type?.toLowerCase().includes(q)) return true;
-      return false;
-    });
-  }, [logics, statusFilter, query]);
+    load();
+  }, []);
 
   const openCreate = () => {
-    navigate(`/business-logic/create?domain=${targetDomainId ?? ""}`);
+    setEditingCategory(null);
+    form.resetFields();
+    setModalOpen(true);
   };
 
-  const openImport = () => {
-    importForm.resetFields();
-    importForm.setFieldsValue({
-      domain_id: targetDomainHasPublished ? targetDomainId : domainsWithPublished[0]?.id,
-      source_type: "sql",
-    });
-    setImportOpen(true);
+  const openEdit = (cat: BusinessLogicCategory) => {
+    setEditingCategory(cat);
+    form.setFieldsValue({ name: cat.name, description: cat.description ?? "" });
+    setModalOpen(true);
   };
 
-  const handleImport = async () => {
-    const values = await importForm.validateFields();
-    setSubmitting(true);
+  const handleSave = async () => {
+    const values = await form.validateFields();
+    setSaving(true);
     try {
-      const created = await api.importBusinessLogic(values);
-      setImportOpen(false);
-      message.success("已从代码导入业务逻辑草稿");
-      navigate(`/business-logic/${created.id}`);
+      if (editingCategory) {
+        await api.updateBusinessLogicCategory(editingCategory.id, {
+          name: values.name,
+          description: values.description || undefined,
+        });
+        message.success("分类已更新");
+      } else {
+        await api.createBusinessLogicCategory({
+          name: values.name,
+          description: values.description || undefined,
+        });
+        message.success("分类已创建");
+      }
+      setModalOpen(false);
+      load();
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "导入失败");
+      message.error(err instanceof Error ? err.message : "操作失败");
     } finally {
-      setSubmitting(false);
+      setSaving(false);
     }
   };
 
-  const columns: ColumnsType<BusinessLogic> = [
-    {
-      title: "逻辑名称",
-      dataIndex: "display_name",
-      key: "display_name",
-      width: 240,
-      ellipsis: true,
-      render: (_, record) => (
-        <Link to={`/business-logic/${record.id}`} className="id-link">
-          <span>{record.display_name}</span>
-          <span className="id-link-sub">{record.name}</span>
-        </Link>
-      ),
-    },
-    {
-      title: "类型",
-      dataIndex: "logic_type",
-      key: "logic_type",
-      width: 100,
-    },
-    {
-      title: "数据域",
-      dataIndex: "domain_name",
-      key: "domain_name",
-      width: 140,
-      render: (v) => v || <span className="om-muted">-</span>,
-    },
-    {
-      title: "状态",
-      dataIndex: "status",
-      key: "status",
-      width: 120,
-      render: (status) => <StatusBadge status={status} />,
-    },
-    {
-      title: "操作",
-      key: "action",
-      width: 80,
-      render: (_, record) => (
-        <Button
-          type="link"
-          size="small"
-          icon={<EditOutlined />}
-          onClick={() => navigate(`/business-logic/${record.id}?edit=true`)}
-        />
-      ),
-    },
-  ];
+  const handleDelete = async (id: string) => {
+    try {
+      await api.deleteBusinessLogicCategory(id);
+      message.success("分类已删除");
+      load();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "删除失败");
+    }
+  };
 
-  if (loading && domains.length === 0) return <PageSkeleton type="list" />;
-
-  const noPublishedHint =
-    domainsWithPublished.length === 0
-      ? "当前没有任何已发布本体,请先在工作区完成本体建模并发布,再创建业务逻辑。"
-      : undefined;
+  if (loading && categories.length === 0) return <PageSkeleton type="list" />;
 
   return (
     <PageContainer full>
       <PageHeader
         icon={<FunctionOutlined />}
-        title={domain?.name ?? "业务逻辑"}
+        title="业务逻辑管理"
+        description="创建分类来组织管理业务逻辑，点击分类卡片进入查看"
         extra={
-          <Space wrap>
-            <Input
-              allowClear
-              prefix={<SearchOutlined style={{ color: "var(--om-text-secondary, #94a3b8)" }} />}
-              placeholder="搜索逻辑名称、类型、描述"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              style={{ width: 220 }}
-            />
-            <Select
-              style={{ minWidth: 180 }}
-              value={statusFilter}
-              onChange={(value) =>
-                setSearchParams(
-                  { domain: targetDomainId ?? "", status: value },
-                  { replace: true },
-                )
-              }
-              options={STATUS_FILTER_OPTIONS}
-            />
-            <Button icon={<ImportOutlined />} onClick={openImport} disabled={domainsWithPublished.length === 0}>
-              导入业务逻辑
-            </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={domainsWithPublished.length === 0}>
-              新建业务逻辑
-            </Button>
-          </Space>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            新建分类
+          </Button>
         }
       />
 
@@ -248,90 +117,105 @@ export function BusinessLogicPage() {
           message="加载失败"
           description={error}
           showIcon
-        />
-      )}
-
-      {noPublishedHint && (
-        <Alert
-          type="info"
-          message="尚无已发布本体"
-          description={noPublishedHint}
-          showIcon
-          style={{ marginTop: 12 }}
+          closable
+          onClose={() => setError(null)}
+          style={{ marginBottom: 16 }}
         />
       )}
 
       <Spin spinning={loading}>
-        {logics.length === 0 ? (
-          <EmptyState
-            title="暂无业务逻辑"
-            description="业务逻辑独立于工作区管理。可选择「导入业务逻辑」从代码解析草稿,或「新建业务逻辑」手动创建。"
-            action={
-              <Link to="/workspace">
-                <span className="om-link">前往工作区 →</span>
-              </Link>
-            }
-          />
-        ) : filteredLogics.length === 0 ? (
-          <EmptyState
-            title="未匹配到业务逻辑"
-            description="尝试调整搜索关键词或状态筛选。"
-          />
+        {categories.length === 0 ? (
+          <Empty
+            description="暂无分类"
+            style={{ marginTop: 80 }}
+          >
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              创建第一个分类
+            </Button>
+          </Empty>
         ) : (
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={columns}
-            dataSource={filteredLogics}
-            pagination={{
-              current: page,
-              pageSize,
-              total: filteredLogics.length,
-              showSizeChanger: true,
-              pageSizeOptions: PAGE_SIZE_OPTIONS,
-              showTotal: (total) => `共 ${total} 条`,
-              onChange: (p, ps) => {
-                setPage(p);
-                setPageSize(ps);
-              },
-            }}
-          />
+          <Row gutter={[16, 16]}>
+            {categories.map((cat) => (
+              <Col key={cat.id} xs={24} sm={12} md={8} lg={6}>
+                <Card
+                  hoverable
+                  className="om-category-card"
+                  onClick={() => navigate(`/business-logic/category/${cat.id}`)}
+                  actions={[
+                    <EditOutlined
+                      key="edit"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openEdit(cat);
+                      }}
+                    />,
+                    <Popconfirm
+                      key="delete"
+                      title={`确认删除分类「${cat.name}」？分类下的业务逻辑将移出该分类。`}
+                      onConfirm={(e) => {
+                        e?.stopPropagation();
+                        handleDelete(cat.id);
+                      }}
+                      onCancel={(e) => e?.stopPropagation()}
+                    >
+                      <DeleteOutlined
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Popconfirm>,
+                  ]}
+                >
+                  <Card.Meta
+                    title={
+                      <span>
+                        {cat.name}
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            color: "var(--om-text-secondary, #94a3b8)",
+                            fontSize: 13,
+                            fontWeight: 400,
+                          }}
+                        >
+                          ({cat.logic_count})
+                        </span>
+                      </span>
+                    }
+                    description={
+                      <Paragraph
+                        ellipsis={{ rows: 2 }}
+                        style={{ marginBottom: 0, color: "var(--om-text-secondary, #94a3b8)" }}
+                      >
+                        {cat.description || "暂无描述"}
+                      </Paragraph>
+                    }
+                  />
+                </Card>
+              </Col>
+            ))}
+          </Row>
         )}
       </Spin>
 
       <Modal
-        title="导入业务逻辑"
-        open={importOpen}
-        onCancel={() => setImportOpen(false)}
-        onOk={handleImport}
-        okText="解析并创建草稿"
+        title={editingCategory ? "编辑分类" : "新建分类"}
+        open={modalOpen}
+        onCancel={() => setModalOpen(false)}
+        onOk={handleSave}
+        okText={editingCategory ? "保存" : "创建"}
         cancelText="取消"
-        confirmLoading={submitting}
+        confirmLoading={saving}
         destroyOnClose
-        width={640}
       >
-        <Form form={importForm} layout="vertical">
+        <Form form={form} layout="vertical">
           <Form.Item
-            label="所属数据域"
-            name="domain_id"
-            rules={[{ required: true, message: "请选择数据域" }]}
-            extra="解析后的逻辑将归属该域的已发布本体,引用对象在详情页挑选"
+            label="分类名称"
+            name="name"
+            rules={[{ required: true, message: "请输入分类名称" }]}
           >
-            <Select
-              options={domainsWithPublished.map((d) => ({ label: d.name, value: d.id }))}
-              placeholder="选择已发布本体的数据域"
-            />
+            <Input placeholder="例如：用户指标、风控规则" />
           </Form.Item>
-          <Form.Item label="代码类型" name="source_type" rules={[{ required: true }]}>
-            <Select options={SOURCE_TYPE_OPTIONS} />
-          </Form.Item>
-          <Form.Item label="代码" name="code" rules={[{ required: true, message: "请粘贴代码" }]}>
-            <Input.TextArea
-              rows={12}
-              placeholder="粘贴 SQL / Python / 其它代码,LLM(或 Mock 规则)将解析为业务逻辑草稿"
-              style={{ fontFamily: "monospace" }}
-            />
+          <Form.Item label="描述" name="description">
+            <Input.TextArea rows={3} placeholder="可选，分类描述说明" />
           </Form.Item>
         </Form>
       </Modal>

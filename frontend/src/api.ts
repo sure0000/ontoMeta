@@ -1,5 +1,6 @@
 import type {
   BusinessLogic,
+  BusinessLogicCategory,
   BusinessLogicCreateInput,
   BusinessLogicDetail,
   BusinessLogicImportInput,
@@ -220,15 +221,33 @@ export const api = {
   listBusinessLogics: (params?: {
     ontologyId?: string;
     domainId?: string;
+    categoryId?: string;
     publishedOnly?: boolean;
   }) =>
     request<BusinessLogic[]>(
       `/api/business-logics${buildQuery({
         ontology_id: params?.ontologyId,
         domain_id: params?.domainId,
+        category_id: params?.categoryId,
         published_only: params?.publishedOnly,
       })}`,
     ),
+  listBusinessLogicCategories: () =>
+    request<BusinessLogicCategory[]>("/api/business-logic-categories"),
+  createBusinessLogicCategory: (body: { name: string; description?: string }) =>
+    request<BusinessLogicCategory>("/api/business-logic-categories", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBusinessLogicCategory: (id: string, body: { name?: string; description?: string }) =>
+    request<BusinessLogicCategory>(`/api/business-logic-categories/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteBusinessLogicCategory: (id: string) =>
+    request<{ id: string; deleted: boolean }>(`/api/business-logic-categories/${id}`, {
+      method: "DELETE",
+    }),
   getBusinessLogic: (id: string) => request<BusinessLogicDetail>(`/api/business-logics/${id}`),
 
   createBusinessLogic: (body: BusinessLogicCreateInput) =>

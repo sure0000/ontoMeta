@@ -11,6 +11,7 @@ interface Crumb {
 
 async function resolveBreadcrumbs(
   pathname: string,
+  search: string,
   params: {
     domainId?: string;
     objectId?: string;
@@ -18,6 +19,8 @@ async function resolveBreadcrumbs(
     relationId?: string;
   },
 ): Promise<Crumb[]> {
+  const searchParams = new URLSearchParams(search);
+
   if (pathname === "/workspace" || pathname === "/workspace/") {
     return [{ label: "本体建模" }];
   }
@@ -72,23 +75,53 @@ async function resolveBreadcrumbs(
     return [{ label: "本体浏览", path: "/ontology" }, { label: obj.display_name }];
   }
 
+  // ---- 业务逻辑 ----
+
+  const BL_BASE: Crumb = { label: "业务逻辑", path: "/business-logic" };
+
   if (pathname === "/business-logic") {
-    return [{ label: "业务逻辑" }];
+    return [BL_BASE];
   }
 
+  // /business-logic/category/:categoryId
+  if (pathname.startsWith("/business-logic/category/")) {
+    const segments = pathname.split("/");
+    const catId = segments[3];
+    if (catId) {
+      const cats = await api.listBusinessLogicCategories();
+      const cat = cats.find((c) => c.id === catId);
+      return [BL_BASE, { label: cat?.name ?? "分类" }];
+    }
+    return [BL_BASE, { label: "分类" }];
+  }
+
+  // /business-logic/create?domain=xxx&category=yyy
   if (pathname === "/business-logic/create") {
-    return [
-      { label: "业务逻辑", path: "/business-logic" },
-      { label: "新建" },
-    ];
+    const catId = searchParams.get("category");
+    const crumbs: Crumb[] = [BL_BASE];
+    if (catId) {
+      const cats = await api.listBusinessLogicCategories();
+      const cat = cats.find((c) => c.id === catId);
+      if (cat) {
+        crumbs.push({ label: cat.name, path: `/business-logic/category/${cat.id}` });
+      }
+    }
+    crumbs.push({ label: "新建" });
+    return crumbs;
   }
 
+  // /business-logic/:logicId
   if (pathname.startsWith("/business-logic/") && params.logicId) {
     const logic = await api.getBusinessLogic(params.logicId);
-    return [
-      { label: "业务逻辑", path: "/business-logic" },
-      { label: logic.display_name },
-    ];
+    const crumbs: Crumb[] = [BL_BASE];
+    if (logic.category_id && logic.category_name) {
+      crumbs.push({
+        label: logic.category_name,
+        path: `/business-logic/category/${logic.category_id}`,
+      });
+    }
+    crumbs.push({ label: logic.display_name });
+    return crumbs;
   }
 
   if (pathname === "/settings") {
@@ -112,7 +145,7 @@ export function AppBreadcrumb() {
     let cancelled = false;
     setLoading(true);
 
-    resolveBreadcrumbs(location.pathname, params)
+    resolveBreadcrumbs(location.pathname, location.search, params)
       .then((crumbs) => {
         if (cancelled) return;
         setItems(
@@ -136,7 +169,7 @@ export function AppBreadcrumb() {
     return () => {
       cancelled = true;
     };
-  }, [location.pathname, params.domainId, params.objectId, params.logicId, params.relationId]);
+  }, [location.pathname, location.search, params.domainId, params.objectId, params.logicId, params.relationId]);
 
   if (loading && items.length === 0) {
     return (

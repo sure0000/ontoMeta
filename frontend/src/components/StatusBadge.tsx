@@ -28,7 +28,7 @@ const LABELS: Record<string, string> = {
 type Tone = "default" | "blue" | "cyan" | "gold" | "green" | "red" | "processing";
 
 const TONES: Record<string, Tone> = {
-  draft: "blue",
+  draft: "gold",
   in_review: "gold",
   published: "green",
   archived: "default",
@@ -43,8 +43,8 @@ const TONES: Record<string, Tone> = {
   running: "processing",
   completed: "green",
   failed: "red",
-  active: "blue",
-  generate_draft: "blue",
+  active: "cyan",
+  generate_draft: "gold",
   edit: "cyan",
   pre_publish: "gold",
   publish: "green",

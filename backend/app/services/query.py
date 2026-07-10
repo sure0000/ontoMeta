@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
     BusinessLogic,
+    BusinessLogicCategory,
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
     ChangeConfirmation,
@@ -257,6 +258,11 @@ class OntologyQueryService:
                 logic.id, (0, 0)
             )
         bound_object_count, bound_property_count = binding_counts
+        category_name = None
+        if logic.category_id:
+            cat = db.get(BusinessLogicCategory, logic.category_id)
+            if cat:
+                category_name = cat.name
         return BusinessLogicOut(
             id=logic.id,
             name=logic.name,
@@ -272,6 +278,8 @@ class OntologyQueryService:
             source_confidence=logic.source_confidence,
             domain_context_id=domain_id,
             domain_name=domain_name,
+            category_id=logic.category_id,
+            category_name=category_name,
             bound_object_count=bound_object_count,
             bound_property_count=bound_property_count,
             updated_at=logic.updated_at,
@@ -774,6 +782,7 @@ class OntologyQueryService:
         db: Session,
         ontology_id: str | None = None,
         domain_context_id: str | None = None,
+        category_id: str | None = None,
         published_only: bool = False,
     ) -> list[BusinessLogicOut]:
         query = db.query(BusinessLogic)
@@ -785,6 +794,8 @@ class OntologyQueryService:
             published_only=published_only,
             ontology_model=BusinessLogic,
         )
+        if category_id is not None:
+            query = query.filter(BusinessLogic.category_id == category_id)
         items = query.order_by(BusinessLogic.updated_at.desc()).all()
         if not items:
             return []
@@ -800,6 +811,25 @@ class OntologyQueryService:
             )
             for it in items
         ]
+
+    def list_business_logic_categories(self, db: Session):
+        cats = db.query(BusinessLogicCategory).order_by(
+            BusinessLogicCategory.updated_at.desc()
+        ).all()
+        result = []
+        for cat in cats:
+            count = db.query(BusinessLogic).filter(
+                BusinessLogic.category_id == cat.id
+            ).count()
+            result.append({
+                "id": cat.id,
+                "name": cat.name,
+                "description": cat.description,
+                "logic_count": count,
+                "created_at": cat.created_at,
+                "updated_at": cat.updated_at,
+            })
+        return result
 
     def get_relation_type(self, db: Session, relation_type_id: str) -> RelationTypeDetail | None:
         rel = db.get(RelationType, relation_type_id)

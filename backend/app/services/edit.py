@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     BusinessLogic,
+    BusinessLogicCategory,
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
     DomainContext,
@@ -412,6 +413,7 @@ class EditService:
         expression_summary: str | None = None,
         expression_draft: dict | None = None,
         expression_json: dict | None = None,
+        category_id: str | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
 
@@ -420,12 +422,16 @@ class EditService:
             raise ValueError("logic_type 必须是 metric / tag / rule 之一")
         unique_name = self._ensure_unique_logic_name(db, ontology.id, name)
 
+        if category_id is not None and not db.get(BusinessLogicCategory, category_id):
+            raise ValueError("分类不存在")
+
         summary = expression_summary
         if summary is None and expression_draft:
             summary = self._derive_summary_from_draft(expression_draft)
 
         logic = BusinessLogic(
             ontology_id=ontology.id,
+            category_id=category_id,
             name=unique_name,
             display_name=display_name,
             logic_type=logic_type,
@@ -463,6 +469,7 @@ class EditService:
         expression_summary: str | None = None,
         expression_draft: dict | None = None,
         expression_json: dict | None = None,
+        category_id: str | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
 
@@ -470,6 +477,13 @@ class EditService:
         if not logic:
             raise ValueError("Business logic not found")
 
+        if category_id is not None:
+            if category_id == "":
+                logic.category_id = None
+            elif not db.get(BusinessLogicCategory, category_id):
+                raise ValueError("分类不存在")
+            else:
+                logic.category_id = category_id
         if logic_type is not None:
             if logic_type not in {"metric", "tag", "rule"}:
                 raise ValueError("logic_type 必须是 metric / tag / rule 之一")
@@ -499,6 +513,76 @@ class EditService:
         if not detail:
             raise ValueError("Business logic not found")
         return detail
+
+    def create_business_logic_category(
+        self,
+        db: Session,
+        name: str,
+        description: str | None = None,
+    ):
+        existing = db.query(BusinessLogicCategory).filter(
+            BusinessLogicCategory.name == name
+        ).first()
+        if existing:
+            raise ValueError("分类名称已存在")
+        cat = BusinessLogicCategory(name=name, description=description)
+        db.add(cat)
+        db.commit()
+        db.refresh(cat)
+        return {
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description,
+            "logic_count": 0,
+            "created_at": cat.created_at,
+            "updated_at": cat.updated_at,
+        }
+
+    def update_business_logic_category(
+        self,
+        db: Session,
+        category_id: str,
+        name: str | None = None,
+        description: str | None = None,
+    ):
+        cat = db.get(BusinessLogicCategory, category_id)
+        if not cat:
+            raise ValueError("分类不存在")
+        if name is not None:
+            existing = db.query(BusinessLogicCategory).filter(
+                BusinessLogicCategory.name == name,
+                BusinessLogicCategory.id != category_id,
+            ).first()
+            if existing:
+                raise ValueError("分类名称已存在")
+            cat.name = name
+        if description is not None:
+            cat.description = description
+        db.commit()
+        db.refresh(cat)
+        count = db.query(BusinessLogic).filter(
+            BusinessLogic.category_id == cat.id
+        ).count()
+        return {
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description,
+            "logic_count": count,
+            "created_at": cat.created_at,
+            "updated_at": cat.updated_at,
+        }
+
+    def delete_business_logic_category(
+        self,
+        db: Session,
+        category_id: str,
+    ):
+        cat = db.get(BusinessLogicCategory, category_id)
+        if not cat:
+            raise ValueError("分类不存在")
+        db.delete(cat)
+        db.commit()
+        return {"id": category_id, "deleted": True}
 
     @staticmethod
     def _derive_summary_from_draft(expression_draft: dict) -> str | None:

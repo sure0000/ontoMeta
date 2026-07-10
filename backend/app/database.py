@@ -77,6 +77,11 @@ def init_db() -> None:
         alter_statements.append(
             "ALTER TABLE chat_bi_conversations ADD COLUMN is_archived BOOLEAN DEFAULT 0"
         )
+    if "category_id" not in bl_columns:
+        alter_statements.append(
+            "ALTER TABLE business_logics ADD COLUMN category_id VARCHAR(36) "
+            "REFERENCES business_logic_categories(id) ON DELETE SET NULL"
+        )
     if alter_statements:
         with engine.begin() as conn:
             for stmt in alter_statements:
@@ -106,7 +111,8 @@ _SECONDARY_INDEXES: dict[str, list[str]] = {
         "mapping_object_type_id",
         "status",
     ],
-    "business_logics": ["ontology_id", "status"],
+    "business_logics": ["ontology_id", "status", "category_id"],
+    "business_logic_categories": ["name"],
     "draft_evidences": ["ontology_id", "source_ref"],
     "change_confirmations": ["ontology_id", "target_id", "confirmation_status"],
     "version_records": ["entity_id", "created_at"],

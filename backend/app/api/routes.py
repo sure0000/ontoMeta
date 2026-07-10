@@ -7,6 +7,9 @@ from app.config import settings
 from app.database import get_db
 from app.models import BusinessLogic, ObjectType
 from app.schemas import (
+    BusinessLogicCategoryCreate,
+    BusinessLogicCategoryOut,
+    BusinessLogicCategoryUpdate,
     BusinessLogicCreate,
     BusinessLogicDetail,
     BusinessLogicImportRequest,
@@ -492,6 +495,7 @@ def pre_publish_relation_type(
 def list_business_logics(
     ontology_id: str | None = Query(None),
     domain_id: str | None = Query(None),
+    category_id: str | None = Query(None),
     published_only: bool = Query(False),
     db: Session = Depends(get_db),
 ):
@@ -499,8 +503,42 @@ def list_business_logics(
         db,
         ontology_id=ontology_id,
         domain_context_id=domain_id,
+        category_id=category_id,
         published_only=published_only,
     )
+
+
+@router.get("/business-logic-categories", response_model=list[BusinessLogicCategoryOut])
+def list_business_logic_categories(db: Session = Depends(get_db)):
+    return query.list_business_logic_categories(db)
+
+
+@router.post("/business-logic-categories", response_model=BusinessLogicCategoryOut)
+def create_business_logic_category(data: BusinessLogicCategoryCreate, db: Session = Depends(get_db)):
+    try:
+        return edit_service.create_business_logic_category(db, data.name, data.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/business-logic-categories/{category_id}", response_model=BusinessLogicCategoryOut)
+def update_business_logic_category(
+    category_id: str, data: BusinessLogicCategoryUpdate, db: Session = Depends(get_db)
+):
+    try:
+        return edit_service.update_business_logic_category(
+            db, category_id, name=data.name, description=data.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/business-logic-categories/{category_id}")
+def delete_business_logic_category(category_id: str, db: Session = Depends(get_db)):
+    try:
+        return edit_service.delete_business_logic_category(db, category_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/business-logics/{logic_id}", response_model=BusinessLogicDetail)
@@ -586,6 +624,7 @@ def create_business_logic(data: BusinessLogicCreate, db: Session = Depends(get_d
             expression_summary=data.expression_summary,
             expression_draft=data.expression_draft,
             expression_json=data.expression_json,
+            category_id=data.category_id,
             operator=data.operator,
         )
     except ValueError as exc:
@@ -637,6 +676,7 @@ def update_business_logic(
             expression_summary=data.expression_summary,
             expression_draft=data.expression_draft,
             expression_json=data.expression_json,
+            category_id=data.category_id,
             operator=data.operator,
         )
     except ValueError as exc:

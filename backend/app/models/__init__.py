@@ -183,11 +183,28 @@ class RelationType(Base):
     )
 
 
+class BusinessLogicCategory(Base):
+    __tablename__ = "business_logic_categories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    business_logics: Mapped[list["BusinessLogic"]] = relationship(back_populates="category")
+
+
 class BusinessLogic(Base):
     __tablename__ = "business_logics"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    category_id: Mapped[str | None] = mapped_column(
+        ForeignKey("business_logic_categories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     logic_type: Mapped[str] = mapped_column(String(100))
@@ -205,6 +222,7 @@ class BusinessLogic(Base):
     )
 
     ontology: Mapped["Ontology"] = relationship(back_populates="business_logics")
+    category: Mapped["BusinessLogicCategory | None"] = relationship(back_populates="business_logics")
     object_bindings: Mapped[list["BusinessLogicObjectBinding"]] = relationship(
         back_populates="business_logic", cascade="all, delete-orphan"
     )

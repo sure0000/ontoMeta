@@ -9,6 +9,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { useApi } from "../hooks/useApi";
 import { formatDateTime } from "../utils/format";
+import { getOntologyDomainStatusVisual } from "../utils/statusVisual";
 import type { DomainContext } from "../types";
 
 export function WorkspacePage() {
@@ -36,15 +37,22 @@ export function WorkspacePage() {
         />
       ) : (
         <Row gutter={[16, 16]}>
-          {domains.map((domain) => (
-            <Col key={domain.id} xs={24} sm={12} lg={8} xl={6}>
-              <Link to={`/workspace/${domain.id}`} className="om-card-link">
-                <div className="entity-card">
-                  <div className="entity-card-head">
-                    <div style={{ minWidth: 0 }}>
-                      <div className="entity-card-title">{domain.name}</div>
-                      <div className="entity-card-subtitle">
-                        {domain.owner || "未指定负责人"}
+          {domains.map((domain) => {
+            const statusVisual = getOntologyDomainStatusVisual(domain.status);
+            return (
+              <Col key={domain.id} xs={24} sm={12} lg={8} xl={6}>
+                <Link to={`/workspace/${domain.id}`} className="om-card-link">
+                  <div className="entity-card">
+                    <div className="entity-card-head">
+                      <div className="entity-card-head-main">
+                        <div className={`entity-card-icon entity-card-icon--${statusVisual.tone}`}>
+                          {statusVisual.icon}
+                        </div>
+                        <div style={{ minWidth: 0 }}>
+                          <div className="entity-card-title">{domain.name}</div>
+                          <div className="entity-card-subtitle">
+                            {domain.owner || "未指定负责人"}
+                          </div>
                         </div>
                       </div>
                       <StatusBadge status={domain.status} />
@@ -55,11 +63,17 @@ export function WorkspacePage() {
                     <div className="entity-card-foot">
                       {domain.latest_published_at ? (
                         <span className="entity-card-foot-item">
-                          已发布 <span className="entity-card-foot-time">{formatDateTime(domain.latest_published_at)}</span>
+                          已发布{" "}
+                          <span className="entity-card-foot-time">
+                            {formatDateTime(domain.latest_published_at)}
+                          </span>
                         </span>
                       ) : domain.latest_draft_at ? (
                         <span className="entity-card-foot-item">
-                          草稿生成 <span className="entity-card-foot-time">{formatDateTime(domain.latest_draft_at)}</span>
+                          草稿生成{" "}
+                          <span className="entity-card-foot-time">
+                            {formatDateTime(domain.latest_draft_at)}
+                          </span>
                         </span>
                       ) : (
                         <span className="entity-card-foot-item">
@@ -70,8 +84,9 @@ export function WorkspacePage() {
                   </div>
                 </Link>
               </Col>
-            ))}
-          </Row>
+            );
+          })}
+        </Row>
       )}
     </PageContainer>
   );

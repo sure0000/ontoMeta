@@ -431,6 +431,7 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
+  margin: 20px 0;
 }
 .stat-card {
   background: var(--om-surface);
@@ -530,6 +531,38 @@ body {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 10px;
+}
+.entity-card-head-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+.entity-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 16px;
+}
+.entity-card-icon--primary {
+  background: var(--om-primary-soft);
+  color: var(--om-primary);
+}
+.entity-card-icon--success {
+  background: var(--om-success-soft);
+  color: var(--om-success);
+}
+.entity-card-icon--warning {
+  background: var(--om-warning-soft);
+  color: var(--om-warning);
+}
+.entity-card-icon--neutral {
+  background: var(--om-neutral-soft);
+  color: var(--om-neutral);
 }
 .entity-card-title {
   font-size: 15px;

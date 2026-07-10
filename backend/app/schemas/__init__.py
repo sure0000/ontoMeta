@@ -394,6 +394,27 @@ class BusinessLogicPropertyOption(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BusinessLogicCategoryOut(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    logic_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BusinessLogicCategoryCreate(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class BusinessLogicCategoryUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
 class BusinessLogicCreate(BaseModel):
     domain_id: str
     name: str
@@ -403,6 +424,7 @@ class BusinessLogicCreate(BaseModel):
     expression_summary: str | None = None
     expression_draft: dict | None = None
     expression_json: dict | None = None
+    category_id: str | None = None
     operator: str | None = None
 
 
@@ -413,6 +435,7 @@ class BusinessLogicUpdate(BaseModel):
     expression_summary: str | None = None
     expression_draft: dict | None = None
     expression_json: dict | None = None
+    category_id: str | None = None
     operator: str | None = None
 
 
@@ -420,6 +443,7 @@ class BusinessLogicImportRequest(BaseModel):
     domain_id: str
     code: str
     source_type: str = "sql"
+    category_id: str | None = None
     operator: str | None = None
 
 
@@ -450,6 +474,8 @@ class BusinessLogicOut(BaseModel):
     source_confidence: float | None = None
     domain_context_id: str | None = None
     domain_name: str | None = None
+    category_id: str | None = None
+    category_name: str | None = None
     bound_object_count: int = 0
     bound_property_count: int = 0
     updated_at: datetime

@@ -159,6 +159,15 @@ export interface ObjectTypeDetail extends ObjectTypeSummary {
   version_records?: VersionRecord[];
 }
 
+export interface BusinessLogicCategory {
+  id: string;
+  name: string;
+  description?: string;
+  logic_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BusinessLogic {
   id: string;
   name: string;
@@ -174,6 +183,8 @@ export interface BusinessLogic {
   source_confidence?: number;
   domain_context_id?: string;
   domain_name?: string;
+  category_id?: string | null;
+  category_name?: string | null;
   bound_object_count?: number;
   bound_property_count?: number;
   updated_at: string;
@@ -236,6 +247,7 @@ export interface BusinessLogicCreateInput {
   expression_summary?: string;
   expression_draft?: ExpressionDraft;
   expression_json?: ExpressionJson;
+  category_id?: string | null;
   operator?: string;
 }
 
@@ -246,6 +258,7 @@ export interface BusinessLogicUpdateInput {
   expression_summary?: string;
   expression_draft?: ExpressionDraft;
   expression_json?: ExpressionJson;
+  category_id?: string | null;
   operator?: string;
 }
 
@@ -253,6 +266,7 @@ export interface BusinessLogicImportInput {
   domain_id: string;
   code: string;
   source_type?: string;
+  category_id?: string | null;
   operator?: string;
 }
 

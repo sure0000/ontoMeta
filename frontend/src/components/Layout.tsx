@@ -14,16 +14,12 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { AppBreadcrumb } from "./AppBreadcrumb";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
-import type { BusinessLogic, DomainContext } from "../types";
+import type { DomainContext } from "../types";
 
 const { Sider, Content, Header } = Layout;
 
 function ontologyChildKey(domainId: string) {
   return `/ontology?domain=${domainId}`;
-}
-
-function logicChildKey(domainId: string) {
-  return `/business-logic?domain=${domainId}`;
 }
 
 function readDomainFromSearch(search: string) {
@@ -36,10 +32,7 @@ function getSelectedKey(pathname: string, search: string) {
     const domainId = readDomainFromSearch(search);
     return domainId ? ontologyChildKey(domainId) : "/ontology";
   }
-  if (pathname.startsWith("/business-logic")) {
-    const domainId = readDomainFromSearch(search);
-    return domainId ? logicChildKey(domainId) : "/business-logic";
-  }
+  if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
   if (pathname.startsWith("/settings")) return "/settings";
   return "/ontology";
@@ -47,7 +40,6 @@ function getSelectedKey(pathname: string, search: string) {
 
 function getOpenKeys(pathname: string) {
   if (pathname.startsWith("/ontology")) return ["/ontology"];
-  if (pathname.startsWith("/business-logic")) return ["/business-logic"];
   return [];
 }
 
@@ -75,11 +67,6 @@ export function AppLayout() {
     [],
   );
 
-  const { data: allLogics } = useApi<BusinessLogic[]>(
-    async () => api.listBusinessLogics(),
-    [],
-  );
-
   const selectedKey = useMemo(
     () => getSelectedKey(location.pathname, location.search),
     [location.pathname, location.search],
@@ -87,8 +74,6 @@ export function AppLayout() {
 
   const defaultOpenKeys = useMemo(
     () => getOpenKeys(location.pathname),
-    // 仅在首次挂载时使用，避免手动折叠后被强行撑开
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
@@ -101,24 +86,6 @@ export function AppLayout() {
         <span>
           <span>{d.name}</span>
           {countLabel(d.published_count)}
-        </span>
-      ),
-    }));
-
-    const logicCountByDomain = new Map<string, number>();
-    for (const logic of allLogics ?? []) {
-      if (!logic.domain_context_id) continue;
-      logicCountByDomain.set(
-        logic.domain_context_id,
-        (logicCountByDomain.get(logic.domain_context_id) ?? 0) + 1,
-      );
-    }
-    const logicChildren = domainList.map((d) => ({
-      key: logicChildKey(d.id),
-      label: (
-        <span>
-          <span>{d.name}</span>
-          {countLabel(logicCountByDomain.get(d.id) ?? 0)}
         </span>
       ),
     }));
@@ -138,25 +105,20 @@ export function AppLayout() {
         key: "/business-logic",
         icon: <FunctionOutlined />,
         label: "业务逻辑",
-        children:
-          logicChildren.length > 0
-            ? logicChildren
-            : [{ key: "/business-logic-empty", label: "暂无数据域", disabled: true }],
       },
       { key: "/chat-bi", icon: <RobotOutlined />, label: "智能问数" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ];
-  }, [domains, allLogics]);
+  }, [domains]);
 
   const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
-    if (key === "/ontology-empty" || key === "/business-logic-empty") return;
-    if (key.startsWith("/ontology?") || key.startsWith("/business-logic?")) {
+    if (key === "/ontology-empty") return;
+    if (key.startsWith("/ontology?")) {
       const [, query] = key.split("?");
       const params = new URLSearchParams(query);
       const domainId = params.get("domain");
       if (domainId) {
-        const base = key.startsWith("/ontology?") ? "/ontology" : "/business-logic";
-        navigate(`${base}?domain=${domainId}`);
+        navigate(`/ontology?domain=${domainId}`);
       }
       return;
     }

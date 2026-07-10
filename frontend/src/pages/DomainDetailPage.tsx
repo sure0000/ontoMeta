@@ -1,7 +1,6 @@
 import {
   ApartmentOutlined,
   CheckCircleOutlined,
-  ClockCircleOutlined,
   DeploymentUnitOutlined,
   ExportOutlined,
   HistoryOutlined,
@@ -19,6 +18,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
+import { getOntologyDomainStatusVisual } from "../utils/statusVisual";
 import type {
   DomainContextDetail,
   DraftProgress,
@@ -186,6 +186,9 @@ export function DomainDetailPage() {
     `/workspace/${domainId}/relations/${relationId}`;
 
   const publishedVersion = domain.published_ontology_version;
+  const ontologyStatusVisual = getOntologyDomainStatusVisual(
+    domain.latest_ontology_status ?? (domain.latest_ontology_id ? "draft" : "active"),
+  );
 
   return (
     <PageContainer full>
@@ -279,8 +282,8 @@ export function DomainDetailPage() {
           value={relations.length}
         />
         <StatCard
-          tone={domain.latest_ontology_status === "published" ? "success" : "warning"}
-          icon={<ClockCircleOutlined />}
+          tone={ontologyStatusVisual.tone}
+          icon={ontologyStatusVisual.icon}
           label="本体状态"
           value={
             <span style={{ fontSize: 16 }}>

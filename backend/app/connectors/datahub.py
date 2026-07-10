@@ -154,7 +154,12 @@ fragment DatasetDetails on Dataset {
       foreignDataset { urn name }
     }
   }
-  lineage(input: { direction: DOWNSTREAM, start: 0, count: 50 }) {
+  downstreamLineage: lineage(input: { direction: DOWNSTREAM, start: 0, count: 50 }) {
+    relationships {
+      entity { urn type ... on Dataset { name } }
+    }
+  }
+  upstreamLineage: lineage(input: { direction: UPSTREAM, start: 0, count: 50 }) {
     relationships {
       entity { urn type ... on Dataset { name } }
     }
@@ -286,22 +291,40 @@ def _parse_lineages_from_entities(
     seen: set[tuple[str, str]] = set()
     lineages: list[LineageInput] = []
     for entity in entities:
-        source_urn = entity.get("urn")
-        if not source_urn or source_urn not in domain_dataset_urns:
+        current_urn = entity.get("urn")
+        if not current_urn or current_urn not in domain_dataset_urns:
             continue
-        lineage = entity.get("lineage") or {}
-        for rel in lineage.get("relationships") or []:
+
+        # DOWNSTREAM: current_urn -> target_urn (current feeds into downstream)
+        downstream = entity.get("downstreamLineage") or {}
+        for rel in downstream.get("relationships") or []:
             target_entity = rel.get("entity") or {}
             target_urn = target_entity.get("urn")
             if not target_urn or target_entity.get("type") != "DATASET":
                 continue
             if target_urn not in domain_dataset_urns:
                 continue
-            key = (source_urn, target_urn)
+            key = (current_urn, target_urn)
             if key in seen:
                 continue
             seen.add(key)
-            lineages.append(LineageInput(source_urn=source_urn, target_urn=target_urn))
+            lineages.append(LineageInput(source_urn=current_urn, target_urn=target_urn))
+
+        # UPSTREAM: upstream_urn -> current_urn (upstream feeds into current)
+        upstream = entity.get("upstreamLineage") or {}
+        for rel in upstream.get("relationships") or []:
+            upstream_entity = rel.get("entity") or {}
+            upstream_urn = upstream_entity.get("urn")
+            if not upstream_urn or upstream_entity.get("type") != "DATASET":
+                continue
+            if upstream_urn not in domain_dataset_urns:
+                continue
+            key = (upstream_urn, current_urn)
+            if key in seen:
+                continue
+            seen.add(key)
+            lineages.append(LineageInput(source_urn=upstream_urn, target_urn=current_urn))
+
     return lineages
 
 
