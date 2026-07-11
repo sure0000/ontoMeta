@@ -211,6 +211,9 @@ class DomainContextSummary(BaseModel):
     status: str
     draft_count: int = 0
     published_count: int = 0
+    object_type_count: int = 0
+    relation_type_count: int = 0
+    published_object_type_count: int = 0
     latest_draft_at: datetime | None = None
     latest_published_at: datetime | None = None
     updated_at: datetime
@@ -266,6 +269,8 @@ class ObjectTypeSummary(BaseModel):
     business_logic_count: int = 0
     bound_logic_count: int = 0
     source_confidence: float | None = None
+    domain_context_id: str | None = None
+    domain_name: str | None = None
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -290,8 +295,6 @@ class ObjectTypeLogicBindingOut(BaseModel):
 
 class ObjectTypeDetail(ObjectTypeSummary):
     ontology_id: str | None = None
-    domain_context_id: str | None = None
-    domain_name: str | None = None
     source_ref: str | None = None
     datahub_url: str | None = None
     properties: list[PropertyOut] = Field(default_factory=list)

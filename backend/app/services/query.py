@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+import asyncio
 import json
 import logging
+import time
 
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
@@ -53,6 +55,7 @@ logger = logging.getLogger("ontometa.workspace")
 
 # 持有后台草稿生成任务的强引用，避免 asyncio 在任务完成前将其 GC 回收。
 _background_tasks: set = set()
+_draft_async_tasks: dict[str, "asyncio.Task"] = {}
 
 
 def _loads_json(value: str | None) -> dict | None:
@@ -624,8 +627,16 @@ class OntologyQueryService:
         if not objects:
             return []
         stats = self._bulk_object_stats(db, [o.id for o in objects])
+        domain_map = self._bulk_resolve_domain_context(
+            db, [obj.ontology_id for obj in objects]
+        )
         return [
-            self._to_object_summary(db, obj, stats=stats.get(obj.id))
+            self._to_object_summary(
+                db,
+                obj,
+                stats=stats.get(obj.id),
+                domain=domain_map.get(obj.ontology_id),
+            )
             for obj in objects
         ]
 
@@ -751,14 +762,11 @@ class OntologyQueryService:
             db, related_logic_ids
         )
         source_ref, datahub_url = self._resolve_object_datahub(db, obj)
-        domain_id, domain_name = self._resolve_domain_context(db, obj.ontology_id)
         versions = self.list_versions(db, obj.id)
         ontology_versions = self.list_versions(db, obj.ontology_id)
         return ObjectTypeDetail(
             **summary.model_dump(),
             ontology_id=obj.ontology_id,
-            domain_context_id=domain_id,
-            domain_name=domain_name,
             source_ref=source_ref,
             datahub_url=datahub_url,
             properties=[PropertyOut.model_validate(p) for p in obj.properties],
@@ -1046,11 +1054,16 @@ class OntologyQueryService:
         obj: ObjectType,
         *,
         stats: tuple[int, int, int] | None = None,
+        domain: tuple[str | None, str | None] | None = None,
     ) -> ObjectTypeSummary:
         if stats is None:
             stats = self._bulk_object_stats(db, [obj.id]).get(obj.id, (0, 0, 0))
         property_count, relation_count, bound_logic_count = stats
         logic_count = bound_logic_count
+        if domain is None:
+            domain_id, domain_name = self._resolve_domain_context(db, obj.ontology_id)
+        else:
+            domain_id, domain_name = domain
         return ObjectTypeSummary(
             id=obj.id,
             name=obj.name,
@@ -1062,6 +1075,8 @@ class OntologyQueryService:
             business_logic_count=logic_count,
             bound_logic_count=bound_logic_count,
             source_confidence=obj.source_confidence,
+            domain_context_id=domain_id,
+            domain_name=domain_name,
             updated_at=obj.updated_at,
         )
 
@@ -1126,6 +1141,18 @@ class OntologyQueryService:
         return None, None
 
 
+class DraftGenerationAlreadyRunning(Exception):
+    """同域已有进行中的草稿生成任务。"""
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+        super().__init__(f"该数据域已有生成任务进行中 (task_id={task_id})")
+
+
+class DraftGenerationCancelled(Exception):
+    """草稿生成任务已被用户停止。"""
+
+
 class WorkspaceService:
     """工作区：数据域同步与草稿生成。"""
 
@@ -1143,20 +1170,94 @@ class WorkspaceService:
 
         return DataHubConnector(self.settings_service.get_datahub_runtime(db))
 
+    def _datahub_connector(self):
+        """在无长事务上下文时创建 DataHub 连接器。"""
+        from app.connectors.datahub import DataHubConnector
+        from app.database import SessionLocal
+
+        with SessionLocal() as db:
+            runtime = self.settings_service.get_datahub_runtime(db)
+        return DataHubConnector(runtime)
+
     def _draft_generator(self, db: Session):
         from app.services.draft_generator import OntologyDraftGenerator
 
         return OntologyDraftGenerator(self.settings_service.get_llm_runtime(db))
 
+    def _draft_generator_instance(self):
+        """在无长事务上下文时创建草稿生成器。"""
+        from app.database import SessionLocal
+        from app.services.draft_generator import OntologyDraftGenerator
+
+        with SessionLocal() as db:
+            runtime = self.settings_service.get_llm_runtime(db)
+        return OntologyDraftGenerator(runtime)
+
     @staticmethod
-    def _track_background_task(task) -> None:
-        """持有后台 asyncio 任务强引用并在完成后自动清理。"""
-        _background_tasks.add(task)
+    async def _update_task_progress(task_id: str, progress: int, message: str) -> None:
+        from app.database import SessionLocal
 
-        def _done(_t, *_args):
-            _background_tasks.discard(_t)
+        db = SessionLocal()
+        try:
+            task = db.get(DraftGenerationTask, task_id)
+            if task is None or task.status == "cancelled":
+                return
+            task.progress = progress
+            task.message = message
+            db.commit()
+        finally:
+            db.close()
 
-        task.add_done_callback(_done)
+    @staticmethod
+    def _is_task_cancelled(task_id: str) -> bool:
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            task = db.get(DraftGenerationTask, task_id)
+            return task is not None and task.status == "cancelled"
+        finally:
+            db.close()
+
+    @staticmethod
+    def _ensure_not_cancelled(task_id: str) -> None:
+        if WorkspaceService._is_task_cancelled(task_id):
+            raise DraftGenerationCancelled()
+
+    @staticmethod
+    def _mark_task_failed(task_id: str, message: str) -> None:
+        from app.database import SessionLocal
+
+        if WorkspaceService._is_task_cancelled(task_id):
+            return
+        db = SessionLocal()
+        try:
+            task = db.get(DraftGenerationTask, task_id)
+            if task is None:
+                return
+            task.status = "failed"
+            task.message = message
+            db.commit()
+        finally:
+            db.close()
+
+    @staticmethod
+    def _track_draft_task(task_id: str, asyncio_task: asyncio.Task) -> None:
+        """持有草稿生成 asyncio 任务强引用，便于用户停止时 cancel。"""
+        _draft_async_tasks[task_id] = asyncio_task
+        _background_tasks.add(asyncio_task)
+
+        def _done(t, *_args):
+            _background_tasks.discard(t)
+            _draft_async_tasks.pop(task_id, None)
+
+        asyncio_task.add_done_callback(_done)
+
+    @staticmethod
+    def _cancel_draft_async_task(task_id: str) -> None:
+        asyncio_task = _draft_async_tasks.get(task_id)
+        if asyncio_task and not asyncio_task.done():
+            asyncio_task.cancel()
 
     async def sync_domains(self, db: Session) -> list[DomainContextSummary]:
         connector = self._datahub(db)
@@ -1227,10 +1328,12 @@ class WorkspaceService:
         draft_map = {did: (cnt, latest) for did, cnt, latest in draft_rows}
         published_map = {did: (cnt, latest) for did, cnt, latest in published_rows}
 
-        # 每个 domain 的最新本体状态：单查询取所有域的本体，Python 端取最大 updated_at
+        # 每个 domain 的最新本体：单查询取所有域的本体，Python 端取最大 updated_at
         status_by_domain: dict[str, str] = {}
+        latest_ontology_by_domain: dict[str, str] = {}
         status_rows = (
             db.query(
+                Ontology.id,
                 Ontology.domain_context_id,
                 Ontology.updated_at,
                 Ontology.status,
@@ -1239,17 +1342,59 @@ class WorkspaceService:
             .all()
         )
         best: dict[str, tuple] = {}
-        for did, updated_at, status in status_rows:
+        for oid, did, updated_at, status in status_rows:
             prev = best.get(did)
             if prev is None or updated_at > prev[0]:
-                best[did] = (updated_at, status)
-        status_by_domain = {did: st for did, (_, st) in best.items()}
+                best[did] = (updated_at, status, oid)
+        status_by_domain = {did: st for did, (_, st, _) in best.items()}
+        latest_ontology_by_domain = {did: oid for did, (_, _, oid) in best.items()}
+
+        published_ontology_by_domain: dict[str, str] = {}
+        published_best: dict[str, tuple] = {}
+        for oid, did, published_at, version in (
+            db.query(
+                Ontology.id,
+                Ontology.domain_context_id,
+                Ontology.published_at,
+                Ontology.version,
+            )
+            .filter(
+                Ontology.domain_context_id.in_(domain_ids),
+                Ontology.status == OntologyStatus.PUBLISHED.value,
+            )
+            .all()
+        ):
+            sort_key = (
+                published_at.timestamp() if published_at else 0,
+                version,
+            )
+            prev = published_best.get(did)
+            if prev is None or sort_key > prev[0]:
+                published_best[did] = (sort_key, oid)
+        published_ontology_by_domain = {
+            did: oid for did, (_, oid) in published_best.items()
+        }
+
+        latest_ontology_ids = list(latest_ontology_by_domain.values())
+        published_ontology_ids = list(published_ontology_by_domain.values())
+        entity_counts = OntologyQueryService()._bulk_ontology_entity_counts(
+            db, latest_ontology_ids
+        )
+        published_entity_counts = OntologyQueryService()._bulk_ontology_entity_counts(
+            db, published_ontology_ids
+        )
 
         result: list[DomainContextSummary] = []
         for domain in domains:
             draft_count, latest_draft_at = draft_map.get(domain.id, (0, None))
             published_count, latest_published_at = published_map.get(domain.id, (0, None))
             domain_status = status_by_domain.get(domain.id, "active")
+            latest_oid = latest_ontology_by_domain.get(domain.id)
+            published_oid = published_ontology_by_domain.get(domain.id)
+            object_count, relation_count, _ = entity_counts.get(latest_oid, (0, 0, 0)) if latest_oid else (0, 0, 0)
+            published_object_count, _, _ = (
+                published_entity_counts.get(published_oid, (0, 0, 0)) if published_oid else (0, 0, 0)
+            )
             result.append(
                 DomainContextSummary(
                     id=domain.id,
@@ -1260,6 +1405,9 @@ class WorkspaceService:
                     status=domain_status,
                     draft_count=draft_count,
                     published_count=published_count,
+                    object_type_count=object_count,
+                    relation_type_count=relation_count,
+                    published_object_type_count=published_object_count,
                     latest_draft_at=latest_draft_at,
                     latest_published_at=latest_published_at,
                     updated_at=domain.updated_at,
@@ -1296,6 +1444,17 @@ class WorkspaceService:
         if not domain:
             raise ValueError("Domain not found")
 
+        running = (
+            db.query(DraftGenerationTask)
+            .filter(
+                DraftGenerationTask.domain_context_id == domain_id,
+                DraftGenerationTask.status == "running",
+            )
+            .first()
+        )
+        if running:
+            raise DraftGenerationAlreadyRunning(running.id)
+
         task = DraftGenerationTask(
             domain_context_id=domain_id,
             status="running",
@@ -1315,11 +1474,41 @@ class WorkspaceService:
 
         return progress
 
+    def stop_draft_generation(
+        self, db: Session, domain_id: str, task_id: str
+    ) -> TaskRecordOut:
+        task = (
+            db.query(DraftGenerationTask)
+            .filter(
+                DraftGenerationTask.id == task_id,
+                DraftGenerationTask.domain_context_id == domain_id,
+            )
+            .first()
+        )
+        if not task:
+            raise ValueError("Task not found")
+        if task.status != "running":
+            raise ValueError("仅进行中的任务可以停止")
+        task.status = "cancelled"
+        task.message = "用户已停止任务"
+        _log_change(
+            db,
+            "task",
+            task_id,
+            "stop",
+            summary="用户停止草稿生成",
+        )
+        db.commit()
+        db.refresh(task)
+        self._cancel_draft_async_task(task_id)
+        return TaskRecordOut.model_validate(task)
+
     async def _run_draft_generation(self, domain_id: str, task_id: str) -> None:
         from app.database import SessionLocal
 
+        datahub_domain_id: str | None = None
+
         db = SessionLocal()
-        task: DraftGenerationTask | None = None
         try:
             task = db.get(DraftGenerationTask, task_id)
             if not task:
@@ -1331,69 +1520,109 @@ class WorkspaceService:
                 task.message = "数据域不存在"
                 db.commit()
                 return
-
-            task.progress = 5
-            task.message = "正在从 DataHub 拉取元数据..."
-            db.commit()
-
-            connector = self._datahub(db)
-            try:
-                bundle = await connector.fetch_domain_bundle(domain.datahub_domain_id)
-            finally:
-                await connector.aclose()
-            task.progress = 30
-            task.message = "正在组装证据包..."
-            db.commit()
-
-            evidence = self.evidence_builder.build(bundle)
-            task.progress = 55
-            task.message = "正在生成本体草稿..."
-            db.commit()
-
-            draft = await self._draft_generator(db).generate(evidence)
-            task.progress = 80
-            task.message = "正在持久化草稿..."
-            db.commit()
-
-            purged = self._purge_draft_ontologies(db, domain_id)
-            if purged:
-                _log_change(
-                    db,
-                    "ontology",
-                    domain_id,
-                    "purge_draft",
-                    summary=f"重新生成草稿前清理 {purged} 个旧草稿本体",
-                )
-
-            ontology = Ontology(
-                domain_context_id=domain_id,
-                status=OntologyStatus.DRAFT.value,
-                generated_by="llm",
-            )
-            db.add(ontology)
-            db.flush()
-
-            self.persistence.save_draft(db, ontology, draft)
-            _log_change(db, "ontology", ontology.id, "generate_draft", summary="LLM 草稿生成")
-
-            task.ontology_id = ontology.id
-            task.status = "completed"
-            task.progress = 100
-            task.message = "草稿生成完成"
-            db.commit()
-        except Exception as exc:
-            logger.exception("Draft generation failed for task %s: %s", task_id, exc)
-            try:
-                # task 可能在 db.get 之前就抛错，此时重新加载
-                current = task if task is not None else db.get(DraftGenerationTask, task_id)
-                if current is not None:
-                    current.status = "failed"
-                    current.message = str(exc)
-                    db.commit()
-            except Exception:
-                logger.exception("Failed to mark task %s as failed", task_id)
+            datahub_domain_id = domain.datahub_domain_id
         finally:
             db.close()
+
+        try:
+            self._ensure_not_cancelled(task_id)
+            await self._update_task_progress(task_id, 5, "正在从 DataHub 拉取元数据...")
+
+            phase_start = time.perf_counter()
+            connector = self._datahub_connector()
+            try:
+                bundle = await connector.fetch_domain_bundle(
+                    datahub_domain_id,
+                    include_logic_evidences=False,
+                )
+            finally:
+                await connector.aclose()
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "draft_generation phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 30, "正在组装证据包...")
+
+            phase_start = time.perf_counter()
+            evidence = self.evidence_builder.build(bundle, include_business_logics=False)
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "draft_generation phase=evidence task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 55, "正在生成本体草稿...")
+
+            phase_start = time.perf_counter()
+            draft = await self._draft_generator_instance().generate(evidence)
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "draft_generation phase=llm task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 80, "正在持久化草稿...")
+
+            phase_start = time.perf_counter()
+            db = SessionLocal()
+            try:
+                self._ensure_not_cancelled(task_id)
+                purged = self._purge_draft_ontologies(db, domain_id)
+                if purged:
+                    _log_change(
+                        db,
+                        "ontology",
+                        domain_id,
+                        "purge_draft",
+                        summary=f"重新生成草稿前清理 {purged} 个旧草稿本体",
+                    )
+
+                ontology = Ontology(
+                    domain_context_id=domain_id,
+                    status=OntologyStatus.DRAFT.value,
+                    generated_by="llm",
+                )
+                db.add(ontology)
+                db.flush()
+
+                self.persistence.save_draft(db, ontology, draft)
+                _log_change(
+                    db, "ontology", ontology.id, "generate_draft", summary="LLM 草稿生成"
+                )
+
+                task = db.get(DraftGenerationTask, task_id)
+                if task is not None:
+                    task.ontology_id = ontology.id
+                    task.status = "completed"
+                    task.progress = 100
+                    task.message = "草稿生成完成"
+                    db.commit()
+            finally:
+                db.close()
+            logger.info(
+                "draft_generation phase=persist task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+        except DraftGenerationCancelled:
+            logger.info("Draft generation cancelled for task %s", task_id)
+        except asyncio.CancelledError:
+            logger.info("Draft generation asyncio task cancelled for %s", task_id)
+            raise
+        except Exception as exc:
+            if self._is_task_cancelled(task_id):
+                return
+            logger.exception("Draft generation failed for task %s: %s", task_id, exc)
+            self._mark_task_failed(task_id, str(exc))
 
     def _purge_draft_ontologies(self, db: Session, domain_id: str) -> int:
         """删除同域所有 draft 状态本体及其关联数据，返回删除的本体数。
@@ -1538,6 +1767,13 @@ class WorkspaceService:
             raise ValueError("Task not found")
 
         logs: list[ChangeLogOut] = []
+        task_records = (
+            db.query(EntityChangeLog)
+            .filter(EntityChangeLog.entity_id == task_id)
+            .order_by(EntityChangeLog.created_at.asc())
+            .all()
+        )
+        logs.extend(ChangeLogOut.model_validate(r) for r in task_records)
         if task.ontology_id:
             records = (
                 db.query(EntityChangeLog)

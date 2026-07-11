@@ -38,7 +38,8 @@ export function DomainDetailPage() {
   const [loading, setLoading] = useState(true);
   const [ontologyLoading, setOntologyLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const completionHandledRef = useRef<string | null>(null);
 
   const loadOntology = useCallback(async (ontologyId: string) => {
     setOntologyLoading(true);
@@ -60,7 +61,7 @@ export function DomainDetailPage() {
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
-      clearInterval(pollRef.current);
+      clearTimeout(pollRef.current);
       pollRef.current = null;
     }
   }, []);
@@ -68,14 +69,20 @@ export function DomainDetailPage() {
   const pollProgress = useCallback(
     (taskId: string) => {
       stopPolling();
-      pollRef.current = setInterval(async () => {
+      completionHandledRef.current = null;
+
+      const pollOnce = async () => {
         try {
           const p = await api.getProgress(domainId!);
           if (p.task_id !== taskId) return;
           setDraftProgress(p);
-          if (p.status === "completed" || p.status === "failed") {
+
+          if (p.status === "completed" || p.status === "failed" || p.status === "cancelled") {
+            if (completionHandledRef.current === taskId) return;
+            completionHandledRef.current = taskId;
             stopPolling();
             setGenerating(false);
+
             if (p.status === "completed" && p.ontology_id) {
               const updated = await api.getDomain(domainId!);
               setDomain(updated);
@@ -83,14 +90,21 @@ export function DomainDetailPage() {
               message.success("本体草稿生成完成");
             } else if (p.status === "failed") {
               setError(p.message || "生成失败");
+            } else if (p.status === "cancelled") {
+              message.info(p.message || "草稿生成已停止");
             }
+            return;
           }
+
+          pollRef.current = setTimeout(pollOnce, 2000);
         } catch {
           stopPolling();
           setGenerating(false);
           setError("获取进度失败");
         }
-      }, 2000);
+      };
+
+      void pollOnce();
     },
     [domainId, loadOntology, stopPolling],
   );

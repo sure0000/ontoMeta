@@ -106,7 +106,7 @@ export function OntologyPage() {
     syncedRef.current = Boolean(domainId);
   }, [domainId]);
 
-  if (loading && domains.length === 0) return <PageSkeleton type="cards" />;
+  if (loading && domains.length === 0) return <PageSkeleton type="cards" full />;
 
   if (error && domains.length === 0) {
     return (

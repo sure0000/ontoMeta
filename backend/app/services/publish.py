@@ -46,6 +46,7 @@ class DraftPersistenceService:
         # object_type_name -> { field_name -> property_id }
         object_field_to_property_id: dict[str, dict[str, str]] = {}
 
+        object_models: list[tuple[str, ObjectType]] = []
         for item in draft.object_types:
             obj = ObjectType(
                 ontology_id=ontology.id,
@@ -57,10 +58,13 @@ class DraftPersistenceService:
                 status=EntityStatus.SUGGESTED.value,
             )
             db.add(obj)
-            db.flush()
-            object_name_to_id[item.name] = obj.id
-            object_field_to_property_id[item.name] = {}
+            object_models.append((item.name, obj))
+        db.flush()
+        for name, obj in object_models:
+            object_name_to_id[name] = obj.id
+            object_field_to_property_id[name] = {}
 
+        property_models: list[tuple[str, str, Property]] = []
         for item in draft.properties:
             object_type_id = object_name_to_id.get(item.object_type_name)
             if not object_type_id:
@@ -78,10 +82,13 @@ class DraftPersistenceService:
                 status=EntityStatus.SUGGESTED.value,
             )
             db.add(prop)
+            property_models.append((item.object_type_name, item.name, prop))
+        if property_models:
             db.flush()
-            object_field_to_property_id.setdefault(item.object_type_name, {})[
-                item.name
-            ] = prop.id
+            for object_type_name, field_name, prop in property_models:
+                object_field_to_property_id.setdefault(object_type_name, {})[
+                    field_name
+                ] = prop.id
 
         for item in draft.relation_types:
             source_id = object_name_to_id.get(item.source_object_type_name)
@@ -105,6 +112,7 @@ class DraftPersistenceService:
             )
 
         logic_name_to_id: dict[str, str] = {}
+        logic_models: list[tuple[str, BusinessLogic]] = []
         for item in draft.business_logics:
             logic = BusinessLogic(
                 ontology_id=ontology.id,
@@ -119,8 +127,11 @@ class DraftPersistenceService:
                 status=EntityStatus.SUGGESTED.value,
             )
             db.add(logic)
+            logic_models.append((item.name, logic))
+        if logic_models:
             db.flush()
-            logic_name_to_id[item.name] = logic.id
+            for name, logic in logic_models:
+                logic_name_to_id[name] = logic.id
 
         for item in draft.business_logic_object_bindings:
             logic_id = logic_name_to_id.get(item.logic_name)

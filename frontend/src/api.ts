@@ -87,6 +87,8 @@ export const api = {
     request<DraftProgress>(`/api/domains/${domainId}/generate-draft`, { method: "POST" }),
   getProgress: (domainId: string) => request<DraftProgress>(`/api/domains/${domainId}/progress`),
   listTasks: (domainId: string) => request<TaskRecord[]>(`/api/domains/${domainId}/tasks`),
+  stopDraftTask: (domainId: string, taskId: string) =>
+    request<TaskRecord>(`/api/domains/${domainId}/tasks/${taskId}/stop`, { method: "POST" }),
   getTaskLogs: (domainId: string, taskId: string) =>
     request<ChangeLog[]>(`/api/domains/${domainId}/tasks/${taskId}/logs`),
 

@@ -48,6 +48,50 @@ type Trigger = ObjectTrigger | PropertyTrigger;
 
 const BLOCK_TAGS = new Set(["DIV", "P"]);
 
+function normalizeSegment(seg: ExpressionSegment): ExpressionSegment {
+  if (seg.type === "text") return { type: "text", value: seg.value };
+  const ref: ExpressionRefSegment = {
+    type: "ref",
+    ref_id: seg.ref_id,
+    object_type_id: seg.object_type_id,
+    object_name: seg.object_name,
+    object_display_name: seg.object_display_name,
+  };
+  if (seg.property_id) {
+    ref.property_id = seg.property_id;
+    ref.property_name = seg.property_name;
+    ref.property_display_name = seg.property_display_name;
+  }
+  return ref;
+}
+
+function draftKey(draft: ExpressionDraft | undefined): string {
+  return JSON.stringify({ segments: (draft?.segments ?? []).map(normalizeSegment) });
+}
+
+function isObjectChip(el: HTMLElement): boolean {
+  return Boolean(el.dataset?.refId && !el.dataset.propertyId && el.dataset.objectTypeId);
+}
+
+function ensureTrailingTextAfterObjectChips(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>(".expr-chip--object").forEach((chip) => {
+    const next = chip.nextSibling;
+    if (!next || next.nodeType !== Node.TEXT_NODE) {
+      chip.after(document.createTextNode(""));
+    }
+  });
+}
+
+function placeCaretInTextNode(textNode: Text, offset: number): void {
+  const sel = window.getSelection();
+  if (!sel) return;
+  const range = document.createRange();
+  range.setStart(textNode, offset);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 function genRefId(counter: number): string {
   return `r${counter}`;
 }
@@ -185,78 +229,81 @@ function detectTrigger(): Trigger | null {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
   const range = sel.getRangeAt(0);
-  let container: Node | null = range.startContainer;
+  const container: Node | null = range.startContainer;
   if (container.nodeType !== Node.TEXT_NODE) return null;
   const textNode = container as Text;
   const offset = range.startOffset;
   const text = textNode.data;
-  if (offset === 0) return null;
 
   // 1) 对象模式:光标前最近一个 `@`(未被空白截断)
-  let i = offset - 1;
-  while (i >= 0) {
-    const ch = text[i];
-    if (ch === "@") {
-      const beforeOk =
-        i === 0 || /\s/.test(text[i - 1]) || /[（(\[,.]/.test(text[i - 1]);
-      if (beforeOk) {
+  if (offset > 0) {
+    let i = offset - 1;
+    while (i >= 0) {
+      const ch = text[i];
+      if (ch === "@") {
+        const beforeOk =
+          i === 0 || /\s/.test(text[i - 1]) || /[（(\[,.]/.test(text[i - 1]);
+        if (beforeOk) {
+          const query = text.slice(i + 1, offset);
+          if (!/\s/.test(query)) {
+            return {
+              kind: "object",
+              node: textNode,
+              atOffset: i,
+              endOffset: offset,
+              query,
+            };
+          }
+        }
+        break;
+      }
+      if (/\s/.test(ch)) break;
+      i -= 1;
+    }
+  }
+
+  // 2) 属性模式:光标前最近一个 `.`,且 `.` 前紧邻一个对象 chip
+  if (offset > 0) {
+    let i = offset - 1;
+    while (i >= 0) {
+      const ch = text[i];
+      if (ch === ".") {
         const query = text.slice(i + 1, offset);
-        if (!/\s/.test(query)) {
+        if (/\s/.test(query)) return null;
+        const chipEl = findObjectChipBefore(textNode);
+        if (chipEl) {
           return {
-            kind: "object",
+            kind: "property",
             node: textNode,
             atOffset: i,
             endOffset: offset,
             query,
+            chipEl,
+            objectTypeId: chipEl.dataset.objectTypeId!,
           };
         }
+        return null;
       }
-      break;
+      if (/\s/.test(ch)) break;
+      i -= 1;
     }
-    if (/\s/.test(ch)) break;
-    i -= 1;
-  }
-
-  // 2) 属性模式:光标前最近一个 `.`,且 `.` 前紧邻一个 chip
-  i = offset - 1;
-  while (i >= 0) {
-    const ch = text[i];
-    if (ch === ".") {
-      const query = text.slice(i + 1, offset);
-      if (/\s/.test(query)) return null;
-      // 检查 textNode 之前紧邻的兄弟节点是否为 chip
-      const chipEl = findAdjacentChipBefore(textNode);
-      if (chipEl && chipEl.dataset.objectTypeId) {
-        return {
-          kind: "property",
-          node: textNode,
-          atOffset: i,
-          endOffset: offset,
-          query,
-          chipEl,
-          objectTypeId: chipEl.dataset.objectTypeId,
-        };
-      }
-      return null;
-    }
-    if (/\s/.test(ch)) break;
-    i -= 1;
   }
   return null;
 }
 
-function findAdjacentChipBefore(textNode: Text): HTMLElement | null {
-  let prev: Node | null = textNode.previousSibling;
-  while (prev) {
-    if (prev.nodeType === Node.ELEMENT_NODE) {
-      const el = prev as HTMLElement;
-      if (el.dataset && el.dataset.refId && !el.dataset.propertyId) {
-        return el;
+function findObjectChipBefore(anchor: Node): HTMLElement | null {
+  let node: Node | null = anchor;
+  while (node) {
+    let prev: Node | null = node.previousSibling;
+    while (prev) {
+      if (prev.nodeType === Node.ELEMENT_NODE) {
+        const el = prev as HTMLElement;
+        return isObjectChip(el) ? el : null;
       }
-      return null;
+      if ((prev.textContent || "").trim().length > 0) return null;
+      prev = prev.previousSibling;
     }
-    if ((prev.textContent || "").length > 0) return null;
-    prev = prev.previousSibling;
+    node = node.parentNode;
   }
   return null;
 }
@@ -293,6 +340,7 @@ export function ExpressionRichEditor({
 }: Props) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const lastRenderedKeyRef = useRef<string>("");
+  const isInternalChangeRef = useRef<boolean>(false);
   const refCounterRef = useRef<number>(1);
   const triggerRef = useRef<Trigger | null>(null);
   const composingRef = useRef<boolean>(false);
@@ -304,6 +352,8 @@ export function ExpressionRichEditor({
   const [objects, setObjects] = useState<ObjectTypeSummary[]>([]);
   const [objectsLoading, setObjectsLoading] = useState(false);
   const [propCache, setPropCache] = useState<Record<string, Property[]>>({});
+  const propCacheRef = useRef(propCache);
+  propCacheRef.current = propCache;
   const [propsLoading, setPropsLoading] = useState(false);
   const [popup, setPopup] = useState<Trigger | null>(null);
   const [highlight, setHighlight] = useState(0);
@@ -335,7 +385,9 @@ export function ExpressionRichEditor({
     if (!el) return;
     const segments = domToSegments(el);
     const draft: ExpressionDraft = { segments };
-    lastRenderedKeyRef.current = JSON.stringify(draft);
+    const key = draftKey(draft);
+    lastRenderedKeyRef.current = key;
+    isInternalChangeRef.current = true;
     onChangeRef.current?.(draft);
   };
 
@@ -351,34 +403,33 @@ export function ExpressionRichEditor({
     const el = editorRef.current;
     if (!el) return;
     const draft = value ?? { segments: [] };
-    const key = JSON.stringify(draft);
+    const key = draftKey(draft);
     if (key === lastRenderedKeyRef.current) return;
+    if (isInternalChangeRef.current) {
+      isInternalChangeRef.current = false;
+      return;
+    }
     lastRenderedKeyRef.current = key;
     el.innerHTML = segmentsToHtml(draft.segments ?? [], handleChipRemove);
-    // 重新绑定 chip 内的删除回调(innerHTML 重建后丢失事件监听)
     bindChipRemoveHandlers(el, handleChipRemove);
-    // 更新 ref 计数器,避免新插入 chip 时 ref_id 与已有冲突
+    ensureTrailingTextAfterObjectChips(el);
     refCounterRef.current = Math.max(refCounterRef.current, countExistingRefs(el) + 1);
   }, [value]);
 
   useEffect(() => {
-    if (!domainId) {
-      setObjects([]);
-      return;
-    }
     setObjectsLoading(true);
     api
-      .listObjectTypes({ domainId, publishedOnly })
+      .listObjectTypes({ publishedOnly })
       .then(setObjects)
       .catch(() => setObjects([]))
       .finally(() => setObjectsLoading(false));
-  }, [domainId, publishedOnly]);
+  }, [publishedOnly]);
 
   // 当 popup 指向某对象时,懒加载该对象属性
   useEffect(() => {
     if (!popup || popup.kind !== "property") return;
     const objId = popup.objectTypeId;
-    if (propCache[objId]) return;
+    if (propCacheRef.current[objId]) return;
     setPropsLoading(true);
     api
       .getObjectType(objId)
@@ -389,7 +440,7 @@ export function ExpressionRichEditor({
         setPropCache((prev) => ({ ...prev, [objId]: [] }));
       })
       .finally(() => setPropsLoading(false));
-  }, [popup, propCache]);
+  }, [popup]);
 
   const filteredObjects = useMemo(() => {
     if (!popup || popup.kind !== "object") return [];
@@ -399,10 +450,18 @@ export function ExpressionRichEditor({
         (o) =>
           !q ||
           o.name.toLowerCase().includes(q) ||
-          o.display_name.toLowerCase().includes(q),
+          o.display_name.toLowerCase().includes(q) ||
+          (o.domain_name?.toLowerCase().includes(q) ?? false),
       )
+      .sort((a, b) => {
+        if (!domainId) return 0;
+        const aInDomain = a.domain_context_id === domainId ? 0 : 1;
+        const bInDomain = b.domain_context_id === domainId ? 0 : 1;
+        if (aInDomain !== bInDomain) return aInDomain - bInDomain;
+        return a.display_name.localeCompare(b.display_name, "zh-CN");
+      })
       .slice(0, 8);
-  }, [popup, objects]);
+  }, [popup, objects, domainId]);
 
   const filteredProperties = useMemo(() => {
     if (!popup || popup.kind !== "property") return [];
@@ -500,16 +559,11 @@ export function ExpressionRichEditor({
     };
     const chip = createChipEl(seg, handleChipRemove);
     range.insertNode(chip);
-    // 光标移到 chip 之后
-    const after = document.createRange();
-    after.setStartAfter(chip);
-    after.collapse(true);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(after);
+    const tail = document.createTextNode("");
+    chip.after(tail);
+    placeCaretInTextNode(tail, 0);
     closePopup();
     syncToParent();
-    // 插入对象后,若用户接着输入 `.` 会自动触发属性 picker
     el.focus();
   };
 
@@ -533,13 +587,12 @@ export function ExpressionRichEditor({
       const objDisplay = chipEl.dataset.objectDisplayName || chipEl.dataset.objectName || "?";
       labelEl.textContent = `${objDisplay}.${prop.display_name || prop.name}`;
     }
-    // 光标移到 chip 之后
-    const after = document.createRange();
-    after.setStartAfter(chipEl);
-    after.collapse(true);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(after);
+    let tail = chipEl.nextSibling;
+    if (!tail || tail.nodeType !== Node.TEXT_NODE) {
+      tail = document.createTextNode("");
+      chipEl.after(tail);
+    }
+    placeCaretInTextNode(tail as Text, 0);
     closePopup();
     syncToParent();
     el.focus();
@@ -677,9 +730,10 @@ export function ExpressionRichEditor({
   };
 
   const showObjectPopup = popup?.kind === "object" && filteredObjects.length > 0;
-  const showPropertyPopup = popup?.kind === "property" && filteredProperties.length > 0;
+  const showPropertyPopup = popup?.kind === "property";
+  const showPropertyItems = showPropertyPopup && filteredProperties.length > 0;
   const showPropsLoading =
-    popup?.kind === "property" && propsLoading && filteredProperties.length === 0;
+    showPropertyPopup && propsLoading && filteredProperties.length === 0;
 
   return (
     <div className="expression-editor expression-editor--rich">
@@ -732,7 +786,12 @@ export function ExpressionRichEditor({
                     <span className="expr-popup__item-desc">{o.description}</span>
                   )}
                 </span>
-                <span className="expr-popup__item-sub">{o.name}</span>
+                <span className="expr-popup__item-tail">
+                  {o.domain_name && (
+                    <span className="expr-popup__item-domain">{o.domain_name}</span>
+                  )}
+                  <span className="expr-popup__item-sub">{o.name}</span>
+                </span>
               </button>
             ))}
           </div>,
@@ -743,48 +802,54 @@ export function ExpressionRichEditor({
           <div ref={refs.setFloating} className="expr-popup" style={floatingStyles} role="listbox">
             <div className="expr-popup__head">
               <span className="expr-popup__head-title">属性</span>
-              <span className="expr-popup__head-meta">{filteredProperties.length} 项</span>
+              <span className="expr-popup__head-meta">
+                {showPropsLoading ? "加载中…" : `${filteredProperties.length} 项`}
+              </span>
             </div>
-            {filteredProperties.map((p, idx) => (
-              <button
-                key={p.id}
-                type="button"
-                className={`expr-popup__item${idx === highlight ? " is-active" : ""}`}
-                onMouseEnter={() => setHighlight(idx)}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  setHighlight(idx);
-                  if (popup && popup.kind === "property") extendChipWithProperty(popup, p);
-                }}
-              >
-                <span className="expr-sigil expr-sigil--property" aria-hidden>
-                  P
-                </span>
-                <span className="expr-popup__item-main">
-                  <span className="expr-popup__item-name">{p.display_name}</span>
-                  {p.description && (
-                    <span className="expr-popup__item-desc">{p.description}</span>
-                  )}
-                </span>
-                <span className="expr-popup__item-tail">
-                  {p.data_type && (
-                    <span className="expr-popup__item-type">{p.data_type}</span>
-                  )}
-                  <span className="expr-popup__item-sub">{p.name}</span>
-                </span>
-              </button>
-            ))}
+            {showPropsLoading && (
+              <div className="expr-popup__loading">
+                <Spin size="small" />
+              </div>
+            )}
+            {showPropertyItems &&
+              filteredProperties.map((p, idx) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`expr-popup__item${idx === highlight ? " is-active" : ""}`}
+                  onMouseEnter={() => setHighlight(idx)}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setHighlight(idx);
+                    if (popup && popup.kind === "property") extendChipWithProperty(popup, p);
+                  }}
+                >
+                  <span className="expr-sigil expr-sigil--property" aria-hidden>
+                    P
+                  </span>
+                  <span className="expr-popup__item-main">
+                    <span className="expr-popup__item-name">{p.display_name}</span>
+                    {p.description && (
+                      <span className="expr-popup__item-desc">{p.description}</span>
+                    )}
+                  </span>
+                  <span className="expr-popup__item-tail">
+                    {p.data_type && (
+                      <span className="expr-popup__item-type">{p.data_type}</span>
+                    )}
+                    <span className="expr-popup__item-sub">{p.name}</span>
+                  </span>
+                </button>
+              ))}
+            {!showPropsLoading && !showPropertyItems && (
+              <div className="expr-popup__loading">
+                <span className="om-muted">未找到匹配的字段</span>
+              </div>
+            )}
           </div>,
           document.body,
         )}
-      {showPropsLoading &&
-        createPortal(
-          <div ref={refs.setFloating} className="expr-popup expr-popup--hint" style={floatingStyles}>
-            <Spin size="small" /> <span className="om-muted">加载属性…</span>
-          </div>,
-          document.body,
-        )}
-      {!showObjectPopup && !showPropertyPopup && !showPropsLoading && popup && (
+      {!showObjectPopup && !showPropertyPopup && popup && (
         <div className="expression-editor__hint">
           <span className="om-muted">
             {popup.kind === "object"

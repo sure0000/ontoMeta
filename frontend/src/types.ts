@@ -7,6 +7,9 @@ export interface DomainContext {
   status: string;
   draft_count: number;
   published_count: number;
+  object_type_count: number;
+  relation_type_count: number;
+  published_object_type_count: number;
   latest_draft_at?: string;
   latest_published_at?: string;
   updated_at: string;
@@ -83,6 +86,8 @@ export interface ObjectTypeSummary {
   business_logic_count: number;
   bound_logic_count?: number;
   source_confidence?: number;
+  domain_context_id?: string;
+  domain_name?: string;
   updated_at: string;
 }
 

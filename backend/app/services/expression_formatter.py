@@ -116,6 +116,7 @@ def _resolve_refs(db: Session, ontology_id: str, refs: list[dict]) -> list[dict]
         return []
     obj_ids = {r["object_type_id"] for r in refs if r.get("object_type_id")}
     prop_ids = {r["property_id"] for r in refs if r.get("property_id")}
+    published_ontology_ids = set(OntologyQueryService()._published_ontology_ids(db))
     obj_map: dict[str, ObjectType] = {}
     prop_map: dict[str, Property] = {}
     if obj_ids:
@@ -124,14 +125,14 @@ def _resolve_refs(db: Session, ontology_id: str, refs: list[dict]) -> list[dict]
             .filter(ObjectType.id.in_(list(obj_ids)))
             .all()
         ):
-            if obj.ontology_id == ontology_id:
+            if obj.ontology_id in published_ontology_ids:
                 obj_map[obj.id] = obj
     if prop_ids:
         for prop in (
             db.query(Property).filter(Property.id.in_(list(prop_ids))).all()
         ):
             obj = obj_map.get(prop.object_type_id) or db.get(ObjectType, prop.object_type_id)
-            if obj and obj.ontology_id == ontology_id:
+            if obj and obj.ontology_id in published_ontology_ids:
                 prop_map[prop.id] = prop
     resolved: list[dict] = []
     for r in refs:

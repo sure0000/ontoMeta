@@ -1,13 +1,18 @@
-import { Col, Row, Skeleton } from "antd";
+import { Skeleton } from "antd";
 
 interface Props {
   type?: "list" | "detail" | "cards";
+  full?: boolean;
 }
 
-export function PageSkeleton({ type = "list" }: Props) {
+function containerClass(full?: boolean) {
+  return `page-container fade-in${full ? " page-container--full" : ""}`;
+}
+
+export function PageSkeleton({ type = "list", full }: Props) {
   if (type === "detail") {
     return (
-      <div className="page-container--full">
+      <div className={containerClass(true)}>
         <div className="page-header" style={{ marginBottom: 20 }}>
           <div className="page-header-main">
             <Skeleton.Avatar active shape="square" size={40} />
@@ -43,12 +48,11 @@ export function PageSkeleton({ type = "list" }: Props) {
 
   if (type === "cards") {
     return (
-      <div className="page-container">
+      <div className={containerClass(full)}>
         <Skeleton paragraph={{ rows: 1, width: 200 }} active style={{ marginBottom: 20 }} />
-        <Row gutter={[16, 16]}>
+        <div className="workspace-domain-grid">
           {Array.from({ length: 6 }).map((_, i) => (
-            <Col key={i} xs={24} sm={12} lg={8} xl={6}>
-              <div className="om-skeleton-card">
+            <div key={i} className="om-skeleton-card">
                 <div
                   style={{
                     display: "flex",
@@ -74,15 +78,14 @@ export function PageSkeleton({ type = "list" }: Props) {
                   <Skeleton.Input active size="small" style={{ width: 100 }} />
                 </div>
               </div>
-            </Col>
           ))}
-        </Row>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="page-container">
+    <div className={containerClass(full)}>
       <Skeleton paragraph={{ rows: 1, width: 200 }} active style={{ marginBottom: 20 }} />
       <div className="om-skeleton-card">
         <Skeleton active paragraph={{ rows: 8 }} />

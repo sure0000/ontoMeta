@@ -96,7 +96,7 @@ export function BusinessLogicPage() {
     }
   };
 
-  if (loading && categories.length === 0) return <PageSkeleton type="list" />;
+  if (loading && categories.length === 0) return <PageSkeleton type="list" full />;
 
   return (
     <PageContainer full>

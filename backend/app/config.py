@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
     use_mock_llm: bool = True
+    llm_timeout_seconds: float = 300.0
+
+    max_concurrent_draft_generations: int = 2
+    datahub_max_concurrency: int = 5
 
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 

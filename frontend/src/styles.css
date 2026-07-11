@@ -275,9 +275,12 @@ body {
 .page-container {
   max-width: 1280px;
   margin: 0 auto;
+  width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  overflow-x: hidden;
   overflow-y: auto;
   min-height: 0;
 }
@@ -597,17 +600,29 @@ body {
   padding-top: 12px;
   border-top: 1px dashed var(--om-border);
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
   font-size: 12px;
   color: var(--om-text-tertiary);
+}
+.entity-card-foot-stats {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.entity-card-foot-meta {
+  font-size: 11px;
+  color: var(--om-text-tertiary);
+  line-height: 1.4;
+  word-break: break-word;
 }
 .entity-card-foot-item {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 .entity-card-foot-item strong {
   color: var(--om-text);
@@ -1048,9 +1063,18 @@ body {
 .om-card-link {
   display: block;
   color: inherit;
+  min-width: 0;
 }
 .om-card-link:hover {
   color: inherit;
+}
+
+.workspace-domain-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 272px), 1fr));
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
 }
 
 .ontology-workspace-search {
@@ -1248,7 +1272,7 @@ body {
 .expr-popup {
   z-index: 1000;
   min-width: 320px;
-  max-width: 360px;
+  max-width: 420px;
   max-height: 320px;
   overflow-y: auto;
   background: var(--om-surface);
@@ -1368,6 +1392,18 @@ body {
   padding: 1px 6px;
   border-radius: 10px;
   white-space: nowrap;
+}
+.expr-popup__item-domain {
+  font-size: 10px;
+  color: #0369a1;
+  background: #e0f2fe;
+  border: 1px solid #bae6fd;
+  padding: 1px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .expr-popup__item-sub {
   font-size: 12px;

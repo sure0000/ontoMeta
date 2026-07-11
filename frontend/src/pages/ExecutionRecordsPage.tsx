@@ -3,10 +3,11 @@ import {
   ProfileOutlined,
   FileTextOutlined,
   CopyOutlined,
+  StopOutlined,
 } from "@ant-design/icons";
 import { Alert, Button, Modal, Space, Spin, Table, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -31,8 +32,9 @@ export function ExecutionRecordsPage() {
   const [logsLoading, setLogsLoading] = useState(false);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [activeTask, setActiveTask] = useState<TaskRecord | null>(null);
+  const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
 
-  const { data: bundle, loading, error } = useApi<TasksBundle>(
+  const { data: bundle, loading, error, reload } = useApi<TasksBundle>(
     async () => {
       if (!domainId) return { tasks: [], logsByTask: {} };
       const items = await api.listTasks(domainId);
@@ -51,6 +53,41 @@ export function ExecutionRecordsPage() {
 
   const tasks = bundle?.tasks ?? [];
   const taskLogsMap = bundle?.logsByTask ?? {};
+  const hasRunningTask = tasks.some((task) => task.status === "running");
+
+  useEffect(() => {
+    if (!hasRunningTask) return;
+    const timer = setInterval(() => {
+      void reload();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [hasRunningTask, reload]);
+
+  const handleStopTask = useCallback(
+    (task: TaskRecord) => {
+      if (!domainId) return;
+      Modal.confirm({
+        title: "确认停止任务",
+        content: "停止后将中断当前草稿生成流程，已生成的中间结果不会保存。",
+        okText: "停止",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: async () => {
+          setStoppingTaskId(task.id);
+          try {
+            await api.stopDraftTask(domainId, task.id);
+            message.success("任务已停止");
+            await reload();
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : "停止失败");
+          } finally {
+            setStoppingTaskId(null);
+          }
+        },
+      });
+    },
+    [domainId, reload],
+  );
 
   const openLogModal = (task: TaskRecord) => {
     setActiveTask(task);
@@ -156,23 +193,40 @@ export function ExecutionRecordsPage() {
     {
       title: "操作",
       key: "actions",
-      width: 96,
+      width: 150,
       render: (_, record) => (
-        <Button
-          type={activeTask?.id === record.id ? "primary" : "link"}
-          size="small"
-          onClick={(e) => {
-            e.stopPropagation();
-            openLogModal(record);
-          }}
-        >
-          查看日志
-        </Button>
+        <Space size={4}>
+          {record.status === "running" && (
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<StopOutlined />}
+              loading={stoppingTaskId === record.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleStopTask(record);
+              }}
+            >
+              停止
+            </Button>
+          )}
+          <Button
+            type={activeTask?.id === record.id ? "primary" : "link"}
+            size="small"
+            onClick={(e) => {
+              e.stopPropagation();
+              openLogModal(record);
+            }}
+          >
+            查看日志
+          </Button>
+        </Space>
       ),
     },
   ];
 
-  if (loading) return <PageSkeleton type="list" />;
+  if (loading) return <PageSkeleton type="list" full />;
 
   return (
     <PageContainer full>

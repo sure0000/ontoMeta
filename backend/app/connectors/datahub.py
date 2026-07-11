@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from app.config import settings
@@ -390,7 +392,11 @@ class DataHubConnector:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0, trust_env=False)
+            self._client = httpx.AsyncClient(
+                timeout=30.0,
+                trust_env=False,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
         return self._client
 
     async def aclose(self) -> None:
@@ -404,7 +410,12 @@ class DataHubConnector:
             return MOCK_DOMAINS
         return await self._fetch_domains_from_api()
 
-    async def fetch_domain_bundle(self, datahub_domain_id: str) -> DataHubDomainBundle:
+    async def fetch_domain_bundle(
+        self,
+        datahub_domain_id: str,
+        *,
+        include_logic_evidences: bool = False,
+    ) -> DataHubDomainBundle:
         if self.use_mock:
             domain = next((d for d in MOCK_DOMAINS if d.id == datahub_domain_id), None)
             if not domain:
@@ -413,9 +424,16 @@ class DataHubConnector:
                 domain=domain,
                 datasets=MOCK_DATASETS.get(datahub_domain_id, []),
                 lineages=MOCK_LINEAGES.get(datahub_domain_id, []),
-                logic_evidences=MOCK_LOGIC.get(datahub_domain_id, []),
+                logic_evidences=(
+                    MOCK_LOGIC.get(datahub_domain_id, [])
+                    if include_logic_evidences
+                    else []
+                ),
             )
-        return await self._fetch_domain_bundle_from_api(datahub_domain_id)
+        return await self._fetch_domain_bundle_from_api(
+            datahub_domain_id,
+            include_logic_evidences=include_logic_evidences,
+        )
 
     async def get_dataset_by_urn(self, dataset_urn: str) -> DatasetInput:
         if self.use_mock:
@@ -505,7 +523,12 @@ class DataHubConnector:
         domains = data.get("listDomains", {}).get("domains", [])
         return [_parse_domain(item) for item in domains]
 
-    async def _fetch_domain_bundle_from_api(self, datahub_domain_id: str) -> DataHubDomainBundle:
+    async def _fetch_domain_bundle_from_api(
+        self,
+        datahub_domain_id: str,
+        *,
+        include_logic_evidences: bool = False,
+    ) -> DataHubDomainBundle:
         domain_raw = await self._fetch_domain_raw(datahub_domain_id)
         if not domain_raw:
             raise ValueError(f"Domain not found: {datahub_domain_id}")
@@ -519,9 +542,8 @@ class DataHubConnector:
         lineages = _parse_lineages_from_entities(dataset_entities, domain_urn_set)
 
         logic_evidences: list[LogicEvidenceInput] = []
-        for dataset in datasets:
-            queries = await self._fetch_dataset_queries(dataset.urn)
-            logic_evidences.extend(_parse_query_logic_evidences(dataset, queries))
+        if include_logic_evidences:
+            logic_evidences = await self._fetch_all_dataset_queries(datasets)
 
         return DataHubDomainBundle(
             domain=domain,
@@ -597,12 +619,41 @@ class DataHubConnector:
           }
         }
         """
+        batches = [
+            urns[idx : idx + _ENTITY_BATCH_SIZE]
+            for idx in range(0, len(urns), _ENTITY_BATCH_SIZE)
+        ]
+        semaphore = asyncio.Semaphore(settings.datahub_max_concurrency)
+
+        async def fetch_batch(batch: list[str]) -> list[dict]:
+            async with semaphore:
+                data = await self._graphql(query, {"urns": batch})
+                return data.get("entities") or []
+
+        batch_results = await asyncio.gather(*(fetch_batch(batch) for batch in batches))
         entities: list[dict] = []
-        for idx in range(0, len(urns), _ENTITY_BATCH_SIZE):
-            batch = urns[idx : idx + _ENTITY_BATCH_SIZE]
-            data = await self._graphql(query, {"urns": batch})
-            entities.extend(data.get("entities") or [])
+        for batch_entities in batch_results:
+            entities.extend(batch_entities)
         return [item for item in entities if item.get("urn")]
+
+    async def _fetch_all_dataset_queries(
+        self, datasets: list[DatasetInput]
+    ) -> list[LogicEvidenceInput]:
+        if not datasets:
+            return []
+
+        semaphore = asyncio.Semaphore(settings.datahub_max_concurrency)
+
+        async def fetch_for_dataset(dataset: DatasetInput) -> list[LogicEvidenceInput]:
+            async with semaphore:
+                queries = await self._fetch_dataset_queries(dataset.urn)
+                return _parse_query_logic_evidences(dataset, queries)
+
+        results = await asyncio.gather(*(fetch_for_dataset(ds) for ds in datasets))
+        logic_evidences: list[LogicEvidenceInput] = []
+        for items in results:
+            logic_evidences.extend(items)
+        return logic_evidences
 
     async def _fetch_dataset_queries(self, dataset_urn: str) -> list[dict]:
         query = """

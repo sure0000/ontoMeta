@@ -164,7 +164,7 @@ export function BusinessLogicCategoryPage() {
     },
   ];
 
-  if (loading && !category) return <PageSkeleton type="list" />;
+  if (loading && !category) return <PageSkeleton type="list" full />;
 
   if (!category) {
     return (

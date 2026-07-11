@@ -85,7 +85,7 @@ export function AppLayout() {
       label: (
         <span>
           <span>{d.name}</span>
-          {countLabel(d.published_count)}
+          {countLabel(d.published_object_type_count ?? 0)}
         </span>
       ),
     }));

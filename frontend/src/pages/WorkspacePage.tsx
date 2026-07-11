@@ -1,5 +1,6 @@
 import { FolderOpenOutlined } from "@ant-design/icons";
-import { Alert, Col, Row } from "antd";
+import { Alert } from "antd";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -12,10 +13,32 @@ import { formatDateTime } from "../utils/format";
 import { getOntologyDomainStatusVisual } from "../utils/statusVisual";
 import type { DomainContext } from "../types";
 
+const WORKSPACE_STATUS_ORDER: Record<string, number> = {
+  draft: 0,
+  in_review: 0,
+  active: 1,
+  published: 2,
+  archived: 3,
+};
+
+function sortWorkspaceDomains(domains: DomainContext[]): DomainContext[] {
+  return [...domains].sort((a, b) => {
+    const orderA = WORKSPACE_STATUS_ORDER[a.status] ?? 1;
+    const orderB = WORKSPACE_STATUS_ORDER[b.status] ?? 1;
+    if (orderA !== orderB) return orderA - orderB;
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+  });
+}
+
 export function WorkspacePage() {
   const { data: domains, loading, error } = useApi<DomainContext[]>(
     () => api.listDomains(),
     [],
+  );
+
+  const sortedDomains = useMemo(
+    () => (domains ? sortWorkspaceDomains(domains) : []),
+    [domains],
   );
 
   if (loading) return <PageSkeleton type="cards" />;
@@ -30,63 +53,69 @@ export function WorkspacePage() {
 
       {error ? (
         <Alert type="error" message="加载失败" description={error} showIcon />
-      ) : !domains || domains.length === 0 ? (
+      ) : sortedDomains.length === 0 ? (
         <EmptyState
           title="暂无数据域"
           description="尚未从 DataHub 同步任何数据域，请联系管理员配置数据域后开始建模。"
         />
       ) : (
-        <Row gutter={[16, 16]}>
-          {domains.map((domain) => {
+        <div className="workspace-domain-grid">
+          {sortedDomains.map((domain) => {
             const statusVisual = getOntologyDomainStatusVisual(domain.status);
             return (
-              <Col key={domain.id} xs={24} sm={12} lg={8} xl={6}>
-                <Link to={`/workspace/${domain.id}`} className="om-card-link">
-                  <div className="entity-card">
-                    <div className="entity-card-head">
-                      <div className="entity-card-head-main">
-                        <div className={`entity-card-icon entity-card-icon--${statusVisual.tone}`}>
-                          {statusVisual.icon}
-                        </div>
-                        <div style={{ minWidth: 0 }}>
-                          <div className="entity-card-title">{domain.name}</div>
-                          <div className="entity-card-subtitle">
-                            {domain.owner || "未指定负责人"}
-                          </div>
+              <Link key={domain.id} to={`/workspace/${domain.id}`} className="om-card-link">
+                <div className="entity-card">
+                  <div className="entity-card-head">
+                    <div className="entity-card-head-main">
+                      <div className={`entity-card-icon entity-card-icon--${statusVisual.tone}`}>
+                        {statusVisual.icon}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div className="entity-card-title">{domain.name}</div>
+                        <div className="entity-card-subtitle">
+                          {domain.owner || "未指定负责人"}
                         </div>
                       </div>
-                      <StatusBadge status={domain.status} />
                     </div>
-                    <div className="entity-card-desc">
-                      {domain.description || "暂无描述"}
+                    <StatusBadge status={domain.status} />
+                  </div>
+                  <div className="entity-card-desc">
+                    {domain.description || "暂无描述"}
+                  </div>
+                  <div className="entity-card-foot">
+                    <div className="entity-card-foot-stats">
+                      <span className="entity-card-foot-item">
+                        <strong>{domain.object_type_count}</strong> 业务对象
+                      </span>
+                      <span className="entity-card-foot-item">
+                        <strong>{domain.relation_type_count}</strong> 关系
+                      </span>
                     </div>
-                    <div className="entity-card-foot">
+                    <div className="entity-card-foot-meta">
                       {domain.latest_published_at ? (
-                        <span className="entity-card-foot-item">
+                        <>
                           已发布{" "}
                           <span className="entity-card-foot-time">
                             {formatDateTime(domain.latest_published_at)}
                           </span>
-                        </span>
+                        </>
                       ) : domain.latest_draft_at ? (
-                        <span className="entity-card-foot-item">
+                        <>
                           草稿生成{" "}
                           <span className="entity-card-foot-time">
                             {formatDateTime(domain.latest_draft_at)}
                           </span>
-                        </span>
+                        </>
                       ) : (
-                        <span className="entity-card-foot-item">
-                          <span className="entity-card-foot-time">未开始</span>
-                        </span>
+                        <span className="entity-card-foot-time">未开始</span>
                       )}
                     </div>
                   </div>
-                </Link>
-              </Col>
+                </div>
+              </Link>
             );
           })}
-        </Row>
+        </div>
       )}
     </PageContainer>
   );

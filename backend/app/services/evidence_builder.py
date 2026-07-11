@@ -27,7 +27,12 @@ def _infer_object_name(dataset_name: str) -> str:
 class EvidenceBuilder:
     """将 DataHub 原始输入整理为 LLM 证据包。"""
 
-    def build(self, bundle: DataHubDomainBundle) -> EvidenceBundle:
+    def build(
+        self,
+        bundle: DataHubDomainBundle,
+        *,
+        include_business_logics: bool = False,
+    ) -> EvidenceBundle:
         object_types: list[ObjectTypeEvidencePack] = []
         properties: list[PropertyEvidencePack] = []
         relations: list[RelationEvidencePack] = []
@@ -109,21 +114,22 @@ class EvidenceBuilder:
                 )
             )
 
-        for logic in bundle.logic_evidences:
-            logic_type = "metric" if logic.name in {"gmv", "revenue", "amount"} else "tag"
-            business_logics.append(
-                LogicEvidencePack(
-                    name=_to_snake(logic.name),
-                    display_name=logic.name,
-                    logic_type=logic_type,
-                    description=logic.description,
-                    expression_summary=logic.expression,
-                    source_type=logic.source_type,
-                    source_ref=logic.source_ref,
-                    confidence=0.65,
-                    evidence_refs=[logic.source_ref or logic.name],
+        if include_business_logics:
+            for logic in bundle.logic_evidences:
+                logic_type = "metric" if logic.name in {"gmv", "revenue", "amount"} else "tag"
+                business_logics.append(
+                    LogicEvidencePack(
+                        name=_to_snake(logic.name),
+                        display_name=logic.name,
+                        logic_type=logic_type,
+                        description=logic.description,
+                        expression_summary=logic.expression,
+                        source_type=logic.source_type,
+                        source_ref=logic.source_ref,
+                        confidence=0.65,
+                        evidence_refs=[logic.source_ref or logic.name],
+                    )
                 )
-            )
 
         return EvidenceBundle(
             object_types=self._dedupe_objects(object_types),

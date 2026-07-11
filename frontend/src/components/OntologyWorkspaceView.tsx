@@ -127,7 +127,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         align: "right",
       },
       {
-        title: "绑定逻辑",
+        title: "逻辑",
         dataIndex: "bound_logic_count",
         key: "bound_logic_count",
         width: 110,
@@ -473,15 +473,17 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                       {obj.description || "暂无描述"}
                     </div>
                     <div className="entity-card-foot">
-                      <span className="entity-card-foot-item">
-                        <strong>{obj.property_count}</strong> 属性
-                      </span>
-                      <span className="entity-card-foot-item">
-                        <strong>{obj.relation_count}</strong> 关系
-                      </span>
-                      <span className="entity-card-foot-item">
-                        绑定 <strong>{obj.bound_logic_count ?? 0}</strong> 逻辑
-                      </span>
+                      <div className="entity-card-foot-stats">
+                        <span className="entity-card-foot-item">
+                          <strong>{obj.property_count}</strong> 属性
+                        </span>
+                        <span className="entity-card-foot-item">
+                          <strong>{obj.relation_count}</strong> 关系
+                        </span>
+                        <span className="entity-card-foot-item">
+                          <strong>{obj.bound_logic_count ?? 0}</strong> 逻辑
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </Link>

@@ -65,7 +65,12 @@ from app.services.edit import EditService
 from app.services.expression_formatter import ExpressionFormatterService
 from app.services.logic_import import LogicImportService
 from app.services.publish import ConfirmationService
-from app.services.query import OntologyQueryService, WorkspaceService
+from app.services.query import (
+    DraftGenerationAlreadyRunning,
+    OntologyQueryService,
+    WorkspaceService,
+)
+from app.services.draft_generation_queue import run_draft_generation_limited
 from app.services.settings_service import SettingsService, mask_secret
 from app.services.chat_bi import ChatBiService
 
@@ -270,10 +275,22 @@ def get_domain(domain_id: str, db: Session = Depends(get_db)):
 async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
     try:
         progress = workspace.start_draft_generation(db, domain_id)
-        task = asyncio.create_task(workspace._run_draft_generation(domain_id, progress.task_id))
-        # 持有强引用避免被 GC；任务完成或失败后自动清理
-        workspace._track_background_task(task)
+
+        async def _execute() -> None:
+            await workspace._run_draft_generation(domain_id, progress.task_id)
+
+        task = asyncio.create_task(
+            run_draft_generation_limited(
+                progress.task_id,
+                WorkspaceService._update_task_progress,
+                _execute,
+                WorkspaceService._is_task_cancelled,
+            )
+        )
+        workspace._track_draft_task(progress.task_id, task)
         return progress
+    except DraftGenerationAlreadyRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -302,6 +319,14 @@ def get_task_logs(domain_id: str, task_id: str, db: Session = Depends(get_db)):
         return workspace.get_task_logs(db, domain_id, task_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/domains/{domain_id}/tasks/{task_id}/stop", response_model=TaskRecordOut)
+def stop_draft_task(domain_id: str, task_id: str, db: Session = Depends(get_db)):
+    try:
+        return workspace.stop_draft_generation(db, domain_id, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/ontologies", response_model=list[OntologySummary])
