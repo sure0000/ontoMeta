@@ -26,6 +26,13 @@ type ObjectViewMode = "list" | "cards" | "graph";
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
 
+export interface ServerPaging {
+  total: number;
+  page: number;
+  pageSize: number;
+  onChange: (page: number, pageSize: number) => void;
+}
+
 function normalizeQuery(input: string) {
   return input.trim().toLowerCase();
 }
@@ -55,6 +62,15 @@ interface Props {
   objectDetailPath?: (objectId: string) => string;
   relationDetailPath?: (relationId: string) => string;
   workspaceMode?: boolean;
+  /** 服务端分页：开启后 objects/relations 视为当前页数据 */
+  objectPaging?: ServerPaging;
+  relationPaging?: ServerPaging;
+  /** 服务端搜索受控；未传则本地过滤 */
+  searchQuery?: string;
+  onSearchChange?: (q: string) => void;
+  /** 图谱邻域展开 */
+  onExpandGraphNode?: (objectId: string) => void;
+  graphExpanding?: boolean;
 }
 
 export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
@@ -64,40 +80,54 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   objectDetailPath = (id) => `/ontology/${id}`,
   relationDetailPath,
   workspaceMode = false,
+  objectPaging,
+  relationPaging,
+  searchQuery,
+  onSearchChange,
+  onExpandGraphNode,
+  graphExpanding = false,
 }: Props) {
+  const serverMode = Boolean(objectPaging || relationPaging);
   const [entityTab, setEntityTab] = useState<EntityTab>("objects");
   const [objectView, setObjectView] = useState<ObjectViewMode>("cards");
-  const [query, setQuery] = useState("");
+  const [localQuery, setLocalQuery] = useState("");
   const [objectPage, setObjectPage] = useState(1);
   const [objectPageSize, setObjectPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [relationPage, setRelationPage] = useState(1);
   const [relationPageSize, setRelationPageSize] = useState(DEFAULT_PAGE_SIZE);
 
+  const query = onSearchChange ? (searchQuery ?? "") : localQuery;
   const normalizedQuery = normalizeQuery(query);
 
-  const filteredObjects = useMemo(
-    () => objects.filter((o) => matchObject(o, normalizedQuery)),
-    [objects, normalizedQuery],
-  );
+  const filteredObjects = useMemo(() => {
+    if (serverMode) return objects;
+    return objects.filter((o) => matchObject(o, normalizedQuery));
+  }, [objects, normalizedQuery, serverMode]);
 
-  const filteredRelations = useMemo(
-    () => relations.filter((r) => matchRelation(r, normalizedQuery)),
-    [relations, normalizedQuery],
-  );
+  const filteredRelations = useMemo(() => {
+    if (serverMode) return relations;
+    return relations.filter((r) => matchRelation(r, normalizedQuery));
+  }, [relations, normalizedQuery, serverMode]);
 
-  // 切换 tab 或搜索时重置分页
   useEffect(() => {
-    setObjectPage(1);
-    setRelationPage(1);
-  }, [entityTab, normalizedQuery]);
+    if (!serverMode) {
+      setObjectPage(1);
+      setRelationPage(1);
+    }
+  }, [entityTab, normalizedQuery, serverMode]);
+
+  const effectiveObjectPage = objectPaging?.page ?? objectPage;
+  const effectiveObjectPageSize = objectPaging?.pageSize ?? objectPageSize;
+  const effectiveObjectTotal = objectPaging?.total ?? filteredObjects.length;
+  const effectiveRelationPage = relationPaging?.page ?? relationPage;
+  const effectiveRelationPageSize = relationPaging?.pageSize ?? relationPageSize;
+  const effectiveRelationTotal = relationPaging?.total ?? filteredRelations.length;
 
   const pagedObjects = useMemo(() => {
-    if (objectView === "cards") {
-      const start = (objectPage - 1) * objectPageSize;
-      return filteredObjects.slice(start, start + objectPageSize);
-    }
-    return filteredObjects;
-  }, [filteredObjects, objectPage, objectPageSize, objectView]);
+    if (serverMode || objectView !== "cards") return filteredObjects;
+    const start = (objectPage - 1) * objectPageSize;
+    return filteredObjects.slice(start, start + objectPageSize);
+  }, [filteredObjects, objectPage, objectPageSize, objectView, serverMode]);
 
   const objectColumns: ColumnsType<ObjectTypeSummary> = useMemo(
     () => [
@@ -247,11 +277,37 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     [],
   );
   const handleQueryChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value),
-    [],
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const next = e.target.value;
+      if (onSearchChange) onSearchChange(next);
+      else setLocalQuery(next);
+    },
+    [onSearchChange],
   );
 
-  if (objects.length === 0 && relations.length === 0) {
+  const handleObjectPageChange = useCallback(
+    (page: number, pageSize: number) => {
+      if (objectPaging) objectPaging.onChange(page, pageSize);
+      else {
+        setObjectPage(page);
+        setObjectPageSize(pageSize);
+      }
+    },
+    [objectPaging],
+  );
+
+  const handleRelationPageChange = useCallback(
+    (page: number, pageSize: number) => {
+      if (relationPaging) relationPaging.onChange(page, pageSize);
+      else {
+        setRelationPage(page);
+        setRelationPageSize(pageSize);
+      }
+    },
+    [relationPaging],
+  );
+
+  if (objects.length === 0 && relations.length === 0 && effectiveObjectTotal === 0 && effectiveRelationTotal === 0) {
     return (
       <SectionCard title="本体草稿" icon={<AppstoreOutlined />} bodyFlush>
         <EmptyState
@@ -263,6 +319,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   }
 
   const showSearch = entityTab !== "objects" || objectView !== "graph";
+  const objectCountLabel = serverMode ? effectiveObjectTotal : objects.length;
+  const relationCountLabel = serverMode ? effectiveRelationTotal : relations.length;
+  const useVirtualTable = effectiveObjectPageSize >= 50 || effectiveRelationPageSize >= 50;
 
   const entitySwitcher = workspaceMode ? (
     <Segmented
@@ -273,7 +332,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           label: (
             <span>
               <AppstoreOutlined style={{ marginRight: 6 }} />
-              对象 {objects.length}
+              对象 {objectCountLabel}
             </span>
           ),
           value: "objects",
@@ -282,7 +341,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           label: (
             <span>
               <ApartmentOutlined style={{ marginRight: 6 }} />
-              关系 {relations.length}
+              关系 {relationCountLabel}
             </span>
           ),
           value: "relations",
@@ -338,6 +397,13 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       />
     ) : null;
 
+  const graphMeta =
+    graph?.truncated || (graph?.total_object_count && graph.total_object_count > graph.nodes.length)
+      ? `局部 ${graph.nodes.length}/${graph.total_object_count ?? "?"} 节点 · ${graph.edges.length} 关系`
+      : graph
+        ? `${graph.nodes.length} 节点 · ${graph.edges.length} 关系`
+        : "图谱生成中";
+
   return (
     <div className="om-stack">
       <div className="toolbar">
@@ -348,15 +414,13 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         <div className="toolbar-right">
           {objectViewSwitcher}
           {entityTab === "objects" && objectView === "graph" && (
-            <span className="toolbar-text">
-              {graph ? `${graph.nodes.length} 节点 · ${graph.edges.length} 关系` : "图谱生成中"}
-            </span>
+            <span className="toolbar-text">{graphMeta}</span>
           )}
         </div>
       </div>
 
       {entityTab === "relations" ? (
-        relations.length === 0 ? (
+        effectiveRelationTotal === 0 && filteredRelations.length === 0 ? (
           <SectionCard title="关系列表" icon={<ApartmentOutlined />} bodyFlush>
             <EmptyState
               title="暂无关系类型"
@@ -370,7 +434,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         ) : (
           <SectionCard
             title="关系列表"
-            count={filteredRelations.length}
+            count={effectiveRelationTotal}
             countPrimary
             icon={<ApartmentOutlined />}
             bodyFlush
@@ -381,30 +445,28 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
               size="middle"
               columns={relationColumns}
               dataSource={filteredRelations}
-              scroll={{ x: "max-content" }}
+              scroll={{ x: "max-content", y: useVirtualTable ? 560 : undefined }}
+              virtual={useVirtualTable}
               pagination={{
-                current: relationPage,
-                pageSize: relationPageSize,
-                total: filteredRelations.length,
+                current: effectiveRelationPage,
+                pageSize: effectiveRelationPageSize,
+                total: effectiveRelationTotal,
                 showSizeChanger: true,
                 pageSizeOptions: PAGE_SIZE_OPTIONS,
                 showTotal: (total) => `共 ${total} 条`,
-                onChange: (page, pageSize) => {
-                  setRelationPage(page);
-                  setRelationPageSize(pageSize);
-                },
+                onChange: handleRelationPageChange,
               }}
             />
           </SectionCard>
         )
-      ) : objects.length === 0 ? (
+      ) : effectiveObjectTotal === 0 && objects.length === 0 ? (
         <SectionCard title="对象列表" icon={<AppstoreOutlined />} bodyFlush>
           <EmptyState title="暂无业务对象" />
         </SectionCard>
       ) : objectView === "graph" && graph ? (
         <SectionCard
           title="对象图谱"
-          count={objects.length}
+          count={graph.total_object_count ?? objects.length}
           countPrimary
           icon={<NodeIndexOutlined />}
           bodyFlush
@@ -413,6 +475,14 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
             graph={graph}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
+            onExpandNode={onExpandGraphNode}
+            expanding={graphExpanding}
+            centerNodeId={graph.center_id ?? undefined}
+            hint={
+              graph.truncated
+                ? "双击展开邻域 · Shift+单击查看详情 · 拖拽重排"
+                : undefined
+            }
             embedded
           />
         </SectionCard>
@@ -424,7 +494,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         ) : (
           <SectionCard
             title="对象列表"
-            count={filteredObjects.length}
+            count={effectiveObjectTotal}
             countPrimary
             icon={<AppstoreOutlined />}
             bodyFlush
@@ -434,19 +504,17 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
               rowKey="id"
               size="middle"
               columns={objectColumns}
-              dataSource={filteredObjects}
-              scroll={{ x: "max-content" }}
+              dataSource={serverMode ? objects : filteredObjects}
+              scroll={{ x: "max-content", y: useVirtualTable ? 560 : undefined }}
+              virtual={useVirtualTable}
               pagination={{
-                current: objectPage,
-                pageSize: objectPageSize,
-                total: filteredObjects.length,
+                current: effectiveObjectPage,
+                pageSize: effectiveObjectPageSize,
+                total: effectiveObjectTotal,
                 showSizeChanger: true,
                 pageSizeOptions: PAGE_SIZE_OPTIONS,
                 showTotal: (total) => `共 ${total} 条`,
-                onChange: (page, pageSize) => {
-                  setObjectPage(page);
-                  setObjectPageSize(pageSize);
-                },
+                onChange: handleObjectPageChange,
               }}
             />
           </SectionCard>
@@ -492,16 +560,13 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           </Row>
           <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
             <Pagination
-              current={objectPage}
-              pageSize={objectPageSize}
-              total={filteredObjects.length}
+              current={effectiveObjectPage}
+              pageSize={effectiveObjectPageSize}
+              total={effectiveObjectTotal}
               showSizeChanger
               pageSizeOptions={PAGE_SIZE_OPTIONS}
               showTotal={(total) => `共 ${total} 条`}
-              onChange={(page, pageSize) => {
-                setObjectPage(page);
-                setObjectPageSize(pageSize);
-              }}
+              onChange={handleObjectPageChange}
             />
           </div>
         </div>

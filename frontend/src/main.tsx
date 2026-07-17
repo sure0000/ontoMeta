@@ -5,7 +5,12 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "antd/dist/reset.css";
-import "./styles.css";
+import "./styles/tokens.css";
+import "./styles/layout.css";
+import "./styles/graph.css";
+import "./styles/expression.css";
+import "./styles/chat-bi.css";
+import "./styles/external-api.css";
 
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';

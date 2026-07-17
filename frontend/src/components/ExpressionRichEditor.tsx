@@ -420,7 +420,7 @@ export function ExpressionRichEditor({
     setObjectsLoading(true);
     api
       .listObjectTypes({ publishedOnly })
-      .then(setObjects)
+      .then((page) => setObjects(page.items))
       .catch(() => setObjects([]))
       .finally(() => setObjectsLoading(false));
   }, [publishedOnly]);

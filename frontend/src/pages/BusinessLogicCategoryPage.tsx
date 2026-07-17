@@ -62,7 +62,8 @@ export function BusinessLogicCategoryPage() {
   const { data: logics, loading, error } = useApi<BusinessLogic[]>(
     async () => {
       if (!categoryId) return [];
-      return api.listBusinessLogics({ categoryId });
+      const page = await api.listBusinessLogics({ categoryId });
+      return page.items;
     },
     [categoryId],
   );

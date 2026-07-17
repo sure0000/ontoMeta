@@ -4,9 +4,12 @@ import { BusinessLogicCategoryPage } from "./pages/BusinessLogicCategoryPage";
 import { BusinessLogicCreatePage } from "./pages/BusinessLogicCreatePage";
 import { BusinessLogicDetailPage } from "./pages/BusinessLogicDetailPage";
 import { BusinessLogicPage } from "./pages/BusinessLogicPage";
-import { ChatBiPage } from "./pages/ChatBiPage";
+import { ChatBiPage } from "./pages/chat-bi";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
+import { ExternalApiAppsPage } from "./pages/ExternalApiAppsPage";
+import { ExternalApiCatalogPage } from "./pages/ExternalApiCatalogPage";
+import { ExternalApiDetailPage } from "./pages/ExternalApiDetailPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
 import { RelationTypeDetailPage } from "./pages/RelationTypeDetailPage";
@@ -31,6 +34,10 @@ export default function App() {
         <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
         <Route path="/chat-bi" element={<ChatBiPage />} />
+        <Route path="/external-api" element={<Navigate to="/external-api/apps" replace />} />
+        <Route path="/external-api/apps" element={<ExternalApiAppsPage />} />
+        <Route path="/external-api/endpoints" element={<ExternalApiCatalogPage />} />
+        <Route path="/external-api/endpoints/:apiId" element={<ExternalApiDetailPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>

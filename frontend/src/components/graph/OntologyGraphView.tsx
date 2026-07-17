@@ -32,6 +32,9 @@ export interface OntologyGraphViewProps {
   objectDetailPath?: (objectId: string) => string;
   relationDetailPath?: (relationId: string) => string;
   onEdgeClick?: (edge: OntologyGraph["edges"][number]) => void;
+  /** 双击节点展开邻域 */
+  onExpandNode?: (objectId: string) => void;
+  expanding?: boolean;
   hint?: string;
   defaultLayout?: LayoutMode;
   /** 嵌入 SectionCard / Tabs 时使用，去除外层重复边框 */
@@ -89,6 +92,8 @@ function OntologyGraphViewInner({
   objectDetailPath,
   relationDetailPath,
   onEdgeClick,
+  onExpandNode,
+  expanding = false,
   hint,
   defaultLayout,
   embedded = false,
@@ -126,12 +131,22 @@ function OntologyGraphViewInner({
   }, []);
 
   const handleNodeClick = useCallback(
+    (event: React.MouseEvent, node: Node) => {
+      if (!objectDetailPath) return;
+      // 开启邻域展开时，普通单击不跳转（避免与双击冲突）；Shift+单击进详情
+      if (onExpandNode && !event.shiftKey) return;
+      navigate(objectDetailPath(node.id));
+    },
+    [navigate, objectDetailPath, onExpandNode],
+  );
+
+  const handleNodeDoubleClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      if (objectDetailPath) {
-        navigate(objectDetailPath(node.id));
+      if (onExpandNode && !expanding) {
+        onExpandNode(node.id);
       }
     },
-    [navigate, objectDetailPath],
+    [onExpandNode, expanding],
   );
 
   const handleEdgeClick = useCallback(
@@ -150,9 +165,11 @@ function OntologyGraphViewInner({
   );
 
   const edgeClickEnabled = Boolean(onEdgeClick || relationDetailPath);
-  const defaultHint = edgeClickEnabled
-    ? "拖拽节点重排 · 点击节点查看详情 · 点击关系边跳转编辑"
-    : "拖拽节点重排 · 点击节点查看详情";
+  const defaultHint = onExpandNode
+    ? "双击展开邻域 · Shift+单击查看详情 · 拖拽重排"
+    : edgeClickEnabled
+      ? "拖拽节点重排 · 点击节点查看详情 · 点击关系边跳转编辑"
+      : "拖拽节点重排 · 点击节点查看详情";
 
   const layoutButtons = (
     <Space size={4}>
@@ -195,7 +212,9 @@ function OntologyGraphViewInner({
       style={{ height }}
     >
       <div className="ontology-graph-toolbar">
-        <span className="ontology-graph-hint">{hint ?? defaultHint}</span>
+        <span className="ontology-graph-hint">
+          {expanding ? "正在展开邻域…" : (hint ?? defaultHint)}
+        </span>
         {layoutButtons}
       </div>
       <ReactFlow
@@ -211,6 +230,7 @@ function OntologyGraphViewInner({
           instance.fitView({ padding: 0.15 });
         }}
         onNodeClick={handleNodeClick}
+        onNodeDoubleClick={onExpandNode ? handleNodeDoubleClick : undefined}
         onEdgeClick={edgeClickEnabled ? handleEdgeClick : undefined}
         nodesConnectable={false}
         nodesDraggable

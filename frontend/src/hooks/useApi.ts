@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 export interface UseAsyncResult<T> {
   data: T | null;
@@ -7,7 +7,7 @@ export interface UseAsyncResult<T> {
   /** 重新触发传入的 fetcher，返回最新结果。 */
   reload: () => Promise<T | null>;
   /** 直接覆盖本地 data，便于乐观更新。 */
-  setData: (data: T | null) => void;
+  setData: Dispatch<SetStateAction<T | null>>;
 }
 
 /**

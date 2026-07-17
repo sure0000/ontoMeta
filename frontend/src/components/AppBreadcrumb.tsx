@@ -124,12 +124,43 @@ async function resolveBreadcrumbs(
     return crumbs;
   }
 
-  if (pathname === "/settings") {
-    return [{ label: "设置" }];
-  }
-
   if (pathname.startsWith("/chat-bi")) {
     return [{ label: "智能问数" }];
+  }
+
+  if (pathname === "/external-api/apps" || pathname === "/external-api") {
+    return [
+      { label: "外部API", path: "/external-api/apps" },
+      { label: "应用创建" },
+    ];
+  }
+
+  if (pathname === "/external-api/endpoints") {
+    return [
+      { label: "外部API", path: "/external-api/endpoints" },
+      { label: "MCP接口" },
+    ];
+  }
+
+  if (pathname.startsWith("/external-api/endpoints/")) {
+    const apiId = pathname.split("/")[3];
+    const crumbs: Crumb[] = [
+      { label: "外部API", path: "/external-api/endpoints" },
+      { label: "MCP接口", path: "/external-api/endpoints" },
+    ];
+    if (apiId) {
+      try {
+        const item = await api.getExternalApiCatalogItem(apiId);
+        crumbs.push({ label: item.name });
+      } catch {
+        crumbs.push({ label: "MCP Tool" });
+      }
+    }
+    return crumbs;
+  }
+
+  if (pathname === "/settings") {
+    return [{ label: "设置" }];
   }
 
   return [{ label: "首页", path: "/ontology" }];

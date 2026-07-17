@@ -5,6 +5,7 @@ import {
   EyeOutlined,
   PlusOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import {
@@ -27,12 +28,13 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { useEffect, useState } from "react";
+import { api, clearAdminToken, getAdminToken, setAdminToken } from "../api";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
+import { useApi } from "../hooks/useApi";
 import type { DatahubSettings, LlmModelOption, LlmServiceConfig } from "../types";
 
 const { Text } = Typography;
@@ -55,12 +57,39 @@ type DatahubFormValues = {
   use_mock: boolean;
 };
 
+type AdminTokenFormValues = {
+  token: string;
+};
+
+type SettingsBundle = {
+  llmServices: LlmServiceConfig[];
+  llmModels: LlmModelOption[];
+  datahubSettings: DatahubSettings;
+};
+
 export function SettingsPage() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [llmServices, setLlmServices] = useState<LlmServiceConfig[]>([]);
-  const [llmModels, setLlmModels] = useState<LlmModelOption[]>([]);
-  const [datahubSettings, setDatahubSettings] = useState<DatahubSettings | null>(null);
+  const {
+    data: bundle,
+    loading,
+    error,
+    reload: loadAll,
+    setData: setBundle,
+  } = useApi<SettingsBundle>(async () => {
+    const [services, models, datahub] = await Promise.all([
+      api.listLlmServices(),
+      api.listLlmModels(),
+      api.getDatahubSettings(),
+    ]);
+    return {
+      llmServices: services,
+      llmModels: models,
+      datahubSettings: datahub,
+    };
+  }, []);
+
+  const llmServices = bundle?.llmServices ?? [];
+  const llmModels = bundle?.llmModels ?? [];
+  const datahubSettings = bundle?.datahubSettings ?? null;
 
   const [llmModalOpen, setLlmModalOpen] = useState(false);
   const [llmModalMode, setLlmModalMode] = useState<"create" | "edit">("create");
@@ -70,35 +99,20 @@ export function SettingsPage() {
 
   const [llmForm] = Form.useForm<LlmFormValues>();
   const [datahubForm] = Form.useForm<DatahubFormValues>();
+  const [adminTokenForm] = Form.useForm<AdminTokenFormValues>();
   const [datahubSaving, setDatahubSaving] = useState(false);
-
-  const loadAll = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [services, models, datahub] = await Promise.all([
-        api.listLlmServices(),
-        api.listLlmModels(),
-        api.getDatahubSettings(),
-      ]);
-      setLlmServices(services);
-      setLlmModels(models);
-      setDatahubSettings(datahub);
-      datahubForm.setFieldsValue({
-        gms_url: datahub.gms_url,
-        frontend_url: datahub.frontend_url,
-        use_mock: datahub.use_mock,
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载设置失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [datahubForm]);
+  const [adminTokenSaved, setAdminTokenSaved] = useState(() => Boolean(getAdminToken()));
 
   useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+    if (!datahubSettings) return;
+    datahubForm.setFieldsValue({
+      gms_url: datahubSettings.gms_url,
+      frontend_url: datahubSettings.frontend_url,
+      use_mock: datahubSettings.use_mock,
+    });
+    adminTokenForm.setFieldsValue({ token: getAdminToken() });
+    setAdminTokenSaved(Boolean(getAdminToken()));
+  }, [datahubSettings, datahubForm, adminTokenForm]);
 
   const openCreateLlm = () => {
     setLlmModalMode("create");
@@ -198,7 +212,9 @@ export function SettingsPage() {
             token: values.token?.trim() ? values.token.trim() : undefined,
             use_mock: values.use_mock,
           });
-          setDatahubSettings(updated);
+          setBundle((prev) =>
+            prev ? { ...prev, datahubSettings: updated } : prev,
+          );
           message.success("DataHub 配置已保存");
           datahubForm.setFieldValue("token", "");
         } catch (err) {
@@ -208,6 +224,26 @@ export function SettingsPage() {
         }
       },
     });
+  };
+
+  const handleAdminTokenSave = async () => {
+    const values = await adminTokenForm.validateFields();
+    const token = values.token.trim();
+    if (!token) {
+      message.warning("请输入与 backend/.env 中 ONTOMETA_ADMIN_TOKEN 一致的 Token");
+      return;
+    }
+    setAdminToken(token);
+    setAdminTokenSaved(true);
+    message.success("管理 Token 已保存到本机，后续请求将自动携带");
+    await loadAll();
+  };
+
+  const handleAdminTokenClear = () => {
+    clearAdminToken();
+    adminTokenForm.setFieldsValue({ token: "" });
+    setAdminTokenSaved(false);
+    message.info("已清除本机管理 Token");
   };
 
   const llmColumns: ColumnsType<LlmServiceConfig> = [
@@ -404,6 +440,54 @@ export function SettingsPage() {
                     <Button type="primary" onClick={handleDatahubSave} loading={datahubSaving}>
                       保存 DataHub 配置
                     </Button>
+                  </Form.Item>
+                </Form>
+              </SectionCard>
+            ),
+          },
+          {
+            key: "security",
+            label: (
+              <span>
+                <SafetyCertificateOutlined style={{ marginRight: 6 }} />
+                管理鉴权
+              </span>
+            ),
+            children: (
+              <SectionCard
+                title="管理 Token"
+                icon={<SafetyCertificateOutlined />}
+                extra={
+                  adminTokenSaved ? (
+                    <Tag color="success">本机已配置</Tag>
+                  ) : (
+                    <Tag color="warning">未配置</Tag>
+                  )
+                }
+              >
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="管理 API 需携带与后端 ONTOMETA_ADMIN_TOKEN 一致的 Token"
+                  description="Token 仅保存在本机浏览器 localStorage，用于开发便利；生产环境建议由反向代理注入。"
+                />
+                <Form form={adminTokenForm} layout="vertical" style={{ maxWidth: 640 }}>
+                  <Form.Item
+                    label="Admin Token"
+                    name="token"
+                    rules={[{ required: true, message: "请输入管理 Token" }]}
+                    extra="对应 backend/.env 中的 ONTOMETA_ADMIN_TOKEN"
+                  >
+                    <Input.Password placeholder="与后端配置保持一致" />
+                  </Form.Item>
+                  <Form.Item>
+                    <Space>
+                      <Button type="primary" onClick={() => void handleAdminTokenSave()}>
+                        保存到本机
+                      </Button>
+                      <Button onClick={handleAdminTokenClear}>清除</Button>
+                    </Space>
                   </Form.Item>
                 </Form>
               </SectionCard>

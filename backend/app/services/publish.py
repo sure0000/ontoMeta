@@ -20,6 +20,13 @@ from app.models import (
 )
 from app.schemas import ConfirmationCreate, OntologyDraftOutput
 from app.services.common import log_change
+from app.services.draft_consistency import DraftConsistencyError, assert_ontology_consistent
+from app.services.version_diff import (
+    capture_ontology_snapshot,
+    compute_version_diff,
+    load_previous_snapshot,
+    summarize_diff,
+)
 
 
 def _log_change(
@@ -191,7 +198,17 @@ class PublishService:
         if not ontology:
             raise ValueError("Ontology not found")
 
-        ontology.version += 1
+        assert_ontology_consistent(db, ontology_id)
+
+        new_version = ontology.version + 1
+        previous_snapshot = load_previous_snapshot(
+            db, ontology_id, before_version=new_version
+        )
+        current_snapshot = capture_ontology_snapshot(db, ontology_id)
+        diff = compute_version_diff(previous_snapshot, current_snapshot)
+        diff_summary = f"发布本体版本 v{new_version}：{summarize_diff(diff)}"
+
+        ontology.version = new_version
         ontology.status = OntologyStatus.PUBLISHED.value
         ontology.published_at = datetime.now(timezone.utc)
         ontology.approved_by = operator
@@ -215,7 +232,9 @@ class PublishService:
                 entity_type="ontology",
                 entity_id=ontology.id,
                 version=ontology.version,
-                diff_summary=f"发布本体版本 v{ontology.version}",
+                diff_summary=diff_summary,
+                diff_json=json.dumps(diff, ensure_ascii=False),
+                snapshot_json=json.dumps(current_snapshot, ensure_ascii=False),
                 operator=operator,
             )
         )

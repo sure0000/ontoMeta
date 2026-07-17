@@ -60,7 +60,9 @@ export interface TaskRecord {
   status: string;
   progress: number;
   message?: string;
+  error_summary?: string;
   ontology_id?: string;
+  evidence_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -303,6 +305,55 @@ export interface VersionRecord {
   diff_summary?: string;
   operator?: string;
   created_at: string;
+  has_diff?: boolean;
+  has_snapshot?: boolean;
+}
+
+export interface VersionDiffSection {
+  added: Array<{ key?: string; name?: string; display_name?: string }>;
+  removed: Array<{ key?: string; name?: string; display_name?: string }>;
+  modified: Array<{
+    key?: string;
+    name?: string;
+    display_name?: string;
+    changes?: Record<string, { from?: unknown; to?: unknown }>;
+  }>;
+}
+
+export interface VersionDiff {
+  ontology_id: string;
+  version: number;
+  previous_version?: number | null;
+  diff_summary?: string;
+  operator?: string;
+  created_at?: string;
+  object_types: VersionDiffSection;
+  properties: VersionDiffSection;
+  relation_types: VersionDiffSection;
+  business_logics: VersionDiffSection;
+}
+
+export interface VersionSnapshot {
+  ontology_id: string;
+  version: number;
+  diff_summary?: string;
+  created_at?: string;
+  object_types: Record<string, unknown>[];
+  properties: Record<string, unknown>[];
+  relation_types: Record<string, unknown>[];
+  business_logics: Record<string, unknown>[];
+}
+
+export interface OntologyValidationResult {
+  ontology_id: string;
+  ok: boolean;
+  issues: Array<{
+    code: string;
+    message: string;
+    entity_type: string;
+    entity_id?: string;
+    entity_name?: string;
+  }>;
 }
 
 export interface OntologySummary {
@@ -337,6 +388,18 @@ export interface GraphEdge {
 export interface OntologyGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  center_id?: string | null;
+  depth?: number;
+  truncated?: boolean;
+  total_object_count?: number;
+  total_relation_count?: number;
+}
+
+export interface PageResult<T> {
+  items: T[];
+  total: number;
+  limit: number | null;
+  offset: number;
 }
 
 export interface Confirmation {
@@ -462,4 +525,64 @@ export interface ChatBiSuggestions {
 export interface ChatBiHistoryItem {
   role: "user" | "assistant";
   content: string;
+}
+
+// --- External API ---
+
+export interface ExternalApp {
+  id: string;
+  name: string;
+  description?: string | null;
+  app_key: string;
+  api_key_hint?: string | null;
+  api_key?: string | null;
+  scopes: string[];
+  rate_limit_per_minute?: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string | null;
+}
+
+export interface ExternalAppCreated extends ExternalApp {
+  api_key: string;
+}
+
+export interface ExternalApiFieldDoc {
+  name: string;
+  type: string;
+  description: string;
+}
+
+export interface ExternalApiCatalogItem {
+  id: string;
+  name: string;
+  tool_name: string;
+  category: string;
+  description: string;
+  auth_required: boolean;
+  required_scope: string;
+  rest_method?: string | null;
+  rest_path?: string | null;
+  input_schema: Record<string, unknown>;
+  output_fields: ExternalApiFieldDoc[];
+  example_result?: unknown;
+  mcp_endpoint: string;
+}
+
+export interface ExternalApiCallLog {
+  id: string;
+  app_id: string;
+  tool_name?: string | null;
+  path?: string | null;
+  status_code: number;
+  duration_ms?: number | null;
+  error_message?: string | null;
+  created_at: string;
+}
+
+export interface McpToolCallResult {
+  content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+  structuredContent?: unknown;
+  isError?: boolean;
 }

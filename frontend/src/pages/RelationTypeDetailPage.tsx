@@ -4,8 +4,6 @@ import {
   BulbOutlined,
   DatabaseOutlined,
   LinkOutlined,
-  SaveOutlined,
-  SendOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -26,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { OntologyGraphView } from "../components/graph";
+import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -256,7 +255,7 @@ export function RelationTypeDetailPage() {
             : api.listObjectTypes({ ontologyId: detail.ontology_id }),
           domainId ? api.getDomain(domainId) : api.getConfig(),
         ]);
-        setPeerObjects(peers);
+        setPeerObjects(peers.items);
         setDatahubBase(
           domainId
             ? extractDataHubBase(
@@ -469,23 +468,18 @@ export function RelationTypeDetailPage() {
           <Space>
             <StatusBadge status={rel.status} />
             {inWorkspace ? (
-              <>
-                <Link to={workspaceBackPath}>
-                  <Button>返回工作区</Button>
-                </Link>
-                <Button loading={saving} onClick={handleSave} icon={<SaveOutlined />}>
-                  保存
-                </Button>
-                <Button
-                  type="primary"
-                  loading={prePublishing}
-                  disabled={!canPrePublish}
-                  onClick={handlePrePublish}
-                  icon={<SendOutlined />}
-                >
-                  预发布
-                </Button>
-              </>
+              <EntityEditToolbar
+                saving={saving}
+                prePublishing={prePublishing}
+                canPrePublish={canPrePublish}
+                onSave={handleSave}
+                onPrePublish={handlePrePublish}
+                leading={
+                  <Link to={workspaceBackPath}>
+                    <Button>返回工作区</Button>
+                  </Link>
+                }
+              />
             ) : null}
           </Space>
         }
@@ -560,58 +554,14 @@ export function RelationTypeDetailPage() {
                             : "事实表承载多个对象之间的关联，从 DataHub 搜索对应的事实表"
                         }
                       >
-                        <Select
-                          showSearch
-                          allowClear
-                          loading={datasetSearching || ensuringDataset}
+                        <MappingDatasetSelect
+                          options={datasetOptions}
+                          searching={datasetSearching}
+                          ensuring={ensuringDataset}
                           placeholder="输入表名 / 显示名搜索 DataHub 表"
-                          optionFilterProp="label"
-                          optionLabelProp="label"
-                          filterOption={false}
+                          detailed
                           onSearch={searchDatasets}
-                          notFoundContent={
-                            datasetSearching
-                              ? "搜索中..."
-                              : "输入关键字搜索 DataHub 表"
-                          }
-                          options={datasetOptions.map((ds) => ({
-                            label: ds.display_name || ds.name,
-                            value: ds.object_type_id ?? `dataset:${ds.urn}`,
-                            dataset: ds,
-                          }))}
-                          onSelect={(_value, option) => {
-                            const ds = (option as { dataset?: DataHubDatasetOption })
-                              .dataset;
-                            if (ds && !ds.object_type_id) {
-                              void handleDatasetSelect(ds);
-                            }
-                          }}
-                          optionRender={(option) => {
-                            const ds = (option as { dataset?: DataHubDatasetOption })
-                              .dataset;
-                            if (!ds) return option.label;
-                            return (
-                              <Space direction="vertical" size={0}>
-                                <Space size={6}>
-                                  <Text strong>{ds.display_name || ds.name}</Text>
-                                  {ds.platform ? <Tag>{ds.platform}</Tag> : null}
-                                  {ds.object_type_id ? (
-                                    <Tag color="green">已映射</Tag>
-                                  ) : (
-                                    <Tag color="blue">将创建</Tag>
-                                  )}
-                                </Space>
-                                {ds.description ? (
-                                  <Text type="secondary" style={{ fontSize: 12 }}>
-                                    {ds.description}
-                                  </Text>
-                                ) : null}
-                                <Text type="secondary" code style={{ fontSize: 11 }}>
-                                  {ds.urn}
-                                </Text>
-                              </Space>
-                            );
-                          }}
+                          onSelectUnmapped={(ds) => void handleDatasetSelect(ds)}
                         />
                       </Form.Item>
                     ) : null}

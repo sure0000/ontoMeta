@@ -144,32 +144,50 @@
 
 ## 6. API 设计
 
+> 管理端路径均挂在 `/api` 前缀下，需 `ONTOMETA_ADMIN_TOKEN`。完整契约以运行中的 OpenAPI（`/docs`）为准。
+
 ### 6.1 工作区相关
 
-- `GET /domains`
-- `GET /domains/:id`
-- `POST /domains/:id/generate-draft`
-- `GET /domains/:id/progress`
+- `GET /api/domains`、`GET /api/domains/{id}`
+- `POST /api/domains/{id}/generate-draft`、`GET /api/domains/{id}/progress`
+- `GET /api/domains/{id}/tasks`、任务日志 / stop / retry
+- `GET /api/domains/{id}/draft-duplicates`
 
 ### 6.2 本体相关
 
-- `GET /ontologies`
-- `GET /ontologies/:id`
-- `GET /object-types/:id`
-- `GET /ontologies/:id/versions`
+- `GET /api/ontologies`、`GET /api/ontologies/{id}`
+- `GET /api/ontologies/{id}/object-types`、`.../relation-types`（分页 `limit`/`offset`/`q`）
+- `GET /api/ontologies/{id}/graph`（邻域：`center_id`/`depth`/`max_nodes`/`full`）
+- `GET /api/ontologies/{id}/versions`、`.../versions/{v}/diff|snapshot`
+- `POST /api/ontologies/{id}/validate`（发布前一致性校验）
+- `GET|PATCH /api/object-types/{id}`、`GET|PATCH /api/relation-types/{id}`
 
 ### 6.3 业务逻辑相关
 
-- `GET /business-logics`
-- `GET /business-logics/:id`
+- `GET /api/business-logics`（分页）、`GET /api/business-logics/{id}`
+- 分类 CRUD、表达式格式化、绑定、发布确认
 
 ### 6.4 重要操作确认相关
 
-- `POST /confirmations`
-- `GET /confirmations/:id`
-- `POST /confirmations/:id/confirm`
-- `POST /confirmations/:id/cancel`
+- `POST /api/confirmations`
+- `GET /api/confirmations/{id}`
+- `POST /api/confirmations/{id}/confirm`、`.../cancel`
 
+### 6.5 Chat BI
+
+- 会话 / 分类 CRUD：`/api/chat-bi/conversations*`、`/api/chat-bi/categories*`
+- `POST /api/chat-bi/ask`、`GET /api/chat-bi/suggestions`
+
+### 6.6 设置与外部应用管理
+
+- LLM / DataHub：`/api/settings/*`、`GET /api/config`
+- 外部应用 CRUD、Key 轮换、调用日志、目录：`/api/external-apps*`、`/api/external-api/*`
+
+### 6.7 对外只读（App API Key）
+
+- REST：`GET /api/v1/domains|object-types|relation-types|business-logics`（及详情）
+- MCP：`GET|POST /api/mcp`、`GET /api/mcp/tools`、`POST /api/mcp/tools/call`
+- Scope：`domains:read` / `objects:read` / `relations:read` / `logics:read`；限流超限 `429`
 ---
 
 ## 7. LLM 设计
@@ -214,20 +232,23 @@
 
 ## 9. 安全与审计
 
-- 所有编辑与发布动作需要审计日志
+- 所有编辑与发布动作需要审计日志（变更日志 / 确认记录）
 - 所有 DataHub 引用保留原始来源 ID
-- 发布版本不可被无痕覆盖
-- 权限分为读取、编辑、审核、发布四层
-
+- 发布版本不可被无痕覆盖；支持版本 diff 与快照只读查看
+- **权限现状（阶段性）**：
+  - 管理面：共享 `ONTOMETA_ADMIN_TOKEN`（非完整 RBAC）
+  - 对外面：外部 App API Key（哈希存储）+ 应用级 scope + 进程内限流
+  - 产品目标中的「读取 / 编辑 / 审核 / 发布」四层角色尚未落地，见 [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md) 非目标说明
+- 生产（`DEBUG=false`）500 响应脱敏；CORS 使用显式 origins
 ---
 
 ## 10. 非功能要求
 
 ### 10.1 性能
 
-- 数据域详情页应支持大域分页加载
-- 图谱展示应支持局部展开，避免一次渲染全图
-- LLM 生成应支持异步任务化
+- 数据域详情页应支持大域分页加载（已实现 `PageResult` + limit/offset）
+- 图谱展示应支持局部展开，避免一次渲染全图（已实现邻域参数）
+- LLM 生成应支持异步任务化（已实现进程内队列；多实例队列延期）
 
 ### 10.2 可维护性
 
@@ -261,3 +282,30 @@
 - 增强跨域语义建模
 - 增强业务逻辑解析能力
 - 增强数字孪生表达能力
+
+---
+
+## 12. Schema 迁移
+
+- 使用 **Alembic**（`backend/alembic/`）；应用启动时执行 `upgrade head`
+- 开发可用 SQLite；生产 / Docker Compose 使用 PostgreSQL（`DATABASE_URL`）
+- 遗留库（有表无 `alembic_version`）启动时 stamp，或运行 `scripts/alembic_stamp_legacy.py`
+- 详见 [backend/alembic/README.md](./backend/alembic/README.md)
+
+---
+
+## 13. 异步任务与队列
+
+- 草稿生成状态机：`queued → running → succeeded | failed | cancelled`（兼容旧 `completed`）
+- **进程内** Semaphore + DB 队列位次；配置 `MAX_CONCURRENT_DRAFT_GENERATIONS`
+- 进程重启：`queued`/`running` → `failed`（fail-on-restart，不自动 resume）；失败任务可 `retry`
+- Chat BI / 表达式格式化中的同步 LLM 调用经 `asyncio.to_thread`，避免阻塞事件循环
+- 多实例 / Redis·Celery 级队列为延期项（B5.1），Compose 中 Redis 为可选注释服务
+
+---
+
+## 14. 部署
+
+- 本地：`Makefile`（`install` / `backend` / `frontend` / `migrate` / `test`）
+- 容器：根目录 `docker compose up --build` → `postgres` + `api` + `frontend`（Nginx 反代 `/api`）
+- 环境变量清单：`backend/.env.example`

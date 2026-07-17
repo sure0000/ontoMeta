@@ -1,0 +1,94 @@
+/* ============================================================
+ * ontoMeta — Global styles & design tokens
+ * ============================================================ */
+
+:root {
+  --om-bg: #f6f8fb;
+  --om-bg-soft: #eef2f7;
+  --om-surface: #ffffff;
+  --om-surface-muted: #f8fafc;
+  --om-border: #eef1f6;
+  --om-border-strong: #e2e8f0;
+
+  --om-text: #0f172a;
+  --om-text-secondary: #475569;
+  --om-text-tertiary: #94a3b8;
+  --om-text-disabled: #cbd5e1;
+
+  --om-primary: #2563eb;
+  --om-primary-soft: #eff4ff;
+  --om-primary-border: #bfdbfe;
+
+  --om-success: #16a34a;
+  --om-success-soft: #dcfce7;
+  --om-warning: #d97706;
+  --om-warning-soft: #fef3c7;
+  --om-error: #dc2626;
+  --om-error-soft: #fee2e2;
+  --om-neutral: #64748b;
+  --om-neutral-soft: #f1f5f9;
+
+  --om-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --om-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06);
+  --om-shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08);
+
+  --om-radius: 10px;
+  --om-radius-lg: 12px;
+  --om-radius-sm: 8px;
+
+  --om-sidebar-w: 232px;
+  --om-sidebar-collapsed-w: 64px;
+  --om-header-h: 56px;
+
+  --om-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Monaco,
+    Consolas, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--om-bg);
+  color: var(--om-text);
+  font-family: inherit;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.18);
+  color: var(--om-text);
+}
+
+/* ---------- Scrollbars ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #dbe2ec;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #c2ccd9;
+  background-clip: content-box;
+}
+

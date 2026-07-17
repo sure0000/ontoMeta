@@ -1,9 +1,21 @@
-from collections.abc import Generator
+"""数据库引擎、Session 与启动迁移。
 
-from sqlalchemy import create_engine, event, text
+Schema 变更一律走 Alembic（见 backend/alembic/）。
+本模块仅负责：连接、跑 upgrade/stamp、以及幂等数据回填。
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Generator
+from pathlib import Path
+
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
+
+logger = logging.getLogger("ontometa.database")
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
@@ -33,121 +45,113 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def init_db() -> None:
-    from sqlalchemy import inspect
+def _alembic_config():
+    from alembic.config import Config
 
+    ini_path = Path(__file__).resolve().parent.parent / "alembic.ini"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    return cfg
+
+
+def run_migrations() -> None:
+    """执行 Alembic upgrade；遗留库（有业务表但无 alembic_version）则 stamp head。
+
+    遗留库前提：schema 已与当前模型一致（B1 之后的库满足）。
+    若极旧库缺列，请先备份，再按 README「旧库升级」处理，勿直接 stamp。
+    """
+    from alembic import command
+
+    cfg = _alembic_config()
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+
+    if "alembic_version" not in tables and "domain_contexts" in tables:
+        logger.info(
+            "Detected legacy DB without alembic_version; stamping to head "
+            "(assumes schema already matches models)"
+        )
+        command.stamp(cfg, "head")
+        return
+
+    command.upgrade(cfg, "head")
+
+
+def init_db() -> None:
     from app import models  # noqa: F401
-    from app.services.relation_structure import infer_relation_structure_type
+    from app.services.draft_task_service import recover_stale_draft_tasks
     from app.services.settings_service import SettingsService
 
-    Base.metadata.create_all(bind=engine)
+    run_migrations()
 
     with SessionLocal() as db:
         SettingsService().ensure_defaults(db)
 
+    _backfill_relation_structure_types()
+    _migrate_external_api_key_hashes()
+    recover_stale_draft_tasks()
+
+
+def _backfill_relation_structure_types() -> None:
+    """幂等：补全 relation_types.structure_type 空值。"""
     inspector = inspect(engine)
     if "relation_types" not in inspector.get_table_names():
         return
+    cols = {c["name"] for c in inspector.get_columns("relation_types")}
+    if "structure_type" not in cols:
+        return
 
-    columns = {column["name"] for column in inspector.get_columns("relation_types")}
-    bl_columns: set[str] = set()
-    if "business_logics" in inspector.get_table_names():
-        bl_columns = {column["name"] for column in inspector.get_columns("business_logics")}
-
-    # 将所有需要的 ALTER 合并到同一个事务中执行，减少连接/提交开销。
-    alter_statements: list[str] = []
-    if "structure_type" not in columns:
-        alter_statements.append(
-            "ALTER TABLE relation_types ADD COLUMN structure_type VARCHAR(50)"
-        )
-    if "mapping_object_type_id" not in columns:
-        alter_statements.append(
-            "ALTER TABLE relation_types ADD COLUMN mapping_object_type_id "
-            "VARCHAR(36) REFERENCES object_types(id)"
-        )
-    if "expression_draft" not in bl_columns:
-        alter_statements.append(
-            "ALTER TABLE business_logics ADD COLUMN expression_draft TEXT"
-        )
-    if "expression_json" not in bl_columns:
-        alter_statements.append(
-            "ALTER TABLE business_logics ADD COLUMN expression_json TEXT"
-        )
-    chatbi_conv_columns: set[str] = set()
-    if "chat_bi_conversations" in inspector.get_table_names():
-        chatbi_conv_columns = {c["name"] for c in inspector.get_columns("chat_bi_conversations")}
-    if "category" not in chatbi_conv_columns:
-        alter_statements.append(
-            "ALTER TABLE chat_bi_conversations ADD COLUMN category VARCHAR(100)"
-        )
-    if "is_pinned" not in chatbi_conv_columns:
-        alter_statements.append(
-            "ALTER TABLE chat_bi_conversations ADD COLUMN is_pinned BOOLEAN DEFAULT 0"
-        )
-    if "is_archived" not in chatbi_conv_columns:
-        alter_statements.append(
-            "ALTER TABLE chat_bi_conversations ADD COLUMN is_archived BOOLEAN DEFAULT 0"
-        )
-    if "category_id" not in bl_columns:
-        alter_statements.append(
-            "ALTER TABLE business_logics ADD COLUMN category_id VARCHAR(36) "
-            "REFERENCES business_logic_categories(id) ON DELETE SET NULL"
-        )
-    if alter_statements:
-        with engine.begin() as conn:
-            for stmt in alter_statements:
-                conn.execute(text(stmt))
-
-    _ensure_secondary_indexes(inspector)
+    from app.models import RelationType
+    from app.services.relation_structure import infer_relation_structure_type
 
     with SessionLocal() as db:
-        from app.models import RelationType
-
+        updated = 0
         for rel in db.query(RelationType).filter(RelationType.structure_type.is_(None)).all():
-            rel.structure_type = infer_relation_structure_type(rel.description, rel.source_evidence)
-        db.commit()
+            rel.structure_type = infer_relation_structure_type(
+                rel.description, rel.source_evidence
+            )
+            updated += 1
+        if updated:
+            db.commit()
+            logger.info("Backfilled structure_type on %s relation_types", updated)
 
 
-# 表名 -> 列名，对应 models 中新增的 index=True 列。
-# SQLite/SQLAlchemy 在 create_all 时会为新表自动建索引，
-# 但对历史已存在的表不会补建，这里显式 CREATE INDEX IF NOT EXISTS。
-_SECONDARY_INDEXES: dict[str, list[str]] = {
-    "ontologies": ["domain_context_id", "status"],
-    "object_types": ["ontology_id", "source_ref", "status"],
-    "properties": ["object_type_id", "status"],
-    "relation_types": [
-        "ontology_id",
-        "source_object_type_id",
-        "target_object_type_id",
-        "mapping_object_type_id",
-        "status",
-    ],
-    "business_logics": ["ontology_id", "status", "category_id"],
-    "business_logic_categories": ["name"],
-    "draft_evidences": ["ontology_id", "source_ref"],
-    "change_confirmations": ["ontology_id", "target_id", "confirmation_status"],
-    "version_records": ["entity_id", "created_at"],
-    "entity_change_logs": ["entity_id", "created_at"],
-    "draft_generation_tasks": ["domain_context_id", "ontology_id", "status"],
-    "chat_bi_conversations": ["domain_id", "category"],
-    "chat_bi_messages": ["conversation_id"],
-}
+def _migrate_external_api_key_hashes() -> None:
+    """幂等：将遗留明文 api_key 哈希回填（B1 数据迁移，可重复执行）。"""
+    from app.auth import api_key_prefix, hash_api_key
+    from app.models import ExternalApp
 
+    inspector = inspect(engine)
+    if "external_apps" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("external_apps")}
+    if "api_key_hash" not in cols:
+        return
 
-def _ensure_secondary_indexes(inspector) -> None:
-    existing_tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        for table, columns in _SECONDARY_INDEXES.items():
-            if table not in existing_tables:
+    pepper = settings.api_key_hash_pepper
+    migrated = 0
+    with SessionLocal() as db:
+        rows = db.query(ExternalApp).all()
+        for row in rows:
+            if row.api_key_hash:
+                raw = (row.api_key or "").strip()
+                if raw.startswith("om_sk_"):
+                    row.api_key = f"hashed:{row.api_key_hash}"
+                    migrated += 1
                 continue
-            existing_columns = {c["name"] for c in inspector.get_columns(table)}
-            for col in columns:
-                if col not in existing_columns:
-                    continue
-                idx_name = f"ix_{table}_{col}"
-                conn.execute(
-                    text(
-                        f"CREATE INDEX IF NOT EXISTS {idx_name} "
-                        f"ON {table} ({col})"
-                    )
+            raw = (row.api_key or "").strip()
+            if not raw or raw.startswith("hashed:"):
+                logger.warning(
+                    "external_app %s (%s) 无可用明文 Key 且无 hash，需重新生成密钥",
+                    row.id,
+                    row.name,
                 )
+                continue
+            key_hash = hash_api_key(raw, pepper)
+            row.api_key_hash = key_hash
+            row.api_key_prefix = api_key_prefix(raw)
+            row.api_key = f"hashed:{key_hash}"
+            migrated += 1
+        if migrated:
+            db.commit()
+            logger.info("Migrated %s external app API key(s) to hash storage", migrated)

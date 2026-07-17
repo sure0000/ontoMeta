@@ -22,25 +22,65 @@ import type {
   DraftProgress,
   ExpressionDraft,
   ExpressionJson,
+  ExternalApiCallLog,
+  ExternalApiCatalogItem,
+  McpToolCallResult,
+  ExternalApp,
+  ExternalAppCreated,
   LlmModelOption,
   LlmServiceConfig,
   ObjectTypeDetail,
   ObjectTypeSummary,
   OntologyGraph,
   OntologySummary,
+  PageResult,
   Property,
   RelationType,
   RelationTypeDetail,
   TaskRecord,
+  OntologyValidationResult,
+  VersionDiff,
+  VersionRecord,
+  VersionSnapshot,
 } from "./types";
 import { buildQuery } from "./utils/format";
 
+const ADMIN_TOKEN_STORAGE_KEY = "ontometa_admin_token";
+
+/** 读取管理 Token：优先 localStorage，其次 Vite 环境变量。 */
+export function getAdminToken(): string {
+  try {
+    const fromStorage = localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY);
+    if (fromStorage?.trim()) return fromStorage.trim();
+  } catch {
+    // ignore (SSR / privacy mode)
+  }
+  const fromEnv = import.meta.env.VITE_ONTOMETA_ADMIN_TOKEN;
+  return typeof fromEnv === "string" ? fromEnv.trim() : "";
+}
+
+export function setAdminToken(token: string): void {
+  localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token.trim());
+}
+
+export function clearAdminToken(): void {
+  localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
+  const headers = new Headers(options?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const adminToken = getAdminToken();
+  if (adminToken && !headers.has("X-Admin-Token")) {
+    headers.set("X-Admin-Token", adminToken);
+  }
   try {
     response = await fetch(path, {
-      headers: { "Content-Type": "application/json" },
       ...options,
+      headers,
     });
   } catch (err) {
     throw new Error(
@@ -53,10 +93,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     let detail = raw || `请求失败：HTTP ${response.status}`;
     try {
       const parsed = JSON.parse(raw) as {
-        detail?: string | Array<{ msg?: string }>;
+        detail?: string | Array<{ msg?: string }> | { message?: string; issues?: unknown };
       };
       if (typeof parsed.detail === "string" && parsed.detail.trim()) {
         detail = parsed.detail;
+      } else if (parsed.detail && typeof parsed.detail === "object" && !Array.isArray(parsed.detail)) {
+        const obj = parsed.detail as { message?: string };
+        if (obj.message) detail = obj.message;
       } else if (Array.isArray(parsed.detail)) {
         const joined = parsed.detail
           .map((item) => item.msg)
@@ -89,6 +132,16 @@ export const api = {
   listTasks: (domainId: string) => request<TaskRecord[]>(`/api/domains/${domainId}/tasks`),
   stopDraftTask: (domainId: string, taskId: string) =>
     request<TaskRecord>(`/api/domains/${domainId}/tasks/${taskId}/stop`, { method: "POST" }),
+  retryDraftTask: (domainId: string, taskId: string) =>
+    request<DraftProgress>(`/api/domains/${domainId}/tasks/${taskId}/retry`, { method: "POST" }),
+  getDraftDuplicates: (domainId: string) =>
+    request<{
+      domain_id: string;
+      draft_count: number;
+      draft_ontology_ids: string[];
+      will_purge_on_regenerate: boolean;
+      message: string;
+    }>(`/api/domains/${domainId}/draft-duplicates`),
   getTaskLogs: (domainId: string, taskId: string) =>
     request<ChangeLog[]>(`/api/domains/${domainId}/tasks/${taskId}/logs`),
 
@@ -185,12 +238,18 @@ export const api = {
     ontologyId?: string;
     domainId?: string;
     publishedOnly?: boolean;
+    q?: string;
+    limit?: number;
+    offset?: number;
   }) =>
-    request<RelationType[]>(
+    request<PageResult<RelationType>>(
       `/api/relation-types${buildQuery({
         ontology_id: params?.ontologyId,
         domain_id: params?.domainId,
         published_only: params?.publishedOnly,
+        q: params?.q,
+        limit: params?.limit,
+        offset: params?.offset,
       })}`,
     ),
 
@@ -204,18 +263,45 @@ export const api = {
       })}`,
     ),
   getOntology: (id: string) => request<OntologySummary>(`/api/ontologies/${id}`),
-  getOntologyGraph: (id: string) => request<OntologyGraph>(`/api/ontologies/${id}/graph`),
+  listOntologyVersions: (ontologyId: string) =>
+    request<VersionRecord[]>(`/api/ontologies/${ontologyId}/versions`),
+  getOntologyVersionDiff: (ontologyId: string, version: number) =>
+    request<VersionDiff>(`/api/ontologies/${ontologyId}/versions/${version}/diff`),
+  getOntologyVersionSnapshot: (ontologyId: string, version: number) =>
+    request<VersionSnapshot>(`/api/ontologies/${ontologyId}/versions/${version}/snapshot`),
+  validateOntology: (ontologyId: string) =>
+    request<OntologyValidationResult>(`/api/ontologies/${ontologyId}/validate`, {
+      method: "POST",
+    }),
+  getOntologyGraph: (
+    id: string,
+    params?: { centerId?: string; depth?: number; full?: boolean; maxNodes?: number },
+  ) =>
+    request<OntologyGraph>(
+      `/api/ontologies/${id}/graph${buildQuery({
+        center_id: params?.centerId,
+        depth: params?.depth,
+        full: params?.full,
+        max_nodes: params?.maxNodes,
+      })}`,
+    ),
 
   listObjectTypes: (params?: {
     ontologyId?: string;
     domainId?: string;
     publishedOnly?: boolean;
+    q?: string;
+    limit?: number;
+    offset?: number;
   }) =>
-    request<ObjectTypeSummary[]>(
+    request<PageResult<ObjectTypeSummary>>(
       `/api/object-types${buildQuery({
         ontology_id: params?.ontologyId,
         domain_id: params?.domainId,
         published_only: params?.publishedOnly,
+        q: params?.q,
+        limit: params?.limit,
+        offset: params?.offset,
       })}`,
     ),
   getObjectType: (id: string) => request<ObjectTypeDetail>(`/api/object-types/${id}`),
@@ -225,13 +311,19 @@ export const api = {
     domainId?: string;
     categoryId?: string;
     publishedOnly?: boolean;
+    q?: string;
+    limit?: number;
+    offset?: number;
   }) =>
-    request<BusinessLogic[]>(
+    request<PageResult<BusinessLogic>>(
       `/api/business-logics${buildQuery({
         ontology_id: params?.ontologyId,
         domain_id: params?.domainId,
         category_id: params?.categoryId,
         published_only: params?.publishedOnly,
+        q: params?.q,
+        limit: params?.limit,
+        offset: params?.offset,
       })}`,
     ),
   listBusinessLogicCategories: () =>
@@ -472,4 +564,85 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  // --- External API ---
+
+  listExternalApps: () => request<ExternalApp[]>("/api/external-apps"),
+
+  listExternalScopes: () =>
+    request<{ scopes: string[] }>("/api/external-apps/scopes"),
+
+  createExternalApp: (body: {
+    name: string;
+    description?: string;
+    scopes?: string[];
+    rate_limit_per_minute?: number | null;
+  }) =>
+    request<ExternalAppCreated>("/api/external-apps", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getExternalApp: (id: string) =>
+    request<ExternalApp>(`/api/external-apps/${id}`),
+
+  updateExternalApp: (
+    id: string,
+    body: {
+      name?: string;
+      description?: string;
+      status?: string;
+      scopes?: string[];
+      rate_limit_per_minute?: number | null;
+    },
+  ) =>
+    request<ExternalApp>(`/api/external-apps/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  regenerateExternalAppKey: (id: string) =>
+    request<ExternalAppCreated>(`/api/external-apps/${id}/regenerate-key`, {
+      method: "POST",
+    }),
+
+  deleteExternalApp: (id: string) =>
+    request<{ id: string; deleted: boolean }>(`/api/external-apps/${id}`, {
+      method: "DELETE",
+    }),
+
+  listExternalAppCallLogs: (appId: string, limit = 50) =>
+    request<ExternalApiCallLog[]>(
+      `/api/external-apps/${appId}/call-logs?limit=${limit}`,
+    ),
+
+  listExternalApiCatalog: () =>
+    request<ExternalApiCatalogItem[]>("/api/external-api/catalog"),
+
+  getExternalApiCatalogItem: (apiId: string) =>
+    request<ExternalApiCatalogItem>(`/api/external-api/catalog/${apiId}`),
+
+  /** 调用 MCP tools/call（试用），需传入 API Key（真实鉴权） */
+  callMcpTool: async (
+    toolName: string,
+    arguments_: Record<string, unknown>,
+    apiKey: string,
+  ): Promise<{ status: number; data: McpToolCallResult | unknown }> => {
+    const response = await fetch("/api/mcp/tools/call", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": apiKey,
+      },
+      body: JSON.stringify({ name: toolName, arguments: arguments_ }),
+    });
+    let data: unknown;
+    const text = await response.text();
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    return { status: response.status, data };
+  },
 };

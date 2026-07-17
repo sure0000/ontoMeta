@@ -1,0 +1,130 @@
+.workspace-domain-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 272px), 1fr));
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+}
+
+.ontology-workspace-search {
+  width: 260px;
+  max-width: 100%;
+  flex-shrink: 0;
+}
+
+/* ============================================================
+ * Ontology graph
+ * ============================================================ */
+.ontology-graph-view {
+  width: 100%;
+  min-width: 0;
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* 嵌入卡片 / Tabs 内时去除重复边框 */
+.ontology-graph-view--embedded,
+.section-card-body--flush .ontology-graph-view,
+.om-tabs--inset .ontology-graph-view {
+  border: none;
+  border-radius: 0;
+}
+.ontology-graph-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--om-border);
+  background: var(--om-surface-muted);
+}
+.ontology-graph-hint {
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ontology-graph-view .react-flow {
+  flex: 1;
+  min-height: 0;
+  background: radial-gradient(
+      circle at 1px 1px,
+      #e2e8f0 1px,
+      transparent 0
+    )
+    0 0 / 20px 20px;
+}
+
+.ontology-flow-node {
+  min-width: 152px;
+  max-width: 184px;
+  padding: 10px 12px;
+  border: 1px solid var(--om-border-strong);
+  border-radius: 10px;
+  background: var(--om-surface);
+  box-shadow: var(--om-shadow-sm);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.ontology-flow-node:hover {
+  border-color: var(--om-primary);
+  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.18);
+  transform: translateY(-1px);
+}
+.ontology-flow-node--center {
+  border-color: var(--om-primary);
+  background: linear-gradient(180deg, #eff4ff 0%, #ffffff 100%);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.22);
+}
+.ontology-flow-node-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text);
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ontology-flow-node--center .ontology-flow-node-title {
+  color: var(--om-primary);
+}
+.ontology-flow-handle {
+  opacity: 0;
+  width: 6px;
+  height: 6px;
+  min-width: 6px;
+  min-height: 6px;
+}
+.ontology-graph-view .react-flow__edge path {
+  transition: stroke 0.15s, stroke-width 0.15s;
+}
+.ontology-graph-view .react-flow__edge:hover path {
+  stroke: var(--om-primary);
+  stroke-width: 2;
+}
+.ontology-graph-view .react-flow__edge-text {
+  cursor: pointer;
+  font-weight: 500;
+}
+.ontology-graph-view .react-flow__controls {
+  box-shadow: var(--om-shadow-md);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--om-border);
+}
+.ontology-graph-view .react-flow__controls-button {
+  border-bottom: 1px solid var(--om-border);
+  background: var(--om-surface);
+}
+.ontology-graph-view .react-flow__controls-button:hover {
+  background: var(--om-surface-muted);
+}
+.ontology-graph-view .react-flow__attribution {
+  display: none;
+}

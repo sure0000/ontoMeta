@@ -1,5 +1,6 @@
 import {
   ApartmentOutlined,
+  ApiOutlined,
   FunctionOutlined,
   FolderOutlined,
   MenuFoldOutlined,
@@ -34,12 +35,18 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
+  if (pathname.startsWith("/external-api/apps")) return "/external-api/apps";
+  if (pathname.startsWith("/external-api/endpoints")) {
+    return "/external-api/endpoints";
+  }
+  if (pathname.startsWith("/external-api")) return "/external-api/apps";
   if (pathname.startsWith("/settings")) return "/settings";
   return "/ontology";
 }
 
 function getOpenKeys(pathname: string) {
   if (pathname.startsWith("/ontology")) return ["/ontology"];
+  if (pathname.startsWith("/external-api")) return ["/external-api"];
   return [];
 }
 
@@ -107,12 +114,25 @@ export function AppLayout() {
         label: "业务逻辑",
       },
       { key: "/chat-bi", icon: <RobotOutlined />, label: "智能问数" },
+      {
+        key: "/external-api",
+        icon: <ApiOutlined />,
+        label: "外部API",
+        children: [
+          { key: "/external-api/apps", label: "应用创建" },
+          { key: "/external-api/endpoints", label: "MCP接口" },
+        ],
+      },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ];
   }, [domains]);
 
   const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
     if (key === "/ontology-empty") return;
+    if (key === "/external-api") {
+      navigate("/external-api/apps");
+      return;
+    }
     if (key.startsWith("/ontology?")) {
       const [, query] = key.split("?");
       const params = new URLSearchParams(query);

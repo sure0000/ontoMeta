@@ -1,6 +1,6 @@
 import { ApartmentOutlined } from "@ant-design/icons";
-import { Alert, Spin } from "antd";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { Alert, Spin, message } from "antd";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -17,11 +17,31 @@ import type {
   RelationType,
 } from "../types";
 
+const DEFAULT_PAGE_SIZE = 20;
+
+function mergeOntologyGraph(base: OntologyGraph | null, extra: OntologyGraph): OntologyGraph {
+  const nodeMap = new Map((base?.nodes ?? []).map((n) => [n.id, n]));
+  for (const n of extra.nodes) nodeMap.set(n.id, n);
+  const edgeMap = new Map((base?.edges ?? []).map((e) => [e.id, e]));
+  for (const e of extra.edges) edgeMap.set(e.id, e);
+  return {
+    nodes: [...nodeMap.values()],
+    edges: [...edgeMap.values()],
+    center_id: extra.center_id ?? base?.center_id,
+    depth: extra.depth ?? base?.depth,
+    truncated: Boolean(extra.truncated || base?.truncated),
+    total_object_count: extra.total_object_count ?? base?.total_object_count ?? nodeMap.size,
+    total_relation_count: extra.total_relation_count ?? base?.total_relation_count,
+  };
+}
+
 interface OntologyBundle {
   domains: DomainContext[];
   domain: DomainContextDetail | null;
   objects: ObjectTypeSummary[];
+  objectTotal: number;
   relations: RelationType[];
+  relationTotal: number;
   graph: OntologyGraph | null;
   publishedOntologyId: string | null;
 }
@@ -29,8 +49,26 @@ interface OntologyBundle {
 export function OntologyPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const domainId = searchParams.get("domain") || undefined;
+  const [objectPage, setObjectPage] = useState(1);
+  const [relationPage, setRelationPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [graphExpanding, setGraphExpanding] = useState(false);
+  const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
 
-  const { data: bundle, loading, error } = useApi<OntologyBundle>(
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    setObjectPage(1);
+    setRelationPage(1);
+    graphCacheRef.current = null;
+  }, [debouncedQ, domainId]);
+
+  const { data: bundle, loading, error, setData: setBundle } = useApi<OntologyBundle>(
     async () => {
       const domains = await api.listDomains();
       if (domains.length === 0) {
@@ -38,7 +76,9 @@ export function OntologyPage() {
           domains,
           domain: null,
           objects: [],
+          objectTotal: 0,
           relations: [],
+          relationTotal: 0,
           graph: null,
           publishedOntologyId: null,
         };
@@ -49,7 +89,9 @@ export function OntologyPage() {
           domains,
           domain: null,
           objects: [],
+          objectTotal: 0,
           relations: [],
+          relationTotal: 0,
           graph: null,
           publishedOntologyId: null,
         };
@@ -61,26 +103,57 @@ export function OntologyPage() {
           domains,
           domain,
           objects: [],
+          objectTotal: 0,
           relations: [],
+          relationTotal: 0,
           graph: null,
           publishedOntologyId: null,
         };
       }
-      const [objectList, graphData, relationList] = await Promise.all([
-        api.listObjectTypes({ ontologyId, publishedOnly: true }),
-        api.getOntologyGraph(ontologyId),
-        api.listRelationTypes({ ontologyId, publishedOnly: true }),
-      ]);
+      const cached = graphCacheRef.current;
+      const reuseGraph = cached?.ontologyId === ontologyId ? cached.graph : null;
+      const objectOffset = (objectPage - 1) * pageSize;
+      const relationOffset = (relationPage - 1) * pageSize;
+      const listReqs = [
+        api.listObjectTypes({
+          ontologyId,
+          publishedOnly: true,
+          q: debouncedQ || undefined,
+          limit: pageSize,
+          offset: objectOffset,
+        }),
+        api.listRelationTypes({
+          ontologyId,
+          publishedOnly: true,
+          q: debouncedQ || undefined,
+          limit: pageSize,
+          offset: relationOffset,
+        }),
+      ] as const;
+      let graph: OntologyGraph | null = reuseGraph;
+      let objectsPage;
+      let relationsPage;
+      if (reuseGraph) {
+        [objectsPage, relationsPage] = await Promise.all(listReqs);
+      } else {
+        [objectsPage, relationsPage, graph] = await Promise.all([
+          ...listReqs,
+          api.getOntologyGraph(ontologyId, { depth: 1 }),
+        ]);
+      }
+      if (graph) graphCacheRef.current = { ontologyId, graph };
       return {
         domains,
         domain,
-        objects: objectList,
-        relations: relationList,
-        graph: graphData,
+        objects: objectsPage.items,
+        objectTotal: objectsPage.total,
+        relations: relationsPage.items,
+        relationTotal: relationsPage.total,
+        graph,
         publishedOntologyId: ontologyId,
       };
     },
-    [domainId],
+    [domainId, objectPage, relationPage, pageSize, debouncedQ],
   );
 
   const domains = bundle?.domains ?? [];
@@ -89,9 +162,34 @@ export function OntologyPage() {
   const relations = bundle?.relations ?? [];
   const graph = bundle?.graph ?? null;
   const publishedOntologyId = bundle?.publishedOntologyId ?? null;
+  const objectTotal = bundle?.objectTotal ?? 0;
+  const relationTotal = bundle?.relationTotal ?? 0;
+
+  const handleExpandGraphNode = useCallback(
+    async (objectId: string) => {
+      if (!publishedOntologyId) return;
+      setGraphExpanding(true);
+      try {
+        const neighborhood = await api.getOntologyGraph(publishedOntologyId, {
+          centerId: objectId,
+          depth: 1,
+        });
+        setBundle((prev) => {
+          if (!prev) return prev;
+          const merged = mergeOntologyGraph(prev.graph, neighborhood);
+          graphCacheRef.current = { ontologyId: publishedOntologyId, graph: merged };
+          return { ...prev, graph: merged };
+        });
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "展开邻域失败");
+      } finally {
+        setGraphExpanding(false);
+      }
+    },
+    [publishedOntologyId, setBundle],
+  );
 
   // 首次进入且未在 URL 中带 domain 参数时，把默认域写入 URL（replace，不污染历史）。
-  // 必须放在 effect 中，不能在 render 期间调用 setSearchParams。
   const syncedRef = useRef(false);
   useLayoutEffect(() => {
     if (syncedRef.current) return;
@@ -101,7 +199,6 @@ export function OntologyPage() {
     }
   }, [domainId, domains, setSearchParams]);
 
-  // domainId 变化时重置 sync 标记
   useEffect(() => {
     syncedRef.current = Boolean(domainId);
   }, [domainId]);
@@ -143,6 +240,28 @@ export function OntologyPage() {
             relations={relations}
             graph={graph}
             relationDetailPath={(relationId) => `/ontology/relations/${relationId}`}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            objectPaging={{
+              total: objectTotal,
+              page: objectPage,
+              pageSize,
+              onChange: (page, size) => {
+                setObjectPage(page);
+                setPageSize(size);
+              },
+            }}
+            relationPaging={{
+              total: relationTotal,
+              page: relationPage,
+              pageSize,
+              onChange: (page, size) => {
+                setRelationPage(page);
+                setPageSize(size);
+              },
+            }}
+            onExpandGraphNode={handleExpandGraphNode}
+            graphExpanding={graphExpanding}
           />
         )}
       </Spin>

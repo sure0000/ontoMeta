@@ -6,8 +6,6 @@ import {
   LinkOutlined,
   NodeIndexOutlined,
   PlusOutlined,
-  SaveOutlined,
-  SendOutlined,
   ShareAltOutlined,
 } from "@ant-design/icons";
 import {
@@ -23,7 +21,6 @@ import {
   Space,
   Table,
   Tabs,
-  Tag,
   Typography,
   message,
 } from "antd";
@@ -32,6 +29,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
 import { ObjectRelationGraph } from "../components/ObjectRelationGraph";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -163,7 +161,7 @@ export function ObjectTypeDetailPage() {
         if (detail?.ontology_id) {
           try {
             const peers = await api.listObjectTypes({ ontologyId: detail.ontology_id });
-            setPeerObjects(peers);
+            setPeerObjects(peers.items);
           } catch {
             setPeerObjects([]);
           }
@@ -625,24 +623,13 @@ export function ObjectTypeDetailPage() {
           <Space>
             <StatusBadge status={obj.status} />
             {inWorkspace ? (
-              <>
-                <Button
-                  loading={saving}
-                  onClick={handleSave}
-                  icon={<SaveOutlined />}
-                >
-                  保存
-                </Button>
-                <Button
-                  type="primary"
-                  loading={prePublishing}
-                  disabled={!canPrePublish}
-                  onClick={handlePrePublish}
-                  icon={<SendOutlined />}
-                >
-                  预发布
-                </Button>
-              </>
+              <EntityEditToolbar
+                saving={saving}
+                prePublishing={prePublishing}
+                canPrePublish={canPrePublish}
+                onSave={handleSave}
+                onPrePublish={handlePrePublish}
+              />
             ) : obj.domain_context_id ? (
               <Link to={`/workspace/${obj.domain_context_id}/objects/${obj.id}`}>
                 <Button>前往工作区编辑</Button>
@@ -873,38 +860,12 @@ export function ObjectTypeDetailPage() {
                   : "事实表承载多个对象之间的关联"
               }
             >
-              <Select
-                showSearch
-                allowClear
-                loading={datasetSearching || ensuringDataset}
-                placeholder="输入表名搜索 DataHub 表"
-                optionFilterProp="label"
-                filterOption={false}
+              <MappingDatasetSelect
+                options={datasetOptions}
+                searching={datasetSearching}
+                ensuring={ensuringDataset}
                 onSearch={searchDatasets}
-                notFoundContent={
-                  datasetSearching ? "搜索中..." : "输入关键字搜索 DataHub 表"
-                }
-                options={datasetOptions.map((ds) => ({
-                  label: ds.display_name || ds.name,
-                  value: ds.object_type_id ?? `dataset:${ds.urn}`,
-                  dataset: ds,
-                }))}
-                onSelect={(_value, option) => {
-                  const ds = (option as { dataset?: DataHubDatasetOption }).dataset;
-                  if (ds && !ds.object_type_id) {
-                    void handleDatasetSelect(ds);
-                  }
-                }}
-                optionRender={(option) => {
-                  const ds = (option as { dataset?: DataHubDatasetOption }).dataset;
-                  if (!ds) return option.label;
-                  return (
-                    <Space size={6}>
-                      <Text strong>{ds.display_name || ds.name}</Text>
-                      {ds.object_type_id ? <Tag color="green">已映射</Tag> : <Tag color="blue">将创建</Tag>}
-                    </Space>
-                  );
-                }}
+                onSelectUnmapped={(ds) => void handleDatasetSelect(ds)}
               />
             </Form.Item>
           )}

@@ -4,6 +4,7 @@ import {
   FileTextOutlined,
   CopyOutlined,
   StopOutlined,
+  RedoOutlined,
 } from "@ant-design/icons";
 import { Alert, Button, Modal, Space, Spin, Table, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -33,6 +34,7 @@ export function ExecutionRecordsPage() {
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [activeTask, setActiveTask] = useState<TaskRecord | null>(null);
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
+  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
 
   const { data: bundle, loading, error, reload } = useApi<TasksBundle>(
     async () => {
@@ -53,7 +55,9 @@ export function ExecutionRecordsPage() {
 
   const tasks = bundle?.tasks ?? [];
   const taskLogsMap = bundle?.logsByTask ?? {};
-  const hasRunningTask = tasks.some((task) => task.status === "running");
+  const hasRunningTask = tasks.some(
+    (task) => task.status === "running" || task.status === "queued",
+  );
 
   useEffect(() => {
     if (!hasRunningTask) return;
@@ -82,6 +86,33 @@ export function ExecutionRecordsPage() {
             message.error(err instanceof Error ? err.message : "停止失败");
           } finally {
             setStoppingTaskId(null);
+          }
+        },
+      });
+    },
+    [domainId, reload],
+  );
+
+  const handleRetryTask = useCallback(
+    (task: TaskRecord) => {
+      if (!domainId) return;
+      Modal.confirm({
+        title: "重试失败任务",
+        content: task.error_summary
+          ? `将基于上次失败原因重新排队生成。上次错误：${task.error_summary}`
+          : "将重新排队执行草稿生成。",
+        okText: "重试",
+        cancelText: "取消",
+        onOk: async () => {
+          setRetryingTaskId(task.id);
+          try {
+            await api.retryDraftTask(domainId, task.id);
+            message.success("已重新入队");
+            await reload();
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : "重试失败");
+          } finally {
+            setRetryingTaskId(null);
           }
         },
       });
@@ -193,10 +224,10 @@ export function ExecutionRecordsPage() {
     {
       title: "操作",
       key: "actions",
-      width: 150,
+      width: 220,
       render: (_, record) => (
         <Space size={4}>
-          {record.status === "running" && (
+          {(record.status === "running" || record.status === "queued") && (
             <Button
               type="link"
               size="small"
@@ -209,6 +240,20 @@ export function ExecutionRecordsPage() {
               }}
             >
               停止
+            </Button>
+          )}
+          {record.status === "failed" && (
+            <Button
+              type="link"
+              size="small"
+              icon={<RedoOutlined />}
+              loading={retryingTaskId === record.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleRetryTask(record);
+              }}
+            >
+              重试
             </Button>
           )}
           <Button

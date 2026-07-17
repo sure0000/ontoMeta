@@ -7,7 +7,7 @@ import {
   PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Modal, Progress, Space, Spin, message } from "antd";
+import { Alert, Button, Modal, Progress, Space, Spin, Table, message } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
@@ -18,6 +18,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
+import { useApi } from "../hooks/useApi";
 import { getOntologyDomainStatusVisual } from "../utils/statusVisual";
 import type {
   DomainContextDetail,
@@ -25,39 +26,236 @@ import type {
   ObjectTypeSummary,
   OntologyGraph,
   RelationType,
+  VersionDiff,
+  VersionRecord,
 } from "../types";
+
+const DEFAULT_PAGE_SIZE = 20;
+
+function mergeOntologyGraph(base: OntologyGraph | null, extra: OntologyGraph): OntologyGraph {
+  const nodeMap = new Map((base?.nodes ?? []).map((n) => [n.id, n]));
+  for (const n of extra.nodes) nodeMap.set(n.id, n);
+  const edgeMap = new Map((base?.edges ?? []).map((e) => [e.id, e]));
+  for (const e of extra.edges) edgeMap.set(e.id, e);
+  return {
+    nodes: [...nodeMap.values()],
+    edges: [...edgeMap.values()],
+    center_id: extra.center_id ?? base?.center_id,
+    depth: extra.depth ?? base?.depth,
+    truncated: Boolean(extra.truncated || base?.truncated),
+    total_object_count: extra.total_object_count ?? base?.total_object_count ?? nodeMap.size,
+    total_relation_count: extra.total_relation_count ?? base?.total_relation_count,
+  };
+}
+
+type DomainBundle = {
+  domain: DomainContextDetail;
+  objects: ObjectTypeSummary[];
+  objectTotal: number;
+  relations: RelationType[];
+  relationTotal: number;
+  graph: OntologyGraph | null;
+};
+
+async function fetchOntologyLists(
+  ontologyId: string,
+  opts: {
+    objectPage: number;
+    relationPage: number;
+    pageSize: number;
+    q?: string;
+    /** 传入已有图谱时跳过重新拉取，保留邻域展开结果 */
+    existingGraph?: OntologyGraph | null;
+  },
+): Promise<Omit<DomainBundle, "domain">> {
+  const objectOffset = (opts.objectPage - 1) * opts.pageSize;
+  const relationOffset = (opts.relationPage - 1) * opts.pageSize;
+  const listPromises = [
+    api.listObjectTypes({
+      ontologyId,
+      q: opts.q || undefined,
+      limit: opts.pageSize,
+      offset: objectOffset,
+    }),
+    api.listRelationTypes({
+      ontologyId,
+      q: opts.q || undefined,
+      limit: opts.pageSize,
+      offset: relationOffset,
+    }),
+  ] as const;
+  if (opts.existingGraph) {
+    const [objectsPage, relationsPage] = await Promise.all(listPromises);
+    return {
+      objects: objectsPage.items,
+      objectTotal: objectsPage.total,
+      relations: relationsPage.items,
+      relationTotal: relationsPage.total,
+      graph: opts.existingGraph,
+    };
+  }
+  const [objectsPage, relationsPage, graph] = await Promise.all([
+    ...listPromises,
+    api.getOntologyGraph(ontologyId, { depth: 1 }),
+  ]);
+  return {
+    objects: objectsPage.items,
+    objectTotal: objectsPage.total,
+    relations: relationsPage.items,
+    relationTotal: relationsPage.total,
+    graph,
+  };
+}
+
+async function fetchDomainBundle(
+  domainId: string,
+  opts: {
+    objectPage: number;
+    relationPage: number;
+    pageSize: number;
+    q?: string;
+    existingGraph?: OntologyGraph | null;
+    existingOntologyId?: string | null;
+  },
+): Promise<DomainBundle> {
+  const domain = await api.getDomain(domainId);
+  if (!domain.latest_ontology_id) {
+    return {
+      domain,
+      objects: [],
+      objectTotal: 0,
+      relations: [],
+      relationTotal: 0,
+      graph: null,
+    };
+  }
+  const reuseGraph =
+    opts.existingOntologyId === domain.latest_ontology_id ? opts.existingGraph : null;
+  const lists = await fetchOntologyLists(domain.latest_ontology_id, {
+    ...opts,
+    existingGraph: reuseGraph,
+  });
+  return { domain, ...lists };
+}
 
 export function DomainDetailPage() {
   const { domainId } = useParams<{ domainId: string }>();
-  const [domain, setDomain] = useState<DomainContextDetail | null>(null);
-  const [objects, setObjects] = useState<ObjectTypeSummary[]>([]);
-  const [relations, setRelations] = useState<RelationType[]>([]);
-  const [graph, setGraph] = useState<OntologyGraph | null>(null);
+  const [objectPage, setObjectPage] = useState(1);
+  const [relationPage, setRelationPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [graphExpanding, setGraphExpanding] = useState(false);
+  const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    setObjectPage(1);
+    setRelationPage(1);
+  }, [debouncedQ, domainId]);
+
+  const {
+    data: bundle,
+    loading,
+    error: loadError,
+    setData: setBundle,
+  } = useApi<DomainBundle>(
+    async () => {
+      if (!domainId) throw new Error("缺少数据域 ID");
+      const cached = graphCacheRef.current;
+      const result = await fetchDomainBundle(domainId, {
+        objectPage,
+        relationPage,
+        pageSize,
+        q: debouncedQ,
+        existingGraph: cached?.graph ?? null,
+        existingOntologyId: cached?.ontologyId ?? null,
+      });
+      if (result.domain.latest_ontology_id && result.graph) {
+        graphCacheRef.current = {
+          ontologyId: result.domain.latest_ontology_id,
+          graph: result.graph,
+        };
+      }
+      return result;
+    },
+    [domainId, objectPage, relationPage, pageSize, debouncedQ],
+  );
+
+  const domain = bundle?.domain ?? null;
+  const objects = bundle?.objects ?? [];
+  const relations = bundle?.relations ?? [];
+  const graph = bundle?.graph ?? null;
+  const objectTotal = bundle?.objectTotal ?? 0;
+  const relationTotal = bundle?.relationTotal ?? 0;
+
   const [generating, setGenerating] = useState(false);
   const [draftProgress, setDraftProgress] = useState<DraftProgress | null>(null);
-  const [loading, setLoading] = useState(true);
   const [ontologyLoading, setOntologyLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versions, setVersions] = useState<VersionRecord[]>([]);
+  const [selectedDiff, setSelectedDiff] = useState<VersionDiff | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completionHandledRef = useRef<string | null>(null);
 
-  const loadOntology = useCallback(async (ontologyId: string) => {
-    setOntologyLoading(true);
-    try {
-      const [objectList, graphData, relationList] = await Promise.all([
-        api.listObjectTypes({ ontologyId }),
-        api.getOntologyGraph(ontologyId),
-        api.listRelationTypes({ ontologyId }),
-      ]);
-      setObjects(objectList);
-      setRelations(relationList);
-      setGraph(graphData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载本体失败");
-    } finally {
-      setOntologyLoading(false);
-    }
-  }, []);
+  const error = actionError || loadError;
+
+  const loadOntology = useCallback(
+    async (ontologyId: string) => {
+      setOntologyLoading(true);
+      try {
+        graphCacheRef.current = null;
+        const lists = await fetchOntologyLists(ontologyId, {
+          objectPage: 1,
+          relationPage: 1,
+          pageSize,
+          q: debouncedQ,
+        });
+        if (lists.graph) {
+          graphCacheRef.current = { ontologyId, graph: lists.graph };
+        }
+        setObjectPage(1);
+        setRelationPage(1);
+        setBundle((prev) => (prev ? { ...prev, ...lists } : prev));
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : "加载本体失败");
+      } finally {
+        setOntologyLoading(false);
+      }
+    },
+    [setBundle, pageSize, debouncedQ],
+  );
+
+  const handleExpandGraphNode = useCallback(
+    async (objectId: string) => {
+      const ontologyId = domain?.latest_ontology_id;
+      if (!ontologyId) return;
+      setGraphExpanding(true);
+      try {
+        const neighborhood = await api.getOntologyGraph(ontologyId, {
+          centerId: objectId,
+          depth: 1,
+        });
+        setBundle((prev) => {
+          if (!prev) return prev;
+          const merged = mergeOntologyGraph(prev.graph, neighborhood);
+          graphCacheRef.current = { ontologyId, graph: merged };
+          return { ...prev, graph: merged };
+        });
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "展开邻域失败");
+      } finally {
+        setGraphExpanding(false);
+      }
+    },
+    [domain?.latest_ontology_id, setBundle],
+  );
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -77,19 +275,27 @@ export function DomainDetailPage() {
           if (p.task_id !== taskId) return;
           setDraftProgress(p);
 
-          if (p.status === "completed" || p.status === "failed" || p.status === "cancelled") {
+          if (
+            p.status === "succeeded" ||
+            p.status === "completed" ||
+            p.status === "failed" ||
+            p.status === "cancelled"
+          ) {
             if (completionHandledRef.current === taskId) return;
             completionHandledRef.current = taskId;
             stopPolling();
             setGenerating(false);
 
-            if (p.status === "completed" && p.ontology_id) {
+            if (
+              (p.status === "succeeded" || p.status === "completed") &&
+              p.ontology_id
+            ) {
               const updated = await api.getDomain(domainId!);
-              setDomain(updated);
+              setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
               await loadOntology(p.ontology_id);
               message.success("本体草稿生成完成");
             } else if (p.status === "failed") {
-              setError(p.message || "生成失败");
+              setActionError(p.message || "生成失败");
             } else if (p.status === "cancelled") {
               message.info(p.message || "草稿生成已停止");
             }
@@ -100,32 +306,14 @@ export function DomainDetailPage() {
         } catch {
           stopPolling();
           setGenerating(false);
-          setError("获取进度失败");
+          setActionError("获取进度失败");
         }
       };
 
       void pollOnce();
     },
-    [domainId, loadOntology, stopPolling],
+    [domainId, loadOntology, setBundle, stopPolling],
   );
-
-  useEffect(() => {
-    if (!domainId) return;
-    setLoading(true);
-    api
-      .getDomain(domainId)
-      .then((detail) => {
-        setDomain(detail);
-        if (detail.latest_ontology_id) {
-          return loadOntology(detail.latest_ontology_id);
-        }
-        setObjects([]);
-        setRelations([]);
-        setGraph(null);
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [domainId, loadOntology]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 
@@ -138,7 +326,7 @@ export function DomainDetailPage() {
       cancelText: "取消",
       onOk: async () => {
         setGenerating(true);
-        setError(null);
+        setActionError(null);
         setDraftProgress(null);
         try {
           const result = await api.generateDraft(domainId);
@@ -146,7 +334,7 @@ export function DomainDetailPage() {
           pollProgress(result.task_id);
         } catch (err) {
           setGenerating(false);
-          setError(err instanceof Error ? err.message : "生成失败");
+          setActionError(err instanceof Error ? err.message : "生成失败");
         }
       },
     });
@@ -163,7 +351,14 @@ export function DomainDetailPage() {
       cancelText: "取消",
       onOk: async () => {
         try {
-          setError(null);
+          setActionError(null);
+          const validation = await api.validateOntology(domain.latest_ontology_id!);
+          if (!validation.ok) {
+            const msg = validation.issues.map((i) => i.message).join("；");
+            setActionError(msg || "一致性校验失败");
+            message.error(msg || "一致性校验失败");
+            throw new Error(msg || "一致性校验失败");
+          }
           const confirmation = await api.createConfirmation({
             ontology_id: domain.latest_ontology_id!,
             target_type: "ontology",
@@ -172,16 +367,38 @@ export function DomainDetailPage() {
           });
           await api.confirmAction(confirmation.id);
           const updated = await api.getDomain(domainId);
-          setDomain(updated);
+          setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
           message.success("发布成功");
         } catch (err) {
           const msg = err instanceof Error ? err.message : "发布失败";
-          setError(msg);
+          setActionError(msg);
           message.error(msg);
           throw err;
         }
       },
     });
+  };
+
+  const openVersionHistory = async () => {
+    if (!domain?.published_ontology_id) return;
+    setVersionsOpen(true);
+    setVersionsLoading(true);
+    setSelectedDiff(null);
+    try {
+      const items = await api.listOntologyVersions(domain.published_ontology_id);
+      setVersions(items);
+      if (items[0]?.has_diff) {
+        const diff = await api.getOntologyVersionDiff(
+          domain.published_ontology_id,
+          items[0].version,
+        );
+        setSelectedDiff(diff);
+      }
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载版本失败");
+    } finally {
+      setVersionsLoading(false);
+    }
   };
 
   if (loading) return <PageSkeleton type="detail" />;
@@ -265,7 +482,7 @@ export function DomainDetailPage() {
           message={error}
           showIcon
           closable
-          onClose={() => setError(null)}
+          onClose={() => setActionError(null)}
         />
       )}
 
@@ -287,13 +504,13 @@ export function DomainDetailPage() {
           tone="primary"
           icon={<ApartmentOutlined />}
           label="业务对象"
-          value={objects.length}
+          value={objectTotal}
         />
         <StatCard
           tone="success"
           icon={<DeploymentUnitOutlined />}
           label="关系数量"
-          value={relations.length}
+          value={relationTotal}
         />
         <StatCard
           tone={ontologyStatusVisual.tone}
@@ -311,7 +528,15 @@ export function DomainDetailPage() {
           tone="neutral"
           icon={<PlayCircleOutlined />}
           label="发布版本"
-          value={publishedVersion ? `v${publishedVersion}` : "—"}
+          value={
+            publishedVersion ? (
+              <Button type="link" style={{ padding: 0, height: "auto", fontSize: 20 }} onClick={openVersionHistory}>
+                v{publishedVersion}
+              </Button>
+            ) : (
+              "—"
+            )
+          }
         />
       </div>
 
@@ -340,9 +565,103 @@ export function DomainDetailPage() {
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
             workspaceMode
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            objectPaging={{
+              total: objectTotal,
+              page: objectPage,
+              pageSize,
+              onChange: (page, size) => {
+                setObjectPage(page);
+                setPageSize(size);
+              },
+            }}
+            relationPaging={{
+              total: relationTotal,
+              page: relationPage,
+              pageSize,
+              onChange: (page, size) => {
+                setRelationPage(page);
+                setPageSize(size);
+              },
+            }}
+            onExpandGraphNode={handleExpandGraphNode}
+            graphExpanding={graphExpanding}
           />
         )}
       </Spin>
+
+      <Modal
+        title="发布版本与差异"
+        open={versionsOpen}
+        onCancel={() => setVersionsOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <Spin spinning={versionsLoading}>
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={false}
+            dataSource={versions}
+            columns={[
+              { title: "版本", dataIndex: "version", width: 80, render: (v: number) => `v${v}` },
+              { title: "摘要", dataIndex: "diff_summary", ellipsis: true },
+              {
+                title: "操作",
+                width: 100,
+                render: (_, record: VersionRecord) => (
+                  <Button
+                    type="link"
+                    size="small"
+                    disabled={!record.has_diff || !domain?.published_ontology_id}
+                    onClick={async () => {
+                      if (!domain?.published_ontology_id) return;
+                      try {
+                        const diff = await api.getOntologyVersionDiff(
+                          domain.published_ontology_id,
+                          record.version,
+                        );
+                        setSelectedDiff(diff);
+                      } catch (err) {
+                        message.error(err instanceof Error ? err.message : "加载差异失败");
+                      }
+                    }}
+                  >
+                    查看差异
+                  </Button>
+                ),
+              },
+            ]}
+          />
+          {selectedDiff && (
+            <div style={{ marginTop: 16 }}>
+              <Alert
+                type="info"
+                showIcon
+                message={selectedDiff.diff_summary || `v${selectedDiff.version} 差异`}
+                description={
+                  <div style={{ fontSize: 13 }}>
+                    <div>对象 新增 {selectedDiff.object_types.added.length} / 修改 {selectedDiff.object_types.modified.length} / 删除 {selectedDiff.object_types.removed.length}</div>
+                    <div>关系 新增 {selectedDiff.relation_types.added.length} / 修改 {selectedDiff.relation_types.modified.length} / 删除 {selectedDiff.relation_types.removed.length}</div>
+                    <div>逻辑 新增 {selectedDiff.business_logics.added.length} / 修改 {selectedDiff.business_logics.modified.length} / 删除 {selectedDiff.business_logics.removed.length}</div>
+                    {selectedDiff.object_types.added.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        新增对象：{selectedDiff.object_types.added.map((i) => i.display_name || i.name).join("、")}
+                      </div>
+                    )}
+                    {selectedDiff.relation_types.added.length > 0 && (
+                      <div>
+                        新增关系：{selectedDiff.relation_types.added.map((i) => i.display_name || i.name).join("、")}
+                      </div>
+                    )}
+                  </div>
+                }
+              />
+            </div>
+          )}
+        </Spin>
+      </Modal>
     </PageContainer>
   );
 }

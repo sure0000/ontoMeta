@@ -1,0 +1,1 @@
+export { ChatBiPage } from "./ChatBiPage";

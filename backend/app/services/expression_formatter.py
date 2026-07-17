@@ -8,6 +8,7 @@ LLM/Mock 双模式构造范式:优先使用 SettingsService 配置的默认 LLM,
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -833,7 +834,7 @@ class ExpressionFormatterService:
             )
             self.model = runtime_config.model
 
-    def format(
+    async def format(
         self,
         db: Session,
         *,
@@ -857,7 +858,9 @@ class ExpressionFormatterService:
         if self.use_mock:
             ast = _mock_format(segments, refs, logic_type, description)
         else:
-            ast = self._format_with_llm(segments, refs, logic_type, description)
+            ast = await asyncio.to_thread(
+                self._format_with_llm, segments, refs, logic_type, description
+            )
 
         summary = _segments_to_summary(segments, refs)
         return {

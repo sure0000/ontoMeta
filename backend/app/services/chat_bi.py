@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -79,7 +80,7 @@ class ChatBiService:
 
     # ------------------------------------------------------------------ public
 
-    def ask(
+    async def ask(
         self,
         db: Session,
         *,
@@ -112,6 +113,17 @@ class ChatBiService:
         relations = self._load_relations(db, ontology.id)
         logics = self._load_logics(db, ontology.id)
 
+        # Grounding：无检索命中时明确拒绝编造，不返回虚构/误匹配对象名
+        grounded_objects = self._match_objects(question, snapshots)
+        grounded_logics = self._match_logics(question, logics)
+        if not grounded_objects and not grounded_logics:
+            return self._ungrounded_refusal(
+                domain_id=domain_id,
+                domain_name=domain.name,
+                ontology_id=ontology.id,
+                question=question,
+            )
+
         runtime = self.settings_service.get_llm_runtime(db)
         use_mock = runtime.use_mock or not runtime.api_key
 
@@ -134,10 +146,13 @@ class ChatBiService:
                 snapshots=snapshots,
                 relations=relations,
                 logics=logics,
+                matched_objects=grounded_objects,
+                matched_logics=grounded_logics,
             )
         else:
             try:
-                payload = self._llm_answer(
+                payload = await asyncio.to_thread(
+                    self._llm_answer,
                     runtime=runtime,
                     question=question,
                     knowledge=knowledge,
@@ -150,13 +165,29 @@ class ChatBiService:
                     snapshots=snapshots,
                     relations=relations,
                     logics=logics,
+                    matched_objects=grounded_objects,
+                    matched_logics=grounded_logics,
                 )
                 payload["answer"] = (
                     f"> LLM 调用失败，已降级为规则匹配示例。\n\n{payload['answer']}"
                 )
 
-        # 统一后处理：补全实体 id、格式化 SQL
+        # 统一后处理：补全实体 id、格式化 SQL；过滤无法落地的引用
         payload = resolver.resolve_payload(payload)
+        payload = self._enforce_grounded_refs(
+            payload,
+            grounded_objects=grounded_objects,
+            grounded_logics=grounded_logics,
+            resolver=resolver,
+        )
+        if not payload.get("referenced_objects") and not payload.get("referenced_logics"):
+            return self._ungrounded_refusal(
+                domain_id=domain_id,
+                domain_name=domain.name,
+                ontology_id=ontology.id,
+                question=question,
+            )
+
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
 
@@ -559,8 +590,10 @@ class ChatBiService:
             "以及对应的 id、name、display_name。优先使用本体知识中的真实 id。\n"
             "3. 给出 suggested_sql，表名和字段名必须严格使用本体知识中括号内的标识符（name），"
             "不得臆造或翻译为英文。SQL 应与口径拆解一一对应。\n"
-            "4. referenced_objects / referenced_logics 为数组，元素含 id/name/display_name。\n"
-            "5. 如果信息不足以回答，明确指出缺失的对象或口径，并建议补充方向。\n"
+            "4. referenced_objects / referenced_logics 为数组，元素含 id/name/display_name；"
+            "必须引用本体知识中真实存在的实体，禁止编造对象名。\n"
+            "5. 如果问题与本体知识无关、无法命中任何对象/逻辑，不要猜测；"
+            "answer 明确说明无法基于当前本体回答，referenced_* 置空数组，suggested_sql 为 null。\n"
             "6. 严格输出 JSON："
             "{answer, suggested_sql, caliber_decomposition, referenced_objects, referenced_logics}。\n"
             "   - answer 为 Markdown 字符串；\n"
@@ -674,23 +707,28 @@ class ChatBiService:
         snapshots: list[_ObjectSnapshot],
         relations: list[RelationType],
         logics: list[BusinessLogic],
+        matched_objects: list[_ObjectSnapshot] | None = None,
+        matched_logics: list[BusinessLogic] | None = None,
     ) -> dict:
         q_lower = question.lower()
 
-        matched_objects = self._match_objects(question, snapshots)
+        matched_objects = matched_objects if matched_objects is not None else self._match_objects(
+            question, snapshots
+        )
         if not matched_objects:
-            matched_objects = snapshots[:1]
+            # 调用方应已拦截无命中；此处兜底为空回答，避免回退到 snapshots[:1]
+            return {
+                "answer": "当前问题未能命中已发布本体中的对象或业务逻辑，无法给出基于本体的解读。",
+                "suggested_sql": None,
+                "caliber_decomposition": [],
+                "referenced_objects": [],
+                "referenced_logics": [],
+            }
         primary = matched_objects[0]
 
-        matched_logics = [
-            logic
-            for logic in logics
-            if any(
-                token
-                and token in (logic.name + logic.display_name + (logic.description or "")).lower()
-                for token in self._tokens(question)
-            )
-        ][:2]
+        if matched_logics is None:
+            matched_logics = self._match_logics(question, logics)
+        matched_logics = matched_logics[:2]
 
         is_aggregation = any(k in q_lower for k in _AGG_KEYWORDS) or any(
             k in question for k in _AGG_KEYWORDS
@@ -804,6 +842,91 @@ class ChatBiService:
                 scored.append((score, o))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [o for _, o in scored[:3]]
+
+    def _match_logics(
+        self, question: str, logics: list[BusinessLogic]
+    ) -> list[BusinessLogic]:
+        tokens = self._tokens(question)
+        if not tokens or not logics:
+            return []
+        matched = [
+            logic
+            for logic in logics
+            if any(
+                token
+                and token
+                in (logic.name + logic.display_name + (logic.description or "")).lower()
+                for token in tokens
+            )
+        ]
+        return matched[:3]
+
+    @staticmethod
+    def _ungrounded_refusal(
+        *,
+        domain_id: str,
+        domain_name: str,
+        ontology_id: str,
+        question: str,
+    ) -> dict:
+        q = (question or "").strip()
+        preview = q if len(q) <= 80 else q[:80] + "…"
+        return {
+            "domain_id": domain_id,
+            "domain_name": domain_name,
+            "ontology_id": ontology_id,
+            "answer": (
+                f"无法基于「{domain_name}」已发布本体回答该问题"
+                + (f"（{preview}）" if preview else "")
+                + "：未检索到匹配的对象类型或业务逻辑。"
+                "请换用本体中已有实体的名称提问，或先补充/发布相关建模。"
+            ),
+            "suggested_sql": None,
+            "caliber_decomposition": [],
+            "referenced_objects": [],
+            "referenced_logics": [],
+            "used_mock": True,
+            "grounding_refused": True,
+        }
+
+    @staticmethod
+    def _enforce_grounded_refs(
+        payload: dict,
+        *,
+        grounded_objects: list[_ObjectSnapshot],
+        grounded_logics: list[BusinessLogic],
+        resolver: "_ReferenceResolver",
+    ) -> dict:
+        """过滤无法落地的引用；若 LLM 未给引用则回填检索命中。"""
+        cleaned_objs = [
+            ref
+            for ref in payload.get("referenced_objects") or []
+            if isinstance(ref, dict) and ref.get("id") in resolver.obj_by_id
+        ]
+        if not cleaned_objs and grounded_objects:
+            cleaned_objs = [
+                {"id": o.id, "name": o.name, "display_name": o.display_name}
+                for o in grounded_objects
+            ]
+
+        cleaned_logics = [
+            ref
+            for ref in payload.get("referenced_logics") or []
+            if isinstance(ref, dict) and ref.get("id") in resolver.logic_by_id
+        ]
+        if not cleaned_logics and grounded_logics:
+            cleaned_logics = [
+                {
+                    "id": logic.id,
+                    "name": logic.name,
+                    "display_name": logic.display_name,
+                }
+                for logic in grounded_logics
+            ]
+
+        payload["referenced_objects"] = cleaned_objs
+        payload["referenced_logics"] = cleaned_logics
+        return payload
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
@@ -1015,12 +1138,16 @@ class _ReferenceResolver:
         logics: list[BusinessLogic],
     ) -> None:
         self.obj_by_key: dict[str, _ObjectSnapshot] = {}
+        self.obj_by_id: dict[str, _ObjectSnapshot] = {}
         for o in objects:
+            self.obj_by_id[o.id] = o
             for key in (o.name, o.display_name, o.name.lower(), o.display_name.lower()):
                 if key:
                     self.obj_by_key.setdefault(key, o)
         self.logic_by_key: dict[str, BusinessLogic] = {}
+        self.logic_by_id: dict[str, BusinessLogic] = {}
         for logic in logics:
+            self.logic_by_id[logic.id] = logic
             for key in (logic.name, logic.display_name, logic.name.lower(), logic.display_name.lower()):
                 if key:
                     self.logic_by_key.setdefault(key, logic)
@@ -1040,10 +1167,19 @@ class _ReferenceResolver:
 
     def resolve_payload(self, payload: dict) -> dict:
         payload["referenced_objects"] = [
-            self._resolve_obj(r) for r in payload.get("referenced_objects") or []
+            r
+            for r in (
+                self._resolve_obj(ref) for ref in payload.get("referenced_objects") or []
+            )
+            if r and r.get("id") in self.obj_by_id
         ]
         payload["referenced_logics"] = [
-            self._resolve_logic(r) for r in payload.get("referenced_logics") or []
+            r
+            for r in (
+                self._resolve_logic(ref)
+                for ref in payload.get("referenced_logics") or []
+            )
+            if r and r.get("id") in self.logic_by_id
         ]
         payload["caliber_decomposition"] = [
             self._resolve_caliber_item(item)

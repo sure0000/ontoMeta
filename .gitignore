@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 *.db
 *.db.bak.*
+*.db-wal
+*.db-shm
 
 # Node
 node_modules/
@@ -11,7 +13,22 @@ dist/
 
 # Env
 .env
+.env.mcp
 
 # IDE
 .idea/
 .vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# Local / scratch artifacts
+backend/_query_*.json
+backend/_query_*.txt
+backend/_selected_*.json
+
+# Tests / CI local artifacts
+backend/tests/_test_ontometa.db*
+backend/_ci_test.db*
+.pytest_cache/
