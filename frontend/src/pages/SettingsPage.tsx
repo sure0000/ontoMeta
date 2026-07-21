@@ -68,6 +68,8 @@ type SettingsBundle = {
 };
 
 export function SettingsPage() {
+  const hasToken = Boolean(getAdminToken());
+
   const {
     data: bundle,
     loading,
@@ -75,6 +77,10 @@ export function SettingsPage() {
     reload: loadAll,
     setData: setBundle,
   } = useApi<SettingsBundle>(async () => {
+    if (!getAdminToken()) {
+      // 尚未配置管理 Token，跳过请求，避免无意义的 401 报错
+      return { llmServices: [], llmModels: [], datahubSettings: null as unknown as DatahubSettings };
+    }
     const [services, models, datahub] = await Promise.all([
       api.listLlmServices(),
       api.listLlmModels(),
@@ -86,6 +92,8 @@ export function SettingsPage() {
       datahubSettings: datahub,
     };
   }, []);
+
+  const isAuthError = Boolean(error && (error.includes("鉴权") || error.includes("Token") || error.includes("token") || error.includes("401") || error.includes("503")));
 
   const llmServices = bundle?.llmServices ?? [];
   const llmModels = bundle?.llmModels ?? [];
@@ -333,11 +341,23 @@ export function SettingsPage() {
         description="管理 LLM 服务与 DataHub 连接配置，用于本体草稿生成与元数据读取。"
       />
 
-      {error && <Alert type="error" message="加载失败" description={error} showIcon />}
+      {error && (
+        <Alert
+          type={isAuthError ? "warning" : "error"}
+          message={isAuthError ? "需要配置管理鉴权" : "加载失败"}
+          description={
+            isAuthError
+              ? "请切换到「管理鉴权」标签页，输入与 backend/.env 中 ONTOMETA_ADMIN_TOKEN 一致的 Token，然后点击保存。"
+              : error
+          }
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       <Tabs
         className="om-tabs"
-        defaultActiveKey="llm"
+        defaultActiveKey={isAuthError || !hasToken ? "security" : "llm"}
           items={[
             {
               key: "llm",

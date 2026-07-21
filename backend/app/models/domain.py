@@ -57,3 +57,27 @@ class DraftGenerationTask(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class DraftChunkCheckpoint(Base):
+    """草稿分块生成的按块检查点。
+
+    分块 Map-Reduce 生成时，每个子块成功后把其结果落库；执行中途失败后重试
+    时可复用已完成子块、跳过重复的 LLM 调用以节省 token。按数据域 + 块内容
+    哈希(chunk_key)寻址，新建生成会先清空该域检查点，成功后同样清空。
+    """
+
+    __tablename__ = "draft_chunk_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_context_id", "chunk_key", name="uq_draft_chunk_checkpoint"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    domain_context_id: Mapped[str] = mapped_column(
+        ForeignKey("domain_contexts.id", ondelete="CASCADE"), index=True
+    )
+    chunk_key: Mapped[str] = mapped_column(String(64), index=True)
+    output_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

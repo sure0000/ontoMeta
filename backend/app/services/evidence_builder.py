@@ -13,7 +13,6 @@ from app.services.relation_structure import infer_relation_structure_type
 
 
 def _to_snake(name: str) -> str:
-    name = re.sub(r"^(dim_|fact_|ads_|dwd_|dws_)", "", name)
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
 
 
@@ -56,7 +55,7 @@ class EvidenceBuilder:
                 )
             )
 
-            for field in dataset.fields[:20]:
+            for field in dataset.fields:
                 semantic = self._infer_semantic_type(field)
                 properties.append(
                     PropertyEvidencePack(
@@ -132,9 +131,9 @@ class EvidenceBuilder:
                 )
 
         return EvidenceBundle(
-            object_types=self._dedupe_objects(object_types),
-            properties=properties[:100],
-            relations=self._dedupe_relations(relations),
+            object_types=object_types,
+            properties=properties,
+            relations=relations,
             business_logics=business_logics,
         )
 
@@ -152,19 +151,3 @@ class EvidenceBuilder:
             return "flag"
         return "attribute"
 
-    def _dedupe_objects(self, items: list[ObjectTypeEvidencePack]) -> list[ObjectTypeEvidencePack]:
-        seen: dict[str, ObjectTypeEvidencePack] = {}
-        for item in items:
-            existing = seen.get(item.candidate_name)
-            if not existing or item.confidence > existing.confidence:
-                seen[item.candidate_name] = item
-        return list(seen.values())
-
-    def _dedupe_relations(self, items: list[RelationEvidencePack]) -> list[RelationEvidencePack]:
-        seen: dict[str, RelationEvidencePack] = {}
-        for item in items:
-            key = f"{item.source_object}->{item.target_object}:{item.name}"
-            existing = seen.get(key)
-            if not existing or item.confidence > existing.confidence:
-                seen[key] = item
-        return list(seen.values())

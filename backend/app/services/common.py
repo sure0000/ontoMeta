@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+import httpx
 from sqlalchemy.orm import Session
 
 from app.models import EntityChangeLog
+
+
+def make_http_client() -> httpx.Client:
+    """Create an httpx sync client that ignores system proxy env vars.
+
+    The OpenAI SDK internally uses httpx and defaults to trust_env=True,
+    which picks up HTTP_PROXY / ALL_PROXY / socks5 proxy settings from the
+    environment. When a SOCKS proxy is configured, httpx requires the
+    ``socksio`` extra to be installed.  By disabling trust_env we avoid
+    that dependency and keep the SDK talking directly to the LLM endpoint.
+    """
+    return httpx.Client(trust_env=False)
+
+
+def make_async_http_client() -> httpx.AsyncClient:
+    """Async variant of :func:`make_http_client` for use with AsyncOpenAI."""
+    return httpx.AsyncClient(trust_env=False)
 
 
 def log_change(

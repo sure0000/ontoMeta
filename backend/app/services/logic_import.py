@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import BusinessLogic, DomainContext, EntityStatus, Ontology
 from app.schemas import BusinessLogicDetail
+from app.services.common import make_http_client
 
 
 _CODE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -91,7 +92,14 @@ class LogicImportService:
     def __init__(self, runtime_config=None) -> None:
         if runtime_config is None:
             self.use_mock = settings.use_mock_llm or not settings.openai_api_key
-            self.client = OpenAI(api_key=settings.openai_api_key) if not self.use_mock else None
+            self.client = (
+                OpenAI(
+                    api_key=settings.openai_api_key,
+                    http_client=make_http_client(),
+                )
+                if not self.use_mock
+                else None
+            )
             self.model = settings.openai_model
         else:
             self.use_mock = runtime_config.use_mock or not runtime_config.api_key
@@ -99,6 +107,7 @@ class LogicImportService:
                 OpenAI(
                     api_key=runtime_config.api_key,
                     base_url=runtime_config.api_base_url,
+                    http_client=make_http_client(),
                 )
                 if not self.use_mock
                 else None

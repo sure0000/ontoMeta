@@ -32,3 +32,5 @@ backend/_selected_*.json
 backend/tests/_test_ontometa.db*
 backend/_ci_test.db*
 .pytest_cache/
+.pids/
+.logs/

@@ -1,7 +1,7 @@
 # ontoMeta 本地开发常用命令（Batch B0 / B2 / B3）
 # 用法：在仓库根目录执行 make <target>
 
-.PHONY: help install install-backend install-frontend backend frontend health migrate test compose-up compose-down
+.PHONY: help install install-backend install-frontend backend frontend health migrate test compose-up compose-down start stop restart status
 
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 BACKEND := $(ROOT)backend
@@ -17,6 +17,10 @@ help:
 	@echo "  make migrate           执行 Alembic upgrade head"
 	@echo "  make test              运行后端 pytest"
 	@echo "  make health            检查 GET /health"
+	@echo "  make start             一键启动前后端（后台运行）"
+	@echo "  make stop              一键停止前后端"
+	@echo "  make restart           一键重启前后端"
+	@echo "  make status            查看服务状态"
 	@echo "  make compose-up        docker compose up --build -d"
 	@echo "  make compose-down      docker compose down"
 
@@ -48,6 +52,18 @@ test:
 health:
 	@curl -sf http://127.0.0.1:8000/health && echo || \
 		(echo "health check failed: is backend running on :8000?" >&2; exit 1)
+
+start:
+	@bash "$(ROOT)service.sh" start
+
+stop:
+	@bash "$(ROOT)service.sh" stop
+
+restart:
+	@bash "$(ROOT)service.sh" restart
+
+status:
+	@bash "$(ROOT)service.sh" status
 
 compose-up:
 	docker compose up --build -d

@@ -26,6 +26,7 @@ from app.schemas import (
     TaskRecordOut,
 )
 from app.services.common import log_change
+from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generation_queue import ACTIVE_STATUSES
 
 logger = logging.getLogger("ontometa.workspace")
@@ -181,6 +182,9 @@ class DraftTaskService:
         )
         if active:
             raise DraftGenerationAlreadyRunning(active.id)
+
+        # 全新生成：清空该域历史分块检查点，避免复用过期结果(重试才续跑)。
+        DraftCheckpointStore(domain_id).clear()
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
@@ -383,8 +387,20 @@ class DraftTaskService:
 
             await self._update_task_progress(task_id, 55, "正在生成本体草稿...")
 
+            async def _on_chunk_progress(done: int, total: int) -> None:
+                # 分块生成阶段映射到 55~78% 进度区间。
+                if total <= 0:
+                    return
+                progress = 55 + int(23 * done / total)
+                await self._update_task_progress(
+                    task_id, progress, f"正在分块生成本体草稿... ({done}/{total})"
+                )
+
             phase_start = time.perf_counter()
-            draft = await self._draft_generator_instance().generate(evidence)
+            checkpoint = DraftCheckpointStore(domain_id)
+            draft = await self._draft_generator_instance().generate(
+                evidence, progress_cb=_on_chunk_progress, checkpoint=checkpoint
+            )
             self._ensure_not_cancelled(task_id)
             logger.info(
                 "draft_generation phase=llm task_id=%s domain_id=%s elapsed_ms=%.1f",
@@ -435,6 +451,13 @@ class DraftTaskService:
                     db.commit()
             finally:
                 db.close()
+            # 成功落库后清空检查点(已无续跑需要);清理失败不影响任务成功。
+            try:
+                checkpoint.clear()
+            except Exception:
+                logger.warning(
+                    "清理草稿检查点失败 domain_id=%s", domain_id, exc_info=True
+                )
             logger.info(
                 "draft_generation phase=persist task_id=%s domain_id=%s elapsed_ms=%.1f",
                 task_id,

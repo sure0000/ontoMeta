@@ -1,7 +1,11 @@
 """ORM models — domain modules with stable re-exports."""
 
 from app.models.chat_bi import ChatBiConversation, ChatBiMessage
-from app.models.domain import DomainContext, DraftGenerationTask
+from app.models.domain import (
+    DomainContext,
+    DraftChunkCheckpoint,
+    DraftGenerationTask,
+)
 from app.models.external import ExternalApiCallLog, ExternalApp
 from app.models.logic import (
     BusinessLogic,
@@ -29,6 +33,7 @@ __all__ = [
     "EntityStatus",
     "ConfirmationStatus",
     "DomainContext",
+    "DraftChunkCheckpoint",
     "Ontology",
     "ObjectType",
     "Property",

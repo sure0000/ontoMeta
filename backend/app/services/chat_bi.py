@@ -34,7 +34,7 @@ from app.models import (
     Property,
     RelationType,
 )
-from app.services.common import log_change
+from app.services.common import log_change, make_http_client
 from app.services.query import OntologyQueryService
 from app.services.settings_service import SettingsService
 
@@ -577,7 +577,11 @@ class ChatBiService:
         knowledge: str,
         history: list[dict],
     ) -> dict:
-        client = OpenAI(api_key=runtime.api_key, base_url=runtime.api_base_url)
+        client = OpenAI(
+            api_key=runtime.api_key,
+            base_url=runtime.api_base_url,
+            http_client=make_http_client(),
+        )
         system_prompt = (
             "你是企业数据问答助手（ChatBI）。基于提供的本体知识（业务对象、字段、关系、业务逻辑），"
             "回答用户的业务提问。\n\n"

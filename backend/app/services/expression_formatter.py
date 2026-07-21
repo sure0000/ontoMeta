@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import DomainContext, ObjectType, Property
 from app.services.query import OntologyQueryService
+from app.services.common import make_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -819,7 +820,12 @@ class ExpressionFormatterService:
         if runtime_config is None:
             self.use_mock = settings.use_mock_llm or not settings.openai_api_key
             self.client = (
-                OpenAI(api_key=settings.openai_api_key) if not self.use_mock else None
+                OpenAI(
+                    api_key=settings.openai_api_key,
+                    http_client=make_http_client(),
+                )
+                if not self.use_mock
+                else None
             )
             self.model = settings.openai_model
         else:
@@ -828,6 +834,7 @@ class ExpressionFormatterService:
                 OpenAI(
                     api_key=runtime_config.api_key,
                     base_url=runtime_config.api_base_url,
+                    http_client=make_http_client(),
                 )
                 if not self.use_mock
                 else None
