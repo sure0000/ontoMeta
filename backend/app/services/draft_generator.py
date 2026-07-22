@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 from openai import AsyncOpenAI
 
@@ -30,29 +30,38 @@ ProgressCallback = Callable[[int, int], Awaitable[None]]
 ObjectOverride = dict[str, str | None]
 ObjectOverrides = dict[str, ObjectOverride]
 
+# 每个对象下属性的中文业务名增强：candidate_name -> {field_name: display_name}
+PropertyOverride = dict[str, str]
+PropertyOverrides = dict[str, PropertyOverride]
+
 
 class CheckpointStore(Protocol):
     """分块检查点存储接口(由 task 层提供 DB 实现，测试可注入内存实现)。
 
-    存储的是「每块的对象命名增强(overrides 字典)」，而非整份草稿——结构由证据
-    确定性生成，检查点只缓存 LLM 的命名结果，用于失败重试时跳过重复调用。
+    存储的是「每块的命名增强」——``{"objects": ObjectOverrides, "properties":
+    PropertyOverrides}``，而非整份草稿——结构由证据确定性生成，检查点只缓存 LLM
+    的命名结果，用于失败重试时跳过重复调用。
     """
 
-    def load(self, key: str) -> "ObjectOverrides | None": ...
+    def load(self, key: str) -> "dict[str, Any] | None": ...
 
-    def save(self, key: str, value: "ObjectOverrides") -> None: ...
+    def save(self, key: str, value: "dict[str, Any]") -> None: ...
 
 
 # 说明：草稿的「结构」(有哪些对象、哪些属性、如何归属、有哪些关系)完全由证据
-# 确定性生成，保证零丢失；LLM 只负责把技术名「提升」为业务名(objectTypes 的
-# name/display_name/description)。因此本 prompt 只要求输出 objectTypes，属性与
-# 关系不经过 LLM，也就不会因 LLM 输出不规范而丢字段。
+# 确定性生成，保证零丢失；LLM 只负责把技术名「提升」为业务名——对象的
+# name/display_name/description，以及属性的中文 display_name。属性的英文标识
+# 名/数据类型/语义类型/归属对象始终来自证据，LLM 未覆盖或解析失败时属性
+# display_name 回退现状(display_name or field_name)，因此不会因 LLM 输出不规范
+# 而丢字段。关系(relations)始终规则生成，不经过 LLM。
 _LLM_SYSTEM_PROMPT = (
-    "你是企业本体建模专家。你的任务是把 DataHub 技术元数据中的每个对象(表)提升为"
-    "业务语义命名，而不是简单搬运表名。\n\n"
+    "你是企业本体建模专家。你的任务包含两部分：\n"
+    "1) 把 DataHub 技术元数据中的每个对象(表)提升为业务语义命名，而不是简单搬运表名；\n"
+    "2) 为每个对象下的属性(字段)生成中文业务属性名——结合字段名、列注释(description)、"
+    "示例数据(sample_values)推断业务含义，而不是把字段名直译成中文。\n\n"
     "输入是一份证据 JSON(含 object_types、properties、relations)。你只需输出 JSON，"
-    "且只包含一个字段 objectTypes(数组)。properties 与 relations 仅供你理解对象语义，"
-    "不要输出它们。\n\n"
+    "包含两个字段：objectTypes(数组)、properties(数组)。relations 仅供你理解对象语义，"
+    "不要输出它。\n\n"
     "objectTypes 中每个元素必须包含：\n"
     "- source_ref：原样回传输入中该对象的 source_dataset_urn(务必逐字保留，用于回链，"
     "不可省略或改写)。\n"
@@ -61,20 +70,32 @@ _LLM_SYSTEM_PROMPT = (
     "- display_name：中文业务语义名称(如「支付」「退款」「财务对账」)，"
     "由 display_name 去掉技术后缀推导而来。\n"
     "- description：可选，一句话业务解释。\n\n"
+    "properties 中每个元素必须包含：\n"
+    "- object_source_ref：原样回传该属性所属对象的 source_dataset_urn(与所属"
+    "object_types 条目的 source_dataset_urn 一致，逐字保留，用于回链)。\n"
+    "- field_name：原样回传输入中的 field_name(逐字保留，不可省略或改写)。\n"
+    "- display_name：结合字段名、description、sample_values 推断出的中文业务属性名"
+    "(如「支付金额」「退款状态」「客户等级」)。\n\n"
     "示例：\n"
     "- 输入 candidate_name=payment_di_entity, display_name=支付明细日表, "
     "source_dataset_urn=urn:li:dataset:xxx → "
     "{source_ref:'urn:li:dataset:xxx', name:'payment', display_name:'支付'}\n"
     "- 输入 candidate_name=finance_reconciliation_1d_entity, display_name=财务对账1日汇总 → "
-    "{name:'finance_reconciliation', display_name:'财务对账'}"
+    "{name:'finance_reconciliation', display_name:'财务对账'}\n"
+    "- 输入 object_candidate_name=customer_entity, source_dataset_urn=urn:li:dataset:yyy, "
+    "field_name=lvl_cd, description=null, sample_values=['普通','黄金','铂金'] → "
+    "{object_source_ref:'urn:li:dataset:yyy', field_name:'lvl_cd', display_name:'客户等级'}\n"
+    "- 输入 field_name=order_amt, description='订单金额(分)' → "
+    "{field_name:'order_amt', display_name:'订单金额'}"
 )
 
 
 class OntologyDraftGenerator:
     """生成本体草稿。
 
-    结构(对象/属性/关系)由证据确定性组装，保证零丢失；LLM(非 Mock 模式)仅对
-    对象做业务命名增强。超预算时对「对象命名」这一步做分块，并支持断点续跑。
+    结构(对象/属性/关系)由证据确定性组装，保证零丢失；LLM(非 Mock 模式)对
+    对象做业务命名增强，并为属性生成中文业务名。表数或字符预算超限时对
+    「命名增强」这一步按表数分批(字符预算兜底细分)，并支持断点续跑。
     """
 
     def __init__(self, runtime_config=None) -> None:
@@ -113,29 +134,38 @@ class OntologyDraftGenerator:
     ) -> OntologyDraftOutput:
         # Mock 路径：无 LLM，纯确定性命名。
         if self.use_mock:
-            return self._build_draft_from_evidence(evidence, {})
-        # 预算闸门：payload 在预算内一次拿到对象命名增强，超预算才分块。
-        if len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars:
-            overrides = await self._llm_object_overrides(evidence)
+            return self._build_draft_from_evidence(evidence, {}, {})
+        # 分批闸门：表数与字符预算都在限额内才一次拿到命名增强，否则分块。
+        fits_table_batch = len(evidence.object_types) <= settings.draft_chunk_table_batch_size
+        fits_char_budget = len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
+        if fits_table_batch and fits_char_budget:
+            overrides, property_overrides = await self._llm_overrides(evidence)
         else:
-            overrides = await self._llm_object_overrides_chunked(
+            overrides, property_overrides = await self._llm_overrides_chunked(
                 evidence, progress_cb, checkpoint
             )
         # 结构始终由全量证据确定性组装：对象/属性/关系一个都不会丢。
-        return self._build_draft_from_evidence(evidence, overrides)
+        return self._build_draft_from_evidence(evidence, overrides, property_overrides)
 
     # ------------------------------------------------------------------
     # 确定性组装(零丢失核心)
     # ------------------------------------------------------------------
     def _build_draft_from_evidence(
-        self, evidence: EvidenceBundle, overrides: ObjectOverrides | None = None
+        self,
+        evidence: EvidenceBundle,
+        overrides: ObjectOverrides | None = None,
+        property_overrides: PropertyOverrides | None = None,
     ) -> OntologyDraftOutput:
-        """从证据确定性组装完整草稿；overrides 提供对象的业务命名增强。
+        """从证据确定性组装完整草稿；overrides/property_overrides 提供对象与
+        属性的业务命名增强。
 
         每个对象、每个属性、每条关系都来自证据，overrides 缺失或未匹配时回退到
-        确定性命名(refine)。因此结构完整、必填字段齐全，不存在丢失或校验失败。
+        确定性命名(refine)；property_overrides 缺失或未匹配时属性 display_name
+        回退现状(display_name or field_name)。因此结构完整、必填字段齐全，
+        不存在丢失或校验失败。
         """
         overrides = overrides or {}
+        property_overrides = property_overrides or {}
 
         name_map: dict[str, str] = {}
         display_map: dict[str, str] = {}
@@ -169,11 +199,20 @@ class OntologyDraftGenerator:
             for ot in evidence.object_types
         ]
 
+        def property_display_name(item) -> str:
+            ov_display = (
+                property_overrides.get(item.object_candidate_name, {}).get(
+                    item.field_name
+                )
+                or ""
+            ).strip()
+            return ov_display or item.display_name or item.field_name
+
         properties = [
             DraftProperty(
                 object_type_name=obj_name(item.object_candidate_name),
                 name=self._refine_property_name(item.display_name, item.field_name),
-                display_name=item.display_name or item.field_name,
+                display_name=property_display_name(item),
                 description=item.description,
                 data_type=item.data_type,
                 semantic_type=item.semantic_type,
@@ -212,31 +251,38 @@ class OntologyDraftGenerator:
         )
 
     # ------------------------------------------------------------------
-    # LLM 对象命名增强
+    # LLM 对象命名 + 属性中文名增强
     # ------------------------------------------------------------------
-    async def _llm_object_overrides(self, evidence: EvidenceBundle) -> ObjectOverrides:
-        """单次调用：拿到全量对象的命名增强。"""
+    async def _llm_overrides(
+        self, evidence: EvidenceBundle
+    ) -> tuple[ObjectOverrides, PropertyOverrides]:
+        """单次调用：拿到全量对象的命名增强与属性的中文名增强。"""
         raw = await self._call_llm_objects(evidence)
-        return self._parse_object_overrides(raw, evidence)
+        return (
+            self._parse_object_overrides(raw, evidence),
+            self._parse_property_overrides(raw, evidence),
+        )
 
-    async def _llm_object_overrides_chunked(
+    async def _llm_overrides_chunked(
         self,
         evidence: EvidenceBundle,
         progress_cb: ProgressCallback | None = None,
         checkpoint: CheckpointStore | None = None,
-    ) -> ObjectOverrides:
-        """超预算时分块拿对象命名增强。
+    ) -> tuple[ObjectOverrides, PropertyOverrides]:
+        """超预算(表数或字符)时按表分批拿命名/属性中文名增强。
 
-        仅对象命名分块(LLM 输出极小)，结构随后由全量证据确定性组装。
-        断点续跑：每块命名结果按内容哈希落库，失败重试跳过已完成块。
+        分块单元本身极小(仅命名增强，不含完整草稿)，结构随后由全量证据确定性
+        组装。断点续跑：每块结果按内容哈希落库，失败重试跳过已完成块。
         单块 LLM 失败不吞噬——异常向上抛出由任务层标记失败并可重试续跑。
         """
         sub_bundles, _cross = split_evidence(
-            evidence, settings.llm_context_budget_chars
+            evidence,
+            settings.llm_context_budget_chars,
+            settings.draft_chunk_table_batch_size,
         )
         total_steps = len(sub_bundles)
         logger.info(
-            "draft chunked object-enrichment: sub_bundles=%d", len(sub_bundles)
+            "draft chunked enrichment: sub_bundles=%d", len(sub_bundles)
         )
 
         semaphore = asyncio.Semaphore(max(1, settings.draft_chunk_max_concurrency))
@@ -251,7 +297,7 @@ class OntologyDraftGenerator:
                     completed += 1
                     await progress_cb(completed, total_steps)
 
-        async def run_chunk(sub: EvidenceBundle) -> ObjectOverrides:
+        async def run_chunk(sub: EvidenceBundle) -> dict[str, Any]:
             key = chunk_key(self._build_prompt(sub))
             if checkpoint is not None:
                 cached = checkpoint.load(key)
@@ -261,18 +307,24 @@ class OntologyDraftGenerator:
                     return cached
             async with semaphore:
                 raw = await self._call_llm_objects(sub)
-            overrides = self._parse_object_overrides(raw, sub)
+            result = {
+                "objects": self._parse_object_overrides(raw, sub),
+                "properties": self._parse_property_overrides(raw, sub),
+            }
             if checkpoint is not None:
                 async with checkpoint_lock:
-                    checkpoint.save(key, overrides)
+                    checkpoint.save(key, result)
             await _advance()
-            return overrides
+            return result
 
         results = await asyncio.gather(*(run_chunk(sub) for sub in sub_bundles))
-        merged: ObjectOverrides = {}
-        for overrides in results:
-            merged.update(overrides)
-        return merged
+        merged_objects: ObjectOverrides = {}
+        merged_properties: PropertyOverrides = {}
+        for result in results:
+            merged_objects.update(result.get("objects") or {})
+            for candidate, field_map in (result.get("properties") or {}).items():
+                merged_properties.setdefault(candidate, {}).update(field_map)
+        return merged_objects, merged_properties
 
     async def _call_llm_objects(self, evidence: EvidenceBundle) -> dict:
         prompt = self._build_prompt(evidence)
@@ -286,6 +338,49 @@ class OntologyDraftGenerator:
         )
         content = response.choices[0].message.content or "{}"
         return json.loads(content)
+
+    @staticmethod
+    def _build_candidate_lookup(evidence: EvidenceBundle) -> dict[str, Any]:
+        """构建对象回链用的三级查找表：source_ref → candidate → refine 后同名。"""
+        refined_to_candidate: dict[str, str] = {}
+        for ot in evidence.object_types:
+            refined_to_candidate.setdefault(
+                OntologyDraftGenerator._refine_identifier_name(ot.candidate_name),
+                ot.candidate_name,
+            )
+        return {
+            "dataset_to_candidate": {
+                ot.source_dataset_urn: ot.candidate_name for ot in evidence.object_types
+            },
+            "candidate_set": {ot.candidate_name for ot in evidence.object_types},
+            "refined_to_candidate": refined_to_candidate,
+        }
+
+    @classmethod
+    def _resolve_candidate(cls, obj: dict, lookup: dict[str, Any]) -> str | None:
+        """按 source_ref → candidate_name → refine 后同名 三级兜底回链到 candidate_name。
+
+        任意一路命中即用；都不命中返回 None(调用方据此跳过该条增强，结构不丢)。
+        """
+        src = cls._first_present(
+            obj,
+            [
+                "source_ref",
+                "sourceRef",
+                "source_dataset_urn",
+                "object_source_ref",
+                "objectSourceRef",
+            ],
+        )
+        if src and src in lookup["dataset_to_candidate"]:
+            return lookup["dataset_to_candidate"][src]
+        cand = cls._first_present(obj, ["candidate_name"])
+        if cand and cand in lookup["candidate_set"]:
+            return cand
+        nm = cls._first_present(obj, ["name"])
+        if nm and nm in lookup["refined_to_candidate"]:
+            return lookup["refined_to_candidate"][nm]
+        return None
 
     def _parse_object_overrides(
         self, raw: dict, evidence: EvidenceBundle
@@ -301,34 +396,13 @@ class OntologyDraftGenerator:
         if not isinstance(objects, list):
             return {}
 
-        dataset_to_candidate = {
-            ot.source_dataset_urn: ot.candidate_name for ot in evidence.object_types
-        }
-        candidate_set = {ot.candidate_name for ot in evidence.object_types}
-        refined_to_candidate: dict[str, str] = {}
-        for ot in evidence.object_types:
-            refined_to_candidate.setdefault(
-                self._refine_identifier_name(ot.candidate_name), ot.candidate_name
-            )
+        lookup = self._build_candidate_lookup(evidence)
 
         overrides: ObjectOverrides = {}
         for obj in objects:
             if not isinstance(obj, dict):
                 continue
-            candidate: str | None = None
-            src = self._first_present(
-                obj, ["source_ref", "sourceRef", "source_dataset_urn"]
-            )
-            if src and src in dataset_to_candidate:
-                candidate = dataset_to_candidate[src]
-            if candidate is None:
-                cand = self._first_present(obj, ["candidate_name"])
-                if cand and cand in candidate_set:
-                    candidate = cand
-            if candidate is None:
-                nm = self._first_present(obj, ["name"])
-                if nm and nm in refined_to_candidate:
-                    candidate = refined_to_candidate[nm]
+            candidate = self._resolve_candidate(obj, lookup)
             if candidate is None:
                 continue
             description = obj.get("description")
@@ -341,6 +415,44 @@ class OntologyDraftGenerator:
                 if isinstance(description, str) and description.strip()
                 else None,
             }
+        return overrides
+
+    def _parse_property_overrides(
+        self, raw: dict, evidence: EvidenceBundle
+    ) -> PropertyOverrides:
+        """把 LLM 返回的属性数组回链到证据 (candidate_name, field_name)，得到中文名增强。
+
+        所属对象的回链复用与对象增强相同的三级兜底；field_name 必须与证据中该
+        对象下实际存在的字段完全一致才写入，避免 LLM 编造字段名污染结果。任意
+        一步未命中则跳过该条(属性结构仍由证据保证，display_name 回退现状)。
+        """
+        items = raw.get("properties")
+        if not isinstance(items, list):
+            return {}
+
+        lookup = self._build_candidate_lookup(evidence)
+        fields_by_object: dict[str, set[str]] = {}
+        for prop in evidence.properties:
+            fields_by_object.setdefault(prop.object_candidate_name, set()).add(
+                prop.field_name
+            )
+
+        overrides: PropertyOverrides = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            candidate = self._resolve_candidate(item, lookup)
+            if candidate is None:
+                continue
+            field_name = self._first_present(item, ["field_name", "fieldName"])
+            if not field_name or field_name not in fields_by_object.get(candidate, set()):
+                continue
+            display_name = self._first_present(
+                item, ["display_name", "displayName"]
+            )
+            if not display_name:
+                continue
+            overrides.setdefault(candidate, {})[field_name] = display_name
         return overrides
 
     @staticmethod

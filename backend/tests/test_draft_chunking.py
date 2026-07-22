@@ -177,6 +177,24 @@ def test_split_single_bundle_when_budget_large():
     assert len(sub_bundles[0].relations) == len(bundle.relations)
 
 
+def test_split_respects_table_batch_size():
+    """按表数分批是主策略：字符预算再大，也不能超过 max_tables_per_chunk。"""
+    bundle = _build_bundle(num_objects=15, fields_per_object=1)
+    sub_bundles, cross = split_evidence(bundle, budget=10_000_000, max_tables_per_chunk=5)
+    assert len(sub_bundles) >= 3
+    assert all(len(sub.object_types) <= 5 for sub in sub_bundles)
+    got_objects = [ot.candidate_name for sub in sub_bundles for ot in sub.object_types]
+    assert sorted(got_objects) == sorted(ot.candidate_name for ot in bundle.object_types)
+
+
+def test_split_uses_settings_default_table_batch_size(monkeypatch):
+    monkeypatch.setattr(settings, "draft_chunk_table_batch_size", 4)
+    bundle = _build_bundle(num_objects=10, fields_per_object=1)
+    sub_bundles, _ = split_evidence(bundle, budget=10_000_000)
+    assert all(len(sub.object_types) <= 4 for sub in sub_bundles)
+    assert len(sub_bundles) >= 3
+
+
 # ---------------------------------------------------------------------------
 # 零丢失:确定性组装
 # ---------------------------------------------------------------------------
@@ -416,3 +434,125 @@ def test_db_checkpoint_store_roundtrip(client):
 
     store.clear()
     assert store.load("k1") is None
+
+
+# ---------------------------------------------------------------------------
+# 属性中文业务名增强(LLM properties 输出)
+# ---------------------------------------------------------------------------
+def _good_full_response(payload: dict) -> str:
+    """桩 LLM:对象命名 + 属性中文名增强都按 source_ref/field_name 回链回传。"""
+    objs = [
+        {
+            "source_ref": o["source_dataset_urn"],
+            "name": "biz_" + o["candidate_name"],
+            "display_name": "业务_" + o["display_name"],
+        }
+        for o in payload.get("object_types", [])
+    ]
+    urn_by_candidate = {
+        o["candidate_name"]: o["source_dataset_urn"] for o in payload.get("object_types", [])
+    }
+    props = [
+        {
+            "object_source_ref": urn_by_candidate[p["object_candidate_name"]],
+            "field_name": p["field_name"],
+            "display_name": "中文_" + p["field_name"],
+        }
+        for p in payload.get("properties", [])
+    ]
+    return json.dumps({"objectTypes": objs, "properties": props}, ensure_ascii=False)
+
+
+class _GoodFullCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create(self, *, model, messages, response_format=None):
+        payload = json.loads(messages[-1]["content"])
+        self.calls.append(payload)
+        content = _good_full_response(payload)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
+
+def _stub_full_generator() -> OntologyDraftGenerator:
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "stub"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodFullCompletions()))
+    return gen
+
+
+def test_property_display_name_enriched_by_llm(monkeypatch):
+    bundle = _build_bundle(num_objects=2, fields_per_object=3)
+    gen = _stub_full_generator()
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.properties) == 6  # 零丢失
+    assert all(p.display_name.startswith("中文_") for p in draft.properties)
+    # 英文标识名/数据类型不受属性中文名增强影响，仍来自证据。
+    assert all(p.name.startswith("field_") for p in draft.properties)
+    assert all(p.data_type == "string" for p in draft.properties)
+
+
+def test_property_override_rejects_unknown_field_name(monkeypatch):
+    """LLM 编造不存在的 field_name → 该条增强丢弃，属性零丢失、回退现状命名。"""
+    bundle = _build_bundle(num_objects=1, fields_per_object=2)
+
+    class _FakeFieldCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            obj = payload["object_types"][0]
+            content = json.dumps(
+                {
+                    "objectTypes": [],
+                    "properties": [
+                        {
+                            "object_source_ref": obj["source_dataset_urn"],
+                            "field_name": "not_a_real_field",
+                            "display_name": "伪造字段",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "x"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeFieldCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.properties) == 2  # 零丢失
+    assert all(p.display_name != "伪造字段" for p in draft.properties)
+    assert {p.display_name for p in draft.properties} == {"字段0", "字段1"}
+
+
+def test_chunked_property_overrides_merge(monkeypatch):
+    bundle = _build_bundle(num_objects=6, fields_per_object=3)
+    gen = _stub_full_generator()
+
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+    monkeypatch.setattr(settings, "draft_chunk_table_batch_size", 10)
+    single = asyncio.run(gen.generate(bundle))
+    assert len(gen.client.chat.completions.calls) == 1
+
+    gen.client.chat.completions.calls.clear()
+    monkeypatch.setattr(settings, "draft_chunk_table_batch_size", 2)
+    chunked = asyncio.run(gen.generate(bundle))
+    assert len(gen.client.chat.completions.calls) > 1
+
+    single_props = sorted(
+        (p.object_type_name, p.name, p.display_name) for p in single.properties
+    )
+    chunked_props = sorted(
+        (p.object_type_name, p.name, p.display_name) for p in chunked.properties
+    )
+    assert single_props == chunked_props
+    assert len(chunked.properties) == len(bundle.properties)

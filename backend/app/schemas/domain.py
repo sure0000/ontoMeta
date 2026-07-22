@@ -18,6 +18,7 @@ class FieldInput(BaseModel):
     is_primary_key: bool = False
     is_foreign_key: bool = False
     foreign_key_target: str | None = None
+    sample_values: list[str] = Field(default_factory=list)
 
 
 class DatasetInput(BaseModel):

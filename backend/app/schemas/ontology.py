@@ -30,6 +30,7 @@ class PropertyEvidencePack(BaseModel):
     description: str | None = None
     data_type: str | None = None
     semantic_type: str | None = None
+    sample_values: list[str] = Field(default_factory=list)
     confidence: float = 0.5
     evidence_refs: list[str] = Field(default_factory=list)
 

@@ -30,19 +30,29 @@ def estimate_size(bundle: EvidenceBundle) -> int:
 def split_evidence(
     bundle: EvidenceBundle,
     budget: int,
+    max_tables_per_chunk: int | None = None,
 ) -> tuple[list[EvidenceBundle], list[RelationEvidencePack]]:
     """把证据包按预算切成多个子包,并分离出跨块关系。
 
     分块单元为「对象单元」= 一个 ``ObjectTypeEvidencePack`` 及其全部
     ``PropertyEvidencePack``(以 ``object_candidate_name == candidate_name`` 匹配)。
     用贪心装箱把对象单元合并进子包,每个子包(对象 + 属性)序列化后不超过
-    ``budget``;单个对象单元本身超预算时仍单独成块(对象是最细粒度)。
+    ``budget``,且表数不超过 ``max_tables_per_chunk``;单个对象单元本身超预算
+    时仍单独成块(对象是最细粒度)。
+
+    按表数分块是主策略(默认每批最多 ``max_tables_per_chunk`` 张表),字符预算
+    是兜底细分:一批表还没到数量上限但序列化已超预算时,提前切块,批内表数
+    自然收紧。
 
     关系归类:两端对象落在同一子包 → 随该子包送入;两端跨子包或某端对象缺失
     → 收入返回的跨块关系列表。
 
     返回 ``(子包列表, 跨块关系列表)``。
     """
+    if max_tables_per_chunk is None:
+        from app.config import settings
+
+        max_tables_per_chunk = settings.draft_chunk_table_batch_size
     # 按对象归集属性。
     props_by_obj: dict[str, list] = defaultdict(list)
     for prop in bundle.properties:
@@ -71,7 +81,9 @@ def split_evidence(
             properties=[*current_props, *obj_props],
             relations=_intra_relations(trial_names),
         )
-        if current_ots and estimate_size(trial) > budget:
+        if current_ots and (
+            len(current_ots) >= max_tables_per_chunk or estimate_size(trial) > budget
+        ):
             packed.append({"object_types": current_ots, "properties": current_props})
             current_ots = [obj]
             current_props = list(obj_props)

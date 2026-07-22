@@ -65,6 +65,7 @@ class EvidenceBuilder:
                         description=field.description,
                         data_type=field.data_type,
                         semantic_type=semantic,
+                        sample_values=field.sample_values,
                         confidence=0.7 if field.display_name else 0.55,
                         evidence_refs=[f"{dataset.urn}#{field.name}"],
                     )

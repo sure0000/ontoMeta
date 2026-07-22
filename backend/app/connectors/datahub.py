@@ -45,7 +45,12 @@ MOCK_DATASETS: dict[str, list[DatasetInput]] = {
             fields=[
                 FieldInput(name="customer_id", display_name="客户ID", data_type="bigint", is_primary_key=True),
                 FieldInput(name="customer_name", display_name="客户名称", data_type="string"),
-                FieldInput(name="customer_level", display_name="客户等级", data_type="string"),
+                FieldInput(
+                    name="customer_level",
+                    display_name="客户等级",
+                    data_type="string",
+                    sample_values=["普通", "黄金", "铂金"],
+                ),
                 FieldInput(name="register_date", display_name="注册日期", data_type="date"),
             ],
         ),
@@ -80,7 +85,12 @@ MOCK_DATASETS: dict[str, list[DatasetInput]] = {
                     foreign_key_target="dim_customer.customer_id",
                 ),
                 FieldInput(name="order_amount", display_name="订单金额", data_type="decimal"),
-                FieldInput(name="order_status", display_name="订单状态", data_type="string"),
+                FieldInput(
+                    name="order_status",
+                    display_name="订单状态",
+                    data_type="string",
+                    sample_values=["待支付", "已支付", "已发货", "已完成"],
+                ),
                 FieldInput(name="order_time", display_name="下单时间", data_type="timestamp"),
             ],
         ),
@@ -139,6 +149,9 @@ MOCK_LOGIC: dict[str, list[LogicEvidenceInput]] = {
     ],
 }
 
+_SAMPLE_VALUES_PER_FIELD = 5
+_SAMPLE_VALUE_MAX_LENGTH = 60
+
 _DATASET_ENTITY_FRAGMENT = """
 fragment DatasetDetails on Dataset {
   urn
@@ -154,6 +167,12 @@ fragment DatasetDetails on Dataset {
       sourceFields { fieldPath }
       foreignFields { fieldPath }
       foreignDataset { urn name }
+    }
+  }
+  datasetProfiles(limit: 1) {
+    fieldProfiles {
+      fieldPath
+      sampleValues
     }
   }
   downstreamLineage: lineage(input: { direction: DOWNSTREAM, start: 0, count: 50 }) {
@@ -202,9 +221,34 @@ def _parse_domain(raw: dict) -> DomainInput:
     )
 
 
-def _parse_schema_fields(schema_metadata: dict | None) -> list[FieldInput]:
+def _parse_field_profiles(raw: dict) -> dict[str, list[str]]:
+    """从最近一次 datasetProfiles 提取 {字段名: 样例值} 映射。
+
+    未开启 profiling 或尚无采集结果时 datasetProfiles/fieldProfiles 为空，
+    优雅降级为空字典，不影响后续流程。
+    """
+    profiles = raw.get("datasetProfiles") or []
+    if not profiles:
+        return {}
+    field_profiles = profiles[0].get("fieldProfiles") or []
+    result: dict[str, list[str]] = {}
+    for fp in field_profiles:
+        name = _field_path(fp.get("fieldPath", ""))
+        if not name:
+            continue
+        values = fp.get("sampleValues") or []
+        truncated = [str(v)[:_SAMPLE_VALUE_MAX_LENGTH] for v in values[:_SAMPLE_VALUES_PER_FIELD]]
+        if truncated:
+            result[name] = truncated
+    return result
+
+
+def _parse_schema_fields(
+    schema_metadata: dict | None, field_profiles: dict[str, list[str]] | None = None
+) -> list[FieldInput]:
     if not schema_metadata:
         return []
+    field_profiles = field_profiles or {}
 
     primary_keys = set(schema_metadata.get("primaryKeys") or [])
     foreign_key_by_source: dict[str, tuple[str, str]] = {}
@@ -241,6 +285,7 @@ def _parse_schema_fields(schema_metadata: dict | None) -> list[FieldInput]:
                 is_primary_key=name in primary_keys,
                 is_foreign_key=is_foreign_key,
                 foreign_key_target=fk_target,
+                sample_values=field_profiles.get(name, []),
             )
         )
     return fields
@@ -282,7 +327,9 @@ def _parse_dataset_entity(raw: dict) -> DatasetInput:
         description=props.get("description"),
         platform=platform,
         container=container,
-        fields=_parse_schema_fields(raw.get("schemaMetadata")),
+        fields=_parse_schema_fields(
+            raw.get("schemaMetadata"), _parse_field_profiles(raw)
+        ),
     )
 
 

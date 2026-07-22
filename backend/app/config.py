@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     llm_context_budget_chars: int = 48000
     # 分块生成时并发调用 LLM 的子块数上限。
     draft_chunk_max_concurrency: int = 2
+    # 分块生成时每批最多打包的表(对象)数：优先按表数切块，字符预算作为兜底细分。
+    draft_chunk_table_batch_size: int = 10
 
     max_concurrent_draft_generations: int = 2
     datahub_max_concurrency: int = 5
