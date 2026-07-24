@@ -2,12 +2,12 @@ import {
   ApartmentOutlined,
   CheckCircleOutlined,
   DeploymentUnitOutlined,
+  DownOutlined,
   ExportOutlined,
   HistoryOutlined,
-  PlayCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Modal, Progress, Space, Spin, Table, message } from "antd";
+import { Alert, Button, Dropdown, Modal, Progress, Space, Spin, Table, message } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
@@ -17,10 +17,8 @@ import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { useApi } from "../hooks/useApi";
-import { getOntologyDomainStatusVisual } from "../utils/statusVisual";
 import type {
   DomainContextDetail,
   DraftGenerationScope,
@@ -506,9 +504,6 @@ export function DomainDetailPage() {
     `/workspace/${domainId}/relations/${relationId}`;
 
   const publishedVersion = domain.published_ontology_version;
-  const ontologyStatusVisual = getOntologyDomainStatusVisual(
-    domain.latest_ontology_status ?? (domain.latest_ontology_id ? "draft" : "active"),
-  );
 
   return (
     <PageContainer full>
@@ -546,33 +541,48 @@ export function DomainDetailPage() {
                 <Link to={`/business-logic?domain=${domainId}`}>
                   <Button>业务逻辑</Button>
                 </Link>
+                <Button icon={<HistoryOutlined />} onClick={openVersionHistory}>
+                  版本历史{publishedVersion ? ` v${publishedVersion}` : ""}
+                </Button>
               </>
             )}
-            <Button
-              type="primary"
-              loading={generating.full}
-              disabled={generating.objects || generating.relations}
-              onClick={() => handleGenerate("full")}
-              icon={<ThunderboltOutlined />}
+            <Dropdown
+              trigger={["hover", "click"]}
+              disabled={generating.full || generating.objects || generating.relations}
+              menu={{
+                items: [
+                  {
+                    key: "full",
+                    icon: <ThunderboltOutlined />,
+                    label: "生成本体草稿",
+                    onClick: () => handleGenerate("full"),
+                  },
+                  {
+                    key: "objects",
+                    icon: <ApartmentOutlined />,
+                    label: "生成业务对象",
+                    onClick: () => handleGenerate("objects"),
+                  },
+                  {
+                    key: "relations",
+                    icon: <DeploymentUnitOutlined />,
+                    label: "生成业务关系",
+                    onClick: () => handleGenerate("relations"),
+                  },
+                ],
+              }}
             >
-              生成本体草稿
-            </Button>
-            <Button
-              loading={generating.objects}
-              disabled={generating.full}
-              onClick={() => handleGenerate("objects")}
-              icon={<ApartmentOutlined />}
-            >
-              生成业务对象
-            </Button>
-            <Button
-              loading={generating.relations}
-              disabled={generating.full}
-              onClick={() => handleGenerate("relations")}
-              icon={<DeploymentUnitOutlined />}
-            >
-              生成业务关系
-            </Button>
+              <Button
+                type="primary"
+                loading={generating.full || generating.objects || generating.relations}
+                icon={<ThunderboltOutlined />}
+              >
+                <Space size={4}>
+                  生成
+                  <DownOutlined style={{ fontSize: 10 }} />
+                </Space>
+              </Button>
+            </Dropdown>
             {domain.latest_ontology_id && domain.latest_ontology_status === "draft" && (
               <Button onClick={handlePublish} icon={<CheckCircleOutlined />}>
                 确认发布
@@ -620,47 +630,6 @@ export function DomainDetailPage() {
           );
         },
       )}
-
-      <div className="stat-row">
-        <StatCard
-          tone="primary"
-          icon={<ApartmentOutlined />}
-          label="业务对象"
-          value={objectTotal}
-        />
-        <StatCard
-          tone="success"
-          icon={<DeploymentUnitOutlined />}
-          label="关系数量"
-          value={relationTotal}
-        />
-        <StatCard
-          tone={ontologyStatusVisual.tone}
-          icon={ontologyStatusVisual.icon}
-          label="本体状态"
-          value={
-            <span style={{ fontSize: 16 }}>
-              {domain.latest_ontology_status
-                ? statusLabel(domain.latest_ontology_status)
-                : "未生成"}
-            </span>
-          }
-        />
-        <StatCard
-          tone="neutral"
-          icon={<PlayCircleOutlined />}
-          label="发布版本"
-          value={
-            publishedVersion ? (
-              <Button type="link" style={{ padding: 0, height: "auto", fontSize: 20 }} onClick={openVersionHistory}>
-                v{publishedVersion}
-              </Button>
-            ) : (
-              "—"
-            )
-          }
-        />
-      </div>
 
       <Spin spinning={ontologyLoading}>
         {!domain.latest_ontology_id ? (
@@ -802,15 +771,4 @@ export function DomainDetailPage() {
       </Modal>
     </PageContainer>
   );
-}
-
-function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    draft: "草稿",
-    in_review: "待审",
-    published: "已发布",
-    pre_published: "预发布",
-    archived: "已归档",
-  };
-  return map[status] || status;
 }

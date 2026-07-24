@@ -85,6 +85,13 @@ class ObjectType(Base):
     canonical_term_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    # 对象角色标注（不依赖表名，预生成时由结构/内容/拓扑信号判定）：
+    # business_object / data_table / bridge。role_reason 可追溯，供人工在工作区确认。
+    table_role: Mapped[str] = mapped_column(
+        String(50), default="business_object", index=True
+    )
+    role_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    role_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

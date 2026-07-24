@@ -8,6 +8,7 @@ from app.schemas import (
     PropertyEvidencePack,
     RelationEvidencePack,
 )
+from app.services.object_classifier import FieldSignal, classify_object_role
 from app.services.relation_terms import infer_relation_term
 from app.services.relation_structure import infer_relation_structure_type
 
@@ -38,6 +39,10 @@ class EvidenceBuilder:
         business_logics: list[LogicEvidencePack] = []
 
         dataset_name_map = {ds.urn: ds.name for ds in bundle.datasets}
+        # 跨表拓扑：先聚合“每张表被多少张其它表通过外键指向”（入度）
+        # 与血缘上/下游数量，供对象角色分类器使用。
+        fk_in_degree, lineage_up, lineage_down = self._build_topology(bundle)
+
         # 关系描述用的业务展示名映射:候选名(source_object/target_object)必须
         # 仍由技术名(ds.name)推导，保证与 object_types 的 candidate_name 一致；
         # 但描述文本改用业务展示名，让 LLM 拿到的关系语义证据是「订单明细
@@ -50,6 +55,24 @@ class EvidenceBuilder:
 
         for dataset in bundle.datasets:
             object_name = _infer_object_name(dataset.name)
+            role = classify_object_role(
+                [
+                    FieldSignal(
+                        name=f.name,
+                        semantic_type=self._infer_semantic_type(f),
+                        is_primary_key=f.is_primary_key,
+                        is_foreign_key=f.is_foreign_key,
+                        unique_count=f.unique_count,
+                    )
+                    for f in dataset.fields
+                ],
+                fk_in_degree=fk_in_degree.get(dataset.name, 0),
+                lineage_upstream=lineage_up.get(dataset.urn, 0),
+                lineage_downstream=lineage_down.get(dataset.urn, 0),
+                glossary_terms=dataset.glossary_terms,
+                row_count=dataset.row_count,
+            )
+            # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
             is_dimension = dataset.name.startswith("dim_") or "维" in (dataset.display_name or "")
             confidence = 0.85 if is_dimension else 0.65
 
@@ -61,6 +84,9 @@ class EvidenceBuilder:
                     source_dataset_urn=dataset.urn,
                     confidence=confidence,
                     evidence_refs=[dataset.urn, bundle.domain.id],
+                    table_role=role.role,
+                    role_confidence=role.confidence,
+                    role_reason=role.reason,
                 )
             )
 
@@ -154,6 +180,29 @@ class EvidenceBuilder:
             relations=relations,
             business_logics=business_logics,
         )
+
+    def _build_topology(
+        self, bundle: DataHubDomainBundle
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+        """聚合跨表拓扑信号（不依赖表名含义）：
+
+        - fk_in_degree: 按表名计数“有多少张不同的表通过外键指向它”。
+        - lineage_up / lineage_down: 按 URN 计数血缘上/下游数量。
+        """
+        fk_in_degree: dict[str, set[str]] = {}
+        for ds in bundle.datasets:
+            for f in ds.fields:
+                if f.is_foreign_key and f.foreign_key_target:
+                    target_table = f.foreign_key_target.split(".")[0]
+                    fk_in_degree.setdefault(target_table, set()).add(ds.name)
+        fk_counts = {table: len(refs) for table, refs in fk_in_degree.items()}
+
+        lineage_up: dict[str, int] = {}
+        lineage_down: dict[str, int] = {}
+        for lin in bundle.lineages:
+            lineage_down[lin.source_urn] = lineage_down.get(lin.source_urn, 0) + 1
+            lineage_up[lin.target_urn] = lineage_up.get(lin.target_urn, 0) + 1
+        return fk_counts, lineage_up, lineage_down
 
     def _infer_semantic_type(self, field) -> str:
         name = field.name.lower()

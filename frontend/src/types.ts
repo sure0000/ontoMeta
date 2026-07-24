@@ -92,6 +92,9 @@ export interface ObjectTypeSummary {
   business_logic_count: number;
   bound_logic_count?: number;
   source_confidence?: number;
+  table_role?: string;
+  role_confidence?: number;
+  role_reason?: string;
   domain_context_id?: string;
   domain_name?: string;
   updated_at: string;

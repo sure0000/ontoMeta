@@ -19,6 +19,8 @@ class FieldInput(BaseModel):
     is_foreign_key: bool = False
     foreign_key_target: str | None = None
     sample_values: list[str] = Field(default_factory=list)
+    # profiling 统计：该字段的不同值个数（未开启 profiling 时为 None）。
+    unique_count: int | None = None
 
 
 class DatasetInput(BaseModel):
@@ -29,6 +31,10 @@ class DatasetInput(BaseModel):
     platform: str | None = None
     container: str | None = None
     fields: list[FieldInput] = Field(default_factory=list)
+    # profiling 的总行数（未开启时 None），供粒度/主键唯一度分析。
+    row_count: int | None = None
+    # 人工挂载的业务术语（GlossaryTerm 名称），已确认的业务概念信号。
+    glossary_terms: list[str] = Field(default_factory=list)
 
 
 class LineageInput(BaseModel):

@@ -42,8 +42,10 @@ MOCK_DATASETS: dict[str, list[DatasetInput]] = {
             description="客户主数据维表，包含客户基本信息与等级",
             platform="hive",
             container="customer",
+            row_count=100000,
+            glossary_terms=["客户"],
             fields=[
-                FieldInput(name="customer_id", display_name="客户ID", data_type="bigint", is_primary_key=True),
+                FieldInput(name="customer_id", display_name="客户ID", data_type="bigint", is_primary_key=True, unique_count=100000),
                 FieldInput(name="customer_name", display_name="客户名称", data_type="string"),
                 FieldInput(
                     name="customer_level",
@@ -159,6 +161,14 @@ fragment DatasetDetails on Dataset {
   properties { description }
   platform { name }
   container { properties { name } }
+  glossaryTerms {
+    terms {
+      term {
+        urn
+        ... on GlossaryTerm { properties { name } }
+      }
+    }
+  }
   schemaMetadata {
     fields { fieldPath type nativeDataType description }
     primaryKeys
@@ -170,9 +180,11 @@ fragment DatasetDetails on Dataset {
     }
   }
   datasetProfiles(limit: 1) {
+    rowCount
     fieldProfiles {
       fieldPath
       sampleValues
+      uniqueCount
     }
   }
   downstreamLineage: lineage(input: { direction: DOWNSTREAM, start: 0, count: 50 }) {
@@ -221,8 +233,8 @@ def _parse_domain(raw: dict) -> DomainInput:
     )
 
 
-def _parse_field_profiles(raw: dict) -> dict[str, list[str]]:
-    """从最近一次 datasetProfiles 提取 {字段名: 样例值} 映射。
+def _parse_field_profiles(raw: dict) -> dict[str, dict]:
+    """从最近一次 datasetProfiles 提取 {字段名: {sample_values, unique_count}}。
 
     未开启 profiling 或尚无采集结果时 datasetProfiles/fieldProfiles 为空，
     优雅降级为空字典，不影响后续流程。
@@ -231,20 +243,48 @@ def _parse_field_profiles(raw: dict) -> dict[str, list[str]]:
     if not profiles:
         return {}
     field_profiles = profiles[0].get("fieldProfiles") or []
-    result: dict[str, list[str]] = {}
+    result: dict[str, dict] = {}
     for fp in field_profiles:
         name = _field_path(fp.get("fieldPath", ""))
         if not name:
             continue
         values = fp.get("sampleValues") or []
         truncated = [str(v)[:_SAMPLE_VALUE_MAX_LENGTH] for v in values[:_SAMPLE_VALUES_PER_FIELD]]
-        if truncated:
-            result[name] = truncated
+        unique_count = fp.get("uniqueCount")
+        result[name] = {
+            "sample_values": truncated,
+            "unique_count": unique_count if isinstance(unique_count, int) else None,
+        }
     return result
 
 
+def _parse_row_count(raw: dict) -> int | None:
+    """从最近一次 datasetProfiles 提取总行数（未采集时为 None）。"""
+    profiles = raw.get("datasetProfiles") or []
+    if not profiles:
+        return None
+    row_count = profiles[0].get("rowCount")
+    return row_count if isinstance(row_count, int) else None
+
+
+def _parse_glossary_terms(raw: dict) -> list[str]:
+    """提取数据集上人工挂载的业务术语名称（去重、保序）。"""
+    container = raw.get("glossaryTerms") or {}
+    terms = container.get("terms") or []
+    names: list[str] = []
+    seen: set[str] = set()
+    for entry in terms:
+        term = (entry or {}).get("term") or {}
+        props = term.get("properties") or {}
+        name = props.get("name") or term.get("urn")
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def _parse_schema_fields(
-    schema_metadata: dict | None, field_profiles: dict[str, list[str]] | None = None
+    schema_metadata: dict | None, field_profiles: dict[str, dict] | None = None
 ) -> list[FieldInput]:
     if not schema_metadata:
         return []
@@ -276,6 +316,7 @@ def _parse_schema_fields(
             is_foreign_key = True
             target_table, target_field = foreign_key_by_source[name]
             fk_target = f"{target_table}.{target_field}"
+        profile = field_profiles.get(name) or {}
         fields.append(
             FieldInput(
                 name=name,
@@ -285,7 +326,8 @@ def _parse_schema_fields(
                 is_primary_key=name in primary_keys,
                 is_foreign_key=is_foreign_key,
                 foreign_key_target=fk_target,
-                sample_values=field_profiles.get(name, []),
+                sample_values=profile.get("sample_values", []),
+                unique_count=profile.get("unique_count"),
             )
         )
     return fields
@@ -330,6 +372,8 @@ def _parse_dataset_entity(raw: dict) -> DatasetInput:
         fields=_parse_schema_fields(
             raw.get("schemaMetadata"), _parse_field_profiles(raw)
         ),
+        row_count=_parse_row_count(raw),
+        glossary_terms=_parse_glossary_terms(raw),
     )
 
 

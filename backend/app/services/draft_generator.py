@@ -310,6 +310,9 @@ class OntologyDraftGenerator:
                 description=desc_map[ot.candidate_name],
                 source_ref=ot.source_dataset_urn,
                 confidence=ot.confidence,
+                table_role=ot.table_role,
+                role_confidence=ot.role_confidence,
+                role_reason=ot.role_reason,
             )
             for ot in evidence.object_types
         ]

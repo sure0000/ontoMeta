@@ -21,6 +21,10 @@ class ObjectTypeEvidencePack(BaseModel):
     source_dataset_urn: str
     confidence: float = 0.5
     evidence_refs: list[str] = Field(default_factory=list)
+    # 对象角色标注（不依赖表名，由结构/内容/拓扑信号判定）。
+    table_role: str = "business_object"
+    role_confidence: float = 0.5
+    role_reason: str | None = None
 
 
 class PropertyEvidencePack(BaseModel):
@@ -72,6 +76,10 @@ class DraftObjectType(BaseModel):
     description: str | None = None
     source_ref: str | None = None
     confidence: float = 0.5
+    # 对象角色标注：business_object / data_table / bridge。
+    table_role: str = "business_object"
+    role_confidence: float = 0.5
+    role_reason: str | None = None
 
 
 class DraftProperty(BaseModel):
@@ -174,6 +182,9 @@ class ObjectTypeSummary(BaseModel):
     business_logic_count: int = 0
     bound_logic_count: int = 0
     source_confidence: float | None = None
+    table_role: str = "business_object"
+    role_confidence: float | None = None
+    role_reason: str | None = None
     domain_context_id: str | None = None
     domain_name: str | None = None
     updated_at: datetime

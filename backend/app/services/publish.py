@@ -68,6 +68,9 @@ class DraftPersistenceService:
                 description=item.description,
                 source_ref=item.source_ref,
                 source_confidence=item.confidence,
+                table_role=item.table_role,
+                role_confidence=item.role_confidence,
+                role_reason=item.role_reason,
                 status=EntityStatus.SUGGESTED.value,
             )
             db.add(obj)
@@ -225,6 +228,9 @@ class DraftPersistenceService:
                 existing.display_name = item.display_name
                 existing.description = item.description
                 existing.source_confidence = item.confidence
+                existing.table_role = item.table_role
+                existing.role_confidence = item.role_confidence
+                existing.role_reason = item.role_reason
                 obj = existing
             else:
                 obj = ObjectType(
@@ -234,6 +240,9 @@ class DraftPersistenceService:
                     description=item.description,
                     source_ref=item.source_ref,
                     source_confidence=item.confidence,
+                    table_role=item.table_role,
+                    role_confidence=item.role_confidence,
+                    role_reason=item.role_reason,
                     status=EntityStatus.SUGGESTED.value,
                 )
                 db.add(obj)

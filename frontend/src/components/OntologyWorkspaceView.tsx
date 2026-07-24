@@ -39,6 +39,33 @@ function normalizeQuery(input: string) {
   return input.trim().toLowerCase();
 }
 
+// 对象角色徐章：区分“业务对象 / 普通数据表 / 桥接表”（预生成时标注，待人工确认）。
+const ROLE_META: Record<string, { label: string; color: string }> = {
+  business_object: { label: "业务对象", color: "green" },
+  data_table: { label: "数据表", color: "orange" },
+  bridge: { label: "关系表", color: "purple" },
+};
+
+function RoleBadge({
+  role,
+  reason,
+  confidence,
+}: {
+  role?: string;
+  reason?: string;
+  confidence?: number;
+}) {
+  const meta = ROLE_META[role || "business_object"] ?? ROLE_META.business_object;
+  const tip = [
+    reason,
+    confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null,
+  ]
+    .filter(Boolean)
+    .join("｜");
+  const tag = <Tag color={meta.color}>{meta.label}</Tag>;
+  return tip ? <Tooltip title={tip}>{tag}</Tooltip> : tag;
+}
+
 function matchObject(obj: ObjectTypeSummary, q: string) {
   if (!q) return true;
   if (obj.name?.toLowerCase().includes(q)) return true;
@@ -151,6 +178,19 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
             <span>{record.display_name}</span>
             <span className="id-link-sub">{record.name}</span>
           </Link>
+        ),
+      },
+      {
+        title: "类型",
+        dataIndex: "table_role",
+        key: "table_role",
+        width: 110,
+        render: (_, record) => (
+          <RoleBadge
+            role={record.table_role}
+            reason={record.role_reason}
+            confidence={record.role_confidence}
+          />
         ),
       },
       {
@@ -544,33 +584,34 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         </SectionCard>
       ) : (
         <div>
-          <Row gutter={[16, 16]}>
+          <Row gutter={[12, 12]}>
             {pagedObjects.map((obj) => (
-              <Col key={obj.id} xs={24} sm={12} lg={8} xl={6}>
+              <Col key={obj.id} xs={24} sm={12} md={8} lg={6} xl={4} xxl={4}>
                 <Link to={objectDetailPath(obj.id)} className="om-card-link">
                   <div className="entity-card">
                     <div className="entity-card-head">
-                      <div style={{ minWidth: 0 }}>
-                        <div className="entity-card-title">{obj.display_name}</div>
-                        <div className="entity-card-subtitle">{obj.name}</div>
+                      <div className="entity-card-title" title={obj.display_name}>
+                        {obj.display_name}
                       </div>
-                      <StatusBadge status={obj.status} />
+                      <RoleBadge
+                        role={obj.table_role}
+                        reason={obj.role_reason}
+                        confidence={obj.role_confidence}
+                      />
                     </div>
-                    <div className="entity-card-desc">
-                      {obj.description || "暂无描述"}
+                    <div className="entity-card-subtitle" title={obj.name}>
+                      {obj.name}
                     </div>
                     <div className="entity-card-foot">
-                      <div className="entity-card-foot-stats">
-                        <span className="entity-card-foot-item">
-                          <strong>{obj.property_count}</strong> 属性
-                        </span>
-                        <span className="entity-card-foot-item">
-                          <strong>{obj.relation_count}</strong> 关系
-                        </span>
-                        <span className="entity-card-foot-item">
-                          <strong>{obj.bound_logic_count ?? 0}</strong> 逻辑
-                        </span>
-                      </div>
+                      <span className="entity-card-foot-item">
+                        <strong>{obj.property_count}</strong> 属性
+                      </span>
+                      <span className="entity-card-foot-item">
+                        <strong>{obj.relation_count}</strong> 关系
+                      </span>
+                      <span className="entity-card-foot-item">
+                        <strong>{obj.bound_logic_count ?? 0}</strong> 逻辑
+                      </span>
                     </div>
                   </div>
                 </Link>
