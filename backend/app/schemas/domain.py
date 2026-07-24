@@ -35,6 +35,9 @@ class DatasetInput(BaseModel):
     row_count: int | None = None
     # 人工挂载的业务术语（GlossaryTerm 名称），已确认的业务概念信号。
     glossary_terms: list[str] = Field(default_factory=list)
+    # DataHub 原生 subType（如 View/Table）与 tag 名称，供对象角色分类器识别系统/技术资产。
+    subtypes: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
 
 
 class LineageInput(BaseModel):

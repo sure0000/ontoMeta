@@ -5,6 +5,7 @@ export const RELATION_STRUCTURE_OPTIONS = [
   { label: "外键关系", value: "foreign_key" },
   { label: "桥表", value: "bridge_table" },
   { label: "事实表", value: "fact_table" },
+  { label: "派生/溯源", value: "derivation" },
   { label: "外键映射", value: "other" },
 ] as const;
 
@@ -14,6 +15,7 @@ const RELATION_STRUCTURE_LABELS: Record<RelationStructureType, string> = {
   foreign_key: "外键关系",
   bridge_table: "桥表",
   fact_table: "事实表",
+  derivation: "派生/溯源",
   other: "外键映射",
 };
 
@@ -30,6 +32,14 @@ export function inferRelationStructureType(
   const text = `${description || ""} ${sourceEvidence || ""}`.toLowerCase();
   if (text.includes("外键") || text.includes("foreign")) return "foreign_key";
   if (text.includes("桥") || text.includes("bridge")) return "bridge_table";
+  if (
+    text.includes("血缘") ||
+    text.includes("lineage") ||
+    text.includes("加工至") ||
+    text.includes("派生")
+  ) {
+    return "derivation";
+  }
   if (text.includes("事实") || text.includes("fact_") || text.includes("fact table")) {
     return "fact_table";
   }
@@ -67,11 +77,17 @@ export function normalizeCardinality(value?: string | null): string | undefined 
 }
 
 const VERB_PATTERN =
-  /(属于|包含|下单|引用|派生|关联|归属|拥有|参与|产生|组成|依赖|影响|生成)/;
+  /(属于|包含|下单|引用|派生|关联|归属|拥有|参与|产生|组成|依赖|影响|生成|汇总|对账|结算|统计|清洗|加工|标准化|报表|核对|刻画|度量|支撑)/;
 
 export function compactRelationTerm(value: string): string {
   const text = value.trim();
   if (!text) return text;
+
+  // 已是简短、不含句子/连接词的干净谓词(如「对账为」「汇总为」「属于」)，
+  // 直接保留，避免被 VERB_PATTERN 抽成单动词而丢掉方向后缀。
+  if (text.length <= RELATION_TERM_MAX_LENGTH && !/关联\s|加工至|->|至|通过|血缘/.test(text)) {
+    return text;
+  }
 
   const verbMatch = text.match(VERB_PATTERN);
   if (verbMatch) return verbMatch[1];

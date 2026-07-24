@@ -22,6 +22,7 @@ import type { ObjectTypeSummary, OntologyGraph, OntologyGroupedGraph, RelationTy
 
 type EntityTab = "objects" | "relations";
 type ObjectViewMode = "list" | "cards" | "graph";
+type ObjectRoleFilter = "all" | "business" | "common";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -44,6 +45,7 @@ const ROLE_META: Record<string, { label: string; color: string }> = {
   business_object: { label: "业务对象", color: "green" },
   data_table: { label: "数据表", color: "orange" },
   bridge: { label: "关系表", color: "purple" },
+  technical: { label: "技术/系统表", color: "default" },
 };
 
 function RoleBadge({
@@ -74,6 +76,13 @@ function matchObject(obj: ObjectTypeSummary, q: string) {
   return false;
 }
 
+// 业务对象 = business_object；普通对象 = 非业务对象（数据表 / 关系表）
+function matchObjectRole(obj: ObjectTypeSummary, filter: ObjectRoleFilter) {
+  if (filter === "all") return true;
+  const isBusiness = (obj.table_role || "business_object") === "business_object";
+  return filter === "business" ? isBusiness : !isBusiness;
+}
+
 function matchRelation(rel: RelationType, q: string) {
   if (!q) return true;
   if (rel.name?.toLowerCase().includes(q)) return true;
@@ -97,6 +106,9 @@ interface Props {
   /** 服务端搜索受控；未传则本地过滤 */
   searchQuery?: string;
   onSearchChange?: (q: string) => void;
+  /** 业务对象/普通对象筛选受控；未传则本地过滤 */
+  objectRoleFilter?: ObjectRoleFilter;
+  onObjectRoleFilterChange?: (filter: ObjectRoleFilter) => void;
   /** 图谱邻域展开 */
   onExpandGraphNode?: (objectId: string) => void;
   graphExpanding?: boolean;
@@ -118,6 +130,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   relationPaging,
   searchQuery,
   onSearchChange,
+  objectRoleFilter,
+  onObjectRoleFilterChange,
   onExpandGraphNode,
   graphExpanding = false,
   groupedGraph,
@@ -129,6 +143,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const [entityTab, setEntityTab] = useState<EntityTab>("objects");
   const [objectView, setObjectView] = useState<ObjectViewMode>("cards");
   const [localQuery, setLocalQuery] = useState("");
+  const [localRoleFilter, setLocalRoleFilter] = useState<ObjectRoleFilter>("all");
   const [objectPage, setObjectPage] = useState(1);
   const [objectPageSize, setObjectPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [relationPage, setRelationPage] = useState(1);
@@ -136,11 +151,15 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   const query = onSearchChange ? (searchQuery ?? "") : localQuery;
   const normalizedQuery = normalizeQuery(query);
+  const roleFilter = onObjectRoleFilterChange ? (objectRoleFilter ?? "all") : localRoleFilter;
 
   const filteredObjects = useMemo(() => {
+    // 服务端已按 role_filter 过滤，本地只处理未受控场景
     if (serverMode) return objects;
-    return objects.filter((o) => matchObject(o, normalizedQuery));
-  }, [objects, normalizedQuery, serverMode]);
+    return objects.filter(
+      (o) => matchObject(o, normalizedQuery) && matchObjectRole(o, roleFilter),
+    );
+  }, [objects, normalizedQuery, roleFilter, serverMode]);
 
   const filteredRelations = useMemo(() => {
     if (serverMode) return relations;
@@ -152,7 +171,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       setObjectPage(1);
       setRelationPage(1);
     }
-  }, [entityTab, normalizedQuery, serverMode]);
+  }, [entityTab, normalizedQuery, roleFilter, serverMode]);
 
   const effectiveObjectPage = objectPaging?.page ?? objectPage;
   const effectiveObjectPageSize = objectPaging?.pageSize ?? objectPageSize;
@@ -336,6 +355,15 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     [onSearchChange],
   );
 
+  const handleRoleFilterChange = useCallback(
+    (value: string) => {
+      const next = value as ObjectRoleFilter;
+      if (onObjectRoleFilterChange) onObjectRoleFilterChange(next);
+      else setLocalRoleFilter(next);
+    },
+    [onObjectRoleFilterChange],
+  );
+
   const handleObjectPageChange = useCallback(
     (page: number, pageSize: number) => {
       if (objectPaging) objectPaging.onChange(page, pageSize);
@@ -414,6 +442,19 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     />
   ) : null;
 
+  const roleFilterSwitcher =
+    entityTab === "objects" && objectView !== "graph" ? (
+      <Segmented
+        value={roleFilter}
+        onChange={handleRoleFilterChange}
+        options={[
+          { label: "全部", value: "all" },
+          { label: "业务对象", value: "business" },
+          { label: "普通对象", value: "common" },
+        ]}
+      />
+    ) : null;
+
   const objectViewSwitcher =
     entityTab === "objects" ? (
       <Segmented
@@ -464,6 +505,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         <div className="toolbar-left">
           {entitySwitcher}
           {searchInput}
+          {roleFilterSwitcher}
         </div>
         <div className="toolbar-right">
           {objectViewSwitcher}

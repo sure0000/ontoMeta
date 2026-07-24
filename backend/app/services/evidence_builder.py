@@ -17,6 +17,32 @@ def _to_snake(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
 
 
+# 技术/系统字段词元（独立于表名的内容信号）：命中则该字段偏技术/安全/
+# 基础设施，而非业务属性。用于区分 auth/config/session 等系统表。
+_TECHNICAL_FIELD_TOKENS = (
+    "token", "secret", "passwd", "password", "pwd", "salt", "hash", "cipher",
+    "cert", "credential", "nonce", "signature", "encrypt", "decrypt",
+    "apikey", "api_key", "access_key", "secret_key", "private_key", "public_key",
+    "refresh", "jwt", "oauth", "ldap", "session", "cookie", "ticket",
+    "acl", "privilege", "permission", "scope", "grant",
+    "config", "setting", "param", "checksum", "crc", "trace", "span",
+    "cache", "lock", "ttl", "cursor", "offset", "seq", "uuid", "guid",
+)
+
+
+def _is_technical_field(name: str) -> bool:
+    """字段名（已 lower）是否命中技术词元。用分隔符拆词后比对，避免误伤
+    如 seq_no 中的 seq 与 business 中的子串（business 不含独立词元）。"""
+    tokens = set(re.split(r"[^a-z0-9]+", name))
+    for token in _TECHNICAL_FIELD_TOKENS:
+        if token in tokens:
+            return True
+        # 无分隔符的紧凑命名（如 accesstoken）回退到子串包含，但限较长词元避免误伤。
+        if len(token) >= 6 and token in name:
+            return True
+    return False
+
+
 def _infer_object_name(dataset_name: str) -> str:
     base = _to_snake(dataset_name)
     if base.endswith("s"):
@@ -55,6 +81,12 @@ class EvidenceBuilder:
 
         for dataset in bundle.datasets:
             object_name = _infer_object_name(dataset.name)
+            # 业务命名锚定：是否有人工赋予的业务名/描述/术语，而非裸技术表名。
+            has_business_naming = bool(
+                (dataset.display_name and dataset.display_name != dataset.name)
+                or dataset.description
+                or dataset.glossary_terms
+            )
             role = classify_object_role(
                 [
                     FieldSignal(
@@ -71,6 +103,9 @@ class EvidenceBuilder:
                 lineage_downstream=lineage_down.get(dataset.urn, 0),
                 glossary_terms=dataset.glossary_terms,
                 row_count=dataset.row_count,
+                has_business_naming=has_business_naming,
+                subtypes=dataset.subtypes,
+                tags=dataset.tags,
             )
             # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
             is_dimension = dataset.name.startswith("dim_") or "维" in (dataset.display_name or "")
@@ -148,9 +183,7 @@ class EvidenceBuilder:
                     source_object=source_obj,
                     target_object=target_obj,
                     cardinality="one_to_many",
-                    structure_type=infer_relation_structure_type(
-                        f"血缘：{source_label} 加工至 {target_label}"
-                    ),
+                    structure_type="derivation",
                     description=f"血缘：{source_label} 加工至 {target_label}",
                     confidence=0.6,
                     evidence_refs=[lineage.source_urn, lineage.target_urn],
@@ -208,6 +241,11 @@ class EvidenceBuilder:
         name = field.name.lower()
         if field.is_primary_key or name.endswith("_id"):
             return "identifier"
+        # 技术词汇字段（token/secret/hash/config/session 等）：内容信号，不看表名，
+        # 供分类器识别技术/系统表。放在 datetime/amount 之前，避免 expires_at
+        # 落到 datetime、避免其他技术字段落到默认 attribute。
+        if _is_technical_field(name):
+            return "technical"
         if "date" in name or "time" in name:
             return "datetime"
         if "amount" in name or "price" in name:

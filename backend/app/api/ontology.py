@@ -47,12 +47,15 @@ def get_ontology(ontology_id: str, db: Session = Depends(get_db)):
 def list_object_types_by_ontology(
     ontology_id: str,
     q: str | None = Query(None),
+    role_filter: str | None = Query(
+        None, description="对象角色筛选：business=业务对象，common=普通对象"
+    ),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     return query.list_object_types(
-        db, ontology_id=ontology_id, q=q, limit=limit, offset=offset
+        db, ontology_id=ontology_id, q=q, role_filter=role_filter, limit=limit, offset=offset
     )
 
 
@@ -135,6 +138,9 @@ def list_object_types(
     domain_id: str | None = Query(None),
     published_only: bool = Query(False),
     q: str | None = Query(None),
+    role_filter: str | None = Query(
+        None, description="对象角色筛选：business=业务对象，common=普通对象"
+    ),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -145,6 +151,7 @@ def list_object_types(
         domain_context_id=domain_id,
         published_only=published_only,
         q=q,
+        role_filter=role_filter,
         limit=limit,
         offset=offset,
     )

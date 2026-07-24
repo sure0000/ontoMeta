@@ -73,6 +73,7 @@ async function fetchOntologyLists(
     relationPage: number;
     pageSize: number;
     q?: string;
+    roleFilter?: "business" | "common";
     /** 传入已有图谱时跳过重新拉取，保留邻域展开结果 */
     existingGraph?: OntologyGraph | null;
   },
@@ -83,6 +84,7 @@ async function fetchOntologyLists(
     api.listObjectTypes({
       ontologyId,
       q: opts.q || undefined,
+      roleFilter: opts.roleFilter,
       limit: opts.pageSize,
       offset: objectOffset,
     }),
@@ -123,6 +125,7 @@ async function fetchDomainBundle(
     relationPage: number;
     pageSize: number;
     q?: string;
+    roleFilter?: "business" | "common";
     existingGraph?: OntologyGraph | null;
     existingOntologyId?: string | null;
   },
@@ -154,6 +157,7 @@ export function DomainDetailPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
+  const [roleFilter, setRoleFilter] = useState<"all" | "business" | "common">("all");
   const [graphExpanding, setGraphExpanding] = useState(false);
   const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
   const [graphMode, setGraphMode] = useState<GraphMode>("detail");
@@ -172,6 +176,10 @@ export function DomainDetailPage() {
     setObjectPage(1);
     setRelationPage(1);
   }, [debouncedQ, domainId]);
+
+  useEffect(() => {
+    setObjectPage(1);
+  }, [roleFilter]);
 
   useEffect(() => {
     groupedGraphCacheRef.current = null;
@@ -193,6 +201,7 @@ export function DomainDetailPage() {
         relationPage,
         pageSize,
         q: debouncedQ,
+        roleFilter: roleFilter === "all" ? undefined : roleFilter,
         existingGraph: cached?.graph ?? null,
         existingOntologyId: cached?.ontologyId ?? null,
       });
@@ -204,7 +213,7 @@ export function DomainDetailPage() {
       }
       return result;
     },
-    [domainId, objectPage, relationPage, pageSize, debouncedQ],
+    [domainId, objectPage, relationPage, pageSize, debouncedQ, roleFilter],
   );
 
   const domain = bundle?.domain ?? null;
@@ -670,6 +679,8 @@ export function DomainDetailPage() {
             workspaceMode
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
+            objectRoleFilter={roleFilter}
+            onObjectRoleFilterChange={setRoleFilter}
             objectPaging={{
               total: objectTotal,
               page: objectPage,

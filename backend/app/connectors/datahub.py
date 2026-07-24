@@ -161,6 +161,15 @@ fragment DatasetDetails on Dataset {
   properties { description }
   platform { name }
   container { properties { name } }
+  subTypes { typeNames }
+  tags {
+    tags {
+      tag {
+        urn
+        ... on Tag { properties { name } }
+      }
+    }
+  }
   glossaryTerms {
     terms {
       term {
@@ -265,6 +274,29 @@ def _parse_row_count(raw: dict) -> int | None:
         return None
     row_count = profiles[0].get("rowCount")
     return row_count if isinstance(row_count, int) else None
+
+
+def _parse_subtypes(raw: dict) -> list[str]:
+    """提取 DataHub subType 名称（如 View/Table），供角色分类器识别。"""
+    container = raw.get("subTypes") or {}
+    names = container.get("typeNames") or []
+    return [str(n) for n in names if n]
+
+
+def _parse_tags(raw: dict) -> list[str]:
+    """提取数据集上挂载的 tag 名称（去重、保序）。"""
+    container = raw.get("tags") or {}
+    entries = container.get("tags") or []
+    names: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        tag = (entry or {}).get("tag") or {}
+        props = tag.get("properties") or {}
+        name = props.get("name") or tag.get("urn")
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def _parse_glossary_terms(raw: dict) -> list[str]:
@@ -374,6 +406,8 @@ def _parse_dataset_entity(raw: dict) -> DatasetInput:
         ),
         row_count=_parse_row_count(raw),
         glossary_terms=_parse_glossary_terms(raw),
+        subtypes=_parse_subtypes(raw),
+        tags=_parse_tags(raw),
     )
 
 

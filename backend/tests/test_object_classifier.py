@@ -10,6 +10,7 @@ from app.services.object_classifier import (
     ROLE_BRIDGE,
     ROLE_BUSINESS_OBJECT,
     ROLE_DATA_TABLE,
+    ROLE_TECHNICAL,
     FieldSignal,
     classify_object_role,
 )
@@ -170,3 +171,87 @@ def test_evidence_builder_annotates_roles():
     assert roles["sales_summary_entity"] == ROLE_DATA_TABLE
     # 每个对象都带 reason
     assert all(ot.role_reason for ot in evidence.object_types)
+
+
+def test_auth_like_table_classified_technical():
+    # auth 表：技术词汇字段占多数 + 缺业务命名 → 技术/系统表，而非业务对象。
+    result = classify_object_role(
+        [
+            _f("id", "identifier", pk=True),
+            _f("token", "technical"),
+            _f("secret", "technical"),
+            _f("expires_at", "technical"),
+            _f("salt", "technical"),
+        ],
+        fk_in_degree=0,
+        has_business_naming=False,
+    )
+    assert result.role == ROLE_TECHNICAL
+    assert "技术" in result.reason
+
+
+def test_glossary_exempts_technical_table():
+    # 即便字段偏技术，只要人工挂了业务术语就不判技术表。
+    result = classify_object_role(
+        [
+            _f("id", "identifier", pk=True),
+            _f("token", "technical"),
+            _f("secret", "technical"),
+            _f("salt", "technical"),
+        ],
+        glossary_terms=["凭证"],
+    )
+    assert result.role != ROLE_TECHNICAL
+
+
+def test_datahub_tag_hint_drives_technical():
+    # 显式 DataHub tag 标注为 system + 图孤立 → 技术表（tag 2.0 + 孤立 1.0）。
+    result = classify_object_role(
+        [
+            _f("id", "identifier", pk=True),
+            _f("value", "attribute"),
+        ],
+        tags=["System"],
+        has_business_naming=True,
+    )
+    assert result.role == ROLE_TECHNICAL
+    assert "DataHub" in result.reason
+
+
+def test_isolated_business_table_without_tech_vocab_stays_business():
+    # 纯业务字段的孤立小表（无技术词汇）不应被误判为技术表。
+    result = classify_object_role(
+        [
+            _f("cust_id", "identifier", pk=True),
+            _f("cust_name", "attribute"),
+            _f("city", "attribute"),
+        ],
+        fk_in_degree=0,
+        has_business_naming=True,
+    )
+    assert result.role == ROLE_BUSINESS_OBJECT
+
+
+def test_evidence_builder_flags_auth_as_technical():
+    from app.schemas import DataHubDomainBundle, DatasetInput, DomainInput, FieldInput
+
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="域"),
+        datasets=[
+            DatasetInput(
+                urn="urn:li:dataset:auth",
+                name="auth",
+                display_name="auth",
+                fields=[
+                    FieldInput(name="id", is_primary_key=True),
+                    FieldInput(name="access_token"),
+                    FieldInput(name="refresh_token"),
+                    FieldInput(name="secret_key"),
+                    FieldInput(name="expires_at"),
+                ],
+            ),
+        ],
+    )
+    evidence = EvidenceBuilder().build(bundle)
+    roles = {ot.candidate_name: ot.table_role for ot in evidence.object_types}
+    assert roles["auth_entity"] == ROLE_TECHNICAL

@@ -72,9 +72,13 @@ def test_lineage_relation_default_term_uses_target_keyword_not_generic_derivatio
     evidence = EvidenceBuilder().build(_bundle())
     lineage_rel = next(r for r in evidence.relations if r.structure_type != "foreign_key")
 
-    # 目标对象展示名含「对账」，默认词应体现这一点，而不是笼统的「派生」。
-    assert lineage_rel.display_name != "派生"
-    assert lineage_rel.display_name == "对账生成"
+    # 血缘关系归入独立的「派生/溯源」结构类型（对齐 PROV-O），与业务关联关系区分。
+    assert lineage_rel.structure_type == "derivation"
+    # 目标对象展示名含「对账」，默认词应为方向前向、能读成三元组的谓词，
+    # 而非笼统的「派生」或「…生成」。
+    assert lineage_rel.display_name == "对账为"
+    assert "生成" not in lineage_rel.display_name
+    assert "派生" not in lineage_rel.display_name
 
 
 def test_foreign_key_relation_description_uses_target_business_display_name():
@@ -88,9 +92,29 @@ def test_foreign_key_relation_description_uses_target_business_display_name():
 
 
 def test_infer_relation_term_lineage_keyword_matrix():
-    assert infer_relation_term("lineage", target_label="财务对账结果") == "对账生成"
-    assert infer_relation_term("lineage", target_label="销售统计报表") == "统计汇总"
-    assert infer_relation_term("lineage", target_label="每日销售报表") == "生成报表"
-    assert infer_relation_term("lineage", target_label="结算单") == "结算生成"
-    assert infer_relation_term("lineage", target_label="未知目标") == "加工生成"
-    assert infer_relation_term("lineage") == "加工生成"
+    # 血缘/溯源关系默认词：方向前向、能读成「源 [谓词] 目标」的谓词，去掉统一的「生成」。
+    assert infer_relation_term("lineage", target_label="财务对账结果") == "对账为"
+    assert infer_relation_term("lineage", target_label="销售统计报表") == "统计为"
+    assert infer_relation_term("lineage", target_label="每日销售报表") == "统计为"
+    assert infer_relation_term("lineage", target_label="销售汇总表") == "汇总为"
+    assert infer_relation_term("lineage", target_label="结算单") == "结算为"
+    assert infer_relation_term("lineage", target_label="用户画像") == "刻画"
+    assert infer_relation_term("lineage", target_label="未知目标") == "派生出"
+    assert infer_relation_term("lineage") == "派生出"
+
+
+def test_infer_relation_structure_type_lineage_is_derivation():
+    from app.services.relation_structure import (
+        RELATION_STRUCTURE_TYPES,
+        infer_relation_structure_type,
+        validate_relation_structure_type,
+    )
+
+    # 血缘/加工至/派生 → derivation（溯源范畴）；外键/桥表仍为业务关联结构。
+    assert infer_relation_structure_type("血缘：订单明细 加工至 结算汇总") == "derivation"
+    assert infer_relation_structure_type("lineage: A -> B") == "derivation"
+    assert infer_relation_structure_type("通过外键 order_id 关联") == "foreign_key"
+    assert infer_relation_structure_type("桥表关联") == "bridge_table"
+    # derivation 已是合法结构类型。
+    assert "derivation" in RELATION_STRUCTURE_TYPES
+    assert validate_relation_structure_type("derivation") is None

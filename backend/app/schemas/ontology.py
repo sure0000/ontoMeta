@@ -76,7 +76,7 @@ class DraftObjectType(BaseModel):
     description: str | None = None
     source_ref: str | None = None
     confidence: float = 0.5
-    # 对象角色标注：business_object / data_table / bridge。
+    # 对象角色标注：business_object / data_table / bridge / technical。
     table_role: str = "business_object"
     role_confidence: float = 0.5
     role_reason: str | None = None

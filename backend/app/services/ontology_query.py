@@ -311,6 +311,7 @@ class OntologyQueryService:
         published_only: bool = False,
         *,
         q: str | None = None,
+        role_filter: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> PageResult[ObjectTypeSummary]:
@@ -322,6 +323,11 @@ class OntologyQueryService:
             domain_context_id=domain_context_id,
             published_only=published_only,
         )
+        # 业务对象 / 普通对象筛选：business=业务对象；common=普通对象（数据表+关系表）
+        if role_filter == "business":
+            query = query.filter(ObjectType.table_role == "business_object")
+        elif role_filter == "common":
+            query = query.filter(ObjectType.table_role != "business_object")
         if q and q.strip():
             like = f"%{q.strip()}%"
             query = query.filter(

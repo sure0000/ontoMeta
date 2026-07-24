@@ -17,6 +17,7 @@ from app.schemas import (
 )
 from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.services.relation_structure import infer_relation_structure_type
+from app.services.object_classifier import ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL
 from app.services.common import make_async_http_client
 from app.services.draft_checkpoint import chunk_key
 from app.services.evidence_chunker import split_evidence, split_relations
@@ -36,6 +37,12 @@ PropertyOverrides = dict[str, PropertyOverride]
 
 # 每条关系的业务语义名增强：relation name -> display_name
 RelationOverrides = dict[str, str]
+
+# 每个对象的 LLM 角色否决：candidate_name -> {"role": str, "reason": str|None}。
+# LLM 在命名同时给出「是否真实业务实体」的语义判断，用于修正结构启发式
+# 漏判的技术/系统表（如 auth/session/config）；零额外 LLM 调用（复用对象命名调用）。
+RoleOverride = dict[str, str | None]
+RoleOverrides = dict[str, RoleOverride]
 
 
 class CheckpointStore(Protocol):
@@ -63,13 +70,16 @@ _LLM_SYSTEM_PROMPT = (
     "1) 把 DataHub 技术元数据中的每个对象(表)提升为业务语义命名，而不是简单搬运表名；\n"
     "2) 为每个对象下的属性(字段)生成中文业务属性名——结合字段名、列注释(description)、"
     "示例数据(sample_values)推断业务含义，而不是把字段名直译成中文；\n"
-    "3) 为每条关系(relations)生成有业务含义的关系名——结合两端对象的业务语义"
-    "(source_object/target_object，可参考你自己给出的 objectTypes 命名)与"
-    "description 中的证据(外键字段、血缘加工说明等)推断。血缘类关系(两端"
-    "无外键，只有「血缘：A 加工至 B」这类描述)应主要依据 target 对象的业务"
-    "含义命名——它是产出物，如目标是对账结果就写「对账生成」，目标是统计"
-    "报表就写「统计汇总」，而不是不加区分地写「派生」「关联」「加工」「处理」"
-    "这类无信息量、体现不出产出物是什么的默认词。\n\n"
+    "3) 为每条关系(relations)生成有业务含义的关系名。关系名是**三元组谓词**，"
+    "要能读成「源对象 [关系名] 目标对象」一句话(如「订单 属于 客户」)，而非"
+    "「结算生成」这种「产出物+动作」名词。区分两个关系范畴：\n"
+    "  • 业务关联关系(有外键，structure_type=foreign_key)：两个业务实体之间的"
+    "真实业务事实，从外键字段语义判断，如「属于」「包含」「下单」「引用」「拥有」。\n"
+    "  • 溯源/派生关系(血缘，description 形如「血缘：A 加工至 B」，无外键)：这属于"
+    "数据溯源(对齐 PROV-O 的 wasDerivedFrom)，不是业务事实。按目标对象的变换"
+    "类型取**方向前向的谓词**：目标是汇总就写「汇总为」，对账写「对账为」，"
+    "统计/报表写「统计为」，结算写「结算为」，标签/画像写「刻画」，拿不准写「派生出」；"
+    "不要写「生成」「加工」「派生」「关联」「处理」这类无区分度的默认词。\n\n"
     "输入是一份证据 JSON(含 object_types、properties、relations)。你需要输出 JSON，"
     "包含三个字段：objectTypes(数组)、properties(数组)、relations(数组)。\n\n"
     "objectTypes 中每个元素必须包含：\n"
@@ -79,7 +89,12 @@ _LLM_SYSTEM_PROMPT = (
     "(如 payment、refund、finance_reconciliation)。\n"
     "- display_name：中文业务语义名称(如「支付」「退款」「财务对账」)，"
     "由 display_name 去掉技术后缀推导而来。\n"
-    "- description：可选，一句话业务解释。\n\n"
+    "- description：可选，一句话业务解释。\n"
+    "- role_hint：可选，对该表是否为真实业务实体的语义判断。当这张表明显是"
+    "技术/系统表、与业务无关(如鉴权 auth、会话 session、配置 config、日志 log、"
+    "任务调度、元数据、临时表等——业务人员不会把它当作一个业务概念)时，"
+    "填 role_hint='technical'；当它确实是一个真实世界业务实体(客户/订单/商品等)"
+    "时填 role_hint='business_object'；拿不准则省略。可附 role_reason 简述理由。\n\n"
     "properties 中每个元素必须包含：\n"
     "- object_source_ref：原样回传该属性所属对象的 source_dataset_urn(与所属"
     "object_types 条目的 source_dataset_urn 一致，逐字保留，用于回链)。\n"
@@ -88,11 +103,11 @@ _LLM_SYSTEM_PROMPT = (
     "(如「支付金额」「退款状态」「客户等级」)。\n\n"
     "relations 中每个元素必须包含：\n"
     "- name：原样回传输入中该关系的 name(逐字保留，用于回链，不可省略或改写)。\n"
-    "- display_name：结合两端对象业务含义与 description 证据推断出的简短业务关系词"
-    "(不超过 8 个汉字，只写动词/短语，不写完整句子，如「支付」「退款」「审核」"
-    "「结算生成」「统计汇总」「对账生成」「清洗加工」)，须体现该关系具体产出"
-    "什么/做什么，避免千篇一律地写「派生」「关联」「加工」「处理」这类"
-    "不同关系都能套用、看不出差异的默认词。\n\n"
+    "- display_name：结合两端对象业务含义与 description 证据推断出的简短关系谓词"
+    "(不超过 8 个汉字，只写动词/短语，不写完整句子，且能读成「源 [谓词] 目标」)："
+    "外键关系如「属于」「包含」「下单」「引用」；血缘/溯源关系如「汇总为」「对账为」"
+    "「统计为」「结算为」「刻画」「派生出」。避免千篇一律地写「生成」「派生」「关联」"
+    "「加工」「处理」这类看不出差异的默认词。\n\n"
     "示例：\n"
     "- 输入 candidate_name=payment_di_entity, display_name=支付明细日表, "
     "source_dataset_urn=urn:li:dataset:xxx → "
@@ -110,7 +125,7 @@ _LLM_SYSTEM_PROMPT = (
     "{name:'payment_to_order', display_name:'支付'}\n"
     "- 输入 relations 中一条：name=order_feeds_settlement, structure_type=fact_table, "
     "description='血缘：订单明细 加工至 结算汇总' → "
-    "{name:'order_feeds_settlement', display_name:'结算生成'}"
+    "{name:'order_feeds_settlement', display_name:'结算为'}"
 )
 
 # 关系命名分块流水线专用的系统提示：与对象/属性命名流水线并发独立执行，
@@ -119,36 +134,37 @@ _LLM_SYSTEM_PROMPT = (
 _LLM_RELATION_SYSTEM_PROMPT = (
     "你是企业本体建模专家。你的任务是为每条关系(relations)生成有业务含义的关系名，"
     "结合两端对象的业务语义(参考 object_types 中的 display_name/description)与该关系"
-    "自身 description 中的证据(外键字段、血缘加工说明等)推断。\n\n"
-    "两类关系的命名侧重点不同：\n"
-    "- 有外键(structure_type=foreign_key)的关系：从 description 里的外键字段"
-    "语义判断两端是什么业务动作/归属关系，如「支付」「退款」「审核」「属于」"
-    "「包含」。\n"
-    "- 血缘类关系(description 形如「血缘：A 加工至 B」，没有外键字段)：应主要"
-    "依据 target_object 的业务含义命名——它是产出物，如目标是对账结果就写"
-    "「对账生成」，目标是统计报表就写「统计汇总」，目标是结算数据就写"
-    "「结算生成」。\n\n"
-    "无论哪一类，都不要写「派生」「关联」「加工」「处理」这类无信息量、看不出"
+    "自身 description 中的证据(外键字段、血缘加工说明等)推断。关系名是**三元组"
+    "谓词**，要能读成「源对象 [关系名] 目标对象」一句话(如「订单 属于 客户」)，"
+    "而非「结算生成」这种「产出物+动作」名词。区分两个关系范畴：\n"
+    "- 业务关联关系(有外键，structure_type=foreign_key)：两个业务实体间的真实业务"
+    "事实，从外键字段语义判断，如「属于」「包含」「下单」「引用」「审核」。\n"
+    "- 溯源/派生关系(血缘，description 形如「血缘：A 加工至 B」，无外键)：属于数据"
+    "溯源(对齐 PROV-O 的 wasDerivedFrom)，不是业务事实。按 target_object 的变换类型"
+    "取**方向前向的谓词**：目标是对账结果写「对账为」，目标是汇总/统计/报表写"
+    "「汇总为」「统计为」，目标是结算数据写「结算为」，目标是标签/画像写「刻画」，"
+    "拿不准写「派生出」。\n\n"
+    "无论哪一类，都不要写「生成」「派生」「关联」「加工」「处理」这类无信息量、看不出"
     "两端具体业务差异、随便哪条关系都能套用的默认词。\n\n"
     "输入是一份证据 JSON，包含 object_types(关系两端对象的业务背景，无需为其命名，"
     "也不会被使用)与 relations(需要命名的关系列表)。你需要输出 JSON，只包含一个"
     "字段：relations(数组)。\n\n"
     "relations 中每个元素必须包含：\n"
     "- name：原样回传输入中该关系的 name(逐字保留，用于回链，不可省略或改写)。\n"
-    "- display_name：简短业务关系词(不超过 8 个汉字，只写动词/短语，不写完整句子，"
-    "如「支付」「退款」「审核」「结算生成」「统计汇总」「对账生成」「清洗加工」)，"
-    "须体现该关系具体产出什么/做什么。\n\n"
+    "- display_name：能读成「源 [谓词] 目标」的简短关系谓词(不超过 8 个汉字，只写"
+    "动词/短语，不写完整句子，如「属于」「包含」「下单」「汇总为」「对账为」「统计为」"
+    "「结算为」「刻画」「派生出」)。\n\n"
     "示例：\n"
     "- 输入 relations 中一条：name=payment_to_order, source_object=payment_di_entity, "
     "target_object=order_di_entity, structure_type=foreign_key, "
     "description='支付明细日表 通过外键 order_id 关联 order_di_entity' → "
-    "{name:'payment_to_order', display_name:'支付'}\n"
+    "{name:'payment_to_order', display_name:'属于'}\n"
     "- 输入 relations 中一条：name=order_feeds_settlement, structure_type=fact_table, "
     "description='血缘：订单明细 加工至 结算汇总' → "
-    "{name:'order_feeds_settlement', display_name:'结算生成'}\n"
+    "{name:'order_feeds_settlement', display_name:'结算为'}\n"
     "- 输入 relations 中一条：name=order_feeds_reconciliation, structure_type=other, "
     "description='血缘：订单支付流水 加工至 财务对账结果' → "
-    "{name:'order_feeds_reconciliation', display_name:'对账生成'}"
+    "{name:'order_feeds_reconciliation', display_name:'对账为'}"
 )
 
 
@@ -213,21 +229,21 @@ class OntologyDraftGenerator:
     ) -> OntologyDraftOutput:
         # Mock 路径：无 LLM，纯确定性命名。
         if self.use_mock:
-            return self._build_draft_from_evidence(evidence, {}, {}, {})
+            return self._build_draft_from_evidence(evidence, {}, {}, {}, {})
         # 分批闸门：表数与字符预算都在限额内才一次拿到命名增强，否则分块。
         fits_table_batch = len(evidence.object_types) <= settings.draft_chunk_table_batch_size
         fits_char_budget = len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
         if fits_table_batch and fits_char_budget:
-            overrides, property_overrides, relation_overrides = await self._llm_overrides(
-                evidence
+            overrides, property_overrides, relation_overrides, role_overrides = (
+                await self._llm_overrides(evidence)
             )
         else:
-            overrides, property_overrides, relation_overrides = (
+            overrides, property_overrides, relation_overrides, role_overrides = (
                 await self._llm_overrides_chunked(evidence, progress_cb, checkpoint)
             )
         # 结构始终由全量证据确定性组装：对象/属性/关系一个都不会丢。
         return self._build_draft_from_evidence(
-            evidence, overrides, property_overrides, relation_overrides
+            evidence, overrides, property_overrides, relation_overrides, role_overrides
         )
 
     # ------------------------------------------------------------------
@@ -239,6 +255,7 @@ class OntologyDraftGenerator:
         overrides: ObjectOverrides | None = None,
         property_overrides: PropertyOverrides | None = None,
         relation_overrides: RelationOverrides | None = None,
+        role_overrides: RoleOverrides | None = None,
     ) -> OntologyDraftOutput:
         """从证据确定性组装完整草稿；overrides/property_overrides/relation_overrides
         提供对象、属性与关系的业务命名增强。
@@ -252,9 +269,10 @@ class OntologyDraftGenerator:
         overrides = overrides or {}
         property_overrides = property_overrides or {}
         relation_overrides = relation_overrides or {}
+        role_overrides = role_overrides or {}
 
         object_types, properties, name_map = self._build_object_types_from_evidence(
-            evidence, overrides, property_overrides
+            evidence, overrides, property_overrides, role_overrides
         )
 
         def obj_name(candidate: str) -> str:
@@ -279,12 +297,18 @@ class OntologyDraftGenerator:
         evidence: EvidenceBundle,
         overrides: ObjectOverrides,
         property_overrides: PropertyOverrides,
+        role_overrides: RoleOverrides | None = None,
     ) -> tuple[list[DraftObjectType], list[DraftProperty], dict[str, str]]:
         """确定性组装对象与属性；返回 (object_types, properties, candidate→name 映射)。
 
         映射供关系组装环节按 candidate_name 解析 obj_name，也供「仅生成业务
         关系」场景在不重新命名对象的前提下按 source_dataset_urn 回链已入库对象。
+
+        role_overrides 是 LLM 的角色语义否决（可选）：当 LLM 判定某表为技术/系统
+        表（如 auth）或反之时，覆盖确定性启发式得出的 table_role，并在 role_reason
+        上注明由 LLM 判定；未命中时保留启发式结果。
         """
+        role_overrides = role_overrides or {}
         name_map: dict[str, str] = {}
         display_map: dict[str, str] = {}
         desc_map: dict[str, str | None] = {}
@@ -310,9 +334,7 @@ class OntologyDraftGenerator:
                 description=desc_map[ot.candidate_name],
                 source_ref=ot.source_dataset_urn,
                 confidence=ot.confidence,
-                table_role=ot.table_role,
-                role_confidence=ot.role_confidence,
-                role_reason=ot.role_reason,
+                **self._resolve_role(ot, role_overrides.get(ot.candidate_name)),
             )
             for ot in evidence.object_types
         ]
@@ -390,13 +412,14 @@ class OntologyDraftGenerator:
     # ------------------------------------------------------------------
     async def _llm_overrides(
         self, evidence: EvidenceBundle
-    ) -> tuple[ObjectOverrides, PropertyOverrides, RelationOverrides]:
-        """单次调用：拿到全量对象的命名增强、属性的中文名增强与关系的业务名增强。"""
+    ) -> tuple[ObjectOverrides, PropertyOverrides, RelationOverrides, RoleOverrides]:
+        """单次调用：拿到全量对象的命名增强、属性的中文名增强、关系的业务名增强与角色否决。"""
         raw = await self._call_llm_objects(evidence)
         return (
             self._parse_object_overrides(raw, evidence),
             self._parse_property_overrides(raw, evidence),
             self._parse_relation_overrides(raw, evidence),
+            self._parse_role_overrides(raw, evidence),
         )
 
     async def _llm_overrides_chunked(
@@ -404,7 +427,7 @@ class OntologyDraftGenerator:
         evidence: EvidenceBundle,
         progress_cb: ProgressCallback | None = None,
         checkpoint: CheckpointStore | None = None,
-    ) -> tuple[ObjectOverrides, PropertyOverrides, RelationOverrides]:
+    ) -> tuple[ObjectOverrides, PropertyOverrides, RelationOverrides, RoleOverrides]:
         """超预算(表数、字符预算或关系数量)时，对象/属性命名与关系命名两条流水线
         完全独立分块、并发执行、独立断点续跑：
         - 对象流水线：``split_evidence`` 按表分块，关系字段清空(关系交由关系
@@ -439,11 +462,13 @@ class OntologyDraftGenerator:
 
         advance = self._make_progress_advancer(progress_cb, total_steps)
 
-        (merged_objects, merged_properties), merged_relations = await asyncio.gather(
-            self._run_object_chunks(object_sub_bundles, checkpoint, advance),
-            self._run_relation_chunks(relation_sub_bundles, checkpoint, advance),
+        (merged_objects, merged_properties, merged_roles), merged_relations = (
+            await asyncio.gather(
+                self._run_object_chunks(object_sub_bundles, checkpoint, advance),
+                self._run_relation_chunks(relation_sub_bundles, checkpoint, advance),
+            )
         )
-        return merged_objects, merged_properties, merged_relations
+        return merged_objects, merged_properties, merged_relations, merged_roles
 
     def _split_object_chunks(self, evidence: EvidenceBundle) -> list[EvidenceBundle]:
         """按表分块，清空关系字段(关系交由关系流水线单独处理)。"""
@@ -481,8 +506,8 @@ class OntologyDraftGenerator:
         object_sub_bundles: list[EvidenceBundle],
         checkpoint: CheckpointStore | None,
         advance: Callable[[], Awaitable[None]] | None = None,
-    ) -> tuple[ObjectOverrides, PropertyOverrides]:
-        """并发执行对象/属性命名分块，按内容哈希缓存，返回合并后的增强字典。"""
+    ) -> tuple[ObjectOverrides, PropertyOverrides, RoleOverrides]:
+        """并发执行对象/属性命名分块，按内容哈希缓存，返回合并后的增强字典（含角色否决）。"""
         checkpoint_lock = asyncio.Lock()
         semaphore = asyncio.Semaphore(max(1, self.object_chunk_concurrency))
 
@@ -500,6 +525,7 @@ class OntologyDraftGenerator:
             result = {
                 "objects": self._parse_object_overrides(raw, sub),
                 "properties": self._parse_property_overrides(raw, sub),
+                "roles": self._parse_role_overrides(raw, sub),
             }
             if checkpoint is not None:
                 async with checkpoint_lock:
@@ -512,11 +538,13 @@ class OntologyDraftGenerator:
 
         merged_objects: ObjectOverrides = {}
         merged_properties: PropertyOverrides = {}
+        merged_roles: RoleOverrides = {}
         for result in results:
             merged_objects.update(result.get("objects") or {})
+            merged_roles.update(result.get("roles") or {})
             for candidate, field_map in (result.get("properties") or {}).items():
                 merged_properties.setdefault(candidate, {}).update(field_map)
-        return merged_objects, merged_properties
+        return merged_objects, merged_properties, merged_roles
 
     async def _run_relation_chunks(
         self,
@@ -567,7 +595,7 @@ class OntologyDraftGenerator:
         两者互不等待、各自独立分块与并发，契合「对象/关系分开触发」的诉求。
         """
         if self.use_mock:
-            overrides, property_overrides = {}, {}
+            overrides, property_overrides, role_overrides = {}, {}, {}
         else:
             fits_table_batch = (
                 len(evidence.object_types) <= settings.draft_chunk_table_batch_size
@@ -579,16 +607,19 @@ class OntologyDraftGenerator:
                 raw = await self._call_llm_objects(evidence)
                 overrides = self._parse_object_overrides(raw, evidence)
                 property_overrides = self._parse_property_overrides(raw, evidence)
+                role_overrides = self._parse_role_overrides(raw, evidence)
             else:
                 object_sub_bundles = self._split_object_chunks(evidence)
                 advance = self._make_progress_advancer(
                     progress_cb, len(object_sub_bundles)
                 )
-                overrides, property_overrides = await self._run_object_chunks(
-                    object_sub_bundles, checkpoint, advance
+                overrides, property_overrides, role_overrides = (
+                    await self._run_object_chunks(
+                        object_sub_bundles, checkpoint, advance
+                    )
                 )
         object_types, properties, _name_map = self._build_object_types_from_evidence(
-            evidence, overrides, property_overrides
+            evidence, overrides, property_overrides, role_overrides
         )
         return object_types, properties
 
@@ -781,6 +812,71 @@ class OntologyDraftGenerator:
                 continue
             overrides.setdefault(candidate, {})[field_name] = display_name
         return overrides
+
+    def _parse_role_overrides(
+        self, raw: dict, evidence: EvidenceBundle
+    ) -> RoleOverrides:
+        """把 LLM 返回的对象数组中的 role_hint 回链到证据 candidate_name，得到角色否决字典。
+
+        回链复用与对象命名相同的三级兑底（source_ref → candidate_name → refine 同名）；
+        role_hint 必须是 business_object / technical 之一才写入，其余值（含拿不准时省略）
+        跳过，保留确定性启发式的分类结果。
+        """
+        objects = raw.get("object_types")
+        if not isinstance(objects, list):
+            objects = raw.get("objectTypes")
+        if not isinstance(objects, list):
+            return {}
+
+        lookup = self._build_candidate_lookup(evidence)
+        allowed = {ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL}
+
+        overrides: RoleOverrides = {}
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+            candidate = self._resolve_candidate(obj, lookup)
+            if candidate is None:
+                continue
+            role_hint = self._first_present(obj, ["role_hint", "roleHint"])
+            if not role_hint:
+                continue
+            role_hint = role_hint.strip().lower()
+            if role_hint not in allowed:
+                continue
+            overrides[candidate] = {
+                "role": role_hint,
+                "reason": self._first_present(obj, ["role_reason", "roleReason"]),
+            }
+        return overrides
+
+    @staticmethod
+    def _resolve_role(ot, override: RoleOverride | None) -> dict[str, Any]:
+        """结合确定性启发式角色与 LLM 角色否决，返回 DraftObjectType 的角色字段。
+
+        LLM 未命中、未给出有效 role_hint、或与启发式结果一致时，保留启发式；
+        否则以 LLM 判定覆盖 table_role，并在 role_reason 中保留原启发式依据以供追溯。
+        """
+        base = {
+            "table_role": ot.table_role,
+            "role_confidence": ot.role_confidence,
+            "role_reason": ot.role_reason,
+        }
+        if not override:
+            return base
+        llm_role = (override.get("role") or "").strip()
+        if llm_role not in (ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL):
+            return base
+        if llm_role == ot.table_role:
+            return base
+        label = "技术/系统表" if llm_role == ROLE_TECHNICAL else "业务对象"
+        note = f"LLM 判定为{label}"
+        llm_reason = (override.get("reason") or "").strip()
+        if llm_reason:
+            note += f"：{llm_reason}"
+        if ot.role_reason:
+            note += f"（原启发式：{ot.role_reason}）"
+        return {"table_role": llm_role, "role_confidence": 0.75, "role_reason": note}
 
     def _parse_relation_overrides(
         self, raw: dict, evidence: EvidenceBundle

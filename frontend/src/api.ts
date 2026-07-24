@@ -301,6 +301,7 @@ export const api = {
     domainId?: string;
     publishedOnly?: boolean;
     q?: string;
+    roleFilter?: "business" | "common";
     limit?: number;
     offset?: number;
   }) =>
@@ -310,6 +311,7 @@ export const api = {
         domain_id: params?.domainId,
         published_only: params?.publishedOnly,
         q: params?.q,
+        role_filter: params?.roleFilter,
         limit: params?.limit,
         offset: params?.offset,
       })}`,
