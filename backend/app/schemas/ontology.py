@@ -396,3 +396,67 @@ class OntologyGraph(BaseModel):
     truncated: bool = False
     total_object_count: int = 0
     total_relation_count: int = 0
+
+
+class GraphPoint(BaseModel):
+    """宏观布局中的稳定二维坐标（近邻间距约 1 个单位，前端按固定像素间距放大）。"""
+
+    x: float
+    y: float
+
+
+class ClusterNode(BaseModel):
+    """聚类内的单个 ObjectType 节点。"""
+
+    id: str
+    label: str
+    display_name: str
+    status: str
+
+
+class GraphCluster(BaseModel):
+    """一个业务子域聚类。"""
+
+    id: str
+    name: str
+    nodes: list[ClusterNode] = Field(default_factory=list)
+    node_count: int = 0
+    truncated: bool = False
+    layout: GraphPoint | None = None
+
+
+class HubNode(BaseModel):
+    """枢纽节点（公司、文档类型等几乎处处被引用的公共维度表）。
+
+    它们不参与常规聚类，而是作为宏观图的"主干骨架"独立展示——各业务版块挂在其上，
+    直观体现"万物如何连起来"。
+    """
+
+    id: str
+    label: str
+    display_name: str
+    status: str
+    degree: int = 0
+    layout: GraphPoint | None = None
+
+
+class GroupedGraphEdge(BaseModel):
+    """宏观节点之间的聚合边：weight 为底层被合并的关系条数。
+
+    source/target 既可能是聚类 id，也可能是枢纽节点 id（枢纽以自身对象 id 作为宏观节点）。
+    """
+
+    id: str
+    source_cluster_id: str
+    target_cluster_id: str
+    weight: int = 1
+    relation_ids: list[str] = Field(default_factory=list)
+
+
+class OntologyGroupedGraph(BaseModel):
+    clusters: list[GraphCluster] = Field(default_factory=list)
+    hub_nodes: list[HubNode] = Field(default_factory=list)
+    edges: list[GroupedGraphEdge] = Field(default_factory=list)
+    isolated_nodes: list[ClusterNode] = Field(default_factory=list)
+    total_object_count: int = 0
+    total_relation_count: int = 0

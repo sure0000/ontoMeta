@@ -649,17 +649,21 @@ export function ObjectTypeDetailPage() {
         />
       )}
 
-      <Row gutter={[20, 20]}>
-        <Col xs={24} lg={10}>
-          <SectionCard title="基本信息" icon={<ApartmentOutlined />}>
-            <DataHubSourceLink
-              sourceRef={obj.source_ref}
-              datahubUrl={obj.datahub_url}
-              datahubBase={datahubBase}
-            />
-
-            {inWorkspace ? (
-              <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+      <SectionCard
+        title="基本信息"
+        icon={<ApartmentOutlined />}
+        extra={
+          <DataHubSourceLink
+            sourceRef={obj.source_ref}
+            datahubUrl={obj.datahub_url}
+            datahubBase={datahubBase}
+          />
+        }
+      >
+        {inWorkspace ? (
+          <Form form={form} layout="vertical">
+            <Row gutter={20}>
+              <Col xs={24} md={8}>
                 <Form.Item
                   label="显示名称"
                   name="display_name"
@@ -667,6 +671,8 @@ export function ObjectTypeDetailPage() {
                 >
                   <Input />
                 </Form.Item>
+              </Col>
+              <Col xs={24} md={8}>
                 <Form.Item
                   label="标识名"
                   name="name"
@@ -674,56 +680,49 @@ export function ObjectTypeDetailPage() {
                 >
                   <Input />
                 </Form.Item>
-                <Form.Item label="描述" name="description">
-                  <Input.TextArea rows={3} />
+              </Col>
+              <Col xs={24} md={8}>
+                <Form.Item label="置信度">
+                  <Input value={obj.source_confidence?.toFixed(2) ?? "-"} disabled />
                 </Form.Item>
-                <Descriptions column={1} size="small">
-                  <Descriptions.Item label="置信度">
-                    {obj.source_confidence?.toFixed(2) ?? "-"}
-                  </Descriptions.Item>
-                </Descriptions>
-              </Form>
-            ) : (
-              <Descriptions
-                column={1}
-                size="small"
-                style={{ marginTop: 16 }}
-                labelStyle={{ width: 96 }}
-              >
-                <Descriptions.Item label="数据域">
-                  {obj.domain_name || "-"}
-                </Descriptions.Item>
-                <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
-                <Descriptions.Item label="描述">
-                  {obj.description || "暂无描述"}
-                </Descriptions.Item>
-                <Descriptions.Item label="置信度">
-                  {obj.source_confidence?.toFixed(2) ?? "-"}
-                </Descriptions.Item>
-              </Descriptions>
-            )}
-          </SectionCard>
-        </Col>
+              </Col>
+            </Row>
+            <Form.Item label="描述" name="description" style={{ marginBottom: 0 }}>
+              <Input.TextArea rows={2} />
+            </Form.Item>
+          </Form>
+        ) : (
+          <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+            <Descriptions.Item label="数据域">
+              {obj.domain_name || "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
+            <Descriptions.Item label="置信度">
+              {obj.source_confidence?.toFixed(2) ?? "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="描述" span={4}>
+              {obj.description || "暂无描述"}
+            </Descriptions.Item>
+          </Descriptions>
+        )}
+      </SectionCard>
 
-        <Col xs={24} lg={14}>
-          <SectionCard
-            title="属性"
-            count={properties.length}
-            countPrimary
-            icon={<AppstoreOutlined />}
-            bodyFlush
-          >
-            <Table
-              className="om-table"
-              rowKey="id"
-              size="middle"
-              columns={inWorkspace ? editablePropertyColumns : readOnlyPropertyColumns}
-              dataSource={properties}
-              pagination={false}
-            />
-          </SectionCard>
-        </Col>
-      </Row>
+      <SectionCard
+        title="属性"
+        count={properties.length}
+        countPrimary
+        icon={<AppstoreOutlined />}
+        bodyFlush
+      >
+        <Table
+          className="om-table"
+          rowKey="id"
+          size="middle"
+          columns={inWorkspace ? editablePropertyColumns : readOnlyPropertyColumns}
+          dataSource={properties}
+          pagination={false}
+        />
+      </SectionCard>
 
       <section className="section-card">
         <Tabs
@@ -780,7 +779,7 @@ export function ObjectTypeDetailPage() {
                     obj={obj}
                     objectDetailPath={objectDetailPath}
                     relationDetailPath={relationDetailPath}
-                    defaultLayout="dagre"
+                    height={640}
                     embedded
                   />
                 )

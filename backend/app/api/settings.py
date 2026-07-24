@@ -6,6 +6,8 @@ from app.database import get_db
 from app.schemas import (
     DatahubSettingsOut,
     DatahubSettingsUpdate,
+    DraftGenerationSettingsOut,
+    DraftGenerationSettingsUpdate,
     LlmModelOption,
     LlmServiceConfigCreate,
     LlmServiceConfigDetail,
@@ -111,5 +113,17 @@ def get_datahub_settings(db: Session = Depends(get_db)):
 def update_datahub_settings(data: DatahubSettingsUpdate, db: Session = Depends(get_db)):
     row = settings_service.update_datahub_settings(db, data.model_dump())
     return _datahub_settings_out(row)
+
+
+@router.get("/settings/draft-generation", response_model=DraftGenerationSettingsOut)
+def get_draft_generation_settings(db: Session = Depends(get_db)):
+    return settings_service.get_draft_generation_settings(db)
+
+
+@router.put("/settings/draft-generation", response_model=DraftGenerationSettingsOut)
+def update_draft_generation_settings(
+    data: DraftGenerationSettingsUpdate, db: Session = Depends(get_db)
+):
+    return settings_service.update_draft_generation_settings(db, data.model_dump())
 
 

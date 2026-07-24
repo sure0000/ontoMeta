@@ -8,7 +8,6 @@ interface Props {
   relationDetailPath?: (relationId: string) => string;
   onEdgeClick?: (relationId: string, sourceObjectId: string) => void;
   height?: number;
-  defaultLayout?: "dagre" | "center" | "circular";
   embedded?: boolean;
 }
 
@@ -18,7 +17,6 @@ function ObjectRelationGraphInner({
   relationDetailPath,
   onEdgeClick,
   height = 480,
-  defaultLayout,
   embedded = false,
 }: Props) {
   const graph = useMemo(() => buildRelationGraph(obj), [obj]);
@@ -30,8 +28,6 @@ function ObjectRelationGraphInner({
     }
   };
 
-  const layout = defaultLayout ?? (obj.id ? "center" : "dagre");
-
   return (
     <OntologyGraphView
       graph={graph}
@@ -40,7 +36,6 @@ function ObjectRelationGraphInner({
       relationDetailPath={relationDetailPath}
       onEdgeClick={onEdgeClick ? handleEdgeClick : undefined}
       height={height}
-      defaultLayout={layout}
       embedded={embedded}
     />
   );

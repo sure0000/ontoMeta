@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import type { GraphMode } from "../components/graph";
 import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -14,6 +15,7 @@ import type {
   DomainContextDetail,
   ObjectTypeSummary,
   OntologyGraph,
+  OntologyGroupedGraph,
   RelationType,
 } from "../types";
 
@@ -56,6 +58,12 @@ export function OntologyPage() {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [graphExpanding, setGraphExpanding] = useState(false);
   const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
+  const [graphMode, setGraphMode] = useState<GraphMode>("detail");
+  const [groupedGraph, setGroupedGraph] = useState<OntologyGroupedGraph | null>(null);
+  const [groupedGraphLoading, setGroupedGraphLoading] = useState(false);
+  const groupedGraphCacheRef = useRef<{ ontologyId: string; graph: OntologyGroupedGraph } | null>(
+    null,
+  );
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
@@ -66,6 +74,9 @@ export function OntologyPage() {
     setObjectPage(1);
     setRelationPage(1);
     graphCacheRef.current = null;
+    groupedGraphCacheRef.current = null;
+    setGroupedGraph(null);
+    setGraphMode("detail");
   }, [debouncedQ, domainId]);
 
   const { data: bundle, loading, error, setData: setBundle } = useApi<OntologyBundle>(
@@ -189,6 +200,29 @@ export function OntologyPage() {
     [publishedOntologyId, setBundle],
   );
 
+  const handleGraphModeChange = useCallback(
+    async (mode: GraphMode) => {
+      setGraphMode(mode);
+      if (mode !== "overview" || !publishedOntologyId) return;
+      const cached = groupedGraphCacheRef.current;
+      if (cached?.ontologyId === publishedOntologyId) {
+        setGroupedGraph(cached.graph);
+        return;
+      }
+      setGroupedGraphLoading(true);
+      try {
+        const result = await api.getOntologyGroupedGraph(publishedOntologyId);
+        groupedGraphCacheRef.current = { ontologyId: publishedOntologyId, graph: result };
+        setGroupedGraph(result);
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "加载域概览失败");
+      } finally {
+        setGroupedGraphLoading(false);
+      }
+    },
+    [publishedOntologyId],
+  );
+
   // 首次进入且未在 URL 中带 domain 参数时，把默认域写入 URL（replace，不污染历史）。
   const syncedRef = useRef(false);
   useLayoutEffect(() => {
@@ -262,6 +296,10 @@ export function OntologyPage() {
             }}
             onExpandGraphNode={handleExpandGraphNode}
             graphExpanding={graphExpanding}
+            groupedGraph={groupedGraph}
+            groupedGraphLoading={groupedGraphLoading}
+            graphMode={graphMode}
+            onGraphModeChange={handleGraphModeChange}
           />
         )}
       </Spin>

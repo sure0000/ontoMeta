@@ -18,7 +18,13 @@ from app.models import (
     RelationType,
     VersionRecord,
 )
-from app.schemas import ConfirmationCreate, OntologyDraftOutput
+from app.schemas import (
+    ConfirmationCreate,
+    DraftObjectType,
+    DraftProperty,
+    DraftRelationType,
+    OntologyDraftOutput,
+)
 from app.services.common import log_change
 from app.services.draft_consistency import DraftConsistencyError, assert_ontology_consistent
 from app.services.version_diff import (
@@ -188,6 +194,161 @@ class DraftPersistenceService:
         db.commit()
         db.refresh(ontology)
         return ontology
+
+    def upsert_objects(
+        self,
+        db: Session,
+        ontology: Ontology,
+        object_types: list[DraftObjectType],
+        properties: list[DraftProperty],
+    ) -> dict[str, str]:
+        """按 source_ref(数据集 urn) upsert 对象与属性到已有草稿本体。
+
+        不删除本体下已有的关系，也不删除评估中已消失的对象/属性——用于
+        「仅生成业务对象」独立执行，可与「仅生成业务关系」并行，互不清空
+        对方产出。返回 source_ref -> object_type_id，供关系生成按 urn 精确回链。
+        """
+        existing_by_ref: dict[str, ObjectType] = {
+            obj.source_ref: obj
+            for obj in db.query(ObjectType)
+            .filter(ObjectType.ontology_id == ontology.id)
+            .all()
+            if obj.source_ref
+        }
+
+        object_ref_to_id: dict[str, str] = {}
+        object_id_by_name: dict[str, str] = {}
+        for item in object_types:
+            existing = existing_by_ref.get(item.source_ref) if item.source_ref else None
+            if existing is not None:
+                existing.name = item.name
+                existing.display_name = item.display_name
+                existing.description = item.description
+                existing.source_confidence = item.confidence
+                obj = existing
+            else:
+                obj = ObjectType(
+                    ontology_id=ontology.id,
+                    name=item.name,
+                    display_name=item.display_name,
+                    description=item.description,
+                    source_ref=item.source_ref,
+                    source_confidence=item.confidence,
+                    status=EntityStatus.SUGGESTED.value,
+                )
+                db.add(obj)
+            db.flush()
+            if item.source_ref:
+                object_ref_to_id[item.source_ref] = obj.id
+            object_id_by_name[item.name] = obj.id
+
+        existing_props_by_object: dict[str, dict[str, Property]] = {}
+        if object_id_by_name:
+            for prop in (
+                db.query(Property)
+                .filter(Property.object_type_id.in_(list(object_id_by_name.values())))
+                .all()
+            ):
+                existing_props_by_object.setdefault(prop.object_type_id, {})[
+                    prop.source_field_ref or prop.name
+                ] = prop
+
+        for item in properties:
+            object_type_id = object_id_by_name.get(item.object_type_name)
+            if not object_type_id:
+                continue
+            key = item.source_field_ref or item.name
+            existing_prop = existing_props_by_object.get(object_type_id, {}).get(key)
+            if existing_prop is not None:
+                existing_prop.name = item.name
+                existing_prop.display_name = item.display_name
+                existing_prop.description = item.description
+                existing_prop.data_type = item.data_type
+                existing_prop.semantic_type = item.semantic_type
+                existing_prop.source_field_ref = item.source_field_ref
+                existing_prop.required = item.required
+                existing_prop.source_confidence = item.confidence
+            else:
+                db.add(
+                    Property(
+                        object_type_id=object_type_id,
+                        name=item.name,
+                        display_name=item.display_name,
+                        description=item.description,
+                        data_type=item.data_type,
+                        semantic_type=item.semantic_type,
+                        source_field_ref=item.source_field_ref,
+                        required=item.required,
+                        source_confidence=item.confidence,
+                        status=EntityStatus.SUGGESTED.value,
+                    )
+                )
+
+        ontology.generated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(ontology)
+        return object_ref_to_id
+
+    def upsert_relations(
+        self,
+        db: Session,
+        ontology: Ontology,
+        relation_types: list[DraftRelationType],
+        object_id_by_candidate: dict[str, str],
+    ) -> int:
+        """按 name upsert 关系类型到已有草稿本体，不触碰该本体的对象/属性。
+
+        ``relation_types`` 的 source/target 对象名是证据 candidate_name(未经
+        业务命名提升，见 ``OntologyDraftGenerator.generate_relations``)；
+        ``object_id_by_candidate`` 由调用方按 source_dataset_urn 把 candidate_name
+        回链到已入库的 ObjectType.id。两端有一端回链不到(如对象尚未生成)的
+        关系会被跳过，不计入返回的已写入数量。
+        """
+        existing_by_name = {
+            rel.name: rel
+            for rel in db.query(RelationType)
+            .filter(RelationType.ontology_id == ontology.id)
+            .all()
+        }
+
+        written = 0
+        for item in relation_types:
+            source_id = object_id_by_candidate.get(item.source_object_type_name)
+            target_id = object_id_by_candidate.get(item.target_object_type_name)
+            if not source_id or not target_id:
+                continue
+            existing = existing_by_name.get(item.name)
+            if existing is not None:
+                existing.display_name = item.display_name
+                existing.description = item.description
+                existing.source_object_type_id = source_id
+                existing.target_object_type_id = target_id
+                existing.cardinality = item.cardinality
+                existing.structure_type = item.structure_type
+                existing.source_evidence = item.source_evidence
+                existing.source_confidence = item.confidence
+            else:
+                db.add(
+                    RelationType(
+                        ontology_id=ontology.id,
+                        name=item.name,
+                        display_name=item.display_name,
+                        description=item.description,
+                        source_object_type_id=source_id,
+                        target_object_type_id=target_id,
+                        cardinality=item.cardinality,
+                        structure_type=item.structure_type,
+                        source_evidence=item.source_evidence,
+                        source_confidence=item.confidence,
+                        status=EntityStatus.SUGGESTED.value,
+                    )
+                )
+            written += 1
+
+        ontology.generated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(ontology)
+        return written
 
 
 class PublishService:

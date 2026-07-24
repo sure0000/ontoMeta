@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import type { GraphMode } from "../components/graph";
 import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -22,15 +23,25 @@ import { useApi } from "../hooks/useApi";
 import { getOntologyDomainStatusVisual } from "../utils/statusVisual";
 import type {
   DomainContextDetail,
+  DraftGenerationScope,
   DraftProgress,
   ObjectTypeSummary,
   OntologyGraph,
+  OntologyGroupedGraph,
   RelationType,
   VersionDiff,
   VersionRecord,
 } from "../types";
 
 const DEFAULT_PAGE_SIZE = 20;
+
+const GENERATION_SCOPES: DraftGenerationScope[] = ["full", "objects", "relations"];
+
+const SCOPE_LABEL: Record<DraftGenerationScope, string> = {
+  full: "本体草稿",
+  objects: "业务对象",
+  relations: "业务关系",
+};
 
 function mergeOntologyGraph(base: OntologyGraph | null, extra: OntologyGraph): OntologyGraph {
   const nodeMap = new Map((base?.nodes ?? []).map((n) => [n.id, n]));
@@ -147,6 +158,12 @@ export function DomainDetailPage() {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [graphExpanding, setGraphExpanding] = useState(false);
   const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
+  const [graphMode, setGraphMode] = useState<GraphMode>("detail");
+  const [groupedGraph, setGroupedGraph] = useState<OntologyGroupedGraph | null>(null);
+  const [groupedGraphLoading, setGroupedGraphLoading] = useState(false);
+  const groupedGraphCacheRef = useRef<{ ontologyId: string; graph: OntologyGroupedGraph } | null>(
+    null,
+  );
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
@@ -157,6 +174,12 @@ export function DomainDetailPage() {
     setObjectPage(1);
     setRelationPage(1);
   }, [debouncedQ, domainId]);
+
+  useEffect(() => {
+    groupedGraphCacheRef.current = null;
+    setGroupedGraph(null);
+    setGraphMode("detail");
+  }, [domainId]);
 
   const {
     data: bundle,
@@ -193,16 +216,30 @@ export function DomainDetailPage() {
   const objectTotal = bundle?.objectTotal ?? 0;
   const relationTotal = bundle?.relationTotal ?? 0;
 
-  const [generating, setGenerating] = useState(false);
-  const [draftProgress, setDraftProgress] = useState<DraftProgress | null>(null);
+  const [generating, setGenerating] = useState<Record<DraftGenerationScope, boolean>>({
+    full: false,
+    objects: false,
+    relations: false,
+  });
+  const [draftProgress, setDraftProgress] = useState<
+    Record<DraftGenerationScope, DraftProgress | null>
+  >({ full: null, objects: null, relations: null });
   const [ontologyLoading, setOntologyLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versions, setVersions] = useState<VersionRecord[]>([]);
   const [selectedDiff, setSelectedDiff] = useState<VersionDiff | null>(null);
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const completionHandledRef = useRef<string | null>(null);
+  const pollRefs = useRef<Record<DraftGenerationScope, ReturnType<typeof setTimeout> | null>>({
+    full: null,
+    objects: null,
+    relations: null,
+  });
+  const completionHandledRefs = useRef<Record<DraftGenerationScope, string | null>>({
+    full: null,
+    objects: null,
+    relations: null,
+  });
 
   const error = actionError || loadError;
 
@@ -211,6 +248,9 @@ export function DomainDetailPage() {
       setOntologyLoading(true);
       try {
         graphCacheRef.current = null;
+        groupedGraphCacheRef.current = null;
+        setGroupedGraph(null);
+        setGraphMode("detail");
         const lists = await fetchOntologyLists(ontologyId, {
           objectPage: 1,
           relationPage: 1,
@@ -257,23 +297,48 @@ export function DomainDetailPage() {
     [domain?.latest_ontology_id, setBundle],
   );
 
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearTimeout(pollRef.current);
-      pollRef.current = null;
+  const handleGraphModeChange = useCallback(
+    async (mode: GraphMode) => {
+      setGraphMode(mode);
+      const ontologyId = domain?.latest_ontology_id;
+      if (mode !== "overview" || !ontologyId) return;
+      const cached = groupedGraphCacheRef.current;
+      if (cached?.ontologyId === ontologyId) {
+        setGroupedGraph(cached.graph);
+        return;
+      }
+      setGroupedGraphLoading(true);
+      try {
+        const result = await api.getOntologyGroupedGraph(ontologyId);
+        groupedGraphCacheRef.current = { ontologyId, graph: result };
+        setGroupedGraph(result);
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "加载域概览失败");
+      } finally {
+        setGroupedGraphLoading(false);
+      }
+    },
+    [domain?.latest_ontology_id],
+  );
+
+  const stopPolling = useCallback((scope: DraftGenerationScope) => {
+    const ref = pollRefs.current[scope];
+    if (ref) {
+      clearTimeout(ref);
+      pollRefs.current[scope] = null;
     }
   }, []);
 
   const pollProgress = useCallback(
-    (taskId: string) => {
-      stopPolling();
-      completionHandledRef.current = null;
+    (scope: DraftGenerationScope, taskId: string) => {
+      stopPolling(scope);
+      completionHandledRefs.current[scope] = null;
 
       const pollOnce = async () => {
         try {
-          const p = await api.getProgress(domainId!);
+          const p = await api.getProgress(domainId!, scope);
           if (p.task_id !== taskId) return;
-          setDraftProgress(p);
+          setDraftProgress((prev) => ({ ...prev, [scope]: p }));
 
           if (
             p.status === "succeeded" ||
@@ -281,10 +346,10 @@ export function DomainDetailPage() {
             p.status === "failed" ||
             p.status === "cancelled"
           ) {
-            if (completionHandledRef.current === taskId) return;
-            completionHandledRef.current = taskId;
-            stopPolling();
-            setGenerating(false);
+            if (completionHandledRefs.current[scope] === taskId) return;
+            completionHandledRefs.current[scope] = taskId;
+            stopPolling(scope);
+            setGenerating((prev) => ({ ...prev, [scope]: false }));
 
             if (
               (p.status === "succeeded" || p.status === "completed") &&
@@ -293,19 +358,19 @@ export function DomainDetailPage() {
               const updated = await api.getDomain(domainId!);
               setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
               await loadOntology(p.ontology_id);
-              message.success("本体草稿生成完成");
+              message.success(`${SCOPE_LABEL[scope]}生成完成`);
             } else if (p.status === "failed") {
               setActionError(p.message || "生成失败");
             } else if (p.status === "cancelled") {
-              message.info(p.message || "草稿生成已停止");
+              message.info(p.message || "生成已停止");
             }
             return;
           }
 
-          pollRef.current = setTimeout(pollOnce, 2000);
+          pollRefs.current[scope] = setTimeout(pollOnce, 2000);
         } catch {
-          stopPolling();
-          setGenerating(false);
+          stopPolling(scope);
+          setGenerating((prev) => ({ ...prev, [scope]: false }));
           setActionError("获取进度失败");
         }
       };
@@ -315,25 +380,49 @@ export function DomainDetailPage() {
     [domainId, loadOntology, setBundle, stopPolling],
   );
 
-  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(
+    () => () => GENERATION_SCOPES.forEach((scope) => stopPolling(scope)),
+    [stopPolling],
+  );
 
-  const handleGenerate = () => {
+  const handleGenerate = (scope: DraftGenerationScope) => {
     if (!domainId) return;
+    const config: Record<
+      DraftGenerationScope,
+      { title: string; content: string; run: () => Promise<DraftProgress> }
+    > = {
+      full: {
+        title: "确认生成本体草稿",
+        content: "将根据 DataHub 元数据重新生成本体草稿(对象+关系)，已有草稿内容将被覆盖。",
+        run: () => api.generateDraft(domainId),
+      },
+      objects: {
+        title: "确认生成业务对象",
+        content: "将根据 DataHub 元数据重新生成业务对象与属性，不影响已有的业务关系。",
+        run: () => api.generateObjects(domainId),
+      },
+      relations: {
+        title: "确认生成业务关系",
+        content: "将根据 DataHub 元数据重新生成业务关系，不影响已有的业务对象；需已先生成业务对象。",
+        run: () => api.generateRelations(domainId),
+      },
+    };
+    const { title, content, run } = config[scope];
     Modal.confirm({
-      title: "确认生成本体草稿",
-      content: "将根据 DataHub 元数据重新生成本体草稿，已有草稿内容将被覆盖。",
+      title,
+      content,
       okText: "确认生成",
       cancelText: "取消",
       onOk: async () => {
-        setGenerating(true);
+        setGenerating((prev) => ({ ...prev, [scope]: true }));
         setActionError(null);
-        setDraftProgress(null);
+        setDraftProgress((prev) => ({ ...prev, [scope]: null }));
         try {
-          const result = await api.generateDraft(domainId);
-          setDraftProgress(result);
-          pollProgress(result.task_id);
+          const result = await run();
+          setDraftProgress((prev) => ({ ...prev, [scope]: result }));
+          pollProgress(scope, result.task_id);
         } catch (err) {
-          setGenerating(false);
+          setGenerating((prev) => ({ ...prev, [scope]: false }));
           setActionError(err instanceof Error ? err.message : "生成失败");
         }
       },
@@ -461,11 +550,28 @@ export function DomainDetailPage() {
             )}
             <Button
               type="primary"
-              loading={generating}
-              onClick={handleGenerate}
+              loading={generating.full}
+              disabled={generating.objects || generating.relations}
+              onClick={() => handleGenerate("full")}
               icon={<ThunderboltOutlined />}
             >
               生成本体草稿
+            </Button>
+            <Button
+              loading={generating.objects}
+              disabled={generating.full}
+              onClick={() => handleGenerate("objects")}
+              icon={<ApartmentOutlined />}
+            >
+              生成业务对象
+            </Button>
+            <Button
+              loading={generating.relations}
+              disabled={generating.full}
+              onClick={() => handleGenerate("relations")}
+              icon={<DeploymentUnitOutlined />}
+            >
+              生成业务关系
             </Button>
             {domain.latest_ontology_id && domain.latest_ontology_status === "draft" && (
               <Button onClick={handlePublish} icon={<CheckCircleOutlined />}>
@@ -486,17 +592,33 @@ export function DomainDetailPage() {
         />
       )}
 
-      {generating && draftProgress && (
-        <div style={{ margin: "16px 0", padding: "16px 24px", background: "#f6f8fa", borderRadius: 8 }}>
-          <Progress
-            percent={draftProgress.progress}
-            status={draftProgress.status === "failed" ? "exception" : "active"}
-            strokeColor={{ from: "#108ee9", to: "#87d068" }}
-          />
-          <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
-            {draftProgress.message || "处理中..."}
-          </div>
-        </div>
+      {GENERATION_SCOPES.filter((scope) => generating[scope] && draftProgress[scope]).map(
+        (scope) => {
+          const progress = draftProgress[scope]!;
+          return (
+            <div
+              key={scope}
+              style={{
+                margin: "16px 0",
+                padding: "16px 24px",
+                background: "#f6f8fa",
+                borderRadius: 8,
+              }}
+            >
+              <div style={{ marginBottom: 4, fontWeight: 500 }}>
+                {SCOPE_LABEL[scope]}生成中
+              </div>
+              <Progress
+                percent={progress.progress}
+                status={progress.status === "failed" ? "exception" : "active"}
+                strokeColor={{ from: "#108ee9", to: "#87d068" }}
+              />
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                {progress.message || "处理中..."}
+              </div>
+            </div>
+          );
+        },
       )}
 
       <div className="stat-row">
@@ -546,15 +668,27 @@ export function DomainDetailPage() {
             title="尚未生成本体草稿"
             description="从 DataHub 拉取数据域元数据并生成本体草稿，作为后续编辑与发布的起点。"
             action={
-              <Button
-                type="primary"
-                size="large"
-                loading={generating}
-                onClick={handleGenerate}
-                icon={<ThunderboltOutlined />}
-              >
-                生成本体草稿
-              </Button>
+              <Space>
+                <Button
+                  type="primary"
+                  size="large"
+                  loading={generating.full}
+                  disabled={generating.objects}
+                  onClick={() => handleGenerate("full")}
+                  icon={<ThunderboltOutlined />}
+                >
+                  生成本体草稿
+                </Button>
+                <Button
+                  size="large"
+                  loading={generating.objects}
+                  disabled={generating.full}
+                  onClick={() => handleGenerate("objects")}
+                  icon={<ApartmentOutlined />}
+                >
+                  仅生成业务对象
+                </Button>
+              </Space>
             }
           />
         ) : (
@@ -587,6 +721,10 @@ export function DomainDetailPage() {
             }}
             onExpandGraphNode={handleExpandGraphNode}
             graphExpanding={graphExpanding}
+            groupedGraph={groupedGraph}
+            groupedGraphLoading={groupedGraphLoading}
+            graphMode={graphMode}
+            onGraphModeChange={handleGraphModeChange}
           />
         )}
       </Spin>

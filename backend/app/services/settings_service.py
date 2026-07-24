@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.config import settings as env_settings
-from app.models import DatahubSetting, LlmServiceConfig
+from app.models import DatahubSetting, DraftGenerationSetting, LlmServiceConfig
 
 DEEPSEEK_MODELS = [
     {
@@ -49,6 +49,12 @@ class LlmRuntimeConfig:
     api_key: str | None
     model: str
     use_mock: bool
+
+
+@dataclass
+class DraftGenerationRuntimeConfig:
+    object_chunk_concurrency: int
+    relation_chunk_concurrency: int
 
 
 def mask_secret(value: str | None) -> str | None:
@@ -152,6 +158,29 @@ class SettingsService:
             use_mock=row.use_mock,
         )
 
+    def get_draft_generation_settings(self, db: Session) -> DraftGenerationSetting:
+        self.ensure_defaults(db)
+        row = db.get(DraftGenerationSetting, "default")
+        assert row is not None
+        return row
+
+    def update_draft_generation_settings(
+        self, db: Session, data: dict
+    ) -> DraftGenerationSetting:
+        row = self.get_draft_generation_settings(db)
+        for key, value in data.items():
+            setattr(row, key, value)
+        db.commit()
+        db.refresh(row)
+        return row
+
+    def get_draft_generation_runtime(self, db: Session) -> DraftGenerationRuntimeConfig:
+        row = self.get_draft_generation_settings(db)
+        return DraftGenerationRuntimeConfig(
+            object_chunk_concurrency=row.object_chunk_concurrency,
+            relation_chunk_concurrency=row.relation_chunk_concurrency,
+        )
+
     def get_llm_runtime(self, db: Session) -> LlmRuntimeConfig:
         self.ensure_defaults(db)
         service = (
@@ -204,6 +233,16 @@ class SettingsService:
                     is_default=True,
                     enabled=True,
                     use_mock=env_settings.use_mock_llm,
+                )
+            )
+            db.commit()
+
+        if not db.get(DraftGenerationSetting, "default"):
+            db.add(
+                DraftGenerationSetting(
+                    id="default",
+                    object_chunk_concurrency=env_settings.draft_chunk_max_concurrency,
+                    relation_chunk_concurrency=env_settings.draft_relation_chunk_max_concurrency,
                 )
             )
             db.commit()

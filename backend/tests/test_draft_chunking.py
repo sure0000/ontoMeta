@@ -20,7 +20,7 @@ from app.schemas import (
 )
 from app.services.draft_checkpoint import DraftCheckpointStore, chunk_key
 from app.services.draft_generator import OntologyDraftGenerator
-from app.services.evidence_chunker import estimate_size, split_evidence
+from app.services.evidence_chunker import estimate_size, split_evidence, split_relations
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +193,50 @@ def test_split_uses_settings_default_table_batch_size(monkeypatch):
     sub_bundles, _ = split_evidence(bundle, budget=10_000_000)
     assert all(len(sub.object_types) <= 4 for sub in sub_bundles)
     assert len(sub_bundles) >= 3
+
+
+# ---------------------------------------------------------------------------
+# split_relations(纯函数):关系流水线的独立分块，覆盖跨对象块关系
+# ---------------------------------------------------------------------------
+def test_split_relations_zero_loss_and_no_properties():
+    bundle = _build_bundle(num_objects=8, fields_per_object=6)
+    sub_bundles = split_relations(bundle, budget=10_000_000, max_relations_per_chunk=100)
+    assert len(sub_bundles) == 1
+    got_relations = [r.name for r in sub_bundles[0].relations]
+    assert sorted(got_relations) == sorted(r.name for r in bundle.relations)
+    # 关系流水线子包不携带 properties(不参与结构组装，只做业务命名)。
+    assert all(sub.properties == [] for sub in sub_bundles)
+
+
+def test_split_relations_respects_batch_size_and_covers_cross_chunk_relations():
+    """关系分块不受对象分块边界限制:即便两端对象落在不同对象块,关系也会被
+    完整分到关系流水线的某个块里,不会像旧版 cross_relations 那样被丢弃。"""
+    bundle = _build_bundle(num_objects=8, fields_per_object=6)
+    sub_bundles = split_relations(bundle, budget=10_000_000, max_relations_per_chunk=2)
+    assert all(len(sub.relations) <= 2 for sub in sub_bundles)
+    total = sum(len(sub.relations) for sub in sub_bundles)
+    assert total == len(bundle.relations)  # 零丢失，覆盖所有跨块关系
+
+    # 每个子包携带的 object_types 只是该批关系两端对象的概要(无 properties)。
+    for sub in sub_bundles:
+        names_in_chunk = {ot.candidate_name for ot in sub.object_types}
+        for rel in sub.relations:
+            assert rel.source_object in names_in_chunk
+            assert rel.target_object in names_in_chunk
+
+
+def test_split_relations_respects_char_budget():
+    bundle = _build_bundle(num_objects=8, fields_per_object=6)
+    budget = estimate_size(EvidenceBundle(relations=bundle.relations)) // 3
+    sub_bundles = split_relations(bundle, budget=budget, max_relations_per_chunk=1000)
+    assert len(sub_bundles) > 1
+
+
+def test_split_relations_uses_settings_default_batch_size(monkeypatch):
+    monkeypatch.setattr(settings, "draft_chunk_relation_batch_size", 2)
+    bundle = _build_bundle(num_objects=8, fields_per_object=1)
+    sub_bundles = split_relations(bundle, budget=10_000_000)
+    assert all(len(sub.relations) <= 2 for sub in sub_bundles)
 
 
 # ---------------------------------------------------------------------------
@@ -399,12 +443,77 @@ def test_checkpoint_partial_resume(monkeypatch):
 
     asyncio.run(gen.generate(bundle, checkpoint=store))
     sub_bundles, _ = split_evidence(bundle, 50)
-    victim_key = chunk_key(gen._build_prompt(sub_bundles[0]))
+    stripped = EvidenceBundle(
+        object_types=sub_bundles[0].object_types,
+        properties=sub_bundles[0].properties,
+        relations=[],
+    )
+    victim_key = gen._object_chunk_key(gen._build_prompt(stripped))
     del store.data[victim_key]
 
     gen.client.chat.completions.calls.clear()
     asyncio.run(gen.generate(bundle, checkpoint=store))
     assert len(gen.client.chat.completions.calls) == 1
+
+
+def test_object_and_relation_pipelines_checkpoint_independently(monkeypatch):
+    """对象流水线成功落盘后，关系流水线失败重试不应重跑已缓存的对象块。"""
+    bundle = _build_bundle(num_objects=6, fields_per_object=4)
+    store = _FakeStore()
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 50)
+
+    fail_relations = {"on": True}
+
+    class _FlakyRelationCompletions:
+        def __init__(self) -> None:
+            self.object_calls = 0
+            self.relation_calls = 0
+
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            if payload.get("relations"):
+                # 人为让出事件循环，确保(无真实网络延迟的)对象块协程先跑完，
+                # 使断言可确定性地区分"首轮对象块已完成"与"关系块失败"。
+                await asyncio.sleep(0.02)
+                self.relation_calls += 1
+                if fail_relations["on"]:
+                    raise RuntimeError("relation llm boom")
+                rels = [
+                    {"name": r["name"], "display_name": "结算生成"}
+                    for r in payload.get("relations", [])
+                ]
+                content = json.dumps({"relations": rels}, ensure_ascii=False)
+            else:
+                self.object_calls += 1
+                content = _good_object_response(payload)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "stub"
+    completions = _FlakyRelationCompletions()
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    try:
+        asyncio.run(gen.generate(bundle, checkpoint=store))
+        assert False, "expected relation pipeline failure to propagate"
+    except RuntimeError:
+        pass
+
+    assert completions.object_calls > 0
+    # 对象块已全部落盘缓存(哪怕关系流水线整体失败)。
+    object_calls_after_first_attempt = completions.object_calls
+
+    fail_relations["on"] = False
+    draft = asyncio.run(gen.generate(bundle, checkpoint=store))
+
+    # 重试时对象流水线全部命中缓存，不发起新的对象命名调用。
+    assert completions.object_calls == object_calls_after_first_attempt
+    assert completions.relation_calls > 0
+    assert len(draft.relation_types) == len(bundle.relations)  # 零丢失
+    assert all(r.display_name == "结算生成" for r in draft.relation_types)
 
 
 def test_db_checkpoint_store_roundtrip(client):
@@ -556,3 +665,241 @@ def test_chunked_property_overrides_merge(monkeypatch):
     )
     assert single_props == chunked_props
     assert len(chunked.properties) == len(bundle.properties)
+
+
+# ---------------------------------------------------------------------------
+# 关系业务名增强(LLM relations 输出)
+# ---------------------------------------------------------------------------
+def _good_relation_response(payload: dict) -> str:
+    """桩 LLM:对象命名 + 关系业务名增强都按 source_ref/name 回链回传。"""
+    objs = [
+        {
+            "source_ref": o["source_dataset_urn"],
+            "name": "biz_" + o["candidate_name"],
+            "display_name": "业务_" + o["display_name"],
+        }
+        for o in payload.get("object_types", [])
+    ]
+    rels = [
+        {"name": r["name"], "display_name": "结算生成"}
+        for r in payload.get("relations", [])
+    ]
+    return json.dumps({"objectTypes": objs, "relations": rels}, ensure_ascii=False)
+
+
+class _GoodRelationCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create(self, *, model, messages, response_format=None):
+        payload = json.loads(messages[-1]["content"])
+        self.calls.append(payload)
+        content = _good_relation_response(payload)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
+
+def test_relation_display_name_enriched_by_llm(monkeypatch):
+    bundle = _build_bundle(num_objects=3, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "stub"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodRelationCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.relation_types) == 2  # 零丢失
+    # 证据里默认写死的「关联」应被 LLM 给出的业务语义词取代。
+    assert all(r.display_name == "结算生成" for r in draft.relation_types)
+
+
+def test_relation_override_rejects_invalid_term(monkeypatch):
+    """LLM 返回超长句子式关系名(未通过 validate_relation_term)→ 丢弃，回退默认词。"""
+    bundle = _build_bundle(num_objects=2, fields_per_object=1)
+
+    class _SentenceCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            rels = [
+                {"name": r["name"], "display_name": "这是一段过长且不合法的关系描述句子。"}
+                for r in payload.get("relations", [])
+            ]
+            content = json.dumps({"objectTypes": [], "relations": rels}, ensure_ascii=False)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "x"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_SentenceCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.relation_types) == 1  # 零丢失
+    assert draft.relation_types[0].display_name == "关联"  # 校验失败 → 回退证据默认词
+
+
+def test_relation_override_rejects_unknown_name(monkeypatch):
+    """LLM 编造不存在的关系 name → 该条增强丢弃，关系零丢失、回退默认词。"""
+    bundle = _build_bundle(num_objects=2, fields_per_object=1)
+
+    class _FakeRelationCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            content = json.dumps(
+                {
+                    "objectTypes": [],
+                    "relations": [{"name": "not_a_real_relation", "display_name": "伪造"}],
+                },
+                ensure_ascii=False,
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "x"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeRelationCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.relation_types) == 1  # 零丢失
+    assert draft.relation_types[0].display_name == "关联"
+
+
+# ---------------------------------------------------------------------------
+# 「仅生成业务对象」/「仅生成业务关系」独立入口：支持分开触发、并行执行
+# ---------------------------------------------------------------------------
+def test_generate_object_types_only_single_shot(monkeypatch):
+    """仅对象入口：单次调用只请求对象命名，不产出/不依赖关系命名。"""
+    bundle = _build_bundle(num_objects=3, fields_per_object=2)
+    gen = _stub_full_generator()
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    object_types, properties = asyncio.run(gen.generate_object_types(bundle))
+    assert len(gen.client.chat.completions.calls) == 1
+    assert len(object_types) == 3
+    assert len(properties) == 6  # 零丢失
+    assert {ot.name for ot in object_types} == {
+        f"biz_table_{i}_di_entity" for i in range(3)
+    }
+    assert all(p.display_name.startswith("中文_") for p in properties)
+
+
+def test_generate_object_types_only_chunked(monkeypatch):
+    """仅对象入口分块：多块并发、按内容哈希缓存，结果与单次等价、零丢失。"""
+    bundle = _build_bundle(num_objects=6, fields_per_object=4)
+    gen = _stub_generator()
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 50)
+
+    seen: list[tuple[int, int]] = []
+
+    async def cb(done: int, total: int) -> None:
+        seen.append((done, total))
+
+    object_types, properties = asyncio.run(
+        gen.generate_object_types(bundle, progress_cb=cb)
+    )
+    assert len(gen.client.chat.completions.calls) > 1
+    assert len(object_types) == 6
+    assert len(properties) == len(bundle.properties)
+    assert seen and seen[-1][0] == seen[-1][1]
+    # 关系一律不出现在仅对象入口的调用 payload 里(关系交由独立入口处理)。
+    assert all(not call.get("relations") for call in gen.client.chat.completions.calls)
+
+
+def test_generate_relations_only_single_shot(monkeypatch):
+    """仅关系入口：source/target 保留证据原始 candidate_name(未做对象命名提升)，
+    供调用方按 source_dataset_urn 回链已入库对象，而不是假设这里重新命名了对象。"""
+    bundle = _build_bundle(num_objects=3, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "stub"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodRelationCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    relation_types = asyncio.run(gen.generate_relations(bundle))
+    assert len(relation_types) == 2  # 零丢失
+    assert all(r.display_name == "结算生成" for r in relation_types)
+    # 未经 obj_name 提升，仍是证据里的原始 candidate_name。
+    assert {r.source_object_type_name for r in relation_types} <= {
+        ot.candidate_name for ot in bundle.object_types
+    }
+
+
+def test_generate_relations_only_chunked(monkeypatch):
+    """仅关系入口分块：多块并发执行，零丢失，且不发起对象命名调用。"""
+    bundle = _build_bundle(num_objects=8, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "stub"
+    completions = _GoodRelationCompletions()
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 50)
+    monkeypatch.setattr(settings, "draft_chunk_relation_batch_size", 2)
+
+    relation_types = asyncio.run(gen.generate_relations(bundle))
+    assert len(completions.calls) > 1
+    assert len(relation_types) == len(bundle.relations)
+    assert all(r.display_name == "结算生成" for r in relation_types)
+    # 每次调用 payload 都不含 properties(仅关系入口不组装对象/属性)。
+    assert all(call.get("properties") == [] for call in completions.calls)
+
+
+def test_generate_relations_only_checkpoint_reuse(monkeypatch):
+    """仅关系入口的分块结果同样按内容哈希落检查点，重试可复用、跳过 LLM。"""
+    bundle = _build_bundle(num_objects=8, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "stub"
+    completions = _GoodRelationCompletions()
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    store = _FakeStore()
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 50)
+    monkeypatch.setattr(settings, "draft_chunk_relation_batch_size", 2)
+
+    first = asyncio.run(gen.generate_relations(bundle, checkpoint=store))
+    assert len(completions.calls) > 1
+    assert store.data
+
+    completions.calls.clear()
+    second = asyncio.run(gen.generate_relations(bundle, checkpoint=store))
+    assert len(completions.calls) == 0
+    assert sorted((r.name, r.display_name) for r in first) == sorted(
+        (r.name, r.display_name) for r in second
+    )
+
+
+def test_object_and_relation_only_entries_compose_to_full_generate(monkeypatch):
+    """仅对象 + 仅关系两个独立入口的产出，拼起来应与一体化 generate() 等价——
+    验证「分开执行」重构没有改变确定性组装的语义，只是拆开了触发路径。"""
+    bundle = _build_bundle(num_objects=5, fields_per_object=3)
+
+    gen_full = _stub_full_generator()
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+    full_draft = asyncio.run(gen_full.generate(bundle))
+
+    gen_objects = _stub_full_generator()
+    object_types, properties = asyncio.run(gen_objects.generate_object_types(bundle))
+
+    gen_relations = OntologyDraftGenerator()
+    gen_relations.use_mock = False
+    gen_relations.model = "stub"
+    gen_relations.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_GoodRelationCompletions())
+    )
+    relation_types = asyncio.run(gen_relations.generate_relations(bundle))
+
+    assert sorted(ot.name for ot in object_types) == sorted(
+        ot.name for ot in full_draft.object_types
+    )
+    assert sorted((p.object_type_name, p.name) for p in properties) == sorted(
+        (p.object_type_name, p.name) for p in full_draft.properties
+    )
+    # 关系端点这里是原始 candidate_name，full_draft 里是 obj_name 提升后的名字，
+    # 二者语义上指向同一批对象，只是各自的解析口径不同(仅关系入口需调用方按
+    # source_dataset_urn 回链)，故只比较关系条数与去重后的 name 集合。
+    assert len(relation_types) == len(full_draft.relation_types)
+    assert {r.name for r in relation_types} == {r.name for r in full_draft.relation_types}

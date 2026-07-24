@@ -104,6 +104,7 @@ class DraftProgressOut(BaseModel):
     progress: int
     message: str | None = None
     ontology_id: str | None = None
+    scope: str = "full"
 
 
 class TaskRecordOut(BaseModel):
@@ -114,6 +115,7 @@ class TaskRecordOut(BaseModel):
     error_summary: str | None = None
     ontology_id: str | None = None
     evidence_count: int = 0
+    scope: str = "full"
     created_at: datetime
     updated_at: datetime
 

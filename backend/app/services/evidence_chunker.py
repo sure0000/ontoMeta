@@ -121,3 +121,67 @@ def split_evidence(
         for idx, chunk in enumerate(packed)
     ]
     return sub_bundles, cross_relations
+
+
+def split_relations(
+    bundle: EvidenceBundle,
+    budget: int,
+    max_relations_per_chunk: int | None = None,
+) -> list[EvidenceBundle]:
+    """把*全部*关系(不受对象分块边界限制)按预算切成多个自包含子包。
+
+    与 ``split_evidence`` 是两条独立的分块流水线:对象流水线负责对象/属性
+    命名,关系流水线负责关系业务命名,互不依赖对方的输出,可并发执行、独立
+    断点续跑。因此这里对 ``bundle.relations`` 做全量分块(而非只处理某个对象
+    子包内部的关系),天然覆盖了两端对象落在不同对象子包的跨块关系——
+    ``split_evidence`` 返回的 cross_relations 不会再有遗漏未增强的问题。
+
+    分块单元为单条关系;每个子包附带该批关系涉及到的两端对象概要(仅
+    candidate_name/display_name/description,不含 properties)作为业务背景,
+    帮助 LLM 推断关系语义,但不参与结构组装、也不要求对象命名增强已完成。
+
+    按关系数分块是主策略(默认每批最多 ``max_relations_per_chunk`` 条),字符
+    预算是兜底细分;单条关系本身超预算时仍单独成块。
+    """
+    if max_relations_per_chunk is None:
+        from app.config import settings
+
+        max_relations_per_chunk = settings.draft_chunk_relation_batch_size
+
+    obj_by_candidate = {ot.candidate_name: ot for ot in bundle.object_types}
+
+    def _context_objects(names: set[str]) -> list:
+        return [obj_by_candidate[n] for n in sorted(names) if n in obj_by_candidate]
+
+    packed: list[tuple[list, set[str]]] = []
+    current: list = []
+    current_names: set[str] = set()
+
+    for rel in bundle.relations:
+        trial_names = current_names | {rel.source_object, rel.target_object}
+        trial = EvidenceBundle(
+            object_types=_context_objects(trial_names),
+            properties=[],
+            relations=[*current, rel],
+        )
+        if current and (
+            len(current) >= max_relations_per_chunk or estimate_size(trial) > budget
+        ):
+            packed.append((current, current_names))
+            current = [rel]
+            current_names = {rel.source_object, rel.target_object}
+        else:
+            current = [*current, rel]
+            current_names = trial_names
+
+    if current:
+        packed.append((current, current_names))
+
+    return [
+        EvidenceBundle(
+            object_types=_context_objects(names),
+            properties=[],
+            relations=rels,
+        )
+        for rels, names in packed
+    ]

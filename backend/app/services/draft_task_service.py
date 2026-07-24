@@ -87,7 +87,13 @@ class DraftTaskService:
     def _draft_generator(self, db: Session):
         from app.services.draft_generator import OntologyDraftGenerator
 
-        return OntologyDraftGenerator(self.settings_service.get_llm_runtime(db))
+        llm_runtime = self.settings_service.get_llm_runtime(db)
+        chunk_runtime = self.settings_service.get_draft_generation_runtime(db)
+        return OntologyDraftGenerator(
+            llm_runtime,
+            object_chunk_concurrency=chunk_runtime.object_chunk_concurrency,
+            relation_chunk_concurrency=chunk_runtime.relation_chunk_concurrency,
+        )
 
     def _draft_generator_instance(self):
         """在无长事务上下文时创建草稿生成器。"""
@@ -95,8 +101,13 @@ class DraftTaskService:
         from app.services.draft_generator import OntologyDraftGenerator
 
         with SessionLocal() as db:
-            runtime = self.settings_service.get_llm_runtime(db)
-        return OntologyDraftGenerator(runtime)
+            llm_runtime = self.settings_service.get_llm_runtime(db)
+            chunk_runtime = self.settings_service.get_draft_generation_runtime(db)
+        return OntologyDraftGenerator(
+            llm_runtime,
+            object_chunk_concurrency=chunk_runtime.object_chunk_concurrency,
+            relation_chunk_concurrency=chunk_runtime.relation_chunk_concurrency,
+        )
 
     @staticmethod
     async def _update_task_progress(task_id: str, progress: int, message: str) -> None:
@@ -167,27 +178,51 @@ class DraftTaskService:
         if asyncio_task and not asyncio_task.done():
             asyncio_task.cancel()
 
+    @staticmethod
+    def _ensure_no_conflicting_task(db: Session, domain_id: str, scope: str) -> None:
+        """按范围检测冲突任务：``full`` 会整体重建草稿本体，与任何范围的进行中
+        任务都冲突；``objects``/``relations`` 只与同范围或 ``full`` 的进行中
+        任务冲突，二者之间互不阻塞，可并行执行。"""
+        query = db.query(DraftGenerationTask).filter(
+            DraftGenerationTask.domain_context_id == domain_id,
+            DraftGenerationTask.status.in_(list(ACTIVE_STATUSES)),
+        )
+        if scope != "full":
+            query = query.filter(
+                or_(
+                    DraftGenerationTask.scope == "full",
+                    DraftGenerationTask.scope == scope,
+                )
+            )
+        active = query.first()
+        if active:
+            raise DraftGenerationAlreadyRunning(active.id)
+
+    @staticmethod
+    def _get_draft_ontology(db: Session, domain_id: str) -> Ontology | None:
+        return (
+            db.query(Ontology)
+            .filter(
+                Ontology.domain_context_id == domain_id,
+                Ontology.status == OntologyStatus.DRAFT.value,
+            )
+            .order_by(Ontology.created_at.desc())
+            .first()
+        )
+
     def start_draft_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
         domain = db.get(DomainContext, domain_id)
         if not domain:
             raise ValueError("Domain not found")
 
-        active = (
-            db.query(DraftGenerationTask)
-            .filter(
-                DraftGenerationTask.domain_context_id == domain_id,
-                DraftGenerationTask.status.in_(list(ACTIVE_STATUSES)),
-            )
-            .first()
-        )
-        if active:
-            raise DraftGenerationAlreadyRunning(active.id)
+        self._ensure_no_conflicting_task(db, domain_id, "full")
 
         # 全新生成：清空该域历史分块检查点，避免复用过期结果(重试才续跑)。
         DraftCheckpointStore(domain_id).clear()
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
+            scope="full",
             status="queued",
             progress=0,
             message="已入队，等待执行名额…",
@@ -207,9 +242,77 @@ class DraftTaskService:
             status=task.status,
             progress=task.progress,
             message=task.message,
+            scope=task.scope,
         )
 
         return progress
+
+    def start_object_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
+        """仅生成业务对象：可与 ``start_relation_generation`` 并行执行。"""
+        domain = db.get(DomainContext, domain_id)
+        if not domain:
+            raise ValueError("Domain not found")
+
+        self._ensure_no_conflicting_task(db, domain_id, "objects")
+
+        task = DraftGenerationTask(
+            domain_context_id=domain_id,
+            scope="objects",
+            status="queued",
+            progress=0,
+            message="已入队，等待执行名额…",
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        return DraftProgressOut(
+            task_id=task.id,
+            status=task.status,
+            progress=task.progress,
+            message=task.message,
+            scope=task.scope,
+        )
+
+    def start_relation_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
+        """仅生成业务关系：需已有草稿本体且已含业务对象，可与
+        ``start_object_generation`` 并行执行(关系按 source_dataset_urn 回链
+        已入库对象，不依赖同一次运行内的对象命名)。"""
+        domain = db.get(DomainContext, domain_id)
+        if not domain:
+            raise ValueError("Domain not found")
+
+        ontology = self._get_draft_ontology(db, domain_id)
+        has_objects = (
+            ontology is not None
+            and db.query(ObjectType)
+            .filter(ObjectType.ontology_id == ontology.id)
+            .first()
+            is not None
+        )
+        if not has_objects:
+            raise ValueError("尚无业务对象，请先生成业务对象后再生成业务关系")
+
+        self._ensure_no_conflicting_task(db, domain_id, "relations")
+
+        task = DraftGenerationTask(
+            domain_context_id=domain_id,
+            scope="relations",
+            status="queued",
+            progress=0,
+            message="已入队，等待执行名额…",
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        return DraftProgressOut(
+            task_id=task.id,
+            status=task.status,
+            progress=task.progress,
+            message=task.message,
+            scope=task.scope,
+        )
 
     def stop_draft_generation(
         self, db: Session, domain_id: str, task_id: str
@@ -261,27 +364,23 @@ class DraftTaskService:
         if failed.status != "failed":
             raise ValueError("仅失败任务可以重试")
 
-        active = (
-            db.query(DraftGenerationTask)
-            .filter(
-                DraftGenerationTask.domain_context_id == domain_id,
-                DraftGenerationTask.status.in_(list(ACTIVE_STATUSES)),
-            )
-            .first()
-        )
-        if active:
-            raise DraftGenerationAlreadyRunning(active.id)
+        scope = failed.scope or "full"
+        self._ensure_no_conflicting_task(db, domain_id, scope)
 
-        dup = self.report_duplicate_drafts(db, domain_id)
-        message = "已入队重试，等待执行名额…"
-        if dup.draft_count > 1:
-            message = (
-                f"已入队重试；检测到 {dup.draft_count} 个草稿本体，"
-                "执行时将自动去重保留最新生成结果"
-            )
+        if scope == "full":
+            dup = self.report_duplicate_drafts(db, domain_id)
+            message = "已入队重试，等待执行名额…"
+            if dup.draft_count > 1:
+                message = (
+                    f"已入队重试；检测到 {dup.draft_count} 个草稿本体，"
+                    "执行时将自动去重保留最新生成结果"
+                )
+        else:
+            message = "已入队重试，等待执行名额…"
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
+            scope=scope,
             status="queued",
             progress=0,
             message=message,
@@ -301,6 +400,7 @@ class DraftTaskService:
             status=task.status,
             progress=task.progress,
             message=task.message,
+            scope=task.scope,
         )
 
     def report_duplicate_drafts(self, db: Session, domain_id: str):
@@ -475,6 +575,258 @@ class DraftTaskService:
             logger.exception("Draft generation failed for task %s: %s", task_id, exc)
             self._mark_task_failed(task_id, str(exc))
 
+    async def _run_object_generation(self, domain_id: str, task_id: str) -> None:
+        """仅生成业务对象+属性：与 ``_run_relation_generation`` 完全独立，可
+        并行执行——只 upsert 已有草稿本体的对象/属性，不触碰其关系。"""
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            task = db.get(DraftGenerationTask, task_id)
+            if not task:
+                logger.exception("DraftGenerationTask %s not found", task_id)
+                return
+            domain = db.get(DomainContext, domain_id)
+            if not domain:
+                task.status = "failed"
+                task.message = "数据域不存在"
+                db.commit()
+                return
+            datahub_domain_id = domain.datahub_domain_id
+        finally:
+            db.close()
+
+        try:
+            self._ensure_not_cancelled(task_id)
+            await self._update_task_progress(task_id, 5, "正在从 DataHub 拉取元数据...")
+
+            phase_start = time.perf_counter()
+            connector = self._datahub_connector()
+            try:
+                bundle = await connector.fetch_domain_bundle(
+                    datahub_domain_id, include_logic_evidences=False
+                )
+            finally:
+                await connector.aclose()
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "object_generation phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 30, "正在组装证据包...")
+            evidence = self.evidence_builder.build(bundle, include_business_logics=False)
+            self._ensure_not_cancelled(task_id)
+
+            await self._update_task_progress(task_id, 45, "正在生成业务对象...")
+
+            async def _on_chunk_progress(done: int, total: int) -> None:
+                if total <= 0:
+                    return
+                progress = 45 + int(40 * done / total)
+                await self._update_task_progress(
+                    task_id, progress, f"正在分块生成业务对象... ({done}/{total})"
+                )
+
+            phase_start = time.perf_counter()
+            checkpoint = DraftCheckpointStore(domain_id)
+            object_types, properties = await self._draft_generator_instance().generate_object_types(
+                evidence, progress_cb=_on_chunk_progress, checkpoint=checkpoint
+            )
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "object_generation phase=llm task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 90, "正在持久化业务对象...")
+
+            db = SessionLocal()
+            try:
+                self._ensure_not_cancelled(task_id)
+                ontology = self._get_draft_ontology(db, domain_id)
+                if ontology is None:
+                    ontology = Ontology(
+                        domain_context_id=domain_id,
+                        status=OntologyStatus.DRAFT.value,
+                        generated_by="llm",
+                    )
+                    db.add(ontology)
+                    db.flush()
+
+                self.persistence.upsert_objects(db, ontology, object_types, properties)
+                _log_change(
+                    db,
+                    "ontology",
+                    ontology.id,
+                    "generate_objects",
+                    summary=f"LLM 生成业务对象（{len(object_types)} 个）",
+                )
+
+                task = db.get(DraftGenerationTask, task_id)
+                if task is not None:
+                    task.ontology_id = ontology.id
+                    task.status = "succeeded"
+                    task.progress = 100
+                    task.message = f"已生成 {len(object_types)} 个业务对象"
+                    db.commit()
+            finally:
+                db.close()
+        except DraftGenerationCancelled:
+            logger.info("Object generation cancelled for task %s", task_id)
+        except asyncio.CancelledError:
+            logger.info("Object generation asyncio task cancelled for %s", task_id)
+            raise
+        except Exception as exc:
+            if self._is_task_cancelled(task_id):
+                return
+            logger.exception("Object generation failed for task %s: %s", task_id, exc)
+            self._mark_task_failed(task_id, str(exc))
+
+    async def _run_relation_generation(self, domain_id: str, task_id: str) -> None:
+        """仅生成业务关系：与 ``_run_object_generation`` 完全独立，可并行执行——
+        按 source_dataset_urn 回链已入库对象，不依赖本次运行的对象命名，
+        只 upsert 已有草稿本体的关系，不触碰其对象/属性。"""
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            task = db.get(DraftGenerationTask, task_id)
+            if not task:
+                logger.exception("DraftGenerationTask %s not found", task_id)
+                return
+            domain = db.get(DomainContext, domain_id)
+            if not domain:
+                task.status = "failed"
+                task.message = "数据域不存在"
+                db.commit()
+                return
+            datahub_domain_id = domain.datahub_domain_id
+
+            ontology = self._get_draft_ontology(db, domain_id)
+            if ontology is None:
+                task.status = "failed"
+                task.message = "尚无草稿本体，请先生成业务对象"
+                db.commit()
+                return
+            ontology_id = ontology.id
+            object_urn_to_id = {
+                obj.source_ref: obj.id
+                for obj in db.query(ObjectType)
+                .filter(ObjectType.ontology_id == ontology_id)
+                .all()
+                if obj.source_ref
+            }
+            if not object_urn_to_id:
+                task.status = "failed"
+                task.message = "当前草稿本体尚无业务对象，请先生成业务对象"
+                db.commit()
+                return
+        finally:
+            db.close()
+
+        try:
+            self._ensure_not_cancelled(task_id)
+            await self._update_task_progress(task_id, 5, "正在从 DataHub 拉取元数据...")
+
+            phase_start = time.perf_counter()
+            connector = self._datahub_connector()
+            try:
+                bundle = await connector.fetch_domain_bundle(
+                    datahub_domain_id, include_logic_evidences=False
+                )
+            finally:
+                await connector.aclose()
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "relation_generation phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 30, "正在组装证据包...")
+            evidence = self.evidence_builder.build(bundle, include_business_logics=False)
+            self._ensure_not_cancelled(task_id)
+
+            object_id_by_candidate = {
+                ot.candidate_name: object_urn_to_id[ot.source_dataset_urn]
+                for ot in evidence.object_types
+                if ot.source_dataset_urn in object_urn_to_id
+            }
+
+            await self._update_task_progress(task_id, 45, "正在生成业务关系...")
+
+            async def _on_chunk_progress(done: int, total: int) -> None:
+                if total <= 0:
+                    return
+                progress = 45 + int(40 * done / total)
+                await self._update_task_progress(
+                    task_id, progress, f"正在分块生成业务关系... ({done}/{total})"
+                )
+
+            phase_start = time.perf_counter()
+            checkpoint = DraftCheckpointStore(domain_id)
+            relation_types = await self._draft_generator_instance().generate_relations(
+                evidence, progress_cb=_on_chunk_progress, checkpoint=checkpoint
+            )
+            self._ensure_not_cancelled(task_id)
+            logger.info(
+                "relation_generation phase=llm task_id=%s domain_id=%s elapsed_ms=%.1f",
+                task_id,
+                domain_id,
+                (time.perf_counter() - phase_start) * 1000,
+            )
+
+            await self._update_task_progress(task_id, 90, "正在持久化业务关系...")
+
+            db = SessionLocal()
+            try:
+                self._ensure_not_cancelled(task_id)
+                ontology = db.get(Ontology, ontology_id)
+                if ontology is None:
+                    task = db.get(DraftGenerationTask, task_id)
+                    if task is not None:
+                        task.status = "failed"
+                        task.message = "草稿本体已被删除，请重新生成业务对象"
+                        db.commit()
+                    return
+
+                written = self.persistence.upsert_relations(
+                    db, ontology, relation_types, object_id_by_candidate
+                )
+                _log_change(
+                    db,
+                    "ontology",
+                    ontology.id,
+                    "generate_relations",
+                    summary=f"LLM 生成业务关系（{written} 条）",
+                )
+
+                task = db.get(DraftGenerationTask, task_id)
+                if task is not None:
+                    task.ontology_id = ontology.id
+                    task.status = "succeeded"
+                    task.progress = 100
+                    task.message = f"已生成 {written} 条业务关系"
+                    db.commit()
+            finally:
+                db.close()
+        except DraftGenerationCancelled:
+            logger.info("Relation generation cancelled for task %s", task_id)
+        except asyncio.CancelledError:
+            logger.info("Relation generation asyncio task cancelled for %s", task_id)
+            raise
+        except Exception as exc:
+            if self._is_task_cancelled(task_id):
+                return
+            logger.exception("Relation generation failed for task %s: %s", task_id, exc)
+            self._mark_task_failed(task_id, str(exc))
+
     def _purge_draft_ontologies(self, db: Session, domain_id: str) -> int:
         """删除同域所有 draft 状态本体及其关联数据，返回删除的本体数。
 
@@ -579,13 +931,17 @@ class DraftTaskService:
         db.flush()
         return len(ontology_ids)
 
-    def get_progress(self, db: Session, domain_id: str) -> DraftProgressOut | None:
-        task = (
-            db.query(DraftGenerationTask)
-            .filter(DraftGenerationTask.domain_context_id == domain_id)
-            .order_by(DraftGenerationTask.created_at.desc())
-            .first()
+    def get_progress(
+        self, db: Session, domain_id: str, scope: str | None = None
+    ) -> DraftProgressOut | None:
+        """返回该域最新任务的进度；传入 ``scope`` 时只看该范围的最新任务，
+        便于「生成业务对象」「生成业务关系」两个独立按钮各自轮询自己的任务。"""
+        query = db.query(DraftGenerationTask).filter(
+            DraftGenerationTask.domain_context_id == domain_id
         )
+        if scope is not None:
+            query = query.filter(DraftGenerationTask.scope == scope)
+        task = query.order_by(DraftGenerationTask.created_at.desc()).first()
         if not task:
             return None
         return DraftProgressOut(
@@ -594,6 +950,7 @@ class DraftTaskService:
             progress=task.progress,
             message=task.message,
             ontology_id=task.ontology_id,
+            scope=task.scope,
         )
 
     def list_tasks(self, db: Session, domain_id: str) -> list[TaskRecordOut]:

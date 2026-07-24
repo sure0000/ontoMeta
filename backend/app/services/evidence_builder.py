@@ -38,6 +38,15 @@ class EvidenceBuilder:
         business_logics: list[LogicEvidencePack] = []
 
         dataset_name_map = {ds.urn: ds.name for ds in bundle.datasets}
+        # 关系描述用的业务展示名映射:候选名(source_object/target_object)必须
+        # 仍由技术名(ds.name)推导，保证与 object_types 的 candidate_name 一致；
+        # 但描述文本改用业务展示名，让 LLM 拿到的关系语义证据是「订单明细
+        # 加工至 结算汇总」而非「order_di_entity 加工至 settlement_1d_entity」，
+        # 才有足够信息推断出具体业务关系词，而不是笼统落回「派生」。
+        dataset_display_by_urn = {
+            ds.urn: (ds.display_name or ds.name) for ds in bundle.datasets
+        }
+        dataset_by_name = {ds.name: ds for ds in bundle.datasets}
 
         for dataset in bundle.datasets:
             object_name = _infer_object_name(dataset.name)
@@ -75,7 +84,12 @@ class EvidenceBuilder:
                     target_table = field.foreign_key_target.split(".")[0]
                     target_object = _infer_object_name(target_table)
                     source_label = dataset.display_name or dataset.name
-                    target_label = target_table
+                    target_ds = dataset_by_name.get(target_table)
+                    target_label = (
+                        (target_ds.display_name or target_ds.name)
+                        if target_ds
+                        else target_table
+                    )
                     relations.append(
                         RelationEvidencePack(
                             name=f"{object_name}_to_{target_object}",
@@ -98,17 +112,20 @@ class EvidenceBuilder:
             target_name = dataset_name_map.get(lineage.target_urn, lineage.target_urn)
             source_obj = _infer_object_name(source_name)
             target_obj = _infer_object_name(target_name)
+            # 描述用业务展示名(取不到时才退回技术名)，供 LLM 与确定性兜底推断使用。
+            source_label = dataset_display_by_urn.get(lineage.source_urn, source_name)
+            target_label = dataset_display_by_urn.get(lineage.target_urn, target_name)
             relations.append(
                 RelationEvidencePack(
                     name=f"{source_obj}_feeds_{target_obj}",
-                    display_name=infer_relation_term("lineage"),
+                    display_name=infer_relation_term("lineage", target_label=target_label),
                     source_object=source_obj,
                     target_object=target_obj,
                     cardinality="one_to_many",
                     structure_type=infer_relation_structure_type(
-                        f"血缘：{source_name} 加工至 {target_name}"
+                        f"血缘：{source_label} 加工至 {target_label}"
                     ),
-                    description=f"血缘：{source_name} 加工至 {target_name}",
+                    description=f"血缘：{source_label} 加工至 {target_label}",
                     confidence=0.6,
                     evidence_refs=[lineage.source_urn, lineage.target_urn],
                 )

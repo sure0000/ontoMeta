@@ -26,7 +26,7 @@ from app.models.ontology import (
     RelationType,
     VersionRecord,
 )
-from app.models.settings import DatahubSetting, LlmServiceConfig
+from app.models.settings import DatahubSetting, DraftGenerationSetting, LlmServiceConfig
 
 __all__ = [
     "OntologyStatus",
@@ -49,6 +49,7 @@ __all__ = [
     "DraftGenerationTask",
     "LlmServiceConfig",
     "DatahubSetting",
+    "DraftGenerationSetting",
     "ChatBiConversation",
     "ChatBiMessage",
     "ExternalApp",

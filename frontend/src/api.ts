@@ -19,6 +19,8 @@ import type {
   DatahubSettings,
   DomainContext,
   DomainContextDetail,
+  DraftGenerationScope,
+  DraftGenerationSettings,
   DraftProgress,
   ExpressionDraft,
   ExpressionJson,
@@ -32,6 +34,7 @@ import type {
   ObjectTypeDetail,
   ObjectTypeSummary,
   OntologyGraph,
+  OntologyGroupedGraph,
   OntologySummary,
   PageResult,
   Property,
@@ -128,7 +131,12 @@ export const api = {
   getDomain: (id: string) => request<DomainContextDetail>(`/api/domains/${id}`),
   generateDraft: (domainId: string) =>
     request<DraftProgress>(`/api/domains/${domainId}/generate-draft`, { method: "POST" }),
-  getProgress: (domainId: string) => request<DraftProgress>(`/api/domains/${domainId}/progress`),
+  generateObjects: (domainId: string) =>
+    request<DraftProgress>(`/api/domains/${domainId}/generate-objects`, { method: "POST" }),
+  generateRelations: (domainId: string) =>
+    request<DraftProgress>(`/api/domains/${domainId}/generate-relations`, { method: "POST" }),
+  getProgress: (domainId: string, scope?: DraftGenerationScope) =>
+    request<DraftProgress>(`/api/domains/${domainId}/progress${buildQuery({ scope })}`),
   listTasks: (domainId: string) => request<TaskRecord[]>(`/api/domains/${domainId}/tasks`),
   stopDraftTask: (domainId: string, taskId: string) =>
     request<TaskRecord>(`/api/domains/${domainId}/tasks/${taskId}/stop`, { method: "POST" }),
@@ -285,6 +293,8 @@ export const api = {
         max_nodes: params?.maxNodes,
       })}`,
     ),
+  getOntologyGroupedGraph: (id: string) =>
+    request<OntologyGroupedGraph>(`/api/ontologies/${id}/grouped-graph`),
 
   listObjectTypes: (params?: {
     ontologyId?: string;
@@ -482,6 +492,18 @@ export const api = {
     use_mock?: boolean;
   }) =>
     request<DatahubSettings>("/api/settings/datahub", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  getDraftGenerationSettings: () =>
+    request<DraftGenerationSettings>("/api/settings/draft-generation"),
+
+  updateDraftGenerationSettings: (body: {
+    object_chunk_concurrency: number;
+    relation_chunk_concurrency: number;
+  }) =>
+    request<DraftGenerationSettings>("/api/settings/draft-generation", {
       method: "PUT",
       body: JSON.stringify(body),
     }),

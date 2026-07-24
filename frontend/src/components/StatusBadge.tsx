@@ -2,7 +2,7 @@ interface Props {
   status: string;
 }
 
-const LABELS: Record<string, string> = {
+export const LABELS: Record<string, string> = {
   draft: "草稿",
   in_review: "待审",
   published: "已发布",
@@ -27,9 +27,9 @@ const LABELS: Record<string, string> = {
   publish: "发布",
 };
 
-type Tone = "default" | "blue" | "cyan" | "gold" | "green" | "red" | "processing";
+export type Tone = "default" | "blue" | "cyan" | "gold" | "green" | "red" | "processing";
 
-const TONES: Record<string, Tone> = {
+export const TONES: Record<string, Tone> = {
   draft: "gold",
   in_review: "gold",
   published: "green",

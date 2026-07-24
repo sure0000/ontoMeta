@@ -109,23 +109,30 @@ def get_domain(domain_id: str, db: Session = Depends(get_db)):
     return detail
 
 
+def _launch_draft_task(progress: DraftProgressOut, runner) -> None:
+    """把某个范围的生成执行函数挂到并发限流队列上并跟踪其 asyncio 任务。"""
+
+    async def _execute() -> None:
+        await runner(progress.task_id)
+
+    task = asyncio.create_task(
+        run_draft_generation_limited(
+            progress.task_id,
+            WorkspaceService._update_task_progress,
+            _execute,
+            WorkspaceService._is_task_cancelled,
+        )
+    )
+    workspace._track_draft_task(progress.task_id, task)
+
+
 @router.post("/domains/{domain_id}/generate-draft", response_model=DraftProgressOut)
 async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
     try:
         progress = workspace.start_draft_generation(db, domain_id)
-
-        async def _execute() -> None:
-            await workspace._run_draft_generation(domain_id, progress.task_id)
-
-        task = asyncio.create_task(
-            run_draft_generation_limited(
-                progress.task_id,
-                WorkspaceService._update_task_progress,
-                _execute,
-                WorkspaceService._is_task_cancelled,
-            )
+        _launch_draft_task(
+            progress, lambda task_id: workspace._run_draft_generation(domain_id, task_id)
         )
-        workspace._track_draft_task(progress.task_id, task)
         return progress
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -135,9 +142,47 @@ async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/domains/{domain_id}/generate-objects", response_model=DraftProgressOut)
+async def generate_objects(domain_id: str, db: Session = Depends(get_db)):
+    """仅生成业务对象；可与 /generate-relations 并行触发，互不阻塞。"""
+    try:
+        progress = workspace.start_object_generation(db, domain_id)
+        _launch_draft_task(
+            progress, lambda task_id: workspace._run_object_generation(domain_id, task_id)
+        )
+        return progress
+    except DraftGenerationAlreadyRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/domains/{domain_id}/generate-relations", response_model=DraftProgressOut)
+async def generate_relations(domain_id: str, db: Session = Depends(get_db)):
+    """仅生成业务关系；需已存在含业务对象的草稿本体，可与 /generate-objects 并行触发。"""
+    try:
+        progress = workspace.start_relation_generation(db, domain_id)
+        _launch_draft_task(
+            progress, lambda task_id: workspace._run_relation_generation(domain_id, task_id)
+        )
+        return progress
+    except DraftGenerationAlreadyRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/domains/{domain_id}/progress", response_model=DraftProgressOut)
-def get_progress(domain_id: str, db: Session = Depends(get_db)):
-    progress = workspace.get_progress(db, domain_id)
+def get_progress(
+    domain_id: str,
+    scope: str | None = Query(None, description="按范围过滤：full/objects/relations"),
+    db: Session = Depends(get_db),
+):
+    progress = workspace.get_progress(db, domain_id, scope=scope)
     if not progress:
         raise HTTPException(status_code=404, detail="No generation task found")
     return progress
@@ -167,23 +212,19 @@ def stop_draft_task(domain_id: str, task_id: str, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+_RETRY_RUNNERS = {
+    "objects": lambda domain_id, task_id: workspace._run_object_generation(domain_id, task_id),
+    "relations": lambda domain_id, task_id: workspace._run_relation_generation(domain_id, task_id),
+    "full": lambda domain_id, task_id: workspace._run_draft_generation(domain_id, task_id),
+}
+
+
 @router.post("/domains/{domain_id}/tasks/{task_id}/retry", response_model=DraftProgressOut)
 async def retry_draft_task(domain_id: str, task_id: str, db: Session = Depends(get_db)):
     try:
         progress = workspace.retry_draft_generation(db, domain_id, task_id)
-
-        async def _execute() -> None:
-            await workspace._run_draft_generation(domain_id, progress.task_id)
-
-        task = asyncio.create_task(
-            run_draft_generation_limited(
-                progress.task_id,
-                WorkspaceService._update_task_progress,
-                _execute,
-                WorkspaceService._is_task_cancelled,
-            )
-        )
-        workspace._track_draft_task(progress.task_id, task)
+        runner = _RETRY_RUNNERS.get(progress.scope, _RETRY_RUNNERS["full"])
+        _launch_draft_task(progress, lambda tid: runner(domain_id, tid))
         return progress
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

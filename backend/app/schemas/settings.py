@@ -69,3 +69,16 @@ class DatahubSettingsUpdate(BaseModel):
     frontend_url: str
     token: str | None = None
     use_mock: bool = False
+
+
+class DraftGenerationSettingsOut(BaseModel):
+    object_chunk_concurrency: int
+    relation_chunk_concurrency: int
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DraftGenerationSettingsUpdate(BaseModel):
+    object_chunk_concurrency: int = Field(ge=1, le=32)
+    relation_chunk_concurrency: int = Field(ge=1, le=32)

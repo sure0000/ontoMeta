@@ -49,6 +49,9 @@ class DraftGenerationTask(Base):
     ontology_id: Mapped[str | None] = mapped_column(
         ForeignKey("ontologies.id"), nullable=True, index=True
     )
+    # 生成范围："full"(对象+关系一体生成，历史默认)、"objects"(仅业务对象)、
+    # "relations"(仅业务关系)。用于支持对象/关系分开触发、并行执行。
+    scope: Mapped[str] = mapped_column(String(20), default="full", server_default="full")
     status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)

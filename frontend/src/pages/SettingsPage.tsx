@@ -7,6 +7,7 @@ import {
   RobotOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -15,6 +16,7 @@ import {
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Select,
@@ -35,7 +37,12 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
-import type { DatahubSettings, LlmModelOption, LlmServiceConfig } from "../types";
+import type {
+  DatahubSettings,
+  DraftGenerationSettings,
+  LlmModelOption,
+  LlmServiceConfig,
+} from "../types";
 
 const { Text } = Typography;
 
@@ -57,6 +64,11 @@ type DatahubFormValues = {
   use_mock: boolean;
 };
 
+type DraftGenerationFormValues = {
+  object_chunk_concurrency: number;
+  relation_chunk_concurrency: number;
+};
+
 type AdminTokenFormValues = {
   token: string;
 };
@@ -65,6 +77,7 @@ type SettingsBundle = {
   llmServices: LlmServiceConfig[];
   llmModels: LlmModelOption[];
   datahubSettings: DatahubSettings;
+  draftGenerationSettings: DraftGenerationSettings;
 };
 
 export function SettingsPage() {
@@ -79,17 +92,24 @@ export function SettingsPage() {
   } = useApi<SettingsBundle>(async () => {
     if (!getAdminToken()) {
       // 尚未配置管理 Token，跳过请求，避免无意义的 401 报错
-      return { llmServices: [], llmModels: [], datahubSettings: null as unknown as DatahubSettings };
+      return {
+        llmServices: [],
+        llmModels: [],
+        datahubSettings: null as unknown as DatahubSettings,
+        draftGenerationSettings: null as unknown as DraftGenerationSettings,
+      };
     }
-    const [services, models, datahub] = await Promise.all([
+    const [services, models, datahub, draftGeneration] = await Promise.all([
       api.listLlmServices(),
       api.listLlmModels(),
       api.getDatahubSettings(),
+      api.getDraftGenerationSettings(),
     ]);
     return {
       llmServices: services,
       llmModels: models,
       datahubSettings: datahub,
+      draftGenerationSettings: draftGeneration,
     };
   }, []);
 
@@ -98,6 +118,7 @@ export function SettingsPage() {
   const llmServices = bundle?.llmServices ?? [];
   const llmModels = bundle?.llmModels ?? [];
   const datahubSettings = bundle?.datahubSettings ?? null;
+  const draftGenerationSettings = bundle?.draftGenerationSettings ?? null;
 
   const [llmModalOpen, setLlmModalOpen] = useState(false);
   const [llmModalMode, setLlmModalMode] = useState<"create" | "edit">("create");
@@ -107,8 +128,10 @@ export function SettingsPage() {
 
   const [llmForm] = Form.useForm<LlmFormValues>();
   const [datahubForm] = Form.useForm<DatahubFormValues>();
+  const [draftGenerationForm] = Form.useForm<DraftGenerationFormValues>();
   const [adminTokenForm] = Form.useForm<AdminTokenFormValues>();
   const [datahubSaving, setDatahubSaving] = useState(false);
+  const [draftGenerationSaving, setDraftGenerationSaving] = useState(false);
   const [adminTokenSaved, setAdminTokenSaved] = useState(() => Boolean(getAdminToken()));
 
   useEffect(() => {
@@ -121,6 +144,14 @@ export function SettingsPage() {
     adminTokenForm.setFieldsValue({ token: getAdminToken() });
     setAdminTokenSaved(Boolean(getAdminToken()));
   }, [datahubSettings, datahubForm, adminTokenForm]);
+
+  useEffect(() => {
+    if (!draftGenerationSettings) return;
+    draftGenerationForm.setFieldsValue({
+      object_chunk_concurrency: draftGenerationSettings.object_chunk_concurrency,
+      relation_chunk_concurrency: draftGenerationSettings.relation_chunk_concurrency,
+    });
+  }, [draftGenerationSettings, draftGenerationForm]);
 
   const openCreateLlm = () => {
     setLlmModalMode("create");
@@ -232,6 +263,25 @@ export function SettingsPage() {
         }
       },
     });
+  };
+
+  const handleDraftGenerationSave = async () => {
+    try {
+      const values = await draftGenerationForm.validateFields();
+      setDraftGenerationSaving(true);
+      const updated = await api.updateDraftGenerationSettings({
+        object_chunk_concurrency: values.object_chunk_concurrency,
+        relation_chunk_concurrency: values.relation_chunk_concurrency,
+      });
+      setBundle((prev) =>
+        prev ? { ...prev, draftGenerationSettings: updated } : prev,
+      );
+      message.success("草稿生成并发配置已保存，下次生成即生效");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setDraftGenerationSaving(false);
+    }
   };
 
   const handleAdminTokenSave = async () => {
@@ -459,6 +509,66 @@ export function SettingsPage() {
                   <Form.Item>
                     <Button type="primary" onClick={handleDatahubSave} loading={datahubSaving}>
                       保存 DataHub 配置
+                    </Button>
+                  </Form.Item>
+                </Form>
+              </SectionCard>
+            ),
+          },
+          {
+            key: "draft-generation",
+            label: (
+              <span>
+                <ThunderboltOutlined style={{ marginRight: 6 }} />
+                草稿生成并发
+              </span>
+            ),
+            children: (
+              <SectionCard
+                title="草稿生成分块并发度"
+                icon={<ThunderboltOutlined />}
+                extra={
+                  draftGenerationSettings ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      最近更新：{new Date(draftGenerationSettings.updated_at).toLocaleString()}
+                    </Text>
+                  ) : null
+                }
+              >
+                <Text type="secondary" style={{ display: "block", marginBottom: 16, fontSize: 13 }}>
+                  数据域表数较多时，草稿生成会把业务对象命名与业务关系命名分别拆成多个批次并发调用
+                  LLM。这里的并发度决定同一时刻最多有多少个批次在同时请求；调大可缩短大域的生成耗时，
+                  但也会提高对 LLM 服务的瞬时并发压力，请结合服务端承载能力设置。修改后立即生效，无需
+                  重启服务。
+                </Text>
+                <Form
+                  form={draftGenerationForm}
+                  layout="vertical"
+                  style={{ maxWidth: 480 }}
+                >
+                  <Form.Item
+                    label="业务对象命名并发度"
+                    name="object_chunk_concurrency"
+                    rules={[{ required: true, message: "请输入并发度" }]}
+                    extra="每批最多 10 张表，此处设置同时执行的批次数上限（1~32）"
+                  >
+                    <InputNumber min={1} max={32} style={{ width: "100%" }} />
+                  </Form.Item>
+                  <Form.Item
+                    label="业务关系命名并发度"
+                    name="relation_chunk_concurrency"
+                    rules={[{ required: true, message: "请输入并发度" }]}
+                    extra="每批最多 40 条关系，此处设置同时执行的批次数上限（1~32）"
+                  >
+                    <InputNumber min={1} max={32} style={{ width: "100%" }} />
+                  </Form.Item>
+                  <Form.Item>
+                    <Button
+                      type="primary"
+                      onClick={handleDraftGenerationSave}
+                      loading={draftGenerationSaving}
+                    >
+                      保存并发配置
                     </Button>
                   </Form.Item>
                 </Form>

@@ -1,4 +1,5 @@
 import json
+import math
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -17,10 +18,16 @@ from app.models import (
     VersionRecord,
 )
 from app.schemas import (
+    ClusterNode,
+    GraphCluster,
     GraphEdge,
     GraphNode,
+    GraphPoint,
+    GroupedGraphEdge,
+    HubNode,
     ObjectTypeSummary,
     OntologyGraph,
+    OntologyGroupedGraph,
     OntologySummary,
     PageResult,
     RelationObjectRef,
@@ -28,10 +35,38 @@ from app.schemas import (
     RelationTypeOut,
     VersionRecordOut,
 )
+from app.services.community_detection import (
+    compute_graph_layout,
+    identify_hub_nodes,
+    label_propagation_clusters,
+    name_cluster,
+    split_dominant_clusters,
+)
 from app.services.relation_structure import infer_relation_structure_type
 
 # 图谱局部展开默认节点上限（避免一次渲染全图）
 _DEFAULT_GRAPH_MAX_NODES = 80
+
+# 单个聚类内展示的节点上限（超出则截断，前端显示 "+N more"）
+_DEFAULT_CLUSTER_MAX_NODES = 50
+
+# 语义缩放展开时，单个版块最多平铺的成员卡片数（与前端 OVERVIEW_MEMBER_CAP 对应）。
+# 用它估算版块展开后的占地半径，供布局做尺寸感知的去重叠。
+_LOD_MEMBER_CAP = 24
+# 前端概览的像素常量镜像：成员卡片格子宽/高、坐标单位对应的像素间距（OVERVIEW_SPACING）。
+_OVERVIEW_CELL_W = 196.0
+_OVERVIEW_CELL_H = 96.0
+_OVERVIEW_SPACING = 340.0
+_OVERVIEW_HUB_RADIUS_UNITS = 0.3
+
+
+def _cluster_layout_radius(node_count: int) -> float:
+    """版块展开成 N×N 成员网格后，外接圆在布局单位下的半径（1 单位 ≈ 前端 OVERVIEW_SPACING 像素）。"""
+    shown = max(1, min(node_count, _LOD_MEMBER_CAP))
+    cols = math.ceil(math.sqrt(shown))
+    rows = math.ceil(shown / cols)
+    grid_px = max(cols * _OVERVIEW_CELL_W, rows * _OVERVIEW_CELL_H)
+    return grid_px / 2.0 / _OVERVIEW_SPACING
 
 def _loads_json(value: str | None) -> dict | None:
     if not value:
@@ -567,6 +602,161 @@ class OntologyQueryService:
             center_id=seed,
             depth=max(0, depth),
             truncated=len(selected) < total_object_count,
+            total_object_count=total_object_count,
+            total_relation_count=total_relation_count,
+        )
+
+    def get_ontology_grouped_graph(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        max_cluster_nodes: int = _DEFAULT_CLUSTER_MAX_NODES,
+    ) -> OntologyGroupedGraph:
+        """域层级概览图：自动将 ObjectType 聚类为业务子域，聚合跨簇关系。"""
+        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
+        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
+        total_object_count = len(objects)
+        total_relation_count = len(relations)
+        obj_by_id = {obj.id: obj for obj in objects}
+
+        # 无向邻接（忽略自环），用于聚类与度数计算
+        adjacency: dict[str, set[str]] = {oid: set() for oid in obj_by_id}
+        for rel in relations:
+            s, t = rel.source_object_type_id, rel.target_object_type_id
+            if s in adjacency and t in adjacency and s != t:
+                adjacency[s].add(t)
+                adjacency[t].add(s)
+
+        def to_cluster_node(oid: str) -> ClusterNode:
+            obj = obj_by_id[oid]
+            return ClusterNode(
+                id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+            )
+
+        isolated_ids = [oid for oid in obj_by_id if not adjacency.get(oid)]
+        clustered_ids = [oid for oid in obj_by_id if adjacency.get(oid)]
+
+        # 摘除枢纽节点（公共维度表，几乎处处被引用）后再聚类，避免它们把大半张图
+        # 传递闭包般粘成一个巨簇；枢纽节点摘除后作为独立单节点簇展示。
+        max_hub_count = min(40, max(5, len(clustered_ids) // 20))
+        hub_ids = identify_hub_nodes(
+            {oid: adjacency[oid] for oid in clustered_ids}, max_hub_count
+        )
+        non_hub_ids = [oid for oid in clustered_ids if oid not in hub_ids]
+        reduced_adjacency = {
+            oid: {n for n in adjacency[oid] if n not in hub_ids} for oid in non_hub_ids
+        }
+
+        raw_clusters = (
+            label_propagation_clusters(non_hub_ids, reduced_adjacency) if non_hub_ids else []
+        )
+        raw_clusters = split_dominant_clusters(
+            raw_clusters, reduced_adjacency, max_cluster_nodes, len(non_hub_ids)
+        )
+        # 摘除枢纽后仍然落单的节点（只挂在枢纽上，没有同伴业务对象一起聚类）
+        # 归入孤立节点展示，避免大量单节点簇淹没真正有业务含义的聚类。
+        stray_singletons = [c for c in raw_clusters if len(c) == 1]
+        raw_clusters = [c for c in raw_clusters if len(c) > 1]
+        isolated_ids.extend(next(iter(c)) for c in stray_singletons)
+
+        # 度数降序排列聚类，保证结果确定且大聚类优先展示
+        raw_clusters.sort(key=lambda c: (-len(c), min(c)))
+
+        # 宏观节点（聚类 + 枢纽）到其 id 的映射：枢纽以自身对象 id 作为宏观节点，
+        # 既让跨版块关系能聚合到枢纽上，也让枢纽作为"主干骨架"独立于业务版块展示。
+        cluster_of: dict[str, str] = {}
+        clusters: list[GraphCluster] = []
+        used_names: dict[str, int] = {}
+        for idx, member_ids in enumerate(raw_clusters):
+            cluster_id = f"cluster-{idx}"
+            for oid in member_ids:
+                cluster_of[oid] = cluster_id
+
+            name = name_cluster(member_ids, obj_by_id, adjacency)
+            if name in used_names:
+                used_names[name] += 1
+                name = f"{name} ({used_names[name]})"
+            else:
+                used_names[name] = 0
+
+            ranked_members = sorted(
+                member_ids,
+                key=lambda oid: len(adjacency.get(oid, ())),
+                reverse=True,
+            )
+            truncated = len(ranked_members) > max_cluster_nodes
+            shown_members = ranked_members[:max_cluster_nodes]
+            clusters.append(
+                GraphCluster(
+                    id=cluster_id,
+                    name=name,
+                    nodes=[to_cluster_node(oid) for oid in shown_members],
+                    node_count=len(member_ids),
+                    truncated=truncated,
+                )
+            )
+
+        hub_nodes: list[HubNode] = []
+        for hub_id in sorted(hub_ids, key=lambda h: (-len(adjacency.get(h, ())), h)):
+            cluster_of[hub_id] = hub_id
+            obj = obj_by_id[hub_id]
+            hub_nodes.append(
+                HubNode(
+                    id=hub_id,
+                    label=obj.name,
+                    display_name=obj.display_name,
+                    status=obj.status,
+                    degree=len(adjacency.get(hub_id, ())),
+                )
+            )
+
+        # 跨版块关系聚合（同一宏观节点内部的关系不展示，只关心宏观关系）
+        edge_agg: dict[tuple[str, str], GroupedGraphEdge] = {}
+        for rel in relations:
+            s_cluster = cluster_of.get(rel.source_object_type_id)
+            t_cluster = cluster_of.get(rel.target_object_type_id)
+            if not s_cluster or not t_cluster or s_cluster == t_cluster:
+                continue
+            key = tuple(sorted((s_cluster, t_cluster)))
+            existing = edge_agg.get(key)
+            if existing:
+                existing.weight += 1
+                existing.relation_ids.append(rel.id)
+            else:
+                edge_agg[key] = GroupedGraphEdge(
+                    id=f"cluster-edge-{key[0]}-{key[1]}",
+                    source_cluster_id=s_cluster,
+                    target_cluster_id=t_cluster,
+                    weight=1,
+                    relation_ids=[rel.id],
+                )
+
+        # 稳定坐标：对"聚类 + 枢纽"构成的宏观图跑一次确定性力导向布局，
+        # 让同一份数据每次打开每个版块都落在同一位置（数字孪生式的空间记忆）。
+        layout_nodes = [c.id for c in clusters] + [h.id for h in hub_nodes]
+        layout_edges = [
+            (e.source_cluster_id, e.target_cluster_id, float(e.weight))
+            for e in edge_agg.values()
+        ]
+        # 每个宏观节点的展开占地半径，用于布局的尺寸感知去重叠（避免大版块展开后压到邻居）。
+        layout_sizes = {c.id: _cluster_layout_radius(c.node_count) for c in clusters}
+        layout_sizes.update({h.id: _OVERVIEW_HUB_RADIUS_UNITS for h in hub_nodes})
+        positions = compute_graph_layout(layout_nodes, layout_edges, sizes=layout_sizes)
+        for cluster in clusters:
+            pos = positions.get(cluster.id)
+            if pos:
+                cluster.layout = GraphPoint(x=pos[0], y=pos[1])
+        for hub in hub_nodes:
+            pos = positions.get(hub.id)
+            if pos:
+                hub.layout = GraphPoint(x=pos[0], y=pos[1])
+
+        return OntologyGroupedGraph(
+            clusters=clusters,
+            hub_nodes=hub_nodes,
+            edges=list(edge_agg.values()),
+            isolated_nodes=[to_cluster_node(oid) for oid in isolated_ids],
             total_object_count=total_object_count,
             total_relation_count=total_relation_count,
         )

@@ -8,6 +8,7 @@ from app.schemas import (
     ObjectTypeSummary,
     ObjectTypeUpdate,
     OntologyGraph,
+    OntologyGroupedGraph,
     OntologySummary,
     OntologyValidationResult,
     PageResult,
@@ -72,6 +73,11 @@ def get_ontology_graph(
         full=full,
         max_nodes=max_nodes,
     )
+
+
+@router.get("/ontologies/{ontology_id}/grouped-graph", response_model=OntologyGroupedGraph)
+def get_ontology_grouped_graph(ontology_id: str, db: Session = Depends(get_db)):
+    return query.get_ontology_grouped_graph(db, ontology_id)
 
 
 @router.get("/ontologies/{ontology_id}/versions", response_model=list[VersionRecordOut])

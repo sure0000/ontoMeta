@@ -701,7 +701,6 @@ export function RelationTypeDetailPage() {
             graph={graph}
             height={340}
             objectDetailPath={objectDetailPath}
-            defaultLayout="dagre"
             hint="箭头方向表示关系语义：源对象 → 目标对象"
             embedded
           />

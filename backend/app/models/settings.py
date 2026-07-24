@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 import uuid
@@ -38,6 +38,19 @@ class DatahubSetting(Base):
     frontend_url: Mapped[str] = mapped_column(String(512))
     token: Mapped[str | None] = mapped_column(String(512), nullable=True)
     use_mock: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DraftGenerationSetting(Base):
+    """草稿生成分块并发度：单例配置行，可在设置页动态调整，无需改环境变量重启。"""
+
+    __tablename__ = "draft_generation_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    object_chunk_concurrency: Mapped[int] = mapped_column(Integer, default=4)
+    relation_chunk_concurrency: Mapped[int] = mapped_column(Integer, default=4)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

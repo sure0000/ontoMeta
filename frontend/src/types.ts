@@ -47,12 +47,15 @@ export interface DomainContextDetail extends DomainContext {
   published_ontology_version?: number;
 }
 
+export type DraftGenerationScope = "full" | "objects" | "relations";
+
 export interface DraftProgress {
   task_id: string;
   status: string;
   progress: number;
   message?: string;
   ontology_id?: string;
+  scope: DraftGenerationScope;
 }
 
 export interface TaskRecord {
@@ -63,6 +66,7 @@ export interface TaskRecord {
   error_summary?: string;
   ontology_id?: string;
   evidence_count?: number;
+  scope: DraftGenerationScope;
   created_at: string;
   updated_at: string;
 }
@@ -395,6 +399,55 @@ export interface OntologyGraph {
   total_relation_count?: number;
 }
 
+export interface GraphPoint {
+  x: number;
+  y: number;
+}
+
+export interface ClusterNode {
+  id: string;
+  label: string;
+  display_name: string;
+  status: string;
+}
+
+export interface GraphCluster {
+  id: string;
+  name: string;
+  nodes: ClusterNode[];
+  node_count: number;
+  truncated: boolean;
+  /** 宏观图中的稳定坐标（近邻间距约 1 个单位，前端按固定像素间距放大） */
+  layout?: GraphPoint | null;
+}
+
+export interface HubNode {
+  id: string;
+  label: string;
+  display_name: string;
+  status: string;
+  degree: number;
+  layout?: GraphPoint | null;
+}
+
+export interface GroupedGraphEdge {
+  id: string;
+  /** 可能是聚类 id，也可能是枢纽节点 id */
+  source_cluster_id: string;
+  target_cluster_id: string;
+  weight: number;
+  relation_ids: string[];
+}
+
+export interface OntologyGroupedGraph {
+  clusters: GraphCluster[];
+  hub_nodes: HubNode[];
+  edges: GroupedGraphEdge[];
+  isolated_nodes: ClusterNode[];
+  total_object_count: number;
+  total_relation_count: number;
+}
+
 export interface PageResult<T> {
   items: T[];
   total: number;
@@ -444,6 +497,12 @@ export interface DatahubSettings {
   token_set: boolean;
   token_hint?: string;
   use_mock: boolean;
+  updated_at: string;
+}
+
+export interface DraftGenerationSettings {
+  object_chunk_concurrency: number;
+  relation_chunk_concurrency: number;
   updated_at: string;
 }
 

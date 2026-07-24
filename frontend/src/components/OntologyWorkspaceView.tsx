@@ -9,7 +9,7 @@ import { Input, Pagination, Row, Col, Segmented, Space, Table, Tag, Tooltip } fr
 import type { ColumnsType } from "antd/es/table";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { OntologyGraphView } from "./graph";
+import { OntologyGraphView, type GraphMode } from "./graph";
 import { SectionCard } from "./SectionCard";
 import { StatusBadge } from "./StatusBadge";
 import { EmptyState } from "./EmptyState";
@@ -18,13 +18,15 @@ import {
   inferRelationEvidenceType,
   inferRelationStructureType,
 } from "../utils/relation";
-import type { ObjectTypeSummary, OntologyGraph, RelationType } from "../types";
+import type { ObjectTypeSummary, OntologyGraph, OntologyGroupedGraph, RelationType } from "../types";
 
 type EntityTab = "objects" | "relations";
 type ObjectViewMode = "list" | "cards" | "graph";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
+// 对象数达到该规模才提供"域概览"切换：小域没有必要聚类，避免徒增复杂度
+const OVERVIEW_MIN_OBJECTS = 30;
 
 export interface ServerPaging {
   total: number;
@@ -71,6 +73,11 @@ interface Props {
   /** 图谱邻域展开 */
   onExpandGraphNode?: (objectId: string) => void;
   graphExpanding?: boolean;
+  /** 域层级概览图（按需懒加载）：未提供 onGraphModeChange 时不展示 详情/概览 切换 */
+  groupedGraph?: OntologyGroupedGraph | null;
+  groupedGraphLoading?: boolean;
+  graphMode?: GraphMode;
+  onGraphModeChange?: (mode: GraphMode) => void;
 }
 
 export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
@@ -86,6 +93,10 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   onSearchChange,
   onExpandGraphNode,
   graphExpanding = false,
+  groupedGraph,
+  groupedGraphLoading = false,
+  graphMode,
+  onGraphModeChange,
 }: Props) {
   const serverMode = Boolean(objectPaging || relationPaging);
   const [entityTab, setEntityTab] = useState<EntityTab>("objects");
@@ -404,6 +415,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         ? `${graph.nodes.length} 节点 · ${graph.edges.length} 关系`
         : "图谱生成中";
 
+  const totalObjectCount = graph?.total_object_count ?? objects.length;
+  const overviewEligible = Boolean(onGraphModeChange) && totalObjectCount >= OVERVIEW_MIN_OBJECTS;
+
   return (
     <div className="om-stack">
       <div className="toolbar">
@@ -473,6 +487,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         >
           <OntologyGraphView
             graph={graph}
+            height={720}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
             onExpandNode={onExpandGraphNode}
@@ -484,6 +499,10 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                 : undefined
             }
             embedded
+            groupedGraph={groupedGraph}
+            groupedGraphLoading={groupedGraphLoading}
+            graphMode={graphMode}
+            onGraphModeChange={overviewEligible ? onGraphModeChange : undefined}
           />
         </SectionCard>
       ) : objectView === "list" ? (

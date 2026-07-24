@@ -28,10 +28,14 @@ class Settings(BaseSettings):
     # DeepSeek 64K token 上下文，此处默认 ~48000 字符（约 16-20K token），
     # 为 system prompt 与输出预留充足余量。
     llm_context_budget_chars: int = 48000
-    # 分块生成时并发调用 LLM 的子块数上限。
-    draft_chunk_max_concurrency: int = 2
+    # 对象命名(含属性中文名)分块流水线：并发调用 LLM 的子块数上限。
+    draft_chunk_max_concurrency: int = 4
     # 分块生成时每批最多打包的表(对象)数：优先按表数切块，字符预算作为兜底细分。
     draft_chunk_table_batch_size: int = 10
+    # 关系业务命名分块流水线：每批最多打包的关系数(独立于对象分块，覆盖跨对象块关系)。
+    draft_chunk_relation_batch_size: int = 40
+    # 关系命名分块流水线：并发调用 LLM 的子块数上限(与对象流水线各自独立的信号量)。
+    draft_relation_chunk_max_concurrency: int = 4
 
     max_concurrent_draft_generations: int = 2
     datahub_max_concurrency: int = 5

@@ -3,7 +3,8 @@ import re
 RELATION_TERM_MAX_LENGTH = 8
 
 _VERB_PATTERN = re.compile(
-    r"(属于|包含|下单|引用|派生|关联|归属|拥有|参与|产生|组成|依赖|影响|生成)"
+    r"(属于|包含|下单|引用|派生|关联|归属|拥有|参与|产生|组成|依赖|影响|生成"
+    r"|汇总|对账|结算|统计|清洗|加工|标准化|报表)"
 )
 
 
@@ -33,10 +34,32 @@ def compact_relation_term(value: str) -> str:
     return text
 
 
-def infer_relation_term(kind: str, field_name: str | None = None) -> str:
-    """根据关系类型推断默认关系语义词。"""
+_LINEAGE_TARGET_TERMS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("对账", "reconcil"), "对账生成"),
+    (("汇总", "summary", "统计", "stat"), "统计汇总"),
+    (("报表", "report"), "生成报表"),
+    (("结算", "settle"), "结算生成"),
+    (("清洗", "clean", "标准化", "standard"), "清洗加工"),
+)
+
+
+def infer_relation_term(
+    kind: str, field_name: str | None = None, target_label: str | None = None
+) -> str:
+    """根据关系类型推断默认关系语义词。
+
+    仅在 LLM 未给出(或给出的)业务命名未通过校验时使用，因此这里只是保底：
+    lineage 关系没有真实变换逻辑可用，退而其次按目标对象的业务展示名做关键词
+    匹配(如「汇总」「对账」「报表」)，给出比笼统「派生」更贴近业务的默认词；
+    无法匹配任何关键词时退回「加工生成」，仍比「派生」更能表达"由源加工产出"
+    这一含义。
+    """
     if kind == "lineage":
-        return "派生"
+        label = (target_label or "").lower()
+        for keywords, term in _LINEAGE_TARGET_TERMS:
+            if any(kw in label for kw in keywords):
+                return term
+        return "加工生成"
 
     if kind == "foreign_key":
         lowered = (field_name or "").lower()
