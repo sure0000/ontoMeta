@@ -14,8 +14,11 @@ session/log 等）。
    - 描述性属性占比高（category/attribute/flag）→「在描述一个东西」→ 业务对象
    - 度量占比高（amount）+ 时间粒度 → 「在描述一次计算」→ 数据表/指标
    - 技术词汇字段占比高（token/secret/hash/config/session 等）→ 系统表
-4. 图连通性（拓扑）：既不被外键引用、自身也不引用别表、且无血缘 → 与业务图
-   脱节的孤岛，配合技术字段基本可判技术表。
+4. 图连通性（拓扑）：一个真实业务对象总要与别的实体发生关联——被外键引用、
+   自身引用别表、或有血缘。既不被外键引用、自身也不引用别表、且无血缘 → 与
+   业务图脱节的孤岛：配合技术字段可判技术表；即便无技术字段，只要它又缺乏
+   内在业务身份（业务命名/描述性属性/术语/唯一主键），也不应仅凭一个主键就
+   被识别为业务对象——这类孤岛多为字典/配置/日志/临时表，改判为普通数据表。
 5. 语义锚定（内容）：缺少业务命名/描述/已挂术语（只有一个裸技术名）→ 无业务
    身份，配合技术字段增强技术表判定。
 6. DataHub 原生标注（tags/subTypes）：被标为 system/technical/internal 等。
@@ -209,6 +212,29 @@ def classify_object_role(
         score -= 1.0
         reasons.append("处于血缘下游末端且以度量为主，疑似派生结果")
 
+    # 拓扑：图连通性是业务对象的核心特征——一个真实业务实体总要与别的实体发生
+    # 关联（被外键引用、引用别人、或有血缘）。既无任何关联、又缺乏内在业务身份
+    # （单列业务主键 + 足够描述性属性 + 人工业务命名）的孤岛表，往往是字典/配置/
+    # 日志/临时表，不应仅凭一个主键就被识别为业务对象。人工术语（glossary）是最强
+    # 业务信号，一旦存在即豁免该惩罚。
+    connected = (
+        fk_in_degree >= 1
+        or has_fk_out
+        or lineage_upstream >= 1
+        or lineage_downstream >= 1
+    )
+    has_intrinsic_identity = (
+        single_business_pk and descriptive_ratio >= 0.4 and has_business_naming
+    )
+    graph_isolated_nonbusiness = (
+        not connected and not has_intrinsic_identity and not glossary_terms
+    )
+    if graph_isolated_nonbusiness:
+        score -= 2.0
+        reasons.append(
+            "与业务图脱节（无外键关联、无血缘）且缺乏内在业务身份，疑似字典/配置/日志等非业务表"
+        )
+
     signals = {
         "pk_columns": len(pk_cols),
         "fk_in_degree": fk_in_degree,
@@ -217,6 +243,7 @@ def classify_object_role(
         "technical_ratio": round(technical_ratio, 2),
         "tech_score": round(tech_score, 2),
         "isolated": isolated,
+        "connected": connected,
     }
 
     # 技术表判定：无人工业务术语且技术信号足够强、且不弱于业务信号 → 技术/系统表。
@@ -238,6 +265,11 @@ def classify_object_role(
         # 中间地带但带中等技术信号：不再默认业务对象，改为低置信技术表待人工确认。
         role = ROLE_TECHNICAL
         reasons = tech_reasons + ["信号偏技术/系统表，待人工确认"]
+    elif graph_isolated_nonbusiness:
+        # 中间地带的孤岛表：既无业务关联又无内在业务身份，不再默认业务对象，
+        # 改判为普通数据表待人工确认，避免大量无业务关系的独立表被误定为业务对象。
+        role = ROLE_DATA_TABLE
+        reasons.append("与业务图脱节且无显著业务信号，暂判数据表待人工确认")
     else:
         role = ROLE_BUSINESS_OBJECT
         reasons.append("信号不足，暂按业务对象保留，待人工确认")

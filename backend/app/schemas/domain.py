@@ -80,6 +80,31 @@ class EnsureObjectTypeRequest(BaseModel):
     operator: str | None = None
 
 
+class ManualPropertyInput(BaseModel):
+    name: str
+    display_name: str | None = None
+    data_type: str | None = None
+    semantic_type: str | None = None
+    required: bool = False
+    primary_key: bool = False
+
+
+class ManualObjectCreateRequest(BaseModel):
+    name: str
+    display_name: str
+    description: str | None = None
+    dialect: str = "mysql"
+    data_source: str | None = None
+    properties: list[ManualPropertyInput] = []
+
+
+class ManualObjectCreateResponse(BaseModel):
+    ontology_id: str
+    object_type_id: str
+    table_name: str
+    ddl: str
+
+
 class DomainContextSummary(BaseModel):
     id: str
     datahub_domain_id: str

@@ -20,7 +20,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { PageContainer } from "../../components/PageContainer";
 import { useApi } from "../../hooks/useApi";
@@ -659,6 +659,31 @@ const ChatBiMain = memo(function ChatBiMain({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingConversationRef = useRef<string | null>(null);
   const skipLoadForIdRef = useRef<string | null>(null);
+  const navigate = useNavigate();
+
+  const handleGenerateApp = useCallback(
+    async (question: string, appType: "data_table" | "screen") => {
+      if (!domainId || !question.trim()) return;
+      const hide = message.loading(
+        appType === "screen" ? "正在生成大屏…" : "正在生成表格…",
+        0,
+      );
+      try {
+        const app = await api.generateDataAppFromChat({
+          domain_id: domainId,
+          app_type: appType,
+          question,
+        });
+        hide();
+        message.success("已生成数据应用草稿");
+        navigate(`/data-apps/${app.id}/edit`);
+      } catch (err) {
+        hide();
+        message.error(err instanceof Error ? err.message : "生成失败");
+      }
+    },
+    [domainId, navigate],
+  );
 
   useEffect(() => {
     if (!domainId) return;
@@ -836,6 +861,7 @@ const ChatBiMain = memo(function ChatBiMain({
         suggestions={suggestions}
         submitting={submitting}
         onSuggestionClick={submit}
+        onGenerateApp={handleGenerateApp}
       />
 
       <ChatBiComposer

@@ -36,6 +36,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
 import { StatusBadge } from "../components/StatusBadge";
+import { ProvenanceBadge } from "../components/ProvenanceBadge";
 import { useDebouncedCallback } from "../hooks/useApi";
 import { extractDataHubBase, resolveDataHubDatasetUrl } from "../utils/datahub";
 import {
@@ -622,6 +623,7 @@ export function ObjectTypeDetailPage() {
         extra={
           <Space>
             <StatusBadge status={obj.status} />
+            <ProvenanceBadge provenance={obj} />
             {inWorkspace ? (
               <EntityEditToolbar
                 saving={saving}

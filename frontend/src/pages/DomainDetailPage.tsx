@@ -3,17 +3,20 @@ import {
   CheckCircleOutlined,
   DeploymentUnitOutlined,
   DownOutlined,
+  EditOutlined,
   ExportOutlined,
   HistoryOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Dropdown, Modal, Progress, Space, Spin, Table, message } from "antd";
+import { Alert, Button, Dropdown, Modal, Progress, Space, Spin, Table, Tooltip, message } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import type { GraphMode } from "../components/graph";
 import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
+import { ConflictsPanel } from "../components/ConflictsPanel";
+import { ManualCreateModal } from "../components/ManualCreateModal";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -192,6 +195,7 @@ export function DomainDetailPage() {
     loading,
     error: loadError,
     setData: setBundle,
+    reload: reloadBundle,
   } = useApi<DomainBundle>(
     async () => {
       if (!domainId) throw new Error("缺少数据域 ID");
@@ -232,6 +236,7 @@ export function DomainDetailPage() {
     Record<DraftGenerationScope, DraftProgress | null>
   >({ full: null, objects: null, relations: null });
   const [ontologyLoading, setOntologyLoading] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versionsLoading, setVersionsLoading] = useState(false);
@@ -400,7 +405,8 @@ export function DomainDetailPage() {
     > = {
       full: {
         title: "确认生成本体草稿",
-        content: "将根据 DataHub 元数据重新生成本体草稿(对象+关系)，已有草稿内容将被覆盖。",
+        content:
+          "将根据 DataHub 最新元数据重新生成并与现有草稿合并：未改动字段接受机器更新，你的人工修正会被保留，双改字段进入冲突复核。",
         run: () => api.generateDraft(domainId),
       },
       objects: {
@@ -431,6 +437,27 @@ export function DomainDetailPage() {
         } catch (err) {
           setGenerating((prev) => ({ ...prev, [scope]: false }));
           setActionError(err instanceof Error ? err.message : "生成失败");
+        }
+      },
+    });
+  };
+
+  const handleCreateRevision = () => {
+    if (!domainId) return;
+    Modal.confirm({
+      title: "创建修订草稿",
+      content:
+        "将从已发布本体派生一份修订草稿，已发布内容作为人工权威基线；随后再生成会以三方合并方式引入 DataHub 变化并产出复核冲突。",
+      okText: "创建",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const r = await api.createRevisionDraft(domainId);
+          setActionError(null);
+          await loadOntology(r.ontology_id);
+          void reloadBundle();
+        } catch (err) {
+          setActionError(err instanceof Error ? err.message : "创建修订草稿失败");
         }
       },
     });
@@ -497,7 +524,11 @@ export function DomainDetailPage() {
     }
   };
 
-  if (loading) return <PageSkeleton type="detail" />;
+  // 仅在「首屏尚无数据」时显示整页骨架屏。分页/搜索等再次请求时 loading 也会为 true，
+  // 若此处仍整页返回骨架屏，会卸载并重建整棵子树（含 OntologyWorkspaceView），导致其内部
+  // 的对象/关系视图切换状态被重置——表现为「关系视图下点击分页跳回对象视图」。
+  // 保留已有内容、由下方 Spin 覆盖提示加载，即可让视图切换状态在再次请求间保持。
+  if (loading && !bundle) return <PageSkeleton type="detail" />;
 
   if (!domain) {
     return (
@@ -530,29 +561,40 @@ export function DomainDetailPage() {
         extra={
           <Space wrap>
             {domain.datahub_url && (
-              <Button
-                type="default"
-                href={domain.datahub_url}
-                target="_blank"
-                icon={<ExportOutlined />}
-              >
-                DataHub
-              </Button>
+              <Tooltip title="在 DataHub 中打开">
+                <Button
+                  type="default"
+                  href={domain.datahub_url}
+                  target="_blank"
+                  icon={<ExportOutlined />}
+                  aria-label="在 DataHub 中打开"
+                />
+              </Tooltip>
             )}
             <Link to={`/workspace/${domainId}/executions`}>
-              <Button icon={<HistoryOutlined />}>执行记录</Button>
+              <Tooltip title="执行记录">
+                <Button icon={<HistoryOutlined />} aria-label="执行记录" />
+              </Tooltip>
             </Link>
             {domain.published_ontology_id && (
               <>
                 <Link to={`/ontology?domain=${domainId}`}>
-                  <Button icon={<ApartmentOutlined />}>查看已发布本体</Button>
+                  <Tooltip title="查看已发布本体">
+                    <Button icon={<ApartmentOutlined />} aria-label="查看已发布本体" />
+                  </Tooltip>
                 </Link>
-                <Link to={`/business-logic?domain=${domainId}`}>
-                  <Button>业务逻辑</Button>
-                </Link>
-                <Button icon={<HistoryOutlined />} onClick={openVersionHistory}>
-                  版本历史{publishedVersion ? ` v${publishedVersion}` : ""}
-                </Button>
+                {domain.latest_ontology_status === "published" && (
+                  <Button icon={<ThunderboltOutlined />} onClick={handleCreateRevision}>
+                    创建修订草稿
+                  </Button>
+                )}
+                <Tooltip title={`版本历史${publishedVersion ? ` v${publishedVersion}` : ""}`}>
+                  <Button
+                    icon={<HistoryOutlined />}
+                    onClick={openVersionHistory}
+                    aria-label={`版本历史${publishedVersion ? ` v${publishedVersion}` : ""}`}
+                  />
+                </Tooltip>
               </>
             )}
             <Dropdown
@@ -567,16 +609,10 @@ export function DomainDetailPage() {
                     onClick: () => handleGenerate("full"),
                   },
                   {
-                    key: "objects",
-                    icon: <ApartmentOutlined />,
-                    label: "生成业务对象",
-                    onClick: () => handleGenerate("objects"),
-                  },
-                  {
-                    key: "relations",
-                    icon: <DeploymentUnitOutlined />,
-                    label: "生成业务关系",
-                    onClick: () => handleGenerate("relations"),
+                    key: "manual",
+                    icon: <EditOutlined />,
+                    label: "人工生成",
+                    onClick: () => setManualOpen(true),
                   },
                 ],
               }}
@@ -592,6 +628,15 @@ export function DomainDetailPage() {
                 </Space>
               </Button>
             </Dropdown>
+            {domain.latest_ontology_id && domain.latest_ontology_status === "draft" && (
+              <ConflictsPanel
+                ontologyId={domain.latest_ontology_id}
+                onChanged={() =>
+                  domain.latest_ontology_id &&
+                  void loadOntology(domain.latest_ontology_id)
+                }
+              />
+            )}
             {domain.latest_ontology_id && domain.latest_ontology_status === "draft" && (
               <Button onClick={handlePublish} icon={<CheckCircleOutlined />}>
                 确认发布
@@ -640,7 +685,7 @@ export function DomainDetailPage() {
         },
       )}
 
-      <Spin spinning={ontologyLoading}>
+      <Spin spinning={ontologyLoading || loading}>
         {!domain.latest_ontology_id ? (
           <EmptyState
             title="尚未生成本体草稿"
@@ -659,18 +704,18 @@ export function DomainDetailPage() {
                 </Button>
                 <Button
                   size="large"
-                  loading={generating.objects}
                   disabled={generating.full}
-                  onClick={() => handleGenerate("objects")}
-                  icon={<ApartmentOutlined />}
+                  onClick={() => setManualOpen(true)}
+                  icon={<EditOutlined />}
                 >
-                  仅生成业务对象
+                  人工生成
                 </Button>
               </Space>
             }
           />
         ) : (
-          <OntologyWorkspaceView
+          <>
+            <OntologyWorkspaceView
             objects={objects}
             relations={relations}
             graph={graph}
@@ -706,6 +751,7 @@ export function DomainDetailPage() {
             graphMode={graphMode}
             onGraphModeChange={handleGraphModeChange}
           />
+          </>
         )}
       </Spin>
 
@@ -780,6 +826,17 @@ export function DomainDetailPage() {
           )}
         </Spin>
       </Modal>
+
+      {domainId && (
+        <ManualCreateModal
+          open={manualOpen}
+          onClose={() => setManualOpen(false)}
+          domainId={domainId}
+          ontologyId={domain?.latest_ontology_id}
+          objects={objects}
+          onCreated={() => void reloadBundle()}
+        />
+      )}
     </PageContainer>
   );
 }

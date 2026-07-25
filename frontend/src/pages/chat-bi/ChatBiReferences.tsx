@@ -1,4 +1,5 @@
-import { Tag } from "antd";
+import { Button, Space, Tag } from "antd";
+import { AppstoreOutlined, FundProjectionScreenOutlined, TableOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type {
@@ -142,8 +143,24 @@ const CALIBER_KIND_COLOR: Record<ChatBiCaliberKind, string> = {
   business_logic: "purple",
 };
 
-export function ChatBubble({ message }: { message: ChatMessage }) {
+export function ChatBubble({
+  message,
+  question,
+  onGenerateApp,
+}: {
+  message: ChatMessage;
+  question?: string;
+  onGenerateApp?: (question: string, appType: "data_table" | "screen") => void;
+}) {
   const isUser = message.role === "user";
+  const grounded =
+    !isUser &&
+    !message.payload?.grounding_refused &&
+    Boolean(
+      message.payload?.referenced_objects?.length ||
+        message.payload?.caliber_decomposition?.length,
+    );
+  const canGenerate = grounded && Boolean(onGenerateApp && question);
   return (
     <div
       className={`chatbi-bubble chatbi-bubble--${
@@ -198,6 +215,29 @@ export function ChatBubble({ message }: { message: ChatMessage }) {
             {message.error && (
               <div className="chatbi-mock-hint" style={{ color: "#ef4444" }}>
                 回答出错，请重试。
+              </div>
+            )}
+            {canGenerate && (
+              <div className="chatbi-generate-app" style={{ marginTop: 12 }}>
+                <Space wrap>
+                  <span style={{ color: "var(--om-text-tertiary)", fontSize: 13 }}>
+                    <AppstoreOutlined /> 基于此口径创建数据应用：
+                  </span>
+                  <Button
+                    size="small"
+                    icon={<TableOutlined />}
+                    onClick={() => onGenerateApp!(question!, "data_table")}
+                  >
+                    生成表格
+                  </Button>
+                  <Button
+                    size="small"
+                    icon={<FundProjectionScreenOutlined />}
+                    onClick={() => onGenerateApp!(question!, "screen")}
+                  >
+                    生成大屏
+                  </Button>
+                </Space>
               </div>
             )}
           </>

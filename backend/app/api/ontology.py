@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import edit_service, query
+from app.api.deps import edit_service, provenance_service, query
 from app.database import get_db
 from app.schemas import (
+    ConflictResolveRequest,
+    FieldPinRequest,
     ObjectTypeDetail,
     ObjectTypeSummary,
     ObjectTypeUpdate,
+    OntologyConflictsOut,
     OntologyGraph,
     OntologyGroupedGraph,
     OntologySummary,
@@ -25,6 +28,57 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/ontologies/{ontology_id}/conflicts", response_model=OntologyConflictsOut
+)
+def list_ontology_conflicts(ontology_id: str, db: Session = Depends(get_db)):
+    """列出本体下所有字段级待复核冲突（再生成后人工与上游双改）。"""
+    return provenance_service.list_conflicts(db, ontology_id)
+
+
+@router.post("/conflicts/resolve")
+def resolve_conflict(data: ConflictResolveRequest, db: Session = Depends(get_db)):
+    try:
+        return provenance_service.resolve_conflict(
+            db,
+            data.entity_type,
+            data.entity_id,
+            data.field,
+            data.resolution,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ontologies/{ontology_id}/conflicts/resolve-all")
+def resolve_all_conflicts(
+    ontology_id: str,
+    resolution: str = Query(..., description="accept_theirs | keep_ours"),
+    db: Session = Depends(get_db),
+):
+    """一键解决本体下全部字段冲突。"""
+    if resolution not in {"accept_theirs", "keep_ours"}:
+        raise HTTPException(status_code=400, detail="resolution 必须是 accept_theirs / keep_ours")
+    return provenance_service.resolve_all_conflicts(db, ontology_id, resolution)
+
+
+@router.post("/fields/pin")
+def set_field_pin(data: FieldPinRequest, db: Session = Depends(get_db)):
+    """钉住/放开某个字段：钉住后再生成不会覆盖；放开后交回机器接管。"""
+    try:
+        return provenance_service.set_pin(
+            db,
+            data.entity_type,
+            data.entity_id,
+            data.field,
+            data.pinned,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @router.get("/ontologies", response_model=list[OntologySummary])
 def list_ontologies(

@@ -18,6 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
+from app.models._provenance import ProvenanceMixin
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -52,6 +55,8 @@ class Ontology(Base):
         ForeignKey("domain_contexts.id"), index=True
     )
     version: Mapped[int] = mapped_column(Integer, default=0)
+    # 草稿演进计数：每次生成运行/合并递增，独立于 publish 时才 +1 的 version。
+    draft_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     status: Mapped[str] = mapped_column(
         String(50), default=OntologyStatus.DRAFT.value, index=True
     )
@@ -74,7 +79,7 @@ class Ontology(Base):
     )
 
 
-class ObjectType(Base):
+class ObjectType(Base, ProvenanceMixin):
     __tablename__ = "object_types"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -85,6 +90,15 @@ class ObjectType(Base):
     canonical_term_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    # 字段级溯源与三方合并元数据（见 ONTOLOGY_VERSIONING_PLAN.md）。
+    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
+    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 对象角色标注（不依赖表名，预生成时由结构/内容/拓扑信号判定）：
     # business_object / data_table / bridge / technical。role_reason 可追溯，供人工在工作区确认。
     table_role: Mapped[str] = mapped_column(
@@ -93,6 +107,15 @@ class ObjectType(Base):
     role_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     role_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
+    # 字段级溯源与三方合并元数据。
+    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
+    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -110,7 +133,7 @@ class ObjectType(Base):
     )
 
 
-class Property(Base):
+class Property(Base, ProvenanceMixin):
     __tablename__ = "properties"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -124,6 +147,15 @@ class Property(Base):
     required: Mapped[bool] = mapped_column(Boolean, default=False)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
+    # 字段级溯源与三方合并元数据。
+    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
+    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -132,7 +164,7 @@ class Property(Base):
     object_type: Mapped["ObjectType"] = relationship(back_populates="properties")
 
 
-class RelationType(Base):
+class RelationType(Base, ProvenanceMixin):
     __tablename__ = "relation_types"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -153,7 +185,18 @@ class RelationType(Base):
     )
     source_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 稳定身份键：urn(src)|urn(tgt)|structure_type，合并匹配用，不随可变的 name 变化。
+    source_signature: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
+    # 字段级溯源与三方合并元数据。
+    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
+    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

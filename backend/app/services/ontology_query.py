@@ -936,6 +936,11 @@ class OntologyQueryService:
             domain_context_id=domain_id,
             domain_name=domain_name,
             updated_at=obj.updated_at,
+            origin=obj.origin or "machine",
+            upstream_removed=bool(obj.upstream_removed),
+            has_conflict=obj.has_conflict,
+            pinned_fields=obj.pinned_fields,
+            conflicts=obj.conflicts,
         )
 
     def _to_relation_out(self, db: Session, rel: RelationType) -> RelationTypeOut:
@@ -962,6 +967,11 @@ class OntologyQueryService:
             source_evidence=rel.source_evidence,
             status=rel.status,
             source_confidence=rel.source_confidence,
+            origin=rel.origin or "machine",
+            upstream_removed=bool(rel.upstream_removed),
+            has_conflict=rel.has_conflict,
+            pinned_fields=rel.pinned_fields,
+            conflicts=rel.conflicts,
         )
 
     def _resolve_object_datahub(

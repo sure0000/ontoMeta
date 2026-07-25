@@ -1,6 +1,12 @@
 """ORM models — domain modules with stable re-exports."""
 
 from app.models.chat_bi import ChatBiConversation, ChatBiMessage
+from app.models.data_app import (
+    DataApp,
+    DataAppDataset,
+    DataAppVersion,
+    DataSource,
+)
 from app.models.domain import (
     DomainContext,
     DraftChunkCheckpoint,
@@ -52,6 +58,10 @@ __all__ = [
     "DraftGenerationSetting",
     "ChatBiConversation",
     "ChatBiMessage",
+    "DataSource",
+    "DataApp",
+    "DataAppDataset",
+    "DataAppVersion",
     "ExternalApp",
     "ExternalApiCallLog",
 ]

@@ -1,9 +1,39 @@
 from datetime import datetime
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 T = TypeVar("T")
+
+
+class _ProvenanceReadMixin(BaseModel):
+    """读模型的字段级溯源字段，对瞬态对象的 None 做容错。"""
+
+    origin: str = "machine"
+    upstream_removed: bool = False
+    has_conflict: bool = False
+    pinned_fields: list[str] = Field(default_factory=list)
+    conflicts: dict = Field(default_factory=dict)
+
+    @field_validator("origin", mode="before")
+    @classmethod
+    def _default_origin(cls, v):
+        return v or "machine"
+
+    @field_validator("upstream_removed", "has_conflict", mode="before")
+    @classmethod
+    def _default_bool(cls, v):
+        return bool(v)
+
+    @field_validator("pinned_fields", mode="before")
+    @classmethod
+    def _default_list(cls, v):
+        return v or []
+
+    @field_validator("conflicts", mode="before")
+    @classmethod
+    def _default_dict(cls, v):
+        return v or {}
 
 
 class PageResult(BaseModel, Generic[T]):
@@ -156,7 +186,7 @@ class OntologySummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class PropertyOut(BaseModel):
+class PropertyOut(_ProvenanceReadMixin):
     id: str
     name: str
     display_name: str
@@ -171,7 +201,7 @@ class PropertyOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ObjectTypeSummary(BaseModel):
+class ObjectTypeSummary(_ProvenanceReadMixin):
     id: str
     name: str
     display_name: str
@@ -221,7 +251,7 @@ class ObjectTypeDetail(ObjectTypeSummary):
     version_records: list["VersionRecordOut"] = Field(default_factory=list)
 
 
-class RelationTypeOut(BaseModel):
+class RelationTypeOut(_ProvenanceReadMixin):
     id: str
     name: str
     display_name: str
@@ -317,6 +347,51 @@ class OntologyValidationResult(BaseModel):
 class ReviewUpdate(BaseModel):
     status: str
     operator: str | None = None
+
+
+class ConflictItemOut(BaseModel):
+    """单个字段级待复核冲突。"""
+
+    entity_type: str  # object_type / property / relation_type / business_logic
+    entity_id: str
+    name: str
+    display_name: str
+    field: str
+    base: Any = None
+    ours: Any = None
+    theirs: Any = None
+
+
+class OntologyConflictsOut(BaseModel):
+    ontology_id: str
+    items: list[ConflictItemOut] = Field(default_factory=list)
+    total: int = 0
+
+
+class ConflictResolveRequest(BaseModel):
+    entity_type: str
+    entity_id: str
+    field: str
+    resolution: str  # accept_theirs | keep_ours
+    operator: str | None = None
+
+
+class FieldPinRequest(BaseModel):
+    entity_type: str
+    entity_id: str
+    field: str
+    pinned: bool = True
+    operator: str | None = None
+
+
+class MergeReportOut(BaseModel):
+    task_id: str
+    scope: str | None = None
+    summary: dict = Field(default_factory=dict)
+    object_types: dict = Field(default_factory=dict)
+    properties: dict = Field(default_factory=dict)
+    relation_types: dict = Field(default_factory=dict)
+    business_logics: dict = Field(default_factory=dict)
 
 
 class ObjectTypeUpdate(BaseModel):

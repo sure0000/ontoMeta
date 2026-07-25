@@ -1,6 +1,7 @@
 import {
   ApartmentOutlined,
   ApiOutlined,
+  AppstoreOutlined,
   FunctionOutlined,
   FolderOutlined,
   MenuFoldOutlined,
@@ -35,6 +36,7 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
+  if (pathname.startsWith("/data-apps")) return "/data-apps";
   if (pathname.startsWith("/external-api/apps")) return "/external-api/apps";
   if (pathname.startsWith("/external-api/endpoints")) {
     return "/external-api/endpoints";
@@ -114,6 +116,7 @@ export function AppLayout() {
         label: "业务逻辑",
       },
       { key: "/chat-bi", icon: <RobotOutlined />, label: "智能问数" },
+      { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },
       {
         key: "/external-api",
         icon: <ApiOutlined />,

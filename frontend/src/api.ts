@@ -8,6 +8,8 @@ import type {
   BusinessLogicPropertyBinding,
   BusinessLogicUpdateInput,
   ChangeLog,
+  MergeReport,
+  OntologyConflicts,
   ChatBiAnswer,
   ChatBiCategoryList,
   ChatBiConversation,
@@ -27,6 +29,11 @@ import type {
   ExternalApiCallLog,
   ExternalApiCatalogItem,
   McpToolCallResult,
+  DataAppSummary,
+  DataAppDetail,
+  DataAppPreviewResult,
+  DataAppVersion,
+  DataAppDatasetInput,
   ExternalApp,
   ExternalAppCreated,
   LlmModelOption,
@@ -129,6 +136,28 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
   listDomains: () => request<DomainContext[]>("/api/domains"),
   getDomain: (id: string) => request<DomainContextDetail>(`/api/domains/${id}`),
+  createManualObject: (
+    domainId: string,
+    body: {
+      name: string;
+      display_name: string;
+      description?: string;
+      dialect?: string;
+      data_source?: string;
+      properties: {
+        name: string;
+        display_name?: string;
+        data_type?: string;
+        semantic_type?: string;
+        required?: boolean;
+        primary_key?: boolean;
+      }[];
+    },
+  ) =>
+    request<{ ontology_id: string; object_type_id: string; table_name: string; ddl: string }>(
+      `/api/domains/${domainId}/manual/object-types`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   generateDraft: (domainId: string) =>
     request<DraftProgress>(`/api/domains/${domainId}/generate-draft`, { method: "POST" }),
   generateObjects: (domainId: string) =>
@@ -152,6 +181,43 @@ export const api = {
     }>(`/api/domains/${domainId}/draft-duplicates`),
   getTaskLogs: (domainId: string, taskId: string) =>
     request<ChangeLog[]>(`/api/domains/${domainId}/tasks/${taskId}/logs`),
+  getMergeReport: (domainId: string, taskId: string) =>
+    request<MergeReport>(`/api/domains/${domainId}/tasks/${taskId}/merge-report`),
+
+  listOntologyConflicts: (ontologyId: string) =>
+    request<OntologyConflicts>(`/api/ontologies/${ontologyId}/conflicts`),
+  resolveConflict: (body: {
+    entity_type: string;
+    entity_id: string;
+    field: string;
+    resolution: "accept_theirs" | "keep_ours";
+    operator?: string;
+  }) =>
+    request<{ id: string; field: string; resolution: string }>(`/api/conflicts/resolve`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  resolveAllConflicts: (ontologyId: string, resolution: "accept_theirs" | "keep_ours") =>
+    request<{ ontology_id: string; resolved: number; resolution: string }>(
+      `/api/ontologies/${ontologyId}/conflicts/resolve-all${buildQuery({ resolution })}`,
+      { method: "POST" },
+    ),
+  createRevisionDraft: (domainId: string) =>
+    request<{ ontology_id: string; status: string }>(
+      `/api/domains/${domainId}/create-revision`,
+      { method: "POST" },
+    ),
+  setFieldPin: (body: {
+    entity_type: string;
+    entity_id: string;
+    field: string;
+    pinned: boolean;
+    operator?: string;
+  }) =>
+    request<{ id: string; field: string; pinned: boolean }>(`/api/fields/pin`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   getConfig: () =>
     request<{ datahub_gms_url: string; datahub_frontend_url?: string }>("/api/config"),
@@ -669,4 +735,66 @@ export const api = {
     }
     return { status: response.status, data };
   },
+
+  // ------------------------------------------------------------ Data Apps
+
+  listDataApps: (domainId?: string, appType?: string) => {
+    const qs = new URLSearchParams();
+    if (domainId) qs.set("domain_id", domainId);
+    if (appType) qs.set("app_type", appType);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<DataAppSummary[]>(`/api/data-apps${suffix}`);
+  },
+  getDataApp: (id: string) => request<DataAppDetail>(`/api/data-apps/${id}`),
+  createDataApp: (body: {
+    domain_id: string;
+    app_type: string;
+    name?: string;
+    description?: string;
+    source?: string;
+    spec?: Record<string, unknown>;
+    datasets?: DataAppDatasetInput[];
+  }) =>
+    request<DataAppDetail>(`/api/data-apps`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateDataApp: (
+    id: string,
+    body: {
+      name?: string;
+      description?: string;
+      spec?: Record<string, unknown>;
+      datasets?: DataAppDatasetInput[];
+    },
+  ) =>
+    request<DataAppDetail>(`/api/data-apps/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteDataApp: (id: string) =>
+    request<{ status: string }>(`/api/data-apps/${id}`, { method: "DELETE" }),
+  previewDataAppDataset: (appId: string, datasetId: string, limit = 50) =>
+    request<DataAppPreviewResult>(
+      `/api/data-apps/${appId}/datasets/${datasetId}/preview?limit=${limit}`,
+      { method: "POST" },
+    ),
+  publishDataApp: (id: string, versionComment?: string) =>
+    request<DataAppDetail>(`/api/data-apps/${id}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ version_comment: versionComment }),
+    }),
+  listDataAppVersions: (id: string) =>
+    request<DataAppVersion[]>(`/api/data-apps/${id}/versions`),
+  generateDataAppFromChat: (body: {
+    domain_id: string;
+    app_type: string;
+    question: string;
+    conversation_id?: string;
+    name?: string;
+  }) =>
+    request<DataAppDetail>(`/api/chat-bi/generate-app`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

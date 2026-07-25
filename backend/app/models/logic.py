@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 import uuid
 
 from app.database import Base
+from app.models._provenance import ProvenanceMixin
 from app.models.ontology import EntityStatus
 
 
@@ -35,7 +37,7 @@ class BusinessLogicCategory(Base):
     business_logics: Mapped[list["BusinessLogic"]] = relationship(back_populates="category")
 
 
-class BusinessLogic(Base):
+class BusinessLogic(Base, ProvenanceMixin):
     __tablename__ = "business_logics"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -54,6 +56,15 @@ class BusinessLogic(Base):
     source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
+    # 字段级溯源与三方合并元数据。
+    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
+    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

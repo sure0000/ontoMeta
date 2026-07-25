@@ -118,3 +118,43 @@ def test_infer_relation_structure_type_lineage_is_derivation():
     # derivation 已是合法结构类型。
     assert "derivation" in RELATION_STRUCTURE_TYPES
     assert validate_relation_structure_type("derivation") is None
+
+
+def test_bidirectional_lineage_collapsed_to_single_direction():
+    """DataHub 将引用型外键按双向血缘导入时，证据组装应折叠为单向。
+
+    地址模板引用国家（地址模板 → 国家）；国家作为主数据被多表引用，关联
+    度更高，应作为目标，反向的 country → address_template 应被丢弃。
+    """
+    country = DatasetInput(
+        urn="urn:li:dataset:country", name="country", display_name="国家",
+        fields=[FieldInput(name="country_name"), FieldInput(name="code")],
+    )
+    address_template = DatasetInput(
+        urn="urn:li:dataset:address_template", name="address_template", display_name="地址模板",
+        fields=[FieldInput(name="template"), FieldInput(name="country")],
+    )
+    address = DatasetInput(
+        urn="urn:li:dataset:address", name="address", display_name="地址",
+        fields=[FieldInput(name="line1"), FieldInput(name="country")],
+    )
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="urn:li:domain:erp", name="ERP"),
+        datasets=[country, address_template, address],
+        # DataHub 的双向血缘：每对引用都导出了正/反两条。
+        lineages=[
+            LineageInput(source_urn="urn:li:dataset:address_template", target_urn="urn:li:dataset:country"),
+            LineageInput(source_urn="urn:li:dataset:country", target_urn="urn:li:dataset:address_template"),
+            LineageInput(source_urn="urn:li:dataset:address", target_urn="urn:li:dataset:country"),
+            LineageInput(source_urn="urn:li:dataset:country", target_urn="urn:li:dataset:address"),
+        ],
+    )
+    evidence = EvidenceBuilder().build(bundle)
+    pairs = {(r.source_object, r.target_object) for r in evidence.relations}
+    # 主数据国家作为目标，反向关系被折叠。
+    assert ("address_template_entity", "country_entity") in pairs
+    assert ("country_entity", "address_template_entity") not in pairs
+    assert ("address", "country_entity") in pairs
+    assert ("country_entity", "address") not in pairs
+    # 同一无序对不再同时出现两个方向。
+    assert not any((t, s) in pairs for (s, t) in pairs)

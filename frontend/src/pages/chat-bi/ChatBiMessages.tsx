@@ -15,6 +15,7 @@ export interface ChatBiMessagesProps {
   suggestions: string[];
   submitting: boolean;
   onSuggestionClick: (s: string) => void;
+  onGenerateApp?: (question: string, appType: "data_table" | "screen") => void;
 }
 
 export function ChatBiMessages({
@@ -27,6 +28,7 @@ export function ChatBiMessages({
   suggestions,
   submitting,
   onSuggestionClick,
+  onGenerateApp,
 }: ChatBiMessagesProps) {
   return (
     <div className="chatbi-messages" ref={scrollRef}>
@@ -65,9 +67,26 @@ export function ChatBiMessages({
           ) : null}
         </div>
       ) : (
-        messages.map((msg, idx) => (
-          <ChatBubble key={idx} message={msg} />
-        ))
+        messages.map((msg, idx) => {
+          // 为 assistant 气泡回溯前一条 user 提问，供“生成数据应用”使用
+          let precedingQuestion: string | undefined;
+          if (msg.role === "assistant") {
+            for (let i = idx - 1; i >= 0; i -= 1) {
+              if (messages[i].role === "user") {
+                precedingQuestion = messages[i].content;
+                break;
+              }
+            }
+          }
+          return (
+            <ChatBubble
+              key={idx}
+              message={msg}
+              question={precedingQuestion}
+              onGenerateApp={onGenerateApp}
+            />
+          );
+        })
       )}
     </div>
   );

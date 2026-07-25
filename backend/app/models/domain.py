@@ -56,6 +56,8 @@ class DraftGenerationTask(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 本次生成运行的合并变更报告（JSON）：新增/更新/保留/冲突/上游删除统计与明细。
+    merge_report_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

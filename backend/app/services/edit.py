@@ -42,6 +42,30 @@ def _log_change(
     log_change(db, entity_type, entity_id, action, operator, summary)
 
 
+def _mark_overridden(entity, fields: list[str]) -> None:
+    """把被人工修改的字段钉住（计入 overridden_fields），并标记来源。
+
+    同时清理这些字段的待复核冲突（人工直接编辑即视为已解决）。
+    仅对具备溯源字段的实体生效（ObjectType/Property/RelationType/BusinessLogic）。
+    """
+    if not hasattr(entity, "overridden_fields"):
+        return
+    current = set(json.loads(entity.overridden_fields) if entity.overridden_fields else [])
+    current.update(fields)
+    entity.overridden_fields = json.dumps(sorted(current), ensure_ascii=False)
+    entity.origin = "manual" if getattr(entity, "user_created", False) else "machine_edited"
+    if getattr(entity, "conflict_json", None):
+        try:
+            conflicts = json.loads(entity.conflict_json)
+        except (TypeError, json.JSONDecodeError):
+            conflicts = {}
+        for f in fields:
+            conflicts.pop(f, None)
+        entity.conflict_json = (
+            json.dumps(conflicts, ensure_ascii=False) if conflicts else None
+        )
+
+
 class EditService:
     """工作区本体编辑与预发布。"""
 
@@ -71,12 +95,18 @@ class EditService:
         if not obj:
             raise ValueError("Object type not found")
 
+        changed: list[str] = []
         if name is not None:
             obj.name = name
+            changed.append("name")
         if display_name is not None:
             obj.display_name = display_name
+            changed.append("display_name")
         if description is not None:
             obj.description = description
+            changed.append("description")
+        if changed:
+            _mark_overridden(obj, changed)
 
         if obj.status != EntityStatus.PRE_PUBLISHED.value:
             obj.status = EntityStatus.EDITED.value
@@ -149,6 +179,8 @@ class EditService:
             source_ref=dataset.urn,
             source_confidence=0.5,
             status=EntityStatus.SUGGESTED.value,
+            user_created=True,
+            origin="manual",
         )
         db.add(obj)
         db.flush()
@@ -179,14 +211,21 @@ class EditService:
         if not prop:
             raise ValueError("Property not found")
 
+        changed: list[str] = []
         if display_name is not None:
             prop.display_name = display_name
+            changed.append("display_name")
         if description is not None:
             prop.description = description
+            changed.append("description")
         if data_type is not None:
             prop.data_type = data_type
+            changed.append("data_type")
         if semantic_type is not None:
             prop.semantic_type = semantic_type
+            changed.append("semantic_type")
+        if changed:
+            _mark_overridden(prop, changed)
 
         if prop.status != EntityStatus.PRE_PUBLISHED.value:
             prop.status = EntityStatus.EDITED.value
@@ -261,6 +300,8 @@ class EditService:
             mapping_object_type_id=mapping_object_type_id,
             source_confidence=0.5,
             status=EntityStatus.SUGGESTED.value,
+            user_created=True,
+            origin="manual",
         )
         db.add(rel)
         db.flush()
@@ -293,15 +334,19 @@ class EditService:
             if term_error:
                 raise ValueError(term_error)
             rel.display_name = compact_relation_term(display_name)
+            _mark_overridden(rel, ["display_name"])
         if description is not None:
             rel.description = description
+            _mark_overridden(rel, ["description"])
         if cardinality is not None:
             rel.cardinality = cardinality
+            _mark_overridden(rel, ["cardinality"])
         if structure_type is not None:
             structure_error = validate_relation_structure_type(structure_type)
             if structure_error:
                 raise ValueError(structure_error)
             rel.structure_type = structure_type
+            _mark_overridden(rel, ["structure_type"])
         if mapping_object_type_id is not None:
             if mapping_object_type_id == "":
                 rel.mapping_object_type_id = None
@@ -447,6 +492,8 @@ class EditService:
             source_ref=None,
             source_confidence=0.5,
             status=EntityStatus.SUGGESTED.value,
+            user_created=True,
+            origin="manual",
         )
         db.add(logic)
         db.flush()
@@ -488,12 +535,16 @@ class EditService:
             if logic_type not in {"metric", "tag", "rule"}:
                 raise ValueError("logic_type 必须是 metric / tag / rule 之一")
             logic.logic_type = logic_type
+            _mark_overridden(logic, ["logic_type"])
         if display_name is not None:
             logic.display_name = display_name
+            _mark_overridden(logic, ["display_name"])
         if description is not None:
             logic.description = description
+            _mark_overridden(logic, ["description"])
         if expression_summary is not None:
             logic.expression_summary = expression_summary
+            _mark_overridden(logic, ["expression_summary"])
         if expression_draft is not None:
             logic.expression_draft = json.dumps(expression_draft, ensure_ascii=False)
             if expression_summary is None:

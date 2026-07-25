@@ -207,6 +207,14 @@ class EvidenceBuilder:
                     )
                 )
 
+        # 方向校正：折叠方向相反的重复关系为单条有向关系。DataHub 常把 ERPNext
+        # “Link” 等引用型外键按双向血缘导入，产生 A→B 与 B→A 两条重复血缘，
+        # 被前端渲染成“双向”。业务引用其实是单向的（明细/事实表引用主数据/维度表）。
+        row_count_by_object = {
+            _infer_object_name(ds.name): ds.row_count for ds in bundle.datasets
+        }
+        relations = self._collapse_reverse_relations(relations, row_count_by_object)
+
         return EvidenceBundle(
             object_types=object_types,
             properties=properties,
@@ -236,6 +244,87 @@ class EvidenceBuilder:
             lineage_down[lin.source_urn] = lineage_down.get(lin.source_urn, 0) + 1
             lineage_up[lin.target_urn] = lineage_up.get(lin.target_urn, 0) + 1
         return fk_counts, lineage_up, lineage_down
+
+    def _collapse_reverse_relations(
+        self,
+        relations: list[RelationEvidencePack],
+        row_count_by_object: dict[str, int | None],
+    ) -> list[RelationEvidencePack]:
+        """把方向相反的重复关系折叠为单条有向关系。
+
+        DataHub 常将 ERPNext“Link”等引用型外键按双向血缘导入，同一对对象间因此
+        同时生成 A→B 与 B→A 两条 derivation 关系，被前端渲染成“双向”。但业务
+        引用其实是单向的（明细/事实表 → 主数据/维度表）。按优先级择一保留：
+
+        1. 外键方向权威：若该对存在 foreign_key 关系，以其方向为准，丢弃反向血缘；
+           若两个方向都是真实外键（互相引用）则保留双向。
+        2. 行数：明细表（行数多）引用主数据表（行数少），行数多的一侧为源、少的为目标。
+        3. 关联度：行数缺失时，被更多表关联的一侧更像主数据/维度表，作为目标。
+        4. 仍无法区分时按对象名字典序稳定保留一条，避免随机。
+
+        同方向的多条关系（如同一表的两个不同外键都指向 country）不受影响；只有方向
+        相反的重复才被折叠。
+        """
+        if not relations:
+            return relations
+
+        # 无向关联度：每个对象关联到多少个不同对象（主数据/维度被更多表关联）。
+        neighbors: dict[str, set[str]] = {}
+        groups: dict[frozenset[str], list[RelationEvidencePack]] = {}
+        for rel in relations:
+            neighbors.setdefault(rel.source_object, set()).add(rel.target_object)
+            neighbors.setdefault(rel.target_object, set()).add(rel.source_object)
+            groups.setdefault(
+                frozenset((rel.source_object, rel.target_object)), []
+            ).append(rel)
+        degree = {obj: len(peers) for obj, peers in neighbors.items()}
+
+        kept: list[RelationEvidencePack] = []
+        for pair, rels in groups.items():
+            # 自关联或只有单一方向：原样保留。
+            directions = {(r.source_object, r.target_object) for r in rels}
+            if len(pair) < 2 or len(directions) == 1:
+                kept.extend(rels)
+                continue
+            fk_dirs = {
+                (r.source_object, r.target_object)
+                for r in rels
+                if r.structure_type == "foreign_key"
+            }
+            # 两侧都是真实外键 → 互相引用，保留双向。
+            if len(fk_dirs) >= 2:
+                kept.extend(rels)
+                continue
+            canonical = self._orient_relation(
+                pair, fk_dirs, row_count_by_object, degree
+            )
+            kept.extend(
+                r for r in rels if (r.source_object, r.target_object) == canonical
+            )
+        return kept
+
+    @staticmethod
+    def _orient_relation(
+        pair: frozenset[str],
+        fk_dirs: set[tuple[str, str]],
+        row_count_by_object: dict[str, int | None],
+        degree: dict[str, int],
+    ) -> tuple[str, str]:
+        """为双向重复关系确定唯一业务方向（源 → 目标）。"""
+        a, b = sorted(pair)
+        # 1) 外键方向权威。
+        if len(fk_dirs) == 1:
+            return next(iter(fk_dirs))
+        # 2) 行数：多行（明细）→ 少行（主数据）。
+        ra, rb = row_count_by_object.get(a), row_count_by_object.get(b)
+        if ra is not None and rb is not None and ra != rb:
+            return (a, b) if ra > rb else (b, a)
+        # 3) 关联度：度小的作源，度大的（主数据）作目标。
+        da, db = degree.get(a, 0), degree.get(b, 0)
+        if da != db:
+            return (a, b) if da < db else (b, a)
+        # 4) 稳定兑底：字典序 a → b。
+        return (a, b)
 
     def _infer_semantic_type(self, field) -> str:
         name = field.name.lower()

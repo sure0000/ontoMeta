@@ -3,7 +3,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import edit_service, settings_service, workspace
+from app.api.deps import edit_service, provenance_service, revision_service, settings_service, workspace
 from app.database import get_db
 from app.models import ObjectType
 from app.schemas import (
@@ -13,10 +13,14 @@ from app.schemas import (
     DomainContextSummary,
     DraftProgressOut,
     EnsureObjectTypeRequest,
+    ManualObjectCreateRequest,
+    ManualObjectCreateResponse,
+    MergeReportOut,
     ObjectTypeSummary,
     TaskRecordOut,
 )
 from app.services.draft_generation_queue import run_draft_generation_limited
+from app.services.manual_creation import ManualCreationService, ManualPropertyInput
 from app.services.query import DraftGenerationAlreadyRunning, WorkspaceService
 
 router = APIRouter()
@@ -176,6 +180,56 @@ async def generate_relations(domain_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+_manual_creation = ManualCreationService()
+
+
+@router.post(
+    "/domains/{domain_id}/manual/object-types",
+    response_model=ManualObjectCreateResponse,
+)
+def create_manual_object(
+    domain_id: str,
+    data: ManualObjectCreateRequest,
+    db: Session = Depends(get_db),
+):
+    """人工生成：手工定义一个业务对象写入数据域草稿本体，并按数据源方言生成建表 DDL。
+
+    与「从 DataHub 预生成」互补：预生成面向存量/历史数据的本体治理，本接口
+    面向新业务的“本体先行”建模（先定义本体，再据此在数据源上建物理表）。
+    """
+    try:
+        result = _manual_creation.create_object(
+            db,
+            domain_id,
+            name=data.name,
+            display_name=data.display_name,
+            description=data.description,
+            dialect=data.dialect,
+            data_source=data.data_source,
+            properties=[
+                ManualPropertyInput(
+                    name=p.name,
+                    display_name=p.display_name,
+                    data_type=p.data_type,
+                    semantic_type=p.semantic_type,
+                    required=p.required,
+                    primary_key=p.primary_key,
+                )
+                for p in data.properties
+            ],
+        )
+        return ManualObjectCreateResponse(
+            ontology_id=result.ontology_id,
+            object_type_id=result.object_type_id,
+            table_name=result.table_name,
+            ddl=result.ddl,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/domains/{domain_id}/progress", response_model=DraftProgressOut)
 def get_progress(
     domain_id: str,
@@ -228,6 +282,28 @@ async def retry_draft_task(domain_id: str, task_id: str, db: Session = Depends(g
         return progress
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/domains/{domain_id}/tasks/{task_id}/merge-report",
+    response_model=MergeReportOut,
+)
+def get_task_merge_report(domain_id: str, task_id: str, db: Session = Depends(get_db)):
+    """返回某次生成运行的合并变更报告（新增/更新/保留/冲突/上游删除）。"""
+    try:
+        return provenance_service.get_merge_report(db, domain_id, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/domains/{domain_id}/create-revision")
+def create_revision_draft(domain_id: str, db: Session = Depends(get_db)):
+    """从已发布本体派生修订草稿（场景 D），已发布值作为人工权威基线。"""
+    try:
+        ontology = revision_service.create_revision_draft(db, domain_id)
+        return {"ontology_id": ontology.id, "status": ontology.status}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

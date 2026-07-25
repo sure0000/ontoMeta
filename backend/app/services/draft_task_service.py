@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -63,12 +64,30 @@ class DraftTaskService:
 
     def __init__(self) -> None:
         from app.services.evidence_builder import EvidenceBuilder
+        from app.services.ontology_merge import OntologyMergeService
         from app.services.publish import DraftPersistenceService
         from app.services.settings_service import SettingsService
 
         self.settings_service = SettingsService()
         self.evidence_builder = EvidenceBuilder()
         self.persistence = DraftPersistenceService()
+        self.merge = OntologyMergeService()
+
+    @staticmethod
+    def _store_merge_report(db: Session, task_id: str, report) -> str:
+        """把合并变更报告落到任务上，返回一句话摘要。"""
+        import json as _json
+
+        data = report.to_dict()
+        s = data["summary"]
+        summary = (
+            f"新增{s['added']}・更新{s['updated']}・保留{s['kept']}・"
+            f"冲突{s['conflict']}・上游删除{s['removed']}"
+        )
+        task = db.get(DraftGenerationTask, task_id)
+        if task is not None:
+            task.merge_report_json = _json.dumps(data, ensure_ascii=False)
+        return summary
 
     def _datahub(self, db: Session):
         from app.connectors.datahub import DataHubConnector
@@ -515,31 +534,44 @@ class DraftTaskService:
             db = SessionLocal()
             try:
                 self._ensure_not_cancelled(task_id)
+                # 同域只保留一个 active draft；历史遗留多个时以最新一个为合并
+                # 目标，其余重复草稿才清理（不再回到旧的“删库重建”）。
+                ontology = self._get_draft_ontology(db, domain_id)
                 dup = self.report_duplicate_drafts(db, domain_id)
-                purged = self._purge_draft_ontologies(db, domain_id)
-                if purged:
-                    _log_change(
-                        db,
-                        "ontology",
-                        domain_id,
-                        "purge_draft",
-                        summary=(
-                            f"重新生成草稿前清理 {purged} 个旧草稿本体"
-                            f"（去重检测：{dup.message}）"
-                        ),
+                if dup.draft_count > 1 and ontology is not None:
+                    stale_ids = [
+                        oid for oid in dup.draft_ontology_ids if oid != ontology.id
+                    ]
+                    if stale_ids:
+                        self._delete_ontologies_cascade(db, stale_ids)
+                        _log_change(
+                            db,
+                            "ontology",
+                            ontology.id,
+                            "purge_draft",
+                            summary=(
+                                f"合并前清理 {len(stale_ids)} 个遗留重复草稿本体"
+                            ),
+                        )
+                if ontology is None:
+                    ontology = Ontology(
+                        domain_context_id=domain_id,
+                        status=OntologyStatus.DRAFT.value,
+                        generated_by="llm",
                     )
+                    db.add(ontology)
+                    db.flush()
 
-                ontology = Ontology(
-                    domain_context_id=domain_id,
-                    status=OntologyStatus.DRAFT.value,
-                    generated_by="llm",
-                )
-                db.add(ontology)
-                db.flush()
-
-                self.persistence.save_draft(db, ontology, draft)
+                report = self.merge.merge_full(db, ontology.id, draft, task_id)
+                ontology.generated_at = datetime.now(timezone.utc)
+                ontology.draft_revision = (ontology.draft_revision or 0) + 1
+                summary = self._store_merge_report(db, task_id, report)
                 _log_change(
-                    db, "ontology", ontology.id, "generate_draft", summary="LLM 草稿生成"
+                    db,
+                    "ontology",
+                    ontology.id,
+                    "generate_draft",
+                    summary=f"LLM 草稿生成合并（{summary}）",
                 )
 
                 task = db.get(DraftGenerationTask, task_id)
@@ -547,7 +579,7 @@ class DraftTaskService:
                     task.ontology_id = ontology.id
                     task.status = "succeeded"
                     task.progress = 100
-                    task.message = "草稿生成完成"
+                    task.message = f"草稿生成完成：{summary}"
                     db.commit()
             finally:
                 db.close()
@@ -658,13 +690,22 @@ class DraftTaskService:
                     db.add(ontology)
                     db.flush()
 
-                self.persistence.upsert_objects(db, ontology, object_types, properties)
+                from app.services.ontology_merge import MergeReport
+
+                report = MergeReport()
+                self.merge.merge_objects(
+                    db, ontology.id, object_types, properties, task_id, report,
+                    handle_removal=False,
+                )
+                ontology.generated_at = datetime.now(timezone.utc)
+                ontology.draft_revision = (ontology.draft_revision or 0) + 1
+                summary = self._store_merge_report(db, task_id, report)
                 _log_change(
                     db,
                     "ontology",
                     ontology.id,
                     "generate_objects",
-                    summary=f"LLM 生成业务对象（{len(object_types)} 个）",
+                    summary=f"LLM 生成业务对象（{summary}）",
                 )
 
                 task = db.get(DraftGenerationTask, task_id)
@@ -672,7 +713,7 @@ class DraftTaskService:
                     task.ontology_id = ontology.id
                     task.status = "succeeded"
                     task.progress = 100
-                    task.message = f"已生成 {len(object_types)} 个业务对象"
+                    task.message = f"业务对象已生成：{summary}"
                     db.commit()
             finally:
                 db.close()
@@ -796,15 +837,27 @@ class DraftTaskService:
                         db.commit()
                     return
 
-                written = self.persistence.upsert_relations(
-                    db, ontology, relation_types, object_id_by_candidate
+                from app.services.ontology_merge import MergeReport
+
+                report = MergeReport()
+                written = self.merge.merge_relations(
+                    db,
+                    ontology.id,
+                    relation_types,
+                    lambda candidate: object_id_by_candidate.get(candidate),
+                    task_id,
+                    report,
+                    handle_removal=False,
                 )
+                ontology.generated_at = datetime.now(timezone.utc)
+                ontology.draft_revision = (ontology.draft_revision or 0) + 1
+                summary = self._store_merge_report(db, task_id, report)
                 _log_change(
                     db,
                     "ontology",
                     ontology.id,
                     "generate_relations",
-                    summary=f"LLM 生成业务关系（{written} 条）",
+                    summary=f"LLM 生成业务关系（{summary}）",
                 )
 
                 task = db.get(DraftGenerationTask, task_id)
@@ -812,7 +865,7 @@ class DraftTaskService:
                     task.ontology_id = ontology.id
                     task.status = "succeeded"
                     task.progress = 100
-                    task.message = f"已生成 {written} 条业务关系"
+                    task.message = f"业务关系已生成：{summary}（写入 {written} 条）"
                     db.commit()
             finally:
                 db.close()

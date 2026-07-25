@@ -81,7 +81,15 @@ export interface ChangeLog {
   created_at: string;
 }
 
-export interface ObjectTypeSummary {
+export interface FieldProvenance {
+  origin?: string; // machine | manual | machine_edited
+  upstream_removed?: boolean;
+  has_conflict?: boolean;
+  pinned_fields?: string[];
+  conflicts?: Record<string, { base?: unknown; ours?: unknown; theirs?: unknown }>;
+}
+
+export interface ObjectTypeSummary extends FieldProvenance {
   id: string;
   name: string;
   display_name: string;
@@ -100,7 +108,7 @@ export interface ObjectTypeSummary {
   updated_at: string;
 }
 
-export interface Property {
+export interface Property extends FieldProvenance {
   id: string;
   name: string;
   display_name: string;
@@ -113,7 +121,7 @@ export interface Property {
   status: string;
 }
 
-export interface RelationType {
+export interface RelationType extends FieldProvenance {
   id: string;
   name: string;
   display_name: string;
@@ -575,6 +583,7 @@ export interface ChatBiAnswer {
   referenced_objects?: ChatBiReference[];
   referenced_logics?: ChatBiReference[];
   used_mock: boolean;
+  grounding_refused?: boolean;
   conversation_id?: string | null;
   conversation_title?: string | null;
 }
@@ -647,4 +656,155 @@ export interface McpToolCallResult {
   content: Array<{ type: string; text?: string; [key: string]: unknown }>;
   structuredContent?: unknown;
   isError?: boolean;
+}
+
+// ---- 字段级溯源：合并报告与冲突复核 ----
+
+export interface MergeReportSummary {
+  added: number;
+  updated: number;
+  kept: number;
+  conflict: number;
+  removed: number;
+}
+
+export interface MergeReportItem {
+  id: string;
+  name: string;
+  display_name: string;
+  fields?: string[];
+  conflicts?: Record<string, { base?: unknown; ours?: unknown; theirs?: unknown }>;
+}
+
+export type MergeReportSection = {
+  added: MergeReportItem[];
+  updated: MergeReportItem[];
+  kept: MergeReportItem[];
+  conflict: MergeReportItem[];
+  removed: MergeReportItem[];
+};
+
+export interface MergeReport {
+  task_id: string;
+  scope?: string;
+  summary: MergeReportSummary;
+  object_types: MergeReportSection;
+  properties: MergeReportSection;
+  relation_types: MergeReportSection;
+  business_logics: MergeReportSection;
+}
+
+export interface ConflictItem {
+  entity_type: string; // object_type | property | relation_type | business_logic
+  entity_id: string;
+  name: string;
+  display_name: string;
+  field: string;
+  base?: unknown;
+  ours?: unknown;
+  theirs?: unknown;
+}
+
+export interface OntologyConflicts {
+  ontology_id: string;
+  items: ConflictItem[];
+  total: number;
+}
+
+// ------------------------------------------------------------ Data App (数据应用)
+
+export interface DataAppBindingRef {
+  kind: "object_type" | "property" | "business_logic";
+  id?: string | null;
+  name?: string | null;
+  display_name?: string | null;
+}
+
+export interface DataAppMeasure {
+  ref: DataAppBindingRef;
+  agg: string; // sum / count / avg / max / min
+}
+
+export interface DataAppFilter {
+  ref: DataAppBindingRef;
+  op: string; // eq / ne / gt / lt / ge / le / like
+  value?: unknown;
+}
+
+export interface DataAppTimeRange {
+  ref?: DataAppBindingRef | null;
+  window?: string | null; // last_7d / last_30d / today / this_month
+}
+
+export interface DataAppBinding {
+  primary_object_type_id?: string | null;
+  measures: DataAppMeasure[];
+  dimensions: DataAppBindingRef[];
+  filters: DataAppFilter[];
+  time_range?: DataAppTimeRange | null;
+  row_limit: number;
+}
+
+export interface DataAppDataset {
+  id: string;
+  app_id: string;
+  name: string;
+  primary_object_type_id?: string | null;
+  binding: DataAppBinding;
+  compiled_sql?: string | null;
+  data_source_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DataAppSummary {
+  id: string;
+  domain_id: string;
+  app_type: "data_table" | "screen";
+  name: string;
+  description?: string | null;
+  status: string; // draft / published / archived
+  source: string; // manual / chat_generated
+  current_version: number;
+  published_version?: number | null;
+  published_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DataAppDetail extends DataAppSummary {
+  ontology_id?: string | null;
+  spec?: Record<string, unknown> | null;
+  datasets: DataAppDataset[];
+}
+
+export interface DataAppColumn {
+  key: string;
+  title: string;
+}
+
+export interface DataAppPreviewResult {
+  dataset_id?: string | null;
+  compiled_sql?: string | null;
+  columns: DataAppColumn[];
+  rows: Record<string, unknown>[];
+  used_mock: boolean;
+  warnings: string[];
+}
+
+export interface DataAppVersion {
+  id: string;
+  app_id: string;
+  version: number;
+  diff_summary?: string | null;
+  operator?: string | null;
+  created_at: string;
+}
+
+export interface DataAppDatasetInput {
+  id?: string;
+  name?: string;
+  primary_object_type_id?: string | null;
+  binding: DataAppBinding;
+  data_source_id?: string | null;
 }

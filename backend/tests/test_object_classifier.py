@@ -108,7 +108,9 @@ def test_composite_fk_primary_key_is_bridge():
     assert result.role == ROLE_BRIDGE
 
 
-def test_middle_ground_defaults_to_business_object_low_confidence():
+def test_isolated_dict_like_table_defaults_to_data_table():
+    # 无主键、无任何业务关系（无外键、无血缘）的孤岛字典/配置表，
+    # 不应默认识别为业务对象，而是降为普通数据表待人工确认。
     result = classify_object_role(
         [
             _f("code", "attribute"),
@@ -116,8 +118,25 @@ def test_middle_ground_defaults_to_business_object_low_confidence():
         ],
         fk_in_degree=0,
     )
-    assert result.role == ROLE_BUSINESS_OBJECT
-    assert result.confidence <= 0.55
+    assert result.role == ROLE_DATA_TABLE
+    assert "脱节" in result.reason
+
+
+def test_isolated_pk_only_table_is_not_business_object():
+    # 只有一个主键 + 几个通用字段、无任何业务关系的孤岛表（如日志/临时表）：
+    # 不能仅凭一个主键就被识别为业务对象。
+    result = classify_object_role(
+        [
+            _f("id", "identifier", pk=True),
+            _f("ts", "datetime"),
+            _f("msg", "attribute"),
+        ],
+        fk_in_degree=0,
+        lineage_upstream=0,
+        lineage_downstream=0,
+        has_business_naming=False,
+    )
+    assert result.role != ROLE_BUSINESS_OBJECT
 
 
 def test_evidence_builder_annotates_roles():
