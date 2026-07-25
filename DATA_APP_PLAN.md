@@ -266,8 +266,11 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 - ✅ 导出 CSV（前端客户端导出）
 - ✅ 参数化筛选联动 / 下钻：preview 支持运行时 filters；大屏全局参数栏 + 柱图点击下钻
   （编辑器/只读页共用 ParamBar，Mock 与真实数据源均生效）
-- ⛔ 外挂 Cube（跨源/预聚合/缓存/行级权限）：需独立部署 Cube 服务，作为基础设施项延期
-- ⛔ 定时刷新（cron）：需多实例任务队列（与 B5.1 多实例队列同批），延期
+- ✅ **CubeConnector 已实现**（`backend/app/connectors/cube.py`）：本体→Cube data model 生成
+  （`GET /api/ontologies/{id}/cube-model`）、绑定→Cube 查询翻译、Load API 执行、HS256 JWT
+  （含 securityContext 行级权限）；`kind=cube` 数据源接入 preview；`USE_MOCK_CUBE` 开关本地零依赖。
+  预聚合**定时刷新交由 Cube Refresh Worker**（docker-compose 已备可选服务），因此也覆盖了下方“cron 定时刷新”。
+- ⛔ cron 定时刷新（非预聚合类任务，如定时导出/推送）：需多实例任务队列（与 B5.1 同批），延期
 
 **阶段 2/3 遗留（原文）**
 

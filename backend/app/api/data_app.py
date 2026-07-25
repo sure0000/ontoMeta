@@ -210,6 +210,16 @@ def list_data_app_versions(app_id: str, db: Session = Depends(get_db)):
     return data_app_service.list_versions(db, app_id)
 
 
+# ------------------------------------------------------------- cube model gen
+
+
+@router.get("/ontologies/{ontology_id}/cube-model")
+def get_ontology_cube_model(ontology_id: str, db: Session = Depends(get_db)):
+    """为已发布本体生成 Cube data model（供运维部署到 Cube 服务）。"""
+    model = data_app_service.generate_cube_model(db, ontology_id)
+    return model
+
+
 # ------------------------------------------------------- chat bi → generate app
 
 

@@ -38,6 +38,9 @@ services:
       API_KEY_HASH_PEPPER: ${API_KEY_HASH_PEPPER:-}
       MAX_CONCURRENT_DRAFT_GENERATIONS: ${MAX_CONCURRENT_DRAFT_GENERATIONS:-2}
       EXTERNAL_API_RATE_LIMIT_PER_MINUTE: ${EXTERNAL_API_RATE_LIMIT_PER_MINUTE:-60}
+      USE_MOCK_CUBE: ${USE_MOCK_CUBE:-true}
+      CUBE_API_URL: ${CUBE_API_URL:-http://cube:4000}
+      CUBE_API_SECRET: ${CUBE_API_SECRET:-}
       CORS_ORIGINS: '["http://localhost:5180","http://127.0.0.1:5180"]'
     ports:
       - "8000:8000"
@@ -57,6 +60,40 @@ services:
   #   image: redis:7-alpine
   #   ports:
   #     - "6379:6379"
+
+  # 可选：Cube 语义层（外挂执行/缓存/预聚合）。启用后设 USE_MOCK_CUBE=false 与 CUBE_API_SECRET。
+  # ontoMeta 通过 GET /api/ontologies/{id}/cube-model 生成 model，落到 ./cube/model 后由 Cube 加载。
+  # cube:
+  #   image: cubejs/cube:latest
+  #   ports:
+  #     - "4000:4000"
+  #   environment:
+  #     CUBEJS_DEV_MODE: "true"
+  #     CUBEJS_API_SECRET: ${CUBE_API_SECRET:-change-me}
+  #     CUBEJS_DB_TYPE: postgres
+  #     CUBEJS_DB_HOST: postgres
+  #     CUBEJS_DB_NAME: ontometa
+  #     CUBEJS_DB_USER: ontometa
+  #     CUBEJS_DB_PASS: ontometa
+  #   volumes:
+  #     - ./cube:/cube/conf
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  # cube_refresh_worker:
+  #   image: cubejs/cube:latest
+  #   environment:
+  #     CUBEJS_API_SECRET: ${CUBE_API_SECRET:-change-me}
+  #     CUBEJS_REFRESH_WORKER: "true"   # 预聚合定时刷新（替代进程内 cron）
+  #     CUBEJS_DB_TYPE: postgres
+  #     CUBEJS_DB_HOST: postgres
+  #     CUBEJS_DB_NAME: ontometa
+  #     CUBEJS_DB_USER: ontometa
+  #     CUBEJS_DB_PASS: ontometa
+  #   volumes:
+  #     - ./cube:/cube/conf
+  #   depends_on:
+  #     - cube
 
 volumes:
   ontometa_pg:

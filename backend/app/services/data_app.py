@@ -34,6 +34,7 @@ from app.models import (
 )
 from app.services.common import log_change
 from app.services.data_app_executor import ExecutionError, execute_sql, is_read_only
+from app.connectors.cube import CubeConnector, CubeExecutionError
 from app.services.ontology_query import OntologyQueryService
 
 logger = logging.getLogger("ontometa.data_app")
@@ -463,7 +464,24 @@ class DataAppService:
         warnings = list(result.get("warnings", []))
         # 优先真实数据源执行；失败或未配置时降级为 Mock
         source = db.get(DataSource, ds.data_source_id) if ds.data_source_id else None
-        if source and source.kind != "mock" and source.dsn_secret_ref and result.get("sql"):
+
+        # 路径一：Cube 语义层执行
+        if source and source.kind == "cube":
+            try:
+                columns, rows = self._cube_execute(db, ds, effective, source)
+                return {
+                    "dataset_id": ds.id,
+                    "compiled_sql": result.get("sql"),
+                    "columns": columns,
+                    "rows": rows,
+                    "used_mock": CubeConnector().use_mock,
+                    "warnings": warnings,
+                }
+            except CubeExecutionError as exc:
+                warnings.append(f"Cube 执行失败，已降级为示例数据：{exc}")
+
+        # 路径二：真实关系型数据源直连执行；失败或未配置时降级为 Mock
+        if source and source.kind not in ("mock", "cube") and source.dsn_secret_ref and result.get("sql"):
             try:
                 columns, rows = execute_sql(
                     dsn=source.dsn_secret_ref,
@@ -510,6 +528,71 @@ class DataAppService:
             if any(col in r for r in rows):
                 rows = [r for r in rows if str(r.get(col)) == str(value)]
         return rows
+
+    def _cube_execute(
+        self, db: Session, ds: DataAppDataset, binding: dict, source: DataSource
+    ) -> tuple[list[dict], list[dict]]:
+        """把数据集绑定翻译为 Cube 查询并执行。"""
+        obj = db.get(ObjectType, binding.get("primary_object_type_id"))
+        if not obj:
+            raise CubeExecutionError("未解析主对象，无法构造 Cube 查询")
+        connector = CubeConnector(
+            api_url=source.dsn_secret_ref or None,
+        )
+        cube_query = connector.build_query(
+            object_name=obj.name,
+            measures=binding.get("measures") or [],
+            dimensions=binding.get("dimensions") or [],
+            filters=binding.get("filters") or [],
+            time_range=binding.get("time_range"),
+            limit=int(binding.get("row_limit") or 100),
+        )
+        return connector.query(cube_query)
+
+    def generate_cube_model(self, db: Session, ontology_id: str) -> dict:
+        """为一个本体生成 Cube data model（供运维部署到 Cube 服务）。"""
+        objects_rows = (
+            db.query(ObjectType)
+            .options(joinedload(ObjectType.properties))
+            .filter(ObjectType.ontology_id == ontology_id)
+            .all()
+        )
+        logics = (
+            db.query(BusinessLogic)
+            .filter(BusinessLogic.ontology_id == ontology_id)
+            .all()
+        )
+        # 业务逻辑按主对象归集（通过对象绑定；无绑定时跳过）
+        logic_by_obj: dict[str, list[dict]] = {}
+        for logic in logics:
+            for binding in getattr(logic, "object_bindings", []) or []:
+                logic_by_obj.setdefault(binding.object_type_id, []).append(
+                    {
+                        "name": logic.name,
+                        "display_name": logic.display_name,
+                        "agg": "sum",
+                        "sql": logic.expression_summary or logic.name,
+                    }
+                )
+        objects = [
+            {
+                "name": o.name,
+                "display_name": o.display_name,
+                "sql_table": o.name,
+                "properties": [
+                    {
+                        "name": p.name,
+                        "display_name": p.display_name,
+                        "data_type": p.data_type,
+                        "semantic_type": p.semantic_type,
+                    }
+                    for p in o.properties
+                ],
+                "measures": logic_by_obj.get(o.id, []),
+            }
+            for o in objects_rows
+        ]
+        return CubeConnector().generate_model(objects=objects)
 
     def _mock_execute(
         self, db: Session, binding: dict, *, limit: int

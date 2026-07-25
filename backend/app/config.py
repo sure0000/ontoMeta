@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     use_mock_llm: bool = True
     llm_timeout_seconds: float = 300.0
 
+    # Cube 语义层（可选外挂）：ontoMeta 生成 Cube data model 并调用其 Load API。
+    # 未配置或 use_mock_cube=true 时走确定性 Mock，本地零依赖可跑。
+    cube_api_url: str = "http://localhost:4000"
+    cube_api_secret: str | None = None
+    use_mock_cube: bool = True
+    cube_timeout_seconds: float = 30.0
+
     # 草稿生成时单次 LLM 证据 payload 的字符预算：超过则自动分块 Map-Reduce。
     # 用字符长度做保守估计（宁可多切一块也不冒超长风险），按模型上下文调优：
     # DeepSeek 64K token 上下文，此处默认 ~48000 字符（约 16-20K token），

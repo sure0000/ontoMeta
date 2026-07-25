@@ -15,7 +15,7 @@ import { PlusOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import type { DataSource } from "../types";
 
-const KIND_OPTIONS = ["sqlite", "duckdb", "postgres", "mysql", "mock"].map((v) => ({
+const KIND_OPTIONS = ["sqlite", "duckdb", "postgres", "mysql", "cube", "mock"].map((v) => ({
   label: v,
   value: v,
 }));
