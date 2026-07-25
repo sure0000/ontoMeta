@@ -104,6 +104,32 @@ class DataAppDataset(Base):
     app: Mapped["DataApp"] = relationship(back_populates="datasets")
 
 
+class DataAppWidget(Base):
+    """可复用图表/表格资产：口径绑定 + 可视化配置，可被多个看板引用。"""
+
+    __tablename__ = "data_app_widgets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    domain_id: Mapped[str] = mapped_column(
+        ForeignKey("domain_contexts.id"), index=True
+    )
+    ontology_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    name: Mapped[str] = mapped_column(String(255), default="未命名图表")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    widget_type: Mapped[str] = mapped_column(String(30), default="table")  # table/bar/kpi/line/pie
+    primary_object_type_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    binding_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    viz_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    compiled_sql: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="draft")
+    source: Mapped[str] = mapped_column(String(30), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class DataAppVersion(Base):
     """发布快照：冻结 spec + 数据集绑定 + 编译 SQL，可只读回看/回滚。"""
 

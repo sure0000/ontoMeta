@@ -194,6 +194,63 @@ class DataAppVersionOut(BaseModel):
 # --------------------------------------------------------- Chat BI → generate app
 
 
+# --------------------------------------------------------------------- Widgets
+
+
+class DataAppWidgetCreate(BaseModel):
+    domain_id: str
+    name: str | None = None
+    description: str | None = None
+    widget_type: str = "table"  # table/bar/kpi/line/pie
+    primary_object_type_id: str | None = None
+    binding: DataAppBinding = Field(default_factory=DataAppBinding)
+    viz: dict[str, Any] | None = None
+    data_source_id: str | None = None
+    source: str = "manual"
+
+
+class DataAppWidgetUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    widget_type: str | None = None
+    primary_object_type_id: str | None = None
+    binding: DataAppBinding | None = None
+    viz: dict[str, Any] | None = None
+    data_source_id: str | None = None
+
+
+class DataAppWidgetOut(BaseModel):
+    id: str
+    domain_id: str
+    ontology_id: str | None = None
+    name: str
+    description: str | None = None
+    widget_type: str
+    primary_object_type_id: str | None = None
+    binding: DataAppBinding = Field(default_factory=DataAppBinding)
+    viz: dict[str, Any] | None = None
+    compiled_sql: str | None = None
+    data_source_id: str | None = None
+    status: str
+    source: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class GenerateWidgetFromChatRequest(BaseModel):
+    domain_id: str
+    question: str
+    widget_type: str = "bar"
+    name: str | None = None
+    caliber_decomposition: list[dict[str, Any]] | None = None
+    referenced_objects: list[dict[str, Any]] | None = None
+    dashboard_id: str | None = None
+
+
+class AddWidgetToDashboardRequest(BaseModel):
+    widget_id: str
+
+
 class GenerateAppFromChatRequest(BaseModel):
     domain_id: str
     app_type: str  # data_table / screen

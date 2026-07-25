@@ -185,7 +185,14 @@ Widget（图表/表格资产：可复用、可独立预览）
 - ✅ 只读页 / embed 渲染看板；列表新建支持「数据看板」；Data Agent 新增「生成看板」。
 - ✅ 发布/版本/对外 API 与现有应用同源。后端测试覆盖创建/组合/发布/对话生成。
 
-**阶段 D2（图表成为可复用资产）**
+**阶段 D2（图表成为可复用资产）— ✅ 已落地**
+- ✅ 新增 `DataAppWidget` 表 + CRUD + 预览（抽取通用执行核 `_execute_binding`，与数据集共用）。
+- ✅ 图表库面板（`WidgetLibraryModal`：搜索 / 新建 / 加入看板 / 删除）；一图可被多看板复用。
+- ✅ 看板 tile 支持引用 `widget_id`（与本地 datasetIndex 兼容）；编辑/只读/embed 均可渲染图表 tile。
+- ✅ Data Agent「加入看板」：基于当前回答口径生成可复用图表并追加到选定/新建看板（不重调 LLM）。
+- ✅ 后端测试：图表 CRUD/预览/加入看板/跨看板复用/对话生成入板。
+
+**阶段 D2 遗留 / D3（对外与联动增强）**
 - 新增 `DataAppWidget` 表 + CRUD + 图表库面板（搜索/跨域）。
 - tile 改为引用 `widget_id`；`DatasetEditor` 升级为 Widget 编辑器。
 - Data Agent「加入看板」。

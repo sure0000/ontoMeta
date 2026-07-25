@@ -35,6 +35,8 @@ import type {
   DataAppPreviewResult,
   DataAppVersion,
   DataAppDatasetInput,
+  DataAppBinding,
+  DataAppWidget,
   DataSource,
   ExternalApp,
   ExternalAppCreated,
@@ -852,4 +854,78 @@ export const api = {
     request<{ status: string }>(`/api/data-sources/${id}`, { method: "DELETE" }),
   testDataSource: (id: string) =>
     request<DataSource>(`/api/data-sources/${id}/test`, { method: "POST" }),
+
+  // Widgets（可复用图表资产）
+  listWidgets: (params?: { domainId?: string; q?: string; widgetType?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.domainId) qs.set("domain_id", params.domainId);
+    if (params?.q) qs.set("q", params.q);
+    if (params?.widgetType) qs.set("widget_type", params.widgetType);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<DataAppWidget[]>(`/api/data-app-widgets${suffix}`);
+  },
+  getWidget: (id: string) => request<DataAppWidget>(`/api/data-app-widgets/${id}`),
+  createWidget: (body: {
+    domain_id: string;
+    name?: string;
+    description?: string;
+    widget_type: string;
+    primary_object_type_id?: string | null;
+    binding: DataAppBinding;
+    viz?: Record<string, unknown> | null;
+    data_source_id?: string | null;
+    source?: string;
+  }) =>
+    request<DataAppWidget>(`/api/data-app-widgets`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateWidget: (
+    id: string,
+    body: {
+      name?: string;
+      description?: string;
+      widget_type?: string;
+      binding?: DataAppBinding;
+      viz?: Record<string, unknown> | null;
+      data_source_id?: string | null;
+    },
+  ) =>
+    request<DataAppWidget>(`/api/data-app-widgets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteWidget: (id: string) =>
+    request<{ status: string }>(`/api/data-app-widgets/${id}`, { method: "DELETE" }),
+  previewWidget: (
+    id: string,
+    limit = 50,
+    runtimeFilters?: {
+      ref: { kind: string; id?: string | null; name?: string | null };
+      op: string;
+      value?: unknown;
+    }[],
+  ) =>
+    request<DataAppPreviewResult>(`/api/data-app-widgets/${id}/preview`, {
+      method: "POST",
+      body: JSON.stringify({ limit, runtime_filters: runtimeFilters ?? [] }),
+    }),
+  addWidgetToDashboard: (appId: string, widgetId: string) =>
+    request<DataAppDetail>(`/api/data-apps/${appId}/widgets`, {
+      method: "POST",
+      body: JSON.stringify({ widget_id: widgetId }),
+    }),
+  generateWidgetFromChat: (body: {
+    domain_id: string;
+    question: string;
+    widget_type?: string;
+    name?: string;
+    caliber_decomposition?: unknown[];
+    referenced_objects?: unknown[];
+    dashboard_id?: string;
+  }) =>
+    request<DataAppWidget>(`/api/chat-bi/generate-widget`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

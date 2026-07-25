@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import data_app_service
 from app.database import get_db
 from app.schemas import (
+    AddWidgetToDashboardRequest,
     DataAppCompileResult,
     DataAppCreate,
     DataAppDetail,
@@ -18,10 +19,14 @@ from app.schemas import (
     DataAppSummary,
     DataAppUpdate,
     DataAppVersionOut,
+    DataAppWidgetCreate,
+    DataAppWidgetOut,
+    DataAppWidgetUpdate,
     DataSourceCreate,
     DataSourceOut,
     DataSourceUpdate,
     GenerateAppFromChatRequest,
+    GenerateWidgetFromChatRequest,
 )
 
 router = APIRouter()
@@ -228,7 +233,122 @@ def get_ontology_cube_model_files(ontology_id: str, db: Session = Depends(get_db
     return {"files": data_app_service.generate_cube_model_files(db, ontology_id)}
 
 
+# ----------------------------------------------------------------- widgets
+
+
+@router.get("/data-app-widgets", response_model=list[DataAppWidgetOut])
+def list_widgets(
+    domain_id: str | None = Query(None),
+    q: str | None = Query(None),
+    widget_type: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    return [
+        data_app_service.serialize_widget(w)
+        for w in data_app_service.list_widgets(
+            db, domain_id=domain_id, q=q, widget_type=widget_type
+        )
+    ]
+
+
+@router.post("/data-app-widgets", response_model=DataAppWidgetOut)
+def create_widget(data: DataAppWidgetCreate, db: Session = Depends(get_db)):
+    try:
+        w = data_app_service.create_widget(
+            db,
+            domain_id=data.domain_id,
+            name=data.name,
+            description=data.description,
+            widget_type=data.widget_type,
+            primary_object_type_id=data.primary_object_type_id,
+            binding=data.binding.model_dump(),
+            viz=data.viz,
+            data_source_id=data.data_source_id,
+            source=data.source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return data_app_service.serialize_widget(w)
+
+
+@router.get("/data-app-widgets/{widget_id}", response_model=DataAppWidgetOut)
+def get_widget(widget_id: str, db: Session = Depends(get_db)):
+    w = data_app_service.get_widget(db, widget_id)
+    if not w:
+        raise HTTPException(status_code=404, detail="图表不存在")
+    return data_app_service.serialize_widget(w)
+
+
+@router.patch("/data-app-widgets/{widget_id}", response_model=DataAppWidgetOut)
+def update_widget(widget_id: str, data: DataAppWidgetUpdate, db: Session = Depends(get_db)):
+    payload = data.model_dump(exclude_unset=True)
+    if "binding" in payload and data.binding is not None:
+        payload["binding"] = data.binding.model_dump()
+    try:
+        w = data_app_service.update_widget(db, widget_id, **payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return data_app_service.serialize_widget(w)
+
+
+@router.delete("/data-app-widgets/{widget_id}")
+def delete_widget(widget_id: str, db: Session = Depends(get_db)):
+    try:
+        data_app_service.delete_widget(db, widget_id)
+        return {"status": "ok"}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/data-app-widgets/{widget_id}/preview", response_model=DataAppPreviewResult)
+def preview_widget(
+    widget_id: str,
+    body: DataAppPreviewRequest | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    runtime_filters = [f.model_dump() for f in body.runtime_filters] if body else None
+    effective_limit = body.limit if body and body.limit else limit
+    try:
+        return data_app_service.preview_widget(
+            db, widget_id, limit=effective_limit, runtime_filters=runtime_filters
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/data-apps/{app_id}/widgets", response_model=DataAppDetail)
+def add_widget_to_dashboard(
+    app_id: str, data: AddWidgetToDashboardRequest, db: Session = Depends(get_db)
+):
+    try:
+        app = data_app_service.add_widget_to_dashboard(db, app_id, data.widget_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return data_app_service.serialize_app(db, app, detail=True)
+
+
 # ------------------------------------------------------- chat bi → generate app
+
+
+@router.post("/chat-bi/generate-widget", response_model=DataAppWidgetOut)
+async def generate_widget_from_chat(
+    data: GenerateWidgetFromChatRequest, db: Session = Depends(get_db)
+):
+    try:
+        w = await data_app_service.generate_widget_from_chat(
+            db,
+            domain_id=data.domain_id,
+            question=data.question,
+            widget_type=data.widget_type,
+            name=data.name,
+            caliber_decomposition=data.caliber_decomposition,
+            referenced_objects=data.referenced_objects,
+            dashboard_id=data.dashboard_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return data_app_service.serialize_widget(w)
 
 
 @router.post("/chat-bi/generate-app", response_model=DataAppDetail)

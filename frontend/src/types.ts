@@ -844,3 +844,21 @@ export interface ScreenParam {
   op?: string; // 默认 eq
   default?: string;
 }
+
+export interface DataAppWidget {
+  id: string;
+  domain_id: string;
+  ontology_id?: string | null;
+  name: string;
+  description?: string | null;
+  widget_type: string; // table/bar/kpi/line/pie
+  primary_object_type_id?: string | null;
+  binding: DataAppBinding;
+  viz?: Record<string, unknown> | null;
+  compiled_sql?: string | null;
+  data_source_id?: string | null;
+  status: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+}

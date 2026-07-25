@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +28,7 @@ from app.models import (
     DataApp,
     DataAppDataset,
     DataAppVersion,
+    DataAppWidget,
     DataSource,
     DomainContext,
     ObjectType,
@@ -471,25 +473,48 @@ class DataAppService:
         ds.compiled_sql = base.get("sql")
         db.commit()
 
-        # 运行时参数：把参数化筛选/下钻条件合并进 binding.filters 后再编译执行
+        out = self._execute_binding(
+            db,
+            binding=binding,
+            ontology_id=app.ontology_id,
+            data_source_id=ds.data_source_id,
+            limit=limit,
+            runtime_filters=runtime_filters,
+            security_context=security_context,
+        )
+        out["dataset_id"] = ds.id
+        return out
+
+    def _execute_binding(
+        self,
+        db: Session,
+        *,
+        binding: dict,
+        ontology_id: str | None,
+        data_source_id: str | None,
+        limit: int = 50,
+        runtime_filters: list[dict] | None = None,
+        security_context: dict | None = None,
+    ) -> dict:
+        """通用执行核：编译绑定(含运行时筛选) → Cube/真实源/Mock 执行 → columns/rows。
+
+        被数据集预览与图表(Widget)预览共用。
+        """
         effective = dict(binding)
         rt = [f for f in (runtime_filters or []) if isinstance(f, dict) and f.get("ref")]
         if rt:
             effective["filters"] = list(binding.get("filters") or []) + rt
-        result = self._compile_sql(db, effective, ontology_id=app.ontology_id)
-
+        result = self._compile_sql(db, effective, ontology_id=ontology_id)
         warnings = list(result.get("warnings", []))
-        # 优先真实数据源执行；失败或未配置时降级为 Mock
-        source = db.get(DataSource, ds.data_source_id) if ds.data_source_id else None
+        source = db.get(DataSource, data_source_id) if data_source_id else None
 
-        # 路径一：Cube 语义层执行
+        # 路径一：Cube 语义层
         if source and source.kind == "cube":
             try:
                 columns, rows = self._cube_execute(
-                    db, ds, effective, source, security_context=security_context
+                    db, effective, source, security_context=security_context
                 )
                 return {
-                    "dataset_id": ds.id,
                     "compiled_sql": result.get("sql"),
                     "columns": columns,
                     "rows": rows,
@@ -499,7 +524,7 @@ class DataAppService:
             except CubeExecutionError as exc:
                 warnings.append(f"Cube 执行失败，已降级为示例数据：{exc}")
 
-        # 路径二：真实关系型数据源直连执行；失败或未配置时降级为 Mock
+        # 路径二：真实关系型数据源直连
         if source and source.kind not in ("mock", "cube") and source.dsn_secret_ref and result.get("sql"):
             try:
                 columns, rows = execute_sql(
@@ -509,7 +534,6 @@ class DataAppService:
                     mapping=_loads(source.mapping_json, None),
                 )
                 return {
-                    "dataset_id": ds.id,
                     "compiled_sql": result.get("sql"),
                     "columns": columns,
                     "rows": rows,
@@ -522,7 +546,6 @@ class DataAppService:
         columns, rows = self._mock_execute(db, effective, limit=limit)
         rows = self._apply_runtime_filters_to_mock(db, rows, rt)
         return {
-            "dataset_id": ds.id,
             "compiled_sql": result.get("sql"),
             "columns": columns,
             "rows": rows,
@@ -549,7 +572,7 @@ class DataAppService:
         return rows
 
     def _cube_execute(
-        self, db: Session, ds: DataAppDataset, binding: dict, source: DataSource,
+        self, db: Session, binding: dict, source: DataSource,
         *, security_context: dict | None = None,
     ) -> tuple[list[dict], list[dict]]:
         """把数据集绑定翻译为 Cube 查询并执行。"""
@@ -1051,6 +1074,202 @@ class DataAppService:
             "columns": [],
             "pagination": {"pageSize": 20},
         }
+
+    # ---------------------------------------------------------------- widgets
+
+    def list_widgets(
+        self, db: Session, *, domain_id: str | None = None, q: str | None = None,
+        widget_type: str | None = None,
+    ) -> list[DataAppWidget]:
+        query = db.query(DataAppWidget)
+        if domain_id:
+            query = query.filter(DataAppWidget.domain_id == domain_id)
+        if widget_type:
+            query = query.filter(DataAppWidget.widget_type == widget_type)
+        if q:
+            query = query.filter(DataAppWidget.name.ilike(f"%{q}%"))
+        return query.order_by(desc(DataAppWidget.updated_at)).all()
+
+    def create_widget(
+        self, db: Session, *, domain_id: str, name: str | None, description: str | None,
+        widget_type: str, primary_object_type_id: str | None, binding: dict,
+        viz: dict | None, data_source_id: str | None, source: str = "manual",
+    ) -> DataAppWidget:
+        domain = db.get(DomainContext, domain_id)
+        if not domain:
+            raise ValueError("数据域不存在")
+        ontology = self.query_service.get_published_ontology(db, domain_id)
+        ontology_id = ontology.id if ontology else None
+        primary_id = primary_object_type_id or (binding or {}).get("primary_object_type_id")
+        compiled = self._compile_sql(db, binding or {}, ontology_id=ontology_id)
+        w = DataAppWidget(
+            domain_id=domain_id,
+            ontology_id=ontology_id,
+            name=name or "未命名图表",
+            description=description,
+            widget_type=widget_type or "table",
+            primary_object_type_id=primary_id,
+            binding_json=_dumps(binding or {}),
+            viz_json=_dumps(viz),
+            compiled_sql=compiled.get("sql"),
+            data_source_id=data_source_id,
+            source=source,
+        )
+        db.add(w)
+        db.flush()
+        log_change(db, "data_app_widget", w.id, "create", summary=w.name)
+        db.commit()
+        db.refresh(w)
+        return w
+
+    def get_widget(self, db: Session, widget_id: str) -> DataAppWidget | None:
+        return db.get(DataAppWidget, widget_id)
+
+    def update_widget(self, db: Session, widget_id: str, **fields: Any) -> DataAppWidget:
+        w = db.get(DataAppWidget, widget_id)
+        if not w:
+            raise ValueError("图表不存在")
+        if "binding" in fields and fields["binding"] is not None:
+            binding = fields.pop("binding")
+            w.binding_json = _dumps(binding)
+            w.primary_object_type_id = binding.get("primary_object_type_id") or w.primary_object_type_id
+            compiled = self._compile_sql(db, binding, ontology_id=w.ontology_id)
+            w.compiled_sql = compiled.get("sql")
+        if "viz" in fields:
+            w.viz_json = _dumps(fields.pop("viz"))
+        for key, value in fields.items():
+            if value is not None and hasattr(w, key):
+                setattr(w, key, value)
+        log_change(db, "data_app_widget", w.id, "update", summary=w.name)
+        db.commit()
+        db.refresh(w)
+        return w
+
+    def delete_widget(self, db: Session, widget_id: str) -> None:
+        w = db.get(DataAppWidget, widget_id)
+        if not w:
+            raise ValueError("图表不存在")
+        log_change(db, "data_app_widget", widget_id, "delete", summary=w.name)
+        db.delete(w)
+        db.commit()
+
+    def preview_widget(
+        self, db: Session, widget_id: str, *, limit: int = 50,
+        runtime_filters: list[dict] | None = None, security_context: dict | None = None,
+    ) -> dict:
+        w = db.get(DataAppWidget, widget_id)
+        if not w:
+            raise ValueError("图表不存在")
+        binding = _loads(w.binding_json, {})
+        base = self._compile_sql(db, binding, ontology_id=w.ontology_id)
+        w.compiled_sql = base.get("sql")
+        db.commit()
+        out = self._execute_binding(
+            db,
+            binding=binding,
+            ontology_id=w.ontology_id,
+            data_source_id=w.data_source_id,
+            limit=limit,
+            runtime_filters=runtime_filters,
+            security_context=security_context,
+        )
+        out["widget_id"] = w.id
+        return out
+
+    def serialize_widget(self, w: DataAppWidget) -> dict:
+        return {
+            "id": w.id,
+            "domain_id": w.domain_id,
+            "ontology_id": w.ontology_id,
+            "name": w.name,
+            "description": w.description,
+            "widget_type": w.widget_type,
+            "primary_object_type_id": w.primary_object_type_id,
+            "binding": _loads(w.binding_json, {}),
+            "viz": _loads(w.viz_json, None),
+            "compiled_sql": w.compiled_sql,
+            "data_source_id": w.data_source_id,
+            "status": w.status,
+            "source": w.source,
+            "created_at": w.created_at,
+            "updated_at": w.updated_at,
+        }
+
+    async def generate_widget_from_chat(
+        self, db: Session, *, domain_id: str, question: str, widget_type: str = "bar",
+        name: str | None = None, caliber_decomposition: list[dict] | None = None,
+        referenced_objects: list[dict] | None = None, dashboard_id: str | None = None,
+    ) -> DataAppWidget:
+        """由 Data Agent 口径生成一个可复用图表（可直接加入看板）。"""
+        from app.services.chat_bi import ChatBiService
+
+        caliber = caliber_decomposition or []
+        refs = referenced_objects or []
+        if not caliber and not refs:
+            answer = await ChatBiService().ask(db, domain_id=domain_id, question=question)
+            if answer.get("grounding_refused") or (
+                not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
+            ):
+                raise ValueError("无法基于已发布本体生成图表：未命中对象或口径。")
+            caliber = answer.get("caliber_decomposition") or []
+            refs = answer.get("referenced_objects") or []
+
+        binding = self._binding_from_caliber(db, caliber=caliber, referenced_objects=refs)
+        if not binding.get("primary_object_type_id"):
+            raise ValueError("无法基于已发布本体生成图表：未命中主对象。")
+        # 无维度时默认指标卡
+        if widget_type == "bar" and not binding.get("dimensions"):
+            widget_type = "kpi"
+        w = self.create_widget(
+            db,
+            domain_id=domain_id,
+            name=name or (question[:40] if question else "图表"),
+            description=f"由 Data Agent 生成：{question}"[:255],
+            widget_type=widget_type,
+            primary_object_type_id=binding.get("primary_object_type_id"),
+            binding=binding,
+            viz=None,
+            data_source_id=None,
+            source="chat_generated",
+        )
+        if dashboard_id:
+            self.add_widget_to_dashboard(db, dashboard_id, w.id)
+        return w
+
+    def add_widget_to_dashboard(self, db: Session, app_id: str, widget_id: str) -> DataApp:
+        """把一个可复用图表作为 tile 追加到看板。"""
+        app = db.get(DataApp, app_id)
+        if not app:
+            raise ValueError("数据应用不存在")
+        if app.app_type != "dashboard":
+            raise ValueError("仅看板支持添加图表资产")
+        w = db.get(DataAppWidget, widget_id)
+        if not w:
+            raise ValueError("图表不存在")
+        spec = _loads(app.spec_json, self._default_spec("dashboard"))
+        tiles = spec.get("tiles") or []
+        # 简单排版：每行两个
+        idx = len(tiles)
+        tile = {
+            "id": f"t{uuid.uuid4().hex[:8]}",
+            "widgetType": w.widget_type,
+            "title": w.name,
+            "widget_id": w.id,
+            "x": (idx % 2) * 6,
+            "y": (idx // 2) * 8,
+            "w": 6,
+            "h": 8,
+        }
+        tiles.append(tile)
+        spec["tiles"] = tiles
+        app.spec_json = _dumps(spec)
+        if app.status == "published":
+            app.status = "draft"
+            app.current_version = (app.published_version or app.current_version) + 1
+        log_change(db, "data_app", app.id, "add_widget", summary=w.name)
+        db.commit()
+        db.refresh(app)
+        return app
 
     @staticmethod
     def _default_spec(app_type: str) -> dict:

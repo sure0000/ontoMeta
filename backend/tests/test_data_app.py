@@ -311,3 +311,110 @@ def test_generate_dashboard_from_chat(client, admin_headers):
     assert app["spec"]["layout"] == "grid"
     assert len(app["spec"]["tiles"]) == 1
     assert len(app["datasets"]) == 1
+
+
+def test_widget_crud_and_add_to_dashboard(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    db = SessionLocal()
+    try:
+        channel_id = (
+            db.query(Property)
+            .filter(Property.object_type_id == obj_id, Property.name == "channel")
+            .first()
+        ).id
+    finally:
+        db.close()
+
+    # 1) 创建可复用图表
+    res = client.post(
+        "/api/data-app-widgets",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "name": "渠道金额柱图",
+            "widget_type": "bar",
+            "primary_object_type_id": obj_id,
+            "binding": {
+                "primary_object_type_id": obj_id,
+                "measures": [{"ref": {"kind": "property", "id": amount_id, "name": "amount"}, "agg": "sum"}],
+                "dimensions": [{"kind": "property", "id": channel_id, "name": "channel"}],
+                "filters": [],
+                "row_limit": 100,
+            },
+        },
+    )
+    assert res.status_code == 200, res.text
+    widget = res.json()
+    assert widget["widget_type"] == "bar"
+    assert "SUM(amount)" in (widget["compiled_sql"] or "")
+    widget_id = widget["id"]
+
+    # 2) 图表库可检索
+    res = client.get(f"/api/data-app-widgets?domain_id={domain_id}", headers=admin_headers)
+    assert any(w["id"] == widget_id for w in res.json())
+
+    # 3) 图表预览
+    res = client.post(f"/api/data-app-widgets/{widget_id}/preview", headers=admin_headers, json={"limit": 20})
+    assert res.status_code == 200, res.text
+    assert len(res.json()["columns"]) == 2
+
+    # 4) 新建看板并把图表加入为 tile
+    res = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={"domain_id": domain_id, "app_type": "dashboard", "name": "看板A"},
+    )
+    app_id = res.json()["id"]
+    res = client.post(
+        f"/api/data-apps/{app_id}/widgets",
+        headers=admin_headers,
+        json={"widget_id": widget_id},
+    )
+    assert res.status_code == 200, res.text
+    tiles = res.json()["spec"]["tiles"]
+    assert len(tiles) == 1
+    assert tiles[0]["widget_id"] == widget_id
+
+    # 5) 同一图表可复用到第二个看板
+    res2 = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={"domain_id": domain_id, "app_type": "dashboard", "name": "看板B"},
+    )
+    app2 = res2.json()["id"]
+    res = client.post(f"/api/data-apps/{app2}/widgets", headers=admin_headers, json={"widget_id": widget_id})
+    assert res.status_code == 200
+    assert res.json()["spec"]["tiles"][0]["widget_id"] == widget_id
+
+
+def test_generate_widget_from_chat_into_dashboard(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    dash = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={"domain_id": domain_id, "app_type": "dashboard", "name": "问数看板"},
+    ).json()
+
+    caliber = [
+        {"label": "主对象", "references": [{"kind": "object_type", "id": obj_id, "name": "orders"}]},
+        {"label": "度量字段", "references": [{"kind": "property", "id": amount_id, "name": "amount"}]},
+    ]
+    res = client.post(
+        "/api/chat-bi/generate-widget",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "question": "订单金额合计",
+            "widget_type": "kpi",
+            "caliber_decomposition": caliber,
+            "referenced_objects": [{"id": obj_id, "name": "orders"}],
+            "dashboard_id": dash["id"],
+        },
+    )
+    assert res.status_code == 200, res.text
+    widget = res.json()
+    assert widget["source"] == "chat_generated"
+
+    # 看板已追加该图表 tile
+    detail = client.get(f"/api/data-apps/{dash['id']}", headers=admin_headers).json()
+    assert any(t.get("widget_id") == widget["id"] for t in detail["spec"]["tiles"])

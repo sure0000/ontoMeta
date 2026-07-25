@@ -5,6 +5,7 @@ from app.models.data_app import (
     DataApp,
     DataAppDataset,
     DataAppVersion,
+    DataAppWidget,
     DataSource,
 )
 from app.models.domain import (
@@ -63,6 +64,7 @@ __all__ = [
     "DataApp",
     "DataAppDataset",
     "DataAppVersion",
+    "DataAppWidget",
     "ExternalApp",
     "ExternalApiCallLog",
 ]

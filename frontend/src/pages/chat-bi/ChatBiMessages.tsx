@@ -20,6 +20,10 @@ export interface ChatBiMessagesProps {
     appType: "data_table" | "screen" | "dashboard",
     payload?: import("../../types").ChatBiAnswer,
   ) => void;
+  onAddToDashboard?: (
+    question: string,
+    payload?: import("../../types").ChatBiAnswer,
+  ) => void;
 }
 
 export function ChatBiMessages({
@@ -33,6 +37,7 @@ export function ChatBiMessages({
   submitting,
   onSuggestionClick,
   onGenerateApp,
+  onAddToDashboard,
 }: ChatBiMessagesProps) {
   return (
     <div className="chatbi-messages" ref={scrollRef}>
@@ -94,6 +99,7 @@ export function ChatBiMessages({
               message={msg}
               question={precedingQuestion}
               onGenerateApp={onGenerateApp}
+              onAddToDashboard={onAddToDashboard}
             />
           );
         })

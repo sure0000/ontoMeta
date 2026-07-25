@@ -1,5 +1,5 @@
 import { Button, Space, Tag } from "antd";
-import { AppstoreOutlined, DashboardOutlined, FundProjectionScreenOutlined, TableOutlined } from "@ant-design/icons";
+import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, FundProjectionScreenOutlined, TableOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type {
@@ -147,6 +147,7 @@ export function ChatBubble({
   message,
   question,
   onGenerateApp,
+  onAddToDashboard,
 }: {
   message: ChatMessage;
   question?: string;
@@ -155,6 +156,7 @@ export function ChatBubble({
     appType: "data_table" | "screen" | "dashboard",
     payload?: ChatMessage["payload"],
   ) => void;
+  onAddToDashboard?: (question: string, payload?: ChatMessage["payload"]) => void;
 }) {
   const isUser = message.role === "user";
   const grounded =
@@ -234,6 +236,15 @@ export function ChatBubble({
                   >
                     生成看板
                   </Button>
+                  {onAddToDashboard && (
+                    <Button
+                      size="small"
+                      icon={<AppstoreAddOutlined />}
+                      onClick={() => onAddToDashboard(question!, message.payload)}
+                    >
+                      加入看板
+                    </Button>
+                  )}
                   <Button
                     size="small"
                     icon={<TableOutlined />}

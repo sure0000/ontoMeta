@@ -30,6 +30,7 @@ export function DataAppViewPage() {
   const { appId } = useParams<{ appId: string }>();
   const navigate = useNavigate();
   const [previews, setPreviews] = useState<Record<string, DataAppPreviewResult>>({});
+  const [widgetPreviews, setWidgetPreviews] = useState<Record<string, DataAppPreviewResult>>({});
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [drills, setDrills] = useState<DrillFilter[]>([]);
 
@@ -53,7 +54,7 @@ export function DataAppViewPage() {
     setPreviews(out);
   };
 
-  // 已发布只读页：自动拉取各数据集数据
+  // 已发布只读页：自动拉取各数据集/图表数据
   useEffect(() => {
     if (!app || !appId) return;
     let cancelled = false;
@@ -66,7 +67,21 @@ export function DataAppViewPage() {
           /* ignore individual dataset failure */
         }
       }
-      if (!cancelled) setPreviews(out);
+      const wout: Record<string, DataAppPreviewResult> = {};
+      const wtiles = ((app.spec?.tiles as { widget_id?: string }[]) ?? []).filter(
+        (t) => t.widget_id,
+      );
+      for (const t of wtiles) {
+        try {
+          wout[t.widget_id!] = await api.previewWidget(t.widget_id!);
+        } catch {
+          /* ignore individual widget failure */
+        }
+      }
+      if (!cancelled) {
+        setPreviews(out);
+        setWidgetPreviews(wout);
+      }
     })();
     return () => {
       cancelled = true;
@@ -179,22 +194,27 @@ export function DataAppViewPage() {
           grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
           datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
           previews={previewByIndex}
+          widgetPreviews={widgetPreviews}
           onDrill={(tile, column, value) => {
             const next = [
               ...drills.filter((d) => d.column !== column),
               { column, value },
             ];
             setDrills(next);
-            const ds = app.datasets[tile.datasetIndex ?? 0];
-            if (ds)
+            const filters = buildRuntimeFilters(params, paramValues, next);
+            if (tile.widget_id) {
               void api
-                .previewDataAppDataset(
-                  appId!,
-                  ds.id,
-                  50,
-                  buildRuntimeFilters(params, paramValues, next),
-                )
-                .then((res) => setPreviews((prev) => ({ ...prev, [ds.id]: res })));
+                .previewWidget(tile.widget_id, 50, filters)
+                .then((res) =>
+                  setWidgetPreviews((prev) => ({ ...prev, [tile.widget_id!]: res })),
+                );
+            } else {
+              const ds = app.datasets[tile.datasetIndex ?? 0];
+              if (ds)
+                void api
+                  .previewDataAppDataset(appId!, ds.id, 50, filters)
+                  .then((res) => setPreviews((prev) => ({ ...prev, [ds.id]: res })));
+            }
           }}
         />
       ) : isScreen ? (

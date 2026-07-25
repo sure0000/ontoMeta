@@ -8,6 +8,7 @@ import {
   Input,
   message,
   Modal,
+  Select,
   Spin,
   Tag,
   Tooltip,
@@ -30,6 +31,7 @@ import type {
   ChatBiConversation,
   ChatBiHistoryItem,
   ChatBiMessageItem,
+  DataAppSummary,
   DomainContext,
 } from "../../types";
 import { ChatBiComposer } from "./ChatBiComposer";
@@ -697,6 +699,61 @@ const ChatBiMain = memo(function ChatBiMain({
     [domainId, navigate, activeConversationId],
   );
 
+  const [addDashOpen, setAddDashOpen] = useState(false);
+  const [addDashTarget, setAddDashTarget] = useState<string | undefined>();
+  const [addingDash, setAddingDash] = useState(false);
+  const [dashboards, setDashboards] = useState<DataAppSummary[]>([]);
+  const [pendingAdd, setPendingAdd] = useState<{ question: string; payload?: ChatBiAnswer } | null>(null);
+
+  const openAddToDashboard = useCallback(
+    (question: string, payload?: ChatBiAnswer) => {
+      if (!domainId) return;
+      setPendingAdd({ question, payload });
+      setAddDashTarget("__new__");
+      setAddDashOpen(true);
+      void api
+        .listDataApps(domainId, "dashboard")
+        .then((list) => {
+          setDashboards(list);
+          if (list.length > 0) setAddDashTarget(list[0].id);
+        })
+        .catch(() => setDashboards([]));
+    },
+    [domainId],
+  );
+
+  const confirmAddToDashboard = useCallback(async () => {
+    if (!domainId || !pendingAdd) return;
+    setAddingDash(true);
+    try {
+      let dashboardId = addDashTarget;
+      if (!dashboardId || dashboardId === "__new__") {
+        const created = await api.createDataApp({
+          domain_id: domainId,
+          app_type: "dashboard",
+          name: pendingAdd.question.slice(0, 20) || "新看板",
+        });
+        dashboardId = created.id;
+      }
+      await api.generateWidgetFromChat({
+        domain_id: domainId,
+        question: pendingAdd.question,
+        widget_type: "bar",
+        caliber_decomposition: pendingAdd.payload?.caliber_decomposition,
+        referenced_objects: pendingAdd.payload?.referenced_objects,
+        dashboard_id: dashboardId,
+      });
+      setAddDashOpen(false);
+      setPendingAdd(null);
+      message.success("已生成图表并加入看板");
+      navigate(`/data-apps/${dashboardId}/edit`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加入失败");
+    } finally {
+      setAddingDash(false);
+    }
+  }, [domainId, pendingAdd, addDashTarget, navigate]);
+
   useEffect(() => {
     if (!domainId) return;
     setLoadingSuggestions(true);
@@ -874,6 +931,7 @@ const ChatBiMain = memo(function ChatBiMain({
         submitting={submitting}
         onSuggestionClick={submit}
         onGenerateApp={handleGenerateApp}
+        onAddToDashboard={openAddToDashboard}
       />
 
       <ChatBiComposer
@@ -883,6 +941,29 @@ const ChatBiMain = memo(function ChatBiMain({
         onInputChange={setInput}
         onSubmit={submit}
       />
+
+      <Modal
+        title="加入看板"
+        open={addDashOpen}
+        onCancel={() => setAddDashOpen(false)}
+        onOk={confirmAddToDashboard}
+        okText="生成图表并加入"
+        confirmLoading={addingDash}
+      >
+        <div style={{ marginBottom: 8, color: "var(--om-text-tertiary)" }}>
+          基于当前回答的口径生成一个可复用图表，并加入选定看板（不重调模型）。
+        </div>
+        <Select
+          style={{ width: "100%" }}
+          placeholder="选择目标看板（或新建）"
+          value={addDashTarget}
+          onChange={setAddDashTarget}
+          options={[
+            { label: "＋ 新建看板", value: "__new__" },
+            ...dashboards.map((d) => ({ label: d.name, value: d.id })),
+          ]}
+        />
+      </Modal>
     </section>
   );
 });

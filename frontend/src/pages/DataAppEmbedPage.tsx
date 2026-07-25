@@ -15,6 +15,7 @@ import type { DataAppDetail, DataAppPreviewResult } from "../types";
 export function DataAppEmbedPage() {
   const { appId } = useParams<{ appId: string }>();
   const [previews, setPreviews] = useState<Record<string, DataAppPreviewResult>>({});
+  const [widgetPreviews, setWidgetPreviews] = useState<Record<string, DataAppPreviewResult>>({});
 
   const { data: app, loading } = useApi<DataAppDetail>(
     async () => api.getDataApp(appId!),
@@ -33,7 +34,21 @@ export function DataAppEmbedPage() {
           /* ignore */
         }
       }
-      if (!cancelled) setPreviews(out);
+      const wout: Record<string, DataAppPreviewResult> = {};
+      const wtiles = ((app.spec?.tiles as { widget_id?: string }[]) ?? []).filter(
+        (t) => t.widget_id,
+      );
+      for (const t of wtiles) {
+        try {
+          wout[t.widget_id!] = await api.previewWidget(t.widget_id!);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!cancelled) {
+        setPreviews(out);
+        setWidgetPreviews(wout);
+      }
     })();
     return () => {
       cancelled = true;
@@ -77,6 +92,7 @@ export function DataAppEmbedPage() {
           grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
           datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
           previews={previewByIndex}
+          widgetPreviews={widgetPreviews}
         />
       ) : isScreen ? (
         <div

@@ -23,6 +23,7 @@ export interface DashboardTile {
   widgetType: string; // table / bar / kpi
   title?: string;
   datasetIndex?: number;
+  widget_id?: string; // 引用可复用图表资产（优先于 datasetIndex）
   x: number;
   y: number;
   w: number;
@@ -34,6 +35,7 @@ export interface DashboardGridProps {
   grid?: { cols?: number; rowHeight?: number; gap?: number };
   datasets: { id: string; name: string }[];
   previews: Record<number, DataAppPreviewResult>;
+  widgetPreviews?: Record<string, DataAppPreviewResult>;
   editable?: boolean;
   onLayoutChange?: (tiles: DashboardTile[]) => void;
   onTilePatch?: (id: string, patch: Partial<DashboardTile>) => void;
@@ -52,6 +54,7 @@ export function DashboardGrid({
   grid,
   datasets,
   previews,
+  widgetPreviews,
   editable = false,
   onLayoutChange,
   onTilePatch,
@@ -88,7 +91,9 @@ export function DashboardGrid({
   };
 
   const renderBody = (t: DashboardTile) => {
-    const p = previews[t.datasetIndex ?? 0];
+    const p = t.widget_id
+      ? widgetPreviews?.[t.widget_id]
+      : previews[t.datasetIndex ?? 0];
     if (!p) {
       return (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未预览数据" />
@@ -147,13 +152,17 @@ export function DashboardGrid({
                     options={WIDGET_OPTIONS}
                     onChange={(v) => onTilePatch?.(t.id, { widgetType: v })}
                   />
-                  <Select
-                    size="small"
-                    style={{ width: 110 }}
-                    value={t.datasetIndex ?? 0}
-                    options={datasets.map((d, i) => ({ label: d.name, value: i }))}
-                    onChange={(v) => onTilePatch?.(t.id, { datasetIndex: v })}
-                  />
+                  {t.widget_id ? (
+                    <span style={{ fontSize: 11, color: "#16a34a" }}>图表库</span>
+                  ) : (
+                    <Select
+                      size="small"
+                      style={{ width: 110 }}
+                      value={t.datasetIndex ?? 0}
+                      options={datasets.map((d, i) => ({ label: d.name, value: i }))}
+                      onChange={(v) => onTilePatch?.(t.id, { datasetIndex: v })}
+                    />
+                  )}
                   <DeleteOutlined
                     style={{ color: "#ef4444", cursor: "pointer" }}
                     onClick={() => onRemoveTile?.(t.id)}

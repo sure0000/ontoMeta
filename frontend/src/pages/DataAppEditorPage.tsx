@@ -25,6 +25,7 @@ import {
   DownloadOutlined,
   EyeOutlined,
   FilterOutlined,
+  AppstoreAddOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
@@ -51,6 +52,7 @@ import {
   type ScreenWidget,
 } from "../components/ScreenCanvas";
 import { DashboardGrid, newTile, type DashboardTile } from "../components/DashboardGrid";
+import { WidgetLibraryModal } from "../components/WidgetLibraryModal";
 import type {
   DataAppDataset,
   DataAppDetail,
@@ -78,6 +80,8 @@ export function DataAppEditorPage() {
   const widgetsRef = useRef<ScreenWidget[]>([]);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [drills, setDrills] = useState<DrillFilter[]>([]);
+  const [showWidgetLib, setShowWidgetLib] = useState(false);
+  const [widgetPreviews, setWidgetPreviews] = useState<Record<string, DataAppPreviewResult>>({});
 
   const { data: app, loading, reload, setData } = useApi<DataAppDetail>(
     async () => api.getDataApp(appId!),
@@ -277,6 +281,32 @@ export function DataAppEditorPage() {
 
   const previewAll = (filters = runtimeFilters) => {
     app.datasets.forEach((d) => runPreview(d.id, filters));
+    // 看板：预览引用的图表资产 tile
+    tiles.forEach((t) => {
+      if (t.widget_id) void previewWidgetTile(t.widget_id, filters);
+    });
+  };
+
+  const previewWidgetTile = async (widgetId: string, filters = runtimeFilters) => {
+    try {
+      const res = await api.previewWidget(widgetId, 50, filters);
+      setWidgetPreviews((prev) => ({ ...prev, [widgetId]: res }));
+    } catch {
+      /* ignore individual widget preview failure */
+    }
+  };
+
+  const handleAddWidget = async (widgetId: string) => {
+    if (!appId) return;
+    try {
+      const updated = await api.addWidgetToDashboard(appId, widgetId);
+      setData(updated);
+      setShowWidgetLib(false);
+      message.success("已加入看板");
+      void previewWidgetTile(widgetId);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加入失败");
+    }
   };
 
   const handleDrill = (widget: ScreenWidget, column: string, value: string) => {
@@ -457,6 +487,9 @@ export function DataAppEditorPage() {
                   添加图表
                 </Button>
               </Dropdown>
+              <Button icon={<AppstoreAddOutlined />} onClick={() => setShowWidgetLib(true)}>
+                图表库
+              </Button>
               <Button icon={<FilterOutlined />} onClick={addParam}>
                 添加筛选参数
               </Button>
@@ -521,6 +554,7 @@ export function DataAppEditorPage() {
             grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
             datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
             previews={previewByIndex}
+            widgetPreviews={widgetPreviews}
             editable
             onLayoutChange={commitTiles}
             onTilePatch={patchTile}
@@ -532,8 +566,12 @@ export function DataAppEditorPage() {
               ];
               setDrills(nextDrills);
               const filters = buildRuntimeFilters(params, paramValues, nextDrills);
-              const ds = app.datasets[tile.datasetIndex ?? 0];
-              if (ds) runPreview(ds.id, filters);
+              if (tile.widget_id) {
+                void previewWidgetTile(tile.widget_id, filters);
+              } else {
+                const ds = app.datasets[tile.datasetIndex ?? 0];
+                if (ds) runPreview(ds.id, filters);
+              }
             }}
           />
           <div style={{ textAlign: "right", marginTop: 8 }}>
@@ -781,6 +819,13 @@ export function DataAppEditorPage() {
       />
 
       <DataSourcesModal open={showDataSources} onClose={() => setShowDataSources(false)} />
+
+      <WidgetLibraryModal
+        open={showWidgetLib}
+        domainId={app.domain_id}
+        onClose={() => setShowWidgetLib(false)}
+        onPick={handleAddWidget}
+      />
 
       <Modal
         title="发布数据应用"
