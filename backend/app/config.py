@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     cube_api_secret: str | None = None
     use_mock_cube: bool = True
     cube_timeout_seconds: float = 30.0
+    # 预聚合定时刷新间隔（交给 Cube Refresh Worker）
+    cube_preagg_refresh: str = "1 hour"
+    # 行级权限：租户隔离列名（各对象若含此属性则自动生成 RLS 过滤）；为空则不启用
+    cube_tenant_dimension: str | None = None
 
     # 草稿生成时单次 LLM 证据 payload 的字符预算：超过则自动分块 Map-Reduce。
     # 用字符长度做保守估计（宁可多切一块也不冒超长风险），按模型上下文调优：

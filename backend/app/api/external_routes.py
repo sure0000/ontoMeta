@@ -45,6 +45,19 @@ workspace = WorkspaceService()
 data_app_service = DataAppService()
 
 
+def data_app_service_cube_ctx(app: ExternalApp) -> dict:
+    """由外部应用构造 Cube securityContext（行级权限）：以应用为租户隔离。"""
+    from app.connectors.cube import CubeConnector
+    from app.services.external_api import parse_app_scopes
+
+    return CubeConnector().build_security_context(
+        tenant=app.id,
+        scopes=parse_app_scopes(getattr(app, "scopes", None)),
+        app_id=app.id,
+        app_name=app.name,
+    )
+
+
 def _require_external_app(
     db: Session = Depends(get_db),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
@@ -572,7 +585,10 @@ def v1_query_data_app(
     try:
         require_scope(app, "dataapps:read")
         try:
-            data = data_app_service.query_published_app_data(db, app_id, limit=limit)
+            security_context = data_app_service_cube_ctx(app)
+            data = data_app_service.query_published_app_data(
+                db, app_id, limit=limit, security_context=security_context
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         _log_v1_call(

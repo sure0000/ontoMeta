@@ -266,10 +266,12 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 - ✅ 导出 CSV（前端客户端导出）
 - ✅ 参数化筛选联动 / 下钻：preview 支持运行时 filters；大屏全局参数栏 + 柱图点击下钻
   （编辑器/只读页共用 ParamBar，Mock 与真实数据源均生效）
-- ✅ **CubeConnector 已实现**（`backend/app/connectors/cube.py`）：本体→Cube data model 生成
-  （`GET /api/ontologies/{id}/cube-model`）、绑定→Cube 查询翻译、Load API 执行、HS256 JWT
-  （含 securityContext 行级权限）；`kind=cube` 数据源接入 preview；`USE_MOCK_CUBE` 开关本地零依赖。
-  预聚合**定时刷新交由 Cube Refresh Worker**（docker-compose 已备可选服务），因此也覆盖了下方“cron 定时刷新”。
+- ✅ **CubeConnector 已实现（生产级）**（`backend/app/connectors/cube.py`）：本体→Cube data model
+  生成（含 **pre_aggregations + refresh_key + joins**）、绑定→Cube 查询翻译、Load API 执行、
+  HS256 JWT（含 securityContext 行级权限）、可部署文件导出（model/cubes/*.js + cube.js 含
+  RLS queryRewrite）；`kind=cube` 数据源接入 preview；对外 `/v1/data-apps/{id}/data` 以应用为租户
+  注入 securityContext；`USE_MOCK_CUBE` 开关本地零依赖。部署 checklist 见 §10.1。
+  **预聚合定时刷新交由 Cube Refresh Worker**，因此也覆盖了下方“cron 定时刷新”。
 - ⛔ cron 定时刷新（非预聚合类任务，如定时导出/推送）：需多实例任务队列（与 B5.1 同批），延期
 
 **阶段 2/3 遗留（原文）**
@@ -285,6 +287,35 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 - **口径一致性**：查询一律经 Binding Compiler + 业务逻辑表达式内联，避免 LLM 随手 SQL 造成口径漂移。
 
 ---
+
+## 10.1 生产部署 Cube（外挂，checklist）
+
+> ontoMeta 只做中枢：生成模型/翻译查询/签发带 securityContext 的令牌；执行、缓存、
+> **预聚合定时刷新**、行级权限均由 Cube 承担。
+
+1. **起 Cube 服务**：`docker-compose.yml` 取消注释 `cube` 与 `cube_refresh_worker`
+   （或独立部署）。`cube_refresh_worker` 设 `CUBEJS_REFRESH_WORKER=true` → 预聚合定时刷新。
+2. **配 ontoMeta 环境变量**：
+   ```
+   USE_MOCK_CUBE=false
+   CUBE_API_URL=http://cube:4000
+   CUBE_API_SECRET=<与 Cube 的 CUBEJS_API_SECRET 相同>
+   CUBE_PREAGG_REFRESH=1 hour         # 预聚合刷新间隔
+   CUBE_TENANT_DIMENSION=tenant_id    # 行级权限列（可选）
+   ```
+3. **生成并落盘模型**（本体发布/变更时）：
+   ```
+   GET /api/ontologies/{id}/cube-model/files   # 返回 {model/cubes/*.js, cube.js}
+   ```
+   把返回的每个文件写入 Cube 挂载目录 `./cube/`（`cube.js` 含 RLS queryRewrite）。
+   模型已含 **pre_aggregations + refresh_key + joins**（跨对象关系）。
+4. **建数据源**：ontoMeta 中新增 `kind=cube` 的数据源，数据集选它 → 走 Cube 执行。
+5. **行级权限**：对外 `/api/v1/data-apps/{id}/data` 以「外部应用」为租户，ontoMeta 自动
+   在 JWT 注入 `securityContext.tenant=app_id`；`cube.js` 对含 `tenant_id` 列的 cube
+   强制追加 `tenant_id = tenant` 过滤。
+
+> 物理库连接、预聚合存储（可选 ClickHouse）、跨源（可选 Trino）在 **Cube 侧**配置，
+> ontoMeta 不感知。
 
 ## 11. 参考项目
 

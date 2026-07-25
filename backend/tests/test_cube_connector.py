@@ -204,3 +204,99 @@ def test_preview_via_cube_source(client, admin_headers):
     assert "Orders.channel" in keys
     assert "Orders.amount_sum" in keys
     assert body["rows"]
+
+
+# ---------------------------------------------- 生产级：预聚合 / joins / RLS / files
+
+
+def test_generate_model_pre_aggregations_and_refresh():
+    conn = CubeConnector(use_mock=True)
+    model = conn.generate_model(
+        objects=[
+            {
+                "name": "orders",
+                "display_name": "订单",
+                "properties": [
+                    {"name": "channel", "data_type": "string", "semantic_type": "category"},
+                    {"name": "amount", "data_type": "decimal", "semantic_type": "amount"},
+                    {"name": "created_at", "data_type": "date", "semantic_type": "date"},
+                ],
+                "measures": [],
+                "joins": [],
+            }
+        ],
+        pre_agg_refresh="30 minute",
+    )
+    cube = model["cubes"][0]
+    # 有时间列 → refresh_key 用增量 SQL
+    assert "sql" in cube["refresh_key"]
+    pre = cube["pre_aggregations"]["main"]
+    assert pre["refresh_key"] == {"every": "30 minute"}
+    assert "Orders.amount_sum" in pre["measures"]
+    assert pre["time_dimension"] == "Orders.created_at"
+    assert pre["granularity"] == "day"
+    assert "Orders.channel" in pre["dimensions"]
+
+
+def test_generate_model_joins():
+    conn = CubeConnector(use_mock=True)
+    model = conn.generate_model(
+        objects=[
+            {
+                "name": "orders",
+                "properties": [{"name": "customer_id", "data_type": "bigint"}],
+                "measures": [],
+                "joins": [
+                    {
+                        "target_cube": "Customers",
+                        "relationship": "many_to_one",
+                        "sql": "${Orders}.customer_id = ${Customers}.id",
+                    }
+                ],
+            }
+        ]
+    )
+    cube = model["cubes"][0]
+    assert cube["joins"]["Customers"]["relationship"] == "many_to_one"
+    assert "${Orders}.customer_id = ${Customers}.id" in cube["joins"]["Customers"]["sql"]
+
+
+def test_security_context_and_model_files_rls(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "cube_tenant_dimension", "tenant_id")
+    conn = CubeConnector(use_mock=True)
+    ctx = conn.build_security_context(tenant="t1", scopes=["dataapps:read"], app_id="app1", app_name="A")
+    assert ctx["tenant"] == "t1"
+    assert ctx["scopes"] == ["dataapps:read"]
+
+    model = conn.generate_model(
+        objects=[
+            {
+                "name": "orders",
+                "properties": [
+                    {"name": "tenant_id", "data_type": "string"},
+                    {"name": "amount", "data_type": "decimal", "semantic_type": "amount"},
+                ],
+                "measures": [],
+            }
+        ]
+    )
+    assert model["cubes"][0]["tenant_dimension"] == "tenant_id"
+    files = conn.generate_model_files(model)
+    assert "cube.js" in files
+    assert "model/cubes/Orders.js" in files
+    # cube.js 含行级过滤逻辑 + 该 cube 的租户列映射
+    assert "queryRewrite" in files["cube.js"]
+    assert "securityContext" in files["cube.js"]
+    assert '"Orders": "tenant_id"' in files["cube.js"] or '"Orders":"tenant_id"' in files["cube.js"]
+
+
+def test_cube_model_files_endpoint(client, admin_headers):
+    _domain_id, ontology_id, *_ = _seed_published_ontology()
+    res = client.get(f"/api/ontologies/{ontology_id}/cube-model/files", headers=admin_headers)
+    assert res.status_code == 200, res.text
+    files = res.json()["files"]
+    assert "cube.js" in files
+    assert any(k.startswith("model/cubes/") and k.endswith(".js") for k in files)
+    assert "cube(`Orders`" in files["model/cubes/Orders.js"]

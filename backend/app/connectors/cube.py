@@ -76,22 +76,40 @@ class CubeConnector:
         self,
         *,
         objects: list[dict[str, Any]],
+        pre_agg_refresh: str | None = None,
+        include_pre_aggregations: bool = True,
     ) -> dict[str, Any]:
-        """生成 Cube data model（JSON 形态，可落盘为 model/*.yml 或 *.js）。
+        """生成 Cube data model（JSON 形态，可落盘为 model/*.js 或 *.yml）。
 
-        objects: [{name, display_name, sql_table?, properties:[{name,display_name,data_type,semantic_type}],
-                   measures:[{name,display_name,agg,sql?}]}]
+        objects: [{name, display_name, sql_table?,
+                   properties:[{name,display_name,data_type,semantic_type}],
+                   measures:[{name,display_name,agg,sql?}],
+                   joins:[{target_cube, relationship, sql}]}]
+        每个 cube 附带 refreshKey + 一个 rollup 预聚合（交 Cube Refresh Worker 定时物化），
+        以及由关系推导的 joins；若对象含租户隔离列则标记供 RLS 使用。
         """
+        refresh = pre_agg_refresh or settings.cube_preagg_refresh
+        tenant_dim = (settings.cube_tenant_dimension or "").strip() or None
         cubes: list[dict[str, Any]] = []
         for obj in objects:
             cname = cube_name(obj["name"])
             dimensions: dict[str, Any] = {}
+            time_dims: list[str] = []
+            string_dims: list[str] = []
+            has_tenant = False
             for p in obj.get("properties", []):
+                dtype = self._dim_type(p.get("data_type"), p.get("semantic_type"))
                 dimensions[p["name"]] = {
                     "sql": p["name"],
-                    "type": self._dim_type(p.get("data_type"), p.get("semantic_type")),
+                    "type": dtype,
                     "title": p.get("display_name") or p["name"],
                 }
+                if tenant_dim and p["name"] == tenant_dim:
+                    has_tenant = True
+                if dtype == "time":
+                    time_dims.append(p["name"])
+                elif dtype == "string":
+                    string_dims.append(p["name"])
             measures: dict[str, Any] = {
                 "count": {"type": "count", "title": "记录数"},
             }
@@ -110,15 +128,43 @@ class CubeConnector:
                     "sql": m.get("sql") or m["name"],
                     "title": m.get("display_name") or m["name"],
                 }
-            cubes.append(
-                {
-                    "name": cname,
-                    "sql_table": obj.get("sql_table") or obj["name"],
-                    "title": obj.get("display_name") or obj["name"],
-                    "dimensions": dimensions,
-                    "measures": measures,
+            cube: dict[str, Any] = {
+                "name": cname,
+                "sql_table": obj.get("sql_table") or obj["name"],
+                "title": obj.get("display_name") or obj["name"],
+                "dimensions": dimensions,
+                "measures": measures,
+                # 新鲜度检查：有时间列按其最大值增量刷新，否则按固定间隔
+                "refresh_key": (
+                    {"sql": f"SELECT MAX({time_dims[0]}) FROM {obj.get('sql_table') or obj['name']}"}
+                    if time_dims
+                    else {"every": refresh}
+                ),
+            }
+            if tenant_dim and has_tenant:
+                cube["tenant_dimension"] = tenant_dim  # 供 cube.js queryRewrite 使用
+            joins = obj.get("joins") or []
+            if joins:
+                cube["joins"] = {
+                    j["target_cube"]: {
+                        "relationship": j.get("relationship", "many_to_one"),
+                        "sql": j["sql"],
+                    }
+                    for j in joins
+                    if j.get("target_cube") and j.get("sql")
                 }
-            )
+            if include_pre_aggregations:
+                pre: dict[str, Any] = {
+                    "measures": [f"{cname}.{m}" for m in measures],
+                    "refresh_key": {"every": refresh},
+                }
+                if string_dims:
+                    pre["dimensions"] = [f"{cname}.{d}" for d in string_dims]
+                if time_dims:
+                    pre["time_dimension"] = f"{cname}.{time_dims[0]}"
+                    pre["granularity"] = "day"
+                cube["pre_aggregations"] = {"main": pre}
+            cubes.append(cube)
         return {"cubes": cubes}
 
     @staticmethod
@@ -258,6 +304,88 @@ class CubeConnector:
         signature = hmac.new(self.api_secret.encode(), signing_input, hashlib.sha256).digest()
         segments.append(_b64url(signature))
         return ".".join(segments)
+
+    def build_security_context(
+        self,
+        *,
+        tenant: str | None = None,
+        scopes: list[str] | None = None,
+        app_id: str | None = None,
+        app_name: str | None = None,
+    ) -> dict[str, Any]:
+        """由外部应用构造 Cube securityContext（行级权限 + 审计）。"""
+        ctx: dict[str, Any] = {}
+        if tenant:
+            ctx["tenant"] = tenant
+        if scopes:
+            ctx["scopes"] = scopes
+        if app_id:
+            ctx["app_id"] = app_id
+        if app_name:
+            ctx["app_name"] = app_name
+        return ctx
+
+    def generate_model_files(self, model: dict[str, Any]) -> dict[str, str]:
+        """把 model 处理为可直接部署的 Cube 文件（JavaScript，无 YAML 依赖）。
+
+        返回 {相对路径: 内容}，包含 model/<Cube>.js 与 cube.js（含 RLS queryRewrite）。
+        """
+        files: dict[str, str] = {}
+        tenant_cubes: list[tuple[str, str]] = []  # (cubeName, tenantDim)
+        for cube in model.get("cubes", []):
+            files[f"model/cubes/{cube['name']}.js"] = self._cube_to_js(cube)
+            if cube.get("tenant_dimension"):
+                tenant_cubes.append((cube["name"], cube["tenant_dimension"]))
+        files["cube.js"] = self._config_js(tenant_cubes)
+        return files
+
+    @staticmethod
+    def _cube_to_js(cube: dict[str, Any]) -> str:
+        body = {
+            "sql_table": cube["sql_table"],
+            "title": cube.get("title"),
+            "joins": cube.get("joins", {}),
+            "dimensions": cube.get("dimensions", {}),
+            "measures": cube.get("measures", {}),
+            "pre_aggregations": cube.get("pre_aggregations", {}),
+            "refresh_key": cube.get("refresh_key"),
+        }
+        body = {k: v for k, v in body.items() if v}
+        return (
+            f"cube(`{cube['name']}`, "
+            + json.dumps(body, ensure_ascii=False, indent=2)
+            + ");\n"
+        )
+
+    @staticmethod
+    def _config_js(tenant_cubes: list[tuple[str, str]]) -> str:
+        """生成 cube.js：对含租户列的 cube，根据 securityContext.tenant 强制行级过滤。"""
+        mapping = json.dumps(
+            {c: dim for c, dim in tenant_cubes}, ensure_ascii=False
+        )
+        return (
+            "// 由 ontoMeta 生成：行级权限（RLS）—— 根据 JWT securityContext.tenant 注入过滤。\n"
+            "// tenant 由 ontoMeta 签发的令牌携带（对应外部应用）。\n"
+            f"const TENANT_DIMS = {mapping};\n"
+            "module.exports = {\n"
+            "  queryRewrite: (query, { securityContext }) => {\n"
+            "    const tenant = securityContext && securityContext.tenant;\n"
+            "    if (tenant) {\n"
+            "      query.filters = query.filters || [];\n"
+            "      const cubesInQuery = new Set(\n"
+            "        [].concat(query.measures || [], query.dimensions || [])\n"
+            "          .map((m) => String(m).split('.')[0])\n"
+            "      );\n"
+            "      for (const c of cubesInQuery) {\n"
+            "        if (TENANT_DIMS[c]) {\n"
+            "          query.filters.push({ member: `${c}.${TENANT_DIMS[c]}`, operator: 'equals', values: [String(tenant)] });\n"
+            "        }\n"
+            "      }\n"
+            "    }\n"
+            "    return query;\n"
+            "  },\n"
+            "};\n"
+        )
 
     def _mock_query(self, cube_query: dict[str, Any]) -> tuple[list[dict], list[dict]]:
         dims = cube_query.get("dimensions") or []

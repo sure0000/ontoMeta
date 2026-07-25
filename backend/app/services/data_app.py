@@ -440,6 +440,7 @@ class DataAppService:
         dataset_id: str,
         limit: int = 50,
         runtime_filters: list[dict] | None = None,
+        security_context: dict | None = None,
     ) -> dict:
         app = db.get(DataApp, app_id)
         if not app:
@@ -468,7 +469,9 @@ class DataAppService:
         # 路径一：Cube 语义层执行
         if source and source.kind == "cube":
             try:
-                columns, rows = self._cube_execute(db, ds, effective, source)
+                columns, rows = self._cube_execute(
+                    db, ds, effective, source, security_context=security_context
+                )
                 return {
                     "dataset_id": ds.id,
                     "compiled_sql": result.get("sql"),
@@ -530,7 +533,8 @@ class DataAppService:
         return rows
 
     def _cube_execute(
-        self, db: Session, ds: DataAppDataset, binding: dict, source: DataSource
+        self, db: Session, ds: DataAppDataset, binding: dict, source: DataSource,
+        *, security_context: dict | None = None,
     ) -> tuple[list[dict], list[dict]]:
         """把数据集绑定翻译为 Cube 查询并执行。"""
         obj = db.get(ObjectType, binding.get("primary_object_type_id"))
@@ -547,26 +551,28 @@ class DataAppService:
             time_range=binding.get("time_range"),
             limit=int(binding.get("row_limit") or 100),
         )
-        return connector.query(cube_query)
+        return connector.query(cube_query, security_context=security_context)
 
-    def generate_cube_model(self, db: Session, ontology_id: str) -> dict:
-        """为一个本体生成 Cube data model（供运维部署到 Cube 服务）。"""
+    def _build_cube_objects(self, db: Session, ontology_id: str) -> list[dict]:
+        """汇总本体对象/属性/业务逻辑/关系，组装为 CubeConnector.generate_model 的输入。"""
+        from app.models import RelationType
+
         objects_rows = (
             db.query(ObjectType)
             .options(joinedload(ObjectType.properties))
             .filter(ObjectType.ontology_id == ontology_id)
             .all()
         )
+        obj_by_id = {o.id: o for o in objects_rows}
         logics = (
             db.query(BusinessLogic)
             .filter(BusinessLogic.ontology_id == ontology_id)
             .all()
         )
-        # 业务逻辑按主对象归集（通过对象绑定；无绑定时跳过）
         logic_by_obj: dict[str, list[dict]] = {}
         for logic in logics:
-            for binding in getattr(logic, "object_bindings", []) or []:
-                logic_by_obj.setdefault(binding.object_type_id, []).append(
+            for b in getattr(logic, "object_bindings", []) or []:
+                logic_by_obj.setdefault(b.object_type_id, []).append(
                     {
                         "name": logic.name,
                         "display_name": logic.display_name,
@@ -574,7 +580,22 @@ class DataAppService:
                         "sql": logic.expression_summary or logic.name,
                     }
                 )
-        objects = [
+        # 关系 → joins（挂在 source 对象上）
+        relations = (
+            db.query(RelationType)
+            .filter(RelationType.ontology_id == ontology_id)
+            .all()
+        )
+        joins_by_obj: dict[str, list[dict]] = {}
+        for rel in relations:
+            src = obj_by_id.get(rel.source_object_type_id)
+            tgt = obj_by_id.get(rel.target_object_type_id)
+            if not src or not tgt:
+                continue
+            join = self._relation_to_join(rel, src, tgt)
+            if join:
+                joins_by_obj.setdefault(src.id, []).append(join)
+        return [
             {
                 "name": o.name,
                 "display_name": o.display_name,
@@ -589,10 +610,57 @@ class DataAppService:
                     for p in o.properties
                 ],
                 "measures": logic_by_obj.get(o.id, []),
+                "joins": joins_by_obj.get(o.id, []),
             }
             for o in objects_rows
         ]
+
+    @staticmethod
+    def _relation_to_join(rel, src, tgt) -> dict | None:
+        from app.connectors.cube import cube_name
+
+        # 关系基数 → Cube relationship
+        card = (rel.cardinality or "").lower().replace(" ", "")
+        if card in {"n:1", "many_to_one", "many-to-one", "n-1"}:
+            relationship = "many_to_one"
+        elif card in {"1:n", "one_to_many", "one-to-many", "1-n"}:
+            relationship = "one_to_many"
+        elif card in {"1:1", "one_to_one", "one-to-one"}:
+            relationship = "one_to_one"
+        else:
+            # N:N 需桥接表，此处不自动生成
+            return None
+        src_cube = cube_name(src.name)
+        tgt_cube = cube_name(tgt.name)
+        # 外键：优先从 source_evidence 推断，否则约定 <target>_id = <target>.id
+        fk = None
+        pk = "id"
+        try:
+            ev = _loads(rel.source_evidence, {}) or {}
+            fk = ev.get("foreign_key") or ev.get("source_field") or ev.get("fk_column")
+            pk = ev.get("target_field") or ev.get("pk_column") or pk
+        except Exception:  # noqa: BLE001
+            pass
+        if not fk:
+            fk = f"{tgt.name}_id"
+        return {
+            "target_cube": tgt_cube,
+            "relationship": relationship,
+            "sql": f"${{{src_cube}}}.{fk} = ${{{tgt_cube}}}.{pk}",
+        }
+
+    def generate_cube_model(self, db: Session, ontology_id: str) -> dict:
+        """为一个本体生成 Cube data model（含预聚合/refreshKey/joins）。"""
+        objects = self._build_cube_objects(db, ontology_id)
         return CubeConnector().generate_model(objects=objects)
+
+    def generate_cube_model_files(self, db: Session, ontology_id: str) -> dict:
+        """生成可直接部署的 Cube 文件（model/cubes/*.js + cube.js，含 RLS）。"""
+        connector = CubeConnector()
+        model = connector.generate_model(
+            objects=self._build_cube_objects(db, ontology_id)
+        )
+        return connector.generate_model_files(model)
 
     def _mock_execute(
         self, db: Session, binding: dict, *, limit: int
@@ -739,15 +807,20 @@ class DataAppService:
         return app
 
     def query_published_app_data(
-        self, db: Session, app_id: str, *, limit: int = 100
+        self, db: Session, app_id: str, *, limit: int = 100,
+        security_context: dict | None = None,
     ) -> dict:
-        """对外只读：返回已发布应用各数据集的数据。"""
+        """对外只读：返回已发布应用各数据集的数据（可带行级权限上下文）。"""
         app = self.get_published_app(db, app_id)
         if not app:
             raise ValueError("应用不存在或未发布")
         datasets = []
         for ds in app.datasets:
-            datasets.append(self.preview_dataset(db, app.id, ds.id, limit=limit))
+            datasets.append(
+                self.preview_dataset(
+                    db, app.id, ds.id, limit=limit, security_context=security_context
+                )
+            )
         return {"app_id": app.id, "datasets": datasets}
 
     @staticmethod

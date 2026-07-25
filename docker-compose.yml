@@ -41,6 +41,8 @@ services:
       USE_MOCK_CUBE: ${USE_MOCK_CUBE:-true}
       CUBE_API_URL: ${CUBE_API_URL:-http://cube:4000}
       CUBE_API_SECRET: ${CUBE_API_SECRET:-}
+      CUBE_PREAGG_REFRESH: ${CUBE_PREAGG_REFRESH:-1 hour}
+      CUBE_TENANT_DIMENSION: ${CUBE_TENANT_DIMENSION:-}
       CORS_ORIGINS: '["http://localhost:5180","http://127.0.0.1:5180"]'
     ports:
       - "8000:8000"
