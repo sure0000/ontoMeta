@@ -771,7 +771,7 @@ export interface DataAppDataset {
 export interface DataAppSummary {
   id: string;
   domain_id: string;
-  app_type: "data_table" | "screen";
+  app_type: "data_table" | "screen" | "dashboard";
   name: string;
   description?: string | null;
   status: string; // draft / published / archived

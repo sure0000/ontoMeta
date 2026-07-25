@@ -1,5 +1,5 @@
 import { Button, Space, Tag } from "antd";
-import { AppstoreOutlined, FundProjectionScreenOutlined, TableOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, DashboardOutlined, FundProjectionScreenOutlined, TableOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type {
@@ -152,7 +152,7 @@ export function ChatBubble({
   question?: string;
   onGenerateApp?: (
     question: string,
-    appType: "data_table" | "screen",
+    appType: "data_table" | "screen" | "dashboard",
     payload?: ChatMessage["payload"],
   ) => void;
 }) {
@@ -227,6 +227,13 @@ export function ChatBubble({
                   <span style={{ color: "var(--om-text-tertiary)", fontSize: 13 }}>
                     <AppstoreOutlined /> 基于此口径创建数据应用：
                   </span>
+                  <Button
+                    size="small"
+                    icon={<DashboardOutlined />}
+                    onClick={() => onGenerateApp!(question!, "dashboard", message.payload)}
+                  >
+                    生成看板
+                  </Button>
                   <Button
                     size="small"
                     icon={<TableOutlined />}

@@ -30,6 +30,7 @@ import type { DataAppSummary, DomainContext } from "../types";
 const TYPE_LABEL: Record<string, string> = {
   data_table: "数据表格",
   screen: "可视化大屏",
+  dashboard: "数据看板",
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -98,7 +99,7 @@ export function DataAppsPage() {
       title: "类型",
       dataIndex: "app_type",
       render: (t: string) => (
-        <Tag icon={t === "screen" ? <FundProjectionScreenOutlined /> : <TableOutlined />}>
+        <Tag icon={t === "screen" ? <FundProjectionScreenOutlined /> : t === "dashboard" ? <AppstoreOutlined /> : <TableOutlined />}>
           {TYPE_LABEL[t] ?? t}
         </Tag>
       ),
@@ -186,7 +187,7 @@ export function DataAppsPage() {
         onOk={handleCreate}
         okText="创建并编辑"
       >
-        <Form form={form} layout="vertical" initialValues={{ app_type: "data_table" }}>
+        <Form form={form} layout="vertical" initialValues={{ app_type: "dashboard" }}>
           <Form.Item
             name="domain_id"
             label="数据域"
@@ -197,6 +198,7 @@ export function DataAppsPage() {
           <Form.Item name="app_type" label="应用类型">
             <Segmented
               options={[
+                { label: "数据看板", value: "dashboard", icon: <AppstoreOutlined /> },
                 { label: "数据表格", value: "data_table", icon: <TableOutlined /> },
                 {
                   label: "可视化大屏",

@@ -16,6 +16,7 @@ import {
   buildRuntimeFilters,
   type DrillFilter,
 } from "../components/ParamBar";
+import { DashboardGrid, type DashboardTile } from "../components/DashboardGrid";
 import type {
   DataAppDetail,
   DataAppPreviewResult,
@@ -88,6 +89,12 @@ export function DataAppViewPage() {
   }
 
   const isScreen = app.app_type === "screen";
+  const isDashboard = app.app_type === "dashboard";
+  const tiles = (app.spec?.tiles as DashboardTile[]) ?? [];
+  const previewByIndex: Record<number, DataAppPreviewResult> = {};
+  app.datasets.forEach((d, i) => {
+    if (previews[d.id]) previewByIndex[i] = previews[d.id];
+  });
   const widgets =
     (app.spec?.widgets as { type?: string; datasetIndex?: number; title?: string }[]) ??
     [];
@@ -166,7 +173,31 @@ export function DataAppViewPage() {
         onApply={() => loadData(buildRuntimeFilters(params, paramValues, drills))}
       />
 
-      {isScreen ? (
+      {isDashboard ? (
+        <DashboardGrid
+          tiles={tiles}
+          grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+          datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
+          previews={previewByIndex}
+          onDrill={(tile, column, value) => {
+            const next = [
+              ...drills.filter((d) => d.column !== column),
+              { column, value },
+            ];
+            setDrills(next);
+            const ds = app.datasets[tile.datasetIndex ?? 0];
+            if (ds)
+              void api
+                .previewDataAppDataset(
+                  appId!,
+                  ds.id,
+                  50,
+                  buildRuntimeFilters(params, paramValues, next),
+                )
+                .then((res) => setPreviews((prev) => ({ ...prev, [ds.id]: res })));
+          }}
+        />
+      ) : isScreen ? (
         <div
           style={{
             background: (app.spec?.canvas as { bg?: string })?.bg || "#0b1a2e",

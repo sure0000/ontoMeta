@@ -1,0 +1,20 @@
+/* 数据看板（Dashboard）栅格 */
+.dashboard-grid {
+  position: relative;
+}
+.dashboard-grid .react-grid-item {
+  transition: transform 0.15s ease;
+}
+.dashboard-grid .react-grid-item > .ant-card {
+  height: 100%;
+  border-radius: 10px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+}
+.dashboard-grid .react-grid-item.react-grid-placeholder {
+  background: var(--om-primary, #2563eb);
+  opacity: 0.15;
+  border-radius: 10px;
+}
+.dashboard-tile-drag {
+  user-select: none;
+}

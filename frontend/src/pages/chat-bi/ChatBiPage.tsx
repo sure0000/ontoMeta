@@ -664,12 +664,16 @@ const ChatBiMain = memo(function ChatBiMain({
   const handleGenerateApp = useCallback(
     async (
       question: string,
-      appType: "data_table" | "screen",
+      appType: "data_table" | "screen" | "dashboard",
       payload?: ChatBiAnswer,
     ) => {
       if (!domainId || !question.trim()) return;
       const hide = message.loading(
-        appType === "screen" ? "正在生成大屏…" : "正在生成表格…",
+        appType === "screen"
+          ? "正在生成大屏…"
+          : appType === "dashboard"
+          ? "正在生成看板…"
+          : "正在生成表格…",
         0,
       );
       try {

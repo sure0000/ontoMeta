@@ -50,6 +50,7 @@ import {
   newWidget,
   type ScreenWidget,
 } from "../components/ScreenCanvas";
+import { DashboardGrid, newTile, type DashboardTile } from "../components/DashboardGrid";
 import type {
   DataAppDataset,
   DataAppDetail,
@@ -207,6 +208,33 @@ export function DataAppEditorPage() {
     await updateSpec({ ...(app.spec ?? {}), widgets });
   };
 
+  // ---- dashboard tiles ----
+  const addTile = async (type: string) => {
+    if (!app) return;
+    const tiles = [...((app.spec?.tiles as DashboardTile[]) ?? []), newTile(type, 0)];
+    await updateSpec({ ...(app.spec ?? {}), tiles });
+  };
+  const patchTile = async (id: string, patch: Partial<DashboardTile>) => {
+    if (!app) return;
+    const tiles = ((app.spec?.tiles as DashboardTile[]) ?? []).map((t) =>
+      t.id === id ? { ...t, ...patch } : t,
+    );
+    await updateSpec({ ...(app.spec ?? {}), tiles });
+  };
+  const removeTile = async (id: string) => {
+    if (!app) return;
+    const tiles = ((app.spec?.tiles as DashboardTile[]) ?? []).filter((t) => t.id !== id);
+    await updateSpec({ ...(app.spec ?? {}), tiles });
+  };
+  const commitTiles = (tiles: DashboardTile[]) => {
+    if (!app) return;
+    setData({ ...app, spec: { ...(app.spec ?? {}), tiles } });
+  };
+  const persistTiles = async (tiles: DashboardTile[]) => {
+    if (!app) return;
+    await updateSpec({ ...(app.spec ?? {}), tiles });
+  };
+
   const handlePublish = async () => {
     if (!appId) return;
     setPublishing(true);
@@ -239,6 +267,8 @@ export function DataAppEditorPage() {
   }
 
   const isScreen = app.app_type === "screen";
+  const isDashboard = app.app_type === "dashboard";
+  const tiles = (app.spec?.tiles as DashboardTile[]) ?? [];
   const widgets = (app.spec?.widgets as ScreenWidget[]) ?? [];
   widgetsRef.current = widgets;
   const selected = widgets.find((w) => w.id === selectedWidget) ?? null;
@@ -407,7 +437,112 @@ export function DataAppEditorPage() {
         )}
       </Card>
 
-      {isScreen ? (
+      {isDashboard ? (
+        <Card
+          title="看板布局"
+          extra={
+            <Space>
+              <Dropdown
+                menu={{
+                  items: [
+                    { key: "table", label: "表格" },
+                    { key: "bar", label: "柱状图" },
+                    { key: "kpi", label: "指标卡" },
+                  ],
+                  onClick: ({ key }) => addTile(key),
+                }}
+                disabled={app.datasets.length === 0}
+              >
+                <Button icon={<PlusOutlined />} disabled={app.datasets.length === 0}>
+                  添加图表
+                </Button>
+              </Dropdown>
+              <Button icon={<FilterOutlined />} onClick={addParam}>
+                添加筛选参数
+              </Button>
+              <Button onClick={() => previewAll()}>预览全部</Button>
+            </Space>
+          }
+        >
+          {app.datasets.length === 0 && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="请先在上方创建数据集（可多个），再添加图表并自由拖拽拼接成看板。"
+            />
+          )}
+          {params.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <Space direction="vertical" style={{ width: "100%" }} size={4}>
+                {params.map((p) => (
+                  <Space key={p.id} wrap>
+                    <Text type="secondary">参数</Text>
+                    <Input
+                      size="small"
+                      style={{ width: 120 }}
+                      value={p.label}
+                      placeholder="标题"
+                      onChange={(e) => updateParam(p.id, { label: e.target.value })}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: 160 }}
+                      value={p.column}
+                      placeholder="列名（如 channel）"
+                      onChange={(e) => updateParam(p.id, { column: e.target.value })}
+                    />
+                    <Button
+                      size="small"
+                      danger
+                      type="text"
+                      icon={<DeleteOutlined />}
+                      onClick={() => removeParam(p.id)}
+                    />
+                  </Space>
+                ))}
+              </Space>
+            </div>
+          )}
+          <ParamBar
+            params={params}
+            values={paramValues}
+            drills={drills}
+            onChange={setParamValues}
+            onClearDrill={(i) => {
+              const next = drills.filter((_, xi) => xi !== i);
+              setDrills(next);
+              previewAll(buildRuntimeFilters(params, paramValues, next));
+            }}
+            onApply={() => previewAll()}
+          />
+          <DashboardGrid
+            tiles={tiles}
+            grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+            datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
+            previews={previewByIndex}
+            editable
+            onLayoutChange={commitTiles}
+            onTilePatch={patchTile}
+            onRemoveTile={removeTile}
+            onDrill={(tile, column, value) => {
+              const nextDrills = [
+                ...drills.filter((d) => d.column !== column),
+                { column, value },
+              ];
+              setDrills(nextDrills);
+              const filters = buildRuntimeFilters(params, paramValues, nextDrills);
+              const ds = app.datasets[tile.datasetIndex ?? 0];
+              if (ds) runPreview(ds.id, filters);
+            }}
+          />
+          <div style={{ textAlign: "right", marginTop: 8 }}>
+            <Button size="small" onClick={() => persistTiles(tiles)}>
+              保存布局
+            </Button>
+          </div>
+        </Card>
+      ) : isScreen ? (
         <Card
           title="大屏画布"
           extra={

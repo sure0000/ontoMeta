@@ -40,7 +40,7 @@ from app.services.settings_service import SettingsService
 
 logger = logging.getLogger("ontometa.data_app")
 
-APP_TYPES = {"data_table", "screen"}
+APP_TYPES = {"data_table", "screen", "dashboard"}
 _AGG_FUNCS = {"sum", "count", "avg", "max", "min"}
 _TIME_WINDOW_DAYS = {
     "last_7d": 7,
@@ -195,7 +195,13 @@ class DataAppService:
             domain_id=domain_id,
             ontology_id=ontology.id if ontology else None,
             app_type=app_type,
-            name=name or ("数据大屏" if app_type == "screen" else "数据表格"),
+            name=name or (
+                "数据看板"
+                if app_type == "dashboard"
+                else "数据大屏"
+                if app_type == "screen"
+                else "数据表格"
+            ),
             description=description,
             source=source,
             spec_json=_dumps(spec or self._default_spec(app_type)),
@@ -1008,9 +1014,24 @@ class DataAppService:
     def _spec_from_generation(
         self, app_type: str, question: str, binding: dict
     ) -> dict:
+        has_dim = bool(binding.get("dimensions"))
+        widget_type = "bar" if has_dim else "kpi"
+        if app_type == "dashboard":
+            spec = self._default_spec("dashboard")
+            spec["tiles"] = [
+                {
+                    "id": "t1",
+                    "widgetType": widget_type,
+                    "title": question[:40],
+                    "datasetIndex": 0,
+                    "x": 0,
+                    "y": 0,
+                    "w": 6,
+                    "h": 8,
+                }
+            ]
+            return spec
         if app_type == "screen":
-            has_dim = bool(binding.get("dimensions"))
-            widget_type = "bar" if has_dim else "kpi"
             return {
                 "layout": "screen",
                 "canvas": {"width": 1920, "height": 1080, "bg": "#0b1a2e"},
@@ -1033,6 +1054,14 @@ class DataAppService:
 
     @staticmethod
     def _default_spec(app_type: str) -> dict:
+        if app_type == "dashboard":
+            return {
+                "layout": "grid",
+                "grid": {"cols": 12, "rowHeight": 40, "gap": 12},
+                "theme": {"preset": "light", "bg": "#f5f7fa"},
+                "filters": [],
+                "tiles": [],
+            }
         if app_type == "screen":
             return {
                 "layout": "screen",

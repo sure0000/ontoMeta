@@ -222,3 +222,92 @@ def test_generate_app_reuses_provided_caliber(client, admin_headers):
     # 复用口径 → 编译 SQL 与该口径一致
     assert "SUM(amount)" in (ds["compiled_sql"] or "")
     assert "GROUP BY channel" in (ds["compiled_sql"] or "")
+
+
+def test_dashboard_create_and_generate(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(Property)
+            .filter(Property.object_type_id == obj_id, Property.name == "channel")
+            .first()
+        )
+        channel_id = channel.id
+    finally:
+        db.close()
+
+    # 1) 手工创建 dashboard（默认 grid spec）
+    res = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={"domain_id": domain_id, "app_type": "dashboard", "name": "运营看板"},
+    )
+    assert res.status_code == 200, res.text
+    app = res.json()
+    assert app["app_type"] == "dashboard"
+    assert app["spec"]["layout"] == "grid"
+    assert app["spec"]["tiles"] == []
+
+    # 2) 更新：加两个数据集 + 两个 tile 组合
+    app_id = app["id"]
+    res = client.patch(
+        f"/api/data-apps/{app_id}",
+        headers=admin_headers,
+        json={
+            "datasets": [
+                {
+                    "name": "渠道金额",
+                    "primary_object_type_id": obj_id,
+                    "binding": {
+                        "primary_object_type_id": obj_id,
+                        "measures": [{"ref": {"kind": "property", "id": amount_id, "name": "amount"}, "agg": "sum"}],
+                        "dimensions": [{"kind": "property", "id": channel_id, "name": "channel"}],
+                        "filters": [],
+                        "row_limit": 100,
+                    },
+                },
+                {
+                    "name": "订单明细",
+                    "primary_object_type_id": obj_id,
+                    "binding": {"primary_object_type_id": obj_id, "measures": [], "dimensions": [], "filters": [], "row_limit": 50},
+                },
+            ],
+            "spec": {
+                "layout": "grid",
+                "grid": {"cols": 12, "rowHeight": 40, "gap": 12},
+                "tiles": [
+                    {"id": "t1", "widgetType": "bar", "title": "渠道金额", "datasetIndex": 0, "x": 0, "y": 0, "w": 6, "h": 8},
+                    {"id": "t2", "widgetType": "table", "title": "明细", "datasetIndex": 1, "x": 6, "y": 0, "w": 6, "h": 8},
+                ],
+            },
+        },
+    )
+    assert res.status_code == 200, res.text
+    updated = res.json()
+    assert len(updated["datasets"]) == 2
+    assert len(updated["spec"]["tiles"]) == 2
+
+    # 3) 发布并对外查询数据（两个数据集都有数据）
+    res = client.post(f"/api/data-apps/{app_id}/publish", headers=admin_headers, json={})
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "published"
+
+
+def test_generate_dashboard_from_chat(client, admin_headers):
+    domain_id, *_ = _seed_published_ontology()
+    res = client.post(
+        "/api/chat-bi/generate-app",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "app_type": "dashboard",
+            "question": "最近 30 天各渠道的订单金额合计",
+        },
+    )
+    assert res.status_code == 200, res.text
+    app = res.json()
+    assert app["app_type"] == "dashboard"
+    assert app["spec"]["layout"] == "grid"
+    assert len(app["spec"]["tiles"]) == 1
+    assert len(app["datasets"]) == 1

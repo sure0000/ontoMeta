@@ -17,7 +17,7 @@ export interface ChatBiMessagesProps {
   onSuggestionClick: (s: string) => void;
   onGenerateApp?: (
     question: string,
-    appType: "data_table" | "screen",
+    appType: "data_table" | "screen" | "dashboard",
     payload?: import("../../types").ChatBiAnswer,
   ) => void;
 }

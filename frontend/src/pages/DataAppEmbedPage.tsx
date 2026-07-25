@@ -8,6 +8,7 @@ import {
   DataTableRender,
   KpiRender,
 } from "../components/DataAppRenderer";
+import { DashboardGrid, type DashboardTile } from "../components/DashboardGrid";
 import type { DataAppDetail, DataAppPreviewResult } from "../types";
 
 /** 无外壳的可嵌入（iframe）已发布数据应用页。路径：/embed/apps/:appId */
@@ -49,6 +50,12 @@ export function DataAppEmbedPage() {
   if (!app) return <Empty description="数据应用不存在" />;
 
   const isScreen = app.app_type === "screen";
+  const isDashboard = app.app_type === "dashboard";
+  const tiles = (app.spec?.tiles as DashboardTile[]) ?? [];
+  const previewByIndex: Record<number, DataAppPreviewResult> = {};
+  app.datasets.forEach((d, i) => {
+    if (previews[d.id]) previewByIndex[i] = previews[d.id];
+  });
   const widgets =
     (app.spec?.widgets as { type?: string; datasetIndex?: number; title?: string }[]) ??
     [];
@@ -64,7 +71,14 @@ export function DataAppEmbedPage() {
 
   return (
     <div style={{ padding: 12, minHeight: "100vh", background: "#f5f7fa" }}>
-      {isScreen ? (
+      {isDashboard ? (
+        <DashboardGrid
+          tiles={tiles}
+          grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+          datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
+          previews={previewByIndex}
+        />
+      ) : isScreen ? (
         <div
           style={{
             background: (app.spec?.canvas as { bg?: string })?.bg || "#0b1a2e",

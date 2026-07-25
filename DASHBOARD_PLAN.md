@@ -178,6 +178,13 @@ Widget（图表/表格资产：可复用、可独立预览）
 - 引入 `react-grid-layout`，看板编辑器（grid 模式）+ 统一 `<AppRenderer>`。
 - tile 先引用**本 app 内数据集**（把现有多数据集 app 直接渲成看板），打通「多图一板 + 发布 + 只读页」。
 
+**阶段 D1（看板骨架，复用现有能力）— ✅ 已落地**
+- ✅ `DataApp` 新增 `dashboard` 类型 + `spec.tiles`（内联，未新增表）；grid 默认 spec。
+- ✅ 引入 `react-grid-layout`，`DashboardGrid` 组件（拖拽/缩放/响应式）+ 统一渲染器（table/bar/kpi）。
+- ✅ 编辑器 dashboard 分支：多数据集 + 添加图表 tile + 每格选数据集/图表类型 + 全局筛选(ParamBar)+ 下钻。
+- ✅ 只读页 / embed 渲染看板；列表新建支持「数据看板」；Data Agent 新增「生成看板」。
+- ✅ 发布/版本/对外 API 与现有应用同源。后端测试覆盖创建/组合/发布/对话生成。
+
 **阶段 D2（图表成为可复用资产）**
 - 新增 `DataAppWidget` 表 + CRUD + 图表库面板（搜索/跨域）。
 - tile 改为引用 `widget_id`；`DatasetEditor` 升级为 Widget 编辑器。
