@@ -433,7 +433,12 @@ class DataAppService:
     # ------------------------------------------------------------------ preview
 
     def preview_dataset(
-        self, db: Session, app_id: str, dataset_id: str, limit: int = 50
+        self,
+        db: Session,
+        app_id: str,
+        dataset_id: str,
+        limit: int = 50,
+        runtime_filters: list[dict] | None = None,
     ) -> dict:
         app = db.get(DataApp, app_id)
         if not app:
@@ -442,24 +447,33 @@ class DataAppService:
         if not ds or ds.app_id != app_id:
             raise ValueError("数据集不存在")
         binding = _loads(ds.binding_json, {})
-        result = self._compile_sql(db, binding, ontology_id=app.ontology_id)
-        ds.compiled_sql = result.get("sql")
+
+        # 基线编译（不含运行时参数）持久化，供评审展示
+        base = self._compile_sql(db, binding, ontology_id=app.ontology_id)
+        ds.compiled_sql = base.get("sql")
         db.commit()
+
+        # 运行时参数：把参数化筛选/下钻条件合并进 binding.filters 后再编译执行
+        effective = dict(binding)
+        rt = [f for f in (runtime_filters or []) if isinstance(f, dict) and f.get("ref")]
+        if rt:
+            effective["filters"] = list(binding.get("filters") or []) + rt
+        result = self._compile_sql(db, effective, ontology_id=app.ontology_id)
 
         warnings = list(result.get("warnings", []))
         # 优先真实数据源执行；失败或未配置时降级为 Mock
         source = db.get(DataSource, ds.data_source_id) if ds.data_source_id else None
-        if source and source.kind != "mock" and source.dsn_secret_ref and ds.compiled_sql:
+        if source and source.kind != "mock" and source.dsn_secret_ref and result.get("sql"):
             try:
                 columns, rows = execute_sql(
                     dsn=source.dsn_secret_ref,
-                    sql=ds.compiled_sql,
+                    sql=result["sql"],
                     limit=limit,
                     mapping=_loads(source.mapping_json, None),
                 )
                 return {
                     "dataset_id": ds.id,
-                    "compiled_sql": ds.compiled_sql,
+                    "compiled_sql": result.get("sql"),
                     "columns": columns,
                     "rows": rows,
                     "used_mock": False,
@@ -468,7 +482,8 @@ class DataAppService:
             except ExecutionError as exc:
                 warnings.append(f"真实数据源执行失败，已降级为示例数据：{exc}")
 
-        columns, rows = self._mock_execute(db, binding, limit=limit)
+        columns, rows = self._mock_execute(db, effective, limit=limit)
+        rows = self._apply_runtime_filters_to_mock(db, rows, rt)
         return {
             "dataset_id": ds.id,
             "compiled_sql": result.get("sql"),
@@ -477,6 +492,24 @@ class DataAppService:
             "used_mock": True,
             "warnings": warnings,
         }
+
+    def _apply_runtime_filters_to_mock(
+        self, db: Session, rows: list[dict], runtime_filters: list[dict]
+    ) -> list[dict]:
+        """Mock 模式下按运行时 eq 过滤器裁剪示例行，让参数化/下钻可见生效。"""
+        if not runtime_filters or not rows:
+            return rows
+        for flt in runtime_filters:
+            op = str(flt.get("op") or "eq").lower()
+            if op != "eq":
+                continue
+            col = self._resolve_column_name(db, flt.get("ref") or {})
+            value = flt.get("value")
+            if not col or value is None:
+                continue
+            if any(col in r for r in rows):
+                rows = [r for r in rows if str(r.get(col)) == str(value)]
+        return rows
 
     def _mock_execute(
         self, db: Session, binding: dict, *, limit: int

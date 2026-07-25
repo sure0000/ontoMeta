@@ -236,3 +236,77 @@ def test_mcp_data_app_tools_listed(client, admin_headers):
     )
     assert res.status_code == 200, res.text
     assert res.json().get("isError") in (False, None)
+
+
+# ------------------------------------------------- 参数化筛选 / 下钻（runtime filters）
+
+
+def test_preview_runtime_filter_real_source(client, admin_headers, tmp_path):
+    db_path = tmp_path / "orders_rt.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE orders (channel TEXT, amount REAL);"
+        "INSERT INTO orders VALUES ('A', 100), ('A', 50), ('B', 30);"
+    )
+    conn.commit()
+    conn.close()
+
+    _domain_id, app_id = _seed_published_app_with_source(dsn=f"sqlite:///{db_path}")
+    # 取数据集 id
+    detail = client.get(f"/api/data-apps/{app_id}", headers=admin_headers).json()
+    ds_id = detail["datasets"][0]["id"]
+
+    # 不带参数：A、B 两组
+    res = client.post(
+        f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
+        headers=admin_headers,
+        json={"limit": 100, "runtime_filters": []},
+    )
+    assert res.status_code == 200, res.text
+    assert {r["channel"] for r in res.json()["rows"]} == {"A", "B"}
+
+    # 下钻 channel=A：只剩 A（sum=150）
+    res = client.post(
+        f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
+        headers=admin_headers,
+        json={
+            "limit": 100,
+            "runtime_filters": [
+                {"ref": {"kind": "property", "name": "channel"}, "op": "eq", "value": "A"}
+            ],
+        },
+    )
+    assert res.status_code == 200, res.text
+    rows = res.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["channel"] == "A"
+    assert rows[0]["sum_amount"] == 150
+
+
+def test_preview_runtime_filter_mock(client, admin_headers):
+    _domain_id, app_id = _seed_published_app_with_source()
+    detail = client.get(f"/api/data-apps/{app_id}", headers=admin_headers).json()
+    ds_id = detail["datasets"][0]["id"]
+
+    full = client.post(
+        f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
+        headers=admin_headers,
+        json={"limit": 20, "runtime_filters": []},
+    ).json()
+    assert full["used_mock"] is True
+    assert full["rows"]
+    sample_channel = full["rows"][0]["channel"]
+
+    drilled = client.post(
+        f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
+        headers=admin_headers,
+        json={
+            "limit": 20,
+            "runtime_filters": [
+                {"ref": {"kind": "property", "name": "channel"}, "op": "eq", "value": sample_channel}
+            ],
+        },
+    ).json()
+    # Mock 下钻后仅保留匹配行
+    assert all(r["channel"] == sample_channel for r in drilled["rows"])
+    assert len(drilled["rows"]) <= len(full["rows"])

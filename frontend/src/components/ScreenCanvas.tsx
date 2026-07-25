@@ -24,6 +24,7 @@ export interface ScreenCanvasProps {
   onSelect?: (id: string | null) => void;
   onChange?: (widgets: ScreenWidget[]) => void;
   onCommit?: () => void;
+  onDrill?: (widget: ScreenWidget, column: string, value: string) => void;
 }
 
 const DISPLAY_W = 960; // 画布展示宽度（等比缩放）
@@ -37,6 +38,7 @@ export function ScreenCanvas({
   onSelect,
   onChange,
   onCommit,
+  onDrill,
 }: ScreenCanvasProps) {
   const scale = DISPLAY_W / canvas.width;
   const displayH = canvas.height * scale;
@@ -111,7 +113,13 @@ export function ScreenCanvas({
       return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未预览" />;
     }
     const props = { columns: preview.columns, rows: preview.rows };
-    if (w.type === "bar") return <BarChartRender {...props} />;
+    if (w.type === "bar")
+      return (
+        <BarChartRender
+          {...props}
+          onBarClick={onDrill ? (col, val) => onDrill(w, col, val) : undefined}
+        />
+      );
     if (w.type === "kpi") return <KpiRender {...props} />;
     return <DataTableRender {...props} />;
   };

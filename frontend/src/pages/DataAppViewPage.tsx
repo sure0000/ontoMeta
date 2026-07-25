@@ -11,7 +11,17 @@ import {
   DataTableRender,
   KpiRender,
 } from "../components/DataAppRenderer";
-import type { DataAppDetail, DataAppPreviewResult } from "../types";
+import {
+  ParamBar,
+  buildRuntimeFilters,
+  type DrillFilter,
+} from "../components/ParamBar";
+import type {
+  DataAppDetail,
+  DataAppPreviewResult,
+  RuntimeFilter,
+  ScreenParam,
+} from "../types";
 
 const { Text } = Typography;
 
@@ -19,11 +29,28 @@ export function DataAppViewPage() {
   const { appId } = useParams<{ appId: string }>();
   const navigate = useNavigate();
   const [previews, setPreviews] = useState<Record<string, DataAppPreviewResult>>({});
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  const [drills, setDrills] = useState<DrillFilter[]>([]);
 
   const { data: app, loading } = useApi<DataAppDetail>(
     async () => api.getDataApp(appId!),
     [appId],
   );
+
+  const params = (app?.spec?.params as ScreenParam[]) ?? [];
+
+  const loadData = async (filters: RuntimeFilter[]) => {
+    if (!app || !appId) return;
+    const out: Record<string, DataAppPreviewResult> = {};
+    for (const ds of app.datasets) {
+      try {
+        out[ds.id] = await api.previewDataAppDataset(appId, ds.id, 50, filters);
+      } catch {
+        /* ignore individual dataset failure */
+      }
+    }
+    setPreviews(out);
+  };
 
   // 已发布只读页：自动拉取各数据集数据
   useEffect(() => {
@@ -69,7 +96,19 @@ export function DataAppViewPage() {
     const p = previews[datasetId];
     if (!p) return <Spin size="small" />;
     const props = { columns: p.columns, rows: p.rows };
-    if (widgetType === "bar") return <BarChartRender {...props} />;
+    if (widgetType === "bar")
+      return (
+        <BarChartRender
+          {...props}
+          onBarClick={(col, val) => {
+            const next = [...drills.filter((d) => d.column !== col), { column: col, value: val }];
+            setDrills(next);
+            void api
+              .previewDataAppDataset(appId!, datasetId, 50, buildRuntimeFilters(params, paramValues, next))
+              .then((res) => setPreviews((prev) => ({ ...prev, [datasetId]: res })));
+          }}
+        />
+      );
     if (widgetType === "kpi") return <KpiRender {...props} />;
     return <DataTableRender {...props} />;
   };
@@ -113,6 +152,19 @@ export function DataAppViewPage() {
       {app.status !== "published" && (
         <Text type="warning">当前应用尚未发布，此处展示的是草稿内容。</Text>
       )}
+
+      <ParamBar
+        params={params}
+        values={paramValues}
+        drills={drills}
+        onChange={setParamValues}
+        onClearDrill={(i) => {
+          const next = drills.filter((_, xi) => xi !== i);
+          setDrills(next);
+          void loadData(buildRuntimeFilters(params, paramValues, next));
+        }}
+        onApply={() => loadData(buildRuntimeFilters(params, paramValues, drills))}
+      />
 
       {isScreen ? (
         <div

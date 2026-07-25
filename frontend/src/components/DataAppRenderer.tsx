@@ -31,7 +31,11 @@ export function DataTableRender({ columns, rows }: RenderRows) {
 }
 
 /** 轻量 SVG 柱状图（无第三方图表依赖），取首个维度列为 x、首个度量列为 y */
-export function BarChartRender({ columns, rows }: RenderRows) {
+export function BarChartRender({
+  columns,
+  rows,
+  onBarClick,
+}: RenderRows & { onBarClick?: (column: string, value: string) => void }) {
   if (!columns.length || !rows.length) {
     return <Empty description="暂无数据" />;
   }
@@ -47,6 +51,7 @@ export function BarChartRender({ columns, rows }: RenderRows) {
   const gap = 24;
   const chartH = 260;
   const width = points.length * (barW + gap) + gap;
+  const clickable = Boolean(onBarClick);
 
   return (
     <div style={{ overflowX: "auto" }}>
@@ -56,8 +61,14 @@ export function BarChartRender({ columns, rows }: RenderRows) {
           const x = gap + i * (barW + gap);
           const y = chartH - h + 10;
           return (
-            <g key={i}>
-              <rect x={x} y={y} width={barW} height={h} rx={4} fill="#3b82f6" />
+            <g
+              key={i}
+              style={{ cursor: clickable ? "pointer" : "default" }}
+              onClick={() => onBarClick?.(xKey, p.label)}
+            >
+              <rect x={x} y={y} width={barW} height={h} rx={4} fill="#3b82f6">
+                {clickable && <title>点击下钻：{p.label}</title>}
+              </rect>
               <text
                 x={x + barW / 2}
                 y={y - 6}

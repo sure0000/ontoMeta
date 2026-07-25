@@ -12,6 +12,7 @@ from app.schemas import (
     DataAppCompileResult,
     DataAppCreate,
     DataAppDetail,
+    DataAppPreviewRequest,
     DataAppPreviewResult,
     DataAppPublishRequest,
     DataAppSummary,
@@ -165,11 +166,22 @@ def compile_dataset(app_id: str, dataset_id: str, db: Session = Depends(get_db))
 def preview_dataset(
     app_id: str,
     dataset_id: str,
+    body: DataAppPreviewRequest | None = None,
     limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
+    runtime_filters = (
+        [f.model_dump() for f in body.runtime_filters] if body else None
+    )
+    effective_limit = body.limit if body and body.limit else limit
     try:
-        return data_app_service.preview_dataset(db, app_id, dataset_id, limit=limit)
+        return data_app_service.preview_dataset(
+            db,
+            app_id,
+            dataset_id,
+            limit=effective_limit,
+            runtime_filters=runtime_filters,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

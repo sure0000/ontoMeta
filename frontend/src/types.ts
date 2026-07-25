@@ -819,3 +819,17 @@ export interface DataSource {
   created_at: string;
   updated_at: string;
 }
+
+export interface RuntimeFilter {
+  ref: { kind: string; id?: string | null; name?: string | null; display_name?: string | null };
+  op: string; // eq / ne / gt / lt / like
+  value?: unknown;
+}
+
+export interface ScreenParam {
+  id: string;
+  label: string;
+  column: string; // 物理/本体列名，用于匹配各数据集
+  op?: string; // 默认 eq
+  default?: string;
+}

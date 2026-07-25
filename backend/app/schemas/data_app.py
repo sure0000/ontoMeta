@@ -165,6 +165,13 @@ class DataAppPreviewResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class DataAppPreviewRequest(BaseModel):
+    """预览运行时参数（参数化筛选 / 下钻）。"""
+
+    limit: int = 50
+    runtime_filters: list[DataAppFilter] = Field(default_factory=list)
+
+
 # ------------------------------------------------------------------------ Publish
 
 

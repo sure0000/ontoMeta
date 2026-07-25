@@ -775,10 +775,22 @@ export const api = {
     }),
   deleteDataApp: (id: string) =>
     request<{ status: string }>(`/api/data-apps/${id}`, { method: "DELETE" }),
-  previewDataAppDataset: (appId: string, datasetId: string, limit = 50) =>
+  previewDataAppDataset: (
+    appId: string,
+    datasetId: string,
+    limit = 50,
+    runtimeFilters?: {
+      ref: { kind: string; id?: string | null; name?: string | null; display_name?: string | null };
+      op: string;
+      value?: unknown;
+    }[],
+  ) =>
     request<DataAppPreviewResult>(
-      `/api/data-apps/${appId}/datasets/${datasetId}/preview?limit=${limit}`,
-      { method: "POST" },
+      `/api/data-apps/${appId}/datasets/${datasetId}/preview`,
+      {
+        method: "POST",
+        body: JSON.stringify({ limit, runtime_filters: runtimeFilters ?? [] }),
+      },
     ),
   publishDataApp: (id: string, versionComment?: string) =>
     request<DataAppDetail>(`/api/data-apps/${id}/publish`, {

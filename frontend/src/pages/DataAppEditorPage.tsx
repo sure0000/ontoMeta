@@ -24,6 +24,7 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EyeOutlined,
+  FilterOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
@@ -39,6 +40,11 @@ import {
 import { DatasetEditor } from "../components/DatasetEditor";
 import { DataSourcesModal } from "../components/DataSourcesModal";
 import {
+  ParamBar,
+  buildRuntimeFilters,
+  type DrillFilter,
+} from "../components/ParamBar";
+import {
   ScreenCanvas,
   exportCsv,
   newWidget,
@@ -49,6 +55,8 @@ import type {
   DataAppDetail,
   DataAppPreviewResult,
   DataSource,
+  RuntimeFilter,
+  ScreenParam,
 } from "../types";
 
 const { Text, Paragraph } = Typography;
@@ -67,6 +75,8 @@ export function DataAppEditorPage() {
   const [selectedWidget, setSelectedWidget] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const widgetsRef = useRef<ScreenWidget[]>([]);
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  const [drills, setDrills] = useState<DrillFilter[]>([]);
 
   const { data: app, loading, reload, setData } = useApi<DataAppDetail>(
     async () => api.getDataApp(appId!),
@@ -83,11 +93,11 @@ export function DataAppEditorPage() {
     return map;
   }, [app]);
 
-  const runPreview = async (datasetId: string) => {
+  const runPreview = async (datasetId: string, filters?: RuntimeFilter[]) => {
     if (!appId) return;
     setPreviewing(datasetId);
     try {
-      const res = await api.previewDataAppDataset(appId, datasetId);
+      const res = await api.previewDataAppDataset(appId, datasetId, 50, filters);
       setPreviews((prev) => ({ ...prev, [datasetId]: res }));
       if (res.warnings?.length) message.warning(res.warnings.join("；"));
     } catch (err) {
@@ -232,6 +242,41 @@ export function DataAppEditorPage() {
   const widgets = (app.spec?.widgets as ScreenWidget[]) ?? [];
   widgetsRef.current = widgets;
   const selected = widgets.find((w) => w.id === selectedWidget) ?? null;
+  const params = (app.spec?.params as ScreenParam[]) ?? [];
+  const runtimeFilters = buildRuntimeFilters(params, paramValues, drills);
+
+  const previewAll = (filters = runtimeFilters) => {
+    app.datasets.forEach((d) => runPreview(d.id, filters));
+  };
+
+  const handleDrill = (widget: ScreenWidget, column: string, value: string) => {
+    const nextDrills = [...drills.filter((d) => d.column !== column), { column, value }];
+    setDrills(nextDrills);
+    const filters = buildRuntimeFilters(params, paramValues, nextDrills);
+    const ds = app.datasets[widget.datasetIndex ?? 0];
+    if (ds) runPreview(ds.id, filters);
+  };
+
+  const addParam = async () => {
+    const id = `p${Date.now()}`;
+    const nextParams = [
+      ...params,
+      { id, label: "筛选", column: "", op: "eq" } as ScreenParam,
+    ];
+    await updateSpec({ ...(app.spec ?? {}), params: nextParams });
+  };
+
+  const updateParam = async (id: string, patch: Partial<ScreenParam>) => {
+    const nextParams = params.map((p) => (p.id === id ? { ...p, ...patch } : p));
+    await updateSpec({ ...(app.spec ?? {}), params: nextParams });
+  };
+
+  const removeParam = async (id: string) => {
+    await updateSpec({
+      ...(app.spec ?? {}),
+      params: params.filter((p) => p.id !== id),
+    });
+  };
 
   const renderPreview = (datasetId: string, widgetType?: string) => {
     const p = previews[datasetId];
@@ -382,9 +427,10 @@ export function DataAppEditorPage() {
                   添加组件
                 </Button>
               </Dropdown>
-              <Button onClick={() => app.datasets.forEach((d) => runPreview(d.id))}>
-                预览全部
+              <Button icon={<FilterOutlined />} onClick={addParam}>
+                添加筛选参数
               </Button>
+              <Button onClick={() => previewAll()}>预览全部</Button>
             </Space>
           }
         >
@@ -396,6 +442,52 @@ export function DataAppEditorPage() {
               message="请先创建数据集，再添加大屏组件。"
             />
           )}
+
+          {params.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <Space direction="vertical" style={{ width: "100%" }} size={4}>
+                {params.map((p) => (
+                  <Space key={p.id} wrap>
+                    <Text type="secondary">参数</Text>
+                    <Input
+                      size="small"
+                      style={{ width: 120 }}
+                      value={p.label}
+                      placeholder="标题"
+                      onChange={(e) => updateParam(p.id, { label: e.target.value })}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: 160 }}
+                      value={p.column}
+                      placeholder="列名（如 channel）"
+                      onChange={(e) => updateParam(p.id, { column: e.target.value })}
+                    />
+                    <Button
+                      size="small"
+                      danger
+                      type="text"
+                      icon={<DeleteOutlined />}
+                      onClick={() => removeParam(p.id)}
+                    />
+                  </Space>
+                ))}
+              </Space>
+            </div>
+          )}
+
+          <ParamBar
+            params={params}
+            values={paramValues}
+            drills={drills}
+            onChange={setParamValues}
+            onClearDrill={(i) => {
+              const next = drills.filter((_, xi) => xi !== i);
+              setDrills(next);
+              previewAll(buildRuntimeFilters(params, paramValues, next));
+            }}
+            onApply={() => previewAll()}
+          />
           <div style={{ display: "flex", gap: 16 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <ScreenCanvas
@@ -413,6 +505,7 @@ export function DataAppEditorPage() {
                 onSelect={setSelectedWidget}
                 onChange={handleWidgetsChange}
                 onCommit={commitWidgets}
+                onDrill={handleDrill}
               />
             </div>
             <Card size="small" title="组件属性" style={{ width: 260, flexShrink: 0 }}>

@@ -264,7 +264,8 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 **阶段 3（增强）— 🟡 部分完成**
 - ✅ MCP 工具暴露：`list_data_apps` / `get_data_app` / `query_data_app`（目录同源）
 - ✅ 导出 CSV（前端客户端导出）
-- 🟡 参数化筛选联动 / 下钻：数据集已支持 filters/timeRange 绑定，联动交互待补
+- ✅ 参数化筛选联动 / 下钻：preview 支持运行时 filters；大屏全局参数栏 + 柱图点击下钻
+  （编辑器/只读页共用 ParamBar，Mock 与真实数据源均生效）
 - ⛔ 外挂 Cube（跨源/预聚合/缓存/行级权限）：需独立部署 Cube 服务，作为基础设施项延期
 - ⛔ 定时刷新（cron）：需多实例任务队列（与 B5.1 多实例队列同批），延期
 
