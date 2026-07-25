@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Card, Empty, Space, Spin, Tag, Typography } from "antd";
-import { ArrowLeftOutlined } from "@ant-design/icons";
+import { Card, Empty, Space, Spin, Tag, Typography, Button, message } from "antd";
+import { ArrowLeftOutlined, LinkOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
 import { PageContainer } from "../components/PageContainer";
@@ -94,6 +94,20 @@ export function DataAppViewPage() {
           </Space>
         }
         description={app.description}
+        extra={
+          app.status === "published" ? (
+            <Button
+              icon={<LinkOutlined />}
+              onClick={() => {
+                const url = `${window.location.origin}/embed/apps/${app.id}`;
+                void navigator.clipboard?.writeText(url);
+                message.success("嵌入链接已复制（/embed/apps/…，可用于 iframe）");
+              }}
+            >
+              复制嵌入链接
+            </Button>
+          ) : undefined
+        }
       />
 
       {app.status !== "published" && (

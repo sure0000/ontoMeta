@@ -31,14 +31,19 @@ router = APIRouter()
 
 @router.get("/data-sources", response_model=list[DataSourceOut])
 def list_data_sources(db: Session = Depends(get_db)):
-    return data_app_service.list_data_sources(db)
+    return [data_app_service.serialize_data_source(d) for d in data_app_service.list_data_sources(db)]
 
 
 @router.post("/data-sources", response_model=DataSourceOut)
 def create_data_source(data: DataSourceCreate, db: Session = Depends(get_db)):
-    return data_app_service.create_data_source(
-        db, name=data.name, kind=data.kind, dsn_secret_ref=data.dsn_secret_ref
+    ds = data_app_service.create_data_source(
+        db,
+        name=data.name,
+        kind=data.kind,
+        dsn_secret_ref=data.dsn_secret_ref,
+        mapping=data.mapping,
     )
+    return data_app_service.serialize_data_source(ds)
 
 
 @router.patch("/data-sources/{ds_id}", response_model=DataSourceOut)
@@ -46,9 +51,10 @@ def update_data_source(
     ds_id: str, data: DataSourceUpdate, db: Session = Depends(get_db)
 ):
     try:
-        return data_app_service.update_data_source(
+        ds = data_app_service.update_data_source(
             db, ds_id, **data.model_dump(exclude_unset=True)
         )
+        return data_app_service.serialize_data_source(ds)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -65,9 +71,11 @@ def delete_data_source(ds_id: str, db: Session = Depends(get_db)):
 @router.post("/data-sources/{ds_id}/test", response_model=DataSourceOut)
 def test_data_source(ds_id: str, db: Session = Depends(get_db)):
     try:
-        return data_app_service.test_data_source(db, ds_id)
+        return data_app_service.serialize_data_source(
+            data_app_service.test_data_source(db, ds_id)
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ------------------------------------------------------------------ data apps

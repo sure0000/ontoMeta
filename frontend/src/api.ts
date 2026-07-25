@@ -34,6 +34,7 @@ import type {
   DataAppPreviewResult,
   DataAppVersion,
   DataAppDatasetInput,
+  DataSource,
   ExternalApp,
   ExternalAppCreated,
   LlmModelOption,
@@ -797,4 +798,29 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  // Data sources
+  listDataSources: () => request<DataSource[]>(`/api/data-sources`),
+  createDataSource: (body: {
+    name: string;
+    kind: string;
+    dsn_secret_ref?: string;
+    mapping?: Record<string, unknown>;
+  }) =>
+    request<DataSource>(`/api/data-sources`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateDataSource: (
+    id: string,
+    body: { name?: string; kind?: string; dsn_secret_ref?: string; mapping?: Record<string, unknown> },
+  ) =>
+    request<DataSource>(`/api/data-sources/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteDataSource: (id: string) =>
+    request<{ status: string }>(`/api/data-sources/${id}`, { method: "DELETE" }),
+  testDataSource: (id: string) =>
+    request<DataSource>(`/api/data-sources/${id}/test`, { method: "POST" }),
 };

@@ -33,6 +33,7 @@ from app.models import (
     Property,
 )
 from app.services.common import log_change
+from app.services.data_app_executor import ExecutionError, execute_sql, is_read_only
 from app.services.ontology_query import OntologyQueryService
 
 logger = logging.getLogger("ontometa.data_app")
@@ -79,9 +80,15 @@ class DataAppService:
         return db.query(DataSource).order_by(desc(DataSource.created_at)).all()
 
     def create_data_source(
-        self, db: Session, *, name: str, kind: str, dsn_secret_ref: str | None
+        self, db: Session, *, name: str, kind: str, dsn_secret_ref: str | None,
+        mapping: dict | None = None,
     ) -> DataSource:
-        ds = DataSource(name=name, kind=kind, dsn_secret_ref=dsn_secret_ref)
+        ds = DataSource(
+            name=name,
+            kind=kind,
+            dsn_secret_ref=dsn_secret_ref,
+            mapping_json=_dumps(mapping),
+        )
         db.add(ds)
         db.commit()
         db.refresh(ds)
@@ -91,12 +98,27 @@ class DataAppService:
         ds = db.get(DataSource, ds_id)
         if not ds:
             raise ValueError("数据源不存在")
+        if "mapping" in fields:
+            ds.mapping_json = _dumps(fields.pop("mapping"))
         for key, value in fields.items():
             if value is not None and hasattr(ds, key):
                 setattr(ds, key, value)
         db.commit()
         db.refresh(ds)
         return ds
+
+    @staticmethod
+    def serialize_data_source(ds: DataSource) -> dict:
+        return {
+            "id": ds.id,
+            "name": ds.name,
+            "kind": ds.kind,
+            "status": ds.status,
+            "mapping": _loads(ds.mapping_json, None),
+            "tested_at": ds.tested_at,
+            "created_at": ds.created_at,
+            "updated_at": ds.updated_at,
+        }
 
     def delete_data_source(self, db: Session, ds_id: str) -> None:
         ds = db.get(DataSource, ds_id)
@@ -109,8 +131,19 @@ class DataAppService:
         ds = db.get(DataSource, ds_id)
         if not ds:
             raise ValueError("数据源不存在")
-        # 阶段 1：mock 类型直接标记可用；真实连接测试延后到阶段 2
-        ds.status = "ok" if ds.kind == "mock" else "untested"
+        if ds.kind == "mock" or not ds.dsn_secret_ref:
+            ds.status = "ok" if ds.kind == "mock" else "untested"
+        else:
+            # 真实连接测试：执行一条最小只读查询
+            try:
+                execute_sql(dsn=ds.dsn_secret_ref, sql="SELECT 1", limit=1)
+                ds.status = "ok"
+            except ExecutionError as exc:
+                ds.status = "error"
+                ds.tested_at = _now()
+                db.commit()
+                db.refresh(ds)
+                raise ValueError(f"连接测试失败：{exc}") from exc
         ds.tested_at = _now()
         db.commit()
         db.refresh(ds)
@@ -413,6 +446,28 @@ class DataAppService:
         ds.compiled_sql = result.get("sql")
         db.commit()
 
+        warnings = list(result.get("warnings", []))
+        # 优先真实数据源执行；失败或未配置时降级为 Mock
+        source = db.get(DataSource, ds.data_source_id) if ds.data_source_id else None
+        if source and source.kind != "mock" and source.dsn_secret_ref and ds.compiled_sql:
+            try:
+                columns, rows = execute_sql(
+                    dsn=source.dsn_secret_ref,
+                    sql=ds.compiled_sql,
+                    limit=limit,
+                    mapping=_loads(source.mapping_json, None),
+                )
+                return {
+                    "dataset_id": ds.id,
+                    "compiled_sql": ds.compiled_sql,
+                    "columns": columns,
+                    "rows": rows,
+                    "used_mock": False,
+                    "warnings": warnings,
+                }
+            except ExecutionError as exc:
+                warnings.append(f"真实数据源执行失败，已降级为示例数据：{exc}")
+
         columns, rows = self._mock_execute(db, binding, limit=limit)
         return {
             "dataset_id": ds.id,
@@ -420,7 +475,7 @@ class DataAppService:
             "columns": columns,
             "rows": rows,
             "used_mock": True,
-            "warnings": result.get("warnings", []),
+            "warnings": warnings,
         }
 
     def _mock_execute(
@@ -550,6 +605,56 @@ class DataAppService:
             .order_by(desc(DataAppVersion.version))
             .all()
         )
+
+    # ------------------------------------------------------- public (read-only)
+
+    def list_published_apps(
+        self, db: Session, *, domain_id: str | None = None
+    ) -> list[DataApp]:
+        q = db.query(DataApp).filter(DataApp.status == "published")
+        if domain_id:
+            q = q.filter(DataApp.domain_id == domain_id)
+        return q.order_by(desc(DataApp.published_at)).all()
+
+    def get_published_app(self, db: Session, app_id: str) -> DataApp | None:
+        app = self.get_app(db, app_id)
+        if not app or app.status != "published":
+            return None
+        return app
+
+    def query_published_app_data(
+        self, db: Session, app_id: str, *, limit: int = 100
+    ) -> dict:
+        """对外只读：返回已发布应用各数据集的数据。"""
+        app = self.get_published_app(db, app_id)
+        if not app:
+            raise ValueError("应用不存在或未发布")
+        datasets = []
+        for ds in app.datasets:
+            datasets.append(self.preview_dataset(db, app.id, ds.id, limit=limit))
+        return {"app_id": app.id, "datasets": datasets}
+
+    @staticmethod
+    def serialize_public_app(app: DataApp, *, detail: bool = False) -> dict:
+        data = {
+            "id": app.id,
+            "app_type": app.app_type,
+            "name": app.name,
+            "description": app.description,
+            "published_version": app.published_version,
+            "published_at": app.published_at,
+        }
+        if detail:
+            data["spec"] = _loads(app.spec_json, {})
+            data["datasets"] = [
+                {
+                    "id": ds.id,
+                    "name": ds.name,
+                    "compiled_sql": ds.compiled_sql,
+                }
+                for ds in app.datasets
+            ]
+        return data
 
     # ------------------------------------------------------------ serialization
 

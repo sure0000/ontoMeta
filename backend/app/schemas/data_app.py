@@ -13,14 +13,16 @@ from pydantic import BaseModel, Field
 
 class DataSourceCreate(BaseModel):
     name: str
-    kind: str = "mock"  # postgres/mysql/duckdb/http/mock
+    kind: str = "mock"  # postgres/mysql/duckdb/sqlite/http/mock
     dsn_secret_ref: str | None = None
+    mapping: dict[str, Any] | None = None
 
 
 class DataSourceUpdate(BaseModel):
     name: str | None = None
     kind: str | None = None
     dsn_secret_ref: str | None = None
+    mapping: dict[str, Any] | None = None
 
 
 class DataSourceOut(BaseModel):
@@ -28,6 +30,7 @@ class DataSourceOut(BaseModel):
     name: str
     kind: str
     status: str
+    mapping: dict[str, Any] | None = None
     tested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -190,3 +193,25 @@ class GenerateAppFromChatRequest(BaseModel):
     question: str
     conversation_id: str | None = None
     name: str | None = None
+
+
+# ------------------------------------------------------- public (external API)
+
+
+class PublicDataAppSummary(BaseModel):
+    id: str
+    app_type: str
+    name: str
+    description: str | None = None
+    published_version: int | None = None
+    published_at: datetime | None = None
+
+
+class PublicDataAppDetail(PublicDataAppSummary):
+    spec: dict[str, Any] | None = None
+    datasets: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicDataAppData(BaseModel):
+    app_id: str
+    datasets: list[DataAppPreviewResult] = Field(default_factory=list)

@@ -242,7 +242,9 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 
 ## 9. 分阶段实施
 
-**阶段 1（MVP，纯语义 + Mock 数据，不接物理源）**
+> 实现状态（截至当前提交）：阶段 1 ✅ 完成、阶段 2 ✅ 基本完成、阶段 3 🟡 部分完成。
+
+**阶段 1（MVP，纯语义 + Mock 数据，不接物理源）— ✅ 完成**
 - 表：`data_apps` / `data_app_datasets` / `data_app_versions`（Alembic）。
 - Binding Compiler（本体→SQL 文本）+ Mock Executor（造数）。
 - 后端 CRUD + preview(mock) + publish(confirmation+version)。
@@ -250,16 +252,23 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 - Chat BI「生成表格/大屏」按钮 → 生成草稿。
 - 交付：对话即可生成、预览（示例数据）、发布可分享的应用。
 
-**阶段 2（真实数据）**
-- `data_sources` 模型 + 连接测试 + 只读安全执行（DuckDB + 直连 PG/MySQL）。
-- 物理映射（本体 name ↔ DataHub urn ↔ 物理表列）。
-- 大屏编辑器（拖拽画布、多组件、自适应）。
-- 对外只读 API + iframe 嵌入 + `dataapps:read` scope。
+**阶段 2（真实数据）— ✅ 基本完成**
+- ✅ `data_sources` 模型（含 `mapping_json` 物理映射）+ 连接测试
+- ✅ 只读安全执行器 `data_app_executor`：仅 SELECT/WITH、禁危险关键字、强制 LIMIT、
+  SQLite/DuckDB 时间函数方言适配、物理映射整词替换；SQLAlchemy 直连（sqlite/duckdb/pg/mysql）
+- ✅ `preview` 优先真实数据源执行、失败降级 Mock
+- ✅ 大屏拖拽画布编辑器（增删组件、拖动/缩放、属性面板、绑定数据集、等比缩放）
+- ✅ 对外只读 API `/api/v1/data-apps[/{id}][/data]` + `dataapps:read` scope + iframe 嵌入页 `/embed/apps/:id`
+- 🟡 物理映射的可视化配置为 JSON 输入（进一步做成表单映射为后续项）
 
-**阶段 3（增强）**
-- 外挂 Cube 做跨源/预聚合/缓存/行级权限。
-- 定时刷新、导出（CSV/图片/PDF）、参数化筛选联动、下钻。
-- 应用市场/模板；MCP 工具暴露「生成/查询数据应用」。
+**阶段 3（增强）— 🟡 部分完成**
+- ✅ MCP 工具暴露：`list_data_apps` / `get_data_app` / `query_data_app`（目录同源）
+- ✅ 导出 CSV（前端客户端导出）
+- 🟡 参数化筛选联动 / 下钻：数据集已支持 filters/timeRange 绑定，联动交互待补
+- ⛔ 外挂 Cube（跨源/预聚合/缓存/行级权限）：需独立部署 Cube 服务，作为基础设施项延期
+- ⛔ 定时刷新（cron）：需多实例任务队列（与 B5.1 多实例队列同批），延期
+
+**阶段 2/3 遗留（原文）**
 
 ---
 

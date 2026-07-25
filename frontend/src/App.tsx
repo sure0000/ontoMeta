@@ -8,6 +8,7 @@ import { ChatBiPage } from "./pages/chat-bi";
 import { DataAppEditorPage } from "./pages/DataAppEditorPage";
 import { DataAppsPage } from "./pages/DataAppsPage";
 import { DataAppViewPage } from "./pages/DataAppViewPage";
+import { DataAppEmbedPage } from "./pages/DataAppEmbedPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
 import { ExternalApiAppsPage } from "./pages/ExternalApiAppsPage";
@@ -46,6 +47,7 @@ export default function App() {
         <Route path="/external-api/endpoints/:apiId" element={<ExternalApiDetailPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
+      <Route path="/embed/apps/:appId" element={<DataAppEmbedPage />} />
     </Routes>
   );
 }

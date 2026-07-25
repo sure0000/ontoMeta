@@ -37,6 +37,9 @@ from app.schemas.data_app import (
     DataSourceOut,
     DataSourceUpdate,
     GenerateAppFromChatRequest,
+    PublicDataAppSummary,
+    PublicDataAppDetail,
+    PublicDataAppData,
 )
 from app.schemas.domain import (
     ChangeLogOut,
@@ -273,6 +276,9 @@ __all__ = [
     "DataAppPublishRequest",
     "DataAppVersionOut",
     "GenerateAppFromChatRequest",
+    "PublicDataAppSummary",
+    "PublicDataAppDetail",
+    "PublicDataAppData",
     "ExternalAppCreate",
     "ExternalAppUpdate",
     "ExternalAppOut",

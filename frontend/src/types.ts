@@ -808,3 +808,14 @@ export interface DataAppDatasetInput {
   binding: DataAppBinding;
   data_source_id?: string | null;
 }
+
+export interface DataSource {
+  id: string;
+  name: string;
+  kind: string; // sqlite / duckdb / postgres / mysql / mock
+  status: string; // untested / ok / error
+  mapping?: { tables?: Record<string, string>; columns?: Record<string, string> } | null;
+  tested_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}

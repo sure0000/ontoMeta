@@ -383,6 +383,83 @@ EXTERNAL_MCP_TOOLS: list[dict[str, Any]] = [
             "property_bindings": [],
         },
     },
+    {
+        "id": "list-data-apps",
+        "name": "查询数据应用列表",
+        "tool_name": "list_data_apps",
+        "category": "数据应用",
+        "description": "查询已发布的数据应用（数据表格 / 可视化大屏），可按数据域过滤。",
+        "auth_required": True,
+        "required_scope": "dataapps:read",
+        "rest_method": "GET",
+        "rest_path": "/api/v1/data-apps",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "domain_id": {"type": "string", "description": "数据域 ID，可选"},
+            },
+            "additionalProperties": False,
+        },
+        "output_fields": [
+            {"name": "id", "type": "string", "description": "数据应用 ID"},
+            {"name": "app_type", "type": "string", "description": "data_table / screen"},
+            {"name": "name", "type": "string", "description": "应用名称"},
+            {"name": "published_version", "type": "integer", "description": "已发布版本"},
+        ],
+        "example_result": [
+            {"id": "app-001", "app_type": "data_table", "name": "渠道金额表", "published_version": 1}
+        ],
+    },
+    {
+        "id": "get-data-app",
+        "name": "查询数据应用详情",
+        "tool_name": "get_data_app",
+        "category": "数据应用",
+        "description": "获取单个已发布数据应用的配置（spec）与数据集定义。",
+        "auth_required": True,
+        "required_scope": "dataapps:read",
+        "rest_method": "GET",
+        "rest_path": "/api/v1/data-apps/{app_id}",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "description": "数据应用 ID"},
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+        "output_fields": [
+            {"name": "id", "type": "string", "description": "数据应用 ID"},
+            {"name": "spec", "type": "object", "description": "渲染配置"},
+            {"name": "datasets", "type": "array", "description": "数据集定义"},
+        ],
+        "example_result": {"id": "app-001", "name": "渠道金额表", "datasets": []},
+    },
+    {
+        "id": "query-data-app",
+        "name": "查询数据应用数据",
+        "tool_name": "query_data_app",
+        "category": "数据应用",
+        "description": "执行已发布数据应用的各数据集，返回列与行数据（无物理数据源时返回示例数据）。",
+        "auth_required": True,
+        "required_scope": "dataapps:read",
+        "rest_method": "GET",
+        "rest_path": "/api/v1/data-apps/{app_id}/data",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "description": "数据应用 ID"},
+                "limit": {"type": "integer", "description": "每个数据集返回行数上限，默认 100"},
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+        "output_fields": [
+            {"name": "app_id", "type": "string", "description": "数据应用 ID"},
+            {"name": "datasets", "type": "array", "description": "各数据集的 columns / rows"},
+        ],
+        "example_result": {"app_id": "app-001", "datasets": []},
+    },
 ]
 
 
@@ -572,6 +649,29 @@ class ExternalApiService:
                 if not detail or detail.status != "published":
                     return _tool_result("业务逻辑不存在或未发布", is_error=True)
                 data = detail
+            elif name in {"list_data_apps", "get_data_app", "query_data_app"}:
+                from app.services.data_app import DataAppService
+
+                svc = DataAppService()
+                if name == "list_data_apps":
+                    data = [
+                        svc.serialize_public_app(a)
+                        for a in svc.list_published_apps(
+                            db, domain_id=args.get("domain_id")
+                        )
+                    ]
+                elif name == "get_data_app":
+                    app_obj = svc.get_published_app(db, args["app_id"])
+                    if not app_obj:
+                        return _tool_result("数据应用不存在或未发布", is_error=True)
+                    data = svc.serialize_public_app(app_obj, detail=True)
+                else:  # query_data_app
+                    try:
+                        data = svc.query_published_app_data(
+                            db, args["app_id"], limit=int(args.get("limit") or 100)
+                        )
+                    except ValueError as exc:
+                        return _tool_result(str(exc), is_error=True)
             else:
                 return _tool_result(f"工具未实现：{name}", is_error=True)
         except HTTPException:

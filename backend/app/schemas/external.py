@@ -10,6 +10,7 @@ ALL_EXTERNAL_SCOPES: list[str] = [
     "objects:read",
     "relations:read",
     "logics:read",
+    "dataapps:read",
 ]
 
 

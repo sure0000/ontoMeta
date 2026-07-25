@@ -35,12 +35,14 @@ from app.services.external_api import (
     ExternalApiService,
     require_scope,
 )
+from app.services.data_app import DataAppService
 from app.services.query import OntologyQueryService, WorkspaceService
 
 router = APIRouter()
 external_api = ExternalApiService()
 query = OntologyQueryService()
 workspace = WorkspaceService()
+data_app_service = DataAppService()
 
 
 def _require_external_app(
@@ -502,5 +504,84 @@ def v1_get_business_logic(
             status_code=exc.status_code,
             started=started,
             error_message=str(exc.detail),
+        )
+        raise
+
+
+@v1_router.get("/data-apps")
+def v1_list_data_apps(
+    domain_id: str | None = Query(None),
+    db: Session = Depends(get_db),
+    app: ExternalApp = Depends(_require_external_app),
+):
+    started = time.perf_counter()
+    path = "/api/v1/data-apps"
+    try:
+        require_scope(app, "dataapps:read")
+        data = [
+            data_app_service.serialize_public_app(a)
+            for a in data_app_service.list_published_apps(db, domain_id=domain_id)
+        ]
+        _log_v1_call(
+            db, app, path=path, tool_name="list_data_apps", status_code=200, started=started
+        )
+        return data
+    except HTTPException as exc:
+        _log_v1_call(
+            db, app, path=path, tool_name="list_data_apps",
+            status_code=exc.status_code, started=started, error_message=str(exc.detail),
+        )
+        raise
+
+
+@v1_router.get("/data-apps/{app_id}")
+def v1_get_data_app(
+    app_id: str,
+    db: Session = Depends(get_db),
+    app: ExternalApp = Depends(_require_external_app),
+):
+    started = time.perf_counter()
+    path = f"/api/v1/data-apps/{app_id}"
+    try:
+        require_scope(app, "dataapps:read")
+        published = data_app_service.get_published_app(db, app_id)
+        if not published:
+            raise HTTPException(status_code=404, detail="数据应用不存在或未发布")
+        data = data_app_service.serialize_public_app(published, detail=True)
+        _log_v1_call(
+            db, app, path=path, tool_name="get_data_app", status_code=200, started=started
+        )
+        return data
+    except HTTPException as exc:
+        _log_v1_call(
+            db, app, path=path, tool_name="get_data_app",
+            status_code=exc.status_code, started=started, error_message=str(exc.detail),
+        )
+        raise
+
+
+@v1_router.get("/data-apps/{app_id}/data")
+def v1_query_data_app(
+    app_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    app: ExternalApp = Depends(_require_external_app),
+):
+    started = time.perf_counter()
+    path = f"/api/v1/data-apps/{app_id}/data"
+    try:
+        require_scope(app, "dataapps:read")
+        try:
+            data = data_app_service.query_published_app_data(db, app_id, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _log_v1_call(
+            db, app, path=path, tool_name="query_data_app", status_code=200, started=started
+        )
+        return data
+    except HTTPException as exc:
+        _log_v1_call(
+            db, app, path=path, tool_name="query_data_app",
+            status_code=exc.status_code, started=started, error_message=str(exc.detail),
         )
         raise

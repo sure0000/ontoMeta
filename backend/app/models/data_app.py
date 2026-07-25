@@ -33,6 +33,8 @@ class DataSource(Base):
     kind: Mapped[str] = mapped_column(String(50))  # postgres/mysql/duckdb/http/mock
     # DSN / 密钥仅存引用或加密串，阶段 1 允许为空
     dsn_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 物理映射：{"tables":{ontologyName:physical}, "columns":{...}}，Text(json)
+    mapping_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="untested")
     tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
