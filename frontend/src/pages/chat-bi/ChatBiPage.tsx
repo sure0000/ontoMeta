@@ -662,7 +662,11 @@ const ChatBiMain = memo(function ChatBiMain({
   const navigate = useNavigate();
 
   const handleGenerateApp = useCallback(
-    async (question: string, appType: "data_table" | "screen") => {
+    async (
+      question: string,
+      appType: "data_table" | "screen",
+      payload?: ChatBiAnswer,
+    ) => {
       if (!domainId || !question.trim()) return;
       const hide = message.loading(
         appType === "screen" ? "正在生成大屏…" : "正在生成表格…",
@@ -673,6 +677,10 @@ const ChatBiMain = memo(function ChatBiMain({
           domain_id: domainId,
           app_type: appType,
           question,
+          conversation_id: activeConversationId ?? undefined,
+          // 复用当前回答的口径，保证生成应用与对话展示一致（不重调 LLM）
+          caliber_decomposition: payload?.caliber_decomposition,
+          referenced_objects: payload?.referenced_objects,
         });
         hide();
         message.success("已生成数据应用草稿");
@@ -682,7 +690,7 @@ const ChatBiMain = memo(function ChatBiMain({
         message.error(err instanceof Error ? err.message : "生成失败");
       }
     },
-    [domainId, navigate],
+    [domainId, navigate, activeConversationId],
   );
 
   useEffect(() => {

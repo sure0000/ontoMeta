@@ -901,25 +901,43 @@ class DataAppService:
         question: str,
         conversation_id: str | None = None,
         name: str | None = None,
+        caliber_decomposition: list[dict] | None = None,
+        referenced_objects: list[dict] | None = None,
     ) -> DataApp:
-        """复用 Chat BI 口径拆解结果，生成一个数据应用草稿。"""
+        """基于 Chat BI 口径拆解生成数据应用草稿。
+
+        一致性保证：若前端传入用户已看到的回答载荷（caliber_decomposition /
+        referenced_objects），则直接复用，**不重新调用 LLM**，确保生成的应用
+        与对话中展示的口径完全一致；仅当未传时才回退到重新 ask()。
+        """
         from app.services.chat_bi import ChatBiService
 
         if app_type not in APP_TYPES:
             raise ValueError(f"不支持的应用类型：{app_type}")
-        answer = await ChatBiService().ask(db, domain_id=domain_id, question=question)
-        if answer.get("grounding_refused") or (
-            not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
-        ):
-            raise ValueError(
-                "无法基于已发布本体将该问题落地为数据应用：未命中对象或口径。"
-            )
+
+        caliber = caliber_decomposition or []
+        refs = referenced_objects or []
+        if not caliber and not refs:
+            # 未携带载荷（如直接调 API）：回退到重新问数
+            answer = await ChatBiService().ask(db, domain_id=domain_id, question=question)
+            if answer.get("grounding_refused") or (
+                not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
+            ):
+                raise ValueError(
+                    "无法基于已发布本体将该问题落地为数据应用：未命中对象或口径。"
+                )
+            caliber = answer.get("caliber_decomposition") or []
+            refs = answer.get("referenced_objects") or []
 
         binding = self._binding_from_caliber(
             db,
-            caliber=answer.get("caliber_decomposition") or [],
-            referenced_objects=answer.get("referenced_objects") or [],
+            caliber=caliber,
+            referenced_objects=refs,
         )
+        if not binding.get("primary_object_type_id"):
+            raise ValueError(
+                "无法基于已发布本体将该问题落地为数据应用：未命中主对象。"
+            )
         dataset = {
             "name": (question[:40] or "数据集"),
             "primary_object_type_id": binding.get("primary_object_type_id"),
@@ -932,7 +950,7 @@ class DataAppService:
             domain_id=domain_id,
             app_type=app_type,
             name=app_name,
-            description=f"由智能问数生成：{question}"[:255],
+            description=f"由 Data Agent 生成：{question}"[:255],
             source="chat_generated",
             spec=spec,
             datasets=[dataset],

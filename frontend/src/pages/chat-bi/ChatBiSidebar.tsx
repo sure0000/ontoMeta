@@ -11,6 +11,7 @@ import {
   PushpinFilled,
   PushpinOutlined,
   RightOutlined,
+  RobotOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
 import {
@@ -100,6 +101,20 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
 }: ChatBiSidebarProps) {
   return (
     <aside className="chatbi-sidebar">
+      <div className="chatbi-sidebar-brand">
+        <div className="chatbi-sidebar-brand-icon">
+          <RobotOutlined />
+        </div>
+        <div className="chatbi-sidebar-brand-text">
+          <div className="chatbi-sidebar-brand-title">Data Agent</div>
+          <div className="chatbi-sidebar-brand-sub">
+            {conversations.length} 个对话
+            {archivedConversations.length > 0
+              ? ` · ${archivedConversations.length} 归档`
+              : ""}
+          </div>
+        </div>
+      </div>
       <div className="chatbi-sidebar-header">
         <Select
           style={{ width: "100%" }}

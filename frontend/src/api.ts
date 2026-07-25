@@ -820,6 +820,8 @@ export const api = {
     question: string;
     conversation_id?: string;
     name?: string;
+    caliber_decomposition?: unknown[];
+    referenced_objects?: unknown[];
   }) =>
     request<DataAppDetail>(`/api/chat-bi/generate-app`, {
       method: "POST",

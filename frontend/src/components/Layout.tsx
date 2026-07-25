@@ -115,7 +115,7 @@ export function AppLayout() {
         icon: <FunctionOutlined />,
         label: "业务逻辑",
       },
-      { key: "/chat-bi", icon: <RobotOutlined />, label: "智能问数" },
+      { key: "/chat-bi", icon: <RobotOutlined />, label: "Data Agent" },
       { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },
       {
         key: "/external-api",

@@ -200,6 +200,9 @@ class GenerateAppFromChatRequest(BaseModel):
     question: str
     conversation_id: str | None = None
     name: str | None = None
+    # 复用对话中已展示的回答载荷，保证生成应用与对话口径一致（不重调 LLM）
+    caliber_decomposition: list[dict[str, Any]] | None = None
+    referenced_objects: list[dict[str, Any]] | None = None
 
 
 # ------------------------------------------------------- public (external API)

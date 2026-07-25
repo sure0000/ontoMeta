@@ -101,7 +101,7 @@ class ChatBiService:
                 "answer": (
                     f"「{domain.name}」当前还没有已发布的本体。"
                     "请先在「本体建模」中完成草稿编辑并发布，"
-                    "智能问数会基于已发布本体的对象、字段、关系与业务逻辑进行解读。"
+                    "Data Agent 会基于已发布本体的对象、字段、关系与业务逻辑进行解读。"
                 ),
                 "suggested_sql": None,
                 "referenced_objects": [],

@@ -178,3 +178,47 @@ def test_generate_app_refuses_ungrounded(client, admin_headers):
         },
     )
     assert res.status_code == 400, res.text
+
+
+def test_generate_app_reuses_provided_caliber(client, admin_headers):
+    """点击生成时复用对话已展示的口径，而非重新 ask（保证一致性）。"""
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    db = SessionLocal()
+    try:
+        channel = (
+            db.query(Property)
+            .filter(Property.object_type_id == obj_id, Property.name == "channel")
+            .first()
+        )
+        channel_id = channel.id
+    finally:
+        db.close()
+
+    caliber = [
+        {"label": "主对象", "references": [{"kind": "object_type", "id": obj_id, "name": "orders"}]},
+        {"label": "度量字段", "references": [{"kind": "property", "id": amount_id, "name": "amount"}]},
+        {"label": "维度", "references": [{"kind": "property", "id": channel_id, "name": "channel"}]},
+    ]
+    res = client.post(
+        "/api/chat-bi/generate-app",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "app_type": "data_table",
+            "question": "各渠道金额合计",
+            "caliber_decomposition": caliber,
+            "referenced_objects": [{"id": obj_id, "name": "orders"}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    app = res.json()
+    ds = app["datasets"][0]
+    assert ds["primary_object_type_id"] == obj_id
+    binding = ds["binding"]
+    measure_ids = [m["ref"]["id"] for m in binding["measures"]]
+    dim_ids = [d["id"] for d in binding["dimensions"]]
+    assert amount_id in measure_ids
+    assert channel_id in dim_ids
+    # 复用口径 → 编译 SQL 与该口径一致
+    assert "SUM(amount)" in (ds["compiled_sql"] or "")
+    assert "GROUP BY channel" in (ds["compiled_sql"] or "")

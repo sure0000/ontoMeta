@@ -125,7 +125,7 @@ async function resolveBreadcrumbs(
   }
 
   if (pathname.startsWith("/chat-bi")) {
-    return [{ label: "智能问数" }];
+    return [{ label: "Data Agent" }];
   }
 
   if (pathname === "/external-api/apps" || pathname === "/external-api") {

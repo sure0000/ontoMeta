@@ -243,6 +243,8 @@ async def generate_app_from_chat(
             question=data.question,
             conversation_id=data.conversation_id,
             name=data.name,
+            caliber_decomposition=data.caliber_decomposition,
+            referenced_objects=data.referenced_objects,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

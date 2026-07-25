@@ -150,7 +150,11 @@ export function ChatBubble({
 }: {
   message: ChatMessage;
   question?: string;
-  onGenerateApp?: (question: string, appType: "data_table" | "screen") => void;
+  onGenerateApp?: (
+    question: string,
+    appType: "data_table" | "screen",
+    payload?: ChatMessage["payload"],
+  ) => void;
 }) {
   const isUser = message.role === "user";
   const grounded =
@@ -226,14 +230,14 @@ export function ChatBubble({
                   <Button
                     size="small"
                     icon={<TableOutlined />}
-                    onClick={() => onGenerateApp!(question!, "data_table")}
+                    onClick={() => onGenerateApp!(question!, "data_table", message.payload)}
                   >
                     生成表格
                   </Button>
                   <Button
                     size="small"
                     icon={<FundProjectionScreenOutlined />}
-                    onClick={() => onGenerateApp!(question!, "screen")}
+                    onClick={() => onGenerateApp!(question!, "screen", message.payload)}
                   >
                     生成大屏
                   </Button>

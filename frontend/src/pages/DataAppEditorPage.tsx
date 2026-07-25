@@ -350,7 +350,7 @@ export function DataAppEditorPage() {
         {app.datasets.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="暂无数据集。可在「智能问数」提问后一键生成，或点此新建并绑定本体对象/字段。"
+            description="暂无数据集。可在「Data Agent」提问后一键生成，或点此新建并绑定本体对象/字段。"
           />
         ) : (
           <Space direction="vertical" style={{ width: "100%" }}>
