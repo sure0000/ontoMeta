@@ -20,9 +20,9 @@ from starlette.types import ASGIApp
 
 from app.config import settings
 
-# 管理鉴权豁免：健康检查、对外 v1、MCP（已有 External App API Key）
+# 管理鉴权豁免：健康检查、对外 v1、MCP（已有 External App API Key）、公开分享看板
 _ADMIN_EXEMPT_EXACT = frozenset({"/health"})
-_ADMIN_EXEMPT_PREFIXES = ("/api/v1", "/api/mcp")
+_ADMIN_EXEMPT_PREFIXES = ("/api/v1", "/api/mcp", "/api/public")
 
 
 def is_admin_auth_exempt(path: str) -> bool:

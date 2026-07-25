@@ -418,3 +418,89 @@ def test_generate_widget_from_chat_into_dashboard(client, admin_headers):
     # 看板已追加该图表 tile
     detail = client.get(f"/api/data-apps/{dash['id']}", headers=admin_headers).json()
     assert any(t.get("widget_id") == widget["id"] for t in detail["spec"]["tiles"])
+
+
+def _publish_simple_app(client, admin_headers, domain_id, obj_id, amount_id):
+    res = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "app_type": "data_table",
+            "name": "对外表",
+            "datasets": [
+                {
+                    "name": "金额",
+                    "primary_object_type_id": obj_id,
+                    "binding": {
+                        "primary_object_type_id": obj_id,
+                        "measures": [{"ref": {"kind": "property", "id": amount_id, "name": "amount"}, "agg": "sum"}],
+                        "dimensions": [],
+                        "filters": [],
+                        "row_limit": 100,
+                    },
+                }
+            ],
+        },
+    )
+    app_id = res.json()["id"]
+    client.post(f"/api/data-apps/{app_id}/publish", headers=admin_headers, json={})
+    return app_id
+
+
+def test_public_share_flow(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    app_id = _publish_simple_app(client, admin_headers, domain_id, obj_id, amount_id)
+
+    # 开启公开分享
+    res = client.post(f"/api/data-apps/{app_id}/share", headers=admin_headers, json={})
+    assert res.status_code == 200, res.text
+    status = res.json()
+    assert status["public_enabled"] is True
+    token = status["public_token"]
+    assert token
+
+    # 免登录访问（无 admin token）
+    res = client.get(f"/api/public/data-apps/{token}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["id"] == app_id
+    assert body["render"]["datasets"]
+
+    # 关闭分享 → 404
+    client.delete(f"/api/data-apps/{app_id}/share", headers=admin_headers)
+    res = client.get(f"/api/public/data-apps/{token}")
+    assert res.status_code == 404
+
+
+def test_public_share_password(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    app_id = _publish_simple_app(client, admin_headers, domain_id, obj_id, amount_id)
+
+    res = client.post(
+        f"/api/data-apps/{app_id}/share",
+        headers=admin_headers,
+        json={"password": "s3cret", "expires_in_days": 7},
+    )
+    token = res.json()["public_token"]
+    assert res.json()["password_set"] is True
+
+    # 无口令 → 401
+    assert client.get(f"/api/public/data-apps/{token}").status_code == 401
+    # 错误口令 → 403
+    assert client.get(f"/api/public/data-apps/{token}?password=wrong").status_code == 403
+    # 正确口令 → 200
+    assert client.get(f"/api/public/data-apps/{token}?password=s3cret").status_code == 200
+
+
+def test_public_share_requires_published(client, admin_headers):
+    domain_id, _ont, obj_id, _amount = _seed_published_ontology()
+    res = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={"domain_id": domain_id, "app_type": "dashboard", "name": "草稿看板"},
+    )
+    app_id = res.json()["id"]
+    # 未发布 → 开启分享 400
+    res = client.post(f"/api/data-apps/{app_id}/share", headers=admin_headers, json={})
+    assert res.status_code == 400

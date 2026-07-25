@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -35,6 +36,7 @@ from app.models import (
     Property,
 )
 from app.services.common import log_change
+from app.auth import hash_api_key
 from app.services.data_app_executor import ExecutionError, execute_sql, is_read_only
 from app.connectors.cube import CubeConnector, CubeExecutionError
 from app.services.ontology_query import OntologyQueryService
@@ -847,18 +849,96 @@ class DataAppService:
         self, db: Session, app_id: str, *, limit: int = 100,
         security_context: dict | None = None,
     ) -> dict:
-        """对外只读：返回已发布应用各数据集的数据（可带行级权限上下文）。"""
+        """对外只读：返回已发布应用各数据集与图表 tile 的数据。"""
         app = self.get_published_app(db, app_id)
         if not app:
             raise ValueError("应用不存在或未发布")
-        datasets = []
-        for ds in app.datasets:
-            datasets.append(
-                self.preview_dataset(
-                    db, app.id, ds.id, limit=limit, security_context=security_context
-                )
-            )
-        return {"app_id": app.id, "datasets": datasets}
+        return self._render_app_data(db, app, limit=limit, security_context=security_context)
+
+    def _render_app_data(
+        self, db: Session, app: DataApp, *, limit: int = 100,
+        security_context: dict | None = None,
+    ) -> dict:
+        """汇总一个应用的渲染数据：各数据集预览 + （看板）各图表 tile 预览。"""
+        datasets = [
+            self.preview_dataset(db, app.id, ds.id, limit=limit, security_context=security_context)
+            for ds in app.datasets
+        ]
+        widgets: dict[str, dict] = {}
+        spec = _loads(app.spec_json, {})
+        for tile in spec.get("tiles") or []:
+            wid = tile.get("widget_id")
+            if wid and wid not in widgets:
+                try:
+                    widgets[wid] = self.preview_widget(
+                        db, wid, limit=limit, security_context=security_context
+                    )
+                except ValueError:
+                    continue
+        return {"app_id": app.id, "datasets": datasets, "widgets": widgets}
+
+    # ----------------------------------------------------------- public share
+
+    def enable_public_share(
+        self, db: Session, app_id: str, *, password: str | None = None,
+        expires_in_days: int | None = None,
+    ) -> DataApp:
+        app = db.get(DataApp, app_id)
+        if not app:
+            raise ValueError("数据应用不存在")
+        if app.status != "published":
+            raise ValueError("请先发布后再开启公开分享")
+        if not app.public_token:
+            app.public_token = secrets.token_urlsafe(24)
+        app.public_enabled = True
+        app.public_password_hash = hash_api_key(password) if password else None
+        if expires_in_days and expires_in_days > 0:
+            from datetime import timedelta
+
+            app.public_expires_at = _now() + timedelta(days=expires_in_days)
+        else:
+            app.public_expires_at = None
+        log_change(db, "data_app", app.id, "share_enable")
+        db.commit()
+        db.refresh(app)
+        return app
+
+    def disable_public_share(self, db: Session, app_id: str) -> DataApp:
+        app = db.get(DataApp, app_id)
+        if not app:
+            raise ValueError("数据应用不存在")
+        app.public_enabled = False
+        log_change(db, "data_app", app.id, "share_disable")
+        db.commit()
+        db.refresh(app)
+        return app
+
+    def get_public_app(self, db: Session, token: str, *, password: str | None = None) -> DataApp:
+        """校验公开分享：启用/未过期/口令。失败抛 ValueError（endpoint 映射 403/404）。"""
+        app = (
+            db.query(DataApp)
+            .options(joinedload(DataApp.datasets))
+            .filter(DataApp.public_token == token)
+            .first()
+        )
+        if not app or not app.public_enabled:
+            raise ValueError("分享链接不存在或已关闭")
+        if app.public_expires_at and _now() > app.public_expires_at:
+            raise ValueError("分享链接已过期")
+        if app.public_password_hash:
+            if not password:
+                raise ValueError("__PASSWORD_REQUIRED__")
+            if hash_api_key(password) != app.public_password_hash:
+                raise ValueError("访问口令错误")
+        return app
+
+    def public_share_status(self, app: DataApp) -> dict:
+        return {
+            "public_enabled": app.public_enabled,
+            "public_token": app.public_token if app.public_enabled else None,
+            "password_set": bool(app.public_password_hash),
+            "public_expires_at": app.public_expires_at,
+        }
 
     @staticmethod
     def serialize_public_app(app: DataApp, *, detail: bool = False) -> dict:

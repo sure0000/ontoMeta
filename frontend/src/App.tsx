@@ -9,6 +9,7 @@ import { DataAppEditorPage } from "./pages/DataAppEditorPage";
 import { DataAppsPage } from "./pages/DataAppsPage";
 import { DataAppViewPage } from "./pages/DataAppViewPage";
 import { DataAppEmbedPage } from "./pages/DataAppEmbedPage";
+import { DataAppPublicPage } from "./pages/DataAppPublicPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
 import { ExternalApiAppsPage } from "./pages/ExternalApiAppsPage";
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       <Route path="/embed/apps/:appId" element={<DataAppEmbedPage />} />
+      <Route path="/public/apps/:token" element={<DataAppPublicPage />} />
     </Routes>
   );
 }

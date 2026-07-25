@@ -12,6 +12,7 @@ import {
   Tag,
 } from "antd";
 import { PlusOutlined, SearchOutlined } from "@ant-design/icons";
+import { Switch } from "antd";
 import { api } from "../api";
 import { DatasetEditor } from "./DatasetEditor";
 import type { DataAppWidget, DataSource } from "../types";
@@ -39,11 +40,12 @@ export function WidgetLibraryModal({
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [showEditor, setShowEditor] = useState(false);
   const [newType, setNewType] = useState("bar");
+  const [crossDomain, setCrossDomain] = useState(false);
 
   const load = () => {
     setLoading(true);
     api
-      .listWidgets({ domainId, q: q || undefined })
+      .listWidgets({ domainId: crossDomain ? undefined : domainId, q: q || undefined })
       .then(setWidgets)
       .catch(() => setWidgets([]))
       .finally(() => setLoading(false));
@@ -54,7 +56,7 @@ export function WidgetLibraryModal({
     load();
     api.listDataSources().then(setDataSources).catch(() => setDataSources([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, q, domainId]);
+  }, [open, q, domainId, crossDomain]);
 
   const handleCreate = async (payload: {
     name: string;
@@ -118,6 +120,10 @@ export function WidgetLibraryModal({
         <Button icon={<PlusOutlined />} type="primary" onClick={() => setShowEditor(true)}>
           新建图表
         </Button>
+        <Space size={4}>
+          <Switch size="small" checked={crossDomain} onChange={setCrossDomain} />
+          <span style={{ fontSize: 12, color: "var(--om-text-tertiary)" }}>跨数据域</span>
+        </Space>
       </Space>
 
       <List

@@ -8,6 +8,7 @@ from app.api import (
     confirmations,
     data_app,
     ontology,
+    public_routes,
     settings,
     workspace,
 )
@@ -20,3 +21,4 @@ router.include_router(business_logic.router)
 router.include_router(confirmations.router)
 router.include_router(chat_bi.router)
 router.include_router(data_app.router)
+router.include_router(public_routes.router)

@@ -27,6 +27,8 @@ from app.schemas import (
     DataSourceUpdate,
     GenerateAppFromChatRequest,
     GenerateWidgetFromChatRequest,
+    PublicShareRequest,
+    PublicShareStatus,
 )
 
 router = APIRouter()
@@ -213,6 +215,37 @@ def publish_data_app(
 @router.get("/data-apps/{app_id}/versions", response_model=list[DataAppVersionOut])
 def list_data_app_versions(app_id: str, db: Session = Depends(get_db)):
     return data_app_service.list_versions(db, app_id)
+
+
+# --------------------------------------------------------------- public share
+
+
+@router.get("/data-apps/{app_id}/share", response_model=PublicShareStatus)
+def get_share_status(app_id: str, db: Session = Depends(get_db)):
+    app = data_app_service.get_app(db, app_id)
+    if not app:
+        raise HTTPException(status_code=404, detail="数据应用不存在")
+    return data_app_service.public_share_status(app)
+
+
+@router.post("/data-apps/{app_id}/share", response_model=PublicShareStatus)
+def enable_share(app_id: str, data: PublicShareRequest, db: Session = Depends(get_db)):
+    try:
+        app = data_app_service.enable_public_share(
+            db, app_id, password=data.password, expires_in_days=data.expires_in_days
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return data_app_service.public_share_status(app)
+
+
+@router.delete("/data-apps/{app_id}/share", response_model=PublicShareStatus)
+def disable_share(app_id: str, db: Session = Depends(get_db)):
+    try:
+        app = data_app_service.disable_public_share(db, app_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return data_app_service.public_share_status(app)
 
 
 # ------------------------------------------------------------- cube model gen

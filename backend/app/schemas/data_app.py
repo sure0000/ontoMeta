@@ -251,6 +251,18 @@ class AddWidgetToDashboardRequest(BaseModel):
     widget_id: str
 
 
+class PublicShareRequest(BaseModel):
+    password: str | None = None
+    expires_in_days: int | None = None
+
+
+class PublicShareStatus(BaseModel):
+    public_enabled: bool
+    public_token: str | None = None
+    password_set: bool = False
+    public_expires_at: datetime | None = None
+
+
 class GenerateAppFromChatRequest(BaseModel):
     domain_id: str
     app_type: str  # data_table / screen

@@ -37,6 +37,7 @@ import type {
   DataAppDatasetInput,
   DataAppBinding,
   DataAppWidget,
+  PublicShareStatus,
   DataSource,
   ExternalApp,
   ExternalAppCreated,
@@ -928,4 +929,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  // 公开分享
+  getShareStatus: (appId: string) =>
+    request<PublicShareStatus>(`/api/data-apps/${appId}/share`),
+  enableShare: (appId: string, body: { password?: string; expires_in_days?: number }) =>
+    request<PublicShareStatus>(`/api/data-apps/${appId}/share`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  disableShare: (appId: string) =>
+    request<PublicShareStatus>(`/api/data-apps/${appId}/share`, { method: "DELETE" }),
 };

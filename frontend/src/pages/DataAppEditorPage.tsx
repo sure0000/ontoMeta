@@ -28,6 +28,7 @@ import {
   AppstoreAddOutlined,
   PlusOutlined,
   ReloadOutlined,
+  ShareAltOutlined,
 } from "@ant-design/icons";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
@@ -40,6 +41,7 @@ import {
 } from "../components/DataAppRenderer";
 import { DatasetEditor } from "../components/DatasetEditor";
 import { DataSourcesModal } from "../components/DataSourcesModal";
+import { ShareModal } from "../components/ShareModal";
 import {
   ParamBar,
   buildRuntimeFilters,
@@ -75,6 +77,7 @@ export function DataAppEditorPage() {
   const [showDatasetEditor, setShowDatasetEditor] = useState(false);
   const [editingDataset, setEditingDataset] = useState<DataAppDataset | null>(null);
   const [showDataSources, setShowDataSources] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [selectedWidget, setSelectedWidget] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const widgetsRef = useRef<ScreenWidget[]>([]);
@@ -382,6 +385,9 @@ export function DataAppEditorPage() {
                 查看已发布
               </Button>
             )}
+            <Button icon={<ShareAltOutlined />} onClick={() => setShowShare(true)}>
+              分享
+            </Button>
             <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => setShowPublish(true)}>
               发布
             </Button>
@@ -819,6 +825,13 @@ export function DataAppEditorPage() {
       />
 
       <DataSourcesModal open={showDataSources} onClose={() => setShowDataSources(false)} />
+
+      <ShareModal
+        open={showShare}
+        appId={app.id}
+        published={app.status === "published"}
+        onClose={() => setShowShare(false)}
+      />
 
       <WidgetLibraryModal
         open={showWidgetLib}

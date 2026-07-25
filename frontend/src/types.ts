@@ -862,3 +862,10 @@ export interface DataAppWidget {
   created_at: string;
   updated_at: string;
 }
+
+export interface PublicShareStatus {
+  public_enabled: boolean;
+  public_token?: string | null;
+  password_set: boolean;
+  public_expires_at?: string | null;
+}
