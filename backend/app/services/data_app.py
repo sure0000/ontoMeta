@@ -804,11 +804,30 @@ class DataAppService:
             }
             for ds in app.datasets
         ]
+        # 引用版本锁定：快照看板所引用的图表定义，后续图表编辑不影响已发布看板
+        snapshot_widgets: dict[str, dict] = {}
+        spec = _loads(app.spec_json, {})
+        for tile in spec.get("tiles") or []:
+            wid = tile.get("widget_id")
+            if wid and wid not in snapshot_widgets:
+                w = db.get(DataAppWidget, wid)
+                if w:
+                    snapshot_widgets[wid] = {
+                        "id": w.id,
+                        "name": w.name,
+                        "widget_type": w.widget_type,
+                        "binding": _loads(w.binding_json, {}),
+                        "viz": _loads(w.viz_json, None),
+                        "data_source_id": w.data_source_id,
+                        "ontology_id": w.ontology_id,
+                        "compiled_sql": w.compiled_sql,
+                    }
         record = DataAppVersion(
             app_id=app.id,
             version=version,
             spec_snapshot_json=app.spec_json,
             datasets_snapshot_json=_dumps(snapshot_datasets),
+            widgets_snapshot_json=_dumps(snapshot_widgets),
             diff_summary=version_comment or f"发布 v{version}",
             operator=operator,
         )
@@ -859,23 +878,135 @@ class DataAppService:
         self, db: Session, app: DataApp, *, limit: int = 100,
         security_context: dict | None = None,
     ) -> dict:
-        """汇总一个应用的渲染数据：各数据集预览 + （看板）各图表 tile 预览。"""
+        """汇总一个应用的渲染数据：各数据集预览 + （看板）各图表 tile 预览。
+
+        已发布应用优先用【发布快照】中的图表定义执行（引用版本锁定），
+        图表后续被编辑不会改变已发布看板的呈现。
+        """
         datasets = [
             self.preview_dataset(db, app.id, ds.id, limit=limit, security_context=security_context)
             for ds in app.datasets
         ]
+        frozen = self._published_widget_snapshot(db, app)
         widgets: dict[str, dict] = {}
         spec = _loads(app.spec_json, {})
         for tile in spec.get("tiles") or []:
             wid = tile.get("widget_id")
-            if wid and wid not in widgets:
-                try:
+            if not wid or wid in widgets:
+                continue
+            snap = frozen.get(wid)
+            try:
+                if snap:
+                    out = self._execute_binding(
+                        db,
+                        binding=snap.get("binding") or {},
+                        ontology_id=snap.get("ontology_id"),
+                        data_source_id=snap.get("data_source_id"),
+                        limit=limit,
+                        security_context=security_context,
+                    )
+                    out["widget_id"] = wid
+                    widgets[wid] = out
+                else:
                     widgets[wid] = self.preview_widget(
                         db, wid, limit=limit, security_context=security_context
                     )
-                except ValueError:
-                    continue
+            except ValueError:
+                continue
         return {"app_id": app.id, "datasets": datasets, "widgets": widgets}
+
+    def _published_widget_snapshot(self, db: Session, app: DataApp) -> dict[str, dict]:
+        """取已发布版本的图表快照（无则空，退回实时）。"""
+        if app.status != "published" or not app.published_version:
+            return {}
+        record = (
+            db.query(DataAppVersion)
+            .filter(
+                DataAppVersion.app_id == app.id,
+                DataAppVersion.version == app.published_version,
+            )
+            .order_by(desc(DataAppVersion.created_at))
+            .first()
+        )
+        if not record:
+            return {}
+        return _loads(record.widgets_snapshot_json, {}) or {}
+
+    def record_view(self, db: Session, app: DataApp) -> None:
+        """轻量访问计数（对外只读页调用）。"""
+        try:
+            app.view_count = (app.view_count or 0) + 1
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+
+    def lineage(self, db: Session, app_id: str) -> dict:
+        """看板血缘：看板 → 图表/数据集 → 本体对象/字段。"""
+        app = self.get_app(db, app_id)
+        if not app:
+            raise ValueError("数据应用不存在")
+
+        obj_ids: set[str] = set()
+        prop_ids: set[str] = set()
+
+        def collect(binding: dict) -> tuple[set[str], set[str]]:
+            o: set[str] = set()
+            p: set[str] = set()
+            if binding.get("primary_object_type_id"):
+                o.add(binding["primary_object_type_id"])
+            for m in binding.get("measures") or []:
+                ref = m.get("ref") or {}
+                if ref.get("kind") == "property" and ref.get("id"):
+                    p.add(ref["id"])
+            for d in binding.get("dimensions") or []:
+                if d.get("id"):
+                    p.add(d["id"])
+            tr = (binding.get("time_range") or {}).get("ref") or {}
+            if tr.get("id"):
+                p.add(tr["id"])
+            return o, p
+
+        nodes: list[dict] = []
+        # 本地数据集
+        for ds in app.datasets:
+            o, p = collect(_loads(ds.binding_json, {}))
+            obj_ids |= o
+            prop_ids |= p
+            nodes.append({"kind": "dataset", "id": ds.id, "name": ds.name,
+                          "object_type_ids": sorted(o), "property_ids": sorted(p)})
+        # 引用图表
+        spec = _loads(app.spec_json, {})
+        seen_w: set[str] = set()
+        for tile in spec.get("tiles") or []:
+            wid = tile.get("widget_id")
+            if not wid or wid in seen_w:
+                continue
+            seen_w.add(wid)
+            w = db.get(DataAppWidget, wid)
+            if not w:
+                continue
+            o, p = collect(_loads(w.binding_json, {}))
+            obj_ids |= o
+            prop_ids |= p
+            nodes.append({"kind": "widget", "id": w.id, "name": w.name,
+                          "object_type_ids": sorted(o), "property_ids": sorted(p)})
+
+        objects = [
+            {"id": o.id, "name": o.name, "display_name": o.display_name}
+            for o in db.query(ObjectType).filter(ObjectType.id.in_(obj_ids)).all()
+        ] if obj_ids else []
+        props = [
+            {"id": p.id, "name": p.name, "display_name": p.display_name,
+             "object_type_id": p.object_type_id}
+            for p in db.query(Property).filter(Property.id.in_(prop_ids)).all()
+        ] if prop_ids else []
+        return {
+            "app_id": app.id,
+            "name": app.name,
+            "nodes": nodes,
+            "object_types": objects,
+            "properties": props,
+        }
 
     # ----------------------------------------------------------- public share
 
@@ -976,6 +1107,7 @@ class DataAppService:
             "current_version": app.current_version,
             "published_version": app.published_version,
             "published_at": app.published_at,
+            "view_count": app.view_count,
             "created_at": app.created_at,
             "updated_at": app.updated_at,
         }

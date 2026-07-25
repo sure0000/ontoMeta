@@ -51,7 +51,19 @@ export function DataAppViewPage() {
         /* ignore individual dataset failure */
       }
     }
+    const wout: Record<string, DataAppPreviewResult> = {};
+    const wtiles = ((app.spec?.tiles as { widget_id?: string }[]) ?? []).filter(
+      (t) => t.widget_id,
+    );
+    for (const t of wtiles) {
+      try {
+        wout[t.widget_id!] = await api.previewWidget(t.widget_id!, 50, filters);
+      } catch {
+        /* ignore */
+      }
+    }
     setPreviews(out);
+    setWidgetPreviews(wout);
   };
 
   // 已发布只读页：自动拉取各数据集/图表数据
@@ -192,29 +204,18 @@ export function DataAppViewPage() {
         <DashboardGrid
           tiles={tiles}
           grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+          theme={app.spec?.theme as { bg?: string; accent?: string; preset?: string }}
           datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
           previews={previewByIndex}
           widgetPreviews={widgetPreviews}
-          onDrill={(tile, column, value) => {
+          onDrill={(_tile, column, value) => {
             const next = [
               ...drills.filter((d) => d.column !== column),
               { column, value },
             ];
             setDrills(next);
-            const filters = buildRuntimeFilters(params, paramValues, next);
-            if (tile.widget_id) {
-              void api
-                .previewWidget(tile.widget_id, 50, filters)
-                .then((res) =>
-                  setWidgetPreviews((prev) => ({ ...prev, [tile.widget_id!]: res })),
-                );
-            } else {
-              const ds = app.datasets[tile.datasetIndex ?? 0];
-              if (ds)
-                void api
-                  .previewDataAppDataset(appId!, ds.id, 50, filters)
-                  .then((res) => setPreviews((prev) => ({ ...prev, [ds.id]: res })));
-            }
+            // 交叉过滤广播：刷新全部图表
+            void loadData(buildRuntimeFilters(params, paramValues, next));
           }}
         />
       ) : isScreen ? (

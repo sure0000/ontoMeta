@@ -71,6 +71,7 @@ class DataApp(Base):
     public_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     public_password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     public_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    view_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -147,6 +148,7 @@ class DataAppVersion(Base):
     version: Mapped[int] = mapped_column(Integer)
     spec_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     datasets_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    widgets_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     diff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

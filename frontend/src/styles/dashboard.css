@@ -18,3 +18,17 @@
 .dashboard-tile-drag {
   user-select: none;
 }
+
+/* 看板主题：深色 */
+.dashboard-canvas--dark .ant-card {
+  background: #12233d;
+  border-color: #1e3a5f;
+  color: #e2e8f0;
+}
+.dashboard-canvas--dark .ant-card-head {
+  color: #e2e8f0;
+  border-color: #1e3a5f;
+}
+.dashboard-canvas--dark .ant-empty-description {
+  color: #94a3b8;
+}

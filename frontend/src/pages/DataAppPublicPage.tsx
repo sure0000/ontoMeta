@@ -143,6 +143,7 @@ export function DataAppPublicPage() {
           <DashboardGrid
             tiles={tiles}
             grid={data.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+            theme={data.spec?.theme as { bg?: string; accent?: string; preset?: string }}
             datasets={data.datasets}
             previews={previewByIndex as never}
             widgetPreviews={widgetPreviews as never}

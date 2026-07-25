@@ -940,4 +940,12 @@ export const api = {
     }),
   disableShare: (appId: string) =>
     request<PublicShareStatus>(`/api/data-apps/${appId}/share`, { method: "DELETE" }),
+  getDataAppLineage: (appId: string) =>
+    request<{
+      app_id: string;
+      name: string;
+      nodes: { kind: string; id: string; name: string; object_type_ids: string[]; property_ids: string[] }[];
+      object_types: { id: string; name: string; display_name: string }[];
+      properties: { id: string; name: string; display_name: string; object_type_id: string }[];
+    }>(`/api/data-apps/${appId}/lineage`),
 };

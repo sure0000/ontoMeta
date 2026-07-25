@@ -504,3 +504,102 @@ def test_public_share_requires_published(client, admin_headers):
     # 未发布 → 开启分享 400
     res = client.post(f"/api/data-apps/{app_id}/share", headers=admin_headers, json={})
     assert res.status_code == 400
+
+
+def test_version_lock_widget_snapshot(client, admin_headers):
+    """已发布看板用发布快照的图表定义渲染，后续编辑图表不影响。"""
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    # 图表：sum(amount) 按 channel
+    db = SessionLocal()
+    try:
+        channel_id = (
+            db.query(Property)
+            .filter(Property.object_type_id == obj_id, Property.name == "channel")
+            .first()
+        ).id
+    finally:
+        db.close()
+    widget = client.post(
+        "/api/data-app-widgets",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "name": "原始图表",
+            "widget_type": "bar",
+            "primary_object_type_id": obj_id,
+            "binding": {
+                "primary_object_type_id": obj_id,
+                "measures": [{"ref": {"kind": "property", "id": amount_id, "name": "amount"}, "agg": "sum"}],
+                "dimensions": [{"kind": "property", "id": channel_id, "name": "channel"}],
+                "filters": [],
+                "row_limit": 100,
+            },
+        },
+    ).json()
+    wid = widget["id"]
+
+    dash = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={"domain_id": domain_id, "app_type": "dashboard", "name": "锁定看板"},
+    ).json()
+    app_id = dash["id"]
+    client.post(f"/api/data-apps/{app_id}/widgets", headers=admin_headers, json={"widget_id": wid})
+    client.post(f"/api/data-apps/{app_id}/publish", headers=admin_headers, json={})
+    share = client.post(f"/api/data-apps/{app_id}/share", headers=admin_headers, json={}).json()
+    token = share["public_token"]
+
+    # 发布后编辑图表：改名 + 只留 count（无 sum_amount 列）
+    client.patch(
+        f"/api/data-app-widgets/{wid}",
+        headers=admin_headers,
+        json={"name": "改过的图表", "binding": {"primary_object_type_id": obj_id, "measures": [], "dimensions": [], "filters": [], "row_limit": 5}},
+    )
+
+    # 对外渲染仍用发布快照 → 仍有 sum_amount 列
+    body = client.get(f"/api/public/data-apps/{token}").json()
+    wprev = body["render"]["widgets"][wid]
+    keys = {c["key"] for c in wprev["columns"]}
+    assert "sum_amount" in keys  # 锁定的是发布时口径
+
+
+def test_lineage(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    app = client.post(
+        "/api/data-apps",
+        headers=admin_headers,
+        json={
+            "domain_id": domain_id,
+            "app_type": "data_table",
+            "name": "血缘表",
+            "datasets": [
+                {
+                    "name": "金额",
+                    "primary_object_type_id": obj_id,
+                    "binding": {
+                        "primary_object_type_id": obj_id,
+                        "measures": [{"ref": {"kind": "property", "id": amount_id, "name": "amount"}, "agg": "sum"}],
+                        "dimensions": [],
+                        "filters": [],
+                        "row_limit": 100,
+                    },
+                }
+            ],
+        },
+    ).json()
+    res = client.get(f"/api/data-apps/{app['id']}/lineage", headers=admin_headers)
+    assert res.status_code == 200, res.text
+    lin = res.json()
+    assert any(o["id"] == obj_id for o in lin["object_types"])
+    assert any(p["id"] == amount_id for p in lin["properties"])
+    assert lin["nodes"] and lin["nodes"][0]["kind"] == "dataset"
+
+
+def test_view_count_increment(client, admin_headers):
+    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
+    app_id = _publish_simple_app(client, admin_headers, domain_id, obj_id, amount_id)
+    token = client.post(f"/api/data-apps/{app_id}/share", headers=admin_headers, json={}).json()["public_token"]
+    client.get(f"/api/public/data-apps/{token}")
+    client.get(f"/api/public/data-apps/{token}")
+    detail = client.get(f"/api/data-apps/{app_id}", headers=admin_headers).json()
+    assert detail["view_count"] >= 2

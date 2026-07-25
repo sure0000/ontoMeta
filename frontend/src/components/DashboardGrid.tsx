@@ -11,10 +11,12 @@ import type { DataAppPreviewResult } from "../types";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 
-// react-grid-layout 为 CJS（export =），WidthProvider 挂在默认导出对象上。
-const ResponsiveGrid = (
-  GridLayout as unknown as { WidthProvider: (c: unknown) => ComponentType<Record<string, unknown>> }
-).WidthProvider(GridLayout);
+// react-grid-layout 为 CJS（export =），WidthProvider/Responsive 挂在默认导出对象上。
+const RGL = GridLayout as unknown as {
+  WidthProvider: (c: unknown) => ComponentType<Record<string, unknown>>;
+  Responsive: unknown;
+};
+const ResponsiveGrid = RGL.WidthProvider(RGL.Responsive);
 
 type RGLItem = { i: string; x: number; y: number; w: number; h: number; minW?: number; minH?: number };
 
@@ -33,6 +35,7 @@ export interface DashboardTile {
 export interface DashboardGridProps {
   tiles: DashboardTile[];
   grid?: { cols?: number; rowHeight?: number; gap?: number };
+  theme?: { bg?: string; accent?: string; preset?: string };
   datasets: { id: string; name: string }[];
   previews: Record<number, DataAppPreviewResult>;
   widgetPreviews?: Record<string, DataAppPreviewResult>;
@@ -52,6 +55,7 @@ const WIDGET_OPTIONS = [
 export function DashboardGrid({
   tiles,
   grid,
+  theme,
   datasets,
   previews,
   widgetPreviews,
@@ -119,11 +123,19 @@ export function DashboardGrid({
     );
   }
 
+  const dark = theme?.preset === "dark";
+  const bg = theme?.bg || (dark ? "#0b1a2e" : "#f5f7fa");
+
   return (
+    <div
+      className={dark ? "dashboard-canvas dashboard-canvas--dark" : "dashboard-canvas"}
+      style={{ background: bg, padding: 12, borderRadius: 12 }}
+    >
     <ResponsiveGrid
       className="dashboard-grid"
-      layout={layout}
-      cols={cols}
+      layouts={{ lg: layout, md: layout, sm: layout, xs: layout }}
+      breakpoints={{ lg: 1200, md: 900, sm: 640, xs: 0 }}
+      cols={{ lg: cols, md: cols, sm: Math.max(2, Math.round(cols / 2)), xs: 1 }}
       rowHeight={rowHeight}
       margin={[margin, margin]}
       isDraggable={editable}
@@ -176,6 +188,7 @@ export function DashboardGrid({
         </div>
       ))}
     </ResponsiveGrid>
+    </div>
   );
 }
 

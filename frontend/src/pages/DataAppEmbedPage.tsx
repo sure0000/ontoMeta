@@ -90,6 +90,7 @@ export function DataAppEmbedPage() {
         <DashboardGrid
           tiles={tiles}
           grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+          theme={app.spec?.theme as { bg?: string; accent?: string; preset?: string }}
           datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
           previews={previewByIndex}
           widgetPreviews={widgetPreviews}

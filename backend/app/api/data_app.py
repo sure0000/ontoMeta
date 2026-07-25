@@ -217,6 +217,15 @@ def list_data_app_versions(app_id: str, db: Session = Depends(get_db)):
     return data_app_service.list_versions(db, app_id)
 
 
+@router.get("/data-apps/{app_id}/lineage")
+def get_data_app_lineage(app_id: str, db: Session = Depends(get_db)):
+    """看板血缘：看板 → 图表/数据集 → 本体对象/字段。"""
+    try:
+        return data_app_service.lineage(db, app_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 # --------------------------------------------------------------- public share
 
 

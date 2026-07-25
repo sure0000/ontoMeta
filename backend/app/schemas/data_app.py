@@ -129,6 +129,7 @@ class DataAppSummary(BaseModel):
     current_version: int
     published_version: int | None = None
     published_at: datetime | None = None
+    view_count: int = 0
     created_at: datetime
     updated_at: datetime
 

@@ -29,6 +29,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   ShareAltOutlined,
+  PartitionOutlined,
 } from "@ant-design/icons";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
@@ -78,6 +79,8 @@ export function DataAppEditorPage() {
   const [editingDataset, setEditingDataset] = useState<DataAppDataset | null>(null);
   const [showDataSources, setShowDataSources] = useState(false);
   const [showShare, setShowShare] = useState(false);
+  const [lineage, setLineage] = useState<Awaited<ReturnType<typeof api.getDataAppLineage>> | null>(null);
+  const [showLineage, setShowLineage] = useState(false);
   const [selectedWidget, setSelectedWidget] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const widgetsRef = useRef<ScreenWidget[]>([]);
@@ -388,6 +391,19 @@ export function DataAppEditorPage() {
             <Button icon={<ShareAltOutlined />} onClick={() => setShowShare(true)}>
               分享
             </Button>
+            <Button
+              icon={<PartitionOutlined />}
+              onClick={async () => {
+                try {
+                  setLineage(await api.getDataAppLineage(app.id));
+                  setShowLineage(true);
+                } catch (err) {
+                  message.error(err instanceof Error ? err.message : "获取血缘失败");
+                }
+              }}
+            >
+              血缘
+            </Button>
             <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => setShowPublish(true)}>
               发布
             </Button>
@@ -499,6 +515,20 @@ export function DataAppEditorPage() {
               <Button icon={<FilterOutlined />} onClick={addParam}>
                 添加筛选参数
               </Button>
+              <Segmented
+                size="small"
+                value={(app.spec?.theme as { preset?: string })?.preset || "light"}
+                options={[
+                  { label: "浅色", value: "light" },
+                  { label: "深色", value: "dark" },
+                ]}
+                onChange={(v) =>
+                  updateSpec({
+                    ...(app.spec ?? {}),
+                    theme: { ...((app.spec?.theme as object) ?? {}), preset: String(v) },
+                  })
+                }
+              />
               <Button onClick={() => previewAll()}>预览全部</Button>
             </Space>
           }
@@ -558,6 +588,7 @@ export function DataAppEditorPage() {
           <DashboardGrid
             tiles={tiles}
             grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+            theme={app.spec?.theme as { bg?: string; accent?: string; preset?: string }}
             datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
             previews={previewByIndex}
             widgetPreviews={widgetPreviews}
@@ -565,19 +596,14 @@ export function DataAppEditorPage() {
             onLayoutChange={commitTiles}
             onTilePatch={patchTile}
             onRemoveTile={removeTile}
-            onDrill={(tile, column, value) => {
+            onDrill={(_tile, column, value) => {
               const nextDrills = [
                 ...drills.filter((d) => d.column !== column),
                 { column, value },
               ];
               setDrills(nextDrills);
-              const filters = buildRuntimeFilters(params, paramValues, nextDrills);
-              if (tile.widget_id) {
-                void previewWidgetTile(tile.widget_id, filters);
-              } else {
-                const ds = app.datasets[tile.datasetIndex ?? 0];
-                if (ds) runPreview(ds.id, filters);
-              }
+              // 交叉过滤广播：下钻同时刷新看板内所有图表
+              previewAll(buildRuntimeFilters(params, paramValues, nextDrills));
             }}
           />
           <div style={{ textAlign: "right", marginTop: 8 }}>
@@ -832,6 +858,47 @@ export function DataAppEditorPage() {
         published={app.status === "published"}
         onClose={() => setShowShare(false)}
       />
+
+      <Modal
+        title="看板血缘（看板 → 图表/数据集 → 本体对象/字段）"
+        open={showLineage}
+        onCancel={() => setShowLineage(false)}
+        footer={null}
+        width={640}
+      >
+        {lineage && (
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <div>
+              <Text type="secondary">引用节点</Text>
+              <div>
+                {lineage.nodes.map((n) => (
+                  <Tag key={n.id} color={n.kind === "widget" ? "blue" : "default"}>
+                    {n.kind === "widget" ? "图表" : "数据集"}：{n.name}
+                  </Tag>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Text type="secondary">本体对象</Text>
+              <div>
+                {lineage.object_types.map((o) => (
+                  <Tag key={o.id} color="green">{o.display_name || o.name}</Tag>
+                ))}
+                {lineage.object_types.length === 0 && <Text type="secondary"> 无</Text>}
+              </div>
+            </div>
+            <div>
+              <Text type="secondary">本体字段</Text>
+              <div>
+                {lineage.properties.map((p) => (
+                  <Tag key={p.id}>{p.display_name || p.name}</Tag>
+                ))}
+                {lineage.properties.length === 0 && <Text type="secondary"> 无</Text>}
+              </div>
+            </div>
+          </Space>
+        )}
+      </Modal>
 
       <WidgetLibraryModal
         open={showWidgetLib}

@@ -30,6 +30,7 @@ def public_get_data_app(
         raise HTTPException(status_code=404, detail=msg) from exc
 
     render = data_app_service._render_app_data(db, app, limit=limit)
+    data_app_service.record_view(db, app)
     return {
         "id": app.id,
         "name": app.name,
