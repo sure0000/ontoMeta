@@ -295,14 +295,13 @@ GET /api/v1/data-apps/{publishedId}/data     # 已发布应用数据（scope: da
 
 1. **起 Cube 服务**：`docker-compose.yml` 取消注释 `cube` 与 `cube_refresh_worker`
    （或独立部署）。`cube_refresh_worker` 设 `CUBEJS_REFRESH_WORKER=true` → 预聚合定时刷新。
-2. **配 ontoMeta 环境变量**：
-   ```
-   USE_MOCK_CUBE=false
-   CUBE_API_URL=http://cube:4000
-   CUBE_API_SECRET=<与 Cube 的 CUBEJS_API_SECRET 相同>
-   CUBE_PREAGG_REFRESH=1 hour         # 预聚合刷新间隔
-   CUBE_TENANT_DIMENSION=tenant_id    # 行级权限列（可选）
-   ```
+2. **配 ontoMeta（全部在设置页，无需环境变量/配置文件）**：
+   打开【设置 → Cube 语义层】，关闭“使用 Mock”，填写：
+   - Cube API 地址（如 http://cube:4000）
+   - API 密钥（与 Cube 的 CUBEJS_API_SECRET 一致）
+   - 预聚合定时刷新间隔（如 1 hour）
+   - 行级权限：租户隔离列名（如 tenant_id，可选）
+   保存后立即生效（存入 DB）。
 3. **生成并落盘模型**（本体发布/变更时）：
    ```
    GET /api/ontologies/{id}/cube-model/files   # 返回 {model/cubes/*.js, cube.js}

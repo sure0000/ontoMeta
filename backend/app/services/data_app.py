@@ -36,6 +36,7 @@ from app.services.common import log_change
 from app.services.data_app_executor import ExecutionError, execute_sql, is_read_only
 from app.connectors.cube import CubeConnector, CubeExecutionError
 from app.services.ontology_query import OntologyQueryService
+from app.services.settings_service import SettingsService
 
 logger = logging.getLogger("ontometa.data_app")
 
@@ -74,6 +75,15 @@ class DataAppService:
 
     def __init__(self) -> None:
         self.query_service = OntologyQueryService()
+        self.settings_service = SettingsService()
+
+    def _cube_connector(self, db: Session, source: "DataSource | None" = None) -> CubeConnector:
+        """从设置页（DB）构造 Cube 连接器；数据源可覆盖 api_url。"""
+        runtime = self.settings_service.get_cube_runtime(db)
+        conn = CubeConnector.from_runtime(runtime)
+        if source and source.dsn_secret_ref:
+            conn.api_url = source.dsn_secret_ref.rstrip("/")
+        return conn
 
     # ------------------------------------------------------------- data sources
 
@@ -477,7 +487,7 @@ class DataAppService:
                     "compiled_sql": result.get("sql"),
                     "columns": columns,
                     "rows": rows,
-                    "used_mock": CubeConnector().use_mock,
+                    "used_mock": self._cube_connector(db, source).use_mock,
                     "warnings": warnings,
                 }
             except CubeExecutionError as exc:
@@ -540,9 +550,7 @@ class DataAppService:
         obj = db.get(ObjectType, binding.get("primary_object_type_id"))
         if not obj:
             raise CubeExecutionError("未解析主对象，无法构造 Cube 查询")
-        connector = CubeConnector(
-            api_url=source.dsn_secret_ref or None,
-        )
+        connector = self._cube_connector(db, source)
         cube_query = connector.build_query(
             object_name=obj.name,
             measures=binding.get("measures") or [],
@@ -652,11 +660,11 @@ class DataAppService:
     def generate_cube_model(self, db: Session, ontology_id: str) -> dict:
         """为一个本体生成 Cube data model（含预聚合/refreshKey/joins）。"""
         objects = self._build_cube_objects(db, ontology_id)
-        return CubeConnector().generate_model(objects=objects)
+        return self._cube_connector(db).generate_model(objects=objects)
 
     def generate_cube_model_files(self, db: Session, ontology_id: str) -> dict:
         """生成可直接部署的 Cube 文件（model/cubes/*.js + cube.js，含 RLS）。"""
-        connector = CubeConnector()
+        connector = self._cube_connector(db)
         model = connector.generate_model(
             objects=self._build_cube_objects(db, ontology_id)
         )

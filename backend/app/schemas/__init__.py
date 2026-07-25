@@ -141,6 +141,8 @@ from app.schemas.ontology import (
     VersionSnapshotOut,
 )
 from app.schemas.settings import (
+    CubeSettingsOut,
+    CubeSettingsUpdate,
     DatahubSettingsOut,
     DatahubSettingsUpdate,
     DraftGenerationSettingsOut,
@@ -241,6 +243,8 @@ __all__ = [
     "LlmServiceConfigUpdate",
     "DatahubSettingsOut",
     "DatahubSettingsUpdate",
+    "CubeSettingsOut",
+    "CubeSettingsUpdate",
     "DraftGenerationSettingsOut",
     "DraftGenerationSettingsUpdate",
     "ChatBiReference",

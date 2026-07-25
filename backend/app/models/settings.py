@@ -54,3 +54,20 @@ class DraftGenerationSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class CubeSetting(Base):
+    """Cube 语义层外挂配置：单例配置行，在设置页管理，无需环境变量/配置文件。"""
+
+    __tablename__ = "cube_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    api_url: Mapped[str] = mapped_column(String(512), default="http://localhost:4000")
+    api_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    use_mock: Mapped[bool] = mapped_column(Boolean, default=True)
+    preagg_refresh: Mapped[str] = mapped_column(String(50), default="1 hour")
+    tenant_dimension: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )

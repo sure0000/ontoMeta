@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.config import settings as env_settings
-from app.models import DatahubSetting, DraftGenerationSetting, LlmServiceConfig
+from app.models import DatahubSetting, DraftGenerationSetting, LlmServiceConfig, CubeSetting
 
 DEEPSEEK_MODELS = [
     {
@@ -55,6 +55,16 @@ class LlmRuntimeConfig:
 class DraftGenerationRuntimeConfig:
     object_chunk_concurrency: int
     relation_chunk_concurrency: int
+
+
+@dataclass
+class CubeRuntimeConfig:
+    api_url: str
+    api_secret: str | None
+    use_mock: bool
+    preagg_refresh: str
+    tenant_dimension: str | None
+    timeout_seconds: int
 
 
 def mask_secret(value: str | None) -> str | None:
@@ -181,6 +191,33 @@ class SettingsService:
             relation_chunk_concurrency=row.relation_chunk_concurrency,
         )
 
+    def get_cube_settings(self, db: Session) -> CubeSetting:
+        self.ensure_defaults(db)
+        row = db.get(CubeSetting, "default")
+        assert row is not None
+        return row
+
+    def update_cube_settings(self, db: Session, data: dict) -> CubeSetting:
+        row = self.get_cube_settings(db)
+        for key, value in data.items():
+            if key == "api_secret" and value is None:
+                continue  # 不传则保留原密钥
+            setattr(row, key, value)
+        db.commit()
+        db.refresh(row)
+        return row
+
+    def get_cube_runtime(self, db: Session) -> CubeRuntimeConfig:
+        row = self.get_cube_settings(db)
+        return CubeRuntimeConfig(
+            api_url=row.api_url,
+            api_secret=row.api_secret,
+            use_mock=row.use_mock or not row.api_secret,
+            preagg_refresh=row.preagg_refresh,
+            tenant_dimension=(row.tenant_dimension or None),
+            timeout_seconds=row.timeout_seconds,
+        )
+
     def get_llm_runtime(self, db: Session) -> LlmRuntimeConfig:
         self.ensure_defaults(db)
         service = (
@@ -243,6 +280,21 @@ class SettingsService:
                     id="default",
                     object_chunk_concurrency=env_settings.draft_chunk_max_concurrency,
                     relation_chunk_concurrency=env_settings.draft_relation_chunk_max_concurrency,
+                )
+            )
+            db.commit()
+
+        if not db.get(CubeSetting, "default"):
+            # 首次从环境变量播种一次；此后以 DB（设置页）为权威
+            db.add(
+                CubeSetting(
+                    id="default",
+                    api_url=env_settings.cube_api_url,
+                    api_secret=env_settings.cube_api_secret,
+                    use_mock=env_settings.use_mock_cube,
+                    preagg_refresh=env_settings.cube_preagg_refresh,
+                    tenant_dimension=env_settings.cube_tenant_dimension,
+                    timeout_seconds=int(env_settings.cube_timeout_seconds),
                 )
             )
             db.commit()

@@ -82,3 +82,25 @@ class DraftGenerationSettingsOut(BaseModel):
 class DraftGenerationSettingsUpdate(BaseModel):
     object_chunk_concurrency: int = Field(ge=1, le=32)
     relation_chunk_concurrency: int = Field(ge=1, le=32)
+
+
+class CubeSettingsOut(BaseModel):
+    api_url: str
+    secret_set: bool
+    secret_hint: str | None = None
+    use_mock: bool
+    preagg_refresh: str
+    tenant_dimension: str | None = None
+    timeout_seconds: int
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CubeSettingsUpdate(BaseModel):
+    api_url: str
+    api_secret: str | None = None
+    use_mock: bool = True
+    preagg_refresh: str = "1 hour"
+    tenant_dimension: str | None = None
+    timeout_seconds: int = Field(default=30, ge=1, le=600)

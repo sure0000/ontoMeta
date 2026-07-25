@@ -517,6 +517,17 @@ export interface DraftGenerationSettings {
   updated_at: string;
 }
 
+export interface CubeSettings {
+  api_url: string;
+  secret_set: boolean;
+  secret_hint?: string | null;
+  use_mock: boolean;
+  preagg_refresh: string;
+  tenant_dimension?: string | null;
+  timeout_seconds: number;
+  updated_at: string;
+}
+
 export interface ChatBiConversation {
   id: string;
   domain_id: string;

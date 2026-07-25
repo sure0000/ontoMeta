@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import settings_service
 from app.database import get_db
 from app.schemas import (
+    CubeSettingsOut,
+    CubeSettingsUpdate,
     DatahubSettingsOut,
     DatahubSettingsUpdate,
     DraftGenerationSettingsOut,
@@ -125,5 +127,29 @@ def update_draft_generation_settings(
     data: DraftGenerationSettingsUpdate, db: Session = Depends(get_db)
 ):
     return settings_service.update_draft_generation_settings(db, data.model_dump())
+
+
+def _cube_settings_out(row) -> CubeSettingsOut:
+    return CubeSettingsOut(
+        api_url=row.api_url,
+        secret_set=bool(row.api_secret),
+        secret_hint=mask_secret(row.api_secret),
+        use_mock=row.use_mock,
+        preagg_refresh=row.preagg_refresh,
+        tenant_dimension=row.tenant_dimension,
+        timeout_seconds=row.timeout_seconds,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/settings/cube", response_model=CubeSettingsOut)
+def get_cube_settings(db: Session = Depends(get_db)):
+    return _cube_settings_out(settings_service.get_cube_settings(db))
+
+
+@router.put("/settings/cube", response_model=CubeSettingsOut)
+def update_cube_settings(data: CubeSettingsUpdate, db: Session = Depends(get_db)):
+    row = settings_service.update_cube_settings(db, data.model_dump())
+    return _cube_settings_out(row)
 
 

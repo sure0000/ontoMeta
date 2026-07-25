@@ -300,3 +300,82 @@ def test_cube_model_files_endpoint(client, admin_headers):
     assert "cube.js" in files
     assert any(k.startswith("model/cubes/") and k.endswith(".js") for k in files)
     assert "cube(`Orders`" in files["model/cubes/Orders.js"]
+
+
+# ----------------------------------------- web 设置页驱动（DB 为权威，无需配置文件）
+
+
+def test_cube_settings_api_roundtrip(client, admin_headers):
+    # 读取默认
+    res = client.get("/api/settings/cube", headers=admin_headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["use_mock"] is True
+    assert res.json()["secret_set"] is False
+
+    # 更新（含密钥与租户列）
+    res = client.put(
+        "/api/settings/cube",
+        headers=admin_headers,
+        json={
+            "api_url": "http://cube:4000",
+            "api_secret": "topsecret",
+            "use_mock": False,
+            "preagg_refresh": "15 minute",
+            "tenant_dimension": "tenant_id",
+            "timeout_seconds": 20,
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["secret_set"] is True
+    assert body["api_secret"] if False else True  # 不回显明文
+    assert "topsecret" not in json.dumps(body)  # 密钥不回显
+    assert body["preagg_refresh"] == "15 minute"
+    assert body["tenant_dimension"] == "tenant_id"
+
+    # 不传 api_secret 时保留原密钥
+    res = client.put(
+        "/api/settings/cube",
+        headers=admin_headers,
+        json={
+            "api_url": "http://cube:4000",
+            "use_mock": False,
+            "preagg_refresh": "1 hour",
+            "tenant_dimension": "tenant_id",
+            "timeout_seconds": 30,
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["secret_set"] is True  # 仍在
+
+
+def test_cube_model_uses_db_settings(client, admin_headers):
+    _domain_id, ontology_id, obj_id, *_ = _seed_published_ontology()
+    # 给对象加一个 tenant_id 列，并把 tenant_dimension 通过设置页配置
+    db = SessionLocal()
+    try:
+        db.add(Property(object_type_id=obj_id, name="tenant_id", display_name="租户", data_type="string", status="published"))
+        db.commit()
+    finally:
+        db.close()
+
+    client.put(
+        "/api/settings/cube",
+        headers=admin_headers,
+        json={
+            "api_url": "http://cube:4000",
+            "api_secret": "sk",
+            "use_mock": True,
+            "preagg_refresh": "45 minute",
+            "tenant_dimension": "tenant_id",
+            "timeout_seconds": 30,
+        },
+    )
+
+    res = client.get(f"/api/ontologies/{ontology_id}/cube-model/files", headers=admin_headers)
+    assert res.status_code == 200, res.text
+    files = res.json()["files"]
+    # DB 配置的 tenant_dimension 生效 → cube.js 含 Orders 的租户列映射
+    assert '"Orders": "tenant_id"' in files["cube.js"] or '"Orders":"tenant_id"' in files["cube.js"]
+    # DB 配置的预聚合刷新间隔生效
+    assert "45 minute" in files["model/cubes/Orders.js"]

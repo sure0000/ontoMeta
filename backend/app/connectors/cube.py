@@ -63,12 +63,34 @@ class CubeConnector:
         api_url: str | None = None,
         api_secret: str | None = None,
         use_mock: bool | None = None,
+        preagg_refresh: str | None = None,
+        tenant_dimension: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self.api_url = (api_url or settings.cube_api_url or "").rstrip("/")
         self.api_secret = api_secret if api_secret is not None else settings.cube_api_secret
         self.use_mock = (
             settings.use_mock_cube if use_mock is None else use_mock
         ) or not self.api_secret
+        self.preagg_refresh = preagg_refresh or settings.cube_preagg_refresh
+        self.tenant_dimension = (
+            tenant_dimension if tenant_dimension is not None else settings.cube_tenant_dimension
+        )
+        self.timeout_seconds = (
+            timeout_seconds if timeout_seconds is not None else settings.cube_timeout_seconds
+        )
+
+    @classmethod
+    def from_runtime(cls, runtime: Any) -> "CubeConnector":
+        """从 SettingsService.get_cube_runtime(db) 的配置构造（DB 为权威来源）。"""
+        return cls(
+            api_url=runtime.api_url,
+            api_secret=runtime.api_secret,
+            use_mock=runtime.use_mock,
+            preagg_refresh=runtime.preagg_refresh,
+            tenant_dimension=runtime.tenant_dimension,
+            timeout_seconds=runtime.timeout_seconds,
+        )
 
     # ------------------------------------------------------------- model gen
 
@@ -88,8 +110,8 @@ class CubeConnector:
         每个 cube 附带 refreshKey + 一个 rollup 预聚合（交 Cube Refresh Worker 定时物化），
         以及由关系推导的 joins；若对象含租户隔离列则标记供 RLS 使用。
         """
-        refresh = pre_agg_refresh or settings.cube_preagg_refresh
-        tenant_dim = (settings.cube_tenant_dimension or "").strip() or None
+        refresh = pre_agg_refresh or self.preagg_refresh
+        tenant_dim = (self.tenant_dimension or "").strip() or None
         cubes: list[dict[str, Any]] = []
         for obj in objects:
             cname = cube_name(obj["name"])
@@ -261,7 +283,7 @@ class CubeConnector:
         token = self.build_token(security_context or {})
         url = f"{self.api_url}/cubejs-api/v1/load"
         try:
-            with httpx.Client(trust_env=False, timeout=settings.cube_timeout_seconds) as client:
+            with httpx.Client(trust_env=False, timeout=self.timeout_seconds) as client:
                 resp = client.post(
                     url,
                     headers={"Authorization": token, "Content-Type": "application/json"},

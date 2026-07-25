@@ -1,5 +1,6 @@
 import {
   CloudServerOutlined,
+  DatabaseOutlined,
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
@@ -39,6 +40,7 @@ import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
 import type {
   DatahubSettings,
+  CubeSettings,
   DraftGenerationSettings,
   LlmModelOption,
   LlmServiceConfig,
@@ -69,6 +71,15 @@ type DraftGenerationFormValues = {
   relation_chunk_concurrency: number;
 };
 
+type CubeFormValues = {
+  api_url: string;
+  api_secret?: string;
+  use_mock: boolean;
+  preagg_refresh: string;
+  tenant_dimension?: string;
+  timeout_seconds: number;
+};
+
 type AdminTokenFormValues = {
   token: string;
 };
@@ -78,6 +89,7 @@ type SettingsBundle = {
   llmModels: LlmModelOption[];
   datahubSettings: DatahubSettings;
   draftGenerationSettings: DraftGenerationSettings;
+  cubeSettings: CubeSettings;
 };
 
 export function SettingsPage() {
@@ -97,19 +109,22 @@ export function SettingsPage() {
         llmModels: [],
         datahubSettings: null as unknown as DatahubSettings,
         draftGenerationSettings: null as unknown as DraftGenerationSettings,
+        cubeSettings: null as unknown as CubeSettings,
       };
     }
-    const [services, models, datahub, draftGeneration] = await Promise.all([
+    const [services, models, datahub, draftGeneration, cube] = await Promise.all([
       api.listLlmServices(),
       api.listLlmModels(),
       api.getDatahubSettings(),
       api.getDraftGenerationSettings(),
+      api.getCubeSettings(),
     ]);
     return {
       llmServices: services,
       llmModels: models,
       datahubSettings: datahub,
       draftGenerationSettings: draftGeneration,
+      cubeSettings: cube,
     };
   }, []);
 
@@ -119,6 +134,7 @@ export function SettingsPage() {
   const llmModels = bundle?.llmModels ?? [];
   const datahubSettings = bundle?.datahubSettings ?? null;
   const draftGenerationSettings = bundle?.draftGenerationSettings ?? null;
+  const cubeSettings = bundle?.cubeSettings ?? null;
 
   const [llmModalOpen, setLlmModalOpen] = useState(false);
   const [llmModalMode, setLlmModalMode] = useState<"create" | "edit">("create");
@@ -129,9 +145,11 @@ export function SettingsPage() {
   const [llmForm] = Form.useForm<LlmFormValues>();
   const [datahubForm] = Form.useForm<DatahubFormValues>();
   const [draftGenerationForm] = Form.useForm<DraftGenerationFormValues>();
+  const [cubeForm] = Form.useForm<CubeFormValues>();
   const [adminTokenForm] = Form.useForm<AdminTokenFormValues>();
   const [datahubSaving, setDatahubSaving] = useState(false);
   const [draftGenerationSaving, setDraftGenerationSaving] = useState(false);
+  const [cubeSaving, setCubeSaving] = useState(false);
   const [adminTokenSaved, setAdminTokenSaved] = useState(() => Boolean(getAdminToken()));
 
   useEffect(() => {
@@ -152,6 +170,39 @@ export function SettingsPage() {
       relation_chunk_concurrency: draftGenerationSettings.relation_chunk_concurrency,
     });
   }, [draftGenerationSettings, draftGenerationForm]);
+
+  useEffect(() => {
+    if (!cubeSettings) return;
+    cubeForm.setFieldsValue({
+      api_url: cubeSettings.api_url,
+      use_mock: cubeSettings.use_mock,
+      preagg_refresh: cubeSettings.preagg_refresh,
+      tenant_dimension: cubeSettings.tenant_dimension ?? "",
+      timeout_seconds: cubeSettings.timeout_seconds,
+    });
+  }, [cubeSettings, cubeForm]);
+
+  const handleCubeSave = async () => {
+    try {
+      const values = await cubeForm.validateFields();
+      setCubeSaving(true);
+      const updated = await api.updateCubeSettings({
+        api_url: values.api_url,
+        api_secret: values.api_secret?.trim() ? values.api_secret.trim() : undefined,
+        use_mock: values.use_mock,
+        preagg_refresh: values.preagg_refresh,
+        tenant_dimension: values.tenant_dimension?.trim() || null,
+        timeout_seconds: values.timeout_seconds,
+      });
+      setBundle((prev) => (prev ? { ...prev, cubeSettings: updated } : prev));
+      message.success("Cube 配置已保存");
+      cubeForm.setFieldValue("api_secret", "");
+    } catch (err) {
+      if (err instanceof Error) message.error(err.message);
+    } finally {
+      setCubeSaving(false);
+    }
+  };
 
   const openCreateLlm = () => {
     setLlmModalMode("create");
@@ -569,6 +620,92 @@ export function SettingsPage() {
                       loading={draftGenerationSaving}
                     >
                       保存并发配置
+                    </Button>
+                  </Form.Item>
+                </Form>
+              </SectionCard>
+            ),
+          },
+          {
+            key: "cube",
+            label: (
+              <span>
+                <DatabaseOutlined style={{ marginRight: 6 }} />
+                Cube 语义层
+              </span>
+            ),
+            children: (
+              <SectionCard
+                title="Cube 外挂配置"
+                icon={<DatabaseOutlined />}
+                extra={
+                  cubeSettings ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      最近更新：{new Date(cubeSettings.updated_at).toLocaleString()}
+                    </Text>
+                  ) : null
+                }
+              >
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="所有 Cube 配置均在此管理，无需环境变量/配置文件，保存后立即生效"
+                  description="Cube 作为外挂语义层承担执行/缓存/预聚合定时刷新/行级权限。关闭 Mock 并填写密钥后即走真实 Cube。"
+                />
+                <Form form={cubeForm} layout="vertical" style={{ maxWidth: 640 }}>
+                  <Form.Item
+                    label="使用 Mock（不连真实 Cube）"
+                    name="use_mock"
+                    valuePropName="checked"
+                    extra="开启后返回确定性示例数据，本地零依赖可跑；未填密钥时也自动走 Mock"
+                  >
+                    <Switch />
+                  </Form.Item>
+                  <Form.Item
+                    label="Cube API 地址"
+                    name="api_url"
+                    rules={[{ required: true, message: "请输入 Cube API 地址" }]}
+                    extra="例如 http://cube:4000"
+                  >
+                    <Input prefix={<DatabaseOutlined />} placeholder="http://cube:4000" />
+                  </Form.Item>
+                  <Form.Item
+                    label="API 密钥（CUBEJS_API_SECRET）"
+                    name="api_secret"
+                    extra={
+                      cubeSettings?.secret_set
+                        ? `已配置：${cubeSettings.secret_hint ?? "****"}，留空则保持不变`
+                        : "与 Cube 服务的 CUBEJS_API_SECRET 一致，用于签发访问令牌"
+                    }
+                  >
+                    <Input.Password placeholder="与 Cube 保持一致" />
+                  </Form.Item>
+                  <Form.Item
+                    label="预聚合定时刷新间隔"
+                    name="preagg_refresh"
+                    rules={[{ required: true, message: "请输入刷新间隔" }]}
+                    extra="交给 Cube Refresh Worker，例如 1 hour / 30 minute"
+                  >
+                    <Input placeholder="1 hour" />
+                  </Form.Item>
+                  <Form.Item
+                    label="行级权限：租户隔离列名（可选）"
+                    name="tenant_dimension"
+                    extra="各对象若含此属性，生成的 cube.js 会自动按 securityContext.tenant 强制过滤；留空不启用"
+                  >
+                    <Input placeholder="tenant_id" />
+                  </Form.Item>
+                  <Form.Item
+                    label="查询超时（秒）"
+                    name="timeout_seconds"
+                    rules={[{ required: true, message: "请输入超时" }]}
+                  >
+                    <InputNumber min={1} max={600} style={{ width: "100%" }} />
+                  </Form.Item>
+                  <Form.Item>
+                    <Button type="primary" onClick={() => void handleCubeSave()} loading={cubeSaving}>
+                      保存 Cube 配置
                     </Button>
                   </Form.Item>
                 </Form>

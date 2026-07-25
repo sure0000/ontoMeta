@@ -19,6 +19,7 @@ import type {
   Confirmation,
   DataHubDatasetOption,
   DatahubSettings,
+  CubeSettings,
   DomainContext,
   DomainContextDetail,
   DraftGenerationScope,
@@ -573,6 +574,20 @@ export const api = {
     relation_chunk_concurrency: number;
   }) =>
     request<DraftGenerationSettings>("/api/settings/draft-generation", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  getCubeSettings: () => request<CubeSettings>("/api/settings/cube"),
+  updateCubeSettings: (body: {
+    api_url: string;
+    api_secret?: string;
+    use_mock: boolean;
+    preagg_refresh: string;
+    tenant_dimension?: string | null;
+    timeout_seconds: number;
+  }) =>
+    request<CubeSettings>("/api/settings/cube", {
       method: "PUT",
       body: JSON.stringify(body),
     }),
