@@ -807,8 +807,8 @@ class DataAppService:
         # 引用版本锁定：快照看板所引用的图表定义，后续图表编辑不影响已发布看板
         snapshot_widgets: dict[str, dict] = {}
         spec = _loads(app.spec_json, {})
-        for tile in spec.get("tiles") or []:
-            wid = tile.get("widget_id")
+        for tile in self._spec_panels(spec):
+            wid = self._panel_ref_id(tile)
             if wid and wid not in snapshot_widgets:
                 w = db.get(DataAppWidget, wid)
                 if w:
@@ -890,8 +890,8 @@ class DataAppService:
         frozen = self._published_widget_snapshot(db, app)
         widgets: dict[str, dict] = {}
         spec = _loads(app.spec_json, {})
-        for tile in spec.get("tiles") or []:
-            wid = tile.get("widget_id")
+        for tile in self._spec_panels(spec):
+            wid = self._panel_ref_id(tile)
             if not wid or wid in widgets:
                 continue
             snap = frozen.get(wid)
@@ -977,8 +977,8 @@ class DataAppService:
         # 引用图表
         spec = _loads(app.spec_json, {})
         seen_w: set[str] = set()
-        for tile in spec.get("tiles") or []:
-            wid = tile.get("widget_id")
+        for tile in self._spec_panels(spec):
+            wid = self._panel_ref_id(tile)
             if not wid or wid in seen_w:
                 continue
             seen_w.add(wid)
@@ -1253,7 +1253,7 @@ class DataAppService:
         widget_type = "bar" if has_dim else "kpi"
         if app_type == "dashboard":
             spec = self._default_spec("dashboard")
-            spec["tiles"] = [
+            spec["panels"] = [
                 {
                     "id": "t1",
                     "widgetType": widget_type,
@@ -1449,31 +1449,31 @@ class DataAppService:
         return w
 
     def add_widget_to_dashboard(self, db: Session, app_id: str, widget_id: str) -> DataApp:
-        """把一个可复用图表作为 tile 追加到看板。"""
+        """把一个可复用面板（Panel）追加到看板。"""
         app = db.get(DataApp, app_id)
         if not app:
             raise ValueError("数据应用不存在")
         if app.app_type != "dashboard":
-            raise ValueError("仅看板支持添加图表资产")
+            raise ValueError("仅看板支持添加面板资产")
         w = db.get(DataAppWidget, widget_id)
         if not w:
-            raise ValueError("图表不存在")
+            raise ValueError("面板不存在")
         spec = _loads(app.spec_json, self._default_spec("dashboard"))
-        tiles = spec.get("tiles") or []
+        panels = list(self._spec_panels(spec))
         # 简单排版：每行两个
-        idx = len(tiles)
-        tile = {
+        idx = len(panels)
+        panel = {
             "id": f"t{uuid.uuid4().hex[:8]}",
             "widgetType": w.widget_type,
             "title": w.name,
-            "widget_id": w.id,
+            "panel_id": w.id,
             "x": (idx % 2) * 6,
             "y": (idx // 2) * 8,
             "w": 6,
             "h": 8,
         }
-        tiles.append(tile)
-        spec["tiles"] = tiles
+        panels.append(panel)
+        self._set_spec_panels(spec, panels)
         app.spec_json = _dumps(spec)
         if app.status == "published":
             app.status = "draft"
@@ -1483,6 +1483,26 @@ class DataAppService:
         db.refresh(app)
         return app
 
+    # -------------------------------------------------- panel(tile) spec helpers
+
+    @staticmethod
+    def _spec_panels(spec: dict) -> list[dict]:
+        """读取看板面板（Panel）列表，兼容旧字段 tiles。"""
+        if not isinstance(spec, dict):
+            return []
+        return spec.get("panels") or spec.get("tiles") or []
+
+    @staticmethod
+    def _panel_ref_id(panel: dict) -> str | None:
+        """面板引用的可复用图表(Panel)ID，兼容旧字段 widget_id。"""
+        return panel.get("panel_id") or panel.get("widget_id")
+
+    @staticmethod
+    def _set_spec_panels(spec: dict, panels: list[dict]) -> None:
+        """写入 panels 并清理旧 tiles 字段。"""
+        spec["panels"] = panels
+        spec.pop("tiles", None)
+
     @staticmethod
     def _default_spec(app_type: str) -> dict:
         if app_type == "dashboard":
@@ -1491,7 +1511,7 @@ class DataAppService:
                 "grid": {"cols": 12, "rowHeight": 40, "gap": 12},
                 "theme": {"preset": "light", "bg": "#f5f7fa"},
                 "filters": [],
-                "tiles": [],
+                "panels": [],
             }
         if app_type == "screen":
             return {

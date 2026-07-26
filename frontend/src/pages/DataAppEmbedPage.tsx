@@ -8,7 +8,8 @@ import {
   DataTableRender,
   KpiRender,
 } from "../components/DataAppRenderer";
-import { DashboardGrid, type DashboardTile } from "../components/DashboardGrid";
+import { DashboardGrid, getSpecPanels, getPanelRefId } from "../components/DashboardGrid";
+import { ScreenCanvas, panelToScreenWidget } from "../components/ScreenCanvas";
 import type { DataAppDetail, DataAppPreviewResult } from "../types";
 
 /** 无外壳的可嵌入（iframe）已发布数据应用页。路径：/embed/apps/:appId */
@@ -35,12 +36,12 @@ export function DataAppEmbedPage() {
         }
       }
       const wout: Record<string, DataAppPreviewResult> = {};
-      const wtiles = ((app.spec?.tiles as { widget_id?: string }[]) ?? []).filter(
-        (t) => t.widget_id,
-      );
-      for (const t of wtiles) {
+      const wtiles = getSpecPanels(app.spec)
+        .map((t) => getPanelRefId(t))
+        .filter((wid): wid is string => Boolean(wid));
+      for (const wid of wtiles) {
         try {
-          wout[t.widget_id!] = await api.previewWidget(t.widget_id!);
+          wout[wid] = await api.previewWidget(wid);
         } catch {
           /* ignore */
         }
@@ -66,14 +67,12 @@ export function DataAppEmbedPage() {
 
   const isScreen = app.app_type === "screen";
   const isDashboard = app.app_type === "dashboard";
-  const tiles = (app.spec?.tiles as DashboardTile[]) ?? [];
+  const isCanvas = (app.spec?.layout as string) === "canvas" || isScreen;
+  const tiles = getSpecPanels(app.spec);
   const previewByIndex: Record<number, DataAppPreviewResult> = {};
   app.datasets.forEach((d, i) => {
     if (previews[d.id]) previewByIndex[i] = previews[d.id];
   });
-  const widgets =
-    (app.spec?.widgets as { type?: string; datasetIndex?: number; title?: string }[]) ??
-    [];
 
   const renderData = (datasetId: string, type?: string) => {
     const p = previews[datasetId];
@@ -86,7 +85,22 @@ export function DataAppEmbedPage() {
 
   return (
     <div style={{ padding: 12, minHeight: "100vh", background: "#f5f7fa" }}>
-      {isDashboard ? (
+      {isCanvas ? (
+        <div style={{ overflow: "auto" }}>
+          <ScreenCanvas
+            canvas={
+              (app.spec?.canvas as { width: number; height: number; bg?: string }) ?? {
+                width: 1920,
+                height: 1080,
+                bg: "#0b1a2e",
+              }
+            }
+            widgets={tiles.map(panelToScreenWidget)}
+            previews={previewByIndex}
+            selectedId={null}
+          />
+        </div>
+      ) : isDashboard || tiles.length > 0 ? (
         <DashboardGrid
           tiles={tiles}
           grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
@@ -95,26 +109,6 @@ export function DataAppEmbedPage() {
           previews={previewByIndex}
           widgetPreviews={widgetPreviews}
         />
-      ) : isScreen ? (
-        <div
-          style={{
-            background: (app.spec?.canvas as { bg?: string })?.bg || "#0b1a2e",
-            padding: 16,
-            borderRadius: 12,
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-            gap: 12,
-          }}
-        >
-          {widgets.map((w, i) => {
-            const ds = app.datasets[w.datasetIndex ?? 0];
-            return (
-              <Card key={i} size="small" title={w.title || `组件 ${i + 1}`}>
-                {ds ? renderData(ds.id, w.type) : <Empty />}
-              </Card>
-            );
-          })}
-        </div>
       ) : (
         app.datasets.map((ds) => (
           <Card key={ds.id} title={ds.name} style={{ marginBottom: 12 }}>

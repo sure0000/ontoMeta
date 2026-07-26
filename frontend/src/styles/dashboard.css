@@ -1,4 +1,21 @@
+/* 数据应用编辑器：数据集列表行 */
+.data-app-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+.data-app-list-row:hover {
+  background: var(--om-surface-muted);
+}
+
 /* 数据看板（Dashboard）栅格 */
+.dashboard-canvas {
+  transition: background 0.2s ease;
+}
 .dashboard-grid {
   position: relative;
 }
@@ -9,9 +26,12 @@
   height: 100%;
   border-radius: 10px;
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+  background: var(--dashboard-panel-bg, #fff);
+  border-color: var(--dashboard-border, #e5e7eb);
+  color: var(--dashboard-text, inherit);
 }
 .dashboard-grid .react-grid-item.react-grid-placeholder {
-  background: var(--om-primary, #2563eb);
+  background: var(--dashboard-accent, #2563eb);
   opacity: 0.15;
   border-radius: 10px;
 }
@@ -19,16 +39,28 @@
   user-select: none;
 }
 
-/* 看板主题：深色 */
-.dashboard-canvas--dark .ant-card {
-  background: #12233d;
-  border-color: #1e3a5f;
-  color: #e2e8f0;
+/* 主题面板：标题栏 / 次要文字随主题变量 */
+.dashboard-canvas .ant-card-head {
+  color: var(--dashboard-text, inherit);
+  border-color: var(--dashboard-border, #e5e7eb);
 }
-.dashboard-canvas--dark .ant-card-head {
-  color: #e2e8f0;
-  border-color: #1e3a5f;
+.dashboard-canvas .ant-empty-description {
+  color: var(--dashboard-text-secondary, #94a3b8);
 }
-.dashboard-canvas--dark .ant-empty-description {
-  color: #94a3b8;
+
+/* 深色系主题（dark / tech）：图表文字反白、表格透明底 */
+.dashboard-canvas--dark svg text {
+  fill: var(--dashboard-text-secondary, #cbd5e1);
+}
+.dashboard-canvas--dark .ant-table {
+  background: transparent;
+}
+.dashboard-canvas--dark .ant-table-thead > tr > th,
+.dashboard-canvas--dark .ant-table-tbody > tr > td {
+  background: transparent;
+  color: var(--dashboard-text, #e2e8f0);
+  border-color: var(--dashboard-border, #1e3a5f);
+}
+.dashboard-canvas--dark .ant-table-tbody > tr:hover > td {
+  background: rgba(255, 255, 255, 0.04);
 }

@@ -74,7 +74,7 @@ export function WidgetLibraryModal({
         data_source_id: payload.data_source_id,
         source: "manual",
       });
-      message.success("已创建图表，可在图表库中复用");
+      message.success("已创建面板，可在面板库中复用");
       setShowEditor(false);
       load();
     } catch (err) {
@@ -93,7 +93,7 @@ export function WidgetLibraryModal({
 
   return (
     <Modal
-      title="图表库"
+      title="面板库"
       open={open}
       onCancel={onClose}
       footer={null}
@@ -102,7 +102,7 @@ export function WidgetLibraryModal({
       <Space style={{ width: "100%", marginBottom: 12 }} align="center">
         <Input
           prefix={<SearchOutlined />}
-          placeholder="搜索图表名称"
+          placeholder="搜索面板名称"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           allowClear
@@ -118,7 +118,7 @@ export function WidgetLibraryModal({
           ]}
         />
         <Button icon={<PlusOutlined />} type="primary" onClick={() => setShowEditor(true)}>
-          新建图表
+          新建面板
         </Button>
         <Space size={4}>
           <Switch size="small" checked={crossDomain} onChange={setCrossDomain} />
@@ -129,14 +129,14 @@ export function WidgetLibraryModal({
       <List
         loading={loading}
         dataSource={widgets}
-        locale={{ emptyText: <Empty description="图表库为空，点击「新建图表」或在 Data Agent 中生成" /> }}
+        locale={{ emptyText: <Empty description="面板库为空，点击「新建面板」或在 Data Agent 中生成" /> }}
         renderItem={(w) => (
           <List.Item
             actions={[
               <Button key="add" type="link" onClick={() => onPick(w.id)}>
                 加入看板
               </Button>,
-              <Popconfirm key="del" title="删除该图表？" onConfirm={() => handleDelete(w.id)}>
+              <Popconfirm key="del" title="删除该面板？" onConfirm={() => handleDelete(w.id)}>
                 <Button type="link" danger>
                   删除
                 </Button>

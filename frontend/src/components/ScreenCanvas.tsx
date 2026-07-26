@@ -220,6 +220,43 @@ export function newWidget(type: string, datasetIndex = 0): ScreenWidget {
   };
 }
 
+/** 看板 canvas 面板（Panel）与大屏组件（ScreenWidget）互转，便于 canvas 布局复用本组件。 */
+export interface CanvasPanelLike {
+  id: string;
+  widgetType?: string;
+  type?: string;
+  title?: string;
+  datasetIndex?: number;
+  panel_id?: string;
+  widget_id?: string;
+  rect?: { x: number; y: number; w: number; h: number };
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+}
+
+export function panelToScreenWidget(p: CanvasPanelLike): ScreenWidget {
+  return {
+    id: p.id,
+    type: p.widgetType || p.type || "table",
+    title: p.title,
+    datasetIndex: p.datasetIndex ?? 0,
+    rect: p.rect ?? { x: 60, y: 60, w: 640, h: 360 },
+  };
+}
+
+export function applyWidgetToPanel(w: ScreenWidget, base?: CanvasPanelLike): CanvasPanelLike {
+  return {
+    ...(base ?? {}),
+    id: w.id,
+    widgetType: w.type,
+    title: w.title,
+    datasetIndex: w.datasetIndex,
+    rect: w.rect,
+  };
+}
+
 /** 导出行数据为 CSV 并触发下载 */
 export function exportCsv(filename: string, columns: { key: string; title: string }[], rows: Record<string, unknown>[]) {
   const esc = (v: unknown) => {

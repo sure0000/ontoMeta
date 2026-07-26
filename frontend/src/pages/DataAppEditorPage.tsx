@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
@@ -13,8 +13,8 @@ import {
   Select,
   Space,
   Spin,
-  Tabs,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import {
@@ -22,7 +22,7 @@ import {
   CloudUploadOutlined,
   DatabaseOutlined,
   DeleteOutlined,
-  DownloadOutlined,
+  EllipsisOutlined,
   EyeOutlined,
   FilterOutlined,
   AppstoreAddOutlined,
@@ -35,11 +35,6 @@ import { api } from "../api";
 import { useApi } from "../hooks/useApi";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
-import {
-  BarChartRender,
-  DataTableRender,
-  KpiRender,
-} from "../components/DataAppRenderer";
 import { DatasetEditor } from "../components/DatasetEditor";
 import { DataSourcesModal } from "../components/DataSourcesModal";
 import { ShareModal } from "../components/ShareModal";
@@ -50,11 +45,13 @@ import {
 } from "../components/ParamBar";
 import {
   ScreenCanvas,
-  exportCsv,
   newWidget,
+  panelToScreenWidget,
+  applyWidgetToPanel,
   type ScreenWidget,
 } from "../components/ScreenCanvas";
-import { DashboardGrid, newTile, type DashboardTile } from "../components/DashboardGrid";
+import { DashboardGrid, newTile, getSpecPanels, getPanelRefId, type DashboardTile } from "../components/DashboardGrid";
+import { DASHBOARD_THEME_OPTIONS } from "../components/dashboardThemes";
 import { WidgetLibraryModal } from "../components/WidgetLibraryModal";
 import type {
   DataAppDataset,
@@ -103,6 +100,28 @@ export function DataAppEditorPage() {
     (app?.datasets ?? []).forEach((d, i) => map.set(d.id, i));
     return map;
   }, [app]);
+
+  // 进入编辑器即自动预览各数据集与引用图表，避免"看似无数据"的空白态。
+  useEffect(() => {
+    if (!app || !appId) return;
+    for (const d of app.datasets) {
+      void api
+        .previewDataAppDataset(appId, d.id, 50)
+        .then((res) => setPreviews((prev) => ({ ...prev, [d.id]: res })))
+        .catch(() => {});
+    }
+    const specTiles = getSpecPanels(app.spec);
+    for (const t of specTiles) {
+      const wid = getPanelRefId(t);
+      if (!wid) continue;
+      void api
+        .previewWidget(wid, 50)
+        .then((res) => setWidgetPreviews((prev) => ({ ...prev, [wid]: res })))
+        .catch(() => {});
+    }
+    // 仅在切换应用时触发一次自动预览
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app?.id, appId]);
 
   const runPreview = async (datasetId: string, filters?: RuntimeFilter[]) => {
     if (!appId) return;
@@ -201,48 +220,101 @@ export function DataAppEditorPage() {
   const handleWidgetsChange = (widgets: ScreenWidget[]) => {
     if (!app) return;
     widgetsRef.current = widgets;
-    const spec = { ...(app.spec ?? {}), widgets };
+    const byId = new Map(getSpecPanels(app.spec).map((t) => [t.id, t]));
+    const panels = widgets.map((w) => applyWidgetToPanel(w, byId.get(w.id)));
+    const spec = { ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined };
     // 本地即时更新，避免拖拽卡顿；松手后持久化
     setData({ ...app, spec });
   };
 
   const commitWidgets = async () => {
     if (!app) return;
-    await updateSpec({ ...(app.spec ?? {}), widgets: widgetsRef.current });
+    const byId = new Map(getSpecPanels(app.spec).map((t) => [t.id, t]));
+    const panels = widgetsRef.current.map((w) => applyWidgetToPanel(w, byId.get(w.id)));
+    await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined });
   };
 
   const addWidget = async (type: string) => {
     if (!app) return;
-    const widgets = [...((app.spec?.widgets as ScreenWidget[]) ?? []), newWidget(type)];
+    const widgets = [
+      ...getSpecPanels(app.spec).map(panelToScreenWidget),
+      newWidget(type),
+    ];
     widgetsRef.current = widgets;
-    await updateSpec({ ...(app.spec ?? {}), widgets });
+    const panels = widgets.map((w) => applyWidgetToPanel(w));
+    await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined });
   };
 
-  // ---- dashboard tiles ----
+  // 布局模式切换：栅格（grid）⇄ 大屏画布（canvas），面板语义不变，仅重排坐标。
+  const changeLayout = async (mode: "grid" | "canvas") => {
+    if (!app) return;
+    const panels = getSpecPanels(app.spec).map((p, i) => {
+      if (mode === "canvas") {
+        return {
+          ...p,
+          rect: p.rect ?? {
+            x: 40 + (i % 2) * 680,
+            y: 40 + Math.floor(i / 2) * 440,
+            w: 640,
+            h: 360,
+          },
+        };
+      }
+      return {
+        ...p,
+        x: p.x ?? (i % 2) * 6,
+        y: p.y ?? Math.floor(i / 2) * 8,
+        w: p.w ?? 6,
+        h: p.h ?? 8,
+      };
+    });
+    const spec: Record<string, unknown> = {
+      ...(app.spec ?? {}),
+      layout: mode,
+      panels,
+      tiles: undefined,
+    };
+    if (mode === "canvas" && !app.spec?.canvas) {
+      spec.canvas = { width: 1920, height: 1080, bg: "#0b1a2e" };
+    }
+    await updateSpec(spec);
+  };
+
+  // ---- dashboard panels ----
   const addTile = async (type: string) => {
     if (!app) return;
-    const tiles = [...((app.spec?.tiles as DashboardTile[]) ?? []), newTile(type, 0)];
-    await updateSpec({ ...(app.spec ?? {}), tiles });
+    const tiles = [...getSpecPanels(app.spec), newTile(type, 0)];
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
   };
   const patchTile = async (id: string, patch: Partial<DashboardTile>) => {
     if (!app) return;
-    const tiles = ((app.spec?.tiles as DashboardTile[]) ?? []).map((t) =>
+    const tiles = getSpecPanels(app.spec).map((t) =>
       t.id === id ? { ...t, ...patch } : t,
     );
-    await updateSpec({ ...(app.spec ?? {}), tiles });
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
   };
   const removeTile = async (id: string) => {
     if (!app) return;
-    const tiles = ((app.spec?.tiles as DashboardTile[]) ?? []).filter((t) => t.id !== id);
-    await updateSpec({ ...(app.spec ?? {}), tiles });
+    const tiles = getSpecPanels(app.spec).filter((t) => t.id !== id);
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
   };
   const commitTiles = (tiles: DashboardTile[]) => {
     if (!app) return;
-    setData({ ...app, spec: { ...(app.spec ?? {}), tiles } });
+    setData({ ...app, spec: { ...(app.spec ?? {}), panels: tiles, tiles: undefined } });
   };
   const persistTiles = async (tiles: DashboardTile[]) => {
     if (!app) return;
-    await updateSpec({ ...(app.spec ?? {}), tiles });
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
+  };
+
+  const handleShowLineage = async () => {
+    if (!app) return;
+    try {
+      setLineage(await api.getDataAppLineage(app.id));
+      setShowLineage(true);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "获取血缘失败");
+    }
   };
 
   const handlePublish = async () => {
@@ -276,12 +348,18 @@ export function DataAppEditorPage() {
     );
   }
 
-  const isScreen = app.app_type === "screen";
-  const isDashboard = app.app_type === "dashboard";
-  const tiles = (app.spec?.tiles as DashboardTile[]) ?? [];
-  const widgets = (app.spec?.widgets as ScreenWidget[]) ?? [];
-  widgetsRef.current = widgets;
-  const selected = widgets.find((w) => w.id === selectedWidget) ?? null;
+  const tiles = getSpecPanels(app.spec);
+  const isCanvas =
+    (app.spec?.layout as string) === "canvas" || app.app_type === "screen";
+  const canvasCfg =
+    (app.spec?.canvas as { width: number; height: number; bg?: string }) ?? {
+      width: 1920,
+      height: 1080,
+      bg: "#0b1a2e",
+    };
+  const canvasWidgets = tiles.map(panelToScreenWidget);
+  widgetsRef.current = canvasWidgets;
+  const selected = canvasWidgets.find((w) => w.id === selectedWidget) ?? null;
   const params = (app.spec?.params as ScreenParam[]) ?? [];
   const runtimeFilters = buildRuntimeFilters(params, paramValues, drills);
 
@@ -289,7 +367,8 @@ export function DataAppEditorPage() {
     app.datasets.forEach((d) => runPreview(d.id, filters));
     // 看板：预览引用的图表资产 tile
     tiles.forEach((t) => {
-      if (t.widget_id) void previewWidgetTile(t.widget_id, filters);
+      const wid = getPanelRefId(t);
+      if (wid) void previewWidgetTile(wid, filters);
     });
   };
 
@@ -344,17 +423,6 @@ export function DataAppEditorPage() {
     });
   };
 
-  const renderPreview = (datasetId: string, widgetType?: string) => {
-    const p = previews[datasetId];
-    if (!p) {
-      return <Text type="secondary">点击「预览」拉取数据</Text>;
-    }
-    const props = { columns: p.columns, rows: p.rows };
-    if (widgetType === "bar") return <BarChartRender {...props} />;
-    if (widgetType === "kpi") return <KpiRender {...props} />;
-    return <DataTableRender {...props} />;
-  };
-
   return (
     <PageContainer>
       <PageHeader
@@ -370,40 +438,42 @@ export function DataAppEditorPage() {
             <Tag color={app.status === "published" ? "success" : "default"}>
               {app.status === "published" ? `已发布 v${app.published_version}` : `草稿 v${app.current_version}`}
             </Tag>
-            <Tag>{isScreen ? "可视化大屏" : "数据表格"}</Tag>
+            <Tag>数据看板</Tag>
+            <Tag color="blue">{isCanvas ? "大屏画布" : "栅格布局"}</Tag>
             {saving && <Tag color="processing">保存中…</Tag>}
           </Space>
         }
         description={app.description}
         extra={
-          <Space wrap>
+          <Space>
+            <Tooltip title="刷新">
+              <Button icon={<ReloadOutlined />} onClick={() => reload()} />
+            </Tooltip>
             <Button icon={<DatabaseOutlined />} onClick={() => setShowDataSources(true)}>
               数据源
             </Button>
-            <Button icon={<ReloadOutlined />} onClick={() => reload()}>
-              刷新
-            </Button>
+            <Dropdown
+              menu={{
+                items: [
+                  { key: "lineage", icon: <PartitionOutlined />, label: "血缘分析" },
+                  { key: "share", icon: <ShareAltOutlined />, label: "分享设置" },
+                ],
+                onClick: ({ key }) => {
+                  if (key === "lineage") void handleShowLineage();
+                  else if (key === "share") setShowShare(true);
+                },
+              }}
+            >
+              <Button icon={<EllipsisOutlined />}>更多</Button>
+            </Dropdown>
             {app.status === "published" && (
-              <Button icon={<EyeOutlined />} onClick={() => navigate(`/apps/${app.id}`)}>
+              <Button
+                icon={<EyeOutlined />}
+                onClick={() => window.open(`/apps/${app.id}`, "_blank", "noopener")}
+              >
                 查看已发布
               </Button>
             )}
-            <Button icon={<ShareAltOutlined />} onClick={() => setShowShare(true)}>
-              分享
-            </Button>
-            <Button
-              icon={<PartitionOutlined />}
-              onClick={async () => {
-                try {
-                  setLineage(await api.getDataAppLineage(app.id));
-                  setShowLineage(true);
-                } catch (err) {
-                  message.error(err instanceof Error ? err.message : "获取血缘失败");
-                }
-              }}
-            >
-              血缘
-            </Button>
             <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => setShowPublish(true)}>
               发布
             </Button>
@@ -435,18 +505,9 @@ export function DataAppEditorPage() {
             description="暂无数据集。可在「Data Agent」提问后一键生成，或点此新建并绑定本体对象/字段。"
           />
         ) : (
-          <Space direction="vertical" style={{ width: "100%" }}>
+          <Space direction="vertical" style={{ width: "100%" }} size={2}>
             {app.datasets.map((ds) => (
-              <div
-                key={ds.id}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "6px 8px",
-                  borderBottom: "1px solid var(--om-border, #eee)",
-                }}
-              >
+              <div key={ds.id} className="data-app-list-row">
                 <Space>
                   <Text strong>{ds.name}</Text>
                   {ds.data_source_id ? (
@@ -454,9 +515,13 @@ export function DataAppEditorPage() {
                   ) : (
                     <Tag>Mock</Tag>
                   )}
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {ds.compiled_sql ? "已编译" : "未落地"}
-                  </Text>
+                  {ds.compiled_sql ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>已编译</Text>
+                  ) : (
+                    <Tooltip title="未能落地到本体，发布将被阻止，请检查数据集绑定">
+                      <Text type="warning" style={{ fontSize: 12 }}>未落地</Text>
+                    </Tooltip>
+                  )}
                 </Space>
                 <Space>
                   <Button
@@ -489,221 +554,114 @@ export function DataAppEditorPage() {
         )}
       </Card>
 
-      {isDashboard ? (
-        <Card
-          title="看板布局"
-          extra={
-            <Space>
-              <Dropdown
-                menu={{
-                  items: [
-                    { key: "table", label: "表格" },
-                    { key: "bar", label: "柱状图" },
-                    { key: "kpi", label: "指标卡" },
-                  ],
-                  onClick: ({ key }) => addTile(key),
-                }}
-                disabled={app.datasets.length === 0}
-              >
-                <Button icon={<PlusOutlined />} disabled={app.datasets.length === 0}>
-                  添加图表
-                </Button>
-              </Dropdown>
-              <Button icon={<AppstoreAddOutlined />} onClick={() => setShowWidgetLib(true)}>
-                图表库
-              </Button>
-              <Button icon={<FilterOutlined />} onClick={addParam}>
-                添加筛选参数
-              </Button>
-              <Segmented
-                size="small"
-                value={(app.spec?.theme as { preset?: string })?.preset || "light"}
-                options={[
-                  { label: "浅色", value: "light" },
-                  { label: "深色", value: "dark" },
-                ]}
-                onChange={(v) =>
-                  updateSpec({
-                    ...(app.spec ?? {}),
-                    theme: { ...((app.spec?.theme as object) ?? {}), preset: String(v) },
-                  })
-                }
-              />
-              <Button onClick={() => previewAll()}>预览全部</Button>
-            </Space>
-          }
-        >
-          {app.datasets.length === 0 && (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 12 }}
-              message="请先在上方创建数据集（可多个），再添加图表并自由拖拽拼接成看板。"
+      <Card
+        title="看板"
+        extra={
+          <Space wrap>
+            <Segmented
+              size="small"
+              value={isCanvas ? "canvas" : "grid"}
+              options={[
+                { label: "栅格", value: "grid" },
+                { label: "大屏画布", value: "canvas" },
+              ]}
+              onChange={(v) => changeLayout(v as "grid" | "canvas")}
             />
-          )}
-          {params.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <Space direction="vertical" style={{ width: "100%" }} size={4}>
-                {params.map((p) => (
-                  <Space key={p.id} wrap>
-                    <Text type="secondary">参数</Text>
-                    <Input
-                      size="small"
-                      style={{ width: 120 }}
-                      value={p.label}
-                      placeholder="标题"
-                      onChange={(e) => updateParam(p.id, { label: e.target.value })}
-                    />
-                    <Input
-                      size="small"
-                      style={{ width: 160 }}
-                      value={p.column}
-                      placeholder="列名（如 channel）"
-                      onChange={(e) => updateParam(p.id, { column: e.target.value })}
-                    />
-                    <Button
-                      size="small"
-                      danger
-                      type="text"
-                      icon={<DeleteOutlined />}
-                      onClick={() => removeParam(p.id)}
-                    />
-                  </Space>
-                ))}
-              </Space>
-            </div>
-          )}
-          <ParamBar
-            params={params}
-            values={paramValues}
-            drills={drills}
-            onChange={setParamValues}
-            onClearDrill={(i) => {
-              const next = drills.filter((_, xi) => xi !== i);
-              setDrills(next);
-              previewAll(buildRuntimeFilters(params, paramValues, next));
-            }}
-            onApply={() => previewAll()}
-          />
-          <DashboardGrid
-            tiles={tiles}
-            grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
-            theme={app.spec?.theme as { bg?: string; accent?: string; preset?: string }}
-            datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
-            previews={previewByIndex}
-            widgetPreviews={widgetPreviews}
-            editable
-            onLayoutChange={commitTiles}
-            onTilePatch={patchTile}
-            onRemoveTile={removeTile}
-            onDrill={(_tile, column, value) => {
-              const nextDrills = [
-                ...drills.filter((d) => d.column !== column),
-                { column, value },
-              ];
-              setDrills(nextDrills);
-              // 交叉过滤广播：下钻同时刷新看板内所有图表
-              previewAll(buildRuntimeFilters(params, paramValues, nextDrills));
-            }}
-          />
-          <div style={{ textAlign: "right", marginTop: 8 }}>
-            <Button size="small" onClick={() => persistTiles(tiles)}>
-              保存布局
+            <Dropdown
+              menu={{
+                items: [
+                  { key: "table", label: "表格" },
+                  { key: "bar", label: "柱状图" },
+                  { key: "kpi", label: "指标卡" },
+                ],
+                onClick: ({ key }) => (isCanvas ? addWidget(key) : addTile(key)),
+              }}
+              disabled={app.datasets.length === 0}
+            >
+              <Button icon={<PlusOutlined />} disabled={app.datasets.length === 0}>
+                添加面板
+              </Button>
+            </Dropdown>
+            <Button icon={<AppstoreAddOutlined />} onClick={() => setShowWidgetLib(true)}>
+              面板库
             </Button>
-          </div>
-        </Card>
-      ) : isScreen ? (
-        <Card
-          title="大屏画布"
-          extra={
-            <Space>
-              <Dropdown
-                menu={{
-                  items: [
-                    { key: "bar", label: "柱状图" },
-                    { key: "kpi", label: "指标卡" },
-                    { key: "table", label: "表格" },
-                  ],
-                  onClick: ({ key }) => addWidget(key),
-                }}
-                disabled={app.datasets.length === 0}
-              >
-                <Button icon={<PlusOutlined />} disabled={app.datasets.length === 0}>
-                  添加组件
-                </Button>
-              </Dropdown>
-              <Button icon={<FilterOutlined />} onClick={addParam}>
-                添加筛选参数
-              </Button>
-              <Button onClick={() => previewAll()}>预览全部</Button>
-            </Space>
-          }
-        >
-          {app.datasets.length === 0 && (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 12 }}
-              message="请先创建数据集，再添加大屏组件。"
+            <Button icon={<FilterOutlined />} onClick={addParam}>
+              添加筛选参数
+            </Button>
+            <Select
+              size="small"
+              style={{ width: 140 }}
+              value={(app.spec?.theme as { preset?: string })?.preset || "light"}
+              options={DASHBOARD_THEME_OPTIONS}
+              onChange={(v) =>
+                updateSpec({
+                  ...(app.spec ?? {}),
+                  theme: { ...((app.spec?.theme as object) ?? {}), preset: String(v) },
+                })
+              }
             />
-          )}
-
-          {params.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <Space direction="vertical" style={{ width: "100%" }} size={4}>
-                {params.map((p) => (
-                  <Space key={p.id} wrap>
-                    <Text type="secondary">参数</Text>
-                    <Input
-                      size="small"
-                      style={{ width: 120 }}
-                      value={p.label}
-                      placeholder="标题"
-                      onChange={(e) => updateParam(p.id, { label: e.target.value })}
-                    />
-                    <Input
-                      size="small"
-                      style={{ width: 160 }}
-                      value={p.column}
-                      placeholder="列名（如 channel）"
-                      onChange={(e) => updateParam(p.id, { column: e.target.value })}
-                    />
-                    <Button
-                      size="small"
-                      danger
-                      type="text"
-                      icon={<DeleteOutlined />}
-                      onClick={() => removeParam(p.id)}
-                    />
-                  </Space>
-                ))}
-              </Space>
-            </div>
-          )}
-
-          <ParamBar
-            params={params}
-            values={paramValues}
-            drills={drills}
-            onChange={setParamValues}
-            onClearDrill={(i) => {
-              const next = drills.filter((_, xi) => xi !== i);
-              setDrills(next);
-              previewAll(buildRuntimeFilters(params, paramValues, next));
-            }}
-            onApply={() => previewAll()}
+            <Button onClick={() => previewAll()}>预览全部</Button>
+          </Space>
+        }
+      >
+        {app.datasets.length === 0 && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="请先在上方创建数据集（可多个），再添加面板并自由拖拽拼接成看板（栅格）或大屏（画布）。"
           />
+        )}
+        {params.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <Space direction="vertical" style={{ width: "100%" }} size={4}>
+              {params.map((p) => (
+                <Space key={p.id} wrap>
+                  <Text type="secondary">参数</Text>
+                  <Input
+                    size="small"
+                    style={{ width: 120 }}
+                    value={p.label}
+                    placeholder="标题"
+                    onChange={(e) => updateParam(p.id, { label: e.target.value })}
+                  />
+                  <Input
+                    size="small"
+                    style={{ width: 160 }}
+                    value={p.column}
+                    placeholder="列名（如 channel）"
+                    onChange={(e) => updateParam(p.id, { column: e.target.value })}
+                  />
+                  <Button
+                    size="small"
+                    danger
+                    type="text"
+                    icon={<DeleteOutlined />}
+                    onClick={() => removeParam(p.id)}
+                  />
+                </Space>
+              ))}
+            </Space>
+          </div>
+        )}
+        <ParamBar
+          params={params}
+          values={paramValues}
+          drills={drills}
+          onChange={setParamValues}
+          onClearDrill={(i) => {
+            const next = drills.filter((_, xi) => xi !== i);
+            setDrills(next);
+            previewAll(buildRuntimeFilters(params, paramValues, next));
+          }}
+          onApply={() => previewAll()}
+        />
+        {isCanvas ? (
           <div style={{ display: "flex", gap: 16 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <ScreenCanvas
-                canvas={
-                  (app.spec?.canvas as { width: number; height: number; bg?: string }) ?? {
-                    width: 1920,
-                    height: 1080,
-                    bg: "#0b1a2e",
-                  }
-                }
-                widgets={widgets}
+                canvas={canvasCfg}
+                widgets={canvasWidgets}
                 previews={previewByIndex}
                 selectedId={selectedWidget}
                 editable
@@ -713,9 +671,9 @@ export function DataAppEditorPage() {
                 onDrill={handleDrill}
               />
             </div>
-            <Card size="small" title="组件属性" style={{ width: 260, flexShrink: 0 }}>
+            <Card size="small" title="面板属性" style={{ width: 260, flexShrink: 0 }}>
               {!selected ? (
-                <Text type="secondary">在画布中选中一个组件</Text>
+                <Text type="secondary">在画布中选中一个面板</Text>
               ) : (
                 <Space direction="vertical" style={{ width: "100%" }}>
                   <div>
@@ -724,7 +682,7 @@ export function DataAppEditorPage() {
                       value={selected.title}
                       onChange={(e) =>
                         handleWidgetsChange(
-                          widgets.map((w) =>
+                          canvasWidgets.map((w) =>
                             w.id === selected.id ? { ...w, title: e.target.value } : w,
                           ),
                         )
@@ -733,7 +691,7 @@ export function DataAppEditorPage() {
                     />
                   </div>
                   <div>
-                    <Text type="secondary">图表类型</Text>
+                    <Text type="secondary">面板类型</Text>
                     <Segmented
                       block
                       value={selected.type}
@@ -744,7 +702,7 @@ export function DataAppEditorPage() {
                       ]}
                       onChange={(v) => {
                         handleWidgetsChange(
-                          widgets.map((w) =>
+                          canvasWidgets.map((w) =>
                             w.id === selected.id ? { ...w, type: String(v) } : w,
                           ),
                         );
@@ -760,7 +718,7 @@ export function DataAppEditorPage() {
                       options={app.datasets.map((d, i) => ({ label: d.name, value: i }))}
                       onChange={(v) => {
                         handleWidgetsChange(
-                          widgets.map((w) =>
+                          canvasWidgets.map((w) =>
                             w.id === selected.id ? { ...w, datasetIndex: v } : w,
                           ),
                         );
@@ -773,70 +731,42 @@ export function DataAppEditorPage() {
                     block
                     icon={<DeleteOutlined />}
                     onClick={() => {
-                      handleWidgetsChange(widgets.filter((w) => w.id !== selected.id));
+                      handleWidgetsChange(canvasWidgets.filter((w) => w.id !== selected.id));
                       setSelectedWidget(null);
                       void commitWidgets();
                     }}
                   >
-                    删除组件
+                    删除面板
                   </Button>
                 </Space>
               )}
             </Card>
           </div>
-        </Card>
-      ) : app.datasets.length > 0 ? (
-        <Tabs
-          items={app.datasets.map((ds) => ({
-            key: ds.id,
-            label: ds.name,
-            children: (
-              <Card
-                extra={
-                  <Space>
-                    <Button
-                      icon={<EyeOutlined />}
-                      loading={previewing === ds.id}
-                      onClick={() => runPreview(ds.id)}
-                    >
-                      预览
-                    </Button>
-                    <Button
-                      icon={<DownloadOutlined />}
-                      disabled={!previews[ds.id]}
-                      onClick={() =>
-                        previews[ds.id] &&
-                        exportCsv(ds.name, previews[ds.id].columns, previews[ds.id].rows)
-                      }
-                    >
-                      导出 CSV
-                    </Button>
-                  </Space>
-                }
-              >
-                <Paragraph>
-                  <Text type="secondary">
-                    编译 SQL{previews[ds.id]?.used_mock === false ? "（真实数据源已执行）" : "（Mock 示例数据）"}：
-                  </Text>
-                </Paragraph>
-                <pre
-                  style={{
-                    background: "#0f172a",
-                    color: "#e2e8f0",
-                    padding: 12,
-                    borderRadius: 8,
-                    overflowX: "auto",
-                    fontSize: 12,
-                  }}
-                >
-                  {ds.compiled_sql || "（未能编译，请检查数据集绑定是否落地到本体）"}
-                </pre>
-                <div style={{ marginTop: 12 }}>{renderPreview(ds.id)}</div>
-              </Card>
-            ),
-          }))}
-        />
-      ) : null}
+        ) : (
+          <DashboardGrid
+            tiles={tiles}
+            grid={app.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
+            theme={app.spec?.theme as { bg?: string; accent?: string; preset?: string }}
+            datasets={app.datasets.map((d) => ({ id: d.id, name: d.name }))}
+            previews={previewByIndex}
+            widgetPreviews={widgetPreviews}
+            editable
+            onLayoutChange={commitTiles}
+            onPersist={persistTiles}
+            onTilePatch={patchTile}
+            onRemoveTile={removeTile}
+            onDrill={(_tile, column, value) => {
+              const nextDrills = [
+                ...drills.filter((d) => d.column !== column),
+                { column, value },
+              ];
+              setDrills(nextDrills);
+              // 交叉过滤广播：下钻同时刷新看板内所有面板
+              previewAll(buildRuntimeFilters(params, paramValues, nextDrills));
+            }}
+          />
+        )}
+      </Card>
 
       <DatasetEditor
         open={showDatasetEditor}
@@ -860,7 +790,7 @@ export function DataAppEditorPage() {
       />
 
       <Modal
-        title="看板血缘（看板 → 图表/数据集 → 本体对象/字段）"
+        title="看板血缘（看板 → 面板/数据集 → 本体对象/字段）"
         open={showLineage}
         onCancel={() => setShowLineage(false)}
         footer={null}
@@ -873,7 +803,7 @@ export function DataAppEditorPage() {
               <div>
                 {lineage.nodes.map((n) => (
                   <Tag key={n.id} color={n.kind === "widget" ? "blue" : "default"}>
-                    {n.kind === "widget" ? "图表" : "数据集"}：{n.name}
+                    {n.kind === "widget" ? "面板" : "数据集"}：{n.name}
                   </Tag>
                 ))}
               </div>

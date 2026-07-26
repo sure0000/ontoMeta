@@ -247,7 +247,7 @@ def test_dashboard_create_and_generate(client, admin_headers):
     app = res.json()
     assert app["app_type"] == "dashboard"
     assert app["spec"]["layout"] == "grid"
-    assert app["spec"]["tiles"] == []
+    assert app["spec"]["panels"] == []
 
     # 2) 更新：加两个数据集 + 两个 tile 组合
     app_id = app["id"]
@@ -276,7 +276,7 @@ def test_dashboard_create_and_generate(client, admin_headers):
             "spec": {
                 "layout": "grid",
                 "grid": {"cols": 12, "rowHeight": 40, "gap": 12},
-                "tiles": [
+                "panels": [
                     {"id": "t1", "widgetType": "bar", "title": "渠道金额", "datasetIndex": 0, "x": 0, "y": 0, "w": 6, "h": 8},
                     {"id": "t2", "widgetType": "table", "title": "明细", "datasetIndex": 1, "x": 6, "y": 0, "w": 6, "h": 8},
                 ],
@@ -286,7 +286,7 @@ def test_dashboard_create_and_generate(client, admin_headers):
     assert res.status_code == 200, res.text
     updated = res.json()
     assert len(updated["datasets"]) == 2
-    assert len(updated["spec"]["tiles"]) == 2
+    assert len(updated["spec"]["panels"]) == 2
 
     # 3) 发布并对外查询数据（两个数据集都有数据）
     res = client.post(f"/api/data-apps/{app_id}/publish", headers=admin_headers, json={})
@@ -309,7 +309,7 @@ def test_generate_dashboard_from_chat(client, admin_headers):
     app = res.json()
     assert app["app_type"] == "dashboard"
     assert app["spec"]["layout"] == "grid"
-    assert len(app["spec"]["tiles"]) == 1
+    assert len(app["spec"]["panels"]) == 1
     assert len(app["datasets"]) == 1
 
 
@@ -371,9 +371,9 @@ def test_widget_crud_and_add_to_dashboard(client, admin_headers):
         json={"widget_id": widget_id},
     )
     assert res.status_code == 200, res.text
-    tiles = res.json()["spec"]["tiles"]
+    tiles = res.json()["spec"]["panels"]
     assert len(tiles) == 1
-    assert tiles[0]["widget_id"] == widget_id
+    assert tiles[0]["panel_id"] == widget_id
 
     # 5) 同一图表可复用到第二个看板
     res2 = client.post(
@@ -384,7 +384,7 @@ def test_widget_crud_and_add_to_dashboard(client, admin_headers):
     app2 = res2.json()["id"]
     res = client.post(f"/api/data-apps/{app2}/widgets", headers=admin_headers, json={"widget_id": widget_id})
     assert res.status_code == 200
-    assert res.json()["spec"]["tiles"][0]["widget_id"] == widget_id
+    assert res.json()["spec"]["panels"][0]["panel_id"] == widget_id
 
 
 def test_generate_widget_from_chat_into_dashboard(client, admin_headers):
@@ -417,7 +417,7 @@ def test_generate_widget_from_chat_into_dashboard(client, admin_headers):
 
     # 看板已追加该图表 tile
     detail = client.get(f"/api/data-apps/{dash['id']}", headers=admin_headers).json()
-    assert any(t.get("widget_id") == widget["id"] for t in detail["spec"]["tiles"])
+    assert any(t.get("panel_id") == widget["id"] for t in detail["spec"]["panels"])
 
 
 def _publish_simple_app(client, admin_headers, domain_id, obj_id, amount_id):

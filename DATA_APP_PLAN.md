@@ -1,3 +1,8 @@
+> ⚠️ **概念已重构**：本文中「数据表格 / 数据大屏 / 数据看板」三分模型已被
+> **[DATA_APP_GRAFANA_MODEL.md](./DATA_APP_GRAFANA_MODEL.md)** 取代——收敛为
+> **Panel（最小单位=一个数据逻辑）+ Dashboard（唯一容器）** 的 Grafana 范式。
+> 本文的执行层 / 绑定编译 / Cube 等实现细节仍有效，概念部分以新文档为准。
+
 # ontoMeta 数据应用（Data App）能力设计方案
 
 > 目标：在现有「智能问数（Chat BI）」之外，让用户能在对话中**创建数据应用**

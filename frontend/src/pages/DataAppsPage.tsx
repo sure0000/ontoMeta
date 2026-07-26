@@ -9,7 +9,6 @@ import {
   message,
   Modal,
   Popconfirm,
-  Segmented,
   Select,
   Space,
   Table,
@@ -28,8 +27,8 @@ import { PageHeader } from "../components/PageHeader";
 import type { DataAppSummary, DomainContext } from "../types";
 
 const TYPE_LABEL: Record<string, string> = {
-  data_table: "数据表格",
-  screen: "可视化大屏",
+  data_table: "数据表格（旧）",
+  screen: "可视化大屏（旧）",
   dashboard: "数据看板",
 };
 
@@ -38,6 +37,13 @@ const STATUS_COLOR: Record<string, string> = {
   in_review: "processing",
   published: "success",
   archived: "warning",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  draft: "草稿",
+  in_review: "审核中",
+  published: "已发布",
+  archived: "已归档",
 };
 
 export function DataAppsPage() {
@@ -65,10 +71,10 @@ export function DataAppsPage() {
     try {
       const app = await api.createDataApp({
         domain_id: values.domain_id,
-        app_type: values.app_type,
+        app_type: "dashboard",
         name: values.name,
       });
-      message.success("已创建数据应用草稿");
+      message.success("已创建数据看板草稿");
       setCreating(false);
       form.resetFields();
       navigate(`/data-apps/${app.id}/edit`);
@@ -107,7 +113,7 @@ export function DataAppsPage() {
     {
       title: "状态",
       dataIndex: "status",
-      render: (s: string) => <Tag color={STATUS_COLOR[s] ?? "default"}>{s}</Tag>,
+      render: (s: string) => <Tag color={STATUS_COLOR[s] ?? "default"}>{STATUS_LABEL[s] ?? s}</Tag>,
     },
     {
       title: "来源",
@@ -130,7 +136,11 @@ export function DataAppsPage() {
             编辑
           </Button>
           {row.status === "published" && (
-            <Button size="small" type="link" onClick={() => navigate(`/apps/${row.id}`)}>
+            <Button
+              size="small"
+              type="link"
+              onClick={() => window.open(`/apps/${row.id}`, "_blank", "noopener")}
+            >
               查看
             </Button>
           )}
@@ -149,7 +159,7 @@ export function DataAppsPage() {
       <PageHeader
         icon={<AppstoreOutlined />}
         title="数据应用"
-        description="基于已发布本体创建数据表格页面与可视化大屏，支持预览与发布。"
+        description="基于已发布本体创建数据看板（Dashboard）：以面板（Panel）为最小单位自由拼接，支持拖拽布局、主题切换、预览、发布与对外分享。"
         extra={
           <Space>
             <Select
@@ -165,13 +175,14 @@ export function DataAppsPage() {
               icon={<PlusOutlined />}
               onClick={() => setCreating(true)}
             >
-              新建应用
+              新建看板
             </Button>
           </Space>
         }
       />
       <Card>
         <Table
+          className="om-table"
           rowKey="id"
           loading={loading}
           columns={columns}
@@ -181,13 +192,13 @@ export function DataAppsPage() {
       </Card>
 
       <Modal
-        title="新建数据应用"
+        title="新建数据看板"
         open={creating}
         onCancel={() => setCreating(false)}
         onOk={handleCreate}
         okText="创建并编辑"
       >
-        <Form form={form} layout="vertical" initialValues={{ app_type: "dashboard" }}>
+        <Form form={form} layout="vertical">
           <Form.Item
             name="domain_id"
             label="数据域"
@@ -195,21 +206,8 @@ export function DataAppsPage() {
           >
             <Select placeholder="选择数据域" options={domainOptions} />
           </Form.Item>
-          <Form.Item name="app_type" label="应用类型">
-            <Segmented
-              options={[
-                { label: "数据看板", value: "dashboard", icon: <AppstoreOutlined /> },
-                { label: "数据表格", value: "data_table", icon: <TableOutlined /> },
-                {
-                  label: "可视化大屏",
-                  value: "screen",
-                  icon: <FundProjectionScreenOutlined />,
-                },
-              ]}
-            />
-          </Form.Item>
           <Form.Item name="name" label="名称">
-            <Input placeholder="可选，默认按类型命名" />
+            <Input placeholder="可选，默认命名为“未命名看板”" />
           </Form.Item>
         </Form>
       </Modal>

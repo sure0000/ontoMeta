@@ -1,5 +1,5 @@
 import { Button, Space, Tag } from "antd";
-import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, FundProjectionScreenOutlined, TableOutlined } from "@ant-design/icons";
+import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type {
@@ -219,7 +219,7 @@ export function ChatBubble({
               </div>
             )}
             {message.error && (
-              <div className="chatbi-mock-hint" style={{ color: "#ef4444" }}>
+              <div className="chatbi-mock-hint" style={{ color: "var(--om-error)" }}>
                 回答出错，请重试。
               </div>
             )}
@@ -227,37 +227,24 @@ export function ChatBubble({
               <div className="chatbi-generate-app" style={{ marginTop: 12 }}>
                 <Space wrap>
                   <span style={{ color: "var(--om-text-tertiary)", fontSize: 13 }}>
-                    <AppstoreOutlined /> 基于此口径创建数据应用：
+                    <AppstoreOutlined /> 基于此口径（一个数据逻辑 = 一个面板）：
                   </span>
+                  {onAddToDashboard && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<AppstoreAddOutlined />}
+                      onClick={() => onAddToDashboard(question!, message.payload)}
+                    >
+                      生成面板并加入看板
+                    </Button>
+                  )}
                   <Button
                     size="small"
                     icon={<DashboardOutlined />}
                     onClick={() => onGenerateApp!(question!, "dashboard", message.payload)}
                   >
-                    生成看板
-                  </Button>
-                  {onAddToDashboard && (
-                    <Button
-                      size="small"
-                      icon={<AppstoreAddOutlined />}
-                      onClick={() => onAddToDashboard(question!, message.payload)}
-                    >
-                      加入看板
-                    </Button>
-                  )}
-                  <Button
-                    size="small"
-                    icon={<TableOutlined />}
-                    onClick={() => onGenerateApp!(question!, "data_table", message.payload)}
-                  >
-                    生成表格
-                  </Button>
-                  <Button
-                    size="small"
-                    icon={<FundProjectionScreenOutlined />}
-                    onClick={() => onGenerateApp!(question!, "screen", message.payload)}
-                  >
-                    生成大屏
+                    生成新看板
                   </Button>
                 </Space>
               </div>

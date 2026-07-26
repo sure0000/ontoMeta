@@ -1,3 +1,8 @@
+> ⚠️ **概念已重构**：本文的 Widget/Dashboard 模型已收敛进
+> **[DATA_APP_GRAFANA_MODEL.md](./DATA_APP_GRAFANA_MODEL.md)**——Widget 更名为
+> **Panel（面板，最小单位=一个数据逻辑）**，取消 data_table/screen/dashboard 三类 app，
+> 统一为 **Dashboard（唯一容器，支持自由布局 + 主题切换）**。概念以新文档为准。
+
 # 数据看板（Dashboard）方案：从单图表到自由组合的对外看板
 
 > 目标：把当前「一次生成一个表格 / 一个图表」的数据应用，升级为**可自由组合多个

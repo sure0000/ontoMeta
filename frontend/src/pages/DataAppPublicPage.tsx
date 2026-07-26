@@ -6,7 +6,8 @@ import {
   DataTableRender,
   KpiRender,
 } from "../components/DataAppRenderer";
-import { DashboardGrid, type DashboardTile } from "../components/DashboardGrid";
+import { DashboardGrid, getSpecPanels } from "../components/DashboardGrid";
+import { ScreenCanvas, panelToScreenWidget } from "../components/ScreenCanvas";
 import type { DataAppColumn } from "../types";
 
 const { Title, Text } = Typography;
@@ -111,7 +112,9 @@ export function DataAppPublicPage() {
   }
 
   const isDashboard = data.app_type === "dashboard";
-  const tiles = (data.spec?.tiles as DashboardTile[]) ?? [];
+  const isScreen = data.app_type === "screen";
+  const isCanvas = (data.spec?.layout as string) === "canvas" || isScreen;
+  const tiles = getSpecPanels(data.spec);
   const previewByIndex: Record<number, PreviewLike> = {};
   (data.render.datasets ?? []).forEach((p, i) => {
     previewByIndex[i] = p;
@@ -139,7 +142,22 @@ export function DataAppPublicPage() {
           </Text>
         )}
 
-        {isDashboard ? (
+        {isCanvas ? (
+          <div style={{ overflow: "auto" }}>
+            <ScreenCanvas
+              canvas={
+                (data.spec?.canvas as { width: number; height: number; bg?: string }) ?? {
+                  width: 1920,
+                  height: 1080,
+                  bg: "#0b1a2e",
+                }
+              }
+              widgets={tiles.map(panelToScreenWidget)}
+              previews={previewByIndex as never}
+              selectedId={null}
+            />
+          </div>
+        ) : isDashboard || tiles.length > 0 ? (
           <DashboardGrid
             tiles={tiles}
             grid={data.spec?.grid as { cols?: number; rowHeight?: number; gap?: number }}
