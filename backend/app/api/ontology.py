@@ -29,6 +29,16 @@ from app.schemas import (
 
 router = APIRouter()
 
+_ALLOWED_ROLE_IN = {"business_object", "data_table", "bridge", "technical"}
+
+
+def _parse_role_in(raw: str | None) -> list[str] | None:
+    """把逗号分隔的角色列表解析为合法取值列表；空/全非法返回 None。"""
+    if not raw:
+        return None
+    values = [v.strip() for v in raw.split(",") if v.strip() in _ALLOWED_ROLE_IN]
+    return values or None
+
 
 @router.get(
     "/ontologies/{ontology_id}/conflicts", response_model=OntologyConflictsOut
@@ -101,15 +111,22 @@ def get_ontology(ontology_id: str, db: Session = Depends(get_db)):
 def list_object_types_by_ontology(
     ontology_id: str,
     q: str | None = Query(None),
-    role_filter: str | None = Query(
-        None, description="对象角色筛选：business=业务对象，common=普通对象，review=待复核"
+    role_in: str | None = Query(
+        None, description="对象角色多选(逗号分隔)：business_object,data_table,bridge,technical"
     ),
+    needs_review: bool | None = Query(None, description="仅看待复核=true"),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     return query.list_object_types(
-        db, ontology_id=ontology_id, q=q, role_filter=role_filter, limit=limit, offset=offset
+        db,
+        ontology_id=ontology_id,
+        q=q,
+        role_in=_parse_role_in(role_in),
+        needs_review=needs_review,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -192,9 +209,10 @@ def list_object_types(
     domain_id: str | None = Query(None),
     published_only: bool = Query(False),
     q: str | None = Query(None),
-    role_filter: str | None = Query(
-        None, description="对象角色筛选：business=业务对象，common=普通对象，review=待复核"
+    role_in: str | None = Query(
+        None, description="对象角色多选(逗号分隔)：business_object,data_table,bridge,technical"
     ),
+    needs_review: bool | None = Query(None, description="仅看待复核=true"),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -205,7 +223,8 @@ def list_object_types(
         domain_context_id=domain_id,
         published_only=published_only,
         q=q,
-        role_filter=role_filter,
+        role_in=_parse_role_in(role_in),
+        needs_review=needs_review,
         limit=limit,
         offset=offset,
     )
@@ -232,6 +251,8 @@ def update_object_type(
             name=data.name,
             display_name=data.display_name,
             description=data.description,
+            table_role=data.table_role,
+            needs_review=data.needs_review,
             operator=data.operator,
         )
     except ValueError as exc:

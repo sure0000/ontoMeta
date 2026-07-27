@@ -5,7 +5,7 @@ import {
   ApartmentOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import { Input, Pagination, Row, Col, Segmented, Space, Table, Tag, Tooltip } from "antd";
+import { Checkbox, Input, Pagination, Row, Col, Segmented, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -22,7 +22,6 @@ import type { ObjectTypeSummary, OntologyGraph, OntologyGroupedGraph, RelationTy
 
 type EntityTab = "objects" | "relations";
 type ObjectViewMode = "list" | "cards" | "graph";
-type ObjectRoleFilter = "all" | "business" | "common" | "review";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -117,13 +116,26 @@ function matchObject(obj: ObjectTypeSummary, q: string) {
   return false;
 }
 
-// 业务对象 = business_object；普通对象 = 非业务对象（数据表 / 关系表）；
-// 待复核 = role_reason 带 [待复核] 标记，角色需人工确认。
-function matchObjectRole(obj: ObjectTypeSummary, filter: ObjectRoleFilter) {
-  if (filter === "all") return true;
-  if (filter === "review") return (obj.role_reason ?? "").includes("待复核");
-  const isBusiness = (obj.table_role || "business_object") === "business_object";
-  return filter === "business" ? isBusiness : !isBusiness;
+// 对象类型多选项（与 ROLE_META 对齐）。
+const TYPE_FILTER_OPTIONS = [
+  { label: "业务对象", value: "business_object" },
+  { label: "数据表", value: "data_table" },
+  { label: "关系表", value: "bridge" },
+  { label: "技术/系统表", value: "technical" },
+];
+
+// 组合筛选（本地兜底，服务端已过滤时不走此路径）：
+// 对象类型多选（table_role）AND 仅看待复核（role_reason 带 [待复核]）。
+function matchObjectFilters(
+  obj: ObjectTypeSummary,
+  typeFilter: string[],
+  needsReviewOnly: boolean,
+) {
+  if (typeFilter.length && !typeFilter.includes(obj.table_role || "business_object")) {
+    return false;
+  }
+  if (needsReviewOnly && !(obj.role_reason ?? "").includes("待复核")) return false;
+  return true;
 }
 
 function matchRelation(rel: RelationType, q: string) {
@@ -149,9 +161,14 @@ interface Props {
   /** 服务端搜索受控；未传则本地过滤 */
   searchQuery?: string;
   onSearchChange?: (q: string) => void;
-  /** 业务对象/普通对象筛选受控；未传则本地过滤 */
-  objectRoleFilter?: ObjectRoleFilter;
-  onObjectRoleFilterChange?: (filter: ObjectRoleFilter) => void;
+  /** 对象类型多选筛选受控；未传则本地过滤 */
+  objectTypeFilter?: string[];
+  onObjectTypeFilterChange?: (roles: string[]) => void;
+  /** 仅看待复核开关受控；未传则本地过滤 */
+  needsReviewOnly?: boolean;
+  onNeedsReviewOnlyChange?: (v: boolean) => void;
+  /** 是否展示对象角色分类（类型列/斜角标/待复核/类型筛选）。浏览已发布本体时置 false。 */
+  showRoleClassification?: boolean;
   /** 图谱邻域展开 */
   onExpandGraphNode?: (objectId: string) => void;
   graphExpanding?: boolean;
@@ -173,8 +190,11 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   relationPaging,
   searchQuery,
   onSearchChange,
-  objectRoleFilter,
-  onObjectRoleFilterChange,
+  objectTypeFilter,
+  onObjectTypeFilterChange,
+  needsReviewOnly,
+  onNeedsReviewOnlyChange,
+  showRoleClassification = true,
   onExpandGraphNode,
   graphExpanding = false,
   groupedGraph,
@@ -186,7 +206,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const [entityTab, setEntityTab] = useState<EntityTab>("objects");
   const [objectView, setObjectView] = useState<ObjectViewMode>("cards");
   const [localQuery, setLocalQuery] = useState("");
-  const [localRoleFilter, setLocalRoleFilter] = useState<ObjectRoleFilter>("all");
+  const [localTypeFilter, setLocalTypeFilter] = useState<string[]>([]);
+  const [localNeedsReview, setLocalNeedsReview] = useState(false);
   const [objectPage, setObjectPage] = useState(1);
   const [objectPageSize, setObjectPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [relationPage, setRelationPage] = useState(1);
@@ -194,15 +215,22 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   const query = onSearchChange ? (searchQuery ?? "") : localQuery;
   const normalizedQuery = normalizeQuery(query);
-  const roleFilter = onObjectRoleFilterChange ? (objectRoleFilter ?? "all") : localRoleFilter;
+  const typeFilter = useMemo(
+    () => (onObjectTypeFilterChange ? (objectTypeFilter ?? []) : localTypeFilter),
+    [onObjectTypeFilterChange, objectTypeFilter, localTypeFilter],
+  );
+  const needsReview = onNeedsReviewOnlyChange ? (needsReviewOnly ?? false) : localNeedsReview;
+  const filterKey = `${typeFilter.join(",")}|${needsReview}`;
 
   const filteredObjects = useMemo(() => {
-    // 服务端已按 role_filter 过滤，本地只处理未受控场景
+    // 服务端已按 role_in/needs_review 过滤，本地只处理未受控场景
     if (serverMode) return objects;
     return objects.filter(
-      (o) => matchObject(o, normalizedQuery) && matchObjectRole(o, roleFilter),
+      (o) =>
+        matchObject(o, normalizedQuery) &&
+        matchObjectFilters(o, typeFilter, needsReview),
     );
-  }, [objects, normalizedQuery, roleFilter, serverMode]);
+  }, [objects, normalizedQuery, typeFilter, needsReview, serverMode]);
 
   const filteredRelations = useMemo(() => {
     if (serverMode) return relations;
@@ -214,7 +242,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       setObjectPage(1);
       setRelationPage(1);
     }
-  }, [entityTab, normalizedQuery, roleFilter, serverMode]);
+  }, [entityTab, normalizedQuery, filterKey, serverMode]);
 
   const effectiveObjectPage = objectPaging?.page ?? objectPage;
   const effectiveObjectPageSize = objectPaging?.pageSize ?? objectPageSize;
@@ -242,19 +270,23 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           </Link>
         ),
       },
-      {
-        title: "类型",
-        dataIndex: "table_role",
-        key: "table_role",
-        width: 110,
-        render: (_, record) => (
-          <RoleBadge
-            role={record.table_role}
-            reason={record.role_reason}
-            confidence={record.role_confidence}
-          />
-        ),
-      },
+      ...(showRoleClassification
+        ? [
+            {
+              title: "类型",
+              dataIndex: "table_role",
+              key: "table_role",
+              width: 110,
+              render: (_: unknown, record: ObjectTypeSummary) => (
+                <RoleBadge
+                  role={record.table_role}
+                  reason={record.role_reason}
+                  confidence={record.role_confidence}
+                />
+              ),
+            } as ColumnsType<ObjectTypeSummary>[number],
+          ]
+        : []),
       {
         title: "属性",
         dataIndex: "property_count",
@@ -294,7 +326,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           value?.toFixed(2) ?? <span className="om-muted">-</span>,
       },
     ],
-    [objectDetailPath],
+    [objectDetailPath, showRoleClassification],
   );
 
   const relationColumns: ColumnsType<RelationType> = useMemo(
@@ -398,13 +430,20 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     [onSearchChange],
   );
 
-  const handleRoleFilterChange = useCallback(
-    (value: string) => {
-      const next = value as ObjectRoleFilter;
-      if (onObjectRoleFilterChange) onObjectRoleFilterChange(next);
-      else setLocalRoleFilter(next);
+  const handleTypeFilterChange = useCallback(
+    (values: string[]) => {
+      if (onObjectTypeFilterChange) onObjectTypeFilterChange(values);
+      else setLocalTypeFilter(values);
     },
-    [onObjectRoleFilterChange],
+    [onObjectTypeFilterChange],
+  );
+
+  const handleNeedsReviewChange = useCallback(
+    (checked: boolean) => {
+      if (onNeedsReviewOnlyChange) onNeedsReviewOnlyChange(checked);
+      else setLocalNeedsReview(checked);
+    },
+    [onNeedsReviewOnlyChange],
   );
 
   const handleObjectPageChange = useCallback(
@@ -486,17 +525,25 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   ) : null;
 
   const roleFilterSwitcher =
-    entityTab === "objects" && objectView !== "graph" ? (
-      <Segmented
-        value={roleFilter}
-        onChange={handleRoleFilterChange}
-        options={[
-          { label: "全部", value: "all" },
-          { label: "业务对象", value: "business" },
-          { label: "普通对象", value: "common" },
-          { label: "待复核", value: "review" },
-        ]}
-      />
+    showRoleClassification && entityTab === "objects" && objectView !== "graph" ? (
+      <Space size={8} wrap>
+        <Select
+          mode="multiple"
+          allowClear
+          value={typeFilter}
+          onChange={handleTypeFilterChange}
+          options={TYPE_FILTER_OPTIONS}
+          placeholder="对象类型"
+          maxTagCount="responsive"
+          style={{ minWidth: 200 }}
+        />
+        <Checkbox
+          checked={needsReview}
+          onChange={(e) => handleNeedsReviewChange(e.target.checked)}
+        >
+          仅看待复核
+        </Checkbox>
+      </Space>
     ) : null;
 
   const objectViewSwitcher =
@@ -675,10 +722,12 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
               <Col key={obj.id} xs={24} sm={12} md={8} lg={6} xl={4} xxl={4}>
                 <Link to={objectDetailPath(obj.id)} className="om-card-link">
                   <div className="entity-card">
-                    <CardCorner
-                      role={obj.table_role}
-                      confidence={obj.role_confidence}
-                    />
+                    {showRoleClassification && (
+                      <CardCorner
+                        role={obj.table_role}
+                        confidence={obj.role_confidence}
+                      />
+                    )}
                     <div className="entity-card-head">
                       <div className="entity-card-title" title={obj.display_name}>
                         {obj.display_name}
@@ -688,13 +737,14 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                       {obj.name}
                     </div>
                     <div className="entity-card-flags">
-                      {(obj.role_reason ?? "").includes("待复核") && (
-                        <Tooltip
-                          title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}
-                        >
-                          <span className="entity-card-review">待复核</span>
-                        </Tooltip>
-                      )}
+                      {showRoleClassification &&
+                        (obj.role_reason ?? "").includes("待复核") && (
+                          <Tooltip
+                            title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}
+                          >
+                            <span className="entity-card-review">待复核</span>
+                          </Tooltip>
+                        )}
                     </div>
                     <div className="entity-card-foot">
                       <span className="entity-card-foot-item">

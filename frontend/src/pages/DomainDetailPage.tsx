@@ -76,7 +76,8 @@ async function fetchOntologyLists(
     relationPage: number;
     pageSize: number;
     q?: string;
-    roleFilter?: "business" | "common" | "review";
+    roleIn?: string[];
+    needsReview?: boolean;
     /** 传入已有图谱时跳过重新拉取，保留邻域展开结果 */
     existingGraph?: OntologyGraph | null;
   },
@@ -87,7 +88,8 @@ async function fetchOntologyLists(
     api.listObjectTypes({
       ontologyId,
       q: opts.q || undefined,
-      roleFilter: opts.roleFilter,
+      roleIn: opts.roleIn,
+      needsReview: opts.needsReview,
       limit: opts.pageSize,
       offset: objectOffset,
     }),
@@ -128,7 +130,8 @@ async function fetchDomainBundle(
     relationPage: number;
     pageSize: number;
     q?: string;
-    roleFilter?: "business" | "common" | "review";
+    roleIn?: string[];
+    needsReview?: boolean;
     existingGraph?: OntologyGraph | null;
     existingOntologyId?: string | null;
   },
@@ -160,7 +163,8 @@ export function DomainDetailPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [roleFilter, setRoleFilter] = useState<"all" | "business" | "common" | "review">("all");
+  const [typeFilter, setTypeFilter] = useState<string[]>([]);
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
   const [graphExpanding, setGraphExpanding] = useState(false);
   const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
   const [graphMode, setGraphMode] = useState<GraphMode>("detail");
@@ -182,7 +186,7 @@ export function DomainDetailPage() {
 
   useEffect(() => {
     setObjectPage(1);
-  }, [roleFilter]);
+  }, [typeFilter, needsReviewOnly]);
 
   useEffect(() => {
     groupedGraphCacheRef.current = null;
@@ -205,7 +209,8 @@ export function DomainDetailPage() {
         relationPage,
         pageSize,
         q: debouncedQ,
-        roleFilter: roleFilter === "all" ? undefined : roleFilter,
+        roleIn: typeFilter.length ? typeFilter : undefined,
+        needsReview: needsReviewOnly || undefined,
         existingGraph: cached?.graph ?? null,
         existingOntologyId: cached?.ontologyId ?? null,
       });
@@ -217,7 +222,7 @@ export function DomainDetailPage() {
       }
       return result;
     },
-    [domainId, objectPage, relationPage, pageSize, debouncedQ, roleFilter],
+    [domainId, objectPage, relationPage, pageSize, debouncedQ, typeFilter, needsReviewOnly],
   );
 
   const domain = bundle?.domain ?? null;
@@ -725,8 +730,10 @@ export function DomainDetailPage() {
             workspaceMode
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
-            objectRoleFilter={roleFilter}
-            onObjectRoleFilterChange={setRoleFilter}
+            objectTypeFilter={typeFilter}
+            onObjectTypeFilterChange={setTypeFilter}
+            needsReviewOnly={needsReviewOnly}
+            onNeedsReviewOnlyChange={setNeedsReviewOnly}
             objectPaging={{
               total: objectTotal,
               page: objectPage,

@@ -247,7 +247,13 @@ export const api = {
 
   updateObjectType: (
     objectTypeId: string,
-    body: { name?: string; display_name?: string; description?: string },
+    body: {
+      name?: string;
+      display_name?: string;
+      description?: string;
+      table_role?: string;
+      needs_review?: boolean;
+    },
   ) =>
     request<ObjectTypeDetail>(`/api/object-types/${objectTypeId}`, {
       method: "PATCH",
@@ -372,7 +378,8 @@ export const api = {
     domainId?: string;
     publishedOnly?: boolean;
     q?: string;
-    roleFilter?: "business" | "common" | "review";
+    roleIn?: string[];
+    needsReview?: boolean;
     limit?: number;
     offset?: number;
   }) =>
@@ -382,7 +389,8 @@ export const api = {
         domain_id: params?.domainId,
         published_only: params?.publishedOnly,
         q: params?.q,
-        role_filter: params?.roleFilter,
+        role_in: params?.roleIn?.length ? params.roleIn.join(",") : undefined,
+        needs_review: params?.needsReview,
         limit: params?.limit,
         offset: params?.offset,
       })}`,

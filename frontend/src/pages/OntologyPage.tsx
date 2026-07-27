@@ -273,6 +273,7 @@ export function OntologyPage() {
             objects={objects}
             relations={relations}
             graph={graph}
+            showRoleClassification={false}
             relationDetailPath={(relationId) => `/ontology/relations/${relationId}`}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}

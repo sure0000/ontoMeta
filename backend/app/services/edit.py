@@ -30,6 +30,23 @@ from app.schemas import (
 _OBJECT_BINDING_ROLES = {"subject", "dimension", "output"}
 _PROPERTY_BINDING_ROLES = {"input", "output", "filter", "group"}
 
+# 对象角色的合法取值（与前端 ROLE_META 一致）。
+_ALLOWED_TABLE_ROLES = {"business_object", "data_table", "bridge", "technical"}
+# 待复核软标记：写入 role_reason 前缀，全库以此为复核状态的唯一真源。
+_REVIEW_MARK = "[待复核]"
+
+
+def _set_review_mark(obj: ObjectType, needs_review: bool) -> None:
+    """在 role_reason 上增删 [待复核] 前缀。已确认=去除标记。"""
+    reason = (obj.role_reason or "").strip()
+    body = reason
+    if body.startswith(_REVIEW_MARK):
+        body = body[len(_REVIEW_MARK):].strip()
+    if needs_review:
+        obj.role_reason = f"{_REVIEW_MARK} {body}".strip() if body else _REVIEW_MARK
+    else:
+        obj.role_reason = body or None
+
 
 def _log_change(
     db: Session,
@@ -89,6 +106,8 @@ class EditService:
         name: str | None = None,
         display_name: str | None = None,
         description: str | None = None,
+        table_role: str | None = None,
+        needs_review: bool | None = None,
         operator: str | None = None,
     ) -> ObjectTypeDetail:
         obj = db.get(ObjectType, object_type_id)
@@ -105,6 +124,24 @@ class EditService:
         if description is not None:
             obj.description = description
             changed.append("description")
+
+        role_confirmed = False
+        if table_role is not None and table_role != obj.table_role:
+            if table_role not in _ALLOWED_TABLE_ROLES:
+                raise ValueError(f"非法对象角色：{table_role}")
+            obj.table_role = table_role
+            changed.append("table_role")
+            # 人工改判角色即视为复核通过，自动清除 [待复核]。
+            role_confirmed = True
+
+        # 复核状态：显式 needs_review 优先；否则改角色时自动置为已确认。
+        if needs_review is not None:
+            _set_review_mark(obj, needs_review)
+            changed.append("role_reason")
+        elif role_confirmed:
+            _set_review_mark(obj, False)
+            changed.append("role_reason")
+
         if changed:
             _mark_overridden(obj, changed)
 

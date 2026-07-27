@@ -65,7 +65,16 @@ interface BasicForm {
   name: string;
   display_name: string;
   description?: string;
+  table_role: string;
+  needs_review: boolean;
 }
+
+const ROLE_OPTIONS = [
+  { label: "业务对象", value: "business_object" },
+  { label: "数据表", value: "data_table" },
+  { label: "关系表", value: "bridge" },
+  { label: "技术/系统表", value: "technical" },
+];
 
 interface RelationForm {
   display_name: string;
@@ -140,6 +149,8 @@ export function ObjectTypeDetailPage() {
       name: detail.name,
       display_name: detail.display_name,
       description: detail.description,
+      table_role: detail.table_role || "business_object",
+      needs_review: (detail.role_reason ?? "").includes("待复核"),
     });
     return detail;
   };
@@ -689,9 +700,34 @@ export function ObjectTypeDetailPage() {
                 </Form.Item>
               </Col>
             </Row>
-            <Form.Item label="描述" name="description" style={{ marginBottom: 0 }}>
+            <Form.Item label="描述" name="description" style={{ marginBottom: 16 }}>
               <Input.TextArea rows={2} />
             </Form.Item>
+            <Row gutter={20}>
+              <Col xs={24} md={8}>
+                <Form.Item label="对象类型" name="table_role">
+                  <Select
+                    options={ROLE_OPTIONS}
+                    onChange={() => form.setFieldValue("needs_review", false)}
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={8}>
+                <Form.Item
+                  label="复核状态"
+                  name="needs_review"
+                  extra="改判对象类型后将自动置为已确认"
+                  style={{ marginBottom: 0 }}
+                >
+                  <Select
+                    options={[
+                      { label: "已确认", value: false },
+                      { label: "待复核", value: true },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
           </Form>
         ) : (
           <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">

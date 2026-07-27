@@ -311,7 +311,8 @@ class OntologyQueryService:
         published_only: bool = False,
         *,
         q: str | None = None,
-        role_filter: str | None = None,
+        role_in: list[str] | None = None,
+        needs_review: bool | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> PageResult[ObjectTypeSummary]:
@@ -323,14 +324,17 @@ class OntologyQueryService:
             domain_context_id=domain_context_id,
             published_only=published_only,
         )
-        # 业务对象 / 普通对象 / 待复核 筛选：business=业务对象；common=普通对象
-        # （数据表+关系表）；review=角色待人工复核（role_reason 带 [待复核] 标记）。
-        if role_filter == "business":
-            query = query.filter(ObjectType.table_role == "business_object")
-        elif role_filter == "common":
-            query = query.filter(ObjectType.table_role != "business_object")
-        elif role_filter == "review":
+        # 组合筛选（AND）：role_in=对象角色多选；needs_review=仅看待复核。
+        # 待复核以 role_reason 带 [待复核] 标记为准。
+        if role_in:
+            query = query.filter(ObjectType.table_role.in_(role_in))
+        if needs_review is True:
             query = query.filter(ObjectType.role_reason.ilike("%待复核%"))
+        elif needs_review is False:
+            query = query.filter(
+                (ObjectType.role_reason.is_(None))
+                | (~ObjectType.role_reason.ilike("%待复核%"))
+            )
         if q and q.strip():
             like = f"%{q.strip()}%"
             query = query.filter(

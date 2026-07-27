@@ -398,6 +398,10 @@ class ObjectTypeUpdate(BaseModel):
     name: str | None = None
     display_name: str | None = None
     description: str | None = None
+    # 人工改判对象角色（业务对象/数据表/关系表/技术表）。
+    table_role: str | None = None
+    # 复核状态开关：True=标记为待复核；False=标记为已确认（清除 [待复核]）。
+    needs_review: bool | None = None
     operator: str | None = None
 
 
