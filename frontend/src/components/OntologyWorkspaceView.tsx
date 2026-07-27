@@ -237,6 +237,26 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     return relations.filter((r) => matchRelation(r, normalizedQuery));
   }, [relations, normalizedQuery, serverMode]);
 
+  // 图谱与筛选联动：类型多选/待复核激活时，仅保留匹配节点及其两端都保留的边。
+  const roleFilterActive =
+    showRoleClassification && (typeFilter.length > 0 || needsReview);
+  const displayGraph = useMemo(() => {
+    if (!graph || !roleFilterActive) return graph;
+    const keep = new Set<string>();
+    const nodes = graph.nodes.filter((n) => {
+      const okType =
+        !typeFilter.length || typeFilter.includes(n.table_role || "business_object");
+      const okReview = !needsReview || Boolean(n.needs_review);
+      if (okType && okReview) {
+        keep.add(n.id);
+        return true;
+      }
+      return false;
+    });
+    const edges = graph.edges.filter((e) => keep.has(e.source) && keep.has(e.target));
+    return { ...graph, nodes, edges };
+  }, [graph, roleFilterActive, typeFilter, needsReview]);
+
   useEffect(() => {
     if (!serverMode) {
       setObjectPage(1);
@@ -525,7 +545,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   ) : null;
 
   const roleFilterSwitcher =
-    showRoleClassification && entityTab === "objects" && objectView !== "graph" ? (
+    showRoleClassification && entityTab === "objects" ? (
       <Space size={8} wrap>
         <Select
           mode="multiple"
@@ -580,12 +600,15 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       />
     ) : null;
 
-  const graphMeta =
-    graph?.truncated || (graph?.total_object_count && graph.total_object_count > graph.nodes.length)
-      ? `局部 ${graph.nodes.length}/${graph.total_object_count ?? "?"} 节点 · ${graph.edges.length} 关系`
-      : graph
-        ? `${graph.nodes.length} 节点 · ${graph.edges.length} 关系`
-        : "图谱生成中";
+  const graphMeta = !displayGraph
+    ? "图谱生成中"
+    : roleFilterActive
+      ? `筛选 ${displayGraph.nodes.length} 节点 · ${displayGraph.edges.length} 关系`
+      : displayGraph.truncated ||
+          (displayGraph.total_object_count &&
+            displayGraph.total_object_count > displayGraph.nodes.length)
+        ? `局部 ${displayGraph.nodes.length}/${displayGraph.total_object_count ?? "?"} 节点 · ${displayGraph.edges.length} 关系`
+        : `${displayGraph.nodes.length} 节点 · ${displayGraph.edges.length} 关系`;
 
   const totalObjectCount = graph?.total_object_count ?? objects.length;
   const overviewEligible = Boolean(onGraphModeChange) && totalObjectCount >= OVERVIEW_MIN_OBJECTS;
@@ -650,24 +673,24 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         <SectionCard title="对象列表" icon={<AppstoreOutlined />} bodyFlush>
           <EmptyState title="暂无业务对象" />
         </SectionCard>
-      ) : objectView === "graph" && graph ? (
+      ) : objectView === "graph" && displayGraph ? (
         <SectionCard
           title="对象图谱"
-          count={graph.total_object_count ?? objects.length}
+          count={roleFilterActive ? displayGraph.nodes.length : (displayGraph.total_object_count ?? objects.length)}
           countPrimary
           icon={<NodeIndexOutlined />}
           bodyFlush
         >
           <OntologyGraphView
-            graph={graph}
+            graph={displayGraph}
             height={720}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
             onExpandNode={onExpandGraphNode}
             expanding={graphExpanding}
-            centerNodeId={graph.center_id ?? undefined}
+            centerNodeId={displayGraph.center_id ?? undefined}
             hint={
-              graph.truncated
+              displayGraph.truncated
                 ? "双击展开邻域 · Shift+单击查看详情 · 拖拽重排"
                 : undefined
             }

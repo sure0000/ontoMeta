@@ -388,6 +388,8 @@ export interface GraphNode {
   label: string;
   display_name: string;
   status: string;
+  table_role?: string;
+  needs_review?: boolean;
 }
 
 export interface GraphEdge {

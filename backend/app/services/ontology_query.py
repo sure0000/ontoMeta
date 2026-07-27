@@ -532,7 +532,12 @@ class OntologyQueryService:
         if full or total_object_count <= max_nodes:
             nodes = [
                 GraphNode(
-                    id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+                    id=obj.id,
+                    label=obj.name,
+                    display_name=obj.display_name,
+                    status=obj.status,
+                    table_role=obj.table_role,
+                    needs_review="待复核" in (obj.role_reason or ""),
                 )
                 for obj in objects
             ]
@@ -592,7 +597,12 @@ class OntologyQueryService:
 
         nodes = [
             GraphNode(
-                id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+                id=obj.id,
+                label=obj.name,
+                display_name=obj.display_name,
+                status=obj.status,
+                table_role=obj.table_role,
+                needs_review="待复核" in (obj.role_reason or ""),
             )
             for oid, obj in obj_by_id.items()
             if oid in selected

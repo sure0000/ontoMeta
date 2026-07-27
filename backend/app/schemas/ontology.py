@@ -467,6 +467,8 @@ class GraphNode(BaseModel):
     label: str
     display_name: str
     status: str
+    table_role: str | None = None
+    needs_review: bool = False
 
 
 class GraphEdge(BaseModel):
