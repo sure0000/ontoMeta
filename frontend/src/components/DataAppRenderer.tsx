@@ -66,7 +66,7 @@ export function BarChartRender({
               style={{ cursor: clickable ? "pointer" : "default" }}
               onClick={() => onBarClick?.(xKey, p.label)}
             >
-              <rect x={x} y={y} width={barW} height={h} rx={4} fill="#3b82f6">
+              <rect x={x} y={y} width={barW} height={h} rx={4} fill="var(--om-primary)">
                 {clickable && <title>点击下钻：{p.label}</title>}
               </rect>
               <text
@@ -74,7 +74,7 @@ export function BarChartRender({
                 y={y - 6}
                 textAnchor="middle"
                 fontSize={11}
-                fill="#334155"
+                fill="var(--om-text-secondary)"
               >
                 {p.value}
               </text>
@@ -83,7 +83,7 @@ export function BarChartRender({
                 y={chartH + 28}
                 textAnchor="middle"
                 fontSize={11}
-                fill="#64748b"
+                fill="var(--om-text-tertiary)"
               >
                 {p.label.length > 8 ? `${p.label.slice(0, 8)}…` : p.label}
               </text>
@@ -110,7 +110,7 @@ export function KpiRender({ columns, rows }: RenderRows) {
       : 0;
   return (
     <div style={{ textAlign: "center", padding: "24px 0" }}>
-      <div style={{ fontSize: 40, fontWeight: 700, color: "#2563eb" }}>
+      <div style={{ fontSize: 40, fontWeight: 700, color: "var(--om-primary)" }}>
         {value.toLocaleString()}
       </div>
       <Text type="secondary">{title}</Text>

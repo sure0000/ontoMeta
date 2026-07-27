@@ -102,7 +102,7 @@ def list_object_types_by_ontology(
     ontology_id: str,
     q: str | None = Query(None),
     role_filter: str | None = Query(
-        None, description="对象角色筛选：business=业务对象，common=普通对象"
+        None, description="对象角色筛选：business=业务对象，common=普通对象，review=待复核"
     ),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -193,7 +193,7 @@ def list_object_types(
     published_only: bool = Query(False),
     q: str | None = Query(None),
     role_filter: str | None = Query(
-        None, description="对象角色筛选：business=业务对象，common=普通对象"
+        None, description="对象角色筛选：business=业务对象，common=普通对象，review=待复核"
     ),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),

@@ -525,7 +525,7 @@ export function BusinessLogicDetailPage() {
                     )}
                     {objLogics.length > 0 && (
                       <div className="entity-card-foot" style={{ marginTop: 6, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 11, color: "#8c8c8c", marginRight: 4, lineHeight: "22px" }}>
+                        <span style={{ fontSize: 11, color: "var(--om-text-tertiary)", marginRight: 4, lineHeight: "22px" }}>
                           业务逻辑:
                         </span>
                         {objLogics.map((bl) => {

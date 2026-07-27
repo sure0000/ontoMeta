@@ -142,6 +142,7 @@ export function DataSourcesModal({
       )}
 
       <Table
+        className="om-table"
         rowKey="id"
         size="small"
         loading={loading}

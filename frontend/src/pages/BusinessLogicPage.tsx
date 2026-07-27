@@ -171,7 +171,7 @@ export function BusinessLogicPage() {
                         <span
                           style={{
                             marginLeft: 8,
-                            color: "var(--om-text-secondary, #94a3b8)",
+                            color: "var(--om-text-secondary)",
                             fontSize: 13,
                             fontWeight: 400,
                           }}
@@ -183,7 +183,7 @@ export function BusinessLogicPage() {
                     description={
                       <Paragraph
                         ellipsis={{ rows: 2 }}
-                        style={{ marginBottom: 0, color: "var(--om-text-secondary, #94a3b8)" }}
+                        style={{ marginBottom: 0, color: "var(--om-text-secondary)" }}
                       >
                         {cat.description || "暂无描述"}
                       </Paragraph>

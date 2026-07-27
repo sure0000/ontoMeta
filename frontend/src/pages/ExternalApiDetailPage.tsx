@@ -332,6 +332,7 @@ export function ExternalApiDetailPage() {
           <Text type="secondary">此工具无需输入参数</Text>
         ) : (
           <Table
+            className="om-table"
             rowKey="name"
             columns={paramColumns}
             dataSource={params}
@@ -353,6 +354,7 @@ export function ExternalApiDetailPage() {
 
       <SectionCard title="输出字段" count={item.output_fields.length}>
         <Table
+          className="om-table"
           rowKey="name"
           columns={fieldColumns}
           dataSource={item.output_fields}
@@ -445,7 +447,7 @@ export function ExternalApiDetailPage() {
                     p.required ? (
                       <span>
                         {p.name}
-                        <span style={{ color: "#ef4444", marginLeft: 2 }}>*</span>
+                        <span style={{ color: "var(--om-error)", marginLeft: 2 }}>*</span>
                       </span>
                     ) : (
                       p.name

@@ -48,7 +48,7 @@ export function ChatBiPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const domainIdParam = searchParams.get("domain") || undefined;
 
-  const { data: domains } = useApi<DomainContext[]>(
+  const { data: domains, loading: loadingDomains } = useApi<DomainContext[]>(
     async () => api.listDomains(),
     EMPTY_DEPS,
   );
@@ -495,12 +495,18 @@ export function ChatBiPage() {
   return (
     <PageContainer full>
       {!domainId ? (
-        <Alert
-          type="info"
-          message="请先选择数据域"
-          description="尚未从 DataHub 同步到任何数据域，请在「本体建模」页确认接入配置。"
-          showIcon
-        />
+        loadingDomains || domains === null ? (
+          <div style={{ display: "grid", placeItems: "center", height: "100%" }}>
+            <Spin size="large" />
+          </div>
+        ) : (
+          <Alert
+            type="info"
+            message="请先选择数据域"
+            description="尚未从 DataHub 同步到任何数据域，请在「本体建模」页确认接入配置。"
+            showIcon
+          />
+        )
       ) : !activeDomain ? (
         <div style={{ display: "grid", placeItems: "center", height: "100%" }}>
           <Spin size="large" />

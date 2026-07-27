@@ -57,7 +57,7 @@ function countLabel(count: number) {
     <span
       style={{
         marginLeft: 8,
-        color: "var(--om-text-secondary, #94a3b8)",
+        color: "var(--om-text-secondary)",
         fontSize: 12,
       }}
     >

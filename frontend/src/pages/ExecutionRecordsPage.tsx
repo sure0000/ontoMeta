@@ -354,20 +354,7 @@ export function ExecutionRecordsPage() {
               暂无日志
             </div>
           ) : (
-            <pre
-              style={{
-                margin: 0,
-                padding: 12,
-                background: "var(--om-bg-muted, #f5f5f5)",
-                borderRadius: 6,
-                fontSize: 12,
-                lineHeight: 1.6,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                fontFamily:
-                  "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-              }}
-            >
+            <pre className="code-block code-block--light code-block--bounded" style={{ margin: 0 }}>
               {buildLogText(logs)}
             </pre>
           )}

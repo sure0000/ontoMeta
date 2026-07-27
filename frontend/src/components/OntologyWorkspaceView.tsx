@@ -22,7 +22,7 @@ import type { ObjectTypeSummary, OntologyGraph, OntologyGroupedGraph, RelationTy
 
 type EntityTab = "objects" | "relations";
 type ObjectViewMode = "list" | "cards" | "graph";
-type ObjectRoleFilter = "all" | "business" | "common";
+type ObjectRoleFilter = "all" | "business" | "common" | "review";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -41,11 +41,14 @@ function normalizeQuery(input: string) {
 }
 
 // 对象角色徐章：区分“业务对象 / 普通数据表 / 桥接表”（预生成时标注，待人工确认）。
-const ROLE_META: Record<string, { label: string; color: string }> = {
-  business_object: { label: "业务对象", color: "green" },
-  data_table: { label: "数据表", color: "orange" },
-  bridge: { label: "关系表", color: "purple" },
-  technical: { label: "技术/系统表", color: "default" },
+const ROLE_META: Record<
+  string,
+  { label: string; color: string; short: string; cls: string }
+> = {
+  business_object: { label: "业务对象", color: "green", short: "业务", cls: "business" },
+  data_table: { label: "数据表", color: "blue", short: "数据", cls: "data" },
+  bridge: { label: "关系表", color: "purple", short: "关系", cls: "bridge" },
+  technical: { label: "技术/系统表", color: "default", short: "技术", cls: "technical" },
 };
 
 function RoleBadge({
@@ -58,14 +61,52 @@ function RoleBadge({
   confidence?: number;
 }) {
   const meta = ROLE_META[role || "business_object"] ?? ROLE_META.business_object;
+  const needsReview = (reason ?? "").includes("待复核");
   const tip = [
     reason,
     confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null,
   ]
     .filter(Boolean)
     .join("｜");
-  const tag = <Tag color={meta.color}>{meta.label}</Tag>;
-  return tip ? <Tooltip title={tip}>{tag}</Tooltip> : tag;
+  const content = (
+    <span className="role-badge">
+      <Tag color={meta.color}>{meta.label}</Tag>
+      {needsReview && (
+        <Tag color="gold" className="role-badge-review">
+          待复核
+        </Tag>
+      )}
+    </span>
+  );
+  return tip ? <Tooltip title={tip}>{content}</Tooltip> : content;
+}
+
+// 卡片角色斜角标：右上角彩色色带表示角色（悬停出全称+置信度）。
+// 待复核不放角落，改到「标识名」下方以更清晰地显示（见卡片 flags 行）。
+function CardCorner({
+  role,
+  confidence,
+}: {
+  role?: string;
+  confidence?: number;
+}) {
+  const meta = ROLE_META[role || "business_object"] ?? ROLE_META.business_object;
+  const tip = [
+    meta.label,
+    confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null,
+  ]
+    .filter(Boolean)
+    .join("｜");
+  return (
+    <Tooltip title={tip}>
+      <span
+        className={`entity-card-corner entity-card-corner--${meta.cls}`}
+        aria-label={meta.label}
+      >
+        <span className="entity-card-corner-band">{meta.short}</span>
+      </span>
+    </Tooltip>
+  );
 }
 
 function matchObject(obj: ObjectTypeSummary, q: string) {
@@ -76,9 +117,11 @@ function matchObject(obj: ObjectTypeSummary, q: string) {
   return false;
 }
 
-// 业务对象 = business_object；普通对象 = 非业务对象（数据表 / 关系表）
+// 业务对象 = business_object；普通对象 = 非业务对象（数据表 / 关系表）；
+// 待复核 = role_reason 带 [待复核] 标记，角色需人工确认。
 function matchObjectRole(obj: ObjectTypeSummary, filter: ObjectRoleFilter) {
   if (filter === "all") return true;
+  if (filter === "review") return (obj.role_reason ?? "").includes("待复核");
   const isBusiness = (obj.table_role || "business_object") === "business_object";
   return filter === "business" ? isBusiness : !isBusiness;
 }
@@ -432,7 +475,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const searchInput = showSearch ? (
     <Input
       allowClear
-      prefix={<SearchOutlined style={{ color: "var(--om-text-secondary, #94a3b8)" }} />}
+      prefix={<SearchOutlined style={{ color: "var(--om-text-secondary)" }} />}
       placeholder={
         entityTab === "relations" ? "搜索关系名称、描述、对象" : "搜索对象名称、描述"
       }
@@ -451,6 +494,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           { label: "全部", value: "all" },
           { label: "业务对象", value: "business" },
           { label: "普通对象", value: "common" },
+          { label: "待复核", value: "review" },
         ]}
       />
     ) : null;
@@ -626,23 +670,31 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         </SectionCard>
       ) : (
         <div>
-          <Row gutter={[12, 12]}>
+          <Row gutter={[12, 12]} align="stretch">
             {pagedObjects.map((obj) => (
               <Col key={obj.id} xs={24} sm={12} md={8} lg={6} xl={4} xxl={4}>
                 <Link to={objectDetailPath(obj.id)} className="om-card-link">
                   <div className="entity-card">
+                    <CardCorner
+                      role={obj.table_role}
+                      confidence={obj.role_confidence}
+                    />
                     <div className="entity-card-head">
                       <div className="entity-card-title" title={obj.display_name}>
                         {obj.display_name}
                       </div>
-                      <RoleBadge
-                        role={obj.table_role}
-                        reason={obj.role_reason}
-                        confidence={obj.role_confidence}
-                      />
                     </div>
                     <div className="entity-card-subtitle" title={obj.name}>
                       {obj.name}
+                    </div>
+                    <div className="entity-card-flags">
+                      {(obj.role_reason ?? "").includes("待复核") && (
+                        <Tooltip
+                          title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}
+                        >
+                          <span className="entity-card-review">待复核</span>
+                        </Tooltip>
+                      )}
                     </div>
                     <div className="entity-card-foot">
                       <span className="entity-card-foot-item">

@@ -12,6 +12,7 @@ import "./styles/expression.css";
 import "./styles/chat-bi.css";
 import "./styles/external-api.css";
 import "./styles/dashboard.css";
+import "./styles/big-screen.css";
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 const CODE_FONT_FAMILY =
@@ -94,7 +95,7 @@ createRoot(document.getElementById("root")!).render(
             defaultColor: "#475569",
           },
           Breadcrumb: {
-            itemColor: "#94a3b8",
+            itemColor: "#7c8798",
             linkColor: "#64748b",
             linkHoverColor: "#0f172a",
             lastItemColor: "#0f172a",
@@ -109,7 +110,7 @@ createRoot(document.getElementById("root")!).render(
             borderRadiusSM: 6,
           },
           Descriptions: {
-            labelColor: "#94a3b8",
+            labelColor: "#7c8798",
             contentColor: "#0f172a",
           },
           Input: {
@@ -129,7 +130,7 @@ createRoot(document.getElementById("root")!).render(
             colorPrimary: "#2563eb",
           },
           Empty: {
-            colorText: "#94a3b8",
+            colorText: "#7c8798",
             colorTextDisabled: "#cbd5e1",
           },
           Form: {

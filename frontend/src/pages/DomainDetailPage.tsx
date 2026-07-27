@@ -76,7 +76,7 @@ async function fetchOntologyLists(
     relationPage: number;
     pageSize: number;
     q?: string;
-    roleFilter?: "business" | "common";
+    roleFilter?: "business" | "common" | "review";
     /** 传入已有图谱时跳过重新拉取，保留邻域展开结果 */
     existingGraph?: OntologyGraph | null;
   },
@@ -128,7 +128,7 @@ async function fetchDomainBundle(
     relationPage: number;
     pageSize: number;
     q?: string;
-    roleFilter?: "business" | "common";
+    roleFilter?: "business" | "common" | "review";
     existingGraph?: OntologyGraph | null;
     existingOntologyId?: string | null;
   },
@@ -160,7 +160,7 @@ export function DomainDetailPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [roleFilter, setRoleFilter] = useState<"all" | "business" | "common">("all");
+  const [roleFilter, setRoleFilter] = useState<"all" | "business" | "common" | "review">("all");
   const [graphExpanding, setGraphExpanding] = useState(false);
   const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
   const [graphMode, setGraphMode] = useState<GraphMode>("detail");
@@ -665,7 +665,8 @@ export function DomainDetailPage() {
               style={{
                 margin: "16px 0",
                 padding: "16px 24px",
-                background: "#f6f8fa",
+                background: "var(--om-surface-muted)",
+                border: "1px solid var(--om-border)",
                 borderRadius: 8,
               }}
             >
@@ -675,9 +676,9 @@ export function DomainDetailPage() {
               <Progress
                 percent={progress.progress}
                 status={progress.status === "failed" ? "exception" : "active"}
-                strokeColor={{ from: "#108ee9", to: "#87d068" }}
+                strokeColor={{ from: "#2563eb", to: "#16a34a" }}
               />
-              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+              <div style={{ marginTop: 4, color: "var(--om-text-secondary)", fontSize: 13 }}>
                 {progress.message || "处理中..."}
               </div>
             </div>
@@ -764,6 +765,7 @@ export function DomainDetailPage() {
       >
         <Spin spinning={versionsLoading}>
           <Table
+            className="om-table"
             size="small"
             rowKey="id"
             pagination={false}

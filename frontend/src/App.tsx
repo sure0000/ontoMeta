@@ -41,13 +41,13 @@ export default function App() {
         <Route path="/chat-bi" element={<ChatBiPage />} />
         <Route path="/data-apps" element={<DataAppsPage />} />
         <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />
-        <Route path="/apps/:appId" element={<DataAppViewPage />} />
         <Route path="/external-api" element={<Navigate to="/external-api/apps" replace />} />
         <Route path="/external-api/apps" element={<ExternalApiAppsPage />} />
         <Route path="/external-api/endpoints" element={<ExternalApiCatalogPage />} />
         <Route path="/external-api/endpoints/:apiId" element={<ExternalApiDetailPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
+      <Route path="/apps/:appId" element={<DataAppViewPage />} />
       <Route path="/embed/apps/:appId" element={<DataAppEmbedPage />} />
       <Route path="/public/apps/:token" element={<DataAppPublicPage />} />
     </Routes>

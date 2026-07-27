@@ -353,6 +353,33 @@
   margin-top: 0;
 }
 
+/* ---------- Unified AntD Card (与 .section-card 视觉对齐) ----------
+ * 全局统一所有 <Card> 的圆角/边框/头部观感，与品牌卡片一致。 */
+.ant-card {
+  border-radius: var(--om-radius-lg);
+  border-color: var(--om-border);
+}
+.ant-card > .ant-card-head {
+  min-height: 48px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--om-text);
+  background: linear-gradient(180deg, #fbfcfe 0%, #ffffff 100%);
+  border-bottom: 1px solid var(--om-border);
+}
+.ant-card-small > .ant-card-head {
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+.ant-card > .ant-card-head .ant-card-head-title {
+  font-weight: 600;
+}
+.ant-card > .ant-card-body {
+  border-radius: 0 0 var(--om-radius-lg) var(--om-radius-lg);
+}
+
 /* ---------- Stat cards ---------- */
 .stat-row {
   display: grid;
@@ -459,6 +486,82 @@
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 0;
+  padding-right: 44px;
+  min-height: 18px;
+}
+/* 角色斜角标：右上角彩色色带 + 待复核橙色小三角，自clip不影响卡片投影 */
+.entity-card-corner {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 50px;
+  height: 50px;
+  overflow: hidden;
+  border-top-right-radius: var(--om-radius-md, 10px);
+  z-index: 2;
+}
+.entity-card-corner-band {
+  position: absolute;
+  top: 8px;
+  right: -21px;
+  width: 78px;
+  transform: rotate(45deg);
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  color: #fff;
+  background: var(--om-corner, var(--om-neutral));
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
+}
+.entity-card-corner--business {
+  --om-corner: var(--om-success);
+}
+.entity-card-corner--data {
+  --om-corner: var(--om-primary);
+}
+.entity-card-corner--bridge {
+  --om-corner: #7c3aed;
+}
+.entity-card-corner--technical {
+  --om-corner: var(--om-neutral);
+}
+/* 待复核：常驻一行占位（保证卡片等高），需复核时在「标识名」下方显示橙色胶囊 */
+.entity-card-flags {
+  min-height: 17px;
+  display: flex;
+  align-items: center;
+}
+.entity-card-review {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--om-warning);
+  background: var(--om-warning-soft);
+  border: 1px solid var(--om-warning);
+}
+.entity-card-review::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--om-warning);
+  margin-right: 5px;
+}
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.role-badge :where(.ant-tag) {
+  margin-inline-end: 0;
 }
 .entity-card-head-main {
   display: flex;
@@ -508,6 +611,7 @@
   font-size: 11px;
   color: var(--om-text-tertiary);
   font-family: var(--om-font-mono);
+  padding-right: 16px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -517,9 +621,10 @@
   padding-top: 6px;
   border-top: 1px dashed var(--om-border);
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 4px 10px;
+  justify-content: space-between;
+  gap: 6px;
   font-size: 11px;
   color: var(--om-text-tertiary);
 }
@@ -982,6 +1087,7 @@
 }
 .om-card-link {
   display: block;
+  height: 100%;
   color: inherit;
   min-width: 0;
 }

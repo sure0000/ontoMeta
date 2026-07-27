@@ -372,7 +372,7 @@ export const api = {
     domainId?: string;
     publishedOnly?: boolean;
     q?: string;
-    roleFilter?: "business" | "common";
+    roleFilter?: "business" | "common" | "review";
     limit?: number;
     offset?: number;
   }) =>

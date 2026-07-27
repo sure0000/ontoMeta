@@ -392,6 +392,7 @@ export function ExternalApiAppsPage() {
           />
         ) : (
           <Table
+            className="om-table"
             rowKey="id"
             columns={columns}
             dataSource={apps}

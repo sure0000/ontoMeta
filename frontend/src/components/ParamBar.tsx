@@ -58,14 +58,15 @@ export function ParamBar({
         gap: 12,
         padding: "8px 12px",
         marginBottom: 12,
-        background: "var(--om-surface, #f8fafc)",
+        background: "var(--om-surface-muted)",
+        border: "1px solid var(--om-border)",
         borderRadius: 8,
       }}
     >
-      <FilterOutlined style={{ color: "#64748b" }} />
+      <FilterOutlined style={{ color: "var(--om-text-tertiary)" }} />
       {params.map((p) => (
         <Space key={p.id} size={4}>
-          <span style={{ color: "#64748b", fontSize: 13 }}>{p.label}</span>
+          <span style={{ color: "var(--om-text-secondary)", fontSize: 13 }}>{p.label}</span>
           <Input
             size="small"
             style={{ width: 140 }}

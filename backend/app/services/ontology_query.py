@@ -323,11 +323,14 @@ class OntologyQueryService:
             domain_context_id=domain_context_id,
             published_only=published_only,
         )
-        # 业务对象 / 普通对象筛选：business=业务对象；common=普通对象（数据表+关系表）
+        # 业务对象 / 普通对象 / 待复核 筛选：business=业务对象；common=普通对象
+        # （数据表+关系表）；review=角色待人工复核（role_reason 带 [待复核] 标记）。
         if role_filter == "business":
             query = query.filter(ObjectType.table_role == "business_object")
         elif role_filter == "common":
             query = query.filter(ObjectType.table_role != "business_object")
+        elif role_filter == "review":
+            query = query.filter(ObjectType.role_reason.ilike("%待复核%"))
         if q and q.strip():
             like = f"%{q.strip()}%"
             query = query.filter(

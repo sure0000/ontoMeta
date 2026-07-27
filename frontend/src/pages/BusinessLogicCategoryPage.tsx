@@ -185,7 +185,7 @@ export function BusinessLogicCategoryPage() {
           <Space wrap>
             <Input
               allowClear
-              prefix={<SearchOutlined style={{ color: "var(--om-text-secondary, #94a3b8)" }} />}
+              prefix={<SearchOutlined style={{ color: "var(--om-text-secondary)" }} />}
               placeholder="搜索逻辑名称、类型、描述"
               value={query}
               onChange={(e) => setQuery(e.target.value)}

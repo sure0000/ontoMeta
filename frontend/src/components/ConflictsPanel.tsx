@@ -363,6 +363,7 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
         )}
 
         <Table<ConflictItem>
+          className="om-table"
           size="small"
           loading={loading}
           columns={columns}
