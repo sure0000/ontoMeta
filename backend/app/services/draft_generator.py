@@ -90,11 +90,15 @@ _LLM_SYSTEM_PROMPT = (
     "- display_name：中文业务语义名称(如「支付」「退款」「财务对账」)，"
     "由 display_name 去掉技术后缀推导而来。\n"
     "- description：可选，一句话业务解释。\n"
-    "- role_hint：可选，对该表是否为真实业务实体的语义判断。当这张表明显是"
+    "- role_hint：可选，对该表是否为真实业务实体的语义判断。**只依据证据**"
+    "(表名/列名、列注释 description、示例数据 sample_values、血缘 description)判断，"
+    "不要依据你自己拟的 name/display_name。当这张表明显是"
     "技术/系统表、与业务无关(如鉴权 auth、会话 session、配置 config、日志 log、"
     "任务调度、元数据、临时表等——业务人员不会把它当作一个业务概念)时，"
     "填 role_hint='technical'；当它确实是一个真实世界业务实体(客户/订单/商品等)"
-    "时填 role_hint='business_object'；拿不准则省略。可附 role_reason 简述理由。\n\n"
+    "时填 role_hint='business_object'；拿不准则省略。可附 role_reason 简述理由。\n"
+    "- evidence_gap：可选，一句话说明你判断该表时**缺了什么证据**(如"
+    "「无列注释，仅凭表名推断」「未开样例，类型不明」)，供人工按需补证据。\n\n"
     "properties 中每个元素必须包含：\n"
     "- object_source_ref：原样回传该属性所属对象的 source_dataset_urn(与所属"
     "object_types 条目的 source_dataset_urn 一致，逐字保留，用于回链)。\n"
@@ -847,15 +851,23 @@ class OntologyDraftGenerator:
             overrides[candidate] = {
                 "role": role_hint,
                 "reason": self._first_present(obj, ["role_reason", "roleReason"]),
+                "evidence_gap": self._first_present(
+                    obj, ["evidence_gap", "evidenceGap"]
+                ),
             }
         return overrides
 
     @staticmethod
     def _resolve_role(ot, override: RoleOverride | None) -> dict[str, Any]:
-        """结合确定性启发式角色与 LLM 角色否决，返回 DraftObjectType 的角色字段。
+        """结合确定性启发式角色与 LLM 角色判定，返回 DraftObjectType 的角色字段。
 
-        LLM 未命中、未给出有效 role_hint、或与启发式结果一致时，保留启发式；
-        否则以 LLM 判定覆盖 table_role，并在 role_reason 中保留原启发式依据以供追溯。
+        两个**相互独立**的判定源：结构启发式(object_classifier) 与 LLM 语义判断。
+
+        - 一致：互证信号，保留启发式结果（含其原有置信度/待复核状态）。
+        - 分歧：**不再让 LLM 静默否决**（旧行为把分歧「吃掉」，直接以 0.75 覆盖）。
+          分歧点恰是最该人工看的地方——展示 LLM 的语义判定（对结构贫瘠的源更可信），
+          但**标记待复核并下调置信度**，原因里并陈两方观点与 LLM 报告的证据缺口，
+          交人工裁定。置信度是固定的低值，不由 LLM 自身生成物推导（反循环）。
         """
         base = {
             "table_role": ot.table_role,
@@ -868,15 +880,27 @@ class OntologyDraftGenerator:
         if llm_role not in (ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL):
             return base
         if llm_role == ot.table_role:
+            # 一致：保留启发式（若启发式本就待复核，仍保留其待复核状态）。
             return base
+
         label = "技术/系统表" if llm_role == ROLE_TECHNICAL else "业务对象"
-        note = f"LLM 判定为{label}"
+        heur_label = {
+            ROLE_TECHNICAL: "技术/系统表",
+            ROLE_BUSINESS_OBJECT: "业务对象",
+        }.get(ot.table_role, ot.table_role)
+        note = f"[待复核] 启发式↔LLM 角色分歧：LLM 判为{label}"
         llm_reason = (override.get("reason") or "").strip()
         if llm_reason:
-            note += f"：{llm_reason}"
-        if ot.role_reason:
-            note += f"（原启发式：{ot.role_reason}）"
-        return {"table_role": llm_role, "role_confidence": 0.75, "role_reason": note}
+            note += f"（{llm_reason}）"
+        note += f"；启发式判为{heur_label}"
+        heur_reason = (ot.role_reason or "").removeprefix("[待复核]").strip()
+        if heur_reason:
+            note += f"（{heur_reason}）"
+        evidence_gap = (override.get("evidence_gap") or "").strip()
+        if evidence_gap:
+            note += f"；证据缺口：{evidence_gap}"
+        # 分歧固定低置信(0.5)——凸显「需人工确认」，且不受 LLM 自身生成物影响。
+        return {"table_role": llm_role, "role_confidence": 0.5, "role_reason": note}
 
     def _parse_relation_overrides(
         self, raw: dict, evidence: EvidenceBundle
