@@ -11,6 +11,7 @@ from app.schemas import (
 from app.services.object_classifier import FieldSignal, classify_object_role
 from app.services.relation_terms import infer_relation_term
 from app.services.relation_structure import infer_relation_structure_type
+from app.services.source_profile import InferredFk, detect_source_profile
 
 
 def _to_snake(name: str) -> str:
@@ -65,9 +66,19 @@ class EvidenceBuilder:
         business_logics: list[LogicEvidencePack] = []
 
         dataset_name_map = {ds.urn: ds.name for ds in bundle.datasets}
+        # 源画像：把 Frappe 等源的建库约定翻译成 PK/FK/子表/系统列信号。默认画像
+        # 为无操作（声明式元数据原样透传），保持既有行为。
+        profile = detect_source_profile(bundle)
+        table_index = profile.build_table_index(bundle)
+        # 每张表的推断外键边（Frappe Link 字段等）。声明式外键仍走原字段属性。
+        inferred_fk_by_name: dict[str, list[InferredFk]] = {
+            ds.name: profile.inferred_fks(ds, table_index) for ds in bundle.datasets
+        }
         # 跨表拓扑：先聚合“每张表被多少张其它表通过外键指向”（入度）
-        # 与血缘上/下游数量，供对象角色分类器使用。
-        fk_in_degree, lineage_up, lineage_down = self._build_topology(bundle)
+        # 与血缘上/下游数量，供对象角色分类器使用。（含源画像推断的外键边）
+        fk_in_degree, lineage_up, lineage_down, fk_out_degree = self._build_topology(
+            bundle, inferred_fk_by_name
+        )
 
         # 关系描述用的业务展示名映射:候选名(source_object/target_object)必须
         # 仍由技术名(ds.name)推导，保证与 object_types 的 candidate_name 一致；
@@ -87,18 +98,32 @@ class EvidenceBuilder:
                 or dataset.description
                 or dataset.glossary_terms
             )
-            role = classify_object_role(
-                [
+            pk_names = profile.primary_key_names(dataset)
+            inferred_fk_cols = {
+                e.column.lower() for e in inferred_fk_by_name.get(dataset.name, [])
+            }
+            is_child = profile.is_child_table(dataset)
+            # 构造分类信号：按源画像补齐 PK/FK，并剥离框架系统列（审计/子表锚点等），
+            # 使度量/描述占比反映真实业务字段而非框架噪声。主键即便属系统列也保留。
+            field_signals: list[FieldSignal] = []
+            for f in dataset.fields:
+                is_pk = f.is_primary_key or f.name.lower() in pk_names
+                if not is_pk and profile.is_system_column(f.name):
+                    continue
+                field_signals.append(
                     FieldSignal(
                         name=f.name,
                         semantic_type=self._infer_semantic_type(f),
-                        is_primary_key=f.is_primary_key,
-                        is_foreign_key=f.is_foreign_key,
+                        is_primary_key=is_pk,
+                        is_foreign_key=f.is_foreign_key
+                        or f.name.lower() in inferred_fk_cols,
                         unique_count=f.unique_count,
                     )
-                    for f in dataset.fields
-                ],
+                )
+            role = classify_object_role(
+                field_signals,
                 fk_in_degree=fk_in_degree.get(dataset.name, 0),
+                distinct_fk_targets=fk_out_degree.get(dataset.name, 0),
                 lineage_upstream=lineage_up.get(dataset.urn, 0),
                 lineage_downstream=lineage_down.get(dataset.urn, 0),
                 glossary_terms=dataset.glossary_terms,
@@ -106,6 +131,7 @@ class EvidenceBuilder:
                 has_business_naming=has_business_naming,
                 subtypes=dataset.subtypes,
                 tags=dataset.tags,
+                is_child_table=is_child,
             )
             # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
             is_dimension = dataset.name.startswith("dim_") or "维" in (dataset.display_name or "")
@@ -121,7 +147,9 @@ class EvidenceBuilder:
                     evidence_refs=[dataset.urn, bundle.domain.id],
                     table_role=role.role,
                     role_confidence=role.confidence,
-                    role_reason=role.reason,
+                    role_reason=(
+                        f"[待复核] {role.reason}" if role.needs_review else role.reason
+                    ),
                 )
             )
 
@@ -167,6 +195,40 @@ class EvidenceBuilder:
                             evidence_refs=[f"{dataset.urn}#{field.name}"],
                         )
                     )
+
+            # 源画像推断的外键（如 Frappe Link 字段：列名命中某 DocType 名）。
+            # 声明式外键为空时，这是恢复关系图与 fk 拓扑的主要来源。标注为推断、
+            # 置信度略低，交由人工/LLM 复核。
+            declared_fk_cols = {
+                f.name for f in dataset.fields if f.is_foreign_key and f.foreign_key_target
+            }
+            for edge in inferred_fk_by_name.get(dataset.name, []):
+                if edge.column in declared_fk_cols:
+                    continue  # 已有声明式外键，避免重复
+                target_object = _infer_object_name(edge.target_table)
+                source_label = dataset.display_name or dataset.name
+                target_ds = dataset_by_name.get(edge.target_table)
+                target_label = (
+                    (target_ds.display_name or target_ds.name)
+                    if target_ds
+                    else edge.target_table
+                )
+                relations.append(
+                    RelationEvidencePack(
+                        name=f"{object_name}_to_{target_object}",
+                        display_name=infer_relation_term("foreign_key", edge.column),
+                        source_object=object_name,
+                        target_object=target_object,
+                        cardinality="many_to_one",
+                        structure_type="foreign_key",
+                        description=(
+                            f"{source_label} 通过引用字段 {edge.column} 关联 {target_label}"
+                            f"（推断，来源 {profile.name} 源画像）"
+                        ),
+                        confidence=0.6,
+                        evidence_refs=[f"{dataset.urn}#{edge.column}"],
+                    )
+                )
 
         for lineage in bundle.lineages:
             source_name = dataset_name_map.get(lineage.source_urn, lineage.source_urn)
@@ -223,27 +285,43 @@ class EvidenceBuilder:
         )
 
     def _build_topology(
-        self, bundle: DataHubDomainBundle
-    ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+        self,
+        bundle: DataHubDomainBundle,
+        inferred_fk_by_name: dict[str, list["InferredFk"]] | None = None,
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
         """聚合跨表拓扑信号（不依赖表名含义）：
 
         - fk_in_degree: 按表名计数“有多少张不同的表通过外键指向它”。
         - lineage_up / lineage_down: 按 URN 计数血缘上/下游数量。
+        - fk_out_degree: 按表名计数“这张表的外键指向多少张**不同**的目标表”
+          （facet B：识别引用多个不同实体的关系/事实表）。
+
+        外键既包含声明式 `is_foreign_key`，也包含源画像推断的边（如 Frappe Link 字段），
+        两者合并后统一参与入度/出度统计。
         """
+        inferred_fk_by_name = inferred_fk_by_name or {}
         fk_in_degree: dict[str, set[str]] = {}
+        fk_out_targets: dict[str, set[str]] = {}
         for ds in bundle.datasets:
             for f in ds.fields:
                 if f.is_foreign_key and f.foreign_key_target:
                     target_table = f.foreign_key_target.split(".")[0]
                     fk_in_degree.setdefault(target_table, set()).add(ds.name)
+                    fk_out_targets.setdefault(ds.name, set()).add(target_table)
+            for edge in inferred_fk_by_name.get(ds.name, []):
+                if edge.target_table == ds.name:
+                    continue
+                fk_in_degree.setdefault(edge.target_table, set()).add(ds.name)
+                fk_out_targets.setdefault(ds.name, set()).add(edge.target_table)
         fk_counts = {table: len(refs) for table, refs in fk_in_degree.items()}
+        fk_out_counts = {table: len(tgts) for table, tgts in fk_out_targets.items()}
 
         lineage_up: dict[str, int] = {}
         lineage_down: dict[str, int] = {}
         for lin in bundle.lineages:
             lineage_down[lin.source_urn] = lineage_down.get(lin.source_urn, 0) + 1
             lineage_up[lin.target_urn] = lineage_up.get(lin.target_urn, 0) + 1
-        return fk_counts, lineage_up, lineage_down
+        return fk_counts, lineage_up, lineage_down, fk_out_counts
 
     def _collapse_reverse_relations(
         self,
@@ -335,7 +413,12 @@ class EvidenceBuilder:
         # 落到 datetime、避免其他技术字段落到默认 attribute。
         if _is_technical_field(name):
             return "technical"
-        if "date" in name or "time" in name:
+        if (
+            "date" in name
+            or "time" in name
+            or name.endswith(("_at", "_ts", "_dt"))
+            or name in ("created", "updated", "modified", "ctime", "mtime")
+        ):
             return "datetime"
         if "amount" in name or "price" in name:
             return "amount"

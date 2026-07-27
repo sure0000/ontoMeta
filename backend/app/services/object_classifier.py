@@ -81,6 +81,7 @@ class ClassificationResult:
     confidence: float
     reason: str
     score: float = 0.0
+    needs_review: bool = False
     signals: dict = field(default_factory=dict)
 
 
@@ -88,6 +89,7 @@ def classify_object_role(
     fields: list[FieldSignal],
     *,
     fk_in_degree: int = 0,
+    distinct_fk_targets: int = 0,
     lineage_upstream: int = 0,
     lineage_downstream: int = 0,
     glossary_terms: list[str] | None = None,
@@ -95,6 +97,7 @@ def classify_object_role(
     has_business_naming: bool = True,
     subtypes: list[str] | None = None,
     tags: list[str] | None = None,
+    is_child_table: bool = False,
 ) -> ClassificationResult:
     """对单张表按结构/内容/拓扑/语义锚定信号打分并分类。
 
@@ -102,6 +105,8 @@ def classify_object_role(
     ----
     fields: 该表的字段信号列表。
     fk_in_degree: 有多少其它表通过外键指向这张表（跨表拓扑，调用方预先聚合）。
+    distinct_fk_targets: 这张表的外键指向多少张**不同**的目标表（facet B：引用多个
+        不同实体、自身缺乏独立属性者疑似关系/桥接而非业务对象；调用方预聚合）。
     lineage_upstream / lineage_downstream: 血缘上/下游数量，用于识别「血缘末端
         + 度量为主」的派生汇总表，以及判定图孤岛。
     glossary_terms: 数据集上人工挂载的业务术语（已确认的业务概念，最强信号；
@@ -116,6 +121,20 @@ def classify_object_role(
     glossary_terms = glossary_terms or []
     subtypes = subtypes or []
     tags = tags or []
+
+    # 明细/子表（源画像判定，如 Frappe 的 parent/parenttype 锚点列）：隶属某父
+    # DocType，是其明细行而非独立业务实体，高置信降级为数据表。挂了人工业务
+    # 术语则豁免（人工已认定为业务概念）。
+    if is_child_table and not glossary_terms:
+        return ClassificationResult(
+            role=ROLE_DATA_TABLE,
+            confidence=0.8,
+            reason="明细/子表（含 parent/parenttype 等子表锚点，隶属父表），非独立业务实体",
+            score=0.0,
+            needs_review=False,
+            signals={"is_child_table": True},
+        )
+
     total = len(fields)
     pk_cols = [f for f in fields if f.is_primary_key]
     pk_all_fk = bool(pk_cols) and all(f.is_foreign_key for f in pk_cols)
@@ -126,6 +145,15 @@ def classify_object_role(
     technical = sum(1 for f in fields if (f.semantic_type or "") in _TECHNICAL_TYPES)
     has_grain = any((f.semantic_type or "") in _GRAIN_TYPES for f in fields)
     has_fk_out = any(f.is_foreign_key for f in fields)
+
+    # 自有属性：排除主键与外键后，实体自身的描述/度量字段数——用于区分「关联实体」
+    # （有自有属性，如订单）与「纯关系/桥接」（几乎只有外键，如用户收藏）。
+    own_fields = [f for f in fields if not f.is_primary_key and not f.is_foreign_key]
+    own_descriptive = sum(
+        1 for f in own_fields if (f.semantic_type or "") in _DESCRIPTIVE_TYPES
+    )
+    own_measure = sum(1 for f in own_fields if (f.semantic_type or "") in _MEASURE_TYPES)
+    own_attr_count = own_descriptive + own_measure
 
     measure_ratio = measure / total if total else 0.0
     descriptive_ratio = descriptive / total if total else 0.0
@@ -144,6 +172,29 @@ def classify_object_role(
                 "pk_columns": len(pk_cols),
                 "fk_in_degree": fk_in_degree,
                 "measure_ratio": round(measure_ratio, 2),
+            },
+        )
+
+    # facet B：代理主键的多外键关联表——经典 pk_all_fk 规则（主键=纯外键）漏判的
+    # 关系/事实表。引用了 >=2 个不同实体、自身没有任何独立属性、且无人反向引用 →
+    # 本质是关系而非实体（如「用户收藏」只有 user_id/product_id）。遵循「宁可漏降
+    # 不可错降」：仅在自有属性为 0 时才降级；有任何自有属性或被反向引用者（如订单）
+    # 留待下方按对象打分并标记 needs_review。挂了业务术语则一律豁免。
+    multi_fk = distinct_fk_targets >= 2
+    if multi_fk and own_attr_count == 0 and fk_in_degree == 0 and not glossary_terms:
+        return ClassificationResult(
+            role=ROLE_BRIDGE,
+            confidence=0.6,
+            reason=(
+                f"引用 {distinct_fk_targets} 个不同实体、自身无独立属性且无人反向引用，"
+                "疑似关系/桥接表而非业务对象（代理主键，经典规则漏判）"
+            ),
+            score=0.0,
+            needs_review=True,
+            signals={
+                "distinct_fk_targets": distinct_fk_targets,
+                "own_attr_count": own_attr_count,
+                "fk_in_degree": fk_in_degree,
             },
         )
 
@@ -238,6 +289,8 @@ def classify_object_role(
     signals = {
         "pk_columns": len(pk_cols),
         "fk_in_degree": fk_in_degree,
+        "distinct_fk_targets": distinct_fk_targets,
+        "own_attr_count": own_attr_count,
         "measure_ratio": round(measure_ratio, 2),
         "descriptive_ratio": round(descriptive_ratio, 2),
         "technical_ratio": round(technical_ratio, 2),
@@ -248,11 +301,13 @@ def classify_object_role(
 
     # 技术表判定：无人工业务术语且技术信号足够强、且不弱于业务信号 → 技术/系统表。
     if not glossary_terms and tech_score >= 3.0 and tech_score >= score:
+        tech_conf = _score_to_confidence(tech_score, ROLE_TECHNICAL)
         return ClassificationResult(
             role=ROLE_TECHNICAL,
-            confidence=_score_to_confidence(tech_score, ROLE_TECHNICAL),
+            confidence=tech_conf,
             reason="；".join(tech_reasons) or "疑似技术/系统表",
             score=score,
+            needs_review=tech_conf < 0.7,
             signals=signals,
         )
 
@@ -278,11 +333,22 @@ def classify_object_role(
         tech_score if role == ROLE_TECHNICAL else score, role
     )
 
+    # facet B：引用多个不同实体、但因有自有属性/被反向引用而保留为对象者（如订单），
+    # 是「关联实体」——保留为业务对象，但标记待复核，请人确认是对象而非纯关系。
+    associative_suspect = multi_fk and role == ROLE_BUSINESS_OBJECT
+    if associative_suspect:
+        reasons.append(
+            f"引用 {distinct_fk_targets} 个不同实体但具自有属性/被引用，"
+            "疑似关联实体，请确认为对象而非纯关系"
+        )
+    needs_review = confidence < 0.7 or associative_suspect
+
     return ClassificationResult(
         role=role,
         confidence=confidence,
         reason="；".join(reasons) or "无显著信号",
         score=score,
+        needs_review=needs_review,
         signals=signals,
     )
 
