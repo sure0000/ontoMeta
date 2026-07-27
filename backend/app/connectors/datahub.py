@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import random
 
 import httpx
 
@@ -11,6 +13,22 @@ from app.schemas import (
     LineageInput,
     LogicEvidenceInput,
 )
+
+logger = logging.getLogger("ontometa.datahub")
+
+# GraphQL 请求对**瞬时**网络故障重试（如 ngrok/反代断连、超时、5xx）。仅限确定
+# 可安全重放的错误；GraphQL 业务错误(payload.errors)与 4xx 不重试。
+_MAX_GRAPHQL_ATTEMPTS = 3
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.RemoteProtocolError,  # "Server disconnected without sending a response"
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.PoolTimeout,
+)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 MOCK_DOMAINS: list[DomainInput] = [
     DomainInput(
@@ -819,13 +837,48 @@ class DataHubConnector:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         client = self._get_client()
-        response = await client.post(
-            f"{self.api_url}/api/graphql",
-            json={"query": query, "variables": variables or {}},
-            headers=headers,
+        url = f"{self.api_url}/api/graphql"
+        body = {"query": query, "variables": variables or {}}
+
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_GRAPHQL_ATTEMPTS):
+            try:
+                response = await client.post(url, json=body, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+                if "errors" in payload:
+                    # GraphQL 业务错误：非瞬时，不重试。
+                    raise RuntimeError(str(payload["errors"]))
+                return payload.get("data", {})
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if (
+                    exc.response.status_code in _RETRYABLE_STATUS
+                    and attempt < _MAX_GRAPHQL_ATTEMPTS - 1
+                ):
+                    await self._backoff_sleep(attempt, exc)
+                    continue
+                raise
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                last_exc = exc
+                if attempt < _MAX_GRAPHQL_ATTEMPTS - 1:
+                    await self._backoff_sleep(attempt, exc)
+                    continue
+                raise
+        # 理论不可达（最后一次尝试要么 return 要么 raise），兜底防御。
+        if last_exc is not None:
+            raise last_exc
+        return {}
+
+    @staticmethod
+    async def _backoff_sleep(attempt: int, exc: Exception) -> None:
+        """指数退避 + 抖动：0.5s、1s（+最多 0.3s 抖动）。"""
+        delay = 0.5 * (2**attempt) + random.uniform(0, 0.3)
+        logger.warning(
+            "datahub graphql transient error (attempt %d/%d): %s — retrying in %.1fs",
+            attempt + 1,
+            _MAX_GRAPHQL_ATTEMPTS,
+            type(exc).__name__,
+            delay,
         )
-        response.raise_for_status()
-        payload = response.json()
-        if "errors" in payload:
-            raise RuntimeError(str(payload["errors"]))
-        return payload.get("data", {})
+        await asyncio.sleep(delay)
