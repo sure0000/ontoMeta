@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
+from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from app.config import settings as env_settings
 from app.models import DatahubSetting, DraftGenerationSetting, LlmServiceConfig, CubeSetting
+from app.services.common import make_http_client
+
+# 自建/OpenAI 兼容端点(vLLM、Ollama、LM Studio、企业网关等)常无需鉴权：
+# 缺 API Key 时不应回退 Mock，而是用占位符满足 OpenAI SDK 的非空 key 要求。
+OPENAI_COMPATIBLE_PROVIDERS = {"openai-compatible"}
+OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "EMPTY"
 
 DEEPSEEK_MODELS = [
     {
@@ -228,10 +236,17 @@ class SettingsService:
         if not service:
             service = db.query(LlmServiceConfig).filter(LlmServiceConfig.enabled.is_(True)).first()
         if service:
-            use_mock = service.use_mock or not service.api_key
+            provider = (service.provider or "").lower()
+            keyless_ok = provider in OPENAI_COMPATIBLE_PROVIDERS
+            has_key = bool(service.api_key)
+            # 云端提供商缺 Key 仍回退 Mock(安全默认)；自建 OpenAI 兼容端点允许无 Key 直连
+            use_mock = service.use_mock or (not has_key and not keyless_ok)
+            api_key = service.api_key or (
+                OPENAI_COMPATIBLE_PLACEHOLDER_KEY if keyless_ok else None
+            )
             return LlmRuntimeConfig(
                 api_base_url=service.api_base_url,
-                api_key=service.api_key,
+                api_key=api_key,
                 model=service.model,
                 use_mock=use_mock,
             )
@@ -241,6 +256,50 @@ class SettingsService:
             model=env_settings.openai_model,
             use_mock=env_settings.use_mock_llm or not env_settings.openai_api_key,
         )
+
+    def test_llm_connection(self, db: Session, data: dict) -> dict:
+        """真实拨测一个 LLM 配置：发一次最小 chat 请求，返回连通性与耗时。
+
+        编辑态表单常留空 api_key(表示保持原值)，此时用 service_id 取回已存密钥；
+        自建 OpenAI 兼容端点无鉴权时用占位符 Key 直连。测试忽略 use_mock —— Mock 无需拨测。
+        """
+        provider = (data.get("provider") or "").lower()
+        keyless_ok = provider in OPENAI_COMPATIBLE_PROVIDERS
+
+        api_key = (data.get("api_key") or "").strip() or None
+        if not api_key and data.get("service_id"):
+            existing = db.get(LlmServiceConfig, data["service_id"])
+            if existing and existing.api_key:
+                api_key = existing.api_key
+        if not api_key:
+            if keyless_ok:
+                api_key = OPENAI_COMPATIBLE_PLACEHOLDER_KEY
+            else:
+                return {"ok": False, "message": "未配置 API Key，无法测试真实连接"}
+
+        base_url = (data.get("api_base_url") or "").strip()
+        model = (data.get("model") or "").strip()
+        if not base_url or not model:
+            return {"ok": False, "message": "缺少模型或 API 地址"}
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=min(env_settings.llm_timeout_seconds, 30),
+            max_retries=0,
+            http_client=make_http_client(),
+        )
+        start = perf_counter()
+        try:
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 任何异常都视为拨测失败并回显简要原因
+            return {"ok": False, "message": f"{type(exc).__name__}: {exc}"[:300]}
+        latency_ms = int((perf_counter() - start) * 1000)
+        return {"ok": True, "message": "连接成功", "latency_ms": latency_ms, "model": model}
 
     def ensure_defaults(self, db: Session) -> None:
         # 进程级缓存命中时直接跳过，避免每个请求都跑两个探针查询。

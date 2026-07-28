@@ -313,6 +313,75 @@ def test_zero_loss_under_bad_llm(monkeypatch):
     assert all(p.display_name for p in draft.properties)
 
 
+def test_zero_loss_under_top_level_array(monkeypatch):
+    """回归:LLM 未遵守 json_object、返回顶层 JSON 数组时,不再抛
+    ``'list' object has no attribute 'get'``,而是按调用语境归一化并保留命名。
+
+    该数组会被 ``_coerce_llm_response`` 归到对象命名调用的 object_types,因此
+    命名增强仍生效,且对象/属性/关系一条不丢。
+    """
+
+    class _TopLevelArrayCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            # 裸数组(无 {objectTypes: ...} 包裹),模拟不守规矩的 provider。
+            objs = [
+                {"source_ref": o["source_dataset_urn"], "name": "biz_" + o["candidate_name"]}
+                for o in payload.get("object_types", [])
+            ]
+            content = json.dumps(objs, ensure_ascii=False)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    bundle = _build_bundle(num_objects=4, fields_per_object=3)
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "x"
+    gen.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_TopLevelArrayCompletions())
+    )
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.object_types) == 4
+    assert len(draft.properties) == 12
+    assert len(draft.relation_types) == 3
+    # 顶层数组被归一化后命名增强仍生效。
+    assert {ot.name for ot in draft.object_types} == {
+        f"biz_table_{i}_di_entity" for i in range(4)
+    }
+
+
+def test_top_level_single_wrapper_array_is_unwrapped(monkeypatch):
+    """LLM 用单元素数组包裹了对象 ``[ {objectTypes: [...]} ]`` 时正确拆包。"""
+
+    class _WrappedCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            objs = [
+                {"source_ref": o["source_dataset_urn"], "name": "biz_" + o["candidate_name"]}
+                for o in payload.get("object_types", [])
+            ]
+            content = json.dumps([{"objectTypes": objs}], ensure_ascii=False)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    bundle = _build_bundle(num_objects=3, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.use_mock = False
+    gen.model = "x"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_WrappedCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert len(draft.object_types) == 3
+    assert {ot.name for ot in draft.object_types} == {
+        f"biz_table_{i}_di_entity" for i in range(3)
+    }
+
+
 def test_zero_loss_partial_override(monkeypatch):
     """LLM 只成功命名部分对象,其余退回确定性命名,属性一条不丢。"""
 

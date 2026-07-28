@@ -130,8 +130,8 @@ export function buildClusterMemberNodes(
   const count = shown.length;
   const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
   const rows = Math.ceil(count / cols);
-  const cellW = NODE_WIDTH + 28;
-  const cellH = NODE_HEIGHT + 40;
+  const cellW = NODE_WIDTH + 36;
+  const cellH = NODE_HEIGHT + 44;
   const originX = center.x - ((cols - 1) * cellW) / 2;
   const originY = center.y - ((rows - 1) * cellH) / 2;
   return shown.map((member, i) => ({
@@ -139,6 +139,7 @@ export function buildClusterMemberNodes(
     combo: cluster.id,
     data: {
       label: member.display_name,
+      subLabel: member.label,
       status: member.status,
       isCenter: false,
       kind: "member",

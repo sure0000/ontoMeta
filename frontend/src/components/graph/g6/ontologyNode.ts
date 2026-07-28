@@ -18,6 +18,8 @@ export interface OntologyNodeDatum {
   kind?: "hub" | "member";
   /** hub 节点的度数，作为徽标展示其连接广度 */
   degree?: number;
+  /** 副标题：物理表名等次要标识，填充卡片、提升信息密度 */
+  subLabel?: string;
 }
 
 function datum(data: NodeData): OntologyNodeDatum {
@@ -28,7 +30,7 @@ function datum(data: NodeData): OntologyNodeDatum {
 export const ontologyNodeOptions: NodeOptions = {
   type: "rect",
   style: (data) => {
-    const { label, status, isCenter, kind, degree } = datum(data);
+    const { label, status, isCenter, kind, degree, subLabel } = datum(data);
     if (kind === "hub") {
       return {
         size: [HUB_WIDTH, HUB_HEIGHT],
@@ -67,6 +69,8 @@ export const ontologyNodeOptions: NodeOptions = {
       };
     }
     const colors = statusColors(status);
+    // 标题 + 物理表名副标题（两者不同才拼），让卡片承载更多信息、减少留白。
+    const memberLabel = subLabel && subLabel !== label ? `${label}\n${subLabel}` : label;
     return {
       size: [NODE_WIDTH, NODE_HEIGHT],
       radius: 10,
@@ -76,15 +80,15 @@ export const ontologyNodeOptions: NodeOptions = {
       shadowColor: "rgba(15, 23, 42, 0.12)",
       shadowBlur: isCenter ? 14 : 6,
       cursor: "pointer",
-      labelText: label,
+      labelText: memberLabel,
       labelPlacement: "center",
-      labelOffsetY: -11,
+      labelOffsetY: -13,
       labelFontSize: 13,
       labelFontWeight: 600,
       labelFill: isCenter ? NODE_COLORS.centerTitle : NODE_COLORS.title,
       labelWordWrap: true,
       labelWordWrapWidth: NODE_WIDTH - 24,
-      labelMaxLines: 1,
+      labelMaxLines: 2,
       labelTextOverflow: "ellipsis",
       badge: true,
       badges: [
@@ -110,6 +114,17 @@ export const ontologyNodeOptions: NodeOptions = {
       stroke: NODE_COLORS.hoverBorder,
       shadowBlur: 16,
       shadowColor: "rgba(37, 99, 235, 0.28)",
+    },
+    // 概览 hover 联动：高亮当前簇/枢纽的相关节点，压暗其余，避免一屏噪声。
+    active: {
+      stroke: NODE_COLORS.hoverBorder,
+      lineWidth: 2,
+      shadowBlur: 18,
+      shadowColor: "rgba(37, 99, 235, 0.35)",
+    },
+    dimmed: {
+      opacity: 0.2,
+      labelOpacity: 0.35,
     },
   },
 };

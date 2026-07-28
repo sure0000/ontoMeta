@@ -44,6 +44,10 @@ _DESCRIPTIVE_TYPES = {"category", "attribute", "flag"}
 _GRAIN_TYPES = {"datetime"}
 _TECHNICAL_TYPES = {"technical"}
 
+# 业务环节最小成员数：只有隶属于某个业务环节（关系图上 >= 该值成员的聚类）的表才
+# 可能是业务对象。孤立表（1 成员）与孤对（2 成员）不构成一个业务环节。
+_MIN_SEGMENT_SIZE = 3
+
 # DataHub tag / subType 名称里出现这些词元，视为系统/技术资产的显式标注。
 _TECHNICAL_TAG_HINTS = {
     "system",
@@ -98,6 +102,8 @@ def classify_object_role(
     subtypes: list[str] | None = None,
     tags: list[str] | None = None,
     is_child_table: bool = False,
+    fact_name_token: str | None = None,
+    segment_size: int | None = None,
 ) -> ClassificationResult:
     """对单张表按结构/内容/拓扑/语义锚定信号打分并分类。
 
@@ -115,6 +121,16 @@ def classify_object_role(
     has_business_naming: 该表是否有人工赋予的业务命名/描述/术语（区别于裸技术表名）。
         为 False 时作为技术表的辅助信号。
     subtypes / tags: DataHub 原生 subType / tag 名称，命中技术词元时作为显式技术信号。
+    fact_name_token: 表名/含义命中的事件动词或结构性事实/明细特征词（如「调整」「交易」「明细」
+        「记录」），由调用方经 fact_naming.detect_fact_name 预判。命中即表明这是一次业务**事实**
+        或某父表的**明细行**而非实体——真正的业务对象是它引用的键。作为独立于结构的语义信号
+        （结构 PK/FK 在信号贫瘠源上失效时常是唯一线索）：压低业务分并把本会判为业务对象者改判
+        事实/关系表（复用 bridge），标 needs_review 交人工确认；挂了业务术语则豁免。
+    segment_size: 该表在关系图上所属聚类（业务环节）的成员数，由调用方在整图上跑社区
+        检测预聚合。**必要条件**：只有隶属于某个业务环节（成员数 >= _MIN_SEGMENT_SIZE）
+        的表才可能是业务对象；孤立表/孤对本会判业务对象者改判数据表 + needs_review。
+        None 表示调用方未提供该信号（如直接单测），按不降级处理，保持向后兼容；人工
+        业务术语(glossary)已确认业务身份，豁免此门槛。
 
     返回带 role / confidence / reason 的 ClassificationResult。
     """
@@ -254,6 +270,18 @@ def classify_object_role(
             score -= 1.0
             reasons.append("含时间粒度，疑似按周期汇总物化")
 
+    # 4) 语义命名：表名/含义为动作/事件动词（xx调整、xx交易）或结构性事实/明细特征
+    # （xx明细、xx事实表、xx记录）→ 一次业务事实/明细而非实体。独立于结构的信号——真实 ERP
+    # 无 PK/FK 时，这常是识别事实表的唯一线索。挂了人工术语（已确认为业务概念）则豁免。
+    # 压低业务分，最终归类处再据此把业务对象改判事实表。
+    fact_named = bool(fact_name_token) and not glossary_terms
+    if fact_named:
+        score -= 2.0
+        reasons.append(
+            f"表名/含义含事实/明细特征词「{fact_name_token}」，疑似一次业务事实/明细"
+            f"（{fact_name_token}）而非实体，真正的业务对象是它引用的键"
+        )
+
     # 拓扑：血缘末端 + 度量为主 → 派生结果表
     if (
         lineage_upstream >= 1
@@ -298,6 +326,10 @@ def classify_object_role(
         "isolated": isolated,
         "connected": connected,
     }
+    if fact_named:
+        signals["fact_name_token"] = fact_name_token
+    if segment_size is not None:
+        signals["segment_size"] = segment_size
 
     # 技术表判定：无人工业务术语且技术信号足够强、且不弱于业务信号 → 技术/系统表。
     if not glossary_terms and tech_score >= 3.0 and tech_score >= score:
@@ -329,6 +361,33 @@ def classify_object_role(
         role = ROLE_BUSINESS_OBJECT
         reasons.append("信号不足，暂按业务对象保留，待人工确认")
 
+    # 事实/动词命名改判：动词/事件表是「事实关系」而非业务对象——复用 bridge 角色。
+    # 仅当它本会被判为业务对象时改判（精准针对「把一次动作误当实体」这一危害）；被大量
+    # 表外键引用的枢纽（fk_in_degree>=3）更可能是命名欠佳的主数据，保留为业务对象但仍标
+    # 待复核。data_table/technical 维持原判（派生汇总/系统表不必强扭成关系表）。
+    fact_hub_exempt = fk_in_degree >= 3
+    if fact_named and role == ROLE_BUSINESS_OBJECT and not fact_hub_exempt:
+        role = ROLE_BRIDGE
+        reasons.append("据命名判为业务事实/关系表(bridge)，真正的业务对象应落在其引用的键上")
+
+    # 业务环节归属（关系图结构，**必要条件**）：只有隶属于某个业务环节的表才可能是业务
+    # 对象。业务环节 = 关系图上社区检测得到的 >= _MIN_SEGMENT_SIZE 成员聚类；孤立表/孤对
+    # 不属于任何环节。本会判为业务对象、却不隶属任何环节者改判数据表待人工确认。人工业务
+    # 术语(glossary)已确认业务身份，豁免；segment_size 为 None 表示未提供该信号，不降级。
+    segment_demoted = False
+    if (
+        role == ROLE_BUSINESS_OBJECT
+        and segment_size is not None
+        and segment_size < _MIN_SEGMENT_SIZE
+        and not glossary_terms
+    ):
+        role = ROLE_DATA_TABLE
+        segment_demoted = True
+        reasons.append(
+            f"不隶属任何业务环节（关系图聚类仅 {segment_size} 成员，"
+            f"少于 {_MIN_SEGMENT_SIZE}），暂不作为业务对象，待人工确认"
+        )
+
     confidence = _score_to_confidence(
         tech_score if role == ROLE_TECHNICAL else score, role
     )
@@ -341,7 +400,9 @@ def classify_object_role(
             f"引用 {distinct_fk_targets} 个不同实体但具自有属性/被引用，"
             "疑似关联实体，请确认为对象而非纯关系"
         )
-    needs_review = confidence < 0.7 or associative_suspect
+    needs_review = (
+        confidence < 0.7 or associative_suspect or fact_named or segment_demoted
+    )
 
     return ClassificationResult(
         role=role,

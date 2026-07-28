@@ -1,15 +1,12 @@
 import {
   AppstoreOutlined,
-  BarsOutlined,
-  NodeIndexOutlined,
   ApartmentOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import { Checkbox, Input, Pagination, Row, Col, Segmented, Select, Space, Table, Tag, Tooltip } from "antd";
+import { Button, Checkbox, Input, Pagination, Row, Col, Segmented, Select, Space, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { OntologyGraphView, type GraphMode } from "./graph";
 import { SectionCard } from "./SectionCard";
 import { StatusBadge } from "./StatusBadge";
 import { EmptyState } from "./EmptyState";
@@ -18,15 +15,13 @@ import {
   inferRelationEvidenceType,
   inferRelationStructureType,
 } from "../utils/relation";
-import type { ObjectTypeSummary, OntologyGraph, OntologyGroupedGraph, RelationType } from "../types";
+import type { ObjectTypeSummary, RelationType } from "../types";
+import { getRoleMeta } from "../utils/role";
 
 type EntityTab = "objects" | "relations";
-type ObjectViewMode = "list" | "cards" | "graph";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
-// 对象数达到该规模才提供"域概览"切换：小域没有必要聚类，避免徒增复杂度
-const OVERVIEW_MIN_OBJECTS = 30;
 
 export interface ServerPaging {
   total: number;
@@ -39,47 +34,6 @@ function normalizeQuery(input: string) {
   return input.trim().toLowerCase();
 }
 
-// 对象角色徐章：区分“业务对象 / 普通数据表 / 桥接表”（预生成时标注，待人工确认）。
-const ROLE_META: Record<
-  string,
-  { label: string; color: string; short: string; cls: string }
-> = {
-  business_object: { label: "业务对象", color: "green", short: "业务", cls: "business" },
-  data_table: { label: "数据表", color: "blue", short: "数据", cls: "data" },
-  bridge: { label: "关系表", color: "purple", short: "关系", cls: "bridge" },
-  technical: { label: "技术/系统表", color: "default", short: "技术", cls: "technical" },
-};
-
-function RoleBadge({
-  role,
-  reason,
-  confidence,
-}: {
-  role?: string;
-  reason?: string;
-  confidence?: number;
-}) {
-  const meta = ROLE_META[role || "business_object"] ?? ROLE_META.business_object;
-  const needsReview = (reason ?? "").includes("待复核");
-  const tip = [
-    reason,
-    confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null,
-  ]
-    .filter(Boolean)
-    .join("｜");
-  const content = (
-    <span className="role-badge">
-      <Tag color={meta.color}>{meta.label}</Tag>
-      {needsReview && (
-        <Tag color="gold" className="role-badge-review">
-          待复核
-        </Tag>
-      )}
-    </span>
-  );
-  return tip ? <Tooltip title={tip}>{content}</Tooltip> : content;
-}
-
 // 卡片角色斜角标：右上角彩色色带表示角色（悬停出全称+置信度）。
 // 待复核不放角落，改到「标识名」下方以更清晰地显示（见卡片 flags 行）。
 function CardCorner({
@@ -89,7 +43,7 @@ function CardCorner({
   role?: string;
   confidence?: number;
 }) {
-  const meta = ROLE_META[role || "business_object"] ?? ROLE_META.business_object;
+  const meta = getRoleMeta(role);
   const tip = [
     meta.label,
     confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null,
@@ -151,7 +105,6 @@ function matchRelation(rel: RelationType, q: string) {
 interface Props {
   objects: ObjectTypeSummary[];
   relations: RelationType[];
-  graph: OntologyGraph | null;
   objectDetailPath?: (objectId: string) => string;
   relationDetailPath?: (relationId: string) => string;
   workspaceMode?: boolean;
@@ -169,20 +122,16 @@ interface Props {
   onNeedsReviewOnlyChange?: (v: boolean) => void;
   /** 是否展示对象角色分类（类型列/斜角标/待复核/类型筛选）。浏览已发布本体时置 false。 */
   showRoleClassification?: boolean;
-  /** 图谱邻域展开 */
-  onExpandGraphNode?: (objectId: string) => void;
-  graphExpanding?: boolean;
-  /** 域层级概览图（按需懒加载）：未提供 onGraphModeChange 时不展示 详情/概览 切换 */
-  groupedGraph?: OntologyGroupedGraph | null;
-  groupedGraphLoading?: boolean;
-  graphMode?: GraphMode;
-  onGraphModeChange?: (mode: GraphMode) => void;
+  /** 批量修改对象角色/复核状态。传入即开启对象卡片多选批量操作（仅工作区）。 */
+  onBatchUpdateObjects?: (
+    ids: string[],
+    patch: { table_role?: string; needs_review?: boolean },
+  ) => Promise<void>;
 }
 
 export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   objects,
   relations,
-  graph,
   objectDetailPath = (id) => `/ontology/${id}`,
   relationDetailPath,
   workspaceMode = false,
@@ -195,16 +144,10 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   needsReviewOnly,
   onNeedsReviewOnlyChange,
   showRoleClassification = true,
-  onExpandGraphNode,
-  graphExpanding = false,
-  groupedGraph,
-  groupedGraphLoading = false,
-  graphMode,
-  onGraphModeChange,
+  onBatchUpdateObjects,
 }: Props) {
   const serverMode = Boolean(objectPaging || relationPaging);
   const [entityTab, setEntityTab] = useState<EntityTab>("objects");
-  const [objectView, setObjectView] = useState<ObjectViewMode>("cards");
   const [localQuery, setLocalQuery] = useState("");
   const [localTypeFilter, setLocalTypeFilter] = useState<string[]>([]);
   const [localNeedsReview, setLocalNeedsReview] = useState(false);
@@ -212,6 +155,27 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const [objectPageSize, setObjectPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [relationPage, setRelationPage] = useState(1);
   const [relationPageSize, setRelationPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  // 批量修改（仅对象 Tab、工作区角色分类可见时可用）。
+  const batchEnabled = Boolean(onBatchUpdateObjects) && showRoleClassification;
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [batchRole, setBatchRole] = useState<string | undefined>(undefined);
+  const [batchReview, setBatchReview] = useState<string | undefined>(undefined);
+  const [applying, setApplying] = useState(false);
+
+  const exitBatch = useCallback(() => {
+    setBatchMode(false);
+    setSelectedIds([]);
+    setBatchRole(undefined);
+    setBatchReview(undefined);
+  }, []);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }, []);
 
   const query = onSearchChange ? (searchQuery ?? "") : localQuery;
   const normalizedQuery = normalizeQuery(query);
@@ -223,39 +187,28 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const filterKey = `${typeFilter.join(",")}|${needsReview}`;
 
   const filteredObjects = useMemo(() => {
+    // 卡片按显示名称字典序排列（缺显示名时退回标识名），稳定可预期。
+    const byDisplayName = (a: ObjectTypeSummary, b: ObjectTypeSummary) =>
+      (a.display_name || a.name || "").localeCompare(
+        b.display_name || b.name || "",
+        undefined,
+        { numeric: true },
+      );
     // 服务端已按 role_in/needs_review 过滤，本地只处理未受控场景
-    if (serverMode) return objects;
-    return objects.filter(
-      (o) =>
-        matchObject(o, normalizedQuery) &&
-        matchObjectFilters(o, typeFilter, needsReview),
-    );
+    if (serverMode) return [...objects].sort(byDisplayName);
+    return objects
+      .filter(
+        (o) =>
+          matchObject(o, normalizedQuery) &&
+          matchObjectFilters(o, typeFilter, needsReview),
+      )
+      .sort(byDisplayName);
   }, [objects, normalizedQuery, typeFilter, needsReview, serverMode]);
 
   const filteredRelations = useMemo(() => {
     if (serverMode) return relations;
     return relations.filter((r) => matchRelation(r, normalizedQuery));
   }, [relations, normalizedQuery, serverMode]);
-
-  // 图谱与筛选联动：类型多选/待复核激活时，仅保留匹配节点及其两端都保留的边。
-  const roleFilterActive =
-    showRoleClassification && (typeFilter.length > 0 || needsReview);
-  const displayGraph = useMemo(() => {
-    if (!graph || !roleFilterActive) return graph;
-    const keep = new Set<string>();
-    const nodes = graph.nodes.filter((n) => {
-      const okType =
-        !typeFilter.length || typeFilter.includes(n.table_role || "business_object");
-      const okReview = !needsReview || Boolean(n.needs_review);
-      if (okType && okReview) {
-        keep.add(n.id);
-        return true;
-      }
-      return false;
-    });
-    const edges = graph.edges.filter((e) => keep.has(e.source) && keep.has(e.target));
-    return { ...graph, nodes, edges };
-  }, [graph, roleFilterActive, typeFilter, needsReview]);
 
   useEffect(() => {
     if (!serverMode) {
@@ -272,82 +225,46 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const effectiveRelationTotal = relationPaging?.total ?? filteredRelations.length;
 
   const pagedObjects = useMemo(() => {
-    if (serverMode || objectView !== "cards") return filteredObjects;
+    if (serverMode) return filteredObjects;
     const start = (objectPage - 1) * objectPageSize;
     return filteredObjects.slice(start, start + objectPageSize);
-  }, [filteredObjects, objectPage, objectPageSize, objectView, serverMode]);
+  }, [filteredObjects, objectPage, objectPageSize, serverMode]);
 
-  const objectColumns: ColumnsType<ObjectTypeSummary> = useMemo(
-    () => [
-      {
-        title: "对象名称",
-        dataIndex: "display_name",
-        key: "display_name",
-        render: (_, record) => (
-          <Link to={objectDetailPath(record.id)} className="id-link">
-            <span>{record.display_name}</span>
-            <span className="id-link-sub">{record.name}</span>
-          </Link>
-        ),
-      },
-      ...(showRoleClassification
-        ? [
-            {
-              title: "类型",
-              dataIndex: "table_role",
-              key: "table_role",
-              width: 110,
-              render: (_: unknown, record: ObjectTypeSummary) => (
-                <RoleBadge
-                  role={record.table_role}
-                  reason={record.role_reason}
-                  confidence={record.role_confidence}
-                />
-              ),
-            } as ColumnsType<ObjectTypeSummary>[number],
-          ]
-        : []),
-      {
-        title: "属性",
-        dataIndex: "property_count",
-        key: "property_count",
-        width: 80,
-        align: "right",
-      },
-      {
-        title: "关系",
-        dataIndex: "relation_count",
-        key: "relation_count",
-        width: 80,
-        align: "right",
-      },
-      {
-        title: "逻辑",
-        dataIndex: "bound_logic_count",
-        key: "bound_logic_count",
-        width: 110,
-        render: (v?: number) =>
-          v ? <Tag color="blue">{v}</Tag> : <span className="om-muted">0</span>,
-      },
-      {
-        title: "状态",
-        dataIndex: "status",
-        key: "status",
-        width: 110,
-        render: (status) => <StatusBadge status={status} />,
-      },
-      {
-        title: "置信度",
-        dataIndex: "source_confidence",
-        key: "source_confidence",
-        width: 100,
-        align: "right",
-        render: (value?: number) =>
-          value?.toFixed(2) ?? <span className="om-muted">-</span>,
-      },
-    ],
-    [objectDetailPath, showRoleClassification],
+  // 批量选择只作用于当前页（服务端分页，跨页选择不保证一致）。
+  const pageIds = useMemo(() => pagedObjects.map((o) => o.id), [pagedObjects]);
+  const selectedOnPage = useMemo(
+    () => pageIds.filter((id) => selectedIds.includes(id)),
+    [pageIds, selectedIds],
   );
+  const allPageSelected = pageIds.length > 0 && selectedOnPage.length === pageIds.length;
+
+  const toggleSelectAllPage = useCallback(() => {
+    setSelectedIds((prev) =>
+      allPageSelected
+        ? prev.filter((id) => !pageIds.includes(id))
+        : Array.from(new Set([...prev, ...pageIds])),
+    );
+  }, [allPageSelected, pageIds]);
+
+  const applyBatch = useCallback(async () => {
+    if (!onBatchUpdateObjects || selectedIds.length === 0) return;
+    const patch: { table_role?: string; needs_review?: boolean } = {};
+    if (batchRole) patch.table_role = batchRole;
+    if (batchReview) patch.needs_review = batchReview === "review";
+    if (patch.table_role === undefined && patch.needs_review === undefined) return;
+    setApplying(true);
+    try {
+      await onBatchUpdateObjects(selectedIds, patch);
+      exitBatch();
+    } finally {
+      setApplying(false);
+    }
+  }, [onBatchUpdateObjects, selectedIds, batchRole, batchReview, exitBatch]);
+
+  // 切到关系 Tab 或批量能力关闭时，退出批量态。
+  useEffect(() => {
+    if (entityTab !== "objects" || !batchEnabled) exitBatch();
+  }, [entityTab, batchEnabled, exitBatch]);
 
   const relationColumns: ColumnsType<RelationType> = useMemo(
     () => [
@@ -437,10 +354,6 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   );
 
   const handleEntityTab = useCallback((value: string) => setEntityTab(value as EntityTab), []);
-  const handleObjectView = useCallback(
-    (value: string) => setObjectView(value as ObjectViewMode),
-    [],
-  );
   const handleQueryChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const next = e.target.value;
@@ -499,7 +412,6 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     );
   }
 
-  const showSearch = entityTab !== "objects" || objectView !== "graph";
   const objectCountLabel = serverMode ? effectiveObjectTotal : objects.length;
   const relationCountLabel = serverMode ? effectiveRelationTotal : relations.length;
   const useVirtualTable = effectiveObjectPageSize >= 50 || effectiveRelationPageSize >= 50;
@@ -531,7 +443,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     />
   ) : null;
 
-  const searchInput = showSearch ? (
+  const searchInput = (
     <Input
       allowClear
       prefix={<SearchOutlined style={{ color: "var(--om-text-secondary)" }} />}
@@ -542,7 +454,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       onChange={handleQueryChange}
       className="ontology-workspace-search"
     />
-  ) : null;
+  );
 
   const roleFilterSwitcher =
     showRoleClassification && entityTab === "objects" ? (
@@ -566,52 +478,58 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       </Space>
     ) : null;
 
-  const objectViewSwitcher =
-    entityTab === "objects" ? (
-      <Segmented
-        value={objectView}
-        onChange={handleObjectView}
-        options={[
-          {
-            label: (
-              <Tooltip title="列表视图">
-                <BarsOutlined />
-              </Tooltip>
-            ),
-            value: "list",
-          },
-          {
-            label: (
-              <Tooltip title="卡片视图">
-                <AppstoreOutlined />
-              </Tooltip>
-            ),
-            value: "cards",
-          },
-          {
-            label: (
-              <Tooltip title="图谱视图">
-                <NodeIndexOutlined />
-              </Tooltip>
-            ),
-            value: "graph",
-          },
-        ]}
-      />
+  const batchToggle =
+    batchEnabled && entityTab === "objects" ? (
+      <Button onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}>
+        {batchMode ? "退出批量" : "批量修改"}
+      </Button>
     ) : null;
 
-  const graphMeta = !displayGraph
-    ? "图谱生成中"
-    : roleFilterActive
-      ? `筛选 ${displayGraph.nodes.length} 节点 · ${displayGraph.edges.length} 关系`
-      : displayGraph.truncated ||
-          (displayGraph.total_object_count &&
-            displayGraph.total_object_count > displayGraph.nodes.length)
-        ? `局部 ${displayGraph.nodes.length}/${displayGraph.total_object_count ?? "?"} 节点 · ${displayGraph.edges.length} 关系`
-        : `${displayGraph.nodes.length} 节点 · ${displayGraph.edges.length} 关系`;
-
-  const totalObjectCount = graph?.total_object_count ?? objects.length;
-  const overviewEligible = Boolean(onGraphModeChange) && totalObjectCount >= OVERVIEW_MIN_OBJECTS;
+  const batchBar =
+    batchMode && entityTab === "objects" ? (
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <Space size={8} wrap>
+            <Checkbox
+              checked={allPageSelected}
+              indeterminate={selectedOnPage.length > 0 && !allPageSelected}
+              onChange={toggleSelectAllPage}
+            >
+              全选本页
+            </Checkbox>
+            <span className="om-muted">已选 {selectedIds.length}</span>
+            <Select
+              allowClear
+              value={batchRole}
+              onChange={setBatchRole}
+              options={TYPE_FILTER_OPTIONS}
+              placeholder="设为对象类型"
+              style={{ minWidth: 160 }}
+            />
+            <Select
+              allowClear
+              value={batchReview}
+              onChange={setBatchReview}
+              options={[
+                { label: "设为待复核", value: "review" },
+                { label: "设为已确认", value: "confirmed" },
+              ]}
+              placeholder="复核状态"
+              style={{ minWidth: 140 }}
+            />
+            <Button
+              type="primary"
+              loading={applying}
+              disabled={selectedIds.length === 0 || (!batchRole && !batchReview)}
+              onClick={applyBatch}
+            >
+              应用
+            </Button>
+            <Button onClick={exitBatch}>取消</Button>
+          </Space>
+        </div>
+      </div>
+    ) : null;
 
   return (
     <div className="om-stack">
@@ -620,14 +538,10 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           {entitySwitcher}
           {searchInput}
           {roleFilterSwitcher}
-        </div>
-        <div className="toolbar-right">
-          {objectViewSwitcher}
-          {entityTab === "objects" && objectView === "graph" && (
-            <span className="toolbar-text">{graphMeta}</span>
-          )}
+          {batchToggle}
         </div>
       </div>
+      {batchBar}
 
       {entityTab === "relations" ? (
         effectiveRelationTotal === 0 && filteredRelations.length === 0 ? (
@@ -673,67 +587,6 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         <SectionCard title="对象列表" icon={<AppstoreOutlined />} bodyFlush>
           <EmptyState title="暂无业务对象" />
         </SectionCard>
-      ) : objectView === "graph" && displayGraph ? (
-        <SectionCard
-          title="对象图谱"
-          count={roleFilterActive ? displayGraph.nodes.length : (displayGraph.total_object_count ?? objects.length)}
-          countPrimary
-          icon={<NodeIndexOutlined />}
-          bodyFlush
-        >
-          <OntologyGraphView
-            graph={displayGraph}
-            height={720}
-            objectDetailPath={objectDetailPath}
-            relationDetailPath={relationDetailPath}
-            onExpandNode={onExpandGraphNode}
-            expanding={graphExpanding}
-            centerNodeId={displayGraph.center_id ?? undefined}
-            hint={
-              displayGraph.truncated
-                ? "双击展开邻域 · Shift+单击查看详情 · 拖拽重排"
-                : undefined
-            }
-            embedded
-            groupedGraph={groupedGraph}
-            groupedGraphLoading={groupedGraphLoading}
-            graphMode={graphMode}
-            onGraphModeChange={overviewEligible ? onGraphModeChange : undefined}
-          />
-        </SectionCard>
-      ) : objectView === "list" ? (
-        filteredObjects.length === 0 ? (
-          <SectionCard title="对象列表" icon={<AppstoreOutlined />} bodyFlush>
-            <EmptyState title="未匹配到对象" description="尝试调整搜索关键词。" />
-          </SectionCard>
-        ) : (
-          <SectionCard
-            title="对象列表"
-            count={effectiveObjectTotal}
-            countPrimary
-            icon={<AppstoreOutlined />}
-            bodyFlush
-          >
-            <Table
-              className="om-table"
-              rowKey="id"
-              size="middle"
-              columns={objectColumns}
-              dataSource={serverMode ? objects : filteredObjects}
-              scroll={{ x: "max-content", y: useVirtualTable ? 560 : undefined }}
-              virtual={useVirtualTable}
-              pagination={{
-                current: effectiveObjectPage,
-                pageSize: effectiveObjectPageSize,
-                total: effectiveObjectTotal,
-                showSizeChanger: true,
-                pageSizeOptions: PAGE_SIZE_OPTIONS,
-                showTotal: (total) => `共 ${total} 条`,
-                onChange: handleObjectPageChange,
-              }}
-            />
-          </SectionCard>
-        )
       ) : filteredObjects.length === 0 ? (
         <SectionCard title="对象列表" icon={<AppstoreOutlined />} bodyFlush>
           <EmptyState title="未匹配到对象" description="尝试调整搜索关键词。" />
@@ -741,49 +594,85 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       ) : (
         <div>
           <Row gutter={[12, 12]} align="stretch">
-            {pagedObjects.map((obj) => (
-              <Col key={obj.id} xs={24} sm={12} md={8} lg={6} xl={4} xxl={4}>
-                <Link to={objectDetailPath(obj.id)} className="om-card-link">
-                  <div className="entity-card">
-                    {showRoleClassification && (
-                      <CardCorner
-                        role={obj.table_role}
-                        confidence={obj.role_confidence}
-                      />
-                    )}
-                    <div className="entity-card-head">
-                      <div className="entity-card-title" title={obj.display_name}>
-                        {obj.display_name}
-                      </div>
-                    </div>
-                    <div className="entity-card-subtitle" title={obj.name}>
-                      {obj.name}
-                    </div>
-                    <div className="entity-card-flags">
-                      {showRoleClassification &&
-                        (obj.role_reason ?? "").includes("待复核") && (
-                          <Tooltip
-                            title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}
-                          >
-                            <span className="entity-card-review">待复核</span>
-                          </Tooltip>
-                        )}
-                    </div>
-                    <div className="entity-card-foot">
-                      <span className="entity-card-foot-item">
-                        <strong>{obj.property_count}</strong> 属性
-                      </span>
-                      <span className="entity-card-foot-item">
-                        <strong>{obj.relation_count}</strong> 关系
-                      </span>
-                      <span className="entity-card-foot-item">
-                        <strong>{obj.bound_logic_count ?? 0}</strong> 逻辑
-                      </span>
+            {pagedObjects.map((obj) => {
+              const selected = selectedIds.includes(obj.id);
+              const cardInner = (
+                <div
+                  className={`entity-card${batchMode ? " entity-card--batch" : ""}${
+                    batchMode && selected ? " entity-card--selected" : ""
+                  }`}
+                >
+                  {batchMode && (
+                    <Checkbox
+                      checked={selected}
+                      onChange={() => toggleSelect(obj.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="entity-card-check"
+                    />
+                  )}
+                  {showRoleClassification && (
+                    <CardCorner
+                      role={obj.table_role}
+                      confidence={obj.role_confidence}
+                    />
+                  )}
+                  <div className="entity-card-head">
+                    <div className="entity-card-title" title={obj.display_name}>
+                      {obj.display_name}
                     </div>
                   </div>
-                </Link>
-              </Col>
-            ))}
+                  <div className="entity-card-subtitle" title={obj.name}>
+                    {obj.name}
+                  </div>
+                  <div className="entity-card-flags">
+                    {showRoleClassification &&
+                      (obj.role_reason ?? "").includes("待复核") && (
+                        <Tooltip
+                          title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}
+                        >
+                          <span className="entity-card-review">待复核</span>
+                        </Tooltip>
+                      )}
+                  </div>
+                  <div className="entity-card-foot">
+                    <span className="entity-card-foot-item">
+                      <strong>{obj.property_count}</strong> 属性
+                    </span>
+                    <span className="entity-card-foot-item">
+                      <strong>{obj.relation_count}</strong> 关系
+                    </span>
+                    <span className="entity-card-foot-item">
+                      <strong>{obj.bound_logic_count ?? 0}</strong> 逻辑
+                    </span>
+                  </div>
+                </div>
+              );
+              return (
+                <Col key={obj.id} xs={24} sm={12} md={8} lg={6} xl={4} xxl={4}>
+                  {batchMode ? (
+                    <div
+                      className="om-card-link"
+                      role="button"
+                      tabIndex={0}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => toggleSelect(obj.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          toggleSelect(obj.id);
+                        }
+                      }}
+                    >
+                      {cardInner}
+                    </div>
+                  ) : (
+                    <Link to={objectDetailPath(obj.id)} className="om-card-link">
+                      {cardInner}
+                    </Link>
+                  )}
+                </Col>
+              );
+            })}
           </Row>
           <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
             <Pagination

@@ -111,6 +111,7 @@ class OntologyRevisionService:
                 table_role=obj.table_role,
                 role_confidence=obj.role_confidence,
                 role_reason=obj.role_reason,
+                role_signals=obj.role_signals,
                 status=EntityStatus.SUGGESTED.value,
                 origin="machine_edited",
                 machine_baseline=_baseline(obj, OBJECT_FIELDS),

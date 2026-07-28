@@ -13,7 +13,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
-import type { GraphMode } from "../components/graph";
 import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { ConflictsPanel } from "../components/ConflictsPanel";
 import { ManualCreateModal } from "../components/ManualCreateModal";
@@ -27,8 +26,6 @@ import type {
   DraftGenerationScope,
   DraftProgress,
   ObjectTypeSummary,
-  OntologyGraph,
-  OntologyGroupedGraph,
   RelationType,
   VersionDiff,
   VersionRecord,
@@ -44,29 +41,12 @@ const SCOPE_LABEL: Record<DraftGenerationScope, string> = {
   relations: "业务关系",
 };
 
-function mergeOntologyGraph(base: OntologyGraph | null, extra: OntologyGraph): OntologyGraph {
-  const nodeMap = new Map((base?.nodes ?? []).map((n) => [n.id, n]));
-  for (const n of extra.nodes) nodeMap.set(n.id, n);
-  const edgeMap = new Map((base?.edges ?? []).map((e) => [e.id, e]));
-  for (const e of extra.edges) edgeMap.set(e.id, e);
-  return {
-    nodes: [...nodeMap.values()],
-    edges: [...edgeMap.values()],
-    center_id: extra.center_id ?? base?.center_id,
-    depth: extra.depth ?? base?.depth,
-    truncated: Boolean(extra.truncated || base?.truncated),
-    total_object_count: extra.total_object_count ?? base?.total_object_count ?? nodeMap.size,
-    total_relation_count: extra.total_relation_count ?? base?.total_relation_count,
-  };
-}
-
 type DomainBundle = {
   domain: DomainContextDetail;
   objects: ObjectTypeSummary[];
   objectTotal: number;
   relations: RelationType[];
   relationTotal: number;
-  graph: OntologyGraph | null;
 };
 
 async function fetchOntologyLists(
@@ -78,13 +58,11 @@ async function fetchOntologyLists(
     q?: string;
     roleIn?: string[];
     needsReview?: boolean;
-    /** 传入已有图谱时跳过重新拉取，保留邻域展开结果 */
-    existingGraph?: OntologyGraph | null;
   },
 ): Promise<Omit<DomainBundle, "domain">> {
   const objectOffset = (opts.objectPage - 1) * opts.pageSize;
   const relationOffset = (opts.relationPage - 1) * opts.pageSize;
-  const listPromises = [
+  const [objectsPage, relationsPage] = await Promise.all([
     api.listObjectTypes({
       ontologyId,
       q: opts.q || undefined,
@@ -99,27 +77,12 @@ async function fetchOntologyLists(
       limit: opts.pageSize,
       offset: relationOffset,
     }),
-  ] as const;
-  if (opts.existingGraph) {
-    const [objectsPage, relationsPage] = await Promise.all(listPromises);
-    return {
-      objects: objectsPage.items,
-      objectTotal: objectsPage.total,
-      relations: relationsPage.items,
-      relationTotal: relationsPage.total,
-      graph: opts.existingGraph,
-    };
-  }
-  const [objectsPage, relationsPage, graph] = await Promise.all([
-    ...listPromises,
-    api.getOntologyGraph(ontologyId, { depth: 1 }),
   ]);
   return {
     objects: objectsPage.items,
     objectTotal: objectsPage.total,
     relations: relationsPage.items,
     relationTotal: relationsPage.total,
-    graph,
   };
 }
 
@@ -132,8 +95,6 @@ async function fetchDomainBundle(
     q?: string;
     roleIn?: string[];
     needsReview?: boolean;
-    existingGraph?: OntologyGraph | null;
-    existingOntologyId?: string | null;
   },
 ): Promise<DomainBundle> {
   const domain = await api.getDomain(domainId);
@@ -144,15 +105,9 @@ async function fetchDomainBundle(
       objectTotal: 0,
       relations: [],
       relationTotal: 0,
-      graph: null,
     };
   }
-  const reuseGraph =
-    opts.existingOntologyId === domain.latest_ontology_id ? opts.existingGraph : null;
-  const lists = await fetchOntologyLists(domain.latest_ontology_id, {
-    ...opts,
-    existingGraph: reuseGraph,
-  });
+  const lists = await fetchOntologyLists(domain.latest_ontology_id, opts);
   return { domain, ...lists };
 }
 
@@ -165,14 +120,6 @@ export function DomainDetailPage() {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
-  const [graphExpanding, setGraphExpanding] = useState(false);
-  const graphCacheRef = useRef<{ ontologyId: string; graph: OntologyGraph } | null>(null);
-  const [graphMode, setGraphMode] = useState<GraphMode>("detail");
-  const [groupedGraph, setGroupedGraph] = useState<OntologyGroupedGraph | null>(null);
-  const [groupedGraphLoading, setGroupedGraphLoading] = useState(false);
-  const groupedGraphCacheRef = useRef<{ ontologyId: string; graph: OntologyGroupedGraph } | null>(
-    null,
-  );
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
@@ -188,12 +135,6 @@ export function DomainDetailPage() {
     setObjectPage(1);
   }, [typeFilter, needsReviewOnly]);
 
-  useEffect(() => {
-    groupedGraphCacheRef.current = null;
-    setGroupedGraph(null);
-    setGraphMode("detail");
-  }, [domainId]);
-
   const {
     data: bundle,
     loading,
@@ -203,24 +144,14 @@ export function DomainDetailPage() {
   } = useApi<DomainBundle>(
     async () => {
       if (!domainId) throw new Error("缺少数据域 ID");
-      const cached = graphCacheRef.current;
-      const result = await fetchDomainBundle(domainId, {
+      return fetchDomainBundle(domainId, {
         objectPage,
         relationPage,
         pageSize,
         q: debouncedQ,
         roleIn: typeFilter.length ? typeFilter : undefined,
         needsReview: needsReviewOnly || undefined,
-        existingGraph: cached?.graph ?? null,
-        existingOntologyId: cached?.ontologyId ?? null,
       });
-      if (result.domain.latest_ontology_id && result.graph) {
-        graphCacheRef.current = {
-          ontologyId: result.domain.latest_ontology_id,
-          graph: result.graph,
-        };
-      }
-      return result;
     },
     [domainId, objectPage, relationPage, pageSize, debouncedQ, typeFilter, needsReviewOnly],
   );
@@ -228,7 +159,6 @@ export function DomainDetailPage() {
   const domain = bundle?.domain ?? null;
   const objects = bundle?.objects ?? [];
   const relations = bundle?.relations ?? [];
-  const graph = bundle?.graph ?? null;
   const objectTotal = bundle?.objectTotal ?? 0;
   const relationTotal = bundle?.relationTotal ?? 0;
 
@@ -264,19 +194,12 @@ export function DomainDetailPage() {
     async (ontologyId: string) => {
       setOntologyLoading(true);
       try {
-        graphCacheRef.current = null;
-        groupedGraphCacheRef.current = null;
-        setGroupedGraph(null);
-        setGraphMode("detail");
         const lists = await fetchOntologyLists(ontologyId, {
           objectPage: 1,
           relationPage: 1,
           pageSize,
           q: debouncedQ,
         });
-        if (lists.graph) {
-          graphCacheRef.current = { ontologyId, graph: lists.graph };
-        }
         setObjectPage(1);
         setRelationPage(1);
         setBundle((prev) => (prev ? { ...prev, ...lists } : prev));
@@ -287,55 +210,6 @@ export function DomainDetailPage() {
       }
     },
     [setBundle, pageSize, debouncedQ],
-  );
-
-  const handleExpandGraphNode = useCallback(
-    async (objectId: string) => {
-      const ontologyId = domain?.latest_ontology_id;
-      if (!ontologyId) return;
-      setGraphExpanding(true);
-      try {
-        const neighborhood = await api.getOntologyGraph(ontologyId, {
-          centerId: objectId,
-          depth: 1,
-        });
-        setBundle((prev) => {
-          if (!prev) return prev;
-          const merged = mergeOntologyGraph(prev.graph, neighborhood);
-          graphCacheRef.current = { ontologyId, graph: merged };
-          return { ...prev, graph: merged };
-        });
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : "展开邻域失败");
-      } finally {
-        setGraphExpanding(false);
-      }
-    },
-    [domain?.latest_ontology_id, setBundle],
-  );
-
-  const handleGraphModeChange = useCallback(
-    async (mode: GraphMode) => {
-      setGraphMode(mode);
-      const ontologyId = domain?.latest_ontology_id;
-      if (mode !== "overview" || !ontologyId) return;
-      const cached = groupedGraphCacheRef.current;
-      if (cached?.ontologyId === ontologyId) {
-        setGroupedGraph(cached.graph);
-        return;
-      }
-      setGroupedGraphLoading(true);
-      try {
-        const result = await api.getOntologyGroupedGraph(ontologyId);
-        groupedGraphCacheRef.current = { ontologyId, graph: result };
-        setGroupedGraph(result);
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : "加载域概览失败");
-      } finally {
-        setGroupedGraphLoading(false);
-      }
-    },
-    [domain?.latest_ontology_id],
   );
 
   const stopPolling = useCallback((scope: DraftGenerationScope) => {
@@ -724,7 +598,6 @@ export function DomainDetailPage() {
             <OntologyWorkspaceView
             objects={objects}
             relations={relations}
-            graph={graph}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
             workspaceMode
@@ -734,6 +607,11 @@ export function DomainDetailPage() {
             onObjectTypeFilterChange={setTypeFilter}
             needsReviewOnly={needsReviewOnly}
             onNeedsReviewOnlyChange={setNeedsReviewOnly}
+            onBatchUpdateObjects={async (ids, patch) => {
+              const res = await api.batchUpdateObjectTypes({ ids, ...patch });
+              message.success(`已更新 ${res.updated} 个对象`);
+              reloadBundle();
+            }}
             objectPaging={{
               total: objectTotal,
               page: objectPage,
@@ -752,12 +630,6 @@ export function DomainDetailPage() {
                 setPageSize(size);
               },
             }}
-            onExpandGraphNode={handleExpandGraphNode}
-            graphExpanding={graphExpanding}
-            groupedGraph={groupedGraph}
-            groupedGraphLoading={groupedGraphLoading}
-            graphMode={graphMode}
-            onGraphModeChange={handleGraphModeChange}
           />
           </>
         )}

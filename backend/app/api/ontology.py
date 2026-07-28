@@ -4,8 +4,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import edit_service, provenance_service, query
 from app.database import get_db
 from app.schemas import (
+    ClusterDetail,
     ConflictResolveRequest,
     FieldPinRequest,
+    ObjectTypeBatchUpdate,
+    ObjectTypeBatchUpdateResult,
     ObjectTypeDetail,
     ObjectTypeSummary,
     ObjectTypeUpdate,
@@ -154,6 +157,23 @@ def get_ontology_grouped_graph(ontology_id: str, db: Session = Depends(get_db)):
     return query.get_ontology_grouped_graph(db, ontology_id)
 
 
+@router.get(
+    "/ontologies/{ontology_id}/clusters/{cluster_id}",
+    response_model=ClusterDetail,
+)
+def get_ontology_cluster_detail(
+    ontology_id: str, cluster_id: str, db: Session = Depends(get_db)
+):
+    """单个聚类下钻：全量成员 + 簇内关系边，供前端邻接矩阵视图。
+
+    cluster_id 取自同一本体的 grouped-graph 返回（默认聚类粒度）。
+    """
+    detail = query.get_ontology_cluster_detail(db, ontology_id, cluster_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="聚类不存在或已随数据变化失效，请刷新概览图")
+    return detail
+
+
 @router.get("/ontologies/{ontology_id}/versions", response_model=list[VersionRecordOut])
 def list_ontology_versions(ontology_id: str, db: Session = Depends(get_db)):
     return query.list_versions(db, ontology_id)
@@ -228,6 +248,29 @@ def list_object_types(
         limit=limit,
         offset=offset,
     )
+
+
+@router.patch("/object-types/batch", response_model=ObjectTypeBatchUpdateResult)
+def batch_update_object_types(
+    data: ObjectTypeBatchUpdate,
+    db: Session = Depends(get_db),
+):
+    """批量修改对象类型的角色与复核状态（数据域页面多选批量操作）。
+
+    注意：本路由须声明在 ``/object-types/{object_type_id}`` 之前，
+    否则 "batch" 会被当作 object_type_id 捕获。
+    """
+    try:
+        items = edit_service.batch_update_object_types(
+            db,
+            data.ids,
+            table_role=data.table_role,
+            needs_review=data.needs_review,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ObjectTypeBatchUpdateResult(updated=len(items), items=items)
 
 
 @router.get("/object-types/{object_type_id}", response_model=ObjectTypeDetail)

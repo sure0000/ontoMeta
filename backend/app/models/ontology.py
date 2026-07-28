@@ -106,6 +106,10 @@ class ObjectType(Base, ProvenanceMixin):
     )
     role_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     role_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 分类证据快照（JSON 文本）：score / needs_review / signals（主键、外键入度、
+    # 字段占比、tech_score、连通性等），供复核界面展示「判定依据」。机器每次生成
+    # 重算并直接覆盖，非用户可编辑，不参与三方合并（比照 role_confidence）。
+    role_signals: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     # 字段级溯源与三方合并元数据。
     origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")

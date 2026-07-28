@@ -99,7 +99,8 @@ def test_publish_version_diff_readable(client, admin_headers):
     body = diff.json()
     assert body["version"] == 1
     assert len(body["object_types"]["added"]) == 2
-    assert len(body["relation_types"]["added"]) == 1
+    # 数据域发布仅发布业务对象：关系不随本体发布，故不进入发布快照与版本 diff。
+    assert len(body["relation_types"]["added"]) == 0
 
     snap = client.get(
         f"/api/ontologies/{ontology_id}/versions/1/snapshot",

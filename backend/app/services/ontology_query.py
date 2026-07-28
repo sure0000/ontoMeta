@@ -1,5 +1,6 @@
 import json
 import math
+from dataclasses import dataclass
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -10,6 +11,7 @@ from app.models import (
     BusinessLogicPropertyBinding,
     DomainContext,
     DraftEvidence,
+    EntityStatus,
     ObjectType,
     Ontology,
     OntologyStatus,
@@ -18,6 +20,7 @@ from app.models import (
     VersionRecord,
 )
 from app.schemas import (
+    ClusterDetail,
     ClusterNode,
     GraphCluster,
     GraphEdge,
@@ -156,6 +159,24 @@ def _logic_referenced_ids(logic: BusinessLogic) -> tuple[set[str], set[str]]:
                     prop_ids.add(pid)
     return obj_ids, prop_ids
 
+@dataclass
+class _ClusterPartition:
+    """一次聚类划分的中间结果，供 grouped-graph 与单簇下钻共用。
+
+    关键：同一份数据、同一 max_cluster_nodes → 得到完全相同的簇 id 与成员划分
+    （聚类确定性 + 度数降序命名），这样前端拿概览图里的 cluster_id 回来下钻矩阵不会错位。
+    """
+
+    obj_by_id: dict[str, "ObjectType"]
+    adjacency: dict[str, set[str]]
+    cluster_order: list[str]                # 展示顺序的簇 id
+    cluster_members: dict[str, list[str]]   # 簇 id -> 按度降序的全量成员 id（不截断）
+    cluster_names: dict[str, str]           # 簇 id -> 名称（已去重）
+    hub_ids_ordered: list[str]              # 按度降序的枢纽 id
+    cluster_of: dict[str, str]              # 对象/枢纽 id -> 宏观节点 id
+    isolated_ids: list[str]
+
+
 class OntologyQueryService:
     """只读查询服务（本体 / 对象 / 关系）。"""
 
@@ -216,12 +237,21 @@ class OntologyQueryService:
         published_only: bool = False,
         ontology_model=ObjectType,
     ):
+        def _finalize(scoped):
+            # 已发布浏览/下游只暴露"已发布"实体本身：配合"数据域发布仅发布业务对象"，
+            # 未被发布晋级的关系、业务逻辑、非业务对象因此不会出现在已发布视图。
+            if published_only and hasattr(ontology_model, "status"):
+                return scoped.filter(
+                    ontology_model.status == EntityStatus.PUBLISHED.value
+                )
+            return scoped
+
         if ontology_id:
             if published_only:
                 ontology = db.get(Ontology, ontology_id)
                 if not ontology or ontology.status != OntologyStatus.PUBLISHED.value:
                     return query.filter(False)
-            return query.filter(ontology_model.ontology_id == ontology_id)
+            return _finalize(query.filter(ontology_model.ontology_id == ontology_id))
 
         if domain_context_id:
             ontologies = db.query(Ontology).filter(
@@ -232,13 +262,13 @@ class OntologyQueryService:
             ontology_ids = [o.id for o in ontologies.all()]
             if not ontology_ids:
                 return query.filter(False)
-            return query.filter(ontology_model.ontology_id.in_(ontology_ids))
+            return _finalize(query.filter(ontology_model.ontology_id.in_(ontology_ids)))
 
         if published_only:
             ontology_ids = self._published_ontology_ids(db)
             if not ontology_ids:
                 return query.filter(False)
-            return query.filter(ontology_model.ontology_id.in_(ontology_ids))
+            return _finalize(query.filter(ontology_model.ontology_id.in_(ontology_ids)))
 
         return query
 
@@ -266,29 +296,31 @@ class OntologyQueryService:
         ]
 
     def _bulk_ontology_entity_counts(
-        self, db: Session, ontology_ids: list[str]
+        self, db: Session, ontology_ids: list[str], *, published_only: bool = False
     ) -> dict[str, tuple[int, int, int]]:
-        """批量返回 ontology_id -> (object_type_count, relation_type_count, business_logic_count)。"""
+        """批量返回 ontology_id -> (object_type_count, relation_type_count, business_logic_count)。
+
+        published_only=True 时只计已发布实体；配合"仅发布业务对象"，对象计数即
+        已发布业务对象数，关系/业务逻辑计数为 0（它们不随本体发布）。
+        """
         if not ontology_ids:
             return {}
-        object_rows = (
-            db.query(ObjectType.ontology_id, func.count(ObjectType.id))
-            .filter(ObjectType.ontology_id.in_(ontology_ids))
-            .group_by(ObjectType.ontology_id)
-            .all()
+        object_q = db.query(ObjectType.ontology_id, func.count(ObjectType.id)).filter(
+            ObjectType.ontology_id.in_(ontology_ids)
         )
-        relation_rows = (
-            db.query(RelationType.ontology_id, func.count(RelationType.id))
-            .filter(RelationType.ontology_id.in_(ontology_ids))
-            .group_by(RelationType.ontology_id)
-            .all()
+        relation_q = db.query(RelationType.ontology_id, func.count(RelationType.id)).filter(
+            RelationType.ontology_id.in_(ontology_ids)
         )
-        logic_rows = (
-            db.query(BusinessLogic.ontology_id, func.count(BusinessLogic.id))
-            .filter(BusinessLogic.ontology_id.in_(ontology_ids))
-            .group_by(BusinessLogic.ontology_id)
-            .all()
+        logic_q = db.query(BusinessLogic.ontology_id, func.count(BusinessLogic.id)).filter(
+            BusinessLogic.ontology_id.in_(ontology_ids)
         )
+        if published_only:
+            object_q = object_q.filter(ObjectType.status == EntityStatus.PUBLISHED.value)
+            relation_q = relation_q.filter(RelationType.status == EntityStatus.PUBLISHED.value)
+            logic_q = logic_q.filter(BusinessLogic.status == EntityStatus.PUBLISHED.value)
+        object_rows = object_q.group_by(ObjectType.ontology_id).all()
+        relation_rows = relation_q.group_by(RelationType.ontology_id).all()
+        logic_rows = logic_q.group_by(BusinessLogic.ontology_id).all()
         omap = {oid: c for oid, c in object_rows}
         rmap = {oid: c for oid, c in relation_rows}
         lmap = {oid: c for oid, c in logic_rows}
@@ -629,18 +661,14 @@ class OntologyQueryService:
             total_relation_count=total_relation_count,
         )
 
-    def get_ontology_grouped_graph(
+    def _compute_cluster_partition(
         self,
-        db: Session,
-        ontology_id: str,
+        objects: list[ObjectType],
+        relations: list[RelationType],
         *,
-        max_cluster_nodes: int = _DEFAULT_CLUSTER_MAX_NODES,
-    ) -> OntologyGroupedGraph:
-        """域层级概览图：自动将 ObjectType 聚类为业务子域，聚合跨簇关系。"""
-        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
-        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
-        total_object_count = len(objects)
-        total_relation_count = len(relations)
+        max_cluster_nodes: int,
+    ) -> _ClusterPartition:
+        """把 ObjectType 划分为业务子域 + 枢纽骨架。grouped-graph 与单簇下钻共用此结果。"""
         obj_by_id = {obj.id: obj for obj in objects}
 
         # 无向邻接（忽略自环），用于聚类与度数计算
@@ -650,12 +678,6 @@ class OntologyQueryService:
             if s in adjacency and t in adjacency and s != t:
                 adjacency[s].add(t)
                 adjacency[t].add(s)
-
-        def to_cluster_node(oid: str) -> ClusterNode:
-            obj = obj_by_id[oid]
-            return ClusterNode(
-                id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
-            )
 
         isolated_ids = [oid for oid in obj_by_id if not adjacency.get(oid)]
         clustered_ids = [oid for oid in obj_by_id if adjacency.get(oid)]
@@ -686,10 +708,10 @@ class OntologyQueryService:
         # 度数降序排列聚类，保证结果确定且大聚类优先展示
         raw_clusters.sort(key=lambda c: (-len(c), min(c)))
 
-        # 宏观节点（聚类 + 枢纽）到其 id 的映射：枢纽以自身对象 id 作为宏观节点，
-        # 既让跨版块关系能聚合到枢纽上，也让枢纽作为"主干骨架"独立于业务版块展示。
         cluster_of: dict[str, str] = {}
-        clusters: list[GraphCluster] = []
+        cluster_order: list[str] = []
+        cluster_members: dict[str, list[str]] = {}
+        cluster_names: dict[str, str] = {}
         used_names: dict[str, int] = {}
         for idx, member_ids in enumerate(raw_clusters):
             cluster_id = f"cluster-{idx}"
@@ -708,21 +730,68 @@ class OntologyQueryService:
                 key=lambda oid: len(adjacency.get(oid, ())),
                 reverse=True,
             )
-            truncated = len(ranked_members) > max_cluster_nodes
-            shown_members = ranked_members[:max_cluster_nodes]
+            cluster_order.append(cluster_id)
+            cluster_members[cluster_id] = ranked_members
+            cluster_names[cluster_id] = name
+
+        # 枢纽以自身对象 id 作为宏观节点：既让跨版块关系聚合到枢纽上，也让它作为主干骨架独立展示。
+        hub_ids_ordered = sorted(hub_ids, key=lambda h: (-len(adjacency.get(h, ())), h))
+        for hub_id in hub_ids_ordered:
+            cluster_of[hub_id] = hub_id
+
+        return _ClusterPartition(
+            obj_by_id=obj_by_id,
+            adjacency=adjacency,
+            cluster_order=cluster_order,
+            cluster_members=cluster_members,
+            cluster_names=cluster_names,
+            hub_ids_ordered=hub_ids_ordered,
+            cluster_of=cluster_of,
+            isolated_ids=isolated_ids,
+        )
+
+    def get_ontology_grouped_graph(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        max_cluster_nodes: int = _DEFAULT_CLUSTER_MAX_NODES,
+    ) -> OntologyGroupedGraph:
+        """域层级概览图：自动将 ObjectType 聚类为业务子域，聚合跨簇关系。"""
+        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
+        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
+        total_object_count = len(objects)
+        total_relation_count = len(relations)
+
+        part = self._compute_cluster_partition(
+            objects, relations, max_cluster_nodes=max_cluster_nodes
+        )
+        obj_by_id = part.obj_by_id
+        adjacency = part.adjacency
+
+        def to_cluster_node(oid: str) -> ClusterNode:
+            obj = obj_by_id[oid]
+            return ClusterNode(
+                id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+            )
+
+        clusters: list[GraphCluster] = []
+        for cid in part.cluster_order:
+            members = part.cluster_members[cid]
+            truncated = len(members) > max_cluster_nodes
+            shown_members = members[:max_cluster_nodes]
             clusters.append(
                 GraphCluster(
-                    id=cluster_id,
-                    name=name,
+                    id=cid,
+                    name=part.cluster_names[cid],
                     nodes=[to_cluster_node(oid) for oid in shown_members],
-                    node_count=len(member_ids),
+                    node_count=len(members),
                     truncated=truncated,
                 )
             )
 
         hub_nodes: list[HubNode] = []
-        for hub_id in sorted(hub_ids, key=lambda h: (-len(adjacency.get(h, ())), h)):
-            cluster_of[hub_id] = hub_id
+        for hub_id in part.hub_ids_ordered:
             obj = obj_by_id[hub_id]
             hub_nodes.append(
                 HubNode(
@@ -737,8 +806,8 @@ class OntologyQueryService:
         # 跨版块关系聚合（同一宏观节点内部的关系不展示，只关心宏观关系）
         edge_agg: dict[tuple[str, str], GroupedGraphEdge] = {}
         for rel in relations:
-            s_cluster = cluster_of.get(rel.source_object_type_id)
-            t_cluster = cluster_of.get(rel.target_object_type_id)
+            s_cluster = part.cluster_of.get(rel.source_object_type_id)
+            t_cluster = part.cluster_of.get(rel.target_object_type_id)
             if not s_cluster or not t_cluster or s_cluster == t_cluster:
                 continue
             key = tuple(sorted((s_cluster, t_cluster)))
@@ -779,9 +848,67 @@ class OntologyQueryService:
             clusters=clusters,
             hub_nodes=hub_nodes,
             edges=list(edge_agg.values()),
-            isolated_nodes=[to_cluster_node(oid) for oid in isolated_ids],
+            isolated_nodes=[to_cluster_node(oid) for oid in part.isolated_ids],
             total_object_count=total_object_count,
             total_relation_count=total_relation_count,
+        )
+
+    def get_ontology_cluster_detail(
+        self,
+        db: Session,
+        ontology_id: str,
+        cluster_id: str,
+        *,
+        max_cluster_nodes: int = _DEFAULT_CLUSTER_MAX_NODES,
+    ) -> ClusterDetail | None:
+        """单个聚类的下钻详情：全量成员 + 簇内关系边（供邻接矩阵）。
+
+        cluster_id 必须来自同一 max_cluster_nodes 下的 grouped-graph（默认 50）——聚类确定性
+        保证同一份数据得到同样的簇划分。找不到该簇返回 None（由路由转 404）。
+        """
+        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
+        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
+
+        part = self._compute_cluster_partition(
+            objects, relations, max_cluster_nodes=max_cluster_nodes
+        )
+        members = part.cluster_members.get(cluster_id)
+        if members is None:
+            return None
+
+        member_set = set(members)
+        obj_by_id = part.obj_by_id
+        nodes = [
+            GraphNode(
+                id=obj_by_id[oid].id,
+                label=obj_by_id[oid].name,
+                display_name=obj_by_id[oid].display_name,
+                status=obj_by_id[oid].status,
+                table_role=obj_by_id[oid].table_role,
+                needs_review="待复核" in (obj_by_id[oid].role_reason or ""),
+            )
+            for oid in members
+        ]
+        edges = [
+            GraphEdge(
+                id=rel.id,
+                source=rel.source_object_type_id,
+                target=rel.target_object_type_id,
+                label=rel.display_name,
+                cardinality=_normalize_cardinality(rel.cardinality),
+                relation_id=rel.id,
+                structure_type=rel.structure_type,
+            )
+            for rel in relations
+            if rel.source_object_type_id in member_set
+            and rel.target_object_type_id in member_set
+        ]
+        return ClusterDetail(
+            id=cluster_id,
+            name=part.cluster_names[cluster_id],
+            node_count=len(members),
+            nodes=nodes,
+            edges=edges,
         )
 
     def list_versions(self, db: Session, entity_id: str) -> list[VersionRecordOut]:

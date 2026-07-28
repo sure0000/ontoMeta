@@ -55,6 +55,8 @@ class ObjectTypeEvidencePack(BaseModel):
     table_role: str = "business_object"
     role_confidence: float = 0.5
     role_reason: str | None = None
+    # 分类证据快照：score / needs_review / signals，供复核界面展示「判定依据」。
+    role_signals: dict | None = None
 
 
 class PropertyEvidencePack(BaseModel):
@@ -110,6 +112,7 @@ class DraftObjectType(BaseModel):
     table_role: str = "business_object"
     role_confidence: float = 0.5
     role_reason: str | None = None
+    role_signals: dict | None = None
 
 
 class DraftProperty(BaseModel):
@@ -243,6 +246,9 @@ class ObjectTypeDetail(ObjectTypeSummary):
     ontology_id: str | None = None
     source_ref: str | None = None
     datahub_url: str | None = None
+    # 分类证据快照：score / needs_review / signals（主键、外键入度、字段占比、
+    # tech_score、连通性等）。仅详情返回，供「判定依据」面板展示。
+    role_signals: dict | None = None
     properties: list[PropertyOut] = Field(default_factory=list)
     outgoing_relations: list["RelationTypeOut"] = Field(default_factory=list)
     incoming_relations: list["RelationTypeOut"] = Field(default_factory=list)
@@ -405,6 +411,19 @@ class ObjectTypeUpdate(BaseModel):
     operator: str | None = None
 
 
+class ObjectTypeBatchUpdate(BaseModel):
+    # 批量改判对象角色与复核状态。ids 为空或全无效则不产生任何变更。
+    ids: list[str] = Field(default_factory=list)
+    table_role: str | None = None
+    needs_review: bool | None = None
+    operator: str | None = None
+
+
+class ObjectTypeBatchUpdateResult(BaseModel):
+    updated: int
+    items: list[ObjectTypeSummary] = Field(default_factory=list)
+
+
 class PropertyUpdate(BaseModel):
     display_name: str | None = None
     description: str | None = None
@@ -478,6 +497,7 @@ class GraphEdge(BaseModel):
     label: str
     cardinality: str | None = None
     relation_id: str | None = None
+    structure_type: str | None = None
 
 
 class OntologyGraph(BaseModel):
@@ -552,3 +572,17 @@ class OntologyGroupedGraph(BaseModel):
     isolated_nodes: list[ClusterNode] = Field(default_factory=list)
     total_object_count: int = 0
     total_relation_count: int = 0
+
+
+class ClusterDetail(BaseModel):
+    """单个聚类的下钻详情：全量成员 + 簇内关系，供前端邻接矩阵视图使用。
+
+    与 GraphCluster 不同，这里不截断成员，且携带成员之间的真实关系边
+    （grouped-graph 为宏观视图刻意丢弃了簇内边）。
+    """
+
+    id: str
+    name: str
+    node_count: int = 0
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)

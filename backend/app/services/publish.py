@@ -71,6 +71,11 @@ class DraftPersistenceService:
                 table_role=item.table_role,
                 role_confidence=item.role_confidence,
                 role_reason=item.role_reason,
+                role_signals=(
+                    json.dumps(item.role_signals, ensure_ascii=False)
+                    if item.role_signals is not None
+                    else None
+                ),
                 status=EntityStatus.SUGGESTED.value,
             )
             db.add(obj)
@@ -384,14 +389,27 @@ class PublishService:
         ontology.approved_by = operator
 
         entities: list = []
-        entities.extend(db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all())
-        entities.extend(
-            db.query(Property).join(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
+        # 数据域发布仅发布业务对象：只把 table_role==business_object 的对象类型
+        # 及其属性晋级为 published。非业务对象（数据表/关系表/技术表）、关系
+        # (RelationType)、业务逻辑(BusinessLogic) 不随本体发布，因而不会进入已发布
+        # 浏览态与对外/下游视图。业务逻辑仍可经其独立发布流程(publish_business_logic)
+        # 单独发布。
+        business_objects = (
+            db.query(ObjectType)
+            .filter(
+                ObjectType.ontology_id == ontology_id,
+                ObjectType.table_role == "business_object",
+            )
+            .all()
         )
-        entities.extend(db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all())
-        entities.extend(
-            db.query(BusinessLogic).filter(BusinessLogic.ontology_id == ontology_id).all()
-        )
+        entities.extend(business_objects)
+        business_object_ids = [o.id for o in business_objects]
+        if business_object_ids:
+            entities.extend(
+                db.query(Property)
+                .filter(Property.object_type_id.in_(business_object_ids))
+                .all()
+            )
 
         for entity in entities:
             if entity.status != EntityStatus.DEPRECATED.value:

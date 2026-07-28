@@ -215,6 +215,11 @@ class OntologyMergeService:
                     table_role=item.table_role,
                     role_confidence=item.role_confidence,
                     role_reason=item.role_reason,
+                    role_signals=(
+                        _dumps(item.role_signals)
+                        if item.role_signals is not None
+                        else None
+                    ),
                     status=EntityStatus.SUGGESTED.value,
                     origin="machine",
                     machine_baseline=_dumps(incoming),
@@ -238,6 +243,10 @@ class OntologyMergeService:
                     )
                     obj.source_confidence = item.confidence
                     obj.role_confidence = item.role_confidence
+                    # 机器证据每次重算直接覆盖（非用户可编辑、不进冲突流程）；
+                    # 防御性 None 不覆盖既有值。
+                    if item.role_signals is not None:
+                        obj.role_signals = _dumps(item.role_signals)
                     obj.last_generation_id = gen_id
                     obj.upstream_removed = False
                     obj.origin = (

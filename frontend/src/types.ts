@@ -167,12 +167,21 @@ export interface RelationTypeDetail extends RelationType {
   mapping_object?: RelationObjectRef | null;
 }
 
+/** 对象角色分类的结构化证据快照（后端 object_classifier 产出，仅详情返回）。 */
+export interface RoleSignals {
+  score?: number;
+  needs_review?: boolean;
+  role?: string;
+  signals?: Record<string, number | boolean | string | null>;
+}
+
 export interface ObjectTypeDetail extends ObjectTypeSummary {
   ontology_id?: string;
   domain_context_id?: string;
   domain_name?: string;
   source_ref?: string;
   datahub_url?: string;
+  role_signals?: RoleSignals;
   properties: Property[];
   outgoing_relations: RelationType[];
   incoming_relations: RelationType[];
@@ -400,6 +409,8 @@ export interface GraphEdge {
   cardinality?: string;
   relationId?: string;
   relation_id?: string;
+  /** foreign_key / derivation / bridge_table / fact_table / other，供矩阵单元格按类型着色 */
+  structure_type?: string;
 }
 
 export interface OntologyGraph {
@@ -461,6 +472,15 @@ export interface OntologyGroupedGraph {
   total_relation_count: number;
 }
 
+/** 单簇下钻详情：全量成员 + 簇内关系边，供邻接矩阵视图。 */
+export interface ClusterDetail {
+  id: string;
+  name: string;
+  node_count: number;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
 export interface PageResult<T> {
   items: T[];
   total: number;
@@ -502,6 +522,13 @@ export interface LlmServiceConfig {
   api_key?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface LlmConnectionTestResult {
+  ok: boolean;
+  message: string;
+  latency_ms?: number;
+  model?: string;
 }
 
 export interface DatahubSettings {

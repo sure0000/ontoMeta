@@ -85,5 +85,5 @@ export function comboColors(index: number): ComboColorSet {
 }
 
 export const NODE_WIDTH = 168;
-export const NODE_HEIGHT = 56;
+export const NODE_HEIGHT = 60;
 export const COMBO_HEADER_HEIGHT = 32;

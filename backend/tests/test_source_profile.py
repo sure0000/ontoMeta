@@ -44,6 +44,9 @@ def _frappe_bundle():
         datasets=[
             _tab("tabCustomer", [FieldInput(name="customer_name"), FieldInput(name="territory")]),
             _tab("tabSales Order", [FieldInput(name="customer"), FieldInput(name="grand_total")]),
+            # 第二张引用 Customer 的单据：与 Sales Order 一起让 Customer 落入 >=3 成员的
+            # 业务环节（社区聚类），满足业务对象的环节归属必要条件。
+            _tab("tabSales Invoice", [FieldInput(name="customer"), FieldInput(name="net_total")]),
             _tab(
                 "tabSales Order Item",
                 [
@@ -157,6 +160,17 @@ def test_default_profile_preserves_declared_metadata():
                 name="orders",
                 fields=[
                     FieldInput(name="order_id", is_primary_key=True),
+                    FieldInput(name="cust_id", is_foreign_key=True,
+                               foreign_key_target="customer.cust_id"),
+                ],
+            ),
+            # 第二张引用 customer 的表：让 customer 落入 >=3 成员业务环节，满足环节归属
+            # 必要条件（本用例意在验证声明式外键/主键透传，而非环节门槛）。
+            DatasetInput(
+                urn="urn:li:dataset:p",
+                name="payments",
+                fields=[
+                    FieldInput(name="payment_id", is_primary_key=True),
                     FieldInput(name="cust_id", is_foreign_key=True,
                                foreign_key_target="customer.cust_id"),
                 ],

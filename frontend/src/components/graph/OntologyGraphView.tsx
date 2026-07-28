@@ -4,7 +4,7 @@ import {
   FullscreenOutlined,
   LayoutOutlined,
 } from "@ant-design/icons";
-import { Graph, type GraphOptions, type IElementEvent } from "@antv/g6";
+import { Graph, type GraphOptions, type IElementEvent, type NodeData } from "@antv/g6";
 import { Button, Segmented, Space, Tooltip as AntTooltip } from "antd";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -37,6 +37,8 @@ export interface OntologyGraphViewProps {
   /** 域层级概览图数据；未提供时不展示 详情/概览 切换 */
   groupedGraph?: OntologyGroupedGraph | null;
   groupedGraphLoading?: boolean;
+  /** 双击概览版块下钻：打开该聚类的邻接矩阵 */
+  onClusterDrillIn?: (clusterId: string) => void;
   graphMode?: GraphMode;
   onGraphModeChange?: (mode: GraphMode) => void;
 }
@@ -96,6 +98,7 @@ function OntologyGraphViewInner({
   groupedGraphLoading = false,
   graphMode = "detail",
   onGraphModeChange,
+  onClusterDrillIn,
 }: OntologyGraphViewProps) {
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -144,6 +147,7 @@ function OntologyGraphViewInner({
     onExpandNode,
     expanding,
     isOverview,
+    onClusterDrillIn,
   });
   latest.current = {
     navigate,
@@ -153,6 +157,7 @@ function OntologyGraphViewInner({
     onExpandNode,
     expanding,
     isOverview,
+    onClusterDrillIn,
   };
 
   useEffect(() => {
@@ -340,26 +345,72 @@ function OntologyGraphViewInner({
         requestRebuildWithOpen(next);
       });
 
+      // 双击版块下钻矩阵（跳过孤立虚拟簇 "__isolated__"，后端无对应聚类）。
+      g.on<IElementEvent>("combo:dblclick", (evt) => {
+        const id = String(evt.target.id);
+        if (id.startsWith("__")) return;
+        latest.current.onClusterDrillIn?.(id);
+      });
+
+      // 概览 hover 联动：悬浮版块/枢纽时高亮相关元素、压暗其余，让单个业务块从密图中凸显。
+      // 关键性能点：状态一次性批量下发（单次 setElementState → 单次重绘），
+      // 避免逐元素调用导致的连环重绘卡顿。
+      const applyStates = (states: Record<string, string[]>) => {
+        void g.setElementState(states, false);
+      };
+      const clearOverviewStates = () => {
+        const states: Record<string, string[]> = {};
+        g.getComboData().forEach((c) => (states[String(c.id)] = []));
+        g.getNodeData().forEach((n) => (states[String(n.id)] = []));
+        g.getEdgeData().forEach((e) => {
+          if (e.id != null) states[String(e.id)] = [];
+        });
+        applyStates(states);
+      };
+
+      // 以某个宏观节点(版块/枢纽)为中心，算出所有元素的高亮/压暗批量状态。
+      const buildFocusStates = (
+        focusId: string,
+        isMember: (n: NodeData) => boolean,
+      ): Record<string, string[]> => {
+        const edges = g.getEdgeData();
+        const neighbors = new Set<string>();
+        edges.forEach((e) => {
+          if (String(e.source) === focusId) neighbors.add(String(e.target));
+          if (String(e.target) === focusId) neighbors.add(String(e.source));
+        });
+        const states: Record<string, string[]> = {};
+        g.getComboData().forEach((c) => {
+          const cid = String(c.id);
+          states[cid] = cid === focusId || neighbors.has(cid) ? [] : ["dimmed"];
+        });
+        g.getNodeData().forEach((n) => {
+          const nid = String(n.id);
+          if (nid === focusId) return; // 保留 hover 态
+          states[nid] = isMember(n) || neighbors.has(nid) ? ["active"] : ["dimmed"];
+        });
+        edges.forEach((e) => {
+          if (e.id == null) return;
+          const related = String(e.source) === focusId || String(e.target) === focusId;
+          states[String(e.id)] = related ? ["active"] : ["dimmed"];
+        });
+        return states;
+      };
+
       g.on<IElementEvent>("combo:pointerenter", (evt) => {
-        const hoveredId = evt.target.id;
-        const combos = g.getComboData();
-        const edges = g.getEdgeData();
-        combos.forEach((c) => {
-          if (c.id !== hoveredId) void g.setElementState(c.id, "dimmed");
-        });
-        edges.forEach((e) => {
-          const related = e.source === hoveredId || e.target === hoveredId;
-          if (e.id != null) void g.setElementState(e.id, related ? "active" : "dimmed");
-        });
+        const hoveredId = String(evt.target.id);
+        applyStates(buildFocusStates(hoveredId, (n) => String(n.combo) === hoveredId));
       });
-      g.on<IElementEvent>("combo:pointerleave", () => {
-        const combos = g.getComboData();
-        const edges = g.getEdgeData();
-        combos.forEach((c) => void g.setElementState(c.id, []));
-        edges.forEach((e) => {
-          if (e.id != null) void g.setElementState(e.id, []);
-        });
+      g.on<IElementEvent>("combo:pointerleave", clearOverviewStates);
+
+      // 枢纽 hover 联动：高亮其邻接的版块/枢纽与边（成员节点悬浮不触发，避免抖动）。
+      g.on<IElementEvent>("node:pointerenter", (evt) => {
+        const id = String(evt.target.id);
+        const nd = g.getNodeData(id);
+        if ((nd?.data as { kind?: string } | undefined)?.kind !== "hub") return;
+        applyStates(buildFocusStates(id, () => false));
       });
+      g.on<IElementEvent>("node:pointerleave", clearOverviewStates);
     }
 
     return () => {
@@ -405,7 +456,7 @@ function OntologyGraphViewInner({
     if (groupedGraph.clusters.length === 1 && groupedGraph.isolated_nodes.length === 0) {
       return "所有对象聚为了一类，概览意义有限，可切换详情模式查看细节";
     }
-    return "悬浮聚类高亮其关系 · 点击聚类展开内部节点 · 拖拽重排";
+    return "悬浮聚类高亮其关系 · 点击聚类展开内部节点 · 双击聚类看矩阵 · 拖拽重排";
   };
 
   const defaultHint = isOverview
@@ -433,8 +484,8 @@ function OntologyGraphViewInner({
       value={graphMode}
       onChange={(value) => onGraphModeChange(value as GraphMode)}
       options={[
-        { label: "详情", value: "detail" },
         { label: "概览", value: "overview" },
+        { label: "详情", value: "detail" },
       ]}
     />
   ) : null;

@@ -8,8 +8,14 @@ from app.schemas import (
     PropertyEvidencePack,
     RelationEvidencePack,
 )
-from app.services.object_classifier import FieldSignal, classify_object_role
-from app.services.relation_terms import infer_relation_term
+from app.services.object_classifier import (
+    ROLE_BUSINESS_OBJECT,
+    FieldSignal,
+    classify_object_role,
+)
+from app.services.community_detection import label_propagation_clusters
+from app.services.fact_naming import detect_fact_name
+from app.services.relation_terms import infer_relation_term, reference_term
 from app.services.relation_structure import infer_relation_structure_type
 from app.services.source_profile import InferredFk, detect_source_profile
 
@@ -76,8 +82,8 @@ class EvidenceBuilder:
         }
         # 跨表拓扑：先聚合“每张表被多少张其它表通过外键指向”（入度）
         # 与血缘上/下游数量，供对象角色分类器使用。（含源画像推断的外键边）
-        fk_in_degree, lineage_up, lineage_down, fk_out_degree = self._build_topology(
-            bundle, inferred_fk_by_name
+        fk_in_degree, lineage_up, lineage_down, fk_out_degree, segment_size = (
+            self._build_topology(bundle, inferred_fk_by_name)
         )
 
         # 关系描述用的业务展示名映射:候选名(source_object/target_object)必须
@@ -103,6 +109,19 @@ class EvidenceBuilder:
                 e.column.lower() for e in inferred_fk_by_name.get(dataset.name, [])
             }
             is_child = profile.is_child_table(dataset)
+            # 事实/动词命名信号：技术表名 + 业务含义（展示名/描述/术语）里是否含事件
+            # 动词（xx调整、xx交易）。命中则这张表记录一次业务事实而非实体，分类器据此
+            # 复用 bridge 改判并标待复核（详见 fact_naming）。
+            fact_meaning = " ".join(
+                t
+                for t in (
+                    dataset.display_name,
+                    dataset.description,
+                    *(dataset.glossary_terms or []),
+                )
+                if t
+            )
+            fact_name_token = detect_fact_name(dataset.name, fact_meaning)
             # 构造分类信号：按源画像补齐 PK/FK，并剥离框架系统列（审计/子表锚点等），
             # 使度量/描述占比反映真实业务字段而非框架噪声。主键即便属系统列也保留。
             field_signals: list[FieldSignal] = []
@@ -132,6 +151,8 @@ class EvidenceBuilder:
                 subtypes=dataset.subtypes,
                 tags=dataset.tags,
                 is_child_table=is_child,
+                fact_name_token=fact_name_token,
+                segment_size=segment_size.get(dataset.name),
             )
             # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
             is_dimension = dataset.name.startswith("dim_") or "维" in (dataset.display_name or "")
@@ -150,6 +171,12 @@ class EvidenceBuilder:
                     role_reason=(
                         f"[待复核] {role.reason}" if role.needs_review else role.reason
                     ),
+                    role_signals={
+                        "score": role.score,
+                        "needs_review": role.needs_review,
+                        "role": role.role,
+                        "signals": role.signals,
+                    },
                 )
             )
 
@@ -241,7 +268,11 @@ class EvidenceBuilder:
             relations.append(
                 RelationEvidencePack(
                     name=f"{source_obj}_feeds_{target_obj}",
-                    display_name=infer_relation_term("lineage", target_label=target_label),
+                    display_name=infer_relation_term(
+                        "lineage",
+                        target_label=target_label,
+                        source_label=source_label,
+                    ),
                     source_object=source_obj,
                     target_object=target_obj,
                     cardinality="one_to_many",
@@ -277,6 +308,15 @@ class EvidenceBuilder:
         }
         relations = self._collapse_reverse_relations(relations, row_count_by_object)
 
+        # 业务关系精炼：rule 1（业务关系只存在于业务对象之间）+ 去除与 FK 重复的血缘 +
+        # 把反向的「主数据 派生出 单据」翻转为「单据 引用 主数据」。角色/展示名由上方
+        # 已生成的 object_types 汇总（两端候选名与对象候选名同由 _infer_object_name 推得）。
+        role_by_object = {ot.candidate_name: ot.table_role for ot in object_types}
+        label_by_object = {ot.candidate_name: ot.display_name for ot in object_types}
+        relations = self._refine_business_relations(
+            relations, role_by_object, label_by_object, row_count_by_object
+        )
+
         return EvidenceBundle(
             object_types=object_types,
             properties=properties,
@@ -288,18 +328,38 @@ class EvidenceBuilder:
         self,
         bundle: DataHubDomainBundle,
         inferred_fk_by_name: dict[str, list["InferredFk"]] | None = None,
-    ) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
+    ) -> tuple[
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+        dict[str, int],
+    ]:
         """聚合跨表拓扑信号（不依赖表名含义）：
 
         - fk_in_degree: 按表名计数“有多少张不同的表通过外键指向它”。
         - lineage_up / lineage_down: 按 URN 计数血缘上/下游数量。
         - fk_out_degree: 按表名计数“这张表的外键指向多少张**不同**的目标表”
           （facet B：识别引用多个不同实体的关系/事实表）。
+        - segment_size: 按表名给出“该表所属业务环节（关系图社区）的成员数”。业务对象
+          判定的必要条件——只有隶属于 >= _MIN_SEGMENT_SIZE 成员聚类的表才可能是业务
+          对象。在关系图（外键 + 推断外键 + 血缘，仅计域内两端）上跑社区检测（标签传播，
+          不做枢纽摘除，让高连接的主数据自然落入大簇）得到，孤立表/孤对成员数 < 阈值。
 
         外键既包含声明式 `is_foreign_key`，也包含源画像推断的边（如 Frappe Link 字段），
         两者合并后统一参与入度/出度统计。
         """
         inferred_fk_by_name = inferred_fk_by_name or {}
+        names = {ds.name for ds in bundle.datasets}
+        name_by_urn = {ds.urn: ds.name for ds in bundle.datasets}
+        # 业务环节判定用的无向关系图：节点为域内表名，边取域内两端的外键/血缘关联。
+        adjacency: dict[str, set[str]] = {name: set() for name in names}
+
+        def _link(a: str, b: str) -> None:
+            if a != b and a in adjacency and b in adjacency:
+                adjacency[a].add(b)
+                adjacency[b].add(a)
+
         fk_in_degree: dict[str, set[str]] = {}
         fk_out_targets: dict[str, set[str]] = {}
         for ds in bundle.datasets:
@@ -308,11 +368,13 @@ class EvidenceBuilder:
                     target_table = f.foreign_key_target.split(".")[0]
                     fk_in_degree.setdefault(target_table, set()).add(ds.name)
                     fk_out_targets.setdefault(ds.name, set()).add(target_table)
+                    _link(ds.name, target_table)
             for edge in inferred_fk_by_name.get(ds.name, []):
                 if edge.target_table == ds.name:
                     continue
                 fk_in_degree.setdefault(edge.target_table, set()).add(ds.name)
                 fk_out_targets.setdefault(ds.name, set()).add(edge.target_table)
+                _link(ds.name, edge.target_table)
         fk_counts = {table: len(refs) for table, refs in fk_in_degree.items()}
         fk_out_counts = {table: len(tgts) for table, tgts in fk_out_targets.items()}
 
@@ -321,7 +383,17 @@ class EvidenceBuilder:
         for lin in bundle.lineages:
             lineage_down[lin.source_urn] = lineage_down.get(lin.source_urn, 0) + 1
             lineage_up[lin.target_urn] = lineage_up.get(lin.target_urn, 0) + 1
-        return fk_counts, lineage_up, lineage_down, fk_out_counts
+            src = name_by_urn.get(lin.source_urn)
+            tgt = name_by_urn.get(lin.target_urn)
+            if src and tgt:
+                _link(src, tgt)
+
+        # 关系图社区检测 → 每张表所属业务环节的成员数（孤立表自成 1 成员簇）。
+        clusters = label_propagation_clusters(sorted(names), adjacency)
+        segment_size = {
+            name: len(cluster) for cluster in clusters for name in cluster
+        }
+        return fk_counts, lineage_up, lineage_down, fk_out_counts, segment_size
 
     def _collapse_reverse_relations(
         self,
@@ -403,6 +475,112 @@ class EvidenceBuilder:
             return (a, b) if da < db else (b, a)
         # 4) 稳定兑底：字典序 a → b。
         return (a, b)
+
+    def _refine_business_relations(
+        self,
+        relations: list[RelationEvidencePack],
+        role_by_object: dict[str, str],
+        label_by_object: dict[str, str],
+        row_count_by_object: dict[str, int | None],
+    ) -> list[RelationEvidencePack]:
+        """精炼关系，使「业务关系只存在于业务对象之间」，并消除无意义的「派生出」。
+
+        规则（对齐产品裁决）：
+        1. rule 1：任何业务关联关系（外键/桥/事实）两端都必须是业务对象，否则丢弃。
+        2. 血缘去重：若某对象对已存在业务关联结构（FK/桥/事实），其上的血缘边只是
+           重复表达同一关联，丢弃。
+        3. 血缘 rule 1：任一端非业务对象的血缘丢弃（溯源到系统/数据表不进业务关系图）。
+        4. 反向引用翻转：仍为兜底「派生出」且两端均业务对象的血缘，实为「单据引用主数据」
+           而非派生——按行数/关联度判主/明细，翻转为 明细→主数据 的引用关系
+           （structure_type=foreign_key），命名为「位于/属于/采用/引用」。判不出主/明细
+           不对称时，诚实保留「派生出」。
+        """
+        if not relations:
+            return relations
+
+        def is_bo(obj: str) -> bool:
+            return role_by_object.get(obj) == ROLE_BUSINESS_OBJECT
+
+        business_struct = {"foreign_key", "bridge_table", "fact_table"}
+        fk_pairs: set[frozenset[str]] = {
+            frozenset((r.source_object, r.target_object))
+            for r in relations
+            if r.structure_type in business_struct
+        }
+
+        # 无向关联度：主数据/维度被更多表关联，用作翻转定向的次级依据。
+        neighbors: dict[str, set[str]] = {}
+        for r in relations:
+            neighbors.setdefault(r.source_object, set()).add(r.target_object)
+            neighbors.setdefault(r.target_object, set()).add(r.source_object)
+        degree = {obj: len(peers) for obj, peers in neighbors.items()}
+
+        kept: list[RelationEvidencePack] = []
+        for rel in relations:
+            both_bo = is_bo(rel.source_object) and is_bo(rel.target_object)
+            if rel.structure_type != "derivation":
+                if both_bo:  # rule 1
+                    kept.append(rel)
+                continue
+
+            pair = frozenset((rel.source_object, rel.target_object))
+            if pair in fk_pairs:  # 2) 与已有业务关联重复
+                continue
+            if not both_bo:  # 3) rule 1
+                continue
+            if rel.display_name != "派生出":  # 已具体命名（转化/包含/加工类）→ 保留溯源
+                kept.append(rel)
+                continue
+            # 4) 反向引用翻转（判不出主/明细时原样保留「派生出」）。
+            kept.append(
+                self._orient_reference(
+                    rel, label_by_object, row_count_by_object, degree
+                )
+            )
+        return kept
+
+    @staticmethod
+    def _orient_reference(
+        rel: RelationEvidencePack,
+        label_by_object: dict[str, str],
+        row_count_by_object: dict[str, int | None],
+        degree: dict[str, int],
+    ) -> RelationEvidencePack:
+        """把兜底「派生出」的血缘翻转为「单据(多行/低关联) 引用 主数据(少行/高关联)」。
+
+        主/明细不对称判据：先看行数（明细行多、主数据行少），行数无差异时退回关联度
+        （主数据被更多表关联）。都判不出时返回原关系（保留「派生出」）。
+        """
+        a, b = rel.source_object, rel.target_object
+        ra, rb = row_count_by_object.get(a), row_count_by_object.get(b)
+        detail: str | None = None
+        master: str | None = None
+        if ra is not None and rb is not None and ra != rb:
+            detail, master = (a, b) if ra > rb else (b, a)
+        else:
+            da, db = degree.get(a, 0), degree.get(b, 0)
+            if da != db:
+                detail, master = (a, b) if da < db else (b, a)
+        if detail is None or master is None:
+            return rel  # 无法判别主/明细，诚实保留「派生出」
+
+        detail_label = label_by_object.get(detail, detail)
+        master_label = label_by_object.get(master, master)
+        return rel.model_copy(
+            update={
+                "name": f"{detail}_to_{master}",
+                "display_name": reference_term(master_label),
+                "source_object": detail,
+                "target_object": master,
+                "cardinality": "many_to_one",
+                "structure_type": "foreign_key",
+                "description": (
+                    f"{detail_label} 引用主数据 {master_label}"
+                    "（由血缘方向翻转推断，待复核）"
+                ),
+                "confidence": min(rel.confidence, 0.5),
+            }
+        )
 
     def _infer_semantic_type(self, field) -> str:
         name = field.name.lower()

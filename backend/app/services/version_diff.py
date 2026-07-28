@@ -67,22 +67,28 @@ def _logic_fingerprint(logic: BusinessLogic) -> dict[str, Any]:
 
 
 def capture_ontology_snapshot(db: Session, ontology_id: str) -> dict[str, Any]:
-    """捕获本体当前实体指纹，供下次发布对比与只读快照查看。"""
+    """捕获本体当前发布快照，供下次发布对比与只读快照查看。
+
+    数据域发布仅发布业务对象，故快照只含 table_role==business_object 的对象类型
+    及其属性；关系与业务逻辑不随本体发布，快照中置空。
+    """
     objects = (
-        db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
+        db.query(ObjectType)
+        .filter(
+            ObjectType.ontology_id == ontology_id,
+            ObjectType.table_role == "business_object",
+        )
+        .all()
     )
     obj_by_id = {o.id: o for o in objects}
     props = (
         db.query(Property)
         .join(ObjectType)
-        .filter(ObjectType.ontology_id == ontology_id)
+        .filter(
+            ObjectType.ontology_id == ontology_id,
+            ObjectType.table_role == "business_object",
+        )
         .all()
-    )
-    relations = (
-        db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
-    )
-    logics = (
-        db.query(BusinessLogic).filter(BusinessLogic.ontology_id == ontology_id).all()
     )
 
     return {
@@ -96,29 +102,8 @@ def capture_ontology_snapshot(db: Session, ontology_id: str) -> dict[str, Any]:
             for p in props
             if p.object_type_id in obj_by_id and p.status != "deprecated"
         },
-        "relation_types": {
-            r.name: _rel_fingerprint(
-                r,
-                source_name=obj_by_id[r.source_object_type_id].name
-                if r.source_object_type_id in obj_by_id
-                else "",
-                target_name=obj_by_id[r.target_object_type_id].name
-                if r.target_object_type_id in obj_by_id
-                else "",
-                mapping_name=(
-                    obj_by_id[r.mapping_object_type_id].name
-                    if r.mapping_object_type_id and r.mapping_object_type_id in obj_by_id
-                    else None
-                ),
-            )
-            for r in relations
-            if r.status != "deprecated"
-        },
-        "business_logics": {
-            logic.name: _logic_fingerprint(logic)
-            for logic in logics
-            if logic.status != "deprecated"
-        },
+        "relation_types": {},
+        "business_logics": {},
     }
 
 

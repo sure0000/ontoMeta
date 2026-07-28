@@ -142,7 +142,7 @@ class WorkspaceService(DraftTaskService):
             db, latest_ontology_ids
         )
         published_entity_counts = OntologyQueryService()._bulk_ontology_entity_counts(
-            db, published_ontology_ids
+            db, published_ontology_ids, published_only=True
         )
 
         result: list[DomainContextSummary] = []

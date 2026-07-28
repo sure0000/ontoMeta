@@ -156,6 +156,57 @@ class EditService:
             raise ValueError("Object type not found")
         return detail
 
+    def batch_update_object_types(
+        self,
+        db: Session,
+        ids: list[str],
+        *,
+        table_role: str | None = None,
+        needs_review: bool | None = None,
+        operator: str | None = None,
+    ) -> list[ObjectTypeSummary]:
+        """批量改判对象角色(table_role)与复核状态(needs_review)。
+
+        与单条 update_object_type 语义一致：改角色即视为复核通过（自动清除
+        [待复核]），显式 needs_review 优先。跳过不存在或无实际变更的 id，
+        一次性提交，返回已更新对象的摘要。
+        """
+        if table_role is not None and table_role not in _ALLOWED_TABLE_ROLES:
+            raise ValueError(f"非法对象角色：{table_role}")
+        if needs_review is None and table_role is None:
+            return []
+        ids = [i for i in ids if i]
+        if not ids:
+            return []
+
+        objs = db.query(ObjectType).filter(ObjectType.id.in_(ids)).all()
+        updated: list[ObjectType] = []
+        for obj in objs:
+            changed: list[str] = []
+            role_confirmed = False
+            if table_role is not None and table_role != obj.table_role:
+                obj.table_role = table_role
+                changed.append("table_role")
+                role_confirmed = True
+
+            if needs_review is not None:
+                _set_review_mark(obj, needs_review)
+                changed.append("role_reason")
+            elif role_confirmed:
+                _set_review_mark(obj, False)
+                changed.append("role_reason")
+
+            if not changed:
+                continue
+            _mark_overridden(obj, changed)
+            if obj.status != EntityStatus.PRE_PUBLISHED.value:
+                obj.status = EntityStatus.EDITED.value
+            _log_change(db, "object_type", obj.id, "edit", operator, "批量更新对象类型")
+            updated.append(obj)
+
+        db.commit()
+        return [self.query._to_object_summary(db, o) for o in updated]
+
     async def ensure_object_type_from_dataset(
         self,
         db: Session,

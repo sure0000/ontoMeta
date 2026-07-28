@@ -53,6 +53,23 @@ class LlmServiceConfigUpdate(BaseModel):
     use_mock: bool | None = None
 
 
+class LlmConnectionTestRequest(BaseModel):
+    """连接测试入参：可测试未保存的表单配置。编辑态留空 api_key 时用 service_id 取回已存密钥。"""
+
+    api_base_url: str
+    model: str
+    provider: str = "deepseek"
+    api_key: str | None = None
+    service_id: str | None = None
+
+
+class LlmConnectionTestResult(BaseModel):
+    ok: bool
+    message: str
+    latency_ms: int | None = None
+    model: str | None = None
+
+
 class DatahubSettingsOut(BaseModel):
     gms_url: str
     frontend_url: str

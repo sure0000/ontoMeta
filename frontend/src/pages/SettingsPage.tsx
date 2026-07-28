@@ -44,6 +44,7 @@ import type {
   DraftGenerationSettings,
   LlmModelOption,
   LlmServiceConfig,
+  LlmConnectionTestResult,
 } from "../types";
 
 const { Text } = Typography;
@@ -141,8 +142,13 @@ export function SettingsPage() {
   const [editingLlmId, setEditingLlmId] = useState<string | null>(null);
   const [llmSubmitting, setLlmSubmitting] = useState(false);
   const [viewingLlm, setViewingLlm] = useState<LlmServiceConfig | null>(null);
+  const [llmTesting, setLlmTesting] = useState(false);
+  const [llmTestResult, setLlmTestResult] = useState<LlmConnectionTestResult | null>(null);
 
   const [llmForm] = Form.useForm<LlmFormValues>();
+  // 监听提供商，自建 OpenAI 兼容端点需切换为自由填写模型名 + 通用占位符
+  const llmProvider = Form.useWatch("provider", llmForm);
+  const isOpenAICompatible = llmProvider === "openai-compatible";
   const [datahubForm] = Form.useForm<DatahubFormValues>();
   const [draftGenerationForm] = Form.useForm<DraftGenerationFormValues>();
   const [cubeForm] = Form.useForm<CubeFormValues>();
@@ -207,6 +213,7 @@ export function SettingsPage() {
   const openCreateLlm = () => {
     setLlmModalMode("create");
     setEditingLlmId(null);
+    setLlmTestResult(null);
     llmForm.setFieldsValue({
       name: "",
       provider: "deepseek",
@@ -223,6 +230,7 @@ export function SettingsPage() {
   const openEditLlm = async (record: LlmServiceConfig) => {
     setLlmModalMode("edit");
     setEditingLlmId(record.id);
+    setLlmTestResult(null);
     try {
       const detail = await api.getLlmService(record.id);
       llmForm.setFieldsValue({
@@ -247,6 +255,34 @@ export function SettingsPage() {
       setViewingLlm(detail);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载配置失败");
+    }
+  };
+
+  const handleTestLlm = async () => {
+    // 只校验拨测必需字段，避免未填名称等无关项阻断测试
+    const values = llmForm.getFieldsValue();
+    if (!values.api_base_url || !values.model) {
+      message.warning("请先填写 API 地址与模型");
+      return;
+    }
+    setLlmTesting(true);
+    setLlmTestResult(null);
+    try {
+      const result = await api.testLlmConnection({
+        api_base_url: values.api_base_url,
+        model: values.model,
+        provider: values.provider,
+        api_key: values.api_key?.trim() ? values.api_key.trim() : undefined,
+        service_id: llmModalMode === "edit" && editingLlmId ? editingLlmId : undefined,
+      });
+      setLlmTestResult(result);
+    } catch (err) {
+      setLlmTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : "测试请求失败",
+      });
+    } finally {
+      setLlmTesting(false);
     }
   };
 
@@ -784,8 +820,22 @@ export function SettingsPage() {
           </Form.Item>
           <Form.Item label="提供商" name="provider" rules={[{ required: true }]}>
             <Select
-              options={[{ value: "deepseek", label: "DeepSeek" }]}
+              options={[
+                { value: "deepseek", label: "DeepSeek" },
+                { value: "openai-compatible", label: "OpenAI 兼容（自建）" },
+              ]}
               disabled={llmModalMode === "edit"}
+              onChange={(value) => {
+                // 切换提供商时套用该类型默认地址/模型，避免残留上一个提供商的取值
+                if (value === "openai-compatible") {
+                  llmForm.setFieldsValue({ api_base_url: "http://localhost:8000/v1", model: "" });
+                } else if (value === "deepseek") {
+                  llmForm.setFieldsValue({
+                    api_base_url: "https://api.deepseek.com",
+                    model: llmModels.find((m) => !m.deprecated)?.id ?? "deepseek-v4-flash",
+                  });
+                }
+              }}
             />
           </Form.Item>
           <Form.Item
@@ -793,7 +843,7 @@ export function SettingsPage() {
             name="api_base_url"
             rules={[{ required: true, message: "请输入 API 地址" }]}
           >
-            <Input placeholder="https://api.deepseek.com" />
+            <Input placeholder={isOpenAICompatible ? "http://localhost:8000/v1" : "https://api.deepseek.com"} />
           </Form.Item>
           <Form.Item
             label="API Key"
@@ -803,14 +853,25 @@ export function SettingsPage() {
                 ? `留空则保持现有 Key（${
                     llmServices.find((s) => s.id === editingLlmId)?.api_key_hint ?? "未配置"
                   }）`
-                : "DeepSeek 开放平台申请的 API Key"
+                : isOpenAICompatible
+                  ? "自建服务的鉴权 Key；若服务无需鉴权可留空"
+                  : "DeepSeek 开放平台申请的 API Key"
             }
           >
             <Input.Password placeholder="sk-..." />
           </Form.Item>
-          <Form.Item label="模型" name="model" rules={[{ required: true, message: "请选择模型" }]}>
-            <Select
-              options={[
+          <Form.Item
+            label="模型"
+            name="model"
+            rules={[
+              { required: true, message: isOpenAICompatible ? "请输入模型名称" : "请选择模型" },
+            ]}
+          >
+            {isOpenAICompatible ? (
+              <Input placeholder="模型名称，如 qwen2.5-72b-instruct、gpt-4o-mini" />
+            ) : (
+              <Select
+                options={[
                 {
                   label: "最新模型（推荐）",
                   options: llmModels
@@ -844,7 +905,8 @@ export function SettingsPage() {
                   </div>
                 );
               }}
-            />
+              />
+            )}
           </Form.Item>
           <Form.Item label="设为默认" name="is_default" valuePropName="checked">
             <Switch />
@@ -859,6 +921,33 @@ export function SettingsPage() {
             extra="开启后跳过真实 LLM 调用，使用规则生成草稿"
           >
             <Switch />
+          </Form.Item>
+          <Form.Item label="连接测试" extra="向该地址/模型发一次最小请求，验证连通性（不会保存配置）">
+            <Space direction="vertical" style={{ width: "100%" }} size={8}>
+              <Button
+                icon={<ThunderboltOutlined />}
+                loading={llmTesting}
+                onClick={handleTestLlm}
+              >
+                测试连接
+              </Button>
+              {llmTestResult && (
+                <Alert
+                  type={llmTestResult.ok ? "success" : "error"}
+                  showIcon
+                  message={llmTestResult.ok ? "连接成功" : "连接失败"}
+                  description={
+                    llmTestResult.ok
+                      ? `模型 ${llmTestResult.model ?? ""}${
+                          llmTestResult.latency_ms != null
+                            ? ` · 耗时 ${llmTestResult.latency_ms}ms`
+                            : ""
+                        }`
+                      : llmTestResult.message
+                  }
+                />
+              )}
+            </Space>
           </Form.Item>
         </Form>
       </Modal>

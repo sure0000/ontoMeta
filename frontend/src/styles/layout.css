@@ -489,6 +489,20 @@
   padding-right: 44px;
   min-height: 18px;
 }
+/* 批量选择态：左上角复选框，卡片内容整体右移让出左侧空间避免遮挡标题 */
+.entity-card--batch {
+  padding-left: 34px;
+}
+.entity-card-check {
+  position: absolute;
+  top: 11px;
+  left: 10px;
+  z-index: 3;
+}
+.entity-card--selected {
+  border-color: var(--om-primary);
+  box-shadow: 0 0 0 1px var(--om-primary) inset;
+}
 /* 角色斜角标：右上角彩色色带 + 待复核橙色小三角，自clip不影响卡片投影 */
 .entity-card-corner {
   position: absolute;

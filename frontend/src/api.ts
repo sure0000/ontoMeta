@@ -43,10 +43,12 @@ import type {
   ExternalAppCreated,
   LlmModelOption,
   LlmServiceConfig,
+  LlmConnectionTestResult,
   ObjectTypeDetail,
   ObjectTypeSummary,
   OntologyGraph,
   OntologyGroupedGraph,
+  ClusterDetail,
   OntologySummary,
   PageResult,
   Property,
@@ -265,6 +267,20 @@ export const api = {
       method: "PATCH",
     }),
 
+  batchUpdateObjectTypes: (body: {
+    ids: string[];
+    table_role?: string;
+    needs_review?: boolean;
+    operator?: string;
+  }) =>
+    request<{ updated: number; items: ObjectTypeSummary[] }>(
+      `/api/object-types/batch`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    ),
+
   updateProperty: (
     propertyId: string,
     body: {
@@ -372,6 +388,8 @@ export const api = {
     ),
   getOntologyGroupedGraph: (id: string) =>
     request<OntologyGroupedGraph>(`/api/ontologies/${id}/grouped-graph`),
+  getOntologyCluster: (id: string, clusterId: string) =>
+    request<ClusterDetail>(`/api/ontologies/${id}/clusters/${clusterId}`),
 
   listObjectTypes: (params?: {
     ontologyId?: string;
@@ -562,6 +580,18 @@ export const api = {
   deleteLlmService: (id: string) =>
     request<{ id: string; deleted: boolean }>(`/api/settings/llm-services/${id}`, {
       method: "DELETE",
+    }),
+
+  testLlmConnection: (body: {
+    api_base_url: string;
+    model: string;
+    provider?: string;
+    api_key?: string;
+    service_id?: string;
+  }) =>
+    request<LlmConnectionTestResult>("/api/settings/llm-services/test", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 
   getDatahubSettings: () => request<DatahubSettings>("/api/settings/datahub"),

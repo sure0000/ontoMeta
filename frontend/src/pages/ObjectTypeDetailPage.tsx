@@ -1,6 +1,7 @@
 import {
   ApartmentOutlined,
   AppstoreOutlined,
+  AuditOutlined,
   FunctionOutlined,
   HistoryOutlined,
   LinkOutlined,
@@ -21,6 +22,7 @@ import {
   Space,
   Table,
   Tabs,
+  Tag,
   Typography,
   message,
 } from "antd";
@@ -58,6 +60,15 @@ import type {
   RelationType,
   VersionRecord,
 } from "../types";
+import {
+  describeSignals,
+  getRoleMeta,
+  isNeedsReview,
+  reasonClauses,
+  ROLE_OPTIONS,
+  ROLE_SCORE_THRESHOLD,
+} from "../utils/role";
+import type { SignalDirection, SignalItem } from "../utils/role";
 
 const { Text } = Typography;
 
@@ -69,12 +80,99 @@ interface BasicForm {
   needs_review: boolean;
 }
 
-const ROLE_OPTIONS = [
-  { label: "业务对象", value: "business_object" },
-  { label: "数据表", value: "data_table" },
-  { label: "关系表", value: "bridge" },
-  { label: "技术/系统表", value: "technical" },
+function DirectionTag({ direction }: { direction: SignalDirection }) {
+  if (direction === "business") return <Tag color="green">↑ 倾向业务对象</Tag>;
+  if (direction === "nonbusiness") return <Tag color="orange">↓ 倾向非业务</Tag>;
+  return <Tag>中性</Tag>;
+}
+
+const EVIDENCE_COLUMNS: ColumnsType<SignalItem> = [
+  { title: "信号", dataIndex: "label", key: "label" },
+  { title: "观测值", dataIndex: "value", key: "value", width: 130 },
+  {
+    title: "倾向",
+    key: "direction",
+    width: 150,
+    render: (_, r) => <DirectionTag direction={r.direction} />,
+  },
 ];
+
+// 判定依据面板：把 object_classifier 的结构化证据（role_signals）与逐条理由
+// （role_reason）摊开展示，让复核者据证据快速确认或改判。role_signals 为空
+// （存量未重生成）时优雅降级为「判定说明」清单，功能不缺失。
+function DecisionEvidencePanel({ obj }: { obj: ObjectTypeDetail }) {
+  const meta = getRoleMeta(obj.table_role);
+  const needsReview = isNeedsReview(obj.role_reason);
+  const clauses = reasonClauses(obj.role_reason);
+  const evidence = describeSignals(obj.role_signals);
+  const hasSignals = evidence.items.length > 0;
+  return (
+    <>
+      <Descriptions
+        column={{ xs: 1, md: 3 }}
+        size="small"
+        style={{ marginBottom: 12 }}
+      >
+        <Descriptions.Item label="对象角色">
+          <Tag color={meta.color}>{meta.label}</Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="角色置信度">
+          {obj.role_confidence != null
+            ? `${(obj.role_confidence * 100).toFixed(0)}%`
+            : "-"}
+        </Descriptions.Item>
+        <Descriptions.Item label="复核状态">
+          {needsReview ? (
+            <Tag color="gold">待复核</Tag>
+          ) : (
+            <Tag color="green">已确认</Tag>
+          )}
+        </Descriptions.Item>
+      </Descriptions>
+
+      {evidence.score != null && (
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary">综合得分 </Text>
+          <Text strong>{evidence.score.toFixed(1)}</Text>
+          <Text type="secondary">
+            {" "}
+            （≥ {ROLE_SCORE_THRESHOLD.toFixed(1)} 判为业务对象）
+          </Text>
+        </div>
+      )}
+
+      {hasSignals && (
+        <Table
+          className="om-table"
+          size="small"
+          rowKey="key"
+          pagination={false}
+          dataSource={evidence.items}
+          columns={EVIDENCE_COLUMNS}
+        />
+      )}
+
+      {clauses.length > 0 && (
+        <div style={{ marginTop: hasSignals ? 14 : 0 }}>
+          <Text type="secondary">判定说明</Text>
+          <ul
+            style={{ margin: "4px 0 0", paddingInlineStart: 18, lineHeight: 1.8 }}
+          >
+            {clauses.map((c, i) => (
+              <li key={i}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!hasSignals && clauses.length === 0 && (
+        <Text type="secondary">
+          暂无判定证据（下次重新生成后可见结构化信号）。
+        </Text>
+      )}
+    </>
+  );
+}
 
 interface RelationForm {
   display_name: string;
@@ -695,7 +793,7 @@ export function ObjectTypeDetailPage() {
                 </Form.Item>
               </Col>
               <Col xs={24} md={8}>
-                <Form.Item label="置信度">
+                <Form.Item label="命名置信度">
                   <Input value={obj.source_confidence?.toFixed(2) ?? "-"} disabled />
                 </Form.Item>
               </Col>
@@ -735,7 +833,7 @@ export function ObjectTypeDetailPage() {
               {obj.domain_name || "-"}
             </Descriptions.Item>
             <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
-            <Descriptions.Item label="置信度">
+            <Descriptions.Item label="命名置信度">
               {obj.source_confidence?.toFixed(2) ?? "-"}
             </Descriptions.Item>
             <Descriptions.Item label="描述" span={4}>
@@ -744,6 +842,12 @@ export function ObjectTypeDetailPage() {
           </Descriptions>
         )}
       </SectionCard>
+
+      {(obj.role_reason || obj.role_signals) && (
+        <SectionCard title="判定依据" icon={<AuditOutlined />}>
+          <DecisionEvidencePanel obj={obj} />
+        </SectionCard>
+      )}
 
       <SectionCard
         title="属性"

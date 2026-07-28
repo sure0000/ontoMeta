@@ -10,6 +10,8 @@ from app.schemas import (
     DatahubSettingsUpdate,
     DraftGenerationSettingsOut,
     DraftGenerationSettingsUpdate,
+    LlmConnectionTestRequest,
+    LlmConnectionTestResult,
     LlmModelOption,
     LlmServiceConfigCreate,
     LlmServiceConfigDetail,
@@ -78,6 +80,11 @@ def list_llm_services(db: Session = Depends(get_db)):
 def create_llm_service(data: LlmServiceConfigCreate, db: Session = Depends(get_db)):
     service = settings_service.create_llm_service(db, data.model_dump())
     return _llm_service_detail(service)
+
+
+@router.post("/settings/llm-services/test", response_model=LlmConnectionTestResult)
+def test_llm_connection(data: LlmConnectionTestRequest, db: Session = Depends(get_db)):
+    return settings_service.test_llm_connection(db, data.model_dump())
 
 
 @router.get("/settings/llm-services/{service_id}", response_model=LlmServiceConfigDetail)

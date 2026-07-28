@@ -74,12 +74,16 @@ _LLM_SYSTEM_PROMPT = (
     "要能读成「源对象 [关系名] 目标对象」一句话(如「订单 属于 客户」)，而非"
     "「结算生成」这种「产出物+动作」名词。区分两个关系范畴：\n"
     "  • 业务关联关系(有外键，structure_type=foreign_key)：两个业务实体之间的"
-    "真实业务事实，从外键字段语义判断，如「属于」「包含」「下单」「引用」「拥有」。\n"
+    "真实业务事实，从外键字段语义判断，如「属于」「包含」「下单」「引用」「拥有」。"
+    "若 description 形如「X 引用主数据 Y」，说明是单据引用主数据，按目标取"
+    "「位于」「属于」「采用」「引用」这类引用谓词。\n"
     "  • 溯源/派生关系(血缘，description 形如「血缘：A 加工至 B」，无外键)：这属于"
-    "数据溯源(对齐 PROV-O 的 wasDerivedFrom)，不是业务事实。按目标对象的变换"
-    "类型取**方向前向的谓词**：目标是汇总就写「汇总为」，对账写「对账为」，"
-    "统计/报表写「统计为」，结算写「结算为」，标签/画像写「刻画」，拿不准写「派生出」；"
-    "不要写「生成」「加工」「派生」「关联」「处理」这类无区分度的默认词。\n\n"
+    "数据溯源(对齐 PROV-O 的 wasDerivedFrom)，不是业务事实。两端都是业务对象，优先"
+    "判业务语义：源与目标是**同一业务实体的生命周期阶段**(如 潜客商机→商机、"
+    "线索→商机、客户→潜在客户)写「转化」；目标是源的**明细/子表**(如 订单→订单明细)"
+    "写「包含」；否则按目标变换类型取**方向前向的谓词**：目标是汇总就写「汇总为」，"
+    "对账写「对账为」，统计/报表写「统计为」，结算写「结算为」，标签/画像写「刻画」，"
+    "实在拿不准才写「派生出」；不要写「生成」「加工」「派生」「关联」「处理」这类无区分度的默认词。\n\n"
     "输入是一份证据 JSON(含 object_types、properties、relations)。你需要输出 JSON，"
     "包含三个字段：objectTypes(数组)、properties(数组)、relations(数组)。\n\n"
     "objectTypes 中每个元素必须包含：\n"
@@ -115,9 +119,9 @@ _LLM_SYSTEM_PROMPT = (
     "- name：原样回传输入中该关系的 name(逐字保留，用于回链，不可省略或改写)。\n"
     "- display_name：结合两端对象业务含义与 description 证据推断出的简短关系谓词"
     "(不超过 8 个汉字，只写动词/短语，不写完整句子，且能读成「源 [谓词] 目标」)："
-    "外键关系如「属于」「包含」「下单」「引用」；血缘/溯源关系如「汇总为」「对账为」"
-    "「统计为」「结算为」「刻画」「派生出」。避免千篇一律地写「生成」「派生」「关联」"
-    "「加工」「处理」这类看不出差异的默认词。\n\n"
+    "外键关系如「属于」「包含」「下单」「引用」「位于」；血缘/溯源关系如「转化」「包含」"
+    "「汇总为」「对账为」「统计为」「结算为」「刻画」「派生出」。避免千篇一律地写"
+    "「生成」「派生」「关联」「加工」「处理」这类看不出差异的默认词。\n\n"
     "示例：\n"
     "- 输入 candidate_name=payment_di_entity, display_name=支付明细日表, "
     "source_dataset_urn=urn:li:dataset:xxx → "
@@ -148,12 +152,15 @@ _LLM_RELATION_SYSTEM_PROMPT = (
     "谓词**，要能读成「源对象 [关系名] 目标对象」一句话(如「订单 属于 客户」)，"
     "而非「结算生成」这种「产出物+动作」名词。区分两个关系范畴：\n"
     "- 业务关联关系(有外键，structure_type=foreign_key)：两个业务实体间的真实业务"
-    "事实，从外键字段语义判断，如「属于」「包含」「下单」「引用」「审核」。\n"
+    "事实，从外键字段语义判断，如「属于」「包含」「下单」「引用」「审核」。若 description"
+    "形如「X 引用主数据 Y」，是单据引用主数据，按目标取「位于」「属于」「采用」「引用」。\n"
     "- 溯源/派生关系(血缘，description 形如「血缘：A 加工至 B」，无外键)：属于数据"
-    "溯源(对齐 PROV-O 的 wasDerivedFrom)，不是业务事实。按 target_object 的变换类型"
-    "取**方向前向的谓词**：目标是对账结果写「对账为」，目标是汇总/统计/报表写"
-    "「汇总为」「统计为」，目标是结算数据写「结算为」，目标是标签/画像写「刻画」，"
-    "拿不准写「派生出」。\n\n"
+    "溯源(对齐 PROV-O 的 wasDerivedFrom)，不是业务事实。两端都是业务对象，优先判"
+    "业务语义：源与目标是**同一业务实体的生命周期阶段**(潜客商机→商机、线索→商机、"
+    "客户→潜在客户)写「转化」；目标是源的**明细/子表**(订单→订单明细)写「包含」；"
+    "否则按 target_object 的变换类型取**方向前向的谓词**：目标是对账结果写「对账为」，"
+    "目标是汇总/统计/报表写「汇总为」「统计为」，目标是结算数据写「结算为」，目标是"
+    "标签/画像写「刻画」，实在拿不准才写「派生出」。\n\n"
     "无论哪一类，都不要写「生成」「派生」「关联」「加工」「处理」这类无信息量、看不出"
     "两端具体业务差异、随便哪条关系都能套用的默认词。\n\n"
     "输入是一份证据 JSON，包含 object_types(关系两端对象的业务背景，无需为其命名，"
@@ -162,8 +169,8 @@ _LLM_RELATION_SYSTEM_PROMPT = (
     "relations 中每个元素必须包含：\n"
     "- name：原样回传输入中该关系的 name(逐字保留，用于回链，不可省略或改写)。\n"
     "- display_name：能读成「源 [谓词] 目标」的简短关系谓词(不超过 8 个汉字，只写"
-    "动词/短语，不写完整句子，如「属于」「包含」「下单」「汇总为」「对账为」「统计为」"
-    "「结算为」「刻画」「派生出」)。\n\n"
+    "动词/短语，不写完整句子，如「属于」「包含」「下单」「位于」「转化」「汇总为」"
+    "「对账为」「统计为」「结算为」「刻画」「派生出」)。\n\n"
     "示例：\n"
     "- 输入 relations 中一条：name=payment_to_order, source_object=payment_di_entity, "
     "target_object=order_di_entity, structure_type=foreign_key, "
@@ -344,6 +351,9 @@ class OntologyDraftGenerator:
                 description=desc_map[ot.candidate_name],
                 source_ref=ot.source_dataset_urn,
                 confidence=ot.confidence,
+                # 结构判定证据随对象一路带下去；与 LLM 是否改判标签无关（signals 是
+                # 分类器的原始观测，分歧时仍是有效证据）。_resolve_role 不含该键，无冲突。
+                role_signals=ot.role_signals,
                 **self._resolve_role(ot, role_overrides.get(ot.candidate_name)),
             )
             for ot in evidence.object_types
@@ -692,7 +702,7 @@ class OntologyDraftGenerator:
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        return self._coerce_llm_response(content, primary_list_key="object_types")
 
     async def _call_llm_relations(self, evidence: EvidenceBundle) -> dict:
         prompt = self._build_prompt(evidence)
@@ -705,7 +715,47 @@ class OntologyDraftGenerator:
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        return self._coerce_llm_response(content, primary_list_key="relations")
+
+    @staticmethod
+    def _coerce_llm_response(content: str, *, primary_list_key: str) -> dict:
+        """把 LLM 返回文本解析为 parse_* 期望的顶层字典，容忍不规范输出。
+
+        并非所有 provider/代理都遵守 ``response_format=json_object``：走自定义
+        ``base_url`` 的模型可能返回**顶层 JSON 数组**（裸的对象/关系列表），
+        或干脆返回非法 JSON。此前直接 ``json.loads`` 后交给 ``_parse_*``，一旦
+        拿到 list，首个 ``raw.get(...)`` 就抛 ``'list' object has no attribute
+        'get'``，整份草稿生成失败。
+
+        这里在入口做归一化：
+        - 顶层是 dict：原样返回。
+        - 顶层是 ``[dict]`` 单元素包裹：拆包（常见的「用数组裹一层」写法）。
+        - 顶层是其它数组：按调用方语境归到 ``primary_list_key``（对象命名调用
+          归为 object_types，关系命名调用归为 relations），尽力保留命名增强。
+        - 非法 JSON / 其它类型：回退空字典。
+
+        任何一种回退都不丢结构——草稿结构由证据确定性组装，命名增强缺失时
+        按现有规则回退（见 ``_build_draft_from_evidence``）。
+        """
+        try:
+            data = json.loads(content or "{}")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("LLM 返回非法 JSON，跳过命名增强并回退确定性命名")
+            return {}
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            if len(data) == 1 and isinstance(data[0], dict):
+                return data[0]
+            logger.warning(
+                "LLM 返回顶层数组（未遵守 json_object），按 %s 归一化",
+                primary_list_key,
+            )
+            return {primary_list_key: data}
+        logger.warning(
+            "LLM 返回非对象/数组 JSON（%s），跳过命名增强", type(data).__name__
+        )
+        return {}
 
     @staticmethod
     def _build_candidate_lookup(evidence: EvidenceBundle) -> dict[str, Any]:

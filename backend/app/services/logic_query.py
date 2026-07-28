@@ -389,6 +389,7 @@ class OntologyQueryService(_OntologyQueryBase):
             ontology_id=obj.ontology_id,
             source_ref=source_ref,
             datahub_url=datahub_url,
+            role_signals=_loads_json(obj.role_signals),
             properties=[PropertyOut.model_validate(p) for p in obj.properties],
             outgoing_relations=[self._to_relation_out(db, r) for r in outgoing],
             incoming_relations=[self._to_relation_out(db, r) for r in incoming],
