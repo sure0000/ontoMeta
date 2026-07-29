@@ -1,0 +1,176 @@
+"""Apache Doris Adapter（M8）。
+
+Doris 走 MySQL 线协议，与 Hive 有三处关键语义差异，正是引擎逻辑必须下沉到 Adapter 的原因：
+
+1. **分区列留在列清单里**——与 Hive 相反，分区键既是普通列又参与 ``PARTITION BY``。
+2. **表模型决定去重语义**——有主键时用 **Unique Key** 模型（写入去重、保留最新），
+   否则用 **Duplicate Key**（不去重）。Key 列必须是**前导列**，故渲染时把主键列排到最前。
+3. **无 MERGE INTO（目标版本 < 4.1）**——SCD2 拉链做不到，契约若要求会在渲染前报错，
+   不静默降级；Unique Key 的 UPSERT 不等价于 SCD2。
+
+能力矩阵已对照 Doris 3.x 官方文档逐项核实（``verified=True``），依据见各字段注释。
+一处**有意不声明**：Doris 原生表的「声明式外键（供优化器）」在官方文档未找到可引用的
+建表约束页，故 ``foreign_key=NONE``——不臆造未核实的能力。
+"""
+
+from __future__ import annotations
+
+from app.warehouse.adapters.base import DialectAdapter
+from app.warehouse.capabilities import Capabilities, ConstraintSupport
+from app.warehouse.logical_schema import LogicalColumn, LogicalTable
+
+_CAPS = Capabilities(
+    engine="doris",
+    # Unique Key 模型写入去重、保留最新（Merge-on-Write，2.1 起默认）。
+    # docs/3.x/table-design/data-model/unique/
+    primary_key=ConstraintSupport.ENFORCED,
+    # 原生表声明式外键（供优化器）文档未核实 → 不声明，取 NONE。
+    foreign_key=ConstraintSupport.NONE,
+    primary_key_model="unique",
+    supports_table_comment=True,  # COMMENT "..."（CREATE-TABLE 参考）
+    supports_column_comment=True,
+    supports_partition=True,  # PARTITION BY RANGE/LIST + AUTO 分区
+    supports_bucketing=True,  # DISTRIBUTED BY HASH(...) BUCKETS n（必填）
+    # MERGE INTO 到 4.1.0 才有且目标须 Unique Key 表；目标版本未定，保守取 False。
+    supports_scd2_merge=False,
+    supports_alter_add_column=True,
+    supports_alter_drop_column=True,
+    # 值列增删/改名走 light schema change（2.0 起默认开）；改名 KEY 列为重操作。
+    supports_alter_rename_column=True,
+    # 表名上限 64 字节（列名可到 256，取表名上限作保守闸门）。
+    max_identifier_length=64,
+    verified=True,
+)
+
+# PoC 分桶数；生产应按数据量与 BE 数调整。
+_BUCKETS = 10
+
+
+def _q(name: str) -> str:
+    return f"`{name}`"
+
+
+def _c(text: str) -> str:
+    """Doris/MySQL 字符串字面量，双引号包裹并转义。"""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+class DorisAdapter(DialectAdapter):
+    name = "doris"
+
+    def capabilities(self) -> Capabilities:
+        return _CAPS
+
+    def map_type(self, data_type: str | None, semantic_type: str | None) -> str:
+        """本体类型 → Doris 类型。判定顺序与 hive.py 一致（语义优先于物理类型）。
+
+        注意 Doris **没有 TIMESTAMP 类型**，日期时间落 DATETIME；泛字符串落
+        VARCHAR 而非 STRING——STRING 不能作 Key/分区列，会让主键模型建表失败。
+        """
+        dt = (data_type or "").lower()
+        st = (semantic_type or "").lower()
+        if st == "date" or dt == "date":
+            return "DATE"
+        if st in {"datetime", "time"} or "time" in dt or "date" in dt:
+            return "DATETIME"
+        if st == "amount" or dt in {"decimal", "numeric", "money"}:
+            return "DECIMAL(18,4)"
+        if st in {"number", "count"} or dt in {"int", "integer", "smallint"}:
+            return "INT"
+        if dt in {"bigint", "long"}:
+            return "BIGINT"
+        if dt in {"float", "double", "real"}:
+            return "DOUBLE"
+        if st == "flag" or dt in {"bool", "boolean"}:
+            return "BOOLEAN"
+        # 无长度元数据时的保守默认；宽文本需在本体显式标注类型。
+        return "VARCHAR(1024)"
+
+    def _qualified(self, table: LogicalTable) -> str:
+        if table.database:
+            return f"{_q(table.database)}.{_q(table.name)}"
+        return _q(table.name)
+
+    def _key_columns(self, table: LogicalTable) -> list[str]:
+        pk = table.primary_key
+        return [c for c in pk.columns if table.column(c)] if pk else []
+
+    def _ordered_columns(self, table: LogicalTable) -> list[LogicalColumn]:
+        """Key 列必须前导（Doris 表模型硬约束），其余保持本体属性序。"""
+        keys = self._key_columns(table)
+        lead = [table.column(k) for k in keys]
+        rest = [c for c in table.columns if c.name not in set(keys)]
+        return [c for c in lead if c] + rest
+
+    def _render_column(self, col: LogicalColumn) -> str:
+        line = f"  {_q(col.name)} {self.map_type(col.data_type, col.semantic_type)}"
+        if col.comment:
+            line += f" COMMENT {_c(col.comment)}"
+        return line
+
+    def _partition_clause(self, table: LogicalTable) -> str | None:
+        if not table.partition_key:
+            return None
+        col = table.column(table.partition_key)
+        part_type = self.map_type(col.data_type, col.semantic_type) if col else ""
+        # 日期分区用 AUTO RANGE + date_trunc（按天）；其余用 AUTO LIST——
+        # 二者都允许空分区列表，避免臆造具体分区边界。
+        if part_type in {"DATE", "DATETIME"}:
+            return f"AUTO PARTITION BY RANGE (date_trunc({_q(table.partition_key)}, 'day')) ()"
+        return f"AUTO PARTITION BY LIST ({_q(table.partition_key)}) ()"
+
+    def render_create_table(self, table: LogicalTable) -> str:
+        self.guard(table)
+        columns = self._ordered_columns(table)
+        keys = self._key_columns(table)
+        lines = [
+            f"CREATE TABLE IF NOT EXISTS {self._qualified(table)} (",
+            ",\n".join(self._render_column(c) for c in columns),
+            ")",
+        ]
+        if keys:
+            lines.append(f"UNIQUE KEY({', '.join(_q(k) for k in keys)})")
+        else:
+            # 无主键 → Duplicate 模型，以首列作 Key（不去重）。
+            lines.append(f"DUPLICATE KEY({_q(columns[0].name)})")
+        if table.comment:
+            lines.append(f"COMMENT {_c(table.comment)}")
+        partition = self._partition_clause(table)
+        if partition:
+            lines.append(partition)
+        bucket = keys[0] if keys else columns[0].name
+        lines.append(f"DISTRIBUTED BY HASH({_q(bucket)}) BUCKETS {_BUCKETS}")
+        return "\n".join(lines) + ";"
+
+    def render_alter(self, before: LogicalTable, after: LogicalTable) -> list[str]:
+        """本体变更 → ALTER。Doris 支持逐列增/删/改（值列为 light schema change）。"""
+        self.guard(after)
+        stmts: list[str] = []
+        qualified = self._qualified(after)
+        before_names = {c.name for c in before.columns}
+        after_names = {c.name for c in after.columns}
+
+        for col in after.columns:
+            if col.name not in before_names:
+                stmts.append(
+                    f"ALTER TABLE {qualified} ADD COLUMN {self._render_column(col).strip()};"
+                )
+        for name in sorted(before_names - after_names):
+            stmts.append(f"ALTER TABLE {qualified} DROP COLUMN {_q(name)};")
+        for col in after.columns:
+            old = before.column(col.name)
+            if old is None:
+                continue
+            new_type = self.map_type(col.data_type, col.semantic_type)
+            old_type = self.map_type(old.data_type, old.semantic_type)
+            if new_type != old_type or (col.comment or "") != (old.comment or ""):
+                comment = f" COMMENT {_c(col.comment)}" if col.comment else ""
+                stmts.append(
+                    f"ALTER TABLE {qualified} MODIFY COLUMN {_q(col.name)} {new_type}{comment};"
+                )
+        return stmts
+
+    def translate_sql(self, sql: str) -> str:
+        """Doris 兼容 MySQL 日期函数（CURDATE / DATE_SUB(..., INTERVAL n DAY)），原样返回。"""
+        return sql

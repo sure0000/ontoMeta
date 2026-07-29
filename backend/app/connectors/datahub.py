@@ -882,3 +882,107 @@ class DataHubConnector:
             delay,
         )
         await asyncio.sleep(delay)
+
+
+# ---------------------------------------------------------------- 回写（M7）
+#
+# 连接器此前为纯只读。以下 mutation 让本体成果（业务命名、描述、术语、域）
+# 回灌 DataHub，形成元数据双向闭环。
+#
+# 结构已对照 DataHub 开源 GraphQL schema 核实一致（datahub-graphql-core 的
+# entity.graphql，master）：
+#   - updateDescription(input: DescriptionUpdateInput!): Boolean
+#     DescriptionUpdateInput = {description!, resourceUrn!, subResourceType?, subResource?}
+#     字段级用 subResourceType=DATASET_FIELD（该 enum 目前仅此一值）+ subResource=<fieldPath>；
+#     数据集级省略二者。这是唯一的 canonical mutation（无 updateDatasetDescription）。
+#   - addTerms(input: AddTermsInput!): Boolean
+#     AddTermsInput = {termUrns![String!]!, resourceUrn!, subResourceType?, subResource?}
+#   - setDomain(entityUrn: String!, domainUrn: String!): Boolean —— 位置参数，非 input 对象
+# 三者在 master 均未 @deprecated、无近期形变。
+#
+# ⚠ **仍未在本目标实例的具体 DataHub 版本上核实**——版本极旧的服务端仍可能有差异。
+# 因此服务层默认只做 preview，实际写入须显式 apply；首次 apply 必须在非生产实例上验证一次。
+
+_MUTATION_UPDATE_DESCRIPTION = """
+mutation updateDescription($input: DescriptionUpdateInput!) {
+  updateDescription(input: $input)
+}
+"""
+
+_MUTATION_ADD_TERMS = """
+mutation addTerms($input: AddTermsInput!) {
+  addTerms(input: $input)
+}
+"""
+
+_MUTATION_SET_DOMAIN = """
+mutation setDomain($entityUrn: String!, $domainUrn: String!) {
+  setDomain(entityUrn: $entityUrn, domainUrn: $domainUrn)
+}
+"""
+
+
+class DataHubWriteError(RuntimeError):
+    """回写失败。保留原始 URN 与操作，便于定位与重放。"""
+
+    def __init__(self, operation: str, urn: str, cause: Exception):
+        self.operation = operation
+        self.urn = urn
+        self.cause = cause
+        super().__init__(f"DataHub 回写失败（{operation} @ {urn}）：{cause}")
+
+
+async def _mutate(connector: "DataHubConnector", operation: str, urn: str,
+                  query: str, variables: dict) -> bool:
+    if connector.use_mock:
+        logger.info("mock datahub: skip %s @ %s", operation, urn)
+        return True
+    try:
+        data = await connector._graphql(query, variables)
+    except Exception as exc:  # noqa: BLE001
+        raise DataHubWriteError(operation, urn, exc) from exc
+    return bool(data.get(operation, True))
+
+
+async def update_dataset_description(
+    connector: "DataHubConnector", urn: str, description: str
+) -> bool:
+    """写入数据集描述（业务语义由本体反补到元数据层）。"""
+    return await _mutate(
+        connector, "updateDescription", urn, _MUTATION_UPDATE_DESCRIPTION,
+        {"input": {"resourceUrn": urn, "description": description}},
+    )
+
+
+async def update_field_description(
+    connector: "DataHubConnector", dataset_urn: str, field_path: str, description: str
+) -> bool:
+    return await _mutate(
+        connector, "updateDescription", dataset_urn, _MUTATION_UPDATE_DESCRIPTION,
+        {
+            "input": {
+                "resourceUrn": dataset_urn,
+                "description": description,
+                "subResource": field_path,
+                "subResourceType": "DATASET_FIELD",
+            }
+        },
+    )
+
+
+async def add_glossary_terms(
+    connector: "DataHubConnector", urn: str, term_urns: list[str]
+) -> bool:
+    if not term_urns:
+        return True
+    return await _mutate(
+        connector, "addTerms", urn, _MUTATION_ADD_TERMS,
+        {"input": {"termUrns": term_urns, "resourceUrn": urn}},
+    )
+
+
+async def set_domain(connector: "DataHubConnector", urn: str, domain_urn: str) -> bool:
+    return await _mutate(
+        connector, "setDomain", urn, _MUTATION_SET_DOMAIN,
+        {"entityUrn": urn, "domainUrn": domain_urn},
+    )

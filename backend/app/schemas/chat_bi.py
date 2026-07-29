@@ -116,3 +116,18 @@ class ChatBiCategoryRenameRequest(BaseModel):
 class ChatBiCategoryDeleteRequest(BaseModel):
     domain_id: str
     name: str
+
+
+class ChatBiExecuteRequest(BaseModel):
+    """执行某条回答的 suggested_sql。"""
+
+    data_source_id: str
+    limit: int = 100
+
+
+class ChatBiExecuteResult(BaseModel):
+    message_id: str
+    sql: str
+    columns: list[dict] = []
+    rows: list[dict] = []
+    row_count: int = 0

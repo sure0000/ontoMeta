@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import chat_bi_service
 from app.database import get_db
+from app.services.data_app_executor import ExecutionError
 from app.schemas import (
     ChatBiAnswer,
     ChatBiAskRequest,
@@ -10,6 +11,8 @@ from app.schemas import (
     ChatBiCategoryList,
     ChatBiCategoryRenameRequest,
     ChatBiConversationCreate,
+    ChatBiExecuteRequest,
+    ChatBiExecuteResult,
     ChatBiConversationSummary,
     ChatBiConversationUpdate,
     ChatBiMessageOut,
@@ -190,4 +193,27 @@ def chat_bi_suggestions(domain_id: str = Query(...), db: Session = Depends(get_d
         suggestions = chat_bi_service.suggest_questions(db, domain_id)
         return ChatBiSuggestions(domain_id=domain_id, suggestions=suggestions)
     except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/chat-bi/messages/{message_id}/execute", response_model=ChatBiExecuteResult
+)
+def chat_bi_execute_message(
+    message_id: str,
+    data: ChatBiExecuteRequest,
+    db: Session = Depends(get_db),
+):
+    """执行该条回答的 suggested_sql，返回真实数据。
+
+    数仓表由本体生成后，SQL 里的表名/列名与本体标识符天然一致——
+    问数准确性由架构保证，而非靠提示词约束。
+    """
+    try:
+        return chat_bi_service.execute_message_sql(
+            db, message_id, data_source_id=data.data_source_id, limit=data.limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExecutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

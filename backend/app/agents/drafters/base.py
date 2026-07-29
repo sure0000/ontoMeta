@@ -1,0 +1,25 @@
+"""Spec Drafter 基类。
+
+**LLM 只产声明式 Spec，不产命令**——沿用 ``services/draft_generator.py`` 已确立的
+原则：结构由证据确定性推导，LLM 只做语义提升。具体实现见 M6。
+
+安全：**凭据绝不进 LLM 上下文**。Drafter 只能拿到主机别名、组件名、对象名等
+非敏感标识；密钥由 Executor 按别名从独立存储取（比照 ``DataSource.dsn_secret_ref``
+「仅存引用或加密串」的既有做法）。
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+
+class Drafter(ABC):
+    kind: str
+
+    @abstractmethod
+    def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
+        """自然语言意图 → 声明式 Spec（可 JSON 序列化的 dict）。"""
+
+    def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
+        return (intent or self.kind).strip()[:80] or self.kind

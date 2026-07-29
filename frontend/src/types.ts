@@ -898,3 +898,134 @@ export interface PublicShareStatus {
   password_set: boolean;
   public_expires_at?: string | null;
 }
+
+// ---- 物化契约（M1）----
+// 本体是一级源数据、物理表是二级投影；契约补齐本体不承载的落地配置。
+
+export type MaterializationTargetKind =
+  | "object_type"
+  | "relation_type"
+  | "business_logic";
+export type MaterializationLayer = "dim" | "dwd" | "dws" | "ads";
+export type MaterializationLoadStrategy = "full" | "incremental" | "cdc";
+export type MaterializationScdType = "none" | "scd1" | "scd2";
+
+export interface MaterializationContract {
+  id: string;
+  ontology_id: string;
+  target_kind: MaterializationTargetKind;
+  target_id: string;
+  target_name?: string | null;
+  target_display_name?: string | null;
+  target_layer: MaterializationLayer;
+  engines: string[];
+  load_strategy: MaterializationLoadStrategy;
+  partition_key?: string | null;
+  scd_type: MaterializationScdType;
+  refresh_cron?: string | null;
+  materialized: boolean;
+  /** 机器推导的判定依据，供人工复核 */
+  derivation_reason?: string | null;
+  origin: string;
+  /** 被人工钉住的列名；机器重推导不会覆盖这些字段 */
+  pinned_fields: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaterializationContractUpdateInput {
+  target_layer?: MaterializationLayer;
+  engines?: string[];
+  load_strategy?: MaterializationLoadStrategy;
+  partition_key?: string | null;
+  scd_type?: MaterializationScdType;
+  refresh_cron?: string | null;
+  materialized?: boolean;
+}
+
+export interface MaterializationContractSyncResult {
+  ontology_id: string;
+  created: number;
+  updated: number;
+  skipped_pinned: number;
+  total: number;
+}
+
+// ---- RBAC 主体与角色（M0）----
+
+export type PrincipalRole = "reader" | "editor" | "reviewer" | "publisher";
+
+export interface Principal {
+  id: string;
+  name: string;
+  role: PrincipalRole;
+  token_prefix: string;
+  active: boolean;
+  last_used_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 创建/轮换时返回，token 明文仅此一次。 */
+export interface PrincipalCreated extends Principal {
+  token: string;
+}
+
+export interface RolePolicy {
+  roles: PrincipalRole[];
+  method_defaults: Record<string, string>;
+  overrides: { method: string; path_pattern: string; minimum_role: string }[];
+}
+
+// ---- 治理智能体制品（M5/M6，写侧）----
+
+export type ArtifactKind = "cluster" | "sync" | "transform" | "metric";
+export type ArtifactStatus =
+  | "drafted"
+  | "validated"
+  | "confirmed"
+  | "executing"
+  | "succeeded"
+  | "failed";
+
+export interface AgentValidationIssue {
+  code: string;
+  message: string;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  entity_name?: string | null;
+}
+
+export interface AgentValidationReport {
+  issues: AgentValidationIssue[];
+  blocking_count: number;
+  /** dry-run 差异（将要发生什么）；有阻断项时为 null */
+  dry_run?: Record<string, unknown> | null;
+  dry_run_error?: string | null;
+  validated_at?: string;
+}
+
+export interface GovernanceArtifact {
+  id: string;
+  kind: ArtifactKind | string;
+  name: string;
+  ontology_id?: string | null;
+  intent?: string | null;
+  spec: Record<string, unknown>;
+  status: ArtifactStatus | string;
+  is_high_risk: boolean;
+  validation_report?: AgentValidationReport | null;
+  execution_receipt?: Record<string, unknown> | null;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  executed_at?: string | null;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentKinds {
+  all_kinds: string[];
+  registered: string[];
+  high_risk: string[];
+}

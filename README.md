@@ -29,7 +29,7 @@ ontoMeta/
 | MCP `/api/mcp*` | 同上 API Key | tools/list、tools/call |
 | `GET /health` | 无 | 存活探针 |
 
-完整 RBAC（读/编/审/发四层角色）尚未产品化；当前为 **管理 Token + 外部 App Key（含 scope / 限流）**。详见 [TECH_DESIGN.md](./TECH_DESIGN.md) §9、[OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)。
+完整 RBAC（读/编/审/发四层角色 reader < editor < reviewer < publisher）已产品化（见「角色与令牌」设置页与 `POST /api/principals`）：按主体签发令牌、分级授权，写侧智能体（`/api/agents`）等高危操作需 publisher。`ONTOMETA_ADMIN_TOKEN` 仍为 superuser（等价 publisher）；未创建任何主体时行为与启用 RBAC 前一致。详见 [TECH_DESIGN.md](./TECH_DESIGN.md) §9、[DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0。
 
 ## 快速开始
 
@@ -160,3 +160,4 @@ GitHub Actions：`.github/workflows/ci.yml`（backend pytest + frontend lint/bui
 - [DOMAIN_MODEL.md](./DOMAIN_MODEL.md) — 领域模型
 - [IA.md](./IA.md) — 信息架构
 - [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md) — 工程优化方案（可分批执行）
+- [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) — 智能数仓实现执行文档（里程碑与编码规格）

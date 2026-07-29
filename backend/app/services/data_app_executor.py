@@ -5,12 +5,20 @@
 
 - **只读**：仅允许单条 SELECT / WITH…SELECT；拒绝任何 DDL/DML/多语句/危险函数。
 - **强制 LIMIT**：缺失时自动追加，防止全表扫描。
-- **方言适配（最小）**：针对 SQLite/DuckDB 翻译 MySQL 风格的时间函数。
+- **方言适配**：数仓引擎（hive/kyuubi/doris/starrocks/clickhouse）委托给
+  ``app/warehouse`` 的 Dialect Adapter；本地分析引擎（SQLite/DuckDB）就地处理。
 - **物理映射**：DataSource.mapping_json 可将本体 name → 物理表/列名。
+  数仓表由本体生成后，该映射可直接由 ``services/warehouse_generator.py`` 产出——
+  本体名即物理表名，无需人工维护。
 - **降级**：无数据源 / mock 数据源时，由调用方回退到 Mock 造数。
 
 数据源连接串取自 DataSource.dsn_secret_ref（SQLAlchemy URL，如
-sqlite:////abs/path.db、duckdb:///path、postgresql+psycopg://…）。
+sqlite:////abs/path.db、duckdb:///path、postgresql+psycopg://、hive://host:10000/db、
+kyuubi://host:10009/db…）。
+
+注：数仓引擎的 SQLAlchemy 驱动（PyHive / clickhouse-sqlalchemy 等）**未列入
+requirements.txt**——方言翻译与 backend 识别不需要它们，仅实际建连时需要，
+且版本需按目标集群确认。见 requirements.txt 内的说明。
 """
 
 from __future__ import annotations
@@ -22,6 +30,8 @@ from typing import Any
 import sqlparse
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+
+from app.warehouse import get_adapter
 
 logger = logging.getLogger("ontometa.data_app.executor")
 
@@ -48,6 +58,25 @@ _FORBIDDEN = (
 )
 
 _engine_cache: dict[str, Engine] = {}
+
+# DSN scheme 前缀 → 执行器 backend。顺序敏感：长前缀在前。
+# Kyuubi 是 Spark SQL 网关，方言等同 Hive，故复用 hive Adapter。
+_WAREHOUSE_SCHEMES: tuple[tuple[str, str], ...] = (
+    ("kyuubi", "kyuubi"),
+    ("hive", "hive"),
+    ("starrocks", "starrocks"),
+    ("doris", "doris"),
+    ("clickhouse", "clickhouse"),
+)
+
+# 执行器 backend → app/warehouse 的 Adapter 名。
+_WAREHOUSE_BACKENDS: dict[str, str] = {
+    "hive": "hive",
+    "kyuubi": "hive",
+    "doris": "doris",
+    "starrocks": "starrocks",
+    "clickhouse": "clickhouse",
+}
 
 
 class ExecutionError(Exception):
@@ -93,7 +122,16 @@ def _ensure_limit(sql: str, limit: int) -> str:
 
 
 def _translate_dialect(sql: str, backend: str) -> str:
-    """把 MySQL 风格的时间函数翻译为 SQLite/DuckDB 可执行形式（最小实现）。"""
+    """方言翻译。
+
+    数仓引擎（hive/kyuubi/doris/…）**委托给 ``app/warehouse`` 的 Dialect Adapter**，
+    不在此另开分支——否则同一引擎会存在两套方言逻辑，迟早分叉。
+    本函数只保留 Adapter 覆盖不到的分析型本地引擎（SQLite/DuckDB）。
+    """
+    engine = _WAREHOUSE_BACKENDS.get(backend)
+    if engine:
+        return get_adapter(engine).translate_sql(sql)
+
     if backend in ("sqlite", "duckdb"):
         # DATE_SUB(CURDATE(), INTERVAL 30 DAY) -> date('now','-30 day')
         sql = re.sub(
@@ -131,6 +169,11 @@ def _backend_of(dsn: str) -> str:
         return "duckdb"
     if prefix.startswith(("postgres", "postgresql")):
         return "postgres"
+    # 数仓引擎须在 mysql 之前判定：Doris/StarRocks 走 MySQL 线协议，
+    # 其 DSN 常写成 mysql+pymysql://，但显式 doris:// / starrocks:// 应识别为自身。
+    for scheme, backend in _WAREHOUSE_SCHEMES:
+        if prefix.startswith(scheme):
+            return backend
     if prefix.startswith("mysql"):
         return "mysql"
     return prefix

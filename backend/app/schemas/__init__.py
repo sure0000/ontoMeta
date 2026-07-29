@@ -10,6 +10,8 @@ from app.schemas.chat_bi import (
     ChatBiCategoryList,
     ChatBiCategoryRenameRequest,
     ChatBiConversationCreate,
+    ChatBiExecuteRequest,
+    ChatBiExecuteResult,
     ChatBiConversationSummary,
     ChatBiConversationUpdate,
     ChatBiMessageOut,
@@ -167,6 +169,26 @@ from app.schemas.settings import (
     LlmServiceConfigOut,
     LlmServiceConfigUpdate,
 )
+from app.schemas.agent import (
+    AgentKindsOut,
+    ArtifactConfirmRequest,
+    ArtifactDraftRequest,
+    ArtifactExecuteRequest,
+    GovernanceArtifactOut,
+)
+from app.schemas.principal import (
+    PrincipalCreate,
+    PrincipalCreated,
+    PrincipalOut,
+    PrincipalUpdate,
+    RolePolicyItem,
+    RolePolicyOut,
+)
+from app.schemas.warehouse import (
+    MaterializationContractOut,
+    MaterializationContractSyncResult,
+    MaterializationContractUpdate,
+)
 
 __all__ = [
     "DomainInput",
@@ -320,6 +342,22 @@ __all__ = [
     "ALL_EXTERNAL_SCOPES",
     "McpToolCallRequest",
     "McpToolCallResult",
+    "MaterializationContractOut",
+    "MaterializationContractUpdate",
+    "MaterializationContractSyncResult",
+    "ChatBiExecuteRequest",
+    "ChatBiExecuteResult",
+    "PrincipalOut",
+    "PrincipalCreated",
+    "PrincipalCreate",
+    "PrincipalUpdate",
+    "RolePolicyItem",
+    "RolePolicyOut",
+    "ArtifactDraftRequest",
+    "ArtifactConfirmRequest",
+    "ArtifactExecuteRequest",
+    "GovernanceArtifactOut",
+    "AgentKindsOut",
 ]
 
 

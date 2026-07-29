@@ -43,6 +43,16 @@ import type {
   ExternalAppCreated,
   LlmModelOption,
   LlmServiceConfig,
+  MaterializationContract,
+  MaterializationContractSyncResult,
+  MaterializationContractUpdateInput,
+  MaterializationTargetKind,
+  Principal,
+  PrincipalCreated,
+  PrincipalRole,
+  RolePolicy,
+  AgentKinds,
+  GovernanceArtifact,
   LlmConnectionTestResult,
   ObjectTypeDetail,
   ObjectTypeSummary,
@@ -82,6 +92,16 @@ export function setAdminToken(token: string): void {
 
 export function clearAdminToken(): void {
   localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+}
+
+/** 携带 HTTP 状态码的 API 错误，便于调用方区分 403（权限不足）等情形。 */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -128,7 +148,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       // 响应不是 JSON（例如纯文本 "Internal Server Error"）
       detail = `服务端返回了非 JSON 响应（HTTP ${response.status}）：${raw.slice(0, 120)}`;
     }
-    throw new Error(detail);
+    throw new ApiError(detail, response.status);
   }
 
   try {
@@ -1007,4 +1027,85 @@ export const api = {
       object_types: { id: string; name: string; display_name: string }[];
       properties: { id: string; name: string; display_name: string; object_type_id: string }[];
     }>(`/api/data-apps/${appId}/lineage`),
+
+  // ---- 物化契约（M1）----
+  listMaterializationContracts: (
+    ontologyId: string,
+    params?: { target_kind?: MaterializationTargetKind; materialized_only?: boolean },
+  ) =>
+    request<MaterializationContract[]>(
+      `/api/ontologies/${ontologyId}/materialization-contracts${buildQuery({
+        target_kind: params?.target_kind,
+        materialized_only: params?.materialized_only,
+      })}`,
+    ),
+
+  /** 按本体实体重新推导默认值；人工钉住的字段不会被覆盖。 */
+  syncMaterializationContracts: (ontologyId: string) =>
+    request<MaterializationContractSyncResult>(
+      `/api/ontologies/${ontologyId}/materialization-contracts/sync`,
+      { method: "POST" },
+    ),
+
+  updateMaterializationContract: (
+    contractId: string,
+    body: MaterializationContractUpdateInput,
+  ) =>
+    request<MaterializationContract>(`/api/materialization-contracts/${contractId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  // ---- RBAC 主体与角色（M0）----
+  listPrincipals: () => request<Principal[]>("/api/principals"),
+  getRolePolicy: () => request<RolePolicy>("/api/principals-policy"),
+  createPrincipal: (body: { name: string; role: PrincipalRole }) =>
+    request<PrincipalCreated>("/api/principals", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updatePrincipal: (
+    id: string,
+    body: { name?: string; role?: PrincipalRole; active?: boolean },
+  ) =>
+    request<Principal>(`/api/principals/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  rotatePrincipalToken: (id: string) =>
+    request<PrincipalCreated>(`/api/principals/${id}/rotate-token`, { method: "POST" }),
+  deletePrincipal: (id: string) =>
+    request<{ deleted: string }>(`/api/principals/${id}`, { method: "DELETE" }),
+
+  // ---- 治理智能体流水线（M5/M6，写侧；整个命名空间需 publisher 角色）----
+  listAgentKinds: () => request<AgentKinds>("/api/agents/kinds"),
+  listArtifacts: (params?: { kind?: string; status?: string; ontology_id?: string }) =>
+    request<GovernanceArtifact[]>(`/api/agents/artifacts${buildQuery(params ?? {})}`),
+  getArtifact: (id: string) =>
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}`),
+  draftArtifact: (body: {
+    kind: string;
+    intent: string;
+    context?: Record<string, unknown>;
+    ontology_id?: string | null;
+  }) =>
+    request<GovernanceArtifact>("/api/agents/draft", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  validateArtifact: (id: string, context?: Record<string, unknown>) =>
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}/validate`, {
+      method: "POST",
+      body: JSON.stringify({ context: context ?? {} }),
+    }),
+  confirmArtifact: (id: string, operator?: string) =>
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ operator }),
+    }),
+  executeArtifact: (id: string, context?: Record<string, unknown>) =>
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}/execute`, {
+      method: "POST",
+      body: JSON.stringify({ context: context ?? {} }),
+    }),
 };

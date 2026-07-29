@@ -1127,6 +1127,53 @@ class ChatBiService:
         return items
 
 
+
+    # ---------- M4：把 suggested_sql 真正执行掉 ----------
+
+    def execute_message_sql(
+        self, db: Session, message_id: str, *, data_source_id: str, limit: int = 100
+    ) -> dict:
+        """执行某条回答的 ``suggested_sql``。
+
+        在本体驱动的数仓里，这一步的准确性是架构保证的而非提示词保证的：
+        物理表由本体生成，表名/列名与本体标识符天然一致，
+        ``_LLM`` 那句「必须严格使用本体标识符」从祈使句变成了物理事实。
+
+        安全：复用 ``data_app_executor`` 既有的只读校验与强制 LIMIT。
+        注：执行权限应限制为 publisher 角色，但 RBAC 四层角色尚未产品化
+        （见 README「安全模型（阶段性）」），当前仍由共享 Admin Token 兜底。
+        """
+        from app.models import DataSource
+        from app.services import data_app_executor
+
+        message = db.get(ChatBiMessage, message_id)
+        if message is None:
+            raise ValueError("消息不存在")
+        payload = _loads_payload(message.payload)
+        sql = (payload.get("suggested_sql") or "").strip()
+        if not sql:
+            raise ValueError("该消息没有可执行的 SQL")
+
+        source = db.get(DataSource, data_source_id)
+        if source is None:
+            raise ValueError("数据源不存在")
+        dsn = (source.dsn_secret_ref or "").strip()
+        if not dsn or source.kind == "mock":
+            raise ValueError("该数据源未配置连接串，无法执行")
+
+        mapping = _loads_payload(source.mapping_json)
+        columns, rows = data_app_executor.execute_sql(
+            dsn=dsn, sql=sql, limit=limit, mapping=mapping or None
+        )
+        return {
+            "message_id": message_id,
+            "sql": sql,
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+        }
+
+
 class _ReferenceResolver:
     """将 LLM/Mock 输出中的 name/display_name 解析为真实实体 id，供前端跳转。
 
@@ -1250,3 +1297,13 @@ class _ReferenceResolver:
             if hit:
                 return hit
         return None
+
+
+def _loads_payload(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}

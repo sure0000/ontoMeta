@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
+from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -88,8 +90,135 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if is_admin_auth_exempt(path):
             return await call_next(request)
-        try:
-            verify_admin_token(extract_admin_token(request))
-        except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+        # 第一层：Token 有效性。未配置 principals 时行为与 RBAC 上线前一致。
+        role, principal_id = resolve_principal(request)
+        if role is None:
+            try:
+                verify_admin_token(extract_admin_token(request))
+            except HTTPException as exc:
+                return JSONResponse(
+                    status_code=exc.status_code, content={"detail": exc.detail}
+                )
+            # Token 校验通过但未解析出角色 → 视为 superuser（共享 Admin Token）
+            role = "publisher"
+
+        # 第二层：角色是否满足该端点要求。
+        from app.models.principal import role_satisfies
+
+        minimum = required_role(request.method, path)
+        if not role_satisfies(role, minimum):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": f"权限不足：该操作需要 {minimum} 角色，当前为 {role}"
+                },
+            )
+
+        request.state.principal_role = role
+        request.state.principal_id = principal_id
         return await call_next(request)
+
+
+# ---------------------------------------------------------------- RBAC（M0）
+
+# 端点 → 最低角色。**集中式强制**：逐个端点挂依赖漏一个就是静默失守，
+# 而这里默认按方法兜底，新增端点自动被覆盖（fail-closed）。
+#
+# 匹配顺序敏感：先精确路径覆盖，再按 HTTP 方法兜底。
+_ROLE_OVERRIDES: tuple[tuple[str, str, str], ...] = (
+    # (方法正则, 路径正则, 最低角色)
+    # 主体自管理必须最高权限，否则低权角色可自我提权。
+    (r".*", r"^/api/principals(/|$)", "publisher"),
+    # 写侧智能体：会改集群、建表、执行 SQL；制品本身也含拓扑与 SQL，读亦敏感。
+    (r".*", r"^/api/agents(/|$)", "publisher"),
+    # 发布类：本体发布、预发布、数据应用发布与公开分享
+    (r"^(POST|PATCH|PUT|DELETE)$", r"/(pre-)?publish(/|$)", "publisher"),
+    (r"^(POST|DELETE)$", r"/share(/|$)", "publisher"),
+    # 回写类：向外部 DataHub 写入，影响全域元数据。
+    (r"^POST$", r"/datahub/writeback(/|$)", "publisher"),
+    # 执行类：直接打物理数据源
+    (r"^POST$", r"/execute(/|$)", "publisher"),
+    # 设置类：改 LLM/DataHub/Cube 连接与凭据
+    (r"^(POST|PATCH|PUT|DELETE)$", r"^/api/settings(/|$)", "publisher"),
+    (r"^(POST|PATCH|PUT|DELETE)$", r"^/api/(llm-services|datahub|cube)", "publisher"),
+    # 复核类：二次确认与冲突裁决
+    (r".*", r"^/api/confirmations(/|$)", "reviewer"),
+    (r"^(POST|PATCH|PUT)$", r"/conflicts?(/|$)", "reviewer"),
+    (r"^(POST|PATCH)$", r"/(resolve|resolve-all)(/|$)", "reviewer"),
+    (r"^PATCH$", r"^/api/fields/pin(/|$)", "reviewer"),
+)
+
+# 方法兜底。DELETE 归入 publisher——删除不可逆。
+_METHOD_DEFAULTS: dict[str, str] = {
+    "GET": "reader",
+    "HEAD": "reader",
+    "OPTIONS": "reader",
+    "POST": "editor",
+    "PUT": "editor",
+    "PATCH": "editor",
+    "DELETE": "publisher",
+}
+
+
+def required_role(method: str, path: str) -> str:
+    """该请求所需的最低角色。未知方法按最高权限处理（fail-closed）。"""
+    for method_re, path_re, role in _ROLE_OVERRIDES:
+        if re.match(method_re, method, re.IGNORECASE) and re.search(path_re, path):
+            return role
+    return _METHOD_DEFAULTS.get(method.upper(), "publisher")
+
+
+def resolve_principal(request: Request):
+    """按请求头解析主体。
+
+    返回 ``(role, principal_or_None)``；``ONTOMETA_ADMIN_TOKEN`` 为 superuser，
+    等价 publisher，且不查库——保证未配置 principals 时行为与改造前完全一致。
+    解析失败返回 ``(None, None)``。
+    """
+    from app.database import SessionLocal
+    from app.models.principal import Principal
+
+    token = extract_admin_token(request)
+    if not token:
+        return None, None
+
+    expected = (settings.ontometa_admin_token or "").strip()
+    if expected and hmac.compare_digest(token, expected):
+        return "publisher", None
+
+    token_hash = hash_api_key(token, settings.api_key_hash_pepper)
+    with SessionLocal() as db:
+        principal = (
+            db.query(Principal)
+            .filter(Principal.token_hash == token_hash, Principal.active.is_(True))
+            .first()
+        )
+        if principal is None:
+            return None, None
+        principal.last_used_at = datetime.now(timezone.utc)
+        role = principal.role
+        db.commit()
+        return role, principal.id
+
+
+def require_role(minimum: str):
+    """FastAPI 依赖：要求当前主体至少具备 ``minimum`` 角色。
+
+    中间件已对全部 /api 路径做集中强制；本依赖供新端点在需要**更严格于
+    路径策略**时额外加固，或用于在处理函数内拿到当前角色。
+    """
+    from fastapi import Depends  # noqa: F401  （保持与其它依赖一致的导入位置）
+
+    def _dep(request: Request) -> str:
+        from app.models.principal import role_satisfies
+
+        role = getattr(request.state, "principal_role", None)
+        if not role_satisfies(role, minimum):
+            raise HTTPException(
+                status_code=403,
+                detail=f"权限不足：该操作需要 {minimum} 角色，当前为 {role or '未知'}",
+            )
+        return role
+
+    return _dep

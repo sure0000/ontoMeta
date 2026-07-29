@@ -25,6 +25,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { OntologyGraphView } from "../components/graph";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
+import { MaterializationContractPanel } from "../components/MaterializationContractPanel";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -705,6 +706,14 @@ export function RelationTypeDetailPage() {
             embedded
           />
         </SectionCard>
+      )}
+
+      {inWorkspace && (
+        <MaterializationContractPanel
+          ontologyId={rel.ontology_id}
+          targetKind="relation_type"
+          targetId={rel.id}
+        />
       )}
     </PageContainer>
   );

@@ -9,3 +9,10 @@ python-dotenv>=1.0.1
 openai>=1.57.0
 sqlparse>=0.5.0
 pytest>=8.0.0
+
+# --- 数仓引擎驱动（可选，按需自行安装）---
+# Data App / Chat BI 直连数仓时才需要；方言翻译与 backend 识别不依赖它们。
+# 版本须按目标集群实际版本确认，故不在此固定：
+#   Hive / Kyuubi   pip install "pyhive[hive]" thrift thrift-sasl
+#   Doris / StarRocks  走 MySQL 线协议：pip install pymysql
+#   ClickHouse      pip install clickhouse-sqlalchemy

@@ -33,7 +33,21 @@ from app.models.ontology import (
     RelationType,
     VersionRecord,
 )
+from app.models.agent import (
+    ArtifactKind,
+    ArtifactStatus,
+    GovernanceArtifact,
+    HIGH_RISK_KINDS,
+)
+from app.models.principal import Principal, Role, role_rank, role_satisfies
 from app.models.settings import DatahubSetting, DraftGenerationSetting, LlmServiceConfig, CubeSetting
+from app.models.warehouse import (
+    LoadStrategy,
+    MaterializationContract,
+    MaterializationLayer,
+    ScdType,
+    TargetKind,
+)
 
 __all__ = [
     "OntologyStatus",
@@ -67,4 +81,17 @@ __all__ = [
     "DataAppWidget",
     "ExternalApp",
     "ExternalApiCallLog",
+    "MaterializationContract",
+    "MaterializationLayer",
+    "LoadStrategy",
+    "ScdType",
+    "TargetKind",
+    "Principal",
+    "Role",
+    "role_rank",
+    "role_satisfies",
+    "GovernanceArtifact",
+    "ArtifactKind",
+    "ArtifactStatus",
+    "HIGH_RISK_KINDS",
 ]

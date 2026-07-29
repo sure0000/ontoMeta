@@ -32,6 +32,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
+import { MaterializationContractPanel } from "../components/MaterializationContractPanel";
 import { ObjectRelationGraph } from "../components/ObjectRelationGraph";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -943,6 +944,14 @@ export function ObjectTypeDetailPage() {
         >
           <DecisionEvidencePanel obj={obj} />
         </SectionCard>
+      )}
+
+      {inWorkspace && (
+        <MaterializationContractPanel
+          ontologyId={obj.ontology_id}
+          targetKind="object_type"
+          targetId={obj.id}
+        />
       )}
 
       <SectionCard

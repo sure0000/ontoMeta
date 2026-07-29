@@ -4,6 +4,7 @@ import {
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
+  KeyOutlined,
   PlusOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
@@ -36,6 +37,8 @@ import { api, clearAdminToken, getAdminToken, setAdminToken } from "../api";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { PrincipalsPanel } from "../components/PrincipalsPanel";
+import { AgentsPanel } from "../components/AgentsPanel";
 import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
 import type {
@@ -661,6 +664,26 @@ export function SettingsPage() {
                 </Form>
               </SectionCard>
             ),
+          },
+          {
+            key: "rbac",
+            label: (
+              <span>
+                <KeyOutlined style={{ marginRight: 6 }} />
+                角色与令牌
+              </span>
+            ),
+            children: <PrincipalsPanel />,
+          },
+          {
+            key: "agents",
+            label: (
+              <span>
+                <RobotOutlined style={{ marginRight: 6 }} />
+                治理智能体
+              </span>
+            ),
+            children: <AgentsPanel />,
           },
           {
             key: "cube",
