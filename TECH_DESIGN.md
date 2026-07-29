@@ -95,6 +95,18 @@
 
 ---
 
+### 3.7 智能数仓与治理智能体
+
+职责（详见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md)）：
+
+- **物化契约**（`models/warehouse.py`）：挂在本体对象/关系/逻辑上的落地配置（层/引擎/增量/分区/SCD），参与三路合并
+- **Dialect Adapter + 能力矩阵**（`app/warehouse/`）：本体 → 引擎无关逻辑模型 → 各引擎 DDL/ETL；能力不足显式报错，绝不静默降级
+- **正向生成器**（`services/warehouse_generator.py`）：本体 + 契约 → DDL/ETL/DAG/映射/派生作业；Hive 权威、其余从其派生（单一写入路径）
+- **治理智能体流水线**（`app/agents/`）：集群/同步/加工/指标四类制品，草稿→校验→确认→执行；LLM 只产声明式 Spec，凭据不进 Spec
+- **DataHub 回写**（`services/datahub_writeback.py`）：业务命名/描述/术语/域回灌 DataHub
+
+---
+
 ## 4. 数据流
 
 ### 4.1 草稿生成数据流
@@ -235,10 +247,9 @@
 - 所有编辑与发布动作需要审计日志（变更日志 / 确认记录）
 - 所有 DataHub 引用保留原始来源 ID
 - 发布版本不可被无痕覆盖；支持版本 diff 与快照只读查看
-- **权限现状（阶段性）**：
-  - 管理面：共享 `ONTOMETA_ADMIN_TOKEN`（非完整 RBAC）
+- **权限模型**：
+  - 四层角色 RBAC（读 reader < 编 editor < 审 reviewer < 发 publisher）**已产品化**——按主体签发令牌、集中策略闸门（`app/auth.py`），写侧治理智能体等高危操作需 publisher；`ONTOMETA_ADMIN_TOKEN` 保留为 superuser（等价 publisher），未创建主体时行为与启用前一致。详见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0
   - 对外面：外部 App API Key（哈希存储）+ 应用级 scope + 进程内限流
-  - 产品目标中的「读取 / 编辑 / 审核 / 发布」四层角色尚未落地，见 [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md) 非目标说明
 - 生产（`DEBUG=false`）500 响应脱敏；CORS 使用显式 origins
 ---
 

@@ -175,8 +175,8 @@ n
 ### 2.10 字段级溯源（Provenance）
 
 为支持"预生成本体反复运行、增量演进、不丢人工修正"，ObjectType / Property /
-RelationType / BusinessLogic 均带一组字段级溯源元数据（详见
-`ONTOLOGY_VERSIONING_PLAN.md`）：
+RelationType / BusinessLogic 均带一组字段级溯源元数据（由 `ProvenanceMixin`
+与 `services/ontology_merge.py` 的三路合并实现）：
 
 - origin：machine（机器生成）/ manual（人工新建）/ machine_edited（机器生成后被人工修正）
 - overridden_fields：被人工修改并"钉住"的字段列表（再生成时受保护）
