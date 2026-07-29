@@ -170,6 +170,29 @@ def validate_ontology(db: Session, ontology_id: str) -> list[ValidationIssue]:
                 )
             )
 
+    # 关系表(bridge)必须落地为某条业务关系的实现表(mapping_object)。table_role=bridge
+    # 的语义是「这是一张关系表」；但数据域发布只保留 business_object，若没有任何
+    # RelationType 以它为 mapping_object，它会在发布时被**静默排除**，它所代表的业务
+    # 关系（谁与谁通过它关联）随之丢失。这里报为一致性问题（既在预发布校验展示、又
+    # 阻断发布），提示用「转为业务关系」补全两端点，或把它改判为业务对象/数据表。
+    materialized_bridge_ids = {
+        rel.mapping_object_type_id for rel in relations if rel.mapping_object_type_id
+    }
+    for obj in objects:
+        if obj.table_role == "bridge" and obj.id not in materialized_bridge_ids:
+            issues.append(
+                ValidationIssue(
+                    code="bridge_object_not_materialized",
+                    message=(
+                        f"关系表「{obj.display_name}」({obj.name}) 尚未落地为业务关系，"
+                        "发布时会被静默丢弃：请用「转为业务关系」补全两端点，或改判其对象类型"
+                    ),
+                    entity_type="object_type",
+                    entity_id=obj.id,
+                    entity_name=obj.name,
+                )
+            )
+
     # 逻辑绑定有效
     logics = (
         db.query(BusinessLogic).filter(BusinessLogic.ontology_id == ontology_id).all()

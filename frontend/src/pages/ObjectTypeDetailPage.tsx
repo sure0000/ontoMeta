@@ -28,7 +28,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
@@ -41,6 +41,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { ProvenanceBadge } from "../components/ProvenanceBadge";
 import { useDebouncedCallback } from "../hooks/useApi";
 import { extractDataHubBase, resolveDataHubDatasetUrl } from "../utils/datahub";
+import { suggestEndpoints } from "../utils/endpointSuggest";
 import {
   CARDINALITY_OPTIONS,
   RELATION_STRUCTURE_OPTIONS,
@@ -184,6 +185,23 @@ interface RelationForm {
   mapping_object_type_id?: string | null;
 }
 
+interface ConvertForm {
+  source_object_type_id: string;
+  target_object_type_id: string;
+  display_name: string;
+  structure_type: string;
+}
+
+// 从对象展示名提取默认关系谓词：剥离常见的「表/记录/明细/工单/单/流水/台账」等
+// 结构性后缀，让「设备维修工单」→「设备维修」这样的动词直接作为关系谓词候选。
+function defaultRelationVerb(displayName: string): string {
+  const cleaned = displayName.replace(
+    /(工单记录|操作记录|台账|流水|工单|明细表|明细|记录|事实表|事实|单据|单|表)$/,
+    "",
+  );
+  return (cleaned.trim() || displayName).slice(0, 8);
+}
+
 function DataHubSourceLink({
   sourceRef,
   datahubUrl,
@@ -215,6 +233,7 @@ function DataHubSourceLink({
 
 export function ObjectTypeDetailPage() {
   const { objectId, domainId } = useParams<{ objectId: string; domainId?: string }>();
+  const navigate = useNavigate();
 
   const [obj, setObj] = useState<ObjectTypeDetail | null>(null);
   const [datahubBase, setDatahubBase] = useState<string | undefined>();
@@ -228,6 +247,9 @@ export function ObjectTypeDetailPage() {
   const [relationModalOpen, setRelationModalOpen] = useState(false);
   const [editingRelation, setEditingRelation] = useState<RelationType | null>(null);
   const [relationSaving, setRelationSaving] = useState(false);
+  const [convertModalOpen, setConvertModalOpen] = useState(false);
+  const [convertSaving, setConvertSaving] = useState(false);
+  const [convertForm] = Form.useForm<ConvertForm>();
   const [peerObjects, setPeerObjects] = useState<ObjectTypeSummary[]>([]);
   const [relationTab, setRelationTab] = useState("list");
   const [datasetOptions, setDatasetOptions] = useState<DataHubDatasetOption[]>([]);
@@ -475,6 +497,70 @@ export function ObjectTypeDetailPage() {
     if (!domainId) return (id: string) => `/ontology/relations/${id}`;
     return (id: string) => `/workspace/${domainId}/relations/${id}`;
   }, [domainId]);
+
+  // 转为业务关系：把当前被误判为业务对象的事实/明细/动作表，转成一条两端点间的
+  // 业务关系（原表作为实现表）。仅工作区可用；转换后原对象降级 bridge，跳转到新关系。
+  const endpointCandidates = useMemo(
+    () => peerObjects.filter((o) => o.id !== objectId),
+    [peerObjects, objectId],
+  );
+  const endpointOptions = useMemo(
+    () => endpointCandidates.map((o) => ({ label: o.display_name, value: o.id })),
+    [endpointCandidates],
+  );
+  // 按本表列名反推候选端点键（真实源零 FK，端点只能从列名匹配对象名得到）。
+  const endpointSuggestions = useMemo(
+    () => suggestEndpoints(properties, endpointCandidates),
+    [properties, endpointCandidates],
+  );
+
+  // 点选建议：依次填入尚空的源/目标端点（都已填则替换目标，避免与源重复）。
+  const applyEndpointSuggestion = (id: string) => {
+    const src = convertForm.getFieldValue("source_object_type_id");
+    if (!src) convertForm.setFieldValue("source_object_type_id", id);
+    else if (id !== src) convertForm.setFieldValue("target_object_type_id", id);
+  };
+
+  const openConvertModal = () => {
+    if (!obj) return;
+    convertForm.resetFields();
+    convertForm.setFieldsValue({
+      display_name: defaultRelationVerb(obj.display_name),
+      structure_type: "fact_table",
+    });
+    setConvertModalOpen(true);
+  };
+
+  const handleConvert = async () => {
+    if (!objectId) return;
+    const values = await convertForm.validateFields();
+    if (values.source_object_type_id === values.target_object_type_id) {
+      message.error("源对象与目标对象不能相同");
+      return;
+    }
+    setConvertSaving(true);
+    try {
+      const res = await api.convertObjectToRelation(objectId, {
+        source_object_type_id: values.source_object_type_id,
+        target_object_type_id: values.target_object_type_id,
+        display_name: values.display_name,
+        structure_type: values.structure_type,
+      });
+      setConvertModalOpen(false);
+      message.success(
+        res.promoted_endpoints.length
+          ? `已转为业务关系「${res.relation.display_name}」；已将 ${res.promoted_endpoints.join(
+              "、",
+            )} 提升为业务对象`
+          : `已转为业务关系「${res.relation.display_name}」`,
+      );
+      navigate(relationDetailPath(res.relation.id));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "转换失败");
+    } finally {
+      setConvertSaving(false);
+    }
+  };
 
   const readOnlyPropertyColumns: ColumnsType<Property> = [
     {
@@ -843,8 +929,18 @@ export function ObjectTypeDetailPage() {
         )}
       </SectionCard>
 
-      {(obj.role_reason || obj.role_signals) && (
-        <SectionCard title="判定依据" icon={<AuditOutlined />}>
+      {(inWorkspace || obj.role_reason || obj.role_signals) && (
+        <SectionCard
+          title="判定依据"
+          icon={<AuditOutlined />}
+          extra={
+            inWorkspace && canPrePublish ? (
+              <Button icon={<ShareAltOutlined />} onClick={openConvertModal}>
+                转为业务关系
+              </Button>
+            ) : undefined
+          }
+        >
           <DecisionEvidencePanel obj={obj} />
         </SectionCard>
       )}
@@ -1015,6 +1111,111 @@ export function ObjectTypeDetailPage() {
               allowClear
               options={CARDINALITY_OPTIONS.map((o) => ({ label: o.label, value: o.value }))}
               placeholder="选择关系基数"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="转为业务关系"
+        open={convertModalOpen}
+        onOk={handleConvert}
+        okText="转换"
+        cancelText="取消"
+        confirmLoading={convertSaving}
+        onCancel={() => setConvertModalOpen(false)}
+        width={600}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="这张表是一次业务事实，不是一个业务对象"
+          description={
+            <>
+              「{obj.display_name}」的每行是一次业务动作/事实（如维修、清算、交易），真正的
+              业务对象是它引用的键。转换后：以本表为<b>实现表</b>在下面两个端点对象间建立一条
+              业务关系，本对象降级为「关系表」离开业务对象集（可逆）。端点若不是业务对象将被
+              自动提升。
+            </>
+          }
+        />
+        {properties.length > 0 && (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+            本表字段（供识别端点键）：
+            {properties
+              .slice(0, 12)
+              .map((p) => p.display_name || p.name)
+              .join("、")}
+            {properties.length > 12 ? " …" : ""}
+          </Typography.Paragraph>
+        )}
+        <Form form={convertForm} layout="vertical">
+          <Form.Item
+            label="关系语义词"
+            name="display_name"
+            rules={[...RELATION_TERM_RULES]}
+            extra="读成「源对象 [关系词] 目标对象」，如「维修」「清算」；默认由表名推得"
+          >
+            <Input placeholder="如：维修" maxLength={RELATION_TERM_MAX_LENGTH} showCount />
+          </Form.Item>
+          {endpointSuggestions.length > 0 && (
+            <Form.Item label="建议端点键" extra="据本表列名匹配本体对象推断，点选填入下方端点">
+              <Space size={[6, 6]} wrap>
+                {endpointSuggestions.map((s) => (
+                  <Tag
+                    key={s.object.id}
+                    color="blue"
+                    style={{ cursor: "pointer", marginInlineEnd: 0 }}
+                    onClick={() => applyEndpointSuggestion(s.object.id)}
+                    title={`命中列：${s.matchedColumn}`}
+                  >
+                    {s.object.display_name}
+                  </Tag>
+                ))}
+              </Space>
+            </Form.Item>
+          )}
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                label="源端点对象"
+                name="source_object_type_id"
+                rules={[{ required: true, message: "请选择源端点对象" }]}
+                extra="本表引用的一个键，如「设备」"
+              >
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  options={endpointOptions}
+                  placeholder="关系的起点对象"
+                  notFoundContent="本体内暂无其它对象可作端点"
+                />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                label="目标端点对象"
+                name="target_object_type_id"
+                rules={[{ required: true, message: "请选择目标端点对象" }]}
+                extra="本表引用的另一个键，如「维修工」"
+              >
+                <Select
+                  showSearch
+                  optionFilterProp="label"
+                  options={endpointOptions}
+                  placeholder="关系的终点对象"
+                  notFoundContent="本体内暂无其它对象可作端点"
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="关系结构类型" name="structure_type">
+            <Select
+              options={RELATION_STRUCTURE_OPTIONS.filter((o) =>
+                ["fact_table", "bridge_table"].includes(o.value),
+              ).map((o) => ({ label: o.label, value: o.value }))}
             />
           </Form.Item>
         </Form>

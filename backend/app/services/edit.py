@@ -397,6 +397,128 @@ class EditService:
         db.commit()
         return self.query._to_relation_out(db, rel)
 
+    def convert_object_to_relation(
+        self,
+        db: Session,
+        object_type_id: str,
+        *,
+        source_object_type_id: str,
+        target_object_type_id: str,
+        display_name: str,
+        description: str | None = None,
+        cardinality: str | None = None,
+        structure_type: str | None = "fact_table",
+        operator: str | None = None,
+    ) -> tuple[RelationTypeOut, ObjectTypeSummary, list[str]]:
+        """把被误判为业务对象的事实/明细/动作表转成一条业务关系。
+
+        这类表（维修/清算/交易…）每行是一次业务**事实**而非一个实体：真正的业务对象是
+        它引用的键。转换做三件事，且在一个事务内完成：
+
+        1) 以原表为**实现表**（mapping_object）在 source/target 两端点间新建一条业务
+           关系（结构类型默认 fact_table，谓词取 display_name）；原表属性因此被无损保留
+           为关系的承载表，而非被丢弃。
+        2) 原对象降级为 ``bridge`` 角色——离开业务对象集（数据域发布只保留 business_object，
+           见 publish），不再作为假业务对象出现；role_reason 写明去向，便于审计与回滚。
+        3) 端点必须都是业务对象（rule1：业务关系两端非 business_object 会在发布时被删）。
+           非业务对象端点在此**自动提升**为 business_object，提升者名列入返回值供前端提示。
+
+        可逆：删除该关系并把原对象 table_role 改回 business_object 即还原。
+        改判字段（table_role/role_reason）经 ``_mark_overridden`` 钉住，不会被下次机器
+        生成翻转回去。
+        """
+        from app.services.relation_structure import validate_relation_structure_type
+
+        obj = db.get(ObjectType, object_type_id)
+        if not obj:
+            raise ValueError("Object type not found")
+        ontology_id = obj.ontology_id
+
+        if source_object_type_id == target_object_type_id:
+            raise ValueError("Source and target object cannot be the same")
+        if object_type_id in {source_object_type_id, target_object_type_id}:
+            raise ValueError("被转换的对象不能同时作为关系端点")
+
+        endpoints: list[ObjectType] = []
+        for role_name, ep_id in (
+            ("source", source_object_type_id),
+            ("target", target_object_type_id),
+        ):
+            ep = db.get(ObjectType, ep_id)
+            if not ep or ep.ontology_id != ontology_id:
+                raise ValueError(f"Invalid {role_name} object type")
+            endpoints.append(ep)
+
+        term_error = validate_relation_term(display_name)
+        if term_error:
+            raise ValueError(term_error)
+        compacted = compact_relation_term(display_name)
+
+        if structure_type is not None:
+            structure_error = validate_relation_structure_type(structure_type)
+            if structure_error:
+                raise ValueError(structure_error)
+
+        # 端点必须是业务对象（rule1）：非业务对象端点自动提升，记录被提升者展示名。
+        promoted: list[str] = []
+        for ep in endpoints:
+            if ep.table_role != "business_object":
+                ep.table_role = "business_object"
+                _set_review_mark(ep, False)
+                _mark_overridden(ep, ["table_role", "role_reason"])
+                if ep.status != EntityStatus.PRE_PUBLISHED.value:
+                    ep.status = EntityStatus.EDITED.value
+                _log_change(
+                    db,
+                    "object_type",
+                    ep.id,
+                    "edit",
+                    operator,
+                    f"提升为业务对象（作为关系「{compacted}」端点）",
+                )
+                promoted.append(ep.display_name)
+
+        # 1) 建关系：原对象作为实现表(mapping_object)，无损承载其属性。
+        rel = RelationType(
+            ontology_id=ontology_id,
+            name=obj.name or compacted,
+            display_name=compacted,
+            description=description,
+            source_object_type_id=source_object_type_id,
+            target_object_type_id=target_object_type_id,
+            cardinality=cardinality,
+            structure_type=structure_type,
+            mapping_object_type_id=object_type_id,
+            source_confidence=0.5,
+            status=EntityStatus.EDITED.value,
+            user_created=True,
+            origin="converted",
+        )
+        db.add(rel)
+        db.flush()
+        _log_change(
+            db, "relation_type", rel.id, "create", operator, f"由对象转为业务关系：{compacted}"
+        )
+
+        # 2) 退役原对象：降级 bridge、清待复核、记录去向；钉住字段防重生翻转。
+        obj.table_role = "bridge"
+        obj.role_reason = (
+            f"已转为业务关系「{compacted}」"
+            f"（{endpoints[0].display_name} → {endpoints[1].display_name}），作为该关系的实现表"
+        )
+        _mark_overridden(obj, ["table_role", "role_reason"])
+        if obj.status != EntityStatus.PRE_PUBLISHED.value:
+            obj.status = EntityStatus.EDITED.value
+        _log_change(
+            db, "object_type", obj.id, "edit", operator, f"转为业务关系「{compacted}」"
+        )
+
+        db.commit()
+
+        relation_out = self.query._to_relation_out(db, rel)
+        object_summary = self.query._to_object_summary(db, obj)
+        return relation_out, object_summary, promoted
+
     def update_relation_type(
         self,
         db: Session,

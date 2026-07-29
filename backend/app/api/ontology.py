@@ -7,6 +7,8 @@ from app.schemas import (
     ClusterDetail,
     ConflictResolveRequest,
     FieldPinRequest,
+    ObjectToRelationConvertIn,
+    ObjectToRelationConvertResult,
     ObjectTypeBatchUpdate,
     ObjectTypeBatchUpdateResult,
     ObjectTypeDetail,
@@ -300,6 +302,37 @@ def update_object_type(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/object-types/{object_type_id}/convert-to-relation",
+    response_model=ObjectToRelationConvertResult,
+)
+def convert_object_to_relation(
+    object_type_id: str,
+    data: ObjectToRelationConvertIn,
+    db: Session = Depends(get_db),
+):
+    """把被误判为业务对象的事实/明细/动作表转成一条业务关系（原表作为实现表）。"""
+    try:
+        relation, retired_object, promoted = edit_service.convert_object_to_relation(
+            db,
+            object_type_id,
+            source_object_type_id=data.source_object_type_id,
+            target_object_type_id=data.target_object_type_id,
+            display_name=data.display_name,
+            description=data.description,
+            cardinality=data.cardinality,
+            structure_type=data.structure_type,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ObjectToRelationConvertResult(
+        relation=relation,
+        retired_object=retired_object,
+        promoted_endpoints=promoted,
+    )
 
 
 @router.patch("/object-types/{object_type_id}/pre-publish", response_model=ObjectTypeSummary)

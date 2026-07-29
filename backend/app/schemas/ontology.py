@@ -456,6 +456,31 @@ class RelationTypeUpdate(BaseModel):
     operator: str | None = None
 
 
+class ObjectToRelationConvertIn(BaseModel):
+    """把被误判为业务对象的事实/明细/动作表转成一条业务关系。
+
+    这类表（维修/清算/交易…）每行是一次业务事实而非一个实体：真正的业务对象是它
+    引用的键。转换以原表为「实现表」在两端点间建关系，原对象降级为 bridge 离开业务
+    对象集（可逆）。端点必须是业务对象——非业务对象端点会被自动提升（rule1）。
+    """
+
+    source_object_type_id: str
+    target_object_type_id: str
+    # 关系谓词（读成「源 谓词 目标」），如「维修」「清算」；默认取原对象展示名。
+    display_name: str
+    description: str | None = None
+    cardinality: str | None = None
+    structure_type: str | None = "fact_table"
+    operator: str | None = None
+
+
+class ObjectToRelationConvertResult(BaseModel):
+    relation: RelationTypeOut
+    retired_object: ObjectTypeSummary
+    # 因作为端点而被自动提升为业务对象的对象展示名（rule1），供前端提示。
+    promoted_endpoints: list[str] = Field(default_factory=list)
+
+
 class ConfirmationCreate(BaseModel):
     ontology_id: str
     target_type: str

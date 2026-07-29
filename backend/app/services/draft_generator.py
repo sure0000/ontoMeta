@@ -17,7 +17,11 @@ from app.schemas import (
 )
 from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.services.relation_structure import infer_relation_structure_type
-from app.services.object_classifier import ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL
+from app.services.object_classifier import (
+    ROLE_BRIDGE,
+    ROLE_BUSINESS_OBJECT,
+    ROLE_TECHNICAL,
+)
 from app.services.common import make_async_http_client
 from app.services.draft_checkpoint import chunk_key
 from app.services.evidence_chunker import split_evidence, split_relations
@@ -105,6 +109,12 @@ _LLM_SYSTEM_PROMPT = (
     "  • 站点/运营内容(CMS)：关于我们、团队成员/团队介绍、隐私政策、FAQ、公告、"
     "Banner/文案等——是对外展示的内容文案，不是受治理的业务实体；\n"
     "  • 用户偏好/参数：用户设置、系统参数、字典/枚举配置——是配置项而非业务实体。\n"
+    "另有一类**业务事实/关系表**填 role_hint='bridge'：整表记录的是一次**业务动作/事件/"
+    "流水**，而不是一类业务『东西』——如维修、清算、理赔、巡检、派工、报工、交易、调整、"
+    "结算、过账、核销、收付款、审批、盘点、出入库、退换货等。判据是**每行是一次发生"
+    "(occurrence)而非一个实体实例**：真正的业务对象是它引用的键(设备/客户/账户/工单…)，"
+    "这张表本身是连接这些键的业务事实。某父表的**明细/子表**(订单明细、支付流水)同样"
+    "填 'bridge'。注意与派生汇总区分：血缘下游的统计/汇总结果表不是业务事实，勿填 bridge。\n"
     "当它确实是一个真实世界业务实体(客户/订单/商品等，有独立业务身份、被业务流程"
     "引用)时填 role_hint='business_object'；拿不准则省略。可附 role_reason 简述理由。\n"
     "- evidence_gap：可选，一句话说明你判断该表时**缺了什么证据**(如"
@@ -128,6 +138,9 @@ _LLM_SYSTEM_PROMPT = (
     "{source_ref:'urn:li:dataset:xxx', name:'payment', display_name:'支付'}\n"
     "- 输入 candidate_name=finance_reconciliation_1d_entity, display_name=财务对账1日汇总 → "
     "{name:'finance_reconciliation', display_name:'财务对账'}\n"
+    "- 输入 candidate_name=equip_repair_entity, display_name=设备维修工单 → "
+    "{name:'equip_repair', display_name:'设备维修', role_hint:'bridge', "
+    "role_reason:'每行是一次维修事件，真正的业务对象是它引用的设备与维修工'}\n"
     "- 输入 object_candidate_name=customer_entity, source_dataset_urn=urn:li:dataset:yyy, "
     "field_name=lvl_cd, description=null, sample_values=['普通','黄金','铂金'] → "
     "{object_source_ref:'urn:li:dataset:yyy', field_name:'lvl_cd', display_name:'客户等级'}\n"
@@ -322,7 +335,8 @@ class OntologyDraftGenerator:
         关系」场景在不重新命名对象的前提下按 source_dataset_urn 回链已入库对象。
 
         role_overrides 是 LLM 的角色语义否决（可选）：当 LLM 判定某表为技术/系统
-        表（如 auth）或反之时，覆盖确定性启发式得出的 table_role，并在 role_reason
+        表（如 auth）、业务事实/关系表（如维修/清算，role_hint=bridge）或反之时，
+        覆盖确定性启发式得出的 table_role，并在 role_reason
         上注明由 LLM 判定；未命中时保留启发式结果。
         """
         role_overrides = role_overrides or {}
@@ -879,7 +893,7 @@ class OntologyDraftGenerator:
         """把 LLM 返回的对象数组中的 role_hint 回链到证据 candidate_name，得到角色否决字典。
 
         回链复用与对象命名相同的三级兑底（source_ref → candidate_name → refine 同名）；
-        role_hint 必须是 business_object / technical 之一才写入，其余值（含拿不准时省略）
+        role_hint 必须是 business_object / technical / bridge 之一才写入，其余值（含拿不准时省略）
         跳过，保留确定性启发式的分类结果。
         """
         objects = raw.get("object_types")
@@ -889,7 +903,7 @@ class OntologyDraftGenerator:
             return {}
 
         lookup = self._build_candidate_lookup(evidence)
-        allowed = {ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL}
+        allowed = {ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL, ROLE_BRIDGE}
 
         overrides: RoleOverrides = {}
         for obj in objects:
@@ -933,17 +947,20 @@ class OntologyDraftGenerator:
         if not override:
             return base
         llm_role = (override.get("role") or "").strip()
-        if llm_role not in (ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL):
+        if llm_role not in (ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL, ROLE_BRIDGE):
             return base
         if llm_role == ot.table_role:
             # 一致：保留启发式（若启发式本就待复核，仍保留其待复核状态）。
             return base
 
-        label = "技术/系统表" if llm_role == ROLE_TECHNICAL else "业务对象"
-        heur_label = {
-            ROLE_TECHNICAL: "技术/系统表",
+        # bridge = 业务事实/关系表（记录一次动作/事件，真正的对象是它引用的键）。
+        role_labels = {
             ROLE_BUSINESS_OBJECT: "业务对象",
-        }.get(ot.table_role, ot.table_role)
+            ROLE_TECHNICAL: "技术/系统表",
+            ROLE_BRIDGE: "业务事实/关系表",
+        }
+        label = role_labels.get(llm_role, llm_role)
+        heur_label = role_labels.get(ot.table_role, ot.table_role)
         note = f"[待复核] 启发式↔LLM 角色分歧：LLM 判为{label}"
         llm_reason = (override.get("reason") or "").strip()
         if llm_reason:

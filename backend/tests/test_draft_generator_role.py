@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
 from app.services.draft_generator import OntologyDraftGenerator
-from app.services.object_classifier import ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL
+from app.services.object_classifier import (
+    ROLE_BRIDGE,
+    ROLE_BUSINESS_OBJECT,
+    ROLE_TECHNICAL,
+)
 
 
 def _ot(role, conf, reason):
@@ -51,6 +55,62 @@ def test_disagreement_flags_needs_review_and_lowers_confidence():
     assert "LLM 判为技术/系统表" in out["role_reason"]
     assert "启发式判为业务对象" in out["role_reason"]
     assert "证据缺口：无列注释" in out["role_reason"]
+
+
+def test_llm_bridge_vote_overrides_business_object():
+    # 启发式=业务对象，LLM=业务事实/关系表(维修/清算这类动作表)→ 改判 bridge、待复核。
+    # 正是本次修复的核心：LLM 能把误判成实体的事实/动作表拉回关系维度。
+    ot = _ot(ROLE_BUSINESS_OBJECT, 0.55, "信号不足，暂按业务对象保留")
+    out = OntologyDraftGenerator._resolve_role(
+        ot,
+        {
+            "role": ROLE_BRIDGE,
+            "reason": "每行是一次维修事件，真正的业务对象是设备与维修工",
+            "evidence_gap": None,
+        },
+    )
+    assert out["table_role"] == ROLE_BRIDGE
+    assert out["role_confidence"] == 0.5
+    assert out["role_reason"].startswith("[待复核]")
+    assert "LLM 判为业务事实/关系表" in out["role_reason"]
+    assert "启发式判为业务对象" in out["role_reason"]
+
+
+def test_parse_role_overrides_accepts_bridge():
+    from app.schemas import (
+        DataHubDomainBundle,
+        DatasetInput,
+        DomainInput,
+        FieldInput,
+    )
+    from app.services.evidence_builder import EvidenceBuilder
+
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="域"),
+        datasets=[
+            DatasetInput(
+                urn="urn:li:dataset:repair",
+                name="equip_repair",
+                display_name="设备维修工单",
+                fields=[FieldInput(name="equip_id"), FieldInput(name="worker_id")],
+            ),
+        ],
+    )
+    evidence = EvidenceBuilder().build(bundle)
+    gen = OntologyDraftGenerator(runtime_config=None)
+    raw = {
+        "object_types": [
+            {
+                "source_ref": "urn:li:dataset:repair",
+                "role_hint": "bridge",
+                "role_reason": "每行是一次维修事件",
+            }
+        ]
+    }
+    overrides = gen._parse_role_overrides(raw, evidence)
+    assert overrides
+    ov = next(iter(overrides.values()))
+    assert ov["role"] == ROLE_BRIDGE
 
 
 def test_disagreement_strips_nested_review_prefix():

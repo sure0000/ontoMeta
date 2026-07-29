@@ -267,6 +267,27 @@ export const api = {
       method: "PATCH",
     }),
 
+  // 把被误判为业务对象的事实/明细/动作表转成一条业务关系（原表作为实现表）。
+  convertObjectToRelation: (
+    objectTypeId: string,
+    body: {
+      source_object_type_id: string;
+      target_object_type_id: string;
+      display_name: string;
+      description?: string;
+      cardinality?: string;
+      structure_type?: string;
+    },
+  ) =>
+    request<{
+      relation: RelationType;
+      retired_object: ObjectTypeSummary;
+      promoted_endpoints: string[];
+    }>(`/api/object-types/${objectTypeId}/convert-to-relation`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   batchUpdateObjectTypes: (body: {
     ids: string[];
     table_role?: string;
