@@ -203,7 +203,7 @@ Dashboard   # data_apps 表，app_type 收敛为单一值 'dashboard'
 
 ## 10. 分阶段落地
 
-> **落地状态（本次提交）**：G1 ✅ / G2 ✅ 已实现；G3 🟡 迁移与旧字段清理待续；G4 ⛔ 延期。
+> **落地状态**：G1 ✅ / G2 ✅ / G3 ✅ 已实现（含 screen 并入 canvas）；G4 ⛔ 延期。
 
 **G1（概念收敛，无破坏）— ✅ 已实现**
 - ✅ 新建入口只留「数据看板」（`DataAppsPage` 创建仅 `app_type=dashboard`；旧 data_table/screen 列表兼容展示为「（旧）」）。

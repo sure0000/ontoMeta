@@ -190,6 +190,18 @@ RelationType / BusinessLogic 均带一组字段级溯源元数据（由 `Provena
 RelationType 额外带 source_signature（urn 对 + structure_type）作为稳定身份键，
 合并匹配时不依赖可变的 name。Ontology 带 draft_revision 追踪草稿演进次数。
 
+### 2.11 MaterializationContract（物化契约）
+
+挂在本体对象 / 关系 / 业务逻辑上的物化配置，是「本体 → 物理数仓」正向生成的落地参数：
+目标层（dim/dwd/dws/ads）、目标引擎、增量策略（full/incremental/cdc）、分区键、SCD 类型、
+刷新频率。带 ProvenanceMixin 并参与三路合并（人工钉住的字段机器不覆盖）。
+
+### 2.12 GovernanceArtifact（治理制品）
+
+写侧智能体产出的声明式规格及其生命周期：kind（cluster/sync/transform/metric）、spec_json、
+status（drafted→validated→confirmed→executing→succeeded|failed）、校验报告与执行回执。
+LLM 只产规格不产命令，未经确认不得执行。详见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md)。
+
 ---
 
 ## 3. 领域关系
@@ -201,6 +213,8 @@ RelationType 额外带 source_signature（urn 对 + structure_type）作为稳�
 - 一个 `ObjectType` 下有多个 `Property`
 - 一个 `Ontology` 下有多个 `RelationType`
 - 一个 `Ontology` 下有多个 `BusinessLogic`
+- `Ontology` 的对象 / 关系 / 业务逻辑各自可挂一个 `MaterializationContract`
+- `GovernanceArtifact`（写侧治理制品）可绑定到一个 `Ontology`
 
 ### 3.2 关联关系
 

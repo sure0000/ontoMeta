@@ -30,7 +30,7 @@ ontoMeta 的目标，是构建在 DataHub 之上的企业级本体建模系统�
 
 ### 3.1 输入来源
 
-产品仅以 DataHub 的元数据为输入，不直接依赖业务交易系统。
+产品**主要**以 DataHub 的元数据为输入，不直接依赖业务交易系统；同时提供「人工建模」路径，业务用户可直接录入对象 / 属性 / 关系（无需 DataHub），系统据此生成本体与物理数仓产物。
 
 输入范围包括：
 
@@ -57,8 +57,8 @@ ontoMeta 的目标，是构建在 DataHub 之上的企业级本体建模系统�
 
 ### 4.1 目标用户
 
-- 阶段性鉴权模型：**管理 Token**（控制台 / 管理 API）+ **外部 App API Key**（REST v1 / MCP，含 scope）
-- 完整多角色 RBAC（读 / 编 / 审 / 发）尚未产品化；系统按任务与当前鉴权通道展示能力
+- 鉴权模型：**四层角色 RBAC**（读 reader < 编 editor < 审 reviewer < 发 publisher，按主体签发令牌）+ **外部 App API Key**（REST v1 / MCP，含 scope）
+- `ONTOMETA_ADMIN_TOKEN` 保留为 superuser（等价 publisher）；写侧治理智能体等高危操作需 publisher。详见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0
 
 ### 4.2 典型场景
 
@@ -186,8 +186,8 @@ ontoMeta 的目标，是构建在 DataHub 之上的企业级本体建模系统�
 
 ### 7.2 权限原则
 
-- 管理端：共享 `ONTOMETA_ADMIN_TOKEN`；对外：App Key + scope（如 `objects:read`）
-- 远期：读取权限可按数据域分配（完整 RBAC 单独立项）
+- 管理端：四层角色 RBAC（按主体签发令牌、集中策略闸门）+ `ONTOMETA_ADMIN_TOKEN` superuser；对外：App Key + scope（如 `objects:read`）
+- 完整 RBAC（读 / 编 / 审 / 发）已产品化，见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0
 - 本体草稿生成、编辑、保存、发布、删除等重要操作需二次确认
 
 ---
