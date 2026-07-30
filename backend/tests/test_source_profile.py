@@ -113,6 +113,52 @@ def test_frappe_link_field_inferred_fk():
     assert "tabCustomer" in targets
 
 
+def _affix_bundle():
+    # 目标 DocType + 一张带角色词缀引用列的明细表（贴近真实 Asset Capitalization）。
+    V = "VARCHAR(140)"
+    return DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="ERP"),
+        datasets=[
+            _tab("tabItem", [FieldInput(name="item_name", data_type=V)]),
+            _tab("tabAccount", [FieldInput(name="account_name", data_type=V)]),
+            _tab("tabWarehouse", [FieldInput(name="warehouse_name", data_type=V)]),
+            _tab(
+                "tabStock Entry Detail",
+                [
+                    FieldInput(name="item_code", data_type=V),  # → Item（后缀角色词）
+                    FieldInput(name="fixed_asset_account", data_type=V),  # → Account
+                    FieldInput(name="default_warehouse", data_type=V),  # → Warehouse
+                    FieldInput(name="valuation_rate", data_type="DECIMAL(21, 9)"),
+                ],
+            ),
+        ],
+    )
+
+
+def test_frappe_inferred_fk_resolves_role_affix_columns():
+    # 整名不命中时，按边界词元取语义中心词：真实引用列多带角色词缀，
+    # 只做整名精确会漏掉约一半。
+    bundle = _affix_bundle()
+    p = FrappeProfile()
+    index = p.build_table_index(bundle)
+    detail = {d.name: d for d in bundle.datasets}["tabStock Entry Detail"]
+    edges = {e.column: e.target_table for e in p.inferred_fks(detail, index)}
+    assert edges.get("item_code") == "tabItem"
+    assert edges.get("fixed_asset_account") == "tabAccount"
+    assert edges.get("default_warehouse") == "tabWarehouse"
+
+
+def test_frappe_inferred_fk_skips_measure_column():
+    # 度量列（DECIMAL）不得被当作 Link：valuation_rate 不能误命中任何 DocType。
+    bundle = _affix_bundle()
+    p = FrappeProfile()
+    index = p.build_table_index(bundle)
+    detail = {d.name: d for d in bundle.datasets}["tabStock Entry Detail"]
+    cols = {e.column for e in p.inferred_fks(detail, index)}
+    assert "valuation_rate" not in cols
+
+
+
 def test_child_table_classified_as_bridge():
     # 明细/子表按建模原则判为业务关系(bridge) + 待复核，而非独立业务实体/数据表。
     result = classify_object_role(

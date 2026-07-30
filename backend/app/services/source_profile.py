@@ -128,22 +128,52 @@ class FrappeProfile(SourceProfile):
     def inferred_fks(
         self, dataset: DatasetInput, table_index: dict[str, str]
     ) -> list[InferredFk]:
-        """Frappe Link 字段：列名归一化后命中某 DocType 名 → 指向该表的外键。
-        排除标准列、排除自指。"""
+        """Frappe Link 字段 → 指向某 DocType 的外键。两级匹配：
+
+        1. 快路径——整列名归一化后精确命中某 DocType（如 `asset`→Asset）。
+        2. 边界词元兜底——整名不命中时，把列名按下划线切成词元，取**最右**
+           命中 DocType 的语义中心词（如 `item_code`→Item、`fixed_asset_account`
+           →Account）。真实源里引用列多带角色词缀，只做整名精确会漏掉约一半。
+
+        兜底仅对 VARCHAR 列（Frappe Link/Data/Select 皆为 varchar(140)）开放，
+        据此把度量列排除在外——否则 `current_asset_value` 会误命中 `asset`。
+        排除标准列、排除自指；同名列去重（回声列如 `asset_name` 与 `asset`
+        指向同一目标，由下游按目标集合去重，不重复计度）。
+        """
         out: list[InferredFk] = []
         seen: set[str] = set()
         for f in dataset.fields:
             col = f.name.lower()
-            if col in self.STANDARD_COLUMNS:
+            if col in self.STANDARD_COLUMNS or f.name in seen:
                 continue
-            tok = _norm_token(col)
-            if len(tok) < 3:
-                continue
-            target = table_index.get(tok)
-            if target and target != dataset.name and f.name not in seen:
+            target = self._resolve_fk_target(f, table_index, dataset.name)
+            if target:
                 out.append(InferredFk(column=f.name, target_table=target))
                 seen.add(f.name)
         return out
+
+    def _resolve_fk_target(
+        self, field, table_index: dict[str, str], self_name: str
+    ) -> str | None:
+        col = field.name.lower()
+        # 1) 快路径：整名精确（不设类型护栏，保持既有行为）。
+        whole = _norm_token(col)
+        if len(whole) >= 3:
+            target = table_index.get(whole)
+            if target and target != self_name:
+                return target
+        # 2) 边界词元兜底：仅 VARCHAR（Link/Data/Select），排除度量/整数列。
+        dtype = (field.data_type or "").upper()
+        if "VARCHAR" not in dtype and "CHAR" not in dtype and "TEXT" not in dtype:
+            return None
+        best: str | None = None
+        for seg in re.split(r"[^a-z0-9]+", col):
+            if len(seg) < 3:
+                continue
+            target = table_index.get(seg)
+            if target and target != self_name:
+                best = target  # 取最右命中的语义中心词
+        return best
 
 
 def detect_source_profile(bundle: DataHubDomainBundle) -> SourceProfile:

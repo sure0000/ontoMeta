@@ -12,6 +12,7 @@ from app.services.object_classifier import (
     ROLE_DATA_TABLE,
     ROLE_TECHNICAL,
     FieldSignal,
+    _detect_reference_values,
     classify_object_role,
 )
 
@@ -28,6 +29,32 @@ def _f2(name, sem, pk=False, fk=False, unique=None):
         is_foreign_key=fk,
         unique_count=unique,
     )
+
+
+def test_detect_reference_values_polymorphic_and_echo():
+    fields = [
+        _f("name", "identifier", pk=True),
+        _f("voucher_type", "category"),  # 多态对 → 退维
+        _f("voucher_no", "attribute"),  # 多态对 → 退维
+        _f("asset", "attribute"),  # Link，本身保留
+        _f("asset_name", "attribute"),  # 兄弟回声 → 退维
+        _f("status_type", "category"),  # 单独 _type，无 _no/_id/_name → 不算退维
+        _f("amount", "amount"),
+    ]
+    assert _detect_reference_values(fields) == {
+        "voucher_type",
+        "voucher_no",
+        "asset_name",
+    }
+
+
+def test_reference_value_discount_lowers_business_object_score():
+    # 除引用值列外两表相同：真自有属性 vs 退维引用值。退维不计入描述性 →
+    # 业务对象打分更低（不再被反规范化拷贝抬高）。
+    base = [_f("name", "identifier", pk=True), _f("amount", "amount"), _f("qty", "amount")]
+    plain = base + [_f("region", "attribute"), _f("channel", "attribute")]
+    denorm = base + [_f("voucher_type", "category"), _f("voucher_no", "attribute")]
+    assert classify_object_role(denorm).score < classify_object_role(plain).score
 
 
 def test_glossary_term_tips_borderline_to_business_object():

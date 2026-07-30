@@ -44,6 +44,40 @@ _DESCRIPTIVE_TYPES = {"category", "attribute", "flag"}
 _GRAIN_TYPES = {"datetime"}
 _TECHNICAL_TYPES = {"technical"}
 
+# 退维（反规范化引用值）识别：这些列是**被引用实体的值拷贝或退化标识**，不是本表的
+# 自有属性。信号贫瘠源（无 FK 声明）里它们会伪装成描述性属性，把关系/事实表的描述性
+# 占比灌高、并让 own_attr_count>0 而躲过 facet-B，误判为业务对象。仅用两条高精度信号
+# （宁可少扣不误伤），词根裸配 DocType 一类留待有样本值/基数的实时层确认。
+_ECHO_SUFFIXES = ("_name", "_title", "_code", "_abbr", "_group", "_currency")
+_POLY_REF_SUFFIXES = ("_no", "_id", "_name")
+
+
+def _detect_reference_values(fields: "list[FieldSignal]") -> set[str]:
+    """返回应视为「退维引用值」而非自有属性的列名（小写）。
+
+    1. 多态标识对：同一词根同时出现 `X_type` 与 `X_no`/`X_id`/`X_name`（如
+       `voucher_type`+`voucher_no`）——`X_type` 指明目标表、`X_*` 是其键值，
+       二者都是退化引用而非属性。单独一个 `X_type`（状态/类别枚举）不算。
+    2. 兄弟回声：`{sib}_{name|title|code|abbr|group|currency}` 且 `{sib}` 本身
+       是同表另一列（Frappe fetch_from 反规范化拷贝，如 `asset`+`asset_name`）。
+    """
+    names = {f.name.lower() for f in fields}
+    ref: set[str] = set()
+    for n in names:
+        if not n.endswith("_type") or len(n) <= len("_type"):
+            continue
+        stem = n[: -len("_type")]
+        members = [stem + s for s in _POLY_REF_SUFFIXES if stem + s in names]
+        if members:  # _type 之外至少还有一个引用值列 → 判定为多态引用对
+            ref.add(n)
+            ref.update(members)
+    for n in names:
+        for suf in _ECHO_SUFFIXES:
+            if n.endswith(suf) and len(n) > len(suf) + 1 and n[: -len(suf)] in names:
+                ref.add(n)
+                break
+    return ref
+
 # 业务环节最小成员数：只有隶属于某个业务环节（关系图上 >= 该值成员的聚类）的表才
 # 可能是业务对象。孤立表（1 成员）与孤对（2 成员）不构成一个业务环节。
 _MIN_SEGMENT_SIZE = 3
@@ -162,14 +196,29 @@ def classify_object_role(
     single_business_pk = len(pk_cols) == 1 and not pk_cols[0].is_foreign_key
 
     measure = sum(1 for f in fields if (f.semantic_type or "") in _MEASURE_TYPES)
-    descriptive = sum(1 for f in fields if (f.semantic_type or "") in _DESCRIPTIVE_TYPES)
+    # 退维引用值列：既非自有描述属性也非度量，从描述性计数中剔除，避免把反规范化
+    # 拷贝/退化标识当作实体属性而高估业务对象倾向。
+    ref_value_cols = _detect_reference_values(fields)
+
+    def _is_ref_value(f: "FieldSignal") -> bool:
+        return f.name.lower() in ref_value_cols
+
+    descriptive = sum(
+        1
+        for f in fields
+        if (f.semantic_type or "") in _DESCRIPTIVE_TYPES and not _is_ref_value(f)
+    )
     technical = sum(1 for f in fields if (f.semantic_type or "") in _TECHNICAL_TYPES)
     has_grain = any((f.semantic_type or "") in _GRAIN_TYPES for f in fields)
     has_fk_out = any(f.is_foreign_key for f in fields)
 
-    # 自有属性：排除主键与外键后，实体自身的描述/度量字段数——用于区分「关联实体」
-    # （有自有属性，如订单）与「纯关系/桥接」（几乎只有外键，如用户收藏）。
-    own_fields = [f for f in fields if not f.is_primary_key and not f.is_foreign_key]
+    # 自有属性：排除主键、外键与退维引用值后，实体自身的描述/度量字段数——用于区分
+    # 「关联实体」（有自有属性，如订单）与「纯关系/桥接」（几乎只有引用，如用户收藏）。
+    own_fields = [
+        f
+        for f in fields
+        if not f.is_primary_key and not f.is_foreign_key and not _is_ref_value(f)
+    ]
     own_descriptive = sum(
         1 for f in own_fields if (f.semantic_type or "") in _DESCRIPTIVE_TYPES
     )
