@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from app.schemas import DataHubDomainBundle, DatasetInput
@@ -54,6 +55,12 @@ class SourceProfile:
     def build_table_index(self, bundle: DataHubDomainBundle) -> dict[str, str]:
         """归一化目标名 → 真实表名，供 Link 字段推断外键。默认空（不推断）。"""
         return {}
+
+    def resolve_parent_table(
+        self, dataset: DatasetInput, table_index: dict[str, str]
+    ) -> str | None:
+        """明细/子表的父表（隶属目标）真实表名。默认无（不推断）。"""
+        return None
 
     def inferred_fks(
         self, dataset: DatasetInput, table_index: dict[str, str]
@@ -174,6 +181,34 @@ class FrappeProfile(SourceProfile):
             if target and target != self_name:
                 best = target  # 取最右命中的语义中心词
         return best
+
+    def resolve_parent_table(
+        self, dataset: DatasetInput, table_index: dict[str, str]
+    ) -> str | None:
+        """由子表 ``parenttype`` 列的**样例值**解析其父 DocType 对应的真实表名。
+
+        Frappe 子表靠 ``parent``(父记录主键) + ``parenttype``(父 DocType 名) 隶属父表，
+        这是多态动态链接、无法从 schema 声明推断，但 ``parenttype`` 的取值就是父 DocType
+        名（如 "Sales Invoice"）。取样例众数、归一化后命中 table_index 即得父表
+        （如 tabSales Invoice）。样例值仅在实时摄取（有 profiling）时可得，未采样则返回 None，
+        交由上层优雅跳过。取众数而非首值：抗单条脏样例，且真实数据里子表 parenttype
+        往往单一（一张子表基本只归属一种父 DocType）。
+        """
+        if not self.is_child_table(dataset):
+            return None
+        samples: list[str] = []
+        for f in dataset.fields:
+            if f.name.lower() == "parenttype":
+                samples = f.sample_values or []
+                break
+        counts = Counter(s for s in samples if s)
+        if not counts:
+            return None
+        token = _norm_token(counts.most_common(1)[0][0])
+        if len(token) < 3:
+            return None
+        target = table_index.get(token)
+        return target if target and target != dataset.name else None
 
 
 def detect_source_profile(bundle: DataHubDomainBundle) -> SourceProfile:

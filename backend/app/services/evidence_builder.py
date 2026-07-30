@@ -18,7 +18,7 @@ from app.services.community_detection import label_propagation_clusters
 from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.relation_terms import infer_relation_term, reference_term
 from app.services.relation_structure import infer_relation_structure_type
-from app.services.source_profile import InferredFk, detect_source_profile
+from app.services.source_profile import InferredFk, SourceProfile, detect_source_profile
 
 
 def _to_snake(name: str) -> str:
@@ -322,6 +322,8 @@ class EvidenceBuilder:
         relations.extend(
             self._collapse_bridge_relations(
                 bundle,
+                profile=profile,
+                table_index=table_index,
                 role_by_object=role_by_object,
                 label_by_object=label_by_object,
                 inferred_fk_by_name=inferred_fk_by_name,
@@ -348,6 +350,8 @@ class EvidenceBuilder:
         self,
         bundle: DataHubDomainBundle,
         *,
+        profile: "SourceProfile",
+        table_index: dict[str, str],
         role_by_object: dict[str, str],
         label_by_object: dict[str, str],
         inferred_fk_by_name: dict[str, list["InferredFk"]],
@@ -382,6 +386,13 @@ class EvidenceBuilder:
                     )
             for edge in inferred_fk_by_name.get(dataset.name, []):
                 ref_targets.append(_infer_object_name(edge.target_table))
+
+            # 明细/子表的父表（隶属目标）：由 parenttype 样例值解析，作为**首选端点**
+            # 置于最前——select 以列序第一个业务对象为 source，故父表成为「明细→父单据」
+            # 的源。样例仅实时摄取可得，无 profiling 时解析不出，退回按上面的引用列选端点。
+            parent_table = profile.resolve_parent_table(dataset, table_index)
+            if parent_table:
+                ref_targets.insert(0, _infer_object_name(parent_table))
 
             endpoints = select_bridge_endpoints(
                 ref_targets,

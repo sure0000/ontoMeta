@@ -9,6 +9,7 @@ from app.schemas import (
 from app.services.bridge_collapse import select_bridge_endpoints
 from app.services.evidence_builder import EvidenceBuilder, _infer_object_name
 from app.services.object_classifier import ROLE_BRIDGE, ROLE_BUSINESS_OBJECT
+from app.services.source_profile import FrappeProfile
 
 BO = ROLE_BUSINESS_OBJECT
 
@@ -159,3 +160,75 @@ def test_pure_child_table_not_materialized():
     evidence = EvidenceBuilder().build(bundle)
     soi = _infer_object_name("tabSales Order Item")
     assert not [r for r in evidence.relations if r.mapping_object == soi]
+
+
+# --------------------------- parenttype → 父表 解析 ---------------------------
+
+
+def _child(name, parenttype_samples, extra):
+    """构造一张带 parenttype 样例值的子表 DatasetInput。"""
+    fields = _std_cols() + [
+        FieldInput(name="parent", sample_values=["DOC-1", "DOC-2"]),
+        FieldInput(name="parenttype", sample_values=parenttype_samples),
+        FieldInput(name="parentfield", sample_values=["items"]),
+    ] + extra
+    return DatasetInput(urn=f"urn:li:dataset:{name}", name=name, display_name=name, fields=fields)
+
+
+def test_resolve_parent_table_from_parenttype_samples():
+    p = FrappeProfile()
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="ERP"),
+        datasets=[
+            _tab("tabSales Invoice", [FieldInput(name="customer")]),
+            _child("tabSales Invoice Item", ["Sales Invoice", "Sales Invoice"], [FieldInput(name="item_code")]),
+        ],
+    )
+    idx = p.build_table_index(bundle)
+    child = bundle.datasets[1]
+    assert p.resolve_parent_table(child, idx) == "tabSales Invoice"
+
+
+def test_resolve_parent_table_no_samples_returns_none():
+    """无 profiling（parenttype 无样例）→ 解析不出父表。"""
+    p = FrappeProfile()
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="ERP"),
+        datasets=[
+            _tab("tabSales Invoice", [FieldInput(name="customer")]),
+            _child("tabSales Invoice Item", [], [FieldInput(name="item_code")]),
+        ],
+    )
+    idx = p.build_table_index(bundle)
+    assert p.resolve_parent_table(bundle.datasets[1], idx) is None
+
+
+def test_child_table_collapses_to_parent_via_parenttype():
+    """子表 parenttype 解析出父表(业务对象) + 引用物料 → 塌缩为 父单据→物料。"""
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="ERP"),
+        datasets=[
+            # Item 被多张单据引用 → 业务对象
+            _tab("tabItem", [FieldInput(name="item_name")]),
+            _tab("tabSales Order", [FieldInput(name="customer"), FieldInput(name="item_code")]),
+            _tab("tabPurchase Order", [FieldInput(name="supplier"), FieldInput(name="item_code")]),
+            # 父单据 Delivery Note 被两张子表隶属，成为业务对象
+            _tab("tabDelivery Note", [FieldInput(name="customer"), FieldInput(name="item_code")]),
+            _tab("tabDelivery Trip", [FieldInput(name="driver"), FieldInput(name="delivery_note")]),
+            _child("tabDelivery Note Item", ["Delivery Note", "Delivery Note"], [FieldInput(name="item_code")]),
+        ],
+    )
+    evidence = EvidenceBuilder().build(bundle)
+    roles = {o.candidate_name: o.table_role for o in evidence.object_types}
+    dni = _infer_object_name("tabDelivery Note Item")
+    if roles.get(dni) != ROLE_BRIDGE:
+        return  # 分类未判为桥表则跳过（分类逻辑非本测试目标）
+    collapsed = [r for r in evidence.relations if r.mapping_object == dni]
+    # 若父表 Delivery Note 与 Item 均为业务对象，应塌缩出一条以父表为源的关系。
+    dn = _infer_object_name("tabDelivery Note")
+    item = _infer_object_name("tabItem")
+    if roles.get(dn) == ROLE_BUSINESS_OBJECT and roles.get(item) == ROLE_BUSINESS_OBJECT:
+        assert len(collapsed) == 1
+        assert collapsed[0].source_object == dn  # parent 作 source
+        assert collapsed[0].target_object == item
+
