@@ -24,6 +24,7 @@ from app.schemas import (
     PropertyUpdate,
     RelationTypeCreate,
     RelationTypeDetail,
+    RelationGroupOut,
     RelationTypeOut,
     RelationTypeUpdate,
     ValidationIssueOut,
@@ -370,12 +371,13 @@ def update_property(
 def list_relation_types_by_ontology(
     ontology_id: str,
     q: str | None = Query(None),
+    display_name: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     return query.list_relation_types(
-        db, ontology_id=ontology_id, q=q, limit=limit, offset=offset
+        db, ontology_id=ontology_id, q=q, display_name=display_name, limit=limit, offset=offset
     )
 
 
@@ -405,6 +407,7 @@ def list_relation_types(
     domain_id: str | None = Query(None),
     published_only: bool = Query(False),
     q: str | None = Query(None),
+    display_name: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -415,8 +418,27 @@ def list_relation_types(
         domain_context_id=domain_id,
         published_only=published_only,
         q=q,
+        display_name=display_name,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/relation-groups", response_model=list[RelationGroupOut])
+def list_relation_groups(
+    ontology_id: str | None = Query(None),
+    domain_id: str | None = Query(None),
+    published_only: bool = Query(False),
+    q: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """按 display_name 去重的关系分组列表（关系 Tab 用）。"""
+    return query.list_relation_groups(
+        db,
+        ontology_id=ontology_id,
+        domain_context_id=domain_id,
+        published_only=published_only,
+        q=q,
     )
 
 

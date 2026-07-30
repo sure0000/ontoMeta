@@ -17,6 +17,7 @@ import { ExternalApiCatalogPage } from "./pages/ExternalApiCatalogPage";
 import { ExternalApiDetailPage } from "./pages/ExternalApiDetailPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
+import { RelationGroupDetailPage } from "./pages/RelationGroupDetailPage";
 import { RelationTypeDetailPage } from "./pages/RelationTypeDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
@@ -31,8 +32,10 @@ export default function App() {
         <Route path="/workspace/:domainId/executions" element={<ExecutionRecordsPage />} />
         <Route path="/workspace/:domainId/objects/:objectId" element={<ObjectTypeDetailPage />} />
         <Route path="/workspace/:domainId/relations/:relationId" element={<RelationTypeDetailPage />} />
+        <Route path="/workspace/:domainId/relation-groups/:displayName" element={<RelationGroupDetailPage />} />
         <Route path="/ontology" element={<OntologyPage />} />
         <Route path="/ontology/relations/:relationId" element={<RelationTypeDetailPage />} />
+        <Route path="/ontology/relation-groups/:displayName" element={<RelationGroupDetailPage />} />
         <Route path="/ontology/:objectId" element={<ObjectTypeDetailPage />} />
         <Route path="/business-logic" element={<BusinessLogicPage />} />
         <Route path="/business-logic/category/:categoryId" element={<BusinessLogicCategoryPage />} />

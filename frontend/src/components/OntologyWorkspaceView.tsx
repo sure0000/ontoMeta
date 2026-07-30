@@ -1,15 +1,18 @@
 import {
   AppstoreOutlined,
   ApartmentOutlined,
+  DatabaseOutlined,
   SearchOutlined,
+  ToolOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Input, Pagination, Row, Col, Segmented, Select, Space, Table, Tag, Tooltip } from "antd";
+import { Button, Checkbox, Input, Pagination, Row, Col, Select, Space, Table, Tabs, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { SectionCard } from "./SectionCard";
 import { StatusBadge } from "./StatusBadge";
 import { EmptyState } from "./EmptyState";
+import { RelationGroupList, type RelationScope } from "./RelationGroupList";
 import {
   getRelationStructureLabel,
   inferRelationEvidenceType,
@@ -18,7 +21,15 @@ import {
 import type { ObjectTypeSummary, RelationType } from "../types";
 import { getRoleMeta } from "../utils/role";
 
-type EntityTab = "objects" | "relations";
+/** 视图 Tab：一个关系去重列表 + 三类对象（业务对象/数据表/技术·系统表）。
+ *  关系表(bridge) 不作为对象展示。 */
+type ViewTab = "relations" | "business_object" | "data_table" | "technical";
+
+const OBJECT_TAB_ROLES: ReadonlyArray<Exclude<ViewTab, "relations">> = [
+  "business_object",
+  "data_table",
+  "technical",
+];
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -104,9 +115,13 @@ function matchRelation(rel: RelationType, q: string) {
 
 interface Props {
   objects: ObjectTypeSummary[];
-  relations: RelationType[];
+  relations?: RelationType[];
   objectDetailPath?: (objectId: string) => string;
   relationDetailPath?: (relationId: string) => string;
+  /** 关系去重列表的数据范围（本体/域/是否仅已发布），供关系 Tab 自取分组。 */
+  relationScope?: RelationScope;
+  /** 去重关系行 → 关系详情页路径（已内置 scope）。传入即启用关系去重列表。 */
+  relationGroupDetailPath?: (displayName: string) => string;
   workspaceMode?: boolean;
   /** 服务端分页：开启后 objects/relations 视为当前页数据 */
   objectPaging?: ServerPaging;
@@ -131,10 +146,11 @@ interface Props {
 
 export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   objects,
-  relations,
+  relations = [],
   objectDetailPath = (id) => `/ontology/${id}`,
   relationDetailPath,
-  workspaceMode = false,
+  relationScope,
+  relationGroupDetailPath,
   objectPaging,
   relationPaging,
   searchQuery,
@@ -147,7 +163,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   onBatchUpdateObjects,
 }: Props) {
   const serverMode = Boolean(objectPaging || relationPaging);
-  const [entityTab, setEntityTab] = useState<EntityTab>("objects");
+  // 关系去重列表：传入 scope + 详情路径即启用（否则回退旧的逐条关系表）。
+  const useRelationGroups = Boolean(relationScope && relationGroupDetailPath);
+  const [viewTab, setViewTab] = useState<ViewTab>("relations");
   const [localQuery, setLocalQuery] = useState("");
   const [localTypeFilter, setLocalTypeFilter] = useState<string[]>([]);
   const [localNeedsReview, setLocalNeedsReview] = useState(false);
@@ -210,12 +228,28 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     return relations.filter((r) => matchRelation(r, normalizedQuery));
   }, [relations, normalizedQuery, serverMode]);
 
+  const isObjectTab = viewTab !== "relations";
+
   useEffect(() => {
     if (!serverMode) {
       setObjectPage(1);
       setRelationPage(1);
     }
-  }, [entityTab, normalizedQuery, filterKey, serverMode]);
+  }, [viewTab, normalizedQuery, filterKey, serverMode]);
+
+  // 激活某个对象 Tab 时，把该角色作为唯一的对象类型过滤条件同步给上层
+  // （受控则驱动服务端 role_in 重查，否则走本地过滤）。关系表(bridge) 不设 Tab。
+  useEffect(() => {
+    if (!isObjectTab) return;
+    const roles = [viewTab];
+    if (onObjectTypeFilterChange) {
+      if ((objectTypeFilter ?? []).join(",") !== roles.join(",")) {
+        onObjectTypeFilterChange(roles);
+      }
+    } else {
+      setLocalTypeFilter((prev) => (prev.join(",") === roles.join(",") ? prev : roles));
+    }
+  }, [viewTab, isObjectTab, onObjectTypeFilterChange, objectTypeFilter]);
 
   const effectiveObjectPage = objectPaging?.page ?? objectPage;
   const effectiveObjectPageSize = objectPaging?.pageSize ?? objectPageSize;
@@ -263,8 +297,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   // 切到关系 Tab 或批量能力关闭时，退出批量态。
   useEffect(() => {
-    if (entityTab !== "objects" || !batchEnabled) exitBatch();
-  }, [entityTab, batchEnabled, exitBatch]);
+    if (!isObjectTab || !batchEnabled) exitBatch();
+  }, [isObjectTab, batchEnabled, exitBatch]);
 
   const relationColumns: ColumnsType<RelationType> = useMemo(
     () => [
@@ -353,7 +387,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     [objectDetailPath, relationDetailPath],
   );
 
-  const handleEntityTab = useCallback((value: string) => setEntityTab(value as EntityTab), []);
+  const handleViewTab = useCallback((value: string) => setViewTab(value as ViewTab), []);
   const handleQueryChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const next = e.target.value;
@@ -361,14 +395,6 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       else setLocalQuery(next);
     },
     [onSearchChange],
-  );
-
-  const handleTypeFilterChange = useCallback(
-    (values: string[]) => {
-      if (onObjectTypeFilterChange) onObjectTypeFilterChange(values);
-      else setLocalTypeFilter(values);
-    },
-    [onObjectTypeFilterChange],
   );
 
   const handleNeedsReviewChange = useCallback(
@@ -412,81 +438,72 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     );
   }
 
-  const objectCountLabel = serverMode ? effectiveObjectTotal : objects.length;
-  const relationCountLabel = serverMode ? effectiveRelationTotal : relations.length;
   const useVirtualTable = effectiveObjectPageSize >= 50 || effectiveRelationPageSize >= 50;
 
-  const entitySwitcher = workspaceMode ? (
-    <Segmented
-      value={entityTab}
-      onChange={handleEntityTab}
-      options={[
+  const OBJECT_TAB_META: Record<Exclude<ViewTab, "relations">, { label: string; icon: React.ReactNode }> = {
+    business_object: { label: "业务对象", icon: <AppstoreOutlined /> },
+    data_table: { label: "数据表", icon: <DatabaseOutlined /> },
+    technical: { label: "技术/系统表", icon: <ToolOutlined /> },
+  };
+
+  const tabSwitcher = (
+    <Tabs
+      className="om-tabs om-tabs--inset"
+      activeKey={viewTab}
+      onChange={handleViewTab}
+      items={[
         {
-          label: (
-            <span>
-              <AppstoreOutlined style={{ marginRight: 6 }} />
-              对象 {objectCountLabel}
-            </span>
-          ),
-          value: "objects",
-        },
-        {
+          key: "relations",
           label: (
             <span>
               <ApartmentOutlined style={{ marginRight: 6 }} />
-              关系 {relationCountLabel}
+              关系
             </span>
           ),
-          value: "relations",
         },
+        ...OBJECT_TAB_ROLES.map((role) => ({
+          key: role,
+          label: (
+            <span>
+              <span style={{ marginRight: 6 }}>{OBJECT_TAB_META[role].icon}</span>
+              {OBJECT_TAB_META[role].label}
+            </span>
+          ),
+        })),
       ]}
     />
-  ) : null;
+  );
 
   const searchInput = (
     <Input
       allowClear
       prefix={<SearchOutlined style={{ color: "var(--om-text-secondary)" }} />}
-      placeholder={
-        entityTab === "relations" ? "搜索关系名称、描述、对象" : "搜索对象名称、描述"
-      }
+      placeholder={isObjectTab ? "搜索对象名称、描述" : "搜索关系名称、描述"}
       value={query}
       onChange={handleQueryChange}
       className="ontology-workspace-search"
     />
   );
 
-  const roleFilterSwitcher =
-    showRoleClassification && entityTab === "objects" ? (
-      <Space size={8} wrap>
-        <Select
-          mode="multiple"
-          allowClear
-          value={typeFilter}
-          onChange={handleTypeFilterChange}
-          options={TYPE_FILTER_OPTIONS}
-          placeholder="对象类型"
-          maxTagCount="responsive"
-          style={{ minWidth: 200 }}
-        />
-        <Checkbox
-          checked={needsReview}
-          onChange={(e) => handleNeedsReviewChange(e.target.checked)}
-        >
-          仅看待复核
-        </Checkbox>
-      </Space>
+  const needsReviewSwitcher =
+    showRoleClassification && isObjectTab ? (
+      <Checkbox
+        checked={needsReview}
+        onChange={(e) => handleNeedsReviewChange(e.target.checked)}
+      >
+        仅看待复核
+      </Checkbox>
     ) : null;
 
   const batchToggle =
-    batchEnabled && entityTab === "objects" ? (
+    batchEnabled && isObjectTab ? (
       <Button onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}>
         {batchMode ? "退出批量" : "批量修改"}
       </Button>
     ) : null;
 
   const batchBar =
-    batchMode && entityTab === "objects" ? (
+    batchMode && isObjectTab ? (
       <div className="toolbar">
         <div className="toolbar-left">
           <Space size={8} wrap>
@@ -533,18 +550,26 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   return (
     <div className="om-stack">
+      {tabSwitcher}
       <div className="toolbar">
         <div className="toolbar-left">
-          {entitySwitcher}
           {searchInput}
-          {roleFilterSwitcher}
+          {needsReviewSwitcher}
           {batchToggle}
         </div>
       </div>
       {batchBar}
 
-      {entityTab === "relations" ? (
-        effectiveRelationTotal === 0 && filteredRelations.length === 0 ? (
+      {viewTab === "relations" ? (
+        useRelationGroups ? (
+          <SectionCard title="关系列表（去重）" icon={<ApartmentOutlined />} bodyFlush>
+            <RelationGroupList
+              scope={relationScope!}
+              query={query}
+              detailPath={relationGroupDetailPath!}
+            />
+          </SectionCard>
+        ) : effectiveRelationTotal === 0 && filteredRelations.length === 0 ? (
           <SectionCard title="关系列表" icon={<ApartmentOutlined />} bodyFlush>
             <EmptyState
               title="暂无关系类型"

@@ -292,6 +292,24 @@ class RelationTypeDetail(RelationTypeOut):
     mapping_object: RelationObjectRef | None = None
 
 
+class RelationGroupOut(BaseModel):
+    """按 display_name 去重后的关系分组（列表用）。
+
+    一个 display_name（如「属于」）通常对应成百上千条 (源,目标) 三元组，
+    这里把它折叠成一行，聚合展示类型/基数/置信度/复核状态。具体三元组由
+    关系详情页按 display_name 精确过滤 list_relation_types 拉取。
+    """
+
+    display_name: str
+    count: int
+    description: str | None = None
+    structure_types: list[str] = []
+    cardinalities: list[str] = []
+    confidence_min: float | None = None
+    confidence_max: float | None = None
+    statuses: list[str] = []
+
+
 class VersionRecordOut(BaseModel):
     id: str
     entity_type: str

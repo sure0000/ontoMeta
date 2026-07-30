@@ -213,3 +213,81 @@ def execute_sql(
 
     columns = [{"key": k, "title": k} for k in keys]
     return columns, rows
+
+
+def execute_write(
+    *,
+    dsn: str,
+    statements: list[str],
+    mapping: dict[str, Any] | None = None,
+    timeout_seconds: int = 60,
+) -> dict[str, Any]:
+    """在物理数据源上执行写侧语句（建表 DDL / 落数 DML），单事务顺序执行。
+
+    与 :func:`execute_sql` 相对——物化落库需要 CREATE TABLE / INSERT，故此处
+    **不做只读校验、不追加 LIMIT、不取行**，改用 ``exec_driver_sql`` 把生成 SQL
+    原样交给 DBAPI（避免 SQLAlchemy 把 ``:name`` / ``%`` 误当绑定参数）。
+
+    事务性：在 ``engine.begin()`` 内顺序执行，任一条失败即整体回滚，不留半张表
+    （对支持事务的 backend 如 duckdb/postgres/sqlite 成立；Hive 等无事务引擎回滚
+    是 no-op，此时已建对象需靠 ``CREATE TABLE IF NOT EXISTS`` / ``INSERT OVERWRITE``
+    的幂等语义兜底）。
+
+    返回回执：``{total, executed, failed, error, per_statement}``。失败路径下
+    ``executed`` 归零、先前成功的语句标 ``rolled_back``，如实反映事务已回滚。
+    """
+    backend = _backend_of(dsn)
+    prepared: list[tuple[int, str]] = []
+    for idx, raw in enumerate(statements):
+        body = (raw or "").strip().rstrip(";").strip()
+        if not body:
+            continue
+        body = _apply_mapping(body, mapping)
+        body = _translate_dialect(body, backend)
+        prepared.append((idx, body))
+
+    per_statement: list[dict[str, Any]] = []
+    executed = 0
+    error: str | None = None
+
+    try:
+        engine = _get_engine(dsn)
+        with engine.begin() as conn:
+            if backend == "postgres":
+                conn.exec_driver_sql(
+                    f"SET statement_timeout = {int(timeout_seconds) * 1000}"
+                )
+            for idx, sql in prepared:
+                try:
+                    conn.exec_driver_sql(sql)
+                except Exception as exc:  # noqa: BLE001
+                    error = str(exc)
+                    per_statement.append(
+                        {"index": idx, "ok": False, "error": error, "sql": sql}
+                    )
+                    # 抛出以触发整事务回滚；已成功语句在下方 except 里标记回滚。
+                    raise ExecutionError(error) from exc
+                per_statement.append({"index": idx, "ok": True, "sql": sql})
+                executed += 1
+    except ExecutionError:
+        pass  # error 已记录，构造回执后返回，不再上抛
+    except Exception as exc:  # noqa: BLE001 —— 连接/引擎级失败（如驱动缺失）
+        error = str(exc)
+        logger.warning("materialization write failed: %s", exc)
+
+    if error is not None:
+        # 事务已回滚：先前 ok 的语句实际未落地。
+        executed = 0
+        for ps in per_statement:
+            if ps.get("ok"):
+                ps["ok"] = False
+                ps["rolled_back"] = True
+
+    failed = sum(1 for ps in per_statement if not ps["ok"])
+    return {
+        "total": len(prepared),
+        "executed": executed,
+        "failed": failed,
+        "error": error,
+        "per_statement": per_statement,
+    }

@@ -163,6 +163,7 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     ArtifactKind.SYNC.value: ("source", "target"),
     ArtifactKind.TRANSFORM.value: ("target_table", "ontology_id"),
     ArtifactKind.METRIC.value: ("metric_name",),
+    ArtifactKind.MATERIALIZE.value: ("ontology_id", "target_datasource_id"),
 }
 
 

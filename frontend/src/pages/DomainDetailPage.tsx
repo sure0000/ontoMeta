@@ -421,6 +421,8 @@ export function DomainDetailPage() {
     `/workspace/${domainId}/objects/${objectId}`;
   const relationDetailPath = (relationId: string) =>
     `/workspace/${domainId}/relations/${relationId}`;
+  const relationGroupDetailPath = (displayName: string) =>
+    `/workspace/${domainId}/relation-groups/${encodeURIComponent(displayName)}?oid=${domain.latest_ontology_id}`;
 
   const publishedVersion = domain.published_ontology_version;
 
@@ -600,6 +602,8 @@ export function DomainDetailPage() {
             relations={relations}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
+            relationScope={{ ontologyId: domain.latest_ontology_id ?? undefined }}
+            relationGroupDetailPath={relationGroupDetailPath}
             workspaceMode
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}

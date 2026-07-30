@@ -1020,6 +1020,11 @@
 .om-tab-toolbar--left {
   justify-content: flex-start;
 }
+/* Tab 内非表格内容（表单/面板/列表）的内边距，与 section-card-body 对齐 */
+.om-tab-body {
+  padding: 20px;
+  min-width: 0;
+}
 .om-tab-toolbar--between {
   justify-content: space-between;
 }

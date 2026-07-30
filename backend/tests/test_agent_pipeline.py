@@ -124,9 +124,21 @@ def test_unregistered_kind_returns_501(client, admin_headers):
 
 def test_kinds_endpoint_shows_progress(client, admin_headers):
     body = client.get("/api/agents/kinds", headers=admin_headers).json()
-    assert set(body["all_kinds"]) == {"cluster", "sync", "transform", "metric"}
-    # M6 已注册全部四类
-    assert set(body["registered"]) == {"cluster", "sync", "transform", "metric"}
+    assert set(body["all_kinds"]) == {
+        "cluster",
+        "sync",
+        "transform",
+        "metric",
+        "materialize",
+    }
+    # 五类制品均已注册（含 M3+ 本体一键物化）
+    assert set(body["registered"]) == {
+        "cluster",
+        "sync",
+        "transform",
+        "metric",
+        "materialize",
+    }
     assert body["high_risk"] == ["cluster"]
 
 

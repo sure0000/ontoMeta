@@ -141,6 +141,7 @@ from app.schemas.ontology import (
     PropertyOut,
     PropertyUpdate,
     RelationEvidencePack,
+    RelationGroupOut,
     RelationObjectRef,
     RelationTypeCreate,
     RelationTypeDetail,
@@ -188,6 +189,8 @@ from app.schemas.warehouse import (
     MaterializationContractOut,
     MaterializationContractSyncResult,
     MaterializationContractUpdate,
+    MaterializeRequest,
+    MaterializeResult,
 )
 
 __all__ = [
@@ -224,6 +227,7 @@ __all__ = [
     "ObjectTypeDetail",
     "RelationTypeOut",
     "RelationObjectRef",
+    "RelationGroupOut",
     "RelationTypeDetail",
     "BusinessLogicObjectBindingOut",
     "BusinessLogicPropertyBindingOut",
@@ -345,6 +349,8 @@ __all__ = [
     "MaterializationContractOut",
     "MaterializationContractUpdate",
     "MaterializationContractSyncResult",
+    "MaterializeRequest",
+    "MaterializeResult",
     "ChatBiExecuteRequest",
     "ChatBiExecuteResult",
     "PrincipalOut",
