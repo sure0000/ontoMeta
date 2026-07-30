@@ -2,6 +2,7 @@ import re
 
 from app.schemas import (
     DataHubDomainBundle,
+    DatasetInput,
     EvidenceBundle,
     LogicEvidencePack,
     ObjectTypeEvidencePack,
@@ -17,7 +18,6 @@ from app.services.bridge_collapse import select_bridge_endpoints
 from app.services.community_detection import label_propagation_clusters
 from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.relation_terms import infer_relation_term, reference_term
-from app.services.relation_structure import infer_relation_structure_type
 from app.services.source_profile import InferredFk, SourceProfile, detect_source_profile
 
 
@@ -373,7 +373,7 @@ class EvidenceBuilder:
 
     def _bridge_ref_targets(
         self,
-        dataset: DataHubDomainBundle,  # type: ignore[name-defined]
+        dataset: DatasetInput,
         profile: "SourceProfile",
         table_index: dict[str, str],
         inferred_fk_by_name: dict[str, list["InferredFk"]],
@@ -465,7 +465,7 @@ class EvidenceBuilder:
             obj = _infer_object_name(tech_name)
             in_degree_by_object[obj] = max(in_degree_by_object.get(obj, 0), deg)
 
-        ds_by_bridge: dict[str, DataHubDomainBundle] = {}  # type: ignore[valid-type]
+        ds_by_bridge: dict[str, DatasetInput] = {}
         refs_by_bridge: dict[str, list[str]] = {}
         for dataset in bundle.datasets:
             name = _infer_object_name(dataset.name)

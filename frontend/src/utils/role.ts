@@ -165,7 +165,7 @@ export function describeSignals(rs?: RoleSignals | null): DecisionEvidence {
   if (has("connected") || has("isolated")) {
     const connected = has("connected")
       ? Boolean(s.connected)
-      : !Boolean(s.isolated);
+      : !s.isolated;
     items.push({
       key: "connected",
       label: "图连通性",

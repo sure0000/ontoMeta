@@ -23,7 +23,6 @@ from typing import Any, Iterable
 from sqlalchemy.orm import Session
 
 from app.models import (
-    BusinessLogic,
     DraftEvidence,
     EntityStatus,
     ObjectType,
