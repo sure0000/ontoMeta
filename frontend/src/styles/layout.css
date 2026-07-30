@@ -1006,6 +1006,20 @@
   margin-top: 0;
 }
 
+/* 仅作顶部视图切换的 Tabs（内容在下方独立渲染，Tab 本身不含 tabpane）：
+   不参与 om-stack 的纵向拉伸，且隐藏空的内容容器，避免撑高/遮挡下方工具条。 */
+.om-tabs--switcher.ant-tabs {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.om-tabs--switcher .ant-tabs-nav {
+  padding: 0;
+  border-bottom: 1px solid var(--om-border);
+}
+.om-tabs--switcher .ant-tabs-content-holder {
+  display: none;
+}
+
 /* Tabs 内容区上方的工具条 */
 .om-tab-toolbar {
   display: flex;

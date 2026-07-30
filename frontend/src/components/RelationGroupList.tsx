@@ -49,6 +49,13 @@ export function RelationGroupList({ scope, query, detailPath }: Props) {
 
   const { ontologyId, domainId, publishedOnly } = scope;
 
+  // 输入去抖：关系分组按 display_name 聚合，逐键请求既浪费又易在慢/断网时闪空。
+  const [debouncedQuery, setDebouncedQuery] = useState(query ?? "");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query ?? ""), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
   useEffect(() => {
     if (!ontologyId && !domainId) {
       setGroups([]);
@@ -58,7 +65,7 @@ export function RelationGroupList({ scope, query, detailPath }: Props) {
     setLoading(true);
     setError(null);
     api
-      .listRelationGroups({ ontologyId, domainId, publishedOnly, q: query || undefined })
+      .listRelationGroups({ ontologyId, domainId, publishedOnly, q: debouncedQuery || undefined })
       .then((data) => {
         if (!cancelled) setGroups(data);
       })
@@ -71,7 +78,7 @@ export function RelationGroupList({ scope, query, detailPath }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [ontologyId, domainId, publishedOnly, query]);
+  }, [ontologyId, domainId, publishedOnly, debouncedQuery]);
 
   const columns: ColumnsType<RelationGroup> = useMemo(
     () => [

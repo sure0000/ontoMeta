@@ -2,7 +2,7 @@ import { BranchesOutlined } from "@ant-design/icons";
 import { Alert, Button, Space, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -29,6 +29,7 @@ export function RelationGroupDetailPage() {
   const ontologyId = searchParams.get("oid") || undefined;
   const publishedOnly = searchParams.get("pub") === "1";
   const inWorkspace = Boolean(domainId);
+  const navigate = useNavigate();
 
   const [rows, setRows] = useState<RelationType[]>([]);
   const [total, setTotal] = useState(0);
@@ -91,7 +92,12 @@ export function RelationGroupDetailPage() {
         key: "source",
         render: (_, r) =>
           r.source_object_name ? (
-            <Link to={objectDetailPath(r.source_object_type_id)}>{r.source_object_name}</Link>
+            <Link
+              to={objectDetailPath(r.source_object_type_id)}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {r.source_object_name}
+            </Link>
           ) : (
             <span className="om-muted">-</span>
           ),
@@ -114,7 +120,12 @@ export function RelationGroupDetailPage() {
         key: "target",
         render: (_, r) =>
           r.target_object_name ? (
-            <Link to={objectDetailPath(r.target_object_type_id)}>{r.target_object_name}</Link>
+            <Link
+              to={objectDetailPath(r.target_object_type_id)}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {r.target_object_name}
+            </Link>
           ) : (
             <span className="om-muted">-</span>
           ),
@@ -154,7 +165,11 @@ export function RelationGroupDetailPage() {
         title: "操作",
         key: "actions",
         width: 80,
-        render: (_, r) => <Link to={relationEditPath(r.id)}>详情</Link>,
+        render: (_, r) => (
+          <Link to={relationEditPath(r.id)} onClick={(e) => e.stopPropagation()}>
+            编辑
+          </Link>
+        ),
       },
     ],
     [objectDetailPath, relationEditPath],
@@ -173,7 +188,11 @@ export function RelationGroupDetailPage() {
       <PageHeader
         icon={<BranchesOutlined />}
         title={displayName || "关系详情"}
-        description={`该关系名下共 ${total} 条 (源对象 → 目标对象) 三元组`}
+        description={
+          inWorkspace
+            ? `该关系名下共 ${total} 条 (源对象 → 目标对象) 三元组，点击任意行编辑该关系`
+            : `该关系名下共 ${total} 条 (源对象 → 目标对象) 三元组`
+        }
         extra={
           <Link to={backPath}>
             <Button>返回</Button>
@@ -194,6 +213,10 @@ export function RelationGroupDetailPage() {
           columns={columns}
           dataSource={rows}
           scroll={{ x: "max-content" }}
+          onRow={(r) => ({
+            onClick: () => navigate(relationEditPath(r.id)),
+            style: { cursor: "pointer" },
+          })}
           pagination={{
             current: page,
             pageSize,

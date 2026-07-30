@@ -427,7 +427,18 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     [relationPaging],
   );
 
-  if (objects.length === 0 && relations.length === 0 && effectiveObjectTotal === 0 && effectiveRelationTotal === 0) {
+  // 「暂无本体草稿」是整页占位，会连同 Tab/搜索框一起替换掉——因此只在「确实没有草稿」
+  // 时展示：一旦有搜索词或类型/复核过滤在生效，空结果应由各 Tab 内部的空态承载，
+  // 保留 Tab 与搜索框，否则用户搜到空后连搜索框都消失、无法清空关键词。
+  const hasActiveFilter =
+    Boolean(normalizedQuery) || typeFilter.length > 0 || needsReview;
+  if (
+    !hasActiveFilter &&
+    objects.length === 0 &&
+    relations.length === 0 &&
+    effectiveObjectTotal === 0 &&
+    effectiveRelationTotal === 0
+  ) {
     return (
       <SectionCard title="本体草稿" icon={<AppstoreOutlined />} bodyFlush>
         <EmptyState
@@ -448,7 +459,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   const tabSwitcher = (
     <Tabs
-      className="om-tabs om-tabs--inset"
+      className="om-tabs om-tabs--switcher"
       activeKey={viewTab}
       onChange={handleViewTab}
       items={[
