@@ -6,6 +6,7 @@ from app.schemas import (
 )
 from app.services.evidence_builder import EvidenceBuilder
 from app.services.object_classifier import (
+    ROLE_BRIDGE,
     ROLE_BUSINESS_OBJECT,
     ROLE_DATA_TABLE,
     classify_object_role,
@@ -112,31 +113,34 @@ def test_frappe_link_field_inferred_fk():
     assert "tabCustomer" in targets
 
 
-def test_child_table_classified_as_data_table():
+def test_child_table_classified_as_bridge():
+    # 明细/子表按建模原则判为业务关系(bridge) + 待复核，而非独立业务实体/数据表。
     result = classify_object_role(
         [FieldSignal(name="name", semantic_type="identifier", is_primary_key=True),
          FieldSignal(name="qty", semantic_type="amount")],
         is_child_table=True,
     )
-    assert result.role == ROLE_DATA_TABLE
-    assert not result.needs_review
+    assert result.role == ROLE_BRIDGE
+    assert result.needs_review
     assert "子表" in result.reason
+    assert "关系" in result.reason
 
 
 def test_glossary_exempts_child_table_downgrade():
+    # 挂了人工业务术语 → 豁免子表改判（bridge），落回正常打分为业务对象。
     result = classify_object_role(
         [FieldSignal(name="name", semantic_type="identifier", is_primary_key=True)],
         is_child_table=True,
         glossary_terms=["订单明细"],
     )
-    assert result.role != ROLE_DATA_TABLE
+    assert result.role == ROLE_BUSINESS_OBJECT
 
 
 def test_evidence_builder_frappe_end_to_end():
     evidence = EvidenceBuilder().build(_frappe_bundle())
     roles = {ot.display_name: ot.table_role for ot in evidence.object_types}
-    # 子表 → 数据表
-    assert roles["tabSales Order Item"] == ROLE_DATA_TABLE
+    # 子表 → 业务关系(bridge)
+    assert roles["tabSales Order Item"] == ROLE_BRIDGE
     # Customer 被 Sales Order 通过 Link 字段引用（推断外键入度）→ 业务对象
     assert roles["tabCustomer"] == ROLE_BUSINESS_OBJECT
     # 推断出的 Link 外键关系存在

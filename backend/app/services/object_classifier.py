@@ -103,6 +103,7 @@ def classify_object_role(
     tags: list[str] | None = None,
     is_child_table: bool = False,
     fact_name_token: str | None = None,
+    weak_fact_name_token: str | None = None,
     segment_size: int | None = None,
 ) -> ClassificationResult:
     """对单张表按结构/内容/拓扑/语义锚定信号打分并分类。
@@ -139,15 +140,19 @@ def classify_object_role(
     tags = tags or []
 
     # 明细/子表（源画像判定，如 Frappe 的 parent/parenttype 锚点列）：隶属某父
-    # DocType，是其明细行而非独立业务实体，高置信降级为数据表。挂了人工业务
-    # 术语则豁免（人工已认定为业务概念）。
+    # DocType，是其明细行（一次业务事实）而非独立业务实体。按建模原则「明细表/事实表
+    # 都是业务关系」判为关系表(bridge) + 待复核，真正的业务对象落在其引用的键上。挂了
+    # 人工业务术语则豁免（人工已认定为业务概念）。
     if is_child_table and not glossary_terms:
         return ClassificationResult(
-            role=ROLE_DATA_TABLE,
-            confidence=0.8,
-            reason="明细/子表（含 parent/parenttype 等子表锚点，隶属父表），非独立业务实体",
+            role=ROLE_BRIDGE,
+            confidence=0.6,
+            reason=(
+                "明细/子表（含 parent/parenttype 等子表锚点，隶属父表）——按原则判为业务"
+                "关系(bridge)：它是父表的明细行(一次业务事实)，真正的业务对象落在其引用的键上，待人工确认"
+            ),
             score=0.0,
-            needs_review=False,
+            needs_review=True,
             signals={"is_child_table": True},
         )
 
@@ -362,13 +367,38 @@ def classify_object_role(
         reasons.append("信号不足，暂按业务对象保留，待人工确认")
 
     # 事实/动词命名改判：动词/事件表是「事实关系」而非业务对象——复用 bridge 角色。
-    # 仅当它本会被判为业务对象时改判（精准针对「把一次动作误当实体」这一危害）；被大量
-    # 表外键引用的枢纽（fk_in_degree>=3）更可能是命名欠佳的主数据，保留为业务对象但仍标
-    # 待复核。data_table/technical 维持原判（派生汇总/系统表不必强扭成关系表）。
-    fact_hub_exempt = fk_in_degree >= 3
-    if fact_named and role == ROLE_BUSINESS_OBJECT and not fact_hub_exempt:
+    # 仅当它本会被判为业务对象时改判（精准针对「把一次动作误当实体」这一危害）。
+    # 被多表外键引用（fk_in_degree>=3）本身**不**否决事实判定——交易头(如收货/结算/订单)
+    # 本就会被下游单据引用；此时仍判关系表(bridge)，但在理由里标注其枢纽属性，
+    # needs_review 交人工确认是否实为命名欠佳的主数据。data_table/technical 维持原判
+    # （派生汇总/系统表不必强扭成关系表）。
+    if fact_named and role == ROLE_BUSINESS_OBJECT:
         role = ROLE_BRIDGE
-        reasons.append("据命名判为业务事实/关系表(bridge)，真正的业务对象应落在其引用的键上")
+        if fk_in_degree >= 3:
+            reasons.append(
+                f"据命名判为业务事实/关系表(bridge)；虽被 {fk_in_degree} 张表外键引用"
+                "（疑似枢纽），仍按「事实即关系」优先判为关系表，请人工确认是否实为主数据"
+            )
+        else:
+            reasons.append(
+                "据命名判为业务事实/关系表(bridge)，真正的业务对象应落在其引用的键上"
+            )
+
+    # 弱事实命名 + 结构证据：订单/发票/工单 这类歧义名词单凭命名不判事实（可能是实体），
+    # 但当它同时**引用多个不同维度**（distinct_fk_targets>=2）**且含度量字段**（measure>=1）
+    # 时，结构上就是一张交易/事实表——把被主键+被引用信号带偏成业务对象的交易头改判
+    # 关系表(bridge) + 待复核。无度量、少外键的参考维度（订单类型/付款方式）结构不达标，
+    # 不受影响。挂了人工术语则豁免。
+    weak_fact = bool(weak_fact_name_token) and not glossary_terms
+    weak_fact_structural = weak_fact and distinct_fk_targets >= 2 and measure >= 1
+    if weak_fact_structural and role == ROLE_BUSINESS_OBJECT:
+        role = ROLE_BRIDGE
+        reasons.append(
+            f"命名含交易名词「{weak_fact_name_token}」且引用 {distinct_fk_targets} 个不同维度、"
+            f"含 {measure} 个度量字段，结构上是一次交易/事实——判为业务关系(bridge)，"
+            "真正的业务对象应落在其引用的维度键上，待人工确认"
+        )
+        signals["weak_fact_name_token"] = weak_fact_name_token
 
     # 业务环节归属（关系图结构，**必要条件**）：只有隶属于某个业务环节的表才可能是业务
     # 对象。业务环节 = 关系图上社区检测得到的 >= _MIN_SEGMENT_SIZE 成员聚类；孤立表/孤对
@@ -401,7 +431,11 @@ def classify_object_role(
             "疑似关联实体，请确认为对象而非纯关系"
         )
     needs_review = (
-        confidence < 0.7 or associative_suspect or fact_named or segment_demoted
+        confidence < 0.7
+        or associative_suspect
+        or fact_named
+        or weak_fact_structural
+        or segment_demoted
     )
 
     return ClassificationResult(

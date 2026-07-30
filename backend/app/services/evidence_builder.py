@@ -14,7 +14,7 @@ from app.services.object_classifier import (
     classify_object_role,
 )
 from app.services.community_detection import label_propagation_clusters
-from app.services.fact_naming import detect_fact_name
+from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.relation_terms import infer_relation_term, reference_term
 from app.services.relation_structure import infer_relation_structure_type
 from app.services.source_profile import InferredFk, detect_source_profile
@@ -122,6 +122,9 @@ class EvidenceBuilder:
                 if t
             )
             fact_name_token = detect_fact_name(dataset.name, fact_meaning)
+            # 弱事实/交易命名（订单/发票/工单/order/invoice）：单凭命名不判事实，
+            # 由分类器结合结构证据（多维度外键 + 度量字段）决定是否改判关系表。
+            weak_fact_name_token = detect_weak_fact_name(dataset.name, fact_meaning)
             # 构造分类信号：按源画像补齐 PK/FK，并剥离框架系统列（审计/子表锚点等），
             # 使度量/描述占比反映真实业务字段而非框架噪声。主键即便属系统列也保留。
             field_signals: list[FieldSignal] = []
@@ -152,6 +155,7 @@ class EvidenceBuilder:
                 tags=dataset.tags,
                 is_child_table=is_child,
                 fact_name_token=fact_name_token,
+                weak_fact_name_token=weak_fact_name_token,
                 segment_size=segment_size.get(dataset.name),
             )
             # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
