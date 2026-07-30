@@ -159,9 +159,11 @@ def test_evidence_builder_marks_verb_named_table_as_bridge():
         for p in evidence.object_types
         if p.source_dataset_urn == "urn:li:dataset:stock_adjustment"
     )
-    assert pack.table_role == ROLE_BRIDGE
-    assert "待复核" in (pack.role_reason or "")
-    assert pack.role_signals["signals"].get("fact_name_token") == "调整"
+    # 动词命名 → 初判事实/关系表(bridge)，但仅引用 1 个对象、连不到两个业务对象
+    # → 智能重判为对象。分类器层面的「动词→bridge」由 test_verb_named_business_shape_
+    # reclassified_to_bridge 直接覆盖。
+    assert pack.table_role != ROLE_BRIDGE
+    assert "重判" in (pack.role_reason or "")
 
 
 # -- 结构性明细命名：改判 bridge + 端到端丢边 --------------------------------

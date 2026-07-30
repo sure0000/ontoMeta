@@ -138,7 +138,8 @@ def test_evidence_builder_collapses_bridge_with_mapping():
 
 
 def test_pure_child_table_not_materialized():
-    """只引用父表(+1 个 Link)的子表 → 选不出两个业务对象端点，不生成塌缩边。"""
+    """只引用父表(+1 个 Link)的子表 → 连不到两个业务对象 → 不产出塌缩边，
+    且智能重判为对象（不再停留在 bridge）。"""
     bundle = DataHubDomainBundle(
         domain=DomainInput(id="d1", name="ERP"),
         datasets=[
@@ -159,7 +160,13 @@ def test_pure_child_table_not_materialized():
     )
     evidence = EvidenceBuilder().build(bundle)
     soi = _infer_object_name("tabSales Order Item")
+    # 没有以该子表为实现表的塌缩关系
     assert not [r for r in evidence.relations if r.mapping_object == soi]
+    # 该子表被智能重判为对象，不再是 bridge
+    roles = {ot.candidate_name: ot.table_role for ot in evidence.object_types}
+    assert roles[soi] != ROLE_BRIDGE
+    pack = next(ot for ot in evidence.object_types if ot.candidate_name == soi)
+    assert "重判" in (pack.role_reason or "")
 
 
 # --------------------------- parenttype → 父表 解析 ---------------------------

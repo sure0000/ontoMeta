@@ -101,7 +101,9 @@ def test_customer_hub_scored_as_business_object_with_evidence():
 def test_bridge_shortcircuit_still_emits_signals():
     evidence = EvidenceBuilder().build(_bundle())
     pack = _pack(evidence, "urn:li:dataset:user_favorite")
-    assert pack.table_role == "bridge"
+    # user_favorite 是双主键外键的关联表，但引用的 user/product 非业务对象
+    # → 连不到两个业务对象 → 智能重判为对象(data_table)；结构化证据(pk_columns)仍带出。
+    assert pack.table_role == "data_table"
     # 即便走短路分支,也要带上结构化证据(主键列数)供复核界面展示。
     assert isinstance(pack.role_signals, dict)
     assert pack.role_signals["signals"].get("pk_columns") == 2

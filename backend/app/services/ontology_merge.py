@@ -432,6 +432,13 @@ class OntologyMergeService:
             target_id = resolve_object_id(item.target_object_type_name)
             if not source_id or not target_id:
                 continue
+            # 桥表塌缩：承载该关系的关系表(bridge)实现表，回链为 mapping_object_type_id。
+            # 解析不到（如实现表尚未入库）则留空，不阻塞关系本身入库。
+            mapping_id = (
+                resolve_object_id(item.mapping_object_type_name)
+                if getattr(item, "mapping_object_type_name", None)
+                else None
+            )
             sig = relation_signature(
                 obj_by_id[source_id].source_ref if source_id in obj_by_id else None,
                 obj_by_id[target_id].source_ref if target_id in obj_by_id else None,
@@ -459,6 +466,7 @@ class OntologyMergeService:
                     target_object_type_id=target_id,
                     cardinality=item.cardinality,
                     structure_type=item.structure_type,
+                    mapping_object_type_id=mapping_id,
                     source_evidence=item.source_evidence,
                     source_confidence=item.confidence,
                     source_signature=sig,
@@ -483,6 +491,7 @@ class OntologyMergeService:
                 # 结构性字段（两端、证据、签名）始终跟随机器
                 existing.source_object_type_id = source_id
                 existing.target_object_type_id = target_id
+                existing.mapping_object_type_id = mapping_id
                 existing.source_evidence = item.source_evidence
                 existing.source_confidence = item.confidence
                 existing.source_signature = sig

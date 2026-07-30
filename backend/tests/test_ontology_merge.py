@@ -180,3 +180,35 @@ def test_relation_signature_matches_across_name_change():
     finally:
         db.rollback()
         db.close()
+
+
+def test_merge_relations_persists_mapping_object():
+    """桥表塌缩关系：merge_relations 应把 mapping_object_type_name 回链为
+    mapping_object_type_id（否则关系表没有承接表、发布时被丢弃、数仓无法生成列）。"""
+    merge = OntologyMergeService()
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        src = ObjectType(ontology_id=ontology.id, name="supplier", display_name="供应商",
+                         source_ref="urn:s", status="suggested", table_role="business_object")
+        tgt = ObjectType(ontology_id=ontology.id, name="company", display_name="公司",
+                         source_ref="urn:c", status="suggested", table_role="business_object")
+        bridge = ObjectType(ontology_id=ontology.id, name="purchase_invoice", display_name="采购发票",
+                            source_ref="urn:pi", status="suggested", table_role="bridge")
+        db.add_all([src, tgt, bridge])
+        db.flush()
+        resolve = {"supplier": src.id, "company": tgt.id, "purchase_invoice": bridge.id}
+
+        rel = DraftRelationType(
+            name="purchase_invoice", display_name="采购发票",
+            source_object_type_name="supplier", target_object_type_name="company",
+            structure_type="bridge_table", mapping_object_type_name="purchase_invoice",
+        )
+        merge.merge_relations(db, ontology.id, [rel], lambda n: resolve.get(n), "g1", MergeReport())
+        db.commit()
+        from app.models import RelationType
+        stored = db.query(RelationType).filter(RelationType.ontology_id == ontology.id).one()
+        assert stored.mapping_object_type_id == bridge.id
+    finally:
+        db.rollback()
+        db.close()

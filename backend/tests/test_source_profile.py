@@ -185,8 +185,11 @@ def test_glossary_exempts_child_table_downgrade():
 def test_evidence_builder_frappe_end_to_end():
     evidence = EvidenceBuilder().build(_frappe_bundle())
     roles = {ot.display_name: ot.table_role for ot in evidence.object_types}
-    # 子表 → 业务关系(bridge)
-    assert roles["tabSales Order Item"] == ROLE_BRIDGE
+    # 子表初判为关系表(bridge)，但连不到两个业务对象（bundle 内无 tabItem 可解析）
+    # → 智能重判为对象，不再停留在 bridge。
+    assert roles["tabSales Order Item"] != ROLE_BRIDGE
+    soi = next(ot for ot in evidence.object_types if ot.display_name == "tabSales Order Item")
+    assert "重判" in (soi.role_reason or "")
     # Customer 被 Sales Order 通过 Link 字段引用（推断外键入度）→ 业务对象
     assert roles["tabCustomer"] == ROLE_BUSINESS_OBJECT
     # 推断出的 Link 外键关系存在
