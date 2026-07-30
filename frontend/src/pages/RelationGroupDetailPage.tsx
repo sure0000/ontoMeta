@@ -184,7 +184,7 @@ export function RelationGroupDetailPage() {
   }
 
   return (
-    <PageContainer full>
+    <PageContainer>
       <PageHeader
         icon={<BranchesOutlined />}
         title={displayName || "关系详情"}
