@@ -93,6 +93,45 @@ function buildRelationGraph(obj: ObjectTypeDetail): OntologyGraph {
     });
   }
 
+  // 关系表(bridge)：本对象是关系的 mapping 实现表而非端点，故 outgoing/incoming 为空。
+  // 用 implemented_relations 把它连接的两个业务对象画进来（桥表居中，两侧各连一端），
+  // 让「关系表连接哪些业务对象」一目了然。
+  for (const rel of obj.implemented_relations ?? []) {
+    for (const ep of [
+      { id: rel.source_object_type_id, name: rel.source_object_name },
+      { id: rel.target_object_type_id, name: rel.target_object_name },
+    ]) {
+      if (ep.id && !nodeMap.has(ep.id)) {
+        nodeMap.set(ep.id, {
+          id: ep.id,
+          label: ep.name || ep.id,
+          display_name: ep.name || ep.id,
+          status: rel.status,
+        });
+      }
+    }
+    if (rel.source_object_type_id) {
+      edges.push({
+        id: `impl-s-${rel.id}`,
+        relationId: rel.id,
+        source: obj.id,
+        target: rel.source_object_type_id,
+        label: rel.display_name,
+        cardinality: rel.cardinality,
+      });
+    }
+    if (rel.target_object_type_id) {
+      edges.push({
+        id: `impl-t-${rel.id}`,
+        relationId: rel.id,
+        source: obj.id,
+        target: rel.target_object_type_id,
+        label: rel.display_name,
+        cardinality: rel.cardinality,
+      });
+    }
+  }
+
   return {
     nodes: Array.from(nodeMap.values()),
     edges,

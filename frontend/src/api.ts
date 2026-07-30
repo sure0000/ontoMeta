@@ -47,6 +47,8 @@ import type {
   MaterializationContractSyncResult,
   MaterializationContractUpdateInput,
   MaterializationTargetKind,
+  MaterializationRun,
+  MaterializeRequestInput,
   Principal,
   PrincipalCreated,
   PrincipalRole,
@@ -62,6 +64,7 @@ import type {
   OntologySummary,
   PageResult,
   Property,
+  RelationGroup,
   RelationType,
   RelationTypeDetail,
   TaskRecord,
@@ -381,6 +384,7 @@ export const api = {
     domainId?: string;
     publishedOnly?: boolean;
     q?: string;
+    displayName?: string;
     limit?: number;
     offset?: number;
   }) =>
@@ -390,8 +394,24 @@ export const api = {
         domain_id: params?.domainId,
         published_only: params?.publishedOnly,
         q: params?.q,
+        display_name: params?.displayName,
         limit: params?.limit,
         offset: params?.offset,
+      })}`,
+    ),
+
+  listRelationGroups: (params?: {
+    ontologyId?: string;
+    domainId?: string;
+    publishedOnly?: boolean;
+    q?: string;
+  }) =>
+    request<RelationGroup[]>(
+      `/api/relation-groups${buildQuery({
+        ontology_id: params?.ontologyId,
+        domain_id: params?.domainId,
+        published_only: params?.publishedOnly,
+        q: params?.q,
       })}`,
     ),
 
@@ -1055,6 +1075,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+
+  /** 本体一键物化：生成 DDL/ETL 并对目标数据源真正建表落数。需 publisher 角色。 */
+  materializeOntology: (ontologyId: string, body: MaterializeRequestInput) =>
+    request<MaterializationRun>(
+      `/api/ontologies/${ontologyId}/warehouse/materialize`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** 本体的历次物化执行记录（含回执），最新在前。 */
+  listMaterializationRuns: (ontologyId: string) =>
+    request<MaterializationRun[]>(
+      `/api/ontologies/${ontologyId}/warehouse/materialization-runs`,
+    ),
 
   // ---- RBAC 主体与角色（M0）----
   listPrincipals: () => request<Principal[]>("/api/principals"),

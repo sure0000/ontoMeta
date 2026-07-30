@@ -167,6 +167,18 @@ export interface RelationTypeDetail extends RelationType {
   mapping_object?: RelationObjectRef | null;
 }
 
+/** 按 display_name 去重后的关系分组（关系 Tab 列表用）。 */
+export interface RelationGroup {
+  display_name: string;
+  count: number;
+  description?: string | null;
+  structure_types: string[];
+  cardinalities: string[];
+  confidence_min?: number | null;
+  confidence_max?: number | null;
+  statuses: string[];
+}
+
 /** 对象角色分类的结构化证据快照（后端 object_classifier 产出，仅详情返回）。 */
 export interface RoleSignals {
   score?: number;
@@ -185,6 +197,8 @@ export interface ObjectTypeDetail extends ObjectTypeSummary {
   properties: Property[];
   outgoing_relations: RelationType[];
   incoming_relations: RelationType[];
+  /** 本对象作为关系表(bridge)所实现(mapping)的业务关系；桥表本身非端点，故用于其图谱展示。 */
+  implemented_relations?: RelationType[];
   business_logics: BusinessLogic[];
   business_logic_bindings?: ObjectTypeLogicBinding[];
   version_records?: VersionRecord[];
@@ -949,6 +963,58 @@ export interface MaterializationContractSyncResult {
   updated: number;
   skipped_pinned: number;
   total: number;
+}
+
+/** 一次落库执行的逐条结果（DDL/ETL 各一批）。 */
+export interface MaterializationPhaseReceipt {
+  total: number;
+  executed: number;
+  failed: number;
+  error?: string | null;
+  skipped?: boolean;
+  skip_reason?: string;
+  targets?: string[];
+  per_statement?: {
+    index: number;
+    ok: boolean;
+    target?: string;
+    error?: string;
+    rolled_back?: boolean;
+    sql?: string;
+  }[];
+}
+
+export interface MaterializationReceipt {
+  ontology_id: string;
+  target_datasource: { id: string; name: string; kind: string };
+  engine: string;
+  database_prefix?: string | null;
+  tables: string[];
+  ddl: MaterializationPhaseReceipt;
+  etl: MaterializationPhaseReceipt;
+  warnings?: { target: string; feature: string; detail: string }[];
+  unsupported?: { target: string; reason: string }[];
+  ok: boolean;
+}
+
+export interface MaterializeRequestInput {
+  target_datasource_id: string;
+  engine: string;
+  database_prefix?: string | null;
+  selected_targets?: string[] | null;
+  overrides?: Record<string, MaterializationContractUpdateInput>;
+  intent?: string;
+  operator?: string;
+}
+
+/** 物化执行记录（治理制品回执视图）。 */
+export interface MaterializationRun {
+  artifact_id: string;
+  status: string; // succeeded / failed / …
+  ok: boolean;
+  name: string;
+  receipt?: MaterializationReceipt | null;
+  executed_at?: string | null;
 }
 
 // ---- RBAC 主体与角色（M0）----

@@ -81,6 +81,8 @@ class RelationEvidencePack(BaseModel):
     description: str | None = None
     confidence: float = 0.5
     evidence_refs: list[str] = Field(default_factory=list)
+    # 桥表塌缩：这条关系由某张关系表(bridge)承载时，填其 candidate_name 作实现表。
+    mapping_object: str | None = None
 
 
 class LogicEvidencePack(BaseModel):
@@ -137,6 +139,8 @@ class DraftRelationType(BaseModel):
     structure_type: str | None = None
     source_evidence: str | None = None
     confidence: float = 0.5
+    # 桥表塌缩：承载该关系的关系表(bridge) candidate_name，落库时回链为 mapping_object_type_id。
+    mapping_object_type_name: str | None = None
 
 
 class DraftBusinessLogic(BaseModel):
@@ -252,6 +256,9 @@ class ObjectTypeDetail(ObjectTypeSummary):
     properties: list[PropertyOut] = Field(default_factory=list)
     outgoing_relations: list["RelationTypeOut"] = Field(default_factory=list)
     incoming_relations: list["RelationTypeOut"] = Field(default_factory=list)
+    # 本对象作为关系表(bridge)时，它实现(mapping_object)的业务关系。桥表本身不是
+    # 关系端点，故 outgoing/incoming 为空；这条列表让其详情图谱能显示所连的业务对象。
+    implemented_relations: list["RelationTypeOut"] = Field(default_factory=list)
     business_logics: list["BusinessLogicOut"] = Field(default_factory=list)
     business_logic_bindings: list[ObjectTypeLogicBindingOut] = Field(default_factory=list)
     version_records: list["VersionRecordOut"] = Field(default_factory=list)
@@ -290,6 +297,24 @@ class RelationTypeDetail(RelationTypeOut):
     source_object: RelationObjectRef | None = None
     target_object: RelationObjectRef | None = None
     mapping_object: RelationObjectRef | None = None
+
+
+class RelationGroupOut(BaseModel):
+    """按 display_name 去重后的关系分组（列表用）。
+
+    一个 display_name（如「属于」）通常对应成百上千条 (源,目标) 三元组，
+    这里把它折叠成一行，聚合展示类型/基数/置信度/复核状态。具体三元组由
+    关系详情页按 display_name 精确过滤 list_relation_types 拉取。
+    """
+
+    display_name: str
+    count: int
+    description: str | None = None
+    structure_types: list[str] = []
+    cardinalities: list[str] = []
+    confidence_min: float | None = None
+    confidence_max: float | None = None
+    statuses: list[str] = []
 
 
 class VersionRecordOut(BaseModel):

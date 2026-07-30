@@ -456,7 +456,7 @@ export function RelationTypeDetailPage() {
   const workspaceBackPath = domainId ? `/workspace/${domainId}` : "/workspace";
 
   return (
-    <PageContainer full>
+    <PageContainer>
       <PageHeader
         icon={<BranchesOutlined />}
         title={inWorkspace ? "编辑关系类型" : rel.display_name}

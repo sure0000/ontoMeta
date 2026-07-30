@@ -2,15 +2,15 @@
 
 建模铁律：表名或含义为动作/事件动词（xx调整、xx交易）时，这张表记录的是一次业务
 **事实**而非实体，真正的业务对象是它引用的键。分类器应把本会被判为业务对象者改判为
-事实/关系表（bridge）并标待复核；但不硬压过人工术语与结构主数据枢纽，也不强扭派生
-汇总/系统表。
+事实/关系表（bridge）并标待复核；被多表引用的枢纽也不再豁免（仅在理由里标注供人工
+复核）；但仍不硬压过人工术语，也不强扭派生汇总/系统表。
 """
 
 from __future__ import annotations
 
 from app.schemas import DataHubDomainBundle, DatasetInput, DomainInput, FieldInput
 from app.services.evidence_builder import EvidenceBuilder
-from app.services.fact_naming import detect_fact_name
+from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.object_classifier import (
     ROLE_BRIDGE,
     ROLE_BUSINESS_OBJECT,
@@ -100,13 +100,16 @@ def test_glossary_term_exempts_verb_named_table():
     assert "fact_name_token" not in result.signals
 
 
-def test_reference_hub_stays_business_but_flagged():
-    # 被多张表外键引用的枢纽更可能是命名欠佳的主数据：保留业务对象，但仍标待复核。
+def test_reference_hub_still_reclassified_to_bridge_but_flagged():
+    # 被多张表外键引用的枢纽**不再**否决事实判定：交易头本就会被下游单据引用，
+    # 仍按「事实即关系」判为关系表(bridge)，但保留待复核并在理由里标注枢纽属性，
+    # 交人工确认是否实为命名欠佳的主数据。
     result = classify_object_role(
-        _business_shaped(), fact_name_token="交易", fk_in_degree=3
+        _business_shaped(), fact_name_token="交易", fk_in_degree=5
     )
-    assert result.role == ROLE_BUSINESS_OBJECT
+    assert result.role == ROLE_BRIDGE
     assert result.needs_review is True
+    assert "5 张表" in result.reason
 
 
 def test_verb_named_summary_stays_data_table():
@@ -156,9 +159,11 @@ def test_evidence_builder_marks_verb_named_table_as_bridge():
         for p in evidence.object_types
         if p.source_dataset_urn == "urn:li:dataset:stock_adjustment"
     )
-    assert pack.table_role == ROLE_BRIDGE
-    assert "待复核" in (pack.role_reason or "")
-    assert pack.role_signals["signals"].get("fact_name_token") == "调整"
+    # 动词命名 → 初判事实/关系表(bridge)，但仅引用 1 个对象、连不到两个业务对象
+    # → 智能重判为对象。分类器层面的「动词→bridge」由 test_verb_named_business_shape_
+    # reclassified_to_bridge 直接覆盖。
+    assert pack.table_role != ROLE_BRIDGE
+    assert "重判" in (pack.role_reason or "")
 
 
 # -- 结构性明细命名：改判 bridge + 端到端丢边 --------------------------------
@@ -233,3 +238,125 @@ def test_detail_table_edges_dropped_after_bridge_reclassification():
         od.candidate_name not in (r.source_object, r.target_object)
         for r in evidence.relations
     )
+
+
+# -- B: 弱交易命名 + 结构证据 → 事实/关系表 --------------------------------
+
+
+def test_detect_weak_transaction_nouns():
+    # 弱信号词（订单/发票/工单/order/invoice）——歧义名词，命中弱检测。
+    assert detect_weak_fact_name("purchase_order") == "order"
+    assert detect_weak_fact_name("sales_invoice") == "invoice"
+    assert detect_weak_fact_name(None, "生产工单") == "工单"
+    assert detect_weak_fact_name(None, "采购订单") == "订单"
+    # 且它们**不在**强事实词表里——所以必须靠结构证据才改判，而非强命名。
+    assert detect_fact_name("purchase_order") is None
+    assert detect_fact_name(None, "采购订单") is None
+    # 不含交易词头的参考维度不匹配弱信号。
+    assert detect_weak_fact_name(None, "付款方式") is None
+    assert detect_weak_fact_name(None, "付款条款") is None
+
+
+def _txn_header_shaped():
+    """交易头形态：单列业务主键 + 外键 + 度量字段（会被结构信号带偏成业务对象）。"""
+    return [
+        _f("po_id", "identifier", pk=True),
+        _f("supplier_id", "identifier", fk=True),
+        _f("total", "amount"),
+        _f("status", "category"),
+    ]
+
+
+def test_weak_txn_name_with_structure_reclassified_to_bridge():
+    # 无弱信号 → 交易头被主键/结构带偏成业务对象。
+    baseline = classify_object_role(_txn_header_shaped(), distinct_fk_targets=3)
+    assert baseline.role == ROLE_BUSINESS_OBJECT
+    # 弱交易命名 + 引用≥2维度 + 含度量 → 结构上是事实，改判 bridge + 待复核。
+    result = classify_object_role(
+        _txn_header_shaped(), distinct_fk_targets=3, weak_fact_name_token="订单"
+    )
+    assert result.role == ROLE_BRIDGE
+    assert result.needs_review is True
+    assert "订单" in result.reason
+    assert result.signals.get("weak_fact_name_token") == "订单"
+
+
+def test_weak_txn_name_without_measure_stays_business_object():
+    # 弱交易命名但**无度量字段**（如「订单类型」这类参考维度）→ 结构不达标，保留业务对象。
+    dim = [
+        _f("type_id", "identifier", pk=True),
+        _f("type_name", "attribute"),
+        _f("memo", "attribute"),
+    ]
+    result = classify_object_role(
+        dim, distinct_fk_targets=0, weak_fact_name_token="订单"
+    )
+    assert result.role == ROLE_BUSINESS_OBJECT
+
+
+def test_weak_txn_name_multi_fk_but_no_measure_not_forced_fact():
+    # 多外键但无度量：不满足「事实」结构证据，弱规则不改判（仍可作关联实体待复核）。
+    fields = [
+        _f("id", "identifier", pk=True),
+        _f("a_id", "identifier", fk=True),
+        _f("b_id", "identifier", fk=True),
+        _f("note", "attribute"),
+    ]
+    result = classify_object_role(
+        fields, distinct_fk_targets=2, weak_fact_name_token="订单"
+    )
+    assert result.role == ROLE_BUSINESS_OBJECT
+
+
+def test_glossary_exempts_weak_txn_name():
+    # 挂了人工业务术语 → 已确认业务身份，弱事实改判豁免。
+    result = classify_object_role(
+        _txn_header_shaped(),
+        distinct_fk_targets=3,
+        weak_fact_name_token="订单",
+        glossary_terms=["采购订单"],
+    )
+    assert result.role == ROLE_BUSINESS_OBJECT
+
+
+def test_evidence_builder_marks_transaction_header_as_bridge():
+    # 端到端：采购订单（引用供应商/仓库两个维度 + 含金额度量）→ 事实/关系表(bridge)。
+    supplier = DatasetInput(
+        urn="urn:li:dataset:supplier", name="supplier", display_name="供应商",
+        fields=[
+            FieldInput(name="id", data_type="string", is_primary_key=True),
+            FieldInput(name="name", data_type="string"),
+            FieldInput(name="contact", data_type="string"),
+        ],
+    )
+    warehouse = DatasetInput(
+        urn="urn:li:dataset:warehouse", name="warehouse", display_name="仓库",
+        fields=[
+            FieldInput(name="id", data_type="string", is_primary_key=True),
+            FieldInput(name="name", data_type="string"),
+            FieldInput(name="location", data_type="string"),
+        ],
+    )
+    purchase_order = DatasetInput(
+        urn="urn:li:dataset:purchase_order", name="purchase_order", display_name="采购订单",
+        fields=[
+            FieldInput(name="po_id", data_type="string", is_primary_key=True),
+            FieldInput(name="supplier_id", data_type="string", is_foreign_key=True, foreign_key_target="supplier.id"),
+            FieldInput(name="warehouse_id", data_type="string", is_foreign_key=True, foreign_key_target="warehouse.id"),
+            FieldInput(name="total_amount", data_type="decimal"),
+            FieldInput(name="status", data_type="string"),
+        ],
+    )
+    bundle = DataHubDomainBundle(
+        domain=DomainInput(id="urn:li:domain:proc", name="采购域"),
+        datasets=[purchase_order, supplier, warehouse],
+        lineages=[],
+    )
+    evidence = EvidenceBuilder().build(bundle)
+    po = next(
+        p for p in evidence.object_types
+        if p.source_dataset_urn == "urn:li:dataset:purchase_order"
+    )
+    assert po.table_role == ROLE_BRIDGE
+    assert "待复核" in (po.role_reason or "")
+    assert po.role_signals["signals"].get("weak_fact_name_token") == "订单"

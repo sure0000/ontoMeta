@@ -27,6 +27,7 @@ class ArtifactKind(str, enum.Enum):
     SYNC = "sync"  # 同步作业 → SeaTunnel
     TRANSFORM = "transform"  # ETL 任务 → Spark SQL
     METRIC = "metric"  # 指标任务 → 聚合 SQL
+    MATERIALIZE = "materialize"  # 本体一键物化 → 目标数据源真正建表落数
 
 
 # 高危制品：执行不可逆或直接改动生产集群，必须展示 dry-run 差异后才可确认。

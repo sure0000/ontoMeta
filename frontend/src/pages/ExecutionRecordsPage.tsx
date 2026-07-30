@@ -6,7 +6,7 @@ import {
   StopOutlined,
   RedoOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Modal, Space, Spin, Table, Typography, message } from "antd";
+import { Alert, Button, Modal, Space, Spin, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
@@ -21,6 +21,16 @@ import { useApi } from "../hooks/useApi";
 import type { ChangeLog, TaskRecord } from "../types";
 
 const { Text } = Typography;
+
+// 变更日志的实体类型 → 中文标签，用于「变更概览」列的紧凑标签展示。
+const ENTITY_TYPE_LABEL: Record<string, string> = {
+  object_type: "对象",
+  relation_type: "关系",
+  property: "属性",
+  ontology: "本体",
+  business_logic: "逻辑",
+  task: "任务",
+};
 
 interface TasksBundle {
   tasks: TaskRecord[];
@@ -203,19 +213,24 @@ export function ExecutionRecordsPage() {
       render: (v) => new Date(v).toLocaleString(),
     },
     {
-      title: "实体类型",
+      title: "变更概览",
       key: "entity_type",
-      width: 140,
+      width: 200,
       render: (_, record) => {
         const logs = taskLogsMap[record.id] ?? [];
-        if (logs.length === 0)
-          return <span className="om-muted">-</span>;
+        if (logs.length === 0) return <span className="om-muted">-</span>;
+        // 按实体类型聚合计数，紧凑标签单行展示，避免逐条竖排导致行高参差。
+        const counts = new Map<string, number>();
+        for (const log of logs) {
+          counts.set(log.entity_type, (counts.get(log.entity_type) ?? 0) + 1);
+        }
         return (
-          <Space direction="vertical" size={2} style={{ display: "flex" }}>
-            {logs.map((log) => (
-              <Text key={log.id} style={{ fontSize: 12 }}>
-                {log.entity_type}
-              </Text>
+          <Space size={[4, 4]} wrap>
+            {[...counts.entries()].map(([type, n]) => (
+              <Tag key={type} style={{ margin: 0 }}>
+                {ENTITY_TYPE_LABEL[type] ?? type}
+                {n > 1 ? ` ×${n}` : ""}
+              </Tag>
             ))}
           </Space>
         );
@@ -271,10 +286,12 @@ export function ExecutionRecordsPage() {
     },
   ];
 
-  if (loading) return <PageSkeleton type="list" full />;
+  // 仅在**首次加载**（尚无数据）时整页骨架屏；后续 3 秒轮询走静默刷新，
+  // 不再把整页替换成骨架——否则每次轮询整页闪烁、滚动位置被重置。
+  if (loading && !bundle) return <PageSkeleton type="list" />;
 
   return (
-    <PageContainer full>
+    <PageContainer>
       <PageHeader
         icon={<HistoryOutlined />}
         title="任务执行记录"

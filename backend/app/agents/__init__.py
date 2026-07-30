@@ -7,10 +7,12 @@
 
 from app.agents import registry
 from app.agents.drafters.cluster import ClusterDrafter
+from app.agents.drafters.materialize import MaterializeDrafter
 from app.agents.drafters.metric import MetricDrafter
 from app.agents.drafters.sync import SyncDrafter
 from app.agents.drafters.transform import TransformDrafter
 from app.agents.executors.cluster import ClusterExecutor
+from app.agents.executors.materialize import MaterializeExecutor
 from app.agents.executors.metric import MetricExecutor
 from app.agents.executors.sync import SyncExecutor
 from app.agents.executors.transform import TransformExecutor
@@ -22,6 +24,7 @@ def register_builtin_agents() -> None:
     registry.register("transform", TransformDrafter(), TransformExecutor())
     registry.register("sync", SyncDrafter(), SyncExecutor())
     registry.register("cluster", ClusterDrafter(), ClusterExecutor())
+    registry.register("materialize", MaterializeDrafter(), MaterializeExecutor())
 
 
 register_builtin_agents()

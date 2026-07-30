@@ -116,6 +116,11 @@ class DraftPersistenceService:
             target_id = object_name_to_id.get(item.target_object_type_name)
             if not source_id or not target_id:
                 continue
+            mapping_id = (
+                object_name_to_id.get(item.mapping_object_type_name)
+                if item.mapping_object_type_name
+                else None
+            )
             db.add(
                 RelationType(
                     ontology_id=ontology.id,
@@ -126,6 +131,7 @@ class DraftPersistenceService:
                     target_object_type_id=target_id,
                     cardinality=item.cardinality,
                     structure_type=item.structure_type,
+                    mapping_object_type_id=mapping_id,
                     source_evidence=item.source_evidence,
                     source_confidence=item.confidence,
                     status=EntityStatus.SUGGESTED.value,
@@ -331,6 +337,11 @@ class DraftPersistenceService:
             target_id = object_id_by_candidate.get(item.target_object_type_name)
             if not source_id or not target_id:
                 continue
+            mapping_id = (
+                object_id_by_candidate.get(item.mapping_object_type_name)
+                if item.mapping_object_type_name
+                else None
+            )
             existing = existing_by_name.get(item.name)
             if existing is not None:
                 existing.display_name = item.display_name
@@ -339,6 +350,7 @@ class DraftPersistenceService:
                 existing.target_object_type_id = target_id
                 existing.cardinality = item.cardinality
                 existing.structure_type = item.structure_type
+                existing.mapping_object_type_id = mapping_id
                 existing.source_evidence = item.source_evidence
                 existing.source_confidence = item.confidence
             else:
@@ -352,6 +364,7 @@ class DraftPersistenceService:
                         target_object_type_id=target_id,
                         cardinality=item.cardinality,
                         structure_type=item.structure_type,
+                        mapping_object_type_id=mapping_id,
                         source_evidence=item.source_evidence,
                         source_confidence=item.confidence,
                         status=EntityStatus.SUGGESTED.value,

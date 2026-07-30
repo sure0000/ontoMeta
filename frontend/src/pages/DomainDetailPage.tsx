@@ -118,7 +118,8 @@ export function DomainDetailPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string[]>([]);
+  // 默认 Tab 为「业务对象」：初始就按该角色过滤，避免首帧拉到全部角色（含关系表）后再收窄。
+  const [typeFilter, setTypeFilter] = useState<string[]>(["business_object"]);
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
 
   useEffect(() => {
@@ -421,6 +422,8 @@ export function DomainDetailPage() {
     `/workspace/${domainId}/objects/${objectId}`;
   const relationDetailPath = (relationId: string) =>
     `/workspace/${domainId}/relations/${relationId}`;
+  const relationGroupDetailPath = (displayName: string) =>
+    `/workspace/${domainId}/relation-groups/${encodeURIComponent(displayName)}?oid=${domain.latest_ontology_id}`;
 
   const publishedVersion = domain.published_ontology_version;
 
@@ -600,6 +603,8 @@ export function DomainDetailPage() {
             relations={relations}
             objectDetailPath={objectDetailPath}
             relationDetailPath={relationDetailPath}
+            relationScope={{ ontologyId: domain.latest_ontology_id ?? undefined }}
+            relationGroupDetailPath={relationGroupDetailPath}
             workspaceMode
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}

@@ -139,6 +139,8 @@ _ROLE_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     (r"^POST$", r"/datahub/writeback(/|$)", "publisher"),
     # 执行类：直接打物理数据源
     (r"^POST$", r"/execute(/|$)", "publisher"),
+    # 物化类：一键落库，直接对目标数据源建表/写数
+    (r"^POST$", r"/warehouse/materialize(/|$)", "publisher"),
     # 设置类：改 LLM/DataHub/Cube 连接与凭据
     (r"^(POST|PATCH|PUT|DELETE)$", r"^/api/settings(/|$)", "publisher"),
     (r"^(POST|PATCH|PUT|DELETE)$", r"^/api/(llm-services|datahub|cube)", "publisher"),

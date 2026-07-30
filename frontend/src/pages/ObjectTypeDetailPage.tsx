@@ -2,6 +2,7 @@ import {
   ApartmentOutlined,
   AppstoreOutlined,
   AuditOutlined,
+  DatabaseOutlined,
   FunctionOutlined,
   HistoryOutlined,
   LinkOutlined,
@@ -37,7 +38,6 @@ import { ObjectRelationGraph } from "../components/ObjectRelationGraph";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { SectionCard } from "../components/SectionCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { ProvenanceBadge } from "../components/ProvenanceBadge";
 import { useDebouncedCallback } from "../hooks/useApi";
@@ -252,7 +252,7 @@ export function ObjectTypeDetailPage() {
   const [convertSaving, setConvertSaving] = useState(false);
   const [convertForm] = Form.useForm<ConvertForm>();
   const [peerObjects, setPeerObjects] = useState<ObjectTypeSummary[]>([]);
-  const [relationTab, setRelationTab] = useState("list");
+  const [activeTab, setActiveTab] = useState("basic");
   const [datasetOptions, setDatasetOptions] = useState<DataHubDatasetOption[]>([]);
   const [datasetSearching, setDatasetSearching] = useState(false);
   const [ensuringDataset, setEnsuringDataset] = useState(false);
@@ -651,8 +651,13 @@ export function ObjectTypeDetailPage() {
 
   const canPrePublish =
     obj.status !== "pre_published" && obj.status !== "published";
+  // 关系表(bridge)实现(mapping)的业务关系并入计数/列表/图谱：桥表本身非端点，
+  // 这些才是它连接的业务对象（供应商→科目 等），否则其关系列表/图谱恒为空。
+  const implementedRelations = obj.implemented_relations ?? [];
   const relationCount =
-    obj.outgoing_relations.length + obj.incoming_relations.length;
+    obj.outgoing_relations.length +
+    obj.incoming_relations.length +
+    implementedRelations.length;
 
   const relationColumns: ColumnsType<RelationType> = [
     {
@@ -806,7 +811,11 @@ export function ObjectTypeDetailPage() {
     },
   ];
 
-  const allRelations = [...obj.outgoing_relations, ...obj.incoming_relations];
+  const allRelations = [
+    ...obj.outgoing_relations,
+    ...obj.incoming_relations,
+    ...implementedRelations,
+  ];
   const versionRecords = obj.version_records ?? [];
 
   return (
@@ -847,138 +856,172 @@ export function ObjectTypeDetailPage() {
         />
       )}
 
-      <SectionCard
-        title="基本信息"
-        icon={<ApartmentOutlined />}
-        extra={
-          <DataHubSourceLink
-            sourceRef={obj.source_ref}
-            datahubUrl={obj.datahub_url}
-            datahubBase={datahubBase}
-          />
-        }
-      >
-        {inWorkspace ? (
-          <Form form={form} layout="vertical">
-            <Row gutter={20}>
-              <Col xs={24} md={8}>
-                <Form.Item
-                  label="显示名称"
-                  name="display_name"
-                  rules={[{ required: true, message: "请输入显示名称" }]}
-                >
-                  <Input />
-                </Form.Item>
-              </Col>
-              <Col xs={24} md={8}>
-                <Form.Item
-                  label="标识名"
-                  name="name"
-                  rules={[{ required: true, message: "请输入标识名" }]}
-                >
-                  <Input />
-                </Form.Item>
-              </Col>
-              <Col xs={24} md={8}>
-                <Form.Item label="命名置信度">
-                  <Input value={obj.source_confidence?.toFixed(2) ?? "-"} disabled />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Form.Item label="描述" name="description" style={{ marginBottom: 16 }}>
-              <Input.TextArea rows={2} />
-            </Form.Item>
-            <Row gutter={20}>
-              <Col xs={24} md={8}>
-                <Form.Item label="对象类型" name="table_role">
-                  <Select
-                    options={ROLE_OPTIONS}
-                    onChange={() => form.setFieldValue("needs_review", false)}
-                  />
-                </Form.Item>
-              </Col>
-              <Col xs={24} md={8}>
-                <Form.Item
-                  label="复核状态"
-                  name="needs_review"
-                  extra="改判对象类型后将自动置为已确认"
-                  style={{ marginBottom: 0 }}
-                >
-                  <Select
-                    options={[
-                      { label: "已确认", value: false },
-                      { label: "待复核", value: true },
-                    ]}
-                  />
-                </Form.Item>
-              </Col>
-            </Row>
-          </Form>
-        ) : (
-          <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
-            <Descriptions.Item label="数据域">
-              {obj.domain_name || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
-            <Descriptions.Item label="命名置信度">
-              {obj.source_confidence?.toFixed(2) ?? "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="描述" span={4}>
-              {obj.description || "暂无描述"}
-            </Descriptions.Item>
-          </Descriptions>
-        )}
-      </SectionCard>
-
-      {(inWorkspace || obj.role_reason || obj.role_signals) && (
-        <SectionCard
-          title="判定依据"
-          icon={<AuditOutlined />}
-          extra={
-            inWorkspace && canPrePublish ? (
-              <Button icon={<ShareAltOutlined />} onClick={openConvertModal}>
-                转为业务关系
-              </Button>
-            ) : undefined
-          }
-        >
-          <DecisionEvidencePanel obj={obj} />
-        </SectionCard>
-      )}
-
-      {inWorkspace && (
-        <MaterializationContractPanel
-          ontologyId={obj.ontology_id}
-          targetKind="object_type"
-          targetId={obj.id}
-        />
-      )}
-
-      <SectionCard
-        title="属性"
-        count={properties.length}
-        countPrimary
-        icon={<AppstoreOutlined />}
-        bodyFlush
-      >
-        <Table
-          className="om-table"
-          rowKey="id"
-          size="middle"
-          columns={inWorkspace ? editablePropertyColumns : readOnlyPropertyColumns}
-          dataSource={properties}
-          pagination={false}
-        />
-      </SectionCard>
-
       <section className="section-card">
         <Tabs
           className="om-tabs om-tabs--inset"
-          activeKey={relationTab}
-          onChange={setRelationTab}
+          activeKey={activeTab}
+          onChange={setActiveTab}
           items={[
             {
-              key: "list",
+              key: "basic",
+              label: (
+                <span>
+                  <ApartmentOutlined style={{ marginRight: 6 }} />
+                  基本信息
+                </span>
+              ),
+              children: (
+                <>
+                  <div className="om-tab-toolbar">
+                    <DataHubSourceLink
+                      sourceRef={obj.source_ref}
+                      datahubUrl={obj.datahub_url}
+                      datahubBase={datahubBase}
+                    />
+                  </div>
+                  <div className="om-tab-body">
+                  {inWorkspace ? (
+                    <Form form={form} layout="vertical">
+                      <Row gutter={20}>
+                        <Col xs={24} md={8}>
+                          <Form.Item
+                            label="显示名称"
+                            name="display_name"
+                            rules={[{ required: true, message: "请输入显示名称" }]}
+                          >
+                            <Input />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item
+                            label="标识名"
+                            name="name"
+                            rules={[{ required: true, message: "请输入标识名" }]}
+                          >
+                            <Input />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item label="命名置信度">
+                            <Input value={obj.source_confidence?.toFixed(2) ?? "-"} disabled />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Form.Item label="描述" name="description" style={{ marginBottom: 16 }}>
+                        <Input.TextArea rows={2} />
+                      </Form.Item>
+                      <Row gutter={20}>
+                        <Col xs={24} md={8}>
+                          <Form.Item label="对象类型" name="table_role">
+                            <Select
+                              options={ROLE_OPTIONS}
+                              onChange={() => form.setFieldValue("needs_review", false)}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item
+                            label="复核状态"
+                            name="needs_review"
+                            extra="改判对象类型后将自动置为已确认"
+                            style={{ marginBottom: 0 }}
+                          >
+                            <Select
+                              options={[
+                                { label: "已确认", value: false },
+                                { label: "待复核", value: true },
+                              ]}
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    </Form>
+                  ) : (
+                    <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+                      <Descriptions.Item label="数据域">
+                        {obj.domain_name || "-"}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
+                      <Descriptions.Item label="命名置信度">
+                        {obj.source_confidence?.toFixed(2) ?? "-"}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="描述" span={4}>
+                        {obj.description || "暂无描述"}
+                      </Descriptions.Item>
+                    </Descriptions>
+                  )}
+                  </div>
+                </>
+              ),
+            },
+            ...(inWorkspace || obj.role_reason || obj.role_signals
+              ? [
+                  {
+                    key: "evidence",
+                    label: (
+                      <span>
+                        <AuditOutlined style={{ marginRight: 6 }} />
+                        判定依据
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        {inWorkspace && canPrePublish && (
+                          <div className="om-tab-toolbar">
+                            <Button icon={<ShareAltOutlined />} onClick={openConvertModal}>
+                              转为业务关系
+                            </Button>
+                          </div>
+                        )}
+                        <div className="om-tab-body">
+                          <DecisionEvidencePanel obj={obj} />
+                        </div>
+                      </>
+                    ),
+                  },
+                ]
+              : []),
+            ...(inWorkspace
+              ? [
+                  {
+                    key: "materialization",
+                    label: (
+                      <span>
+                        <DatabaseOutlined style={{ marginRight: 6 }} />
+                        物化契约
+                      </span>
+                    ),
+                    children: (
+                      <MaterializationContractPanel
+                        ontologyId={obj.ontology_id}
+                        targetKind="object_type"
+                        targetId={obj.id}
+                      />
+                    ),
+                  },
+                ]
+              : []),
+            {
+              key: "properties",
+              label: (
+                <span>
+                  <AppstoreOutlined style={{ marginRight: 6 }} />
+                  属性{properties.length > 0 ? ` (${properties.length})` : ""}
+                </span>
+              ),
+              children: (
+                <Table
+                  className="om-table"
+                  rowKey="id"
+                  size="small"
+                  columns={inWorkspace ? editablePropertyColumns : readOnlyPropertyColumns}
+                  dataSource={properties}
+                  pagination={false}
+                />
+              ),
+            },
+            {
+              key: "relations",
               label: (
                 <span>
                   <ShareAltOutlined style={{ marginRight: 6 }} />
@@ -994,19 +1037,21 @@ export function ObjectTypeDetailPage() {
                       </Button>
                     </div>
                   )}
+                  <div className="om-tab-body">
                   {relationCount === 0 ? (
                     <EmptyState title="暂无关系" description={inWorkspace ? "点击「新增关系」按钮创建关系" : "该对象尚未建立与其他对象的关系。"} />
                   ) : (
                     <Table
                       className="om-table"
                       rowKey="id"
-                      size="middle"
+                      size="small"
                       columns={relationColumns}
                       dataSource={allRelations}
                       scroll={{ x: "max-content" }}
                       pagination={false}
                     />
                   )}
+                  </div>
                 </>
               ),
             },
@@ -1032,6 +1077,52 @@ export function ObjectTypeDetailPage() {
                 )
               ),
             },
+            {
+              key: "logic",
+              label: (
+                <span>
+                  <FunctionOutlined style={{ marginRight: 6 }} />
+                  业务逻辑{obj.business_logics.length > 0 ? ` (${obj.business_logics.length})` : ""}
+                </span>
+              ),
+              children: (
+                obj.business_logics.length === 0 ? (
+                  <EmptyState title="暂无关联业务逻辑" />
+                ) : (
+                  <Table
+                    className="om-table"
+                    rowKey="id"
+                    size="small"
+                    columns={logicColumns}
+                    dataSource={obj.business_logics}
+                    pagination={false}
+                  />
+                )
+              ),
+            },
+            ...(!inWorkspace && versionRecords.length > 0
+              ? [
+                  {
+                    key: "versions",
+                    label: (
+                      <span>
+                        <HistoryOutlined style={{ marginRight: 6 }} />
+                        版本记录 ({versionRecords.length})
+                      </span>
+                    ),
+                    children: (
+                      <Table
+                        className="om-table"
+                        rowKey="id"
+                        size="small"
+                        columns={versionColumns}
+                        dataSource={versionRecords}
+                        pagination={false}
+                      />
+                    ),
+                  },
+                ]
+              : []),
           ]}
         />
       </section>
@@ -1229,44 +1320,6 @@ export function ObjectTypeDetailPage() {
           </Form.Item>
         </Form>
       </Modal>
-
-      <SectionCard
-        title="关联业务逻辑"
-        count={obj.business_logics.length}
-        icon={<FunctionOutlined />}
-        bodyFlush
-      >
-        {obj.business_logics.length === 0 ? (
-          <EmptyState title="暂无关联业务逻辑" />
-        ) : (
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={logicColumns}
-            dataSource={obj.business_logics}
-            pagination={false}
-          />
-        )}
-      </SectionCard>
-
-      {!inWorkspace && versionRecords.length > 0 && (
-        <SectionCard
-          title="版本记录"
-          count={versionRecords.length}
-          icon={<HistoryOutlined />}
-          bodyFlush
-        >
-          <Table
-            className="om-table"
-            rowKey="id"
-            size="middle"
-            columns={versionColumns}
-            dataSource={versionRecords}
-            pagination={false}
-          />
-        </SectionCard>
-      )}
       </div>
     </PageContainer>
   );

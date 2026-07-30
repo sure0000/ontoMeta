@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from app.schemas import DataHubDomainBundle, DatasetInput
@@ -54,6 +55,12 @@ class SourceProfile:
     def build_table_index(self, bundle: DataHubDomainBundle) -> dict[str, str]:
         """归一化目标名 → 真实表名，供 Link 字段推断外键。默认空（不推断）。"""
         return {}
+
+    def resolve_parent_table(
+        self, dataset: DatasetInput, table_index: dict[str, str]
+    ) -> str | None:
+        """明细/子表的父表（隶属目标）真实表名。默认无（不推断）。"""
+        return None
 
     def inferred_fks(
         self, dataset: DatasetInput, table_index: dict[str, str]
@@ -128,22 +135,80 @@ class FrappeProfile(SourceProfile):
     def inferred_fks(
         self, dataset: DatasetInput, table_index: dict[str, str]
     ) -> list[InferredFk]:
-        """Frappe Link 字段：列名归一化后命中某 DocType 名 → 指向该表的外键。
-        排除标准列、排除自指。"""
+        """Frappe Link 字段 → 指向某 DocType 的外键。两级匹配：
+
+        1. 快路径——整列名归一化后精确命中某 DocType（如 `asset`→Asset）。
+        2. 边界词元兜底——整名不命中时，把列名按下划线切成词元，取**最右**
+           命中 DocType 的语义中心词（如 `item_code`→Item、`fixed_asset_account`
+           →Account）。真实源里引用列多带角色词缀，只做整名精确会漏掉约一半。
+
+        兜底仅对 VARCHAR 列（Frappe Link/Data/Select 皆为 varchar(140)）开放，
+        据此把度量列排除在外——否则 `current_asset_value` 会误命中 `asset`。
+        排除标准列、排除自指；同名列去重（回声列如 `asset_name` 与 `asset`
+        指向同一目标，由下游按目标集合去重，不重复计度）。
+        """
         out: list[InferredFk] = []
         seen: set[str] = set()
         for f in dataset.fields:
             col = f.name.lower()
-            if col in self.STANDARD_COLUMNS:
+            if col in self.STANDARD_COLUMNS or f.name in seen:
                 continue
-            tok = _norm_token(col)
-            if len(tok) < 3:
-                continue
-            target = table_index.get(tok)
-            if target and target != dataset.name and f.name not in seen:
+            target = self._resolve_fk_target(f, table_index, dataset.name)
+            if target:
                 out.append(InferredFk(column=f.name, target_table=target))
                 seen.add(f.name)
         return out
+
+    def _resolve_fk_target(
+        self, field, table_index: dict[str, str], self_name: str
+    ) -> str | None:
+        col = field.name.lower()
+        # 1) 快路径：整名精确（不设类型护栏，保持既有行为）。
+        whole = _norm_token(col)
+        if len(whole) >= 3:
+            target = table_index.get(whole)
+            if target and target != self_name:
+                return target
+        # 2) 边界词元兜底：仅 VARCHAR（Link/Data/Select），排除度量/整数列。
+        dtype = (field.data_type or "").upper()
+        if "VARCHAR" not in dtype and "CHAR" not in dtype and "TEXT" not in dtype:
+            return None
+        best: str | None = None
+        for seg in re.split(r"[^a-z0-9]+", col):
+            if len(seg) < 3:
+                continue
+            target = table_index.get(seg)
+            if target and target != self_name:
+                best = target  # 取最右命中的语义中心词
+        return best
+
+    def resolve_parent_table(
+        self, dataset: DatasetInput, table_index: dict[str, str]
+    ) -> str | None:
+        """由子表 ``parenttype`` 列的**样例值**解析其父 DocType 对应的真实表名。
+
+        Frappe 子表靠 ``parent``(父记录主键) + ``parenttype``(父 DocType 名) 隶属父表，
+        这是多态动态链接、无法从 schema 声明推断，但 ``parenttype`` 的取值就是父 DocType
+        名（如 "Sales Invoice"）。取样例众数、归一化后命中 table_index 即得父表
+        （如 tabSales Invoice）。样例值仅在实时摄取（有 profiling）时可得，未采样则返回 None，
+        交由上层优雅跳过。取众数而非首值：抗单条脏样例，且真实数据里子表 parenttype
+        往往单一（一张子表基本只归属一种父 DocType）。
+        """
+        if not self.is_child_table(dataset):
+            return None
+        samples: list[str] = []
+        for f in dataset.fields:
+            if f.name.lower() == "parenttype":
+                samples = f.sample_values or []
+                break
+        counts = Counter(s for s in samples if s)
+        if not counts:
+            return None
+        token = _norm_token(counts.most_common(1)[0][0])
+        if len(token) < 3:
+            return None
+        target = table_index.get(token)
+        return target if target and target != dataset.name else None
 
 
 def detect_source_profile(bundle: DataHubDomainBundle) -> SourceProfile:

@@ -51,3 +51,33 @@ class MaterializationContractSyncResult(BaseModel):
         0, description="因人工钉住而未被覆盖的字段数（跨全部契约累计）"
     )
     total: int
+
+
+class MaterializeRequest(BaseModel):
+    """本体一键物化请求：把已发布本体落到某个目标数据源。"""
+
+    target_datasource_id: str = Field(description="目标存储（DataSource）id，其 dsn 即落库连接串")
+    engine: str = Field("hive", description="目标数仓引擎（决定 DDL/ETL 方言）")
+    database_prefix: str | None = Field(
+        None, description="库名后缀，如 erp → dim_erp"
+    )
+    selected_targets: list[str] | None = Field(
+        None, description="勾选要物化的实体名；空/None = 全部可物化实体"
+    )
+    overrides: dict[str, dict] = Field(
+        default_factory=dict,
+        description="{contract_id: {字段: 值}} 人工覆盖的存储策略/层/表名等，写回契约并钉住",
+    )
+    intent: str | None = None
+    operator: str | None = None
+
+
+class MaterializeResult(BaseModel):
+    """物化执行回执。``receipt`` 内含 ddl/etl 分阶段结果与逐表状态。"""
+
+    artifact_id: str
+    status: str
+    ok: bool
+    name: str
+    receipt: dict | None = None
+    executed_at: datetime | None = None

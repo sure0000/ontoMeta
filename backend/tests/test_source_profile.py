@@ -6,6 +6,7 @@ from app.schemas import (
 )
 from app.services.evidence_builder import EvidenceBuilder
 from app.services.object_classifier import (
+    ROLE_BRIDGE,
     ROLE_BUSINESS_OBJECT,
     ROLE_DATA_TABLE,
     classify_object_role,
@@ -112,31 +113,83 @@ def test_frappe_link_field_inferred_fk():
     assert "tabCustomer" in targets
 
 
-def test_child_table_classified_as_data_table():
+def _affix_bundle():
+    # 目标 DocType + 一张带角色词缀引用列的明细表（贴近真实 Asset Capitalization）。
+    V = "VARCHAR(140)"
+    return DataHubDomainBundle(
+        domain=DomainInput(id="d1", name="ERP"),
+        datasets=[
+            _tab("tabItem", [FieldInput(name="item_name", data_type=V)]),
+            _tab("tabAccount", [FieldInput(name="account_name", data_type=V)]),
+            _tab("tabWarehouse", [FieldInput(name="warehouse_name", data_type=V)]),
+            _tab(
+                "tabStock Entry Detail",
+                [
+                    FieldInput(name="item_code", data_type=V),  # → Item（后缀角色词）
+                    FieldInput(name="fixed_asset_account", data_type=V),  # → Account
+                    FieldInput(name="default_warehouse", data_type=V),  # → Warehouse
+                    FieldInput(name="valuation_rate", data_type="DECIMAL(21, 9)"),
+                ],
+            ),
+        ],
+    )
+
+
+def test_frappe_inferred_fk_resolves_role_affix_columns():
+    # 整名不命中时，按边界词元取语义中心词：真实引用列多带角色词缀，
+    # 只做整名精确会漏掉约一半。
+    bundle = _affix_bundle()
+    p = FrappeProfile()
+    index = p.build_table_index(bundle)
+    detail = {d.name: d for d in bundle.datasets}["tabStock Entry Detail"]
+    edges = {e.column: e.target_table for e in p.inferred_fks(detail, index)}
+    assert edges.get("item_code") == "tabItem"
+    assert edges.get("fixed_asset_account") == "tabAccount"
+    assert edges.get("default_warehouse") == "tabWarehouse"
+
+
+def test_frappe_inferred_fk_skips_measure_column():
+    # 度量列（DECIMAL）不得被当作 Link：valuation_rate 不能误命中任何 DocType。
+    bundle = _affix_bundle()
+    p = FrappeProfile()
+    index = p.build_table_index(bundle)
+    detail = {d.name: d for d in bundle.datasets}["tabStock Entry Detail"]
+    cols = {e.column for e in p.inferred_fks(detail, index)}
+    assert "valuation_rate" not in cols
+
+
+
+def test_child_table_classified_as_bridge():
+    # 明细/子表按建模原则判为业务关系(bridge) + 待复核，而非独立业务实体/数据表。
     result = classify_object_role(
         [FieldSignal(name="name", semantic_type="identifier", is_primary_key=True),
          FieldSignal(name="qty", semantic_type="amount")],
         is_child_table=True,
     )
-    assert result.role == ROLE_DATA_TABLE
-    assert not result.needs_review
+    assert result.role == ROLE_BRIDGE
+    assert result.needs_review
     assert "子表" in result.reason
+    assert "关系" in result.reason
 
 
 def test_glossary_exempts_child_table_downgrade():
+    # 挂了人工业务术语 → 豁免子表改判（bridge），落回正常打分为业务对象。
     result = classify_object_role(
         [FieldSignal(name="name", semantic_type="identifier", is_primary_key=True)],
         is_child_table=True,
         glossary_terms=["订单明细"],
     )
-    assert result.role != ROLE_DATA_TABLE
+    assert result.role == ROLE_BUSINESS_OBJECT
 
 
 def test_evidence_builder_frappe_end_to_end():
     evidence = EvidenceBuilder().build(_frappe_bundle())
     roles = {ot.display_name: ot.table_role for ot in evidence.object_types}
-    # 子表 → 数据表
-    assert roles["tabSales Order Item"] == ROLE_DATA_TABLE
+    # 子表初判为关系表(bridge)，但连不到两个业务对象（bundle 内无 tabItem 可解析）
+    # → 智能重判为对象，不再停留在 bridge。
+    assert roles["tabSales Order Item"] != ROLE_BRIDGE
+    soi = next(ot for ot in evidence.object_types if ot.display_name == "tabSales Order Item")
+    assert "重判" in (soi.role_reason or "")
     # Customer 被 Sales Order 通过 Link 字段引用（推断外键入度）→ 业务对象
     assert roles["tabCustomer"] == ROLE_BUSINESS_OBJECT
     # 推断出的 Link 外键关系存在

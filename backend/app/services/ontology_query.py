@@ -1,5 +1,6 @@
 import json
 import math
+from collections import Counter
 from dataclasses import dataclass
 
 from sqlalchemy import func
@@ -34,6 +35,7 @@ from app.schemas import (
     OntologySummary,
     PageResult,
     RelationObjectRef,
+    RelationGroupOut,
     RelationTypeDetail,
     RelationTypeOut,
     VersionRecordOut,
@@ -460,6 +462,7 @@ class OntologyQueryService:
         published_only: bool = False,
         *,
         q: str | None = None,
+        display_name: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> PageResult[RelationTypeOut]:
@@ -476,6 +479,8 @@ class OntologyQueryService:
             published_only=published_only,
             ontology_model=RelationType,
         )
+        if display_name is not None:
+            query = query.filter(RelationType.display_name == display_name)
         if q and q.strip():
             like = f"%{q.strip()}%"
             query = query.filter(
@@ -492,6 +497,87 @@ class OntologyQueryService:
         relations = query.all()
         items = [self._to_relation_out(db, rel) for rel in relations]
         return PageResult(items=items, total=total, limit=limit, offset=offset)
+
+    def list_relation_groups(
+        self,
+        db: Session,
+        ontology_id: str | None = None,
+        domain_context_id: str | None = None,
+        published_only: bool = False,
+        *,
+        q: str | None = None,
+    ) -> list[RelationGroupOut]:
+        """按 display_name 折叠关系为分组（关系去重列表用）。
+
+        scope / q 过滤与 ``list_relation_types`` 完全一致；聚合在 Python 内完成
+        （SQLite 无 array_agg，且 scope 行数有限），并对基数/结构类型套用与
+        ``_to_relation_out`` 相同的归一化，保证列表与详情三元组口径一致。
+        """
+        query = db.query(RelationType)
+        query = self._apply_ontology_scope(
+            db,
+            query,
+            ontology_id=ontology_id,
+            domain_context_id=domain_context_id,
+            published_only=published_only,
+            ontology_model=RelationType,
+        )
+        if q and q.strip():
+            like = f"%{q.strip()}%"
+            query = query.filter(
+                (RelationType.name.ilike(like))
+                | (RelationType.display_name.ilike(like))
+                | (RelationType.description.ilike(like))
+            )
+
+        groups: dict[str, dict] = {}
+        for rel in query.all():
+            key = rel.display_name or ""
+            g = groups.get(key)
+            if g is None:
+                g = {
+                    "count": 0,
+                    "structure_types": set(),
+                    "cardinalities": set(),
+                    "statuses": set(),
+                    "conf_min": None,
+                    "conf_max": None,
+                    "descriptions": Counter(),
+                }
+                groups[key] = g
+            g["count"] += 1
+            structure = rel.structure_type or infer_relation_structure_type(
+                rel.description, rel.source_evidence
+            )
+            if structure:
+                g["structure_types"].add(structure)
+            cardinality = _normalize_cardinality(rel.cardinality)
+            if cardinality:
+                g["cardinalities"].add(cardinality)
+            if rel.status:
+                g["statuses"].add(rel.status)
+            if rel.source_confidence is not None:
+                c = rel.source_confidence
+                g["conf_min"] = c if g["conf_min"] is None else min(g["conf_min"], c)
+                g["conf_max"] = c if g["conf_max"] is None else max(g["conf_max"], c)
+            if rel.description:
+                g["descriptions"][rel.description] += 1
+
+        result = [
+            RelationGroupOut(
+                display_name=name,
+                count=g["count"],
+                description=(g["descriptions"].most_common(1)[0][0] if g["descriptions"] else None),
+                structure_types=sorted(g["structure_types"]),
+                cardinalities=sorted(g["cardinalities"]),
+                confidence_min=g["conf_min"],
+                confidence_max=g["conf_max"],
+                statuses=sorted(g["statuses"]),
+            )
+            for name, g in groups.items()
+        ]
+        result.sort(key=lambda r: r.count, reverse=True)
+        return result
 
 
     def get_relation_type(self, db: Session, relation_type_id: str) -> RelationTypeDetail | None:

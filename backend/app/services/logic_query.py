@@ -367,6 +367,18 @@ class OntologyQueryService(_OntologyQueryBase):
             .filter(RelationType.target_object_type_id == object_type_id)
             .all()
         )
+        # 本对象作为关系表(bridge)实现(mapping)的业务关系：它本身不是关系端点，
+        # 故不在 outgoing/incoming 里；供桥表详情图谱显示它所连接的两个业务对象。
+        implemented = (
+            db.query(RelationType)
+            .options(
+                joinedload(RelationType.source_object_type),
+                joinedload(RelationType.target_object_type),
+                joinedload(RelationType.mapping_object_type),
+            )
+            .filter(RelationType.mapping_object_type_id == object_type_id)
+            .all()
+        )
         related_logics = self._related_logics_for_object(db, obj)
         logic_bindings = self._logic_bindings_for_object(db, obj)
 
@@ -393,6 +405,7 @@ class OntologyQueryService(_OntologyQueryBase):
             properties=[PropertyOut.model_validate(p) for p in obj.properties],
             outgoing_relations=[self._to_relation_out(db, r) for r in outgoing],
             incoming_relations=[self._to_relation_out(db, r) for r in incoming],
+            implemented_relations=[self._to_relation_out(db, r) for r in implemented],
             business_logics=[
                 self._to_business_logic_out(
                     db,

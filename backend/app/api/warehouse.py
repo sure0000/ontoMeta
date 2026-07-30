@@ -5,21 +5,26 @@
 """
 
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
+    agent_pipeline,
     datahub_writeback,
     materialization_contract_service,
     warehouse_generator,
 )
 from app.database import get_db
 from app.models import MaterializationContract, Ontology
+from app.models.agent import ArtifactStatus
 from app.schemas import (
     MaterializationContractOut,
     MaterializationContractSyncResult,
     MaterializationContractUpdate,
+    MaterializeRequest,
+    MaterializeResult,
 )
 from app.warehouse import (
     DEFAULT_ENGINE,
@@ -217,8 +222,89 @@ def generate_warehouse_bundle(
     )
 
 
-# ---------- M7：本体 → DataHub 回写 ----------
+# ---------- M3+：本体一键物化（真正落库执行） ----------
 
+
+def _materialize_out(artifact) -> MaterializeResult:
+    import json
+
+    receipt = None
+    if artifact.execution_receipt_json:
+        try:
+            receipt = json.loads(artifact.execution_receipt_json)
+        except (TypeError, ValueError):
+            receipt = None
+    return MaterializeResult(
+        artifact_id=artifact.id,
+        status=artifact.status,
+        ok=bool(receipt and receipt.get("ok")),
+        name=artifact.name or "物化",
+        receipt=receipt,
+        executed_at=artifact.executed_at,
+    )
+
+
+@router.post(
+    "/ontologies/{ontology_id}/warehouse/materialize",
+    response_model=MaterializeResult,
+)
+def materialize_ontology(
+    ontology_id: str,
+    payload: MaterializeRequest,
+    db: Session = Depends(get_db),
+):
+    """把已发布本体物化到目标数据源：生成 DDL/ETL 并真正建表落数。
+
+    弹窗即人工确认面，故直接置 ``confirmed`` 后执行（物化非高危，无 dry-run 门禁）；
+    全程复用治理制品流水线，产出可审计的执行回执。执行失败不抛 5xx——回执里带
+    ``ok=false`` 与逐条错误，由前端呈现。
+    """
+    _require_ontology(db, ontology_id)
+    _require_engine(payload.engine)
+
+    context = {
+        "ontology_id": ontology_id,
+        "target_datasource_id": payload.target_datasource_id,
+        "engine": payload.engine,
+        "database_prefix": payload.database_prefix,
+        "selected_targets": payload.selected_targets,
+        "overrides": payload.overrides,
+    }
+    try:
+        artifact = agent_pipeline.draft(
+            db,
+            kind="materialize",
+            intent=payload.intent or f"物化 → {payload.engine}",
+            context=context,
+            ontology_id=ontology_id,
+        )
+    except ValueError as exc:  # 缺 target_datasource_id 等输入问题
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    artifact.status = ArtifactStatus.CONFIRMED.value
+    artifact.confirmed_by = payload.operator
+    artifact.confirmed_at = datetime.now(timezone.utc)
+    artifact.origin = "user"
+    artifact.user_created = True
+    db.commit()
+
+    artifact = agent_pipeline.execute(db, artifact.id, context=context)
+    return _materialize_out(artifact)
+
+
+@router.get(
+    "/ontologies/{ontology_id}/warehouse/materialization-runs",
+    response_model=list[MaterializeResult],
+)
+def list_materialization_runs(ontology_id: str, db: Session = Depends(get_db)):
+    """本体的历次物化执行记录（含回执），供面板展示已物化状态。最新在前。"""
+    runs = agent_pipeline.list_artifacts(
+        db, kind="materialize", ontology_id=ontology_id
+    )
+    return [_materialize_out(a) for a in runs]
+
+
+# ---------- M7：本体 → DataHub 回写 ----------
 
 @router.get("/ontologies/{ontology_id}/datahub/writeback-plan")
 def datahub_writeback_plan(ontology_id: str, db: Session = Depends(get_db)):

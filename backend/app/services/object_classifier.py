@@ -44,6 +44,40 @@ _DESCRIPTIVE_TYPES = {"category", "attribute", "flag"}
 _GRAIN_TYPES = {"datetime"}
 _TECHNICAL_TYPES = {"technical"}
 
+# 退维（反规范化引用值）识别：这些列是**被引用实体的值拷贝或退化标识**，不是本表的
+# 自有属性。信号贫瘠源（无 FK 声明）里它们会伪装成描述性属性，把关系/事实表的描述性
+# 占比灌高、并让 own_attr_count>0 而躲过 facet-B，误判为业务对象。仅用两条高精度信号
+# （宁可少扣不误伤），词根裸配 DocType 一类留待有样本值/基数的实时层确认。
+_ECHO_SUFFIXES = ("_name", "_title", "_code", "_abbr", "_group", "_currency")
+_POLY_REF_SUFFIXES = ("_no", "_id", "_name")
+
+
+def _detect_reference_values(fields: "list[FieldSignal]") -> set[str]:
+    """返回应视为「退维引用值」而非自有属性的列名（小写）。
+
+    1. 多态标识对：同一词根同时出现 `X_type` 与 `X_no`/`X_id`/`X_name`（如
+       `voucher_type`+`voucher_no`）——`X_type` 指明目标表、`X_*` 是其键值，
+       二者都是退化引用而非属性。单独一个 `X_type`（状态/类别枚举）不算。
+    2. 兄弟回声：`{sib}_{name|title|code|abbr|group|currency}` 且 `{sib}` 本身
+       是同表另一列（Frappe fetch_from 反规范化拷贝，如 `asset`+`asset_name`）。
+    """
+    names = {f.name.lower() for f in fields}
+    ref: set[str] = set()
+    for n in names:
+        if not n.endswith("_type") or len(n) <= len("_type"):
+            continue
+        stem = n[: -len("_type")]
+        members = [stem + s for s in _POLY_REF_SUFFIXES if stem + s in names]
+        if members:  # _type 之外至少还有一个引用值列 → 判定为多态引用对
+            ref.add(n)
+            ref.update(members)
+    for n in names:
+        for suf in _ECHO_SUFFIXES:
+            if n.endswith(suf) and len(n) > len(suf) + 1 and n[: -len(suf)] in names:
+                ref.add(n)
+                break
+    return ref
+
 # 业务环节最小成员数：只有隶属于某个业务环节（关系图上 >= 该值成员的聚类）的表才
 # 可能是业务对象。孤立表（1 成员）与孤对（2 成员）不构成一个业务环节。
 _MIN_SEGMENT_SIZE = 3
@@ -103,6 +137,7 @@ def classify_object_role(
     tags: list[str] | None = None,
     is_child_table: bool = False,
     fact_name_token: str | None = None,
+    weak_fact_name_token: str | None = None,
     segment_size: int | None = None,
 ) -> ClassificationResult:
     """对单张表按结构/内容/拓扑/语义锚定信号打分并分类。
@@ -139,15 +174,19 @@ def classify_object_role(
     tags = tags or []
 
     # 明细/子表（源画像判定，如 Frappe 的 parent/parenttype 锚点列）：隶属某父
-    # DocType，是其明细行而非独立业务实体，高置信降级为数据表。挂了人工业务
-    # 术语则豁免（人工已认定为业务概念）。
+    # DocType，是其明细行（一次业务事实）而非独立业务实体。按建模原则「明细表/事实表
+    # 都是业务关系」判为关系表(bridge) + 待复核，真正的业务对象落在其引用的键上。挂了
+    # 人工业务术语则豁免（人工已认定为业务概念）。
     if is_child_table and not glossary_terms:
         return ClassificationResult(
-            role=ROLE_DATA_TABLE,
-            confidence=0.8,
-            reason="明细/子表（含 parent/parenttype 等子表锚点，隶属父表），非独立业务实体",
+            role=ROLE_BRIDGE,
+            confidence=0.6,
+            reason=(
+                "明细/子表（含 parent/parenttype 等子表锚点，隶属父表）——按原则判为业务"
+                "关系(bridge)：它是父表的明细行(一次业务事实)，真正的业务对象落在其引用的键上，待人工确认"
+            ),
             score=0.0,
-            needs_review=False,
+            needs_review=True,
             signals={"is_child_table": True},
         )
 
@@ -157,14 +196,29 @@ def classify_object_role(
     single_business_pk = len(pk_cols) == 1 and not pk_cols[0].is_foreign_key
 
     measure = sum(1 for f in fields if (f.semantic_type or "") in _MEASURE_TYPES)
-    descriptive = sum(1 for f in fields if (f.semantic_type or "") in _DESCRIPTIVE_TYPES)
+    # 退维引用值列：既非自有描述属性也非度量，从描述性计数中剔除，避免把反规范化
+    # 拷贝/退化标识当作实体属性而高估业务对象倾向。
+    ref_value_cols = _detect_reference_values(fields)
+
+    def _is_ref_value(f: "FieldSignal") -> bool:
+        return f.name.lower() in ref_value_cols
+
+    descriptive = sum(
+        1
+        for f in fields
+        if (f.semantic_type or "") in _DESCRIPTIVE_TYPES and not _is_ref_value(f)
+    )
     technical = sum(1 for f in fields if (f.semantic_type or "") in _TECHNICAL_TYPES)
     has_grain = any((f.semantic_type or "") in _GRAIN_TYPES for f in fields)
     has_fk_out = any(f.is_foreign_key for f in fields)
 
-    # 自有属性：排除主键与外键后，实体自身的描述/度量字段数——用于区分「关联实体」
-    # （有自有属性，如订单）与「纯关系/桥接」（几乎只有外键，如用户收藏）。
-    own_fields = [f for f in fields if not f.is_primary_key and not f.is_foreign_key]
+    # 自有属性：排除主键、外键与退维引用值后，实体自身的描述/度量字段数——用于区分
+    # 「关联实体」（有自有属性，如订单）与「纯关系/桥接」（几乎只有引用，如用户收藏）。
+    own_fields = [
+        f
+        for f in fields
+        if not f.is_primary_key and not f.is_foreign_key and not _is_ref_value(f)
+    ]
     own_descriptive = sum(
         1 for f in own_fields if (f.semantic_type or "") in _DESCRIPTIVE_TYPES
     )
@@ -362,13 +416,38 @@ def classify_object_role(
         reasons.append("信号不足，暂按业务对象保留，待人工确认")
 
     # 事实/动词命名改判：动词/事件表是「事实关系」而非业务对象——复用 bridge 角色。
-    # 仅当它本会被判为业务对象时改判（精准针对「把一次动作误当实体」这一危害）；被大量
-    # 表外键引用的枢纽（fk_in_degree>=3）更可能是命名欠佳的主数据，保留为业务对象但仍标
-    # 待复核。data_table/technical 维持原判（派生汇总/系统表不必强扭成关系表）。
-    fact_hub_exempt = fk_in_degree >= 3
-    if fact_named and role == ROLE_BUSINESS_OBJECT and not fact_hub_exempt:
+    # 仅当它本会被判为业务对象时改判（精准针对「把一次动作误当实体」这一危害）。
+    # 被多表外键引用（fk_in_degree>=3）本身**不**否决事实判定——交易头(如收货/结算/订单)
+    # 本就会被下游单据引用；此时仍判关系表(bridge)，但在理由里标注其枢纽属性，
+    # needs_review 交人工确认是否实为命名欠佳的主数据。data_table/technical 维持原判
+    # （派生汇总/系统表不必强扭成关系表）。
+    if fact_named and role == ROLE_BUSINESS_OBJECT:
         role = ROLE_BRIDGE
-        reasons.append("据命名判为业务事实/关系表(bridge)，真正的业务对象应落在其引用的键上")
+        if fk_in_degree >= 3:
+            reasons.append(
+                f"据命名判为业务事实/关系表(bridge)；虽被 {fk_in_degree} 张表外键引用"
+                "（疑似枢纽），仍按「事实即关系」优先判为关系表，请人工确认是否实为主数据"
+            )
+        else:
+            reasons.append(
+                "据命名判为业务事实/关系表(bridge)，真正的业务对象应落在其引用的键上"
+            )
+
+    # 弱事实命名 + 结构证据：订单/发票/工单 这类歧义名词单凭命名不判事实（可能是实体），
+    # 但当它同时**引用多个不同维度**（distinct_fk_targets>=2）**且含度量字段**（measure>=1）
+    # 时，结构上就是一张交易/事实表——把被主键+被引用信号带偏成业务对象的交易头改判
+    # 关系表(bridge) + 待复核。无度量、少外键的参考维度（订单类型/付款方式）结构不达标，
+    # 不受影响。挂了人工术语则豁免。
+    weak_fact = bool(weak_fact_name_token) and not glossary_terms
+    weak_fact_structural = weak_fact and distinct_fk_targets >= 2 and measure >= 1
+    if weak_fact_structural and role == ROLE_BUSINESS_OBJECT:
+        role = ROLE_BRIDGE
+        reasons.append(
+            f"命名含交易名词「{weak_fact_name_token}」且引用 {distinct_fk_targets} 个不同维度、"
+            f"含 {measure} 个度量字段，结构上是一次交易/事实——判为业务关系(bridge)，"
+            "真正的业务对象应落在其引用的维度键上，待人工确认"
+        )
+        signals["weak_fact_name_token"] = weak_fact_name_token
 
     # 业务环节归属（关系图结构，**必要条件**）：只有隶属于某个业务环节的表才可能是业务
     # 对象。业务环节 = 关系图上社区检测得到的 >= _MIN_SEGMENT_SIZE 成员聚类；孤立表/孤对
@@ -401,7 +480,11 @@ def classify_object_role(
             "疑似关联实体，请确认为对象而非纯关系"
         )
     needs_review = (
-        confidence < 0.7 or associative_suspect or fact_named or segment_demoted
+        confidence < 0.7
+        or associative_suspect
+        or fact_named
+        or weak_fact_structural
+        or segment_demoted
     )
 
     return ClassificationResult(

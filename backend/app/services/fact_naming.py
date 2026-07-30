@@ -91,3 +91,30 @@ def detect_fact_name(name: str | None, meaning: str | None = None) -> str | None
             return token
 
     return None
+
+
+# 弱事实信号：这些名词**既可为实体也可为事实**（订单/发票/工单/order/invoice），
+# 单凭命名不足以判事实——「订单」可能是交易头，也可能是「订单类型」这类维度。故这里
+# 只标记为“弱信号”，是否改判为事实由 object_classifier 结合**结构证据**（引用多个不同
+# 维度 + 含度量字段）决定，避免把 付款方式/付款条款/订单类型 这类参考维度误判为事实。
+_WEAK_CJK_TXN_TOKENS: tuple[str, ...] = ("订单", "发票", "工单")
+_WEAK_LATIN_TXN_TOKENS: frozenset[str] = frozenset({"order", "invoice"})
+
+
+def detect_weak_fact_name(name: str | None, meaning: str | None = None) -> str | None:
+    """识别**弱**事实/交易命名（订单/发票/工单/order/invoice），命中返回该词元，否则 None。
+
+    与 detect_fact_name 的区别：这些是歧义名词，命中**不**直接判事实——调用方须再验证
+    结构证据（distinct_fk_targets>=2 且含度量字段）才改判 bridge。用于捕捉「采购订单/
+    销售订单/POS发票/生产工单」这类被主键+被引用信号带偏成业务对象的交易头，同时不误伤
+    「订单类型/付款方式」这类无度量、少外键的参考维度。
+    """
+    hay_cjk = f"{name or ''}{meaning or ''}"
+    for token in _WEAK_CJK_TXN_TOKENS:
+        if token in hay_cjk:
+            return token
+    tokens = _to_tokens(name or "") | _to_tokens(meaning or "")
+    for token in _WEAK_LATIN_TXN_TOKENS:
+        if token in tokens:
+            return token
+    return None

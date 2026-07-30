@@ -13,15 +13,21 @@ from app.services.object_classifier import (
     FieldSignal,
     classify_object_role,
 )
+from app.services.bridge_collapse import select_bridge_endpoints
 from app.services.community_detection import label_propagation_clusters
-from app.services.fact_naming import detect_fact_name
+from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.relation_terms import infer_relation_term, reference_term
 from app.services.relation_structure import infer_relation_structure_type
-from app.services.source_profile import InferredFk, detect_source_profile
+from app.services.source_profile import InferredFk, SourceProfile, detect_source_profile
 
 
 def _to_snake(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
+
+
+# 桥表塌缩↔智能重判的迭代轮数上限：重判某桥表为业务对象可能让引用它的桥表凑出端点，
+# 故迭代到稳定；上限兜底防御（实测有效轮数很少）。
+_MAX_RECLASSIFY_ROUNDS = 4
 
 
 # 技术/系统字段词元（独立于表名的内容信号）：命中则该字段偏技术/安全/
@@ -70,6 +76,10 @@ class EvidenceBuilder:
         properties: list[PropertyEvidencePack] = []
         relations: list[RelationEvidencePack] = []
         business_logics: list[LogicEvidencePack] = []
+        # 桥表智能重判所需：每个对象的分类信号（抑制 fact/child 信号后可重跑分类器，
+        # 判断「若不是关系表，它是业务对象还是数据表」）。
+        field_signals_by_name: dict[str, list[FieldSignal]] = {}
+        reeval_args_by_name: dict[str, dict] = {}
 
         dataset_name_map = {ds.urn: ds.name for ds in bundle.datasets}
         # 源画像：把 Frappe 等源的建库约定翻译成 PK/FK/子表/系统列信号。默认画像
@@ -122,6 +132,9 @@ class EvidenceBuilder:
                 if t
             )
             fact_name_token = detect_fact_name(dataset.name, fact_meaning)
+            # 弱事实/交易命名（订单/发票/工单/order/invoice）：单凭命名不判事实，
+            # 由分类器结合结构证据（多维度外键 + 度量字段）决定是否改判关系表。
+            weak_fact_name_token = detect_weak_fact_name(dataset.name, fact_meaning)
             # 构造分类信号：按源画像补齐 PK/FK，并剥离框架系统列（审计/子表锚点等），
             # 使度量/描述占比反映真实业务字段而非框架噪声。主键即便属系统列也保留。
             field_signals: list[FieldSignal] = []
@@ -152,6 +165,22 @@ class EvidenceBuilder:
                 tags=dataset.tags,
                 is_child_table=is_child,
                 fact_name_token=fact_name_token,
+                weak_fact_name_token=weak_fact_name_token,
+                segment_size=segment_size.get(dataset.name),
+            )
+            # 存一份分类信号（不含 fact/child 这几个把它推向 bridge 的信号），
+            # 供未能塌缩的桥表「智能重判为对象」时抑制这些信号后重跑分类器。
+            field_signals_by_name[object_name] = field_signals
+            reeval_args_by_name[object_name] = dict(
+                fk_in_degree=fk_in_degree.get(dataset.name, 0),
+                distinct_fk_targets=fk_out_degree.get(dataset.name, 0),
+                lineage_upstream=lineage_up.get(dataset.urn, 0),
+                lineage_downstream=lineage_down.get(dataset.urn, 0),
+                glossary_terms=dataset.glossary_terms,
+                row_count=dataset.row_count,
+                has_business_naming=has_business_naming,
+                subtypes=dataset.subtypes,
+                tags=dataset.tags,
                 segment_size=segment_size.get(dataset.name),
             )
             # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
@@ -308,6 +337,24 @@ class EvidenceBuilder:
         }
         relations = self._collapse_reverse_relations(relations, row_count_by_object)
 
+        # 桥表(关系表)塌缩 + 智能重判：能连接两个业务对象的桥表塌缩为 BO_A→BO_B 关系
+        # （桥表作 mapping 实现表）；连不到两个业务对象的桥表本就不是关系，智能重判为对象
+        # （业务对象/数据表）。重判可能让其它桥表凑出新端点，故迭代到稳定。见
+        # bridge_collapse.select_bridge_endpoints 与 _collapse_and_reclassify_bridges。
+        relations.extend(
+            self._collapse_and_reclassify_bridges(
+                bundle,
+                object_types=object_types,
+                profile=profile,
+                table_index=table_index,
+                inferred_fk_by_name=inferred_fk_by_name,
+                fk_in_degree=fk_in_degree,
+                row_count_by_object=row_count_by_object,
+                field_signals_by_name=field_signals_by_name,
+                reeval_args_by_name=reeval_args_by_name,
+            )
+        )
+
         # 业务关系精炼：rule 1（业务关系只存在于业务对象之间）+ 去除与 FK 重复的血缘 +
         # 把反向的「主数据 派生出 单据」翻转为「单据 引用 主数据」。角色/展示名由上方
         # 已生成的 object_types 汇总（两端候选名与对象候选名同由 _infer_object_name 推得）。
@@ -323,6 +370,184 @@ class EvidenceBuilder:
             relations=relations,
             business_logics=business_logics,
         )
+
+    def _bridge_ref_targets(
+        self,
+        dataset: DataHubDomainBundle,  # type: ignore[name-defined]
+        profile: "SourceProfile",
+        table_index: dict[str, str],
+        inferred_fk_by_name: dict[str, list["InferredFk"]],
+    ) -> list[str]:
+        """桥表引用的对象候选名（保持列出现序，供 select 端点选择）。
+
+        顺序：父表（parenttype 样例解析，作首选端点/source）→ 声明式外键 → 推断外键。
+        """
+        ref_targets: list[str] = []
+        parent_table = profile.resolve_parent_table(dataset, table_index)
+        if parent_table:
+            ref_targets.append(_infer_object_name(parent_table))
+        for field in dataset.fields:
+            if field.is_foreign_key and field.foreign_key_target:
+                ref_targets.append(
+                    _infer_object_name(field.foreign_key_target.split(".")[0])
+                )
+        for edge in inferred_fk_by_name.get(dataset.name, []):
+            ref_targets.append(_infer_object_name(edge.target_table))
+        return ref_targets
+
+    def _reclassify_bridge_to_object(
+        self,
+        pack: ObjectTypeEvidencePack,
+        role_by_object: dict[str, str],
+        field_signals_by_name: dict[str, list[FieldSignal]],
+        reeval_args_by_name: dict[str, dict],
+    ) -> None:
+        """把「连不到两个业务对象、因而不是关系」的桥表智能重判为对象。
+
+        抑制把它推向 bridge 的信号（is_child_table / fact / weak_fact）后重跑分类器，
+        得到它作为**对象**时的角色：达标业务环节→业务对象，否则→数据表（分类器内的
+        segment_size 降级已处理）。分类器若仍判 bridge（如多外键主键的关联式结构），
+        兜底落数据表——它不是业务关系。全部标 [待复核]。
+        """
+        from app.services.object_classifier import ROLE_BRIDGE, ROLE_DATA_TABLE
+
+        name = pack.candidate_name
+        res = classify_object_role(
+            field_signals_by_name[name],
+            **reeval_args_by_name[name],
+            is_child_table=False,
+            fact_name_token=None,
+            weak_fact_name_token=None,
+        )
+        new_role = res.role if res.role != ROLE_BRIDGE else ROLE_DATA_TABLE
+        label = {"business_object": "业务对象", "data_table": "数据表", "technical": "技术表"}.get(
+            new_role, new_role
+        )
+        pack.table_role = new_role
+        pack.role_reason = (
+            f"[待复核] 关系表未能塌缩为业务关系（连不到两个业务对象），"
+            f"智能重判为{label}：{res.reason}"
+        )
+        pack.role_signals = {
+            "score": res.score,
+            "needs_review": True,
+            "role": new_role,
+            "signals": res.signals,
+            "reclassified_from": "bridge",
+        }
+        role_by_object[name] = new_role
+
+    def _collapse_and_reclassify_bridges(
+        self,
+        bundle: DataHubDomainBundle,
+        *,
+        object_types: list[ObjectTypeEvidencePack],
+        profile: "SourceProfile",
+        table_index: dict[str, str],
+        inferred_fk_by_name: dict[str, list["InferredFk"]],
+        fk_in_degree: dict[str, int],
+        row_count_by_object: dict[str, int | None],
+        field_signals_by_name: dict[str, list[FieldSignal]],
+        reeval_args_by_name: dict[str, dict],
+    ) -> list[RelationEvidencePack]:
+        """桥表塌缩 + 智能重判，迭代到稳定。
+
+        - 能连接两个业务对象的桥表 → 塌缩为一条 BO_A→BO_B 关系（桥表作 mapping 实现表）。
+        - 连不到两个业务对象的桥表 → 本就不是关系 → 智能重判为对象（业务对象/数据表）。
+        - 重判可能把某桥表提升为业务对象，从而让引用它的另一桥表凑出两个业务对象端点，
+          故迭代：每轮先跳过还能靠「待定桥表引用」翻盘的，只重判确定无望的；收敛后再产出关系。
+        """
+        pack_by_name = {ot.candidate_name: ot for ot in object_types}
+        role_by_object = {ot.candidate_name: ot.table_role for ot in object_types}
+        label_by_object = {ot.candidate_name: ot.display_name for ot in object_types}
+        in_degree_by_object: dict[str, int] = {}
+        for tech_name, deg in fk_in_degree.items():
+            obj = _infer_object_name(tech_name)
+            in_degree_by_object[obj] = max(in_degree_by_object.get(obj, 0), deg)
+
+        ds_by_bridge: dict[str, DataHubDomainBundle] = {}  # type: ignore[valid-type]
+        refs_by_bridge: dict[str, list[str]] = {}
+        for dataset in bundle.datasets:
+            name = _infer_object_name(dataset.name)
+            if role_by_object.get(name) == "bridge":
+                ds_by_bridge[name] = dataset
+                refs_by_bridge[name] = self._bridge_ref_targets(
+                    dataset, profile, table_index, inferred_fk_by_name
+                )
+
+        def endpoints_for(name: str):
+            return select_bridge_endpoints(
+                refs_by_bridge[name],
+                role_by_object,
+                in_degree_by_object,
+                row_count_by_object,
+                self_name=name,
+            )
+
+        pending = set(ds_by_bridge)
+        for _ in range(_MAX_RECLASSIFY_ROUNDS):
+            changed = False
+            for name in list(pending):
+                if endpoints_for(name) is not None:
+                    continue  # 能塌缩 → 保持 bridge（是关系），最终统一产出
+                refs = refs_by_bridge[name]
+                # 还有翻盘希望：引用里「业务对象 + 仍待定的桥表」去重后 ≥2
+                hopeful = {
+                    r
+                    for r in refs
+                    if r != name
+                    and (
+                        role_by_object.get(r) == ROLE_BUSINESS_OBJECT
+                        or r in pending
+                    )
+                }
+                if len(hopeful) >= 2:
+                    continue  # 推迟：待定桥表引用可能被提升为业务对象
+                self._reclassify_bridge_to_object(
+                    pack_by_name[name], role_by_object, field_signals_by_name, reeval_args_by_name
+                )
+                pending.discard(name)
+                changed = True
+            if not changed:
+                break
+        # 剩余待定（桥表间循环引用）且仍塌不动 → 一律重判为对象
+        for name in list(pending):
+            if endpoints_for(name) is None:
+                self._reclassify_bridge_to_object(
+                    pack_by_name[name], role_by_object, field_signals_by_name, reeval_args_by_name
+                )
+                pending.discard(name)
+
+        # 产出：仍是 bridge 且能塌缩的桥表 → 一条塌缩关系。
+        collapsed: list[RelationEvidencePack] = []
+        for name, dataset in ds_by_bridge.items():
+            if role_by_object.get(name) != "bridge":
+                continue
+            endpoints = endpoints_for(name)
+            if endpoints is None:
+                continue
+            source, target = endpoints
+            bridge_label = dataset.display_name or dataset.name
+            source_label = label_by_object.get(source, source)
+            target_label = label_by_object.get(target, target)
+            collapsed.append(
+                RelationEvidencePack(
+                    name=name,  # 一桥一关系，用桥表候选名作稳定 upsert 键
+                    display_name=bridge_label,
+                    source_object=source,
+                    target_object=target,
+                    cardinality="many_to_many",
+                    structure_type="bridge_table",
+                    description=(
+                        f"{source_label} 与 {target_label} 通过关系表 {bridge_label} 关联"
+                        "（桥表塌缩，待复核）"
+                    ),
+                    confidence=0.5,
+                    evidence_refs=[dataset.urn],
+                    mapping_object=name,
+                )
+            )
+        return collapsed
 
     def _build_topology(
         self,

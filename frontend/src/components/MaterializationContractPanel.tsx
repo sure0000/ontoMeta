@@ -8,6 +8,7 @@ import type {
   MaterializationContractUpdateInput,
   MaterializationLayer,
   MaterializationLoadStrategy,
+  MaterializationRun,
   MaterializationScdType,
   MaterializationTargetKind,
 } from "../types";
@@ -43,12 +44,40 @@ interface Props {
   targetId: string;
 }
 
+/** 某实体在历次物化中的落地结果（最近一次触及该表的执行）。 */
+interface TableOutcome {
+  ok: boolean;
+  at?: string | null;
+  error?: string;
+}
+
+function matchTableOutcome(
+  runs: MaterializationRun[],
+  entityName: string | null | undefined,
+): TableOutcome | null {
+  if (!entityName) return null;
+  const hit = (list?: { target?: string; ok: boolean; error?: string }[]) =>
+    list?.find((ps) => (ps.target ?? "").split(".").pop() === entityName);
+  // runs 已按最新在前排序：返回第一个触及该表的执行结果。
+  for (const run of runs) {
+    const r = run.receipt;
+    if (!r) continue;
+    const d = hit(r.ddl?.per_statement);
+    const e = hit(r.etl?.per_statement);
+    if (!d && !e) continue;
+    const failed = (d && !d.ok) || (e && !e.ok);
+    return { ok: !failed, at: run.executed_at, error: d?.error || e?.error };
+  }
+  return null;
+}
+
 /** 物化契约面板：本体不承载的落地配置（层/引擎/增量/分区/SCD）。
  *
  * 人工在此修改的字段会被「钉住」，机器重新推导默认值时不再覆盖。
  */
 export function MaterializationContractPanel({ ontologyId, targetKind, targetId }: Props) {
   const [contract, setContract] = useState<MaterializationContract | null>(null);
+  const [outcome, setOutcome] = useState<TableOutcome | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -59,9 +88,18 @@ export function MaterializationContractPanel({ ontologyId, targetKind, targetId 
       const rows = await api.listMaterializationContracts(ontologyId, {
         target_kind: targetKind,
       });
-      setContract(rows.find((r) => r.target_id === targetId) ?? null);
+      const found = rows.find((r) => r.target_id === targetId) ?? null;
+      setContract(found);
+      // 物化契约面板同时展示该实体最近一次的物化落地结果。
+      try {
+        const runs = await api.listMaterializationRuns(ontologyId);
+        setOutcome(matchTableOutcome(runs, found?.target_name));
+      } catch {
+        setOutcome(null);
+      }
     } catch {
       setContract(null);
+      setOutcome(null);
     } finally {
       setLoading(false);
     }
@@ -133,6 +171,22 @@ export function MaterializationContractPanel({ ontologyId, targetKind, targetId 
           {contract.derivation_reason && (
             <Alert type="info" showIcon title={`推导依据：${contract.derivation_reason}`} />
           )}
+          <Alert
+            type={outcome ? (outcome.ok ? "success" : "error") : "info"}
+            showIcon
+            title={
+              !outcome
+                ? "尚未物化"
+                : outcome.ok
+                  ? `已物化${outcome.at ? `（${new Date(outcome.at).toLocaleString()}）` : ""}`
+                  : `上次物化失败${outcome.error ? `：${outcome.error}` : ""}`
+            }
+            description={
+              outcome
+                ? undefined
+                : "在本体页点右上角「物化」，选目标存储后执行落库。"
+            }
+          />
           <Descriptions column={2} size="small" bordered>
             <Descriptions.Item label={<>是否物化 {pinned("materialized")}</>}>
               <Switch
