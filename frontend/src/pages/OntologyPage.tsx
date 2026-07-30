@@ -37,7 +37,7 @@ export function OntologyPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [roleFilter, setRoleFilter] = useState<string[]>([]);
+  const [roleFilter, setRoleFilter] = useState<string[]>(["business_object"]);
   const [materializeOpen, setMaterializeOpen] = useState(false);
 
   useEffect(() => {

@@ -21,15 +21,9 @@ import {
 import type { ObjectTypeSummary, RelationType } from "../types";
 import { getRoleMeta } from "../utils/role";
 
-/** 视图 Tab：一个关系去重列表 + 三类对象（业务对象/数据表/技术·系统表）。
- *  关系表(bridge) 不作为对象展示。 */
+/** 视图 Tab：三类对象（业务对象/数据表/技术·系统表）+ 一个业务关系去重列表。
+ *  关系表(bridge) 不作为对象展示。Tab 顺序：业务对象 → 业务关系 → 数据表 → 技术/系统表。 */
 type ViewTab = "relations" | "business_object" | "data_table" | "technical";
-
-const OBJECT_TAB_ROLES: ReadonlyArray<Exclude<ViewTab, "relations">> = [
-  "business_object",
-  "data_table",
-  "technical",
-];
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -165,7 +159,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const serverMode = Boolean(objectPaging || relationPaging);
   // 关系去重列表：传入 scope + 详情路径即启用（否则回退旧的逐条关系表）。
   const useRelationGroups = Boolean(relationScope && relationGroupDetailPath);
-  const [viewTab, setViewTab] = useState<ViewTab>("relations");
+  const [viewTab, setViewTab] = useState<ViewTab>("business_object");
   const [localQuery, setLocalQuery] = useState("");
   const [localTypeFilter, setLocalTypeFilter] = useState<string[]>([]);
   const [localNeedsReview, setLocalNeedsReview] = useState(false);
@@ -457,30 +451,36 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     technical: { label: "技术/系统表", icon: <ToolOutlined /> },
   };
 
+  const objectTabItem = (role: Exclude<ViewTab, "relations">) => ({
+    key: role,
+    label: (
+      <span>
+        <span style={{ marginRight: 6 }}>{OBJECT_TAB_META[role].icon}</span>
+        {OBJECT_TAB_META[role].label}
+      </span>
+    ),
+  });
+  const relationTabItem = {
+    key: "relations",
+    label: (
+      <span>
+        <ApartmentOutlined style={{ marginRight: 6 }} />
+        业务关系
+      </span>
+    ),
+  };
+
   const tabSwitcher = (
     <Tabs
       className="om-tabs om-tabs--switcher"
       activeKey={viewTab}
       onChange={handleViewTab}
+      // 顺序：业务对象 → 业务关系 → 数据表 → 技术/系统表
       items={[
-        {
-          key: "relations",
-          label: (
-            <span>
-              <ApartmentOutlined style={{ marginRight: 6 }} />
-              关系
-            </span>
-          ),
-        },
-        ...OBJECT_TAB_ROLES.map((role) => ({
-          key: role,
-          label: (
-            <span>
-              <span style={{ marginRight: 6 }}>{OBJECT_TAB_META[role].icon}</span>
-              {OBJECT_TAB_META[role].label}
-            </span>
-          ),
-        })),
+        objectTabItem("business_object"),
+        relationTabItem,
+        objectTabItem("data_table"),
+        objectTabItem("technical"),
       ]}
     />
   );
@@ -578,6 +578,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
               scope={relationScope!}
               query={query}
               detailPath={relationGroupDetailPath!}
+              objectDetailPath={objectDetailPath}
             />
           </SectionCard>
         ) : effectiveRelationTotal === 0 && filteredRelations.length === 0 ? (
