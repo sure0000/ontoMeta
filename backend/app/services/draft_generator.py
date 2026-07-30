@@ -437,6 +437,9 @@ class OntologyDraftGenerator:
                 source_evidence=item.description
                 or (", ".join(item.evidence_refs) if item.evidence_refs else None),
                 confidence=item.confidence,
+                mapping_object_type_name=(
+                    resolve(item.mapping_object) if item.mapping_object else None
+                ),
             )
             for item in evidence.relations
         ]

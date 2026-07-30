@@ -13,6 +13,7 @@ from app.services.object_classifier import (
     FieldSignal,
     classify_object_role,
 )
+from app.services.bridge_collapse import select_bridge_endpoints
 from app.services.community_detection import label_propagation_clusters
 from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.relation_terms import infer_relation_term, reference_term
@@ -312,11 +313,26 @@ class EvidenceBuilder:
         }
         relations = self._collapse_reverse_relations(relations, row_count_by_object)
 
+        # 桥表(关系表)塌缩：每个 table_role=bridge 的对象，用它引用的业务对象选两个
+        # 端点，合成一条 BO_A→BO_B 关系并以桥表为 mapping 实现表。原始「桥表→BO」半边
+        # 会在下方 rule 1 被丢弃（桥表非业务对象），塌缩边两端皆 BO 故保留——桥表因此
+        # 落地为业务关系而非在图谱中孤立无边。见 bridge_collapse.select_bridge_endpoints。
+        role_by_object = {ot.candidate_name: ot.table_role for ot in object_types}
+        label_by_object = {ot.candidate_name: ot.display_name for ot in object_types}
+        relations.extend(
+            self._collapse_bridge_relations(
+                bundle,
+                role_by_object=role_by_object,
+                label_by_object=label_by_object,
+                inferred_fk_by_name=inferred_fk_by_name,
+                fk_in_degree=fk_in_degree,
+                row_count_by_object=row_count_by_object,
+            )
+        )
+
         # 业务关系精炼：rule 1（业务关系只存在于业务对象之间）+ 去除与 FK 重复的血缘 +
         # 把反向的「主数据 派生出 单据」翻转为「单据 引用 主数据」。角色/展示名由上方
         # 已生成的 object_types 汇总（两端候选名与对象候选名同由 _infer_object_name 推得）。
-        role_by_object = {ot.candidate_name: ot.table_role for ot in object_types}
-        label_by_object = {ot.candidate_name: ot.display_name for ot in object_types}
         relations = self._refine_business_relations(
             relations, role_by_object, label_by_object, row_count_by_object
         )
@@ -327,6 +343,78 @@ class EvidenceBuilder:
             relations=relations,
             business_logics=business_logics,
         )
+
+    def _collapse_bridge_relations(
+        self,
+        bundle: DataHubDomainBundle,
+        *,
+        role_by_object: dict[str, str],
+        label_by_object: dict[str, str],
+        inferred_fk_by_name: dict[str, list["InferredFk"]],
+        fk_in_degree: dict[str, int],
+        row_count_by_object: dict[str, int | None],
+    ) -> list[RelationEvidencePack]:
+        """为每个桥表合成一条塌缩关系（BO_A→BO_B，桥表作 mapping 实现表）。
+
+        端点从桥表的声明式外键 + 源画像推断外键所指向的对象里，用
+        ``select_bridge_endpoints`` 按「两端必须业务对象 + 主数据度优先」选出。
+        选不出两个业务对象端点的桥表（典型：只引用父表的明细/子表）返回空，
+        保持未物化，交由一致性告警/后续 parent 端解析处理。
+        """
+        # 主数据度：入度按对象候选名归并（fk_in_degree 原按技术表名计）。
+        in_degree_by_object: dict[str, int] = {}
+        for tech_name, deg in fk_in_degree.items():
+            obj = _infer_object_name(tech_name)
+            in_degree_by_object[obj] = max(in_degree_by_object.get(obj, 0), deg)
+
+        collapsed: list[RelationEvidencePack] = []
+        for dataset in bundle.datasets:
+            bridge_object = _infer_object_name(dataset.name)
+            if role_by_object.get(bridge_object) != "bridge":
+                continue
+
+            # 引用目标（保持列出现序，select 内部去重）：声明式外键在前，推断外键在后。
+            ref_targets: list[str] = []
+            for field in dataset.fields:
+                if field.is_foreign_key and field.foreign_key_target:
+                    ref_targets.append(
+                        _infer_object_name(field.foreign_key_target.split(".")[0])
+                    )
+            for edge in inferred_fk_by_name.get(dataset.name, []):
+                ref_targets.append(_infer_object_name(edge.target_table))
+
+            endpoints = select_bridge_endpoints(
+                ref_targets,
+                role_by_object,
+                in_degree_by_object,
+                row_count_by_object,
+                self_name=bridge_object,
+            )
+            if endpoints is None:
+                continue
+
+            source, target = endpoints
+            bridge_label = dataset.display_name or dataset.name
+            source_label = label_by_object.get(source, source)
+            target_label = label_by_object.get(target, target)
+            collapsed.append(
+                RelationEvidencePack(
+                    name=bridge_object,  # 一桥一关系，用桥表候选名作稳定 upsert 键
+                    display_name=bridge_label,
+                    source_object=source,
+                    target_object=target,
+                    cardinality="many_to_many",
+                    structure_type="bridge_table",
+                    description=(
+                        f"{source_label} 与 {target_label} 通过关系表 {bridge_label} 关联"
+                        "（桥表塌缩，待复核）"
+                    ),
+                    confidence=0.5,
+                    evidence_refs=[dataset.urn],
+                    mapping_object=bridge_object,
+                )
+            )
+        return collapsed
 
     def _build_topology(
         self,

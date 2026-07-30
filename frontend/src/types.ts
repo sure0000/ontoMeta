@@ -197,6 +197,8 @@ export interface ObjectTypeDetail extends ObjectTypeSummary {
   properties: Property[];
   outgoing_relations: RelationType[];
   incoming_relations: RelationType[];
+  /** 本对象作为关系表(bridge)所实现(mapping)的业务关系；桥表本身非端点，故用于其图谱展示。 */
+  implemented_relations?: RelationType[];
   business_logics: BusinessLogic[];
   business_logic_bindings?: ObjectTypeLogicBinding[];
   version_records?: VersionRecord[];

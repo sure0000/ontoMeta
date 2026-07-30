@@ -651,8 +651,13 @@ export function ObjectTypeDetailPage() {
 
   const canPrePublish =
     obj.status !== "pre_published" && obj.status !== "published";
+  // 关系表(bridge)实现(mapping)的业务关系并入计数/列表/图谱：桥表本身非端点，
+  // 这些才是它连接的业务对象（供应商→科目 等），否则其关系列表/图谱恒为空。
+  const implementedRelations = obj.implemented_relations ?? [];
   const relationCount =
-    obj.outgoing_relations.length + obj.incoming_relations.length;
+    obj.outgoing_relations.length +
+    obj.incoming_relations.length +
+    implementedRelations.length;
 
   const relationColumns: ColumnsType<RelationType> = [
     {
@@ -806,7 +811,11 @@ export function ObjectTypeDetailPage() {
     },
   ];
 
-  const allRelations = [...obj.outgoing_relations, ...obj.incoming_relations];
+  const allRelations = [
+    ...obj.outgoing_relations,
+    ...obj.incoming_relations,
+    ...implementedRelations,
+  ];
   const versionRecords = obj.version_records ?? [];
 
   return (
