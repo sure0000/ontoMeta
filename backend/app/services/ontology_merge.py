@@ -35,6 +35,7 @@ from app.schemas import (
     DraftRelationType,
     OntologyDraftOutput,
 )
+from app.services.object_naming import dedupe_object_names
 
 # 各实体的可合并字段（与 alembic c1d2e3f4a5b6 回填保持一致）
 OBJECT_FIELDS = ["name", "display_name", "description", "table_role", "role_reason"]
@@ -169,6 +170,38 @@ def _merge_entity_fields(
     return outcome, machine_changed, new_conflicts
 
 
+def resolve_duplicate_object_names(
+    db: Session, ontology_id: str
+) -> list[tuple[str, str, str]]:
+    """把一个本体内撞名的对象消歧，就地改 ``name``（调用方负责 commit/flush）。
+
+    生成端（A）只在单个证据块内去碰撞；分块生成时同名的两张表可能落在不同块，
+    合并后仍会撞名。故合并末尾与存量脚本都调用此全本体 sweep 兜底。
+
+    规则：撞名组交给 :func:`dedupe_object_names`（撞名成员改用源表名 snake）；但
+    **用户改过 name 的对象不动**（尊重人工命名），让其非钉住的同名兄弟去改名。
+    改名同时推进 machine_baseline["name"]，避免下次重跑把它当机器改动/冲突。
+
+    返回 ``[(object_id, old_name, new_name), ...]``。
+    """
+    objs = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
+    mapping = dedupe_object_names([(o.id, o.name, o.source_ref) for o in objs])
+    changes: list[tuple[str, str, str]] = []
+    for obj in objs:
+        new_name = mapping.get(obj.id, obj.name)
+        if new_name == obj.name:
+            continue
+        if "name" in set(_loads(obj.overridden_fields, [])):
+            continue  # 人工命名，保留
+        old_name = obj.name
+        obj.name = new_name
+        baseline = _loads(obj.machine_baseline, {})
+        baseline["name"] = new_name
+        obj.machine_baseline = _dumps(baseline)
+        changes.append((obj.id, old_name, new_name))
+    return changes
+
+
 class OntologyMergeService:
     """把机器生成结果（theirs）合并进已有草稿本体，保护人工修正。"""
 
@@ -271,6 +304,14 @@ class OntologyMergeService:
 
         if handle_removal:
             self._handle_object_removal(db, existing_objs, seen_object_ids, gen_id, report)
+
+        # 兜底去碰撞：分块生成时同名的两张不同表可能分属不同块，合并后才撞名。
+        # 先 flush 让新建对象可见（会话可能关闭 autoflush），再全本体消歧。
+        db.flush()
+        for obj_id, old_name, new_name in resolve_duplicate_object_names(db, ontology_id):
+            report.record(
+                "object_types", "updated", obj_id, new_name, new_name, fields=["name"]
+            )
 
         return object_ref_to_id
 

@@ -267,3 +267,61 @@ def test_regeneration_dedups_and_prunes_stale_properties():
     finally:
         db.rollback()
         db.close()
+
+
+def test_merge_disambiguates_colliding_object_names():
+    """两张不同源表被压成同名（模拟跨块生成）→ 合并末尾 sweep 改名消歧，
+    发布期一致性校验不再报「对象标识重复」。"""
+    from app.services.draft_consistency import validate_ontology
+
+    merge = OntologyMergeService()
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        u1 = "urn:li:dataset:(urn:li:dataPlatform:mariadb,_h.tabPeriod Closing Voucher,PROD)"
+        u2 = "urn:li:dataset:(urn:li:dataPlatform:mariadb,_h.tabProcess Period Closing Voucher,PROD)"
+        report = MergeReport()
+        merge.merge_objects(
+            db,
+            ontology.id,
+            [
+                _obj(u1, "period_closing_voucher", "期末结算凭证"),
+                _obj(u2, "period_closing_voucher", "流程期末结算凭证"),
+            ],
+            [],
+            "gen1",
+            report,
+        )
+        db.commit()
+
+        objs = db.query(ObjectType).filter(ObjectType.ontology_id == ontology.id).all()
+        names = {o.name for o in objs}
+        # 两个不同对象都在（未被删），且名字唯一
+        assert len(objs) == 2
+        assert len(names) == 2
+        assert "period_closing_voucher" in names
+        assert "process_period_closing_voucher" in names
+        # 一致性校验无重名冲突
+        codes = {i.code for i in validate_ontology(db, ontology.id)}
+        assert "duplicate_object_name" not in codes
+
+        # 幂等：同一批再合并（按 source_ref 命中）不再产生新的改名/冲突
+        report2 = MergeReport()
+        merge.merge_objects(
+            db,
+            ontology.id,
+            [
+                _obj(u1, "period_closing_voucher", "期末结算凭证"),
+                _obj(u2, "period_closing_voucher", "流程期末结算凭证"),
+            ],
+            [],
+            "gen2",
+            report2,
+        )
+        db.commit()
+        assert report2.to_dict()["summary"]["conflict"] == 0
+        objs2 = db.query(ObjectType).filter(ObjectType.ontology_id == ontology.id).all()
+        assert {o.name for o in objs2} == names
+    finally:
+        db.rollback()
+        db.close()

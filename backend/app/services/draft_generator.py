@@ -23,6 +23,7 @@ from app.services.object_classifier import (
     ROLE_TECHNICAL,
 )
 from app.services.common import make_async_http_client
+from app.services.object_naming import dedupe_object_names
 from app.services.draft_checkpoint import chunk_key
 from app.services.evidence_chunker import split_evidence, split_relations
 
@@ -357,6 +358,19 @@ class OntologyDraftGenerator:
             desc_map[ot.candidate_name] = (
                 ov_desc if (ov_desc and str(ov_desc).strip()) else ot.description
             )
+
+        # 标识名去碰撞：不同源表被 LLM/启发式压成同名（如 Frappe 的
+        # tabProcess Period Closing Voucher 与 tabPeriod Closing Voucher 都成
+        # period_closing_voucher）会在发布期触发「对象标识重复」。撞名组改用源表名
+        # 消歧。properties/relations 均经由 name_map 取名，故此处修正会自动下传。
+        name_map.update(
+            dedupe_object_names(
+                [
+                    (ot.candidate_name, name_map[ot.candidate_name], ot.source_dataset_urn)
+                    for ot in evidence.object_types
+                ]
+            )
+        )
 
         object_types = [
             DraftObjectType(
