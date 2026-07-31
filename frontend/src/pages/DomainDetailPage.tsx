@@ -355,13 +355,11 @@ export function DomainDetailPage() {
       onOk: async () => {
         try {
           setActionError(null);
-          const validation = await api.validateOntology(domain.latest_ontology_id!);
-          if (!validation.ok) {
-            const msg = validation.issues.map((i) => i.message).join("；");
-            setActionError(msg || "一致性校验失败");
-            message.error(msg || "一致性校验失败");
-            throw new Error(msg || "一致性校验失败");
-          }
+          // 一致性校验改为建议性：不再阻断发布。发布已确认的业务对象与业务关系，
+          // 待复核/其它类型对象保持原状，冲突仅作简洁提示。
+          const validation = await api
+            .validateOntology(domain.latest_ontology_id!)
+            .catch(() => null);
           const confirmation = await api.createConfirmation({
             ontology_id: domain.latest_ontology_id!,
             target_type: "ontology",
@@ -371,7 +369,16 @@ export function DomainDetailPage() {
           await api.confirmAction(confirmation.id);
           const updated = await api.getDomain(domainId);
           setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
-          message.success("发布成功");
+          const issues = validation && !validation.ok ? validation.issues : [];
+          if (issues.length) {
+            const top = issues.slice(0, 2).map((i) => i.message).join("；");
+            const extra = issues.length > 2 ? ` 等 ${issues.length} 项` : "";
+            message.warning(
+              `已发布已确认的业务对象与关系；${issues.length} 处待复核/冲突保持原状：${top}${extra}`,
+            );
+          } else {
+            message.success("发布成功");
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : "发布失败";
           setActionError(msg);
