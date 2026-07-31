@@ -271,8 +271,9 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
     },
   ];
 
-  // 无冲突：不占用任何页面空间。
-  if (total === 0 && !loading) return null;
+  // 无冲突或数据尚未加载：不占用任何页面空间。gate 用 data 而非 loading，
+  // 否则首帧 loading 期间会先渲染出按钮、数据回来无冲突再消失（闪现）。
+  if (!data || total === 0) return null;
 
   const segmentOptions = [
     { label: `全部 ${total}`, value: "all" },
@@ -283,7 +284,8 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
 
   return (
     <>
-      <Badge count={total} size="small" overflowCount={999}>
+      {/* offset 把计数气泡收进按钮内，避免被 .page-container--full 的 overflow:hidden 裁掉 */}
+      <Badge count={total} size="small" overflowCount={999} offset={[-2, 4]}>
         <Button icon={<WarningOutlined />} onClick={() => setOpen(true)}>
           字段冲突复核
         </Button>

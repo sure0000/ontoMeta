@@ -81,14 +81,50 @@ def test_validate_flags_unmaterialized_bridge(client, admin_headers):
 
 
 def test_publish_blocked_by_unmaterialized_bridge(client, admin_headers):
+    # 部分发布：未物化的关系表(bridge)不再阻断发布，只是不随本体发布、保持原状。
     _, ontology_id = _seed_ontology("bridge-block")
-    _add_object(ontology_id, "equip_repair", "bridge")
+    bridge_id = _add_object(ontology_id, "equip_repair", "bridge")
 
     resp = _publish(client, admin_headers, ontology_id)
-    assert resp.status_code == 400, resp.text
-    detail = resp.json()["detail"]
-    codes = [i["code"] for i in detail["issues"]]
-    assert "bridge_object_not_materialized" in codes
+    assert resp.status_code == 200, resp.text
+    # 桥表非业务对象 → 未随本体发布，状态保持原状。
+    with SessionLocal() as db:
+        obj = db.get(ObjectType, bridge_id)
+        assert obj.status != "published"
+
+
+def test_partial_publish_confirmed_objects_and_relations(client, admin_headers):
+    """部分发布：已确认业务对象 + 其业务关系发布；待复核业务对象、其它角色对象保持原状。"""
+    _, ontology_id = _seed_ontology("partial-pub")
+    src = _add_object(ontology_id, "customer", "business_object")
+    tgt = _add_object(ontology_id, "company", "business_object")
+    with SessionLocal() as db:
+        # 待复核业务对象（role_reason 带 [待复核] 前缀）→ 不应发布。
+        pend = ObjectType(
+            ontology_id=ontology_id, name="pending_obj", display_name="待复核对象",
+            table_role="business_object", status="suggested", role_reason="[待复核] 需人工确认",
+        )
+        db.add(pend)
+        db.flush()
+        pend_id = pend.id
+        # 两端都是已确认业务对象的业务关系 → 应随本体发布。
+        rel = RelationType(
+            ontology_id=ontology_id, name="customer_company", display_name="属于",
+            source_object_type_id=src, target_object_type_id=tgt,
+            structure_type="foreign_key", status="suggested",
+        )
+        db.add(rel)
+        db.flush()
+        rel_id = rel.id
+        db.commit()
+
+    resp = _publish(client, admin_headers, ontology_id)
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        assert db.get(ObjectType, src).status == "published"
+        assert db.get(ObjectType, tgt).status == "published"
+        assert db.get(RelationType, rel_id).status == "published"  # 业务关系随发布
+        assert db.get(ObjectType, pend_id).status != "published"  # 待复核保持原状
 
 
 def test_materialized_bridge_passes(client, admin_headers):

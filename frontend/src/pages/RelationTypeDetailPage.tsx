@@ -203,9 +203,11 @@ export function RelationTypeDetailPage() {
   const watchedSource = Form.useWatch("source_object_type_id", form);
   const watchedTarget = Form.useWatch("target_object_type_id", form);
   const watchedStructureType = Form.useWatch("structure_type", form);
-  const needsMappingTable = STRUCTURE_TYPES_REQUIRING_MAPPING_TABLE.has(
-    watchedStructureType as string,
-  );
+  // 结构类型要求承载表，或该关系本就已设承载表 → 展示该字段；后者避免结构类型
+  // 非 bridge/fact 时把已存在的承载表整块藏起来、既看不到也改不了。
+  const needsMappingTable =
+    STRUCTURE_TYPES_REQUIRING_MAPPING_TABLE.has(watchedStructureType as string) ||
+    Boolean(rel?.mapping_object_type_id);
 
   const loadRelation = async () => {
     if (!relationId) return;
@@ -222,18 +224,23 @@ export function RelationTypeDetailPage() {
       source_object_type_id: detail.source_object_type_id,
       target_object_type_id: detail.target_object_type_id,
     });
-    if (detail.mapping_object_type_id && detail.mapping_object) {
+    // 承载表(mapping)已设置就把它塞进下拉选项——即便后端 mapping_object 引用解析为空
+    // (对象跨域/未解析)，也用 mapping_object_name 兜底，避免 Select 有值却无对应选项
+    // 显示为空、逼用户手动重选。
+    if (detail.mapping_object_type_id) {
+      const ref = detail.mapping_object;
+      const fallbackName = detail.mapping_object_name || detail.mapping_object_type_id;
       setDatasetOptions((prev) => {
         if (prev.some((o) => o.object_type_id === detail.mapping_object_type_id)) {
           return prev;
         }
         return [
           {
-            urn: detail.mapping_object!.source_ref || "",
-            name: detail.mapping_object!.name,
-            display_name: detail.mapping_object!.display_name,
+            urn: ref?.source_ref || "",
+            name: ref?.name || fallbackName,
+            display_name: ref?.display_name || detail.mapping_object_name || "",
             object_type_id: detail.mapping_object_type_id,
-            object_type_display_name: detail.mapping_object!.display_name,
+            object_type_display_name: ref?.display_name || detail.mapping_object_name || "",
           },
           ...prev,
         ];

@@ -533,7 +533,9 @@ class EvidenceBuilder:
             collapsed.append(
                 RelationEvidencePack(
                     name=name,  # 一桥一关系，用桥表候选名作稳定 upsert 键
-                    display_name=bridge_label,
+                    # 关系语义词须为动词：桥表名是名词，故用通用关联动词「关联」，
+                    # 具体承载表(桥表)由 mapping_object 记录、描述里给出。
+                    display_name="关联",
                     source_object=source,
                     target_object=target,
                     cardinality="many_to_many",

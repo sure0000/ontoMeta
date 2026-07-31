@@ -26,13 +26,16 @@ from app.schemas import (
     OntologyDraftOutput,
 )
 from app.services.common import log_change
-from app.services.draft_consistency import DraftConsistencyError, assert_ontology_consistent
 from app.services.version_diff import (
     capture_ontology_snapshot,
     compute_version_diff,
     load_previous_snapshot,
     summarize_diff,
 )
+
+# 待复核标记：对象 role_reason 的 [待复核] 前缀（与 edit._REVIEW_MARK 一致）。
+# 部分发布据此排除未确认的业务对象。
+_REVIEW_MARK = "[待复核]"
 
 
 def _log_change(
@@ -386,8 +389,6 @@ class PublishService:
         if not ontology:
             raise ValueError("Ontology not found")
 
-        assert_ontology_consistent(db, ontology_id)
-
         new_version = ontology.version + 1
         previous_snapshot = load_previous_snapshot(
             db, ontology_id, before_version=new_version
@@ -401,12 +402,11 @@ class PublishService:
         ontology.published_at = datetime.now(timezone.utc)
         ontology.approved_by = operator
 
+        # 部分发布（不再硬校验阻断）：只发布「已确认(非待复核)的业务对象 + 其属性 +
+        # 两端都落在已发布业务对象集里的业务关系」。待复核对象、其它角色对象(数据表/
+        # 关系表/技术表)、端点未发布的关系一律保持原状。一致性冲突由 validate_ontology
+        # 作建议性提示(前端展示)，不阻断发布。业务逻辑仍走 publish_business_logic 单独发布。
         entities: list = []
-        # 数据域发布仅发布业务对象：只把 table_role==business_object 的对象类型
-        # 及其属性晋级为 published。非业务对象（数据表/关系表/技术表）、关系
-        # (RelationType)、业务逻辑(BusinessLogic) 不随本体发布，因而不会进入已发布
-        # 浏览态与对外/下游视图。业务逻辑仍可经其独立发布流程(publish_business_logic)
-        # 单独发布。
         business_objects = (
             db.query(ObjectType)
             .filter(
@@ -415,14 +415,34 @@ class PublishService:
             )
             .all()
         )
-        entities.extend(business_objects)
-        business_object_ids = [o.id for o in business_objects]
-        if business_object_ids:
+        confirmed_objects = [
+            o
+            for o in business_objects
+            if not (o.role_reason or "").startswith(_REVIEW_MARK)
+            and not getattr(o, "deleted_by_user", False)
+        ]
+        entities.extend(confirmed_objects)
+        confirmed_object_ids = {o.id for o in confirmed_objects}
+        if confirmed_object_ids:
             entities.extend(
                 db.query(Property)
-                .filter(Property.object_type_id.in_(business_object_ids))
+                .filter(Property.object_type_id.in_(confirmed_object_ids))
                 .all()
             )
+        # 业务关系：两端都在已发布业务对象集里、未弃用、未被用户删除 → 随本体发布。
+        relations = (
+            db.query(RelationType)
+            .filter(RelationType.ontology_id == ontology_id)
+            .all()
+        )
+        entities.extend(
+            r
+            for r in relations
+            if r.source_object_type_id in confirmed_object_ids
+            and r.target_object_type_id in confirmed_object_ids
+            and not getattr(r, "deleted_by_user", False)
+            and r.status != EntityStatus.DEPRECATED.value
+        )
 
         for entity in entities:
             if entity.status != EntityStatus.DEPRECATED.value:

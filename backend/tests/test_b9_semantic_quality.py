@@ -199,15 +199,13 @@ def test_inconsistent_draft_validation_fails(client, admin_headers):
         },
     )
     assert conf.status_code == 200
-    bad = client.post(
+    # 部分发布：跨本体源端点的关系不随本体发布，但发布本身不再被一致性校验阻断
+    # （校验改为建议性提示，见 validate 端点）。
+    done = client.post(
         f"/api/confirmations/{conf.json()['id']}/confirm",
         headers=admin_headers,
     )
-    assert bad.status_code == 400
-    detail = bad.json()["detail"]
-    assert isinstance(detail, dict)
-    assert "一致性校验失败" in detail["message"]
-    assert detail["issues"]
+    assert done.status_code == 200, done.text
 
 
 def test_chat_bi_no_hit_refuses_fiction(client, admin_headers):
