@@ -3,9 +3,11 @@ import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined } from "@ant-d
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type {
+  ChatBiAgentStep,
   ChatBiCaliberItem,
   ChatBiCaliberKind,
   ChatBiCaliberReference,
+  ChatBiDataResult,
 } from "../../types";
 import {
   splitInlineTokens,
@@ -185,6 +187,9 @@ export function ChatBubble({
           </div>
         ) : (
           <>
+            {!isUser && message.payload?.steps && message.payload.steps.length > 0 && (
+              <StepTrace steps={message.payload.steps} />
+            )}
             <MarkdownLite content={message.content} />
             {message.payload?.caliber_decomposition &&
               message.payload.caliber_decomposition.length > 0 && (
@@ -195,6 +200,10 @@ export function ChatBubble({
             {message.payload?.suggested_sql && (
               <SqlBlock sql={message.payload.suggested_sql} />
             )}
+            {!isUser && message.payload?.data_result &&
+              message.payload.data_result.rows?.length > 0 && (
+                <ResultTable result={message.payload.data_result} />
+              )}
             {message.payload &&
               !isUser &&
               (message.payload.referenced_objects?.length ||
@@ -256,12 +265,114 @@ export function ChatBubble({
   );
 }
 
+const STEP_TOOL_LABELS: Record<string, string> = {
+  search_objects: "检索对象",
+  get_object: "读取对象",
+  search_relations: "检索关系",
+  search_logics: "检索口径",
+  get_logic: "读取口径",
+  run_sql: "执行 SQL",
+};
+
+function stepArgHint(step: ChatBiAgentStep): string {
+  const a = (step.arguments ?? {}) as Record<string, unknown>;
+  if (step.tool === "run_sql") return String(a.sql ?? "").replace(/\s+/g, " ").slice(0, 72);
+  if (a.keyword != null) return String(a.keyword);
+  if (a.object_id != null) return String(a.object_id).slice(0, 8);
+  if (a.logic_id != null) return String(a.logic_id).slice(0, 8);
+  return "";
+}
+
+function StepTrace({ steps }: { steps: ChatBiAgentStep[] }) {
+  const hasFailed = steps.some((s) => s.status === "failed");
+  // 决策点2：默认折叠，失败自动展开
+  const [open, setOpen] = useState(hasFailed);
+  return (
+    <div className="chatbi-steps">
+      <button
+        type="button"
+        className="chatbi-steps-toggle"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className={`chatbi-steps-caret${open ? " open" : ""}`}>▸</span>
+        已执行 {steps.length} 步工具编排{hasFailed ? " · 含失败" : ""}
+      </button>
+      {open && (
+        <ol className="chatbi-steps-list">
+          {steps.map((s) => (
+            <li
+              key={s.index}
+              className={`chatbi-step chatbi-step--${s.status ?? "succeeded"}`}
+            >
+              <span className="chatbi-step-tool">
+                {STEP_TOOL_LABELS[s.tool] ?? s.tool}
+              </span>
+              {stepArgHint(s) && (
+                <code className="chatbi-step-arg">{stepArgHint(s)}</code>
+              )}
+              {s.summary && (
+                <span className="chatbi-step-summary">{s.summary}</span>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function fmtCell(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function ResultTable({ result }: { result: ChatBiDataResult }) {
+  const rows = result.rows ?? [];
+  const cols =
+    result.columns && result.columns.length
+      ? result.columns
+      : Object.keys(rows[0] ?? {}).map((k) => ({ key: k, title: k }));
+  const keys = cols.map((c) => String(c.key ?? c.title ?? ""));
+  const MAX = 50;
+  const shown = rows.slice(0, MAX);
+  return (
+    <div className="chatbi-result">
+      <div className="chatbi-result-title">
+        查询结果 · {rows.length} 行{result.truncated ? "（已截断）" : ""}
+      </div>
+      <div className="chatbi-result-scroll">
+        <table className="chatbi-result-table">
+          <thead>
+            <tr>
+              {cols.map((c, i) => (
+                <th key={i}>{String(c.title ?? c.key ?? "")}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((row, ri) => (
+              <tr key={ri}>
+                {keys.map((k, ci) => (
+                  <td key={ci}>{fmtCell(row[k])}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > shown.length && (
+        <div className="chatbi-result-more">仅展示前 {shown.length} 行</div>
+      )}
+    </div>
+  );
+}
+
 function CaliberDecomposition({
   items,
 }: {
   items: ChatBiCaliberItem[];
-}) {
-  return (
+}) {  return (
     <div className="chatbi-caliber">
       <div className="chatbi-caliber-title">口径拆解 · 本体映射</div>
       <div className="chatbi-caliber-list">

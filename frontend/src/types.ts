@@ -627,6 +627,20 @@ export interface ChatBiCaliberItem {
   references: ChatBiCaliberReference[];
 }
 
+export interface ChatBiAgentStep {
+  index: number;
+  tool: string;
+  arguments?: Record<string, unknown>;
+  status?: "succeeded" | "failed";
+  summary?: string | null;
+}
+
+export interface ChatBiDataResult {
+  columns: { key?: string; title?: string; [k: string]: unknown }[];
+  rows: Record<string, unknown>[];
+  truncated?: boolean;
+}
+
 export interface ChatBiAnswer {
   domain_id: string;
   domain_name: string;
@@ -638,6 +652,8 @@ export interface ChatBiAnswer {
   referenced_logics?: ChatBiReference[];
   used_mock: boolean;
   grounding_refused?: boolean;
+  steps?: ChatBiAgentStep[];
+  data_result?: ChatBiDataResult | null;
   conversation_id?: string | null;
   conversation_title?: string | null;
 }
