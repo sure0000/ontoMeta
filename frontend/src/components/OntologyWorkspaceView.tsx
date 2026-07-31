@@ -206,8 +206,16 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         undefined,
         { numeric: true },
       );
-    // 服务端已按 role_in/needs_review 过滤，本地只处理未受控场景
-    if (serverMode) return [...objects].sort(byDisplayName);
+    // 服务端已按 role_in/needs_review 过滤，本地只处理未受控场景。
+    // 防御性角色过滤：对象 Tab 只显示与当前 Tab 角色一致的对象——即便服务端首帧
+    // 竞态返回了其它角色(如切换 Tab 触发的 role_in 重查尚未回来)，也不会混入
+    // 关系表/技术表，避免「刷新后才正常归属」。
+    if (serverMode) {
+      const sorted = [...objects].sort(byDisplayName);
+      return viewTab !== "relations"
+        ? sorted.filter((o) => (o.table_role || "business_object") === viewTab)
+        : sorted;
+    }
     return objects
       .filter(
         (o) =>
@@ -215,7 +223,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
           matchObjectFilters(o, typeFilter, needsReview),
       )
       .sort(byDisplayName);
-  }, [objects, normalizedQuery, typeFilter, needsReview, serverMode]);
+  }, [objects, normalizedQuery, typeFilter, needsReview, serverMode, viewTab]);
 
   const filteredRelations = useMemo(() => {
     if (serverMode) return relations;

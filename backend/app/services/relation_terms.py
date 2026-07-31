@@ -7,38 +7,42 @@ _VERB_PATTERN = re.compile(
     r"|汇总|对账|结算|统计|清洗|加工|标准化|报表|核对|刻画|度量|支撑)"
 )
 
+# 校验禁止的内容（与 validate_relation_term 保持一致）：句子标点、连续空白、
+# 「关联 」「加工至」这类连接短语、以及名词后缀「表」。compact 的产出必须避开这一集合，
+# 否则生成的关系词能落库、却在人工编辑时被 validate 打回（生成/限制不一致）。
+_FORBIDDEN_TERM = re.compile(r"[。；！？]|\s{2,}|关联\s|加工至|表")
+# 句子/连接标记：命中说明是描述句而非干净谓词，应抽取其中动词而非原样保留。
+_SENTENCE_MARKERS = re.compile(r"->|至|通过|血缘|加工至|关联\s")
+
+
+def _is_clean_term(text: str) -> bool:
+    """是否为可直接作关系语义词的干净短谓词（长度达标且不含禁止内容）。"""
+    return bool(text) and len(text) <= RELATION_TERM_MAX_LENGTH and not _FORBIDDEN_TERM.search(text)
+
 
 def compact_relation_term(value: str) -> str:
-    """将句子式关系描述压缩为简短语义词。"""
+    """将句子式关系描述压缩为简短语义词，且**保证**产出能通过 validate_relation_term。
+
+    优先级：已是干净短谓词→原样保留；描述句→抽取其中动词；仍不达标→剥离禁止字符后
+    截断；最终兜底动词「关联」。避免生成期落库的关系词在编辑期被校验打回。
+    """
     text = value.strip()
     if not text:
         return text
 
-    # 已是简短、不含句子/连接词的干净谓词(如「对账为」「汇总为」「属于」)，
-    # 直接保留，避免被 _VERB_PATTERN 抽成单动词而丢掉方向后缀。
-    if len(text) <= RELATION_TERM_MAX_LENGTH and not re.search(
-        r"关联\s|加工至|->|至|通过|血缘", text
-    ):
+    # 已是干净短谓词(如「对账为」「属于」)且非描述句 → 原样保留。
+    if _is_clean_term(text) and not _SENTENCE_MARKERS.search(text):
         return text
 
-    for pattern in (
-        r"^.+?\s*关联\s*(.+)$",
-        r"^.+?\s*加工至\s*(.+)$",
-        r"^.+?\s*->\s*(.+)$",
-    ):
-        if re.search(pattern, text):
-            match = _VERB_PATTERN.search(text)
-            if match:
-                return match.group(1)
-
+    # 描述句 → 抽取其中的动词。
     match = _VERB_PATTERN.search(text)
     if match:
         return match.group(1)
 
-    if len(text) > RELATION_TERM_MAX_LENGTH:
-        return text[:RELATION_TERM_MAX_LENGTH]
+    # 兜底：剥离禁止字符 + 截断；仍不达标则退回通用动词「关联」。
+    cleaned = re.sub(r"[。；！？]|表|\s+", "", text)[:RELATION_TERM_MAX_LENGTH]
+    return cleaned if _is_clean_term(cleaned) else "关联"
 
-    return text
 
 
 # 血缘/派生关系的默认谓词（对齐 PROV-O 溯源语义）。

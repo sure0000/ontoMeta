@@ -7,6 +7,7 @@ export const detailEdgeOptions: EdgeOptions = {
   style: {
     stroke: EDGE_COLORS.stroke,
     lineWidth: 1.5,
+    cursor: "pointer", // 可点击的鼠标提示，与节点/版块一致，暗示边可点进关系详情
     endArrow: true,
     endArrowType: "triangle",
     endArrowSize: 8,
@@ -15,6 +16,7 @@ export const detailEdgeOptions: EdgeOptions = {
     labelFontSize: 11,
     labelFontWeight: 500,
     labelFill: EDGE_COLORS.label,
+    labelCursor: "pointer",
     labelBackground: true,
     labelBackgroundFill: EDGE_COLORS.labelBg,
     labelBackgroundOpacity: 0.95,
@@ -22,9 +24,13 @@ export const detailEdgeOptions: EdgeOptions = {
     labelPadding: [2, 6],
   },
   state: {
+    // 悬停：加粗描边 + 标签链接色/加粗，读作「这是可点击的链接」。
     hover: {
       stroke: EDGE_COLORS.hoverStroke,
-      lineWidth: 2,
+      lineWidth: 2.5,
+      halo: true,
+      labelFill: EDGE_COLORS.hoverStroke,
+      labelFontWeight: 700,
     },
   },
 };

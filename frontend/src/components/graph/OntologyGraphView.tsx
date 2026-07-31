@@ -290,6 +290,20 @@ function OntologyGraphViewInner({
         }
         if (relationDetailPath) navigate(relationDetailPath(resolveRelationId(graphEdge)));
       });
+
+      // 悬停高亮可点击的关系边（描边加粗 + 标签链接色），配合 cursor:pointer 让边的
+      // 可点击性可见。仅当边确实可跳转时才亮，避免误导。
+      const edgeNavigable = () => {
+        const { onEdgeClick, relationDetailPath } = latest.current;
+        return Boolean(onEdgeClick || relationDetailPath);
+      };
+      g.on<IElementEvent>("edge:pointerenter", (evt) => {
+        if (!edgeNavigable()) return;
+        void g.setElementState(String(evt.target.id), ["hover"], false);
+      });
+      g.on<IElementEvent>("edge:pointerleave", (evt) => {
+        void g.setElementState(String(evt.target.id), [], false);
+      });
     }
 
     if (isOverview) {
