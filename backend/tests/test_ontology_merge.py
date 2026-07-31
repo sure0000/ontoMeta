@@ -212,3 +212,58 @@ def test_merge_relations_persists_mapping_object():
     finally:
         db.rollback()
         db.close()
+
+
+def test_regeneration_dedups_and_prunes_stale_properties():
+    """再生成不重复同名属性；未再出现的陈旧机器属性被清理，人工创建/编辑的保留。"""
+    from app.models import Property
+
+    merge = OntologyMergeService()
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        obj = _obj("urn:o", "customer", "客户")
+        props = [
+            DraftProperty(object_type_name="customer", name="creation", display_name="创建时间"),
+            DraftProperty(object_type_name="customer", name="email", display_name="邮箱"),
+        ]
+        merge.merge_objects(db, ontology.id, [obj], props, "g1", MergeReport())
+        db.commit()
+        oid = (
+            db.query(ObjectType)
+            .filter_by(ontology_id=ontology.id, name="customer")
+            .one()
+            .id
+        )
+        assert db.query(Property).filter_by(object_type_id=oid).count() == 2
+
+        # 再生成(相同证据) → 同名字段不重复。
+        merge.merge_objects(db, ontology.id, [obj], props, "g2", MergeReport())
+        db.commit()
+        assert db.query(Property).filter_by(object_type_id=oid).count() == 2
+
+        # 塞入陈旧机器属性(旧 gen、未再出现) 与人工创建属性。
+        db.add(
+            Property(
+                object_type_id=oid, name="stale_col", display_name="旧列",
+                status=EntityStatus.SUGGESTED.value, origin="machine",
+                last_generation_id="old",
+            )
+        )
+        db.add(
+            Property(
+                object_type_id=oid, name="kept_col", display_name="人工列",
+                status=EntityStatus.EDITED.value, origin="machine_edited",
+                last_generation_id="old", user_created=True,
+            )
+        )
+        db.commit()
+        merge.merge_objects(db, ontology.id, [obj], props, "g3", MergeReport())
+        db.commit()
+        names = {p.name for p in db.query(Property).filter_by(object_type_id=oid).all()}
+        assert "stale_col" not in names  # 陈旧机器属性被清理
+        assert "kept_col" in names  # 人工创建/编辑的保留
+        assert {"creation", "email"} <= names
+    finally:
+        db.rollback()
+        db.close()

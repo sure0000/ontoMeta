@@ -70,6 +70,11 @@ def _dumps(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _prop_key(name: str | None) -> str:
+    """属性去重键：字段名在对象内唯一，故按归一化字段名去重（不用会漂移的 source_field_ref）。"""
+    return (name or "").strip().lower()
+
+
 def _new_report_section() -> dict[str, list]:
     return {"added": [], "updated": [], "kept": [], "conflict": [], "removed": []}
 
@@ -278,6 +283,9 @@ class OntologyMergeService:
         report: MergeReport,
     ) -> None:
         object_ids = list(object_id_by_name.values())
+        # 按字段名去重（字段名在对象内唯一）。历史上用 `source_field_ref or name` 作键，
+        # 但 source_field_ref 会随源 URN/命名在多次重跑间漂移，导致同名字段被判成不同项、
+        # 每重跑一次就追加一份（creation×3 等累积）。字段名才是对象内稳定唯一标识。
         existing_props: dict[str, dict[str, Property]] = {}
         if object_ids:
             for prop in (
@@ -285,14 +293,15 @@ class OntologyMergeService:
                 .filter(Property.object_type_id.in_(object_ids))
                 .all()
             ):
-                key = prop.source_field_ref or prop.name
-                existing_props.setdefault(prop.object_type_id, {})[key] = prop
+                existing_props.setdefault(prop.object_type_id, {}).setdefault(
+                    _prop_key(prop.name), prop
+                )
 
         for item in properties:
             object_type_id = object_id_by_name.get(item.object_type_name)
             if not object_type_id:
                 continue
-            key = item.source_field_ref or item.name
+            key = _prop_key(item.name)
             existing = existing_props.get(object_type_id, {}).get(key)
             incoming = {
                 "display_name": item.display_name,
@@ -318,6 +327,8 @@ class OntologyMergeService:
                 )
                 db.add(prop)
                 db.flush()
+                # 登记到索引，防止同一批 properties 里的同名字段再插一份。
+                existing_props.setdefault(object_type_id, {})[key] = prop
                 report.record(
                     "properties", "added", prop.id, prop.name, prop.display_name
                 )
@@ -328,6 +339,8 @@ class OntologyMergeService:
                 outcome, changed, conflicts = _merge_entity_fields(
                     existing, incoming, PROPERTY_FIELDS
                 )
+                # 跟随当前源：源字段引用可能随重命名/重摄取变化，更新为本次生成的值。
+                existing.source_field_ref = item.source_field_ref
                 existing.source_confidence = item.confidence
                 existing.last_generation_id = gen_id
                 existing.upstream_removed = False
@@ -340,6 +353,42 @@ class OntologyMergeService:
                     "properties", outcome, existing.id, existing.name,
                     existing.display_name, fields=changed, conflicts=conflicts,
                 )
+
+        # 陈旧机器属性清理：本次生成处理过的对象下，未被本次刷新到的机器属性即陈旧/串台
+        # 残留（旧命名批次遗留、跨表串入的字段），删除以免跨重跑累积。人工创建/编辑/已确认的保留。
+        self._prune_stale_properties(db, object_ids, gen_id, report)
+
+    def _prune_stale_properties(
+        self,
+        db: Session,
+        object_ids: list[str],
+        gen_id: str | None,
+        report: MergeReport,
+    ) -> None:
+        if not object_ids or gen_id is None:
+            return
+        # 会话 autoflush=False：先把循环里对 last_generation_id 的更新刷入，
+        # 否则下面的查询读到旧值、会把刚更新过的属性误判为陈旧而删除。
+        db.flush()
+        stale = (
+            db.query(Property)
+            .filter(
+                Property.object_type_id.in_(object_ids),
+                (Property.last_generation_id != gen_id)
+                | (Property.last_generation_id.is_(None)),
+            )
+            .all()
+        )
+        for p in stale:
+            if (
+                p.user_created
+                or _loads(p.overridden_fields, [])
+                or p.status
+                not in (EntityStatus.SUGGESTED.value, EntityStatus.DEPRECATED.value)
+            ):
+                continue  # 保留人工创建/编辑/已确认的属性
+            report.record("properties", "removed", p.id, p.name, p.display_name)
+            db.delete(p)
 
     def _handle_object_removal(
         self,
