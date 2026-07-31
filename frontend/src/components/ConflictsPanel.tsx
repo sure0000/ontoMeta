@@ -284,12 +284,18 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
 
   return (
     <>
-      {/* offset 把计数气泡收进按钮内，避免被 .page-container--full 的 overflow:hidden 裁掉 */}
-      <Badge count={total} size="small" overflowCount={999} offset={[-2, 4]}>
-        <Button icon={<WarningOutlined />} onClick={() => setOpen(true)}>
-          字段冲突复核
-        </Button>
-      </Badge>
+      {/* 计数内联进按钮：早先用 <Badge> 包按钮的角标气泡会溢出按钮盒子，被祖先
+          overflow:hidden 裁掉（或用 offset 收进来又压住按钮边框/文字）。改为按钮内
+          的独立 Badge 计数条，永不被裁剪、也不遮挡按钮本身。 */}
+      <Button icon={<WarningOutlined />} onClick={() => setOpen(true)}>
+        字段冲突复核
+        <Badge
+          count={total}
+          overflowCount={999}
+          color="red"
+          style={{ marginInlineStart: 8 }}
+        />
+      </Button>
 
       <Drawer
         title="字段冲突复核"
