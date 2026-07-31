@@ -17,11 +17,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session, joinedload
 
 import sqlparse
+
+from app.config import settings as env_settings
 
 from app.models import (
     BusinessLogic,
@@ -34,7 +36,7 @@ from app.models import (
     Property,
     RelationType,
 )
-from app.services.common import log_change, make_http_client
+from app.services.common import log_change, make_async_http_client
 from app.services.query import OntologyQueryService
 from app.services.settings_service import SettingsService
 
@@ -43,6 +45,140 @@ logger = logging.getLogger("ontometa.chat_bi")
 _AGG_KEYWORDS = ("多少", "总数", "总量", "合计", "汇总", "统计", "count", "sum", "avg", "平均")
 _TIME_KEYWORDS = ("最近", "近", "今日", "昨天", "本月", "上月", "近 7 天", "近7天", "近 30 天", "近30天")
 _FILTER_KEYWORDS = ("按", "where", "筛选", "条件", "等于", "大于", "小于")
+
+
+# ---------------------------------------------------------------------------
+# Data Agent（工具编排）运行常量 —— 均衡档（见 DATA_AGENT_REDESIGN.md §9.1）
+# ---------------------------------------------------------------------------
+_AGENT_MAX_STEPS = 6            # Agent 循环步数上限，超出强制收尾作答
+_RUN_SQL_LIMIT = 100           # run_sql 默认返回行上限
+_TOOL_RESULT_MAX_CHARS = 8000  # 单个工具结果回灌前的截断阈值
+_SQL_TIMEOUT_SECONDS = 15      # run_sql 语句超时（execute_sql 既有能力）
+_SEARCH_LIMIT = 8              # 检索类工具默认返回条数
+
+_AGENT_SYSTEM_PROMPT = (
+    "你是企业数据问答助手（Data Agent），基于**已发布本体**回答业务问题。\n"
+    "你可以多步调用工具来检索本体（业务对象/字段/关系/业务逻辑）并执行只读 SQL，"
+    "像分析师一样先查清口径再作答。\n\n"
+    "工作纪律：\n"
+    "1. 先用 search_objects / search_logics / search_relations 找到相关实体，"
+    "再用 get_object / get_logic 拿字段与口径细节；不要臆造对象名或字段名。"
+    "检索关键词优先用**中文**（本体以中文命名，英文词多半命不中）。\n"
+    "1b. 概览/列举类问题（如“有哪些对象/本体/业务板块”）**先调用 get_domain_overview**，"
+    "一次拿到板块与总量，不要逐个猜关键词穷举。\n"
+    "2. 若问题需要具体数值/明细，用 get_object 拿到真实字段后写 SQL；"
+    "**只要你写了查询 SQL，就必须通过 run_sql 提交**（哪怕只为取数/校验），"
+    "不要仅在正文里贴 SQL 而不调用 run_sql。表名/字段名必须来自本体。\n"
+    "3. run_sql 只读：只能 SELECT。若返回“无可执行数据源”，就把该查询作为建议 SQL 给出，"
+    "并说明未实际执行。\n"
+    "4. 用中文、Markdown 作答：先给口径解读，再给结论/建议；有数据时用表格或要点呈现。\n"
+    "5. 若本体中确实找不到相关对象/逻辑，如实说明无法基于当前本体回答，不要编造。\n"
+    "6. 不要在正文里堆砌调试信息；工具调用过程会单独展示给用户。"
+)
+
+# OpenAI 原生 function-calling 工具（自建 GLM 实测支持）。
+# 检索类直呼 OntologyQueryService（带 q 关键词 + limit），避免 MCP 目录“仅按域全返”导致的巨结果。
+_AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_objects",
+            "description": "按关键词检索当前数据域的已发布业务对象，返回候选列表（含 id/名称/字段数）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "检索关键词（对象名/含义）"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_object",
+            "description": "获取单个业务对象的完整定义：字段（name/显示名/类型/语义）、进出关系、绑定的业务逻辑。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": "string", "description": "业务对象 id（来自 search_objects）"},
+                },
+                "required": ["object_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_relations",
+            "description": "按关键词检索业务关系（两个对象之间的关联），返回关系列表。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "检索关键词"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_logics",
+            "description": "按关键词检索业务逻辑/指标口径（如 GMV、活跃客户），返回口径列表。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "检索关键词"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_logic",
+            "description": "获取单个业务逻辑/指标的完整口径：表达式、绑定的对象与字段。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "logic_id": {"type": "string", "description": "业务逻辑 id（来自 search_logics）"},
+                },
+                "required": ["logic_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_domain_overview",
+            "description": (
+                "获取当前数据域的整体概览：对象/关系总量、业务板块（聚类）及其规模。"
+                "回答“有哪些对象/本体/业务板块”这类概览问题时首选此工具，一次拿全，无需逐个猜关键词。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_sql",
+            "description": (
+                "在当前数据域的物理数据源上执行**只读 SELECT**，返回列与真实数据行。"
+                "表名/字段名必须使用本体标识符。若无可执行数据源会返回提示，此时改为给出建议 SQL。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string", "description": "单条 SELECT 语句"},
+                    "limit": {"type": "integer", "description": f"返回行上限，默认 {_RUN_SQL_LIMIT}"},
+                },
+                "required": ["sql"],
+            },
+        },
+    },
+]
 
 
 def _format_sql(sql: str | None) -> str | None:
@@ -113,34 +249,27 @@ class ChatBiService:
         relations = self._load_relations(db, ontology.id)
         logics = self._load_logics(db, ontology.id)
 
-        # Grounding：无检索命中时明确拒绝编造，不返回虚构/误匹配对象名
+        # 关键词命中：用于 Mock 兜底的接地判定，也作为 Agent 的检索种子提示
         grounded_objects = self._match_objects(question, snapshots)
         grounded_logics = self._match_logics(question, logics)
-        if not grounded_objects and not grounded_logics:
-            return self._ungrounded_refusal(
-                domain_id=domain_id,
-                domain_name=domain.name,
-                ontology_id=ontology.id,
-                question=question,
-            )
 
         runtime = self.settings_service.get_llm_runtime(db)
         use_mock = runtime.use_mock or not runtime.api_key
 
-        knowledge = self._build_knowledge_text(
-            domain=domain,
-            ontology=ontology,
-            objects=snapshots,
-            relations=relations,
-            logics=logics,
-        )
-
-        # 名称 -> 实体 的索引，用于给 LLM 输出补全真实 id 供前端跳转
+        # 名称 -> 实体 索引用全量本体：把 LLM/工具输出的名称/伪 id 归一到真实 id 供前端跳转
         resolver = _ReferenceResolver(
             objects=snapshots, relations=relations, logics=logics
         )
 
         if use_mock:
+            # Mock 路径：保持原有关键词接地 —— 无命中直接拒绝，避免编造
+            if not grounded_objects and not grounded_logics:
+                return self._ungrounded_refusal(
+                    domain_id=domain_id,
+                    domain_name=domain.name,
+                    ontology_id=ontology.id,
+                    question=question,
+                )
             payload = self._mock_answer(
                 question=question,
                 snapshots=snapshots,
@@ -149,17 +278,37 @@ class ChatBiService:
                 matched_objects=grounded_objects,
                 matched_logics=grounded_logics,
             )
-        else:
-            try:
-                payload = await asyncio.to_thread(
-                    self._llm_answer,
-                    runtime=runtime,
+            payload = resolver.resolve_payload(payload)
+            payload = self._enforce_grounded_refs(
+                payload,
+                grounded_objects=grounded_objects,
+                grounded_logics=grounded_logics,
+                resolver=resolver,
+            )
+            if not payload.get("referenced_objects") and not payload.get("referenced_logics"):
+                return self._ungrounded_refusal(
+                    domain_id=domain_id,
+                    domain_name=domain.name,
+                    ontology_id=ontology.id,
                     question=question,
-                    knowledge=knowledge,
+                )
+        else:
+            # Agent 路径：LLM 自主多步调用工具检索/跑数；refs/sql/data_result 从工具轨迹收割。
+            # 不再一次性灌全量本体 —— 上下文由分页工具按需拉取，结构上根治 413。
+            try:
+                payload = await self._run_agent_loop(
+                    db,
+                    runtime=runtime,
+                    domain=domain,
+                    ontology=ontology,
+                    question=question,
                     history=history or [],
+                    resolver=resolver,
+                    seed_objects=grounded_objects,
+                    seed_logics=grounded_logics,
                 )
             except Exception as exc:
-                logger.exception("ChatBI LLM call failed: %s", exc)
+                logger.exception("ChatBI agent loop failed: %s", exc)
                 payload = self._mock_answer(
                     question=question,
                     snapshots=snapshots,
@@ -168,25 +317,26 @@ class ChatBiService:
                     matched_objects=grounded_objects,
                     matched_logics=grounded_logics,
                 )
+                payload.setdefault("steps", [])
                 payload["answer"] = (
-                    f"> LLM 调用失败，已降级为规则匹配示例。\n\n{payload['answer']}"
+                    f"> {self._friendly_llm_error(exc)}\n\n{payload['answer']}"
                 )
-
-        # 统一后处理：补全实体 id、格式化 SQL；过滤无法落地的引用
-        payload = resolver.resolve_payload(payload)
-        payload = self._enforce_grounded_refs(
-            payload,
-            grounded_objects=grounded_objects,
-            grounded_logics=grounded_logics,
-            resolver=resolver,
-        )
-        if not payload.get("referenced_objects") and not payload.get("referenced_logics"):
-            return self._ungrounded_refusal(
-                domain_id=domain_id,
-                domain_name=domain.name,
-                ontology_id=ontology.id,
-                question=question,
+            payload = resolver.resolve_payload(payload)
+            # Agent 接地判定：只要 Agent 真正命中过本体数据（检索有结果 / 读到对象逻辑 /
+            # 概览 / 跑出数据）就视为接地，即便未产出具体引用（如“有哪些对象”这类概览问题）。
+            grounded = bool(
+                payload.pop("_grounded", False)
+                or payload.get("referenced_objects")
+                or payload.get("referenced_logics")
+                or payload.get("data_result")
             )
+            if not grounded:
+                return self._ungrounded_refusal(
+                    domain_id=domain_id,
+                    domain_name=domain.name,
+                    ontology_id=ontology.id,
+                    question=question,
+                )
 
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
@@ -515,192 +665,434 @@ class ChatBiService:
             .all()
         )
 
-    # ------------------------------------------------------------------ prompt
+    @staticmethod
+    def _friendly_llm_error(exc: Exception) -> str:
+        """把常见 LLM 失败(尤其是上下文/请求体过大)翻译成可读提示，替代笼统报错。"""
+        text = str(exc).lower()
+        status = getattr(exc, "status_code", None)
+        size_signals = (
+            "413",
+            "request entity too large",
+            "context length",
+            "maximum context",
+            "context_length_exceeded",
+            "too many tokens",
+            "string too long",
+            "payload too large",
+        )
+        if status in (413, 422) or any(sig in text for sig in size_signals):
+            return (
+                "LLM 上下文过大：本体知识超出模型/网关的请求上限，已降级为规则匹配示例。"
+                "请缩小提问范围，或联系管理员放宽端点的 body/上下文限制。"
+            )
+        return "LLM 调用失败，已降级为规则匹配示例。"
 
-    def _build_knowledge_text(
+    # -------------------------------------------------------------- agent loop
+
+    def _resolve_domain_data_source(self, db: Session):
+        """为 run_sql 选一个可执行数据源。
+
+        DataSource 目前无数据域绑定（schema 层缺 domain 外键），故策略：
+        唯一可用源直接用；多个可用源取最近更新的一个（P1 实用取舍）；无可用源返回 None
+        （run_sql 据此优雅降级为「仅建议 SQL」）。
+        """
+        from app.models import DataSource
+
+        usable = [
+            s
+            for s in db.query(DataSource).all()
+            if (s.dsn_secret_ref or "").strip() and s.kind != "mock"
+        ]
+        if not usable:
+            return None
+        if len(usable) > 1:
+            usable.sort(key=lambda s: (s.updated_at or s.created_at), reverse=True)
+        return usable[0]
+
+    # --- 工具结果 compact 化：只保留 LLM 需要的字段，压住回灌体积 ---
+
+    @staticmethod
+    def _compact_object_summary(o: Any) -> dict:
+        d = o.model_dump(mode="json") if hasattr(o, "model_dump") else dict(o)
+        return {
+            k: d.get(k)
+            for k in ("id", "name", "display_name", "description", "property_count", "table_role")
+        }
+
+    @staticmethod
+    def _compact_relation(r: Any) -> dict:
+        d = r.model_dump(mode="json") if hasattr(r, "model_dump") else dict(r)
+        return {
+            k: d.get(k)
+            for k in (
+                "id", "name", "display_name", "source_object_name",
+                "target_object_name", "cardinality", "description",
+            )
+        }
+
+    def _compact_object_detail(self, detail: Any) -> dict:
+        d = detail.model_dump(mode="json") if hasattr(detail, "model_dump") else dict(detail)
+        props = [
+            {
+                k: p.get(k)
+                for k in ("name", "display_name", "data_type", "semantic_type", "required", "description")
+            }
+            for p in (d.get("properties") or [])
+        ]
+        rels = [
+            self._compact_relation(r)
+            for r in (d.get("outgoing_relations") or []) + (d.get("incoming_relations") or [])
+        ]
+        logics = [
+            {"id": l.get("id"), "display_name": l.get("display_name"), "expression_summary": l.get("expression_summary")}
+            for l in (d.get("business_logics") or [])
+        ]
+        return {
+            "id": d.get("id"),
+            "name": d.get("name"),
+            "display_name": d.get("display_name"),
+            "description": d.get("description"),
+            "properties": props,
+            "relations": rels,
+            "business_logics": logics,
+        }
+
+    @staticmethod
+    def _compact_logic_summary(l: Any) -> dict:
+        d = l.model_dump(mode="json") if hasattr(l, "model_dump") else dict(l)
+        return {
+            k: d.get(k)
+            for k in ("id", "name", "display_name", "logic_type", "expression_summary", "description")
+        }
+
+    def _compact_logic_detail(self, detail: Any) -> dict:
+        d = detail.model_dump(mode="json") if hasattr(detail, "model_dump") else dict(detail)
+        base = self._compact_logic_summary(detail)
+        base["expression_draft"] = d.get("expression_draft")
+        base["related_objects"] = [
+            {"id": o.get("id"), "display_name": o.get("display_name")}
+            for o in (d.get("related_object_types") or [])
+        ]
+        base["related_properties"] = [
+            {"display_name": p.get("display_name"), "name": p.get("name")}
+            for p in (d.get("related_properties") or [])
+        ]
+        return base
+
+    @staticmethod
+    def _compact_overview(graph: Any) -> dict:
+        d = graph.model_dump(mode="json") if hasattr(graph, "model_dump") else dict(graph)
+        clusters = sorted(
+            d.get("clusters") or [], key=lambda c: c.get("node_count") or 0, reverse=True
+        )
+        return {
+            "total_object_count": d.get("total_object_count"),
+            "total_relation_count": d.get("total_relation_count"),
+            "cluster_count": len(d.get("clusters") or []),
+            "top_clusters": [
+                {"name": c.get("name"), "object_count": c.get("node_count")}
+                for c in clusters[:25]
+            ],
+        }
+
+    def _dispatch_run_sql(self, db: Session, *, args: dict) -> tuple[Any, str, bool]:
+        from app.services import data_app_executor
+
+        sql = str(args.get("sql") or "").strip()
+        if not sql:
+            return {"error": "缺少 sql"}, "run_sql 缺少 sql", True
+        try:
+            limit = int(args.get("limit") or _RUN_SQL_LIMIT)
+        except (TypeError, ValueError):
+            limit = _RUN_SQL_LIMIT
+        limit = max(1, min(limit, _RUN_SQL_LIMIT))
+
+        ok, reason = data_app_executor.is_read_only(sql)
+        if not ok:
+            return {"executed": False, "error": f"仅允许只读 SELECT：{reason}", "sql": sql}, "被只读校验拒绝", True
+
+        source = self._resolve_domain_data_source(db)
+        if source is None:
+            return (
+                {"executed": False, "reason": "当前数据域未绑定可执行数据源，仅能给出建议 SQL", "sql": sql},
+                "无可执行数据源",
+                False,
+            )
+        mapping = _loads_payload(source.mapping_json)
+        try:
+            columns, rows = data_app_executor.execute_sql(
+                dsn=source.dsn_secret_ref,
+                sql=sql,
+                limit=limit,
+                mapping=mapping or None,
+                timeout_seconds=_SQL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"executed": False, "error": str(exc)[:300], "sql": sql}, "SQL 执行失败", True
+        return (
+            {
+                "executed": True,
+                "sql": sql,
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": len(rows) >= limit,
+            },
+            f"返回 {len(rows)} 行",
+            False,
+        )
+
+    def _dispatch_agent_tool(
+        self, db: Session, *, domain_id: str, ontology_id: str, name: str, args: dict
+    ) -> tuple[Any, str, bool]:
+        """执行一个工具调用，返回 (结果对象, 人类可读摘要, 是否错误)。同步，供 to_thread 调用。"""
+        qs = self.query_service
+        try:
+            if name == "search_objects":
+                kw = str(args.get("keyword") or "").strip() or None
+                page = qs.list_object_types(
+                    db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                )
+                items = [self._compact_object_summary(o) for o in page.items]
+                return items, f"命中 {len(items)} 个对象", False
+            if name == "get_object":
+                detail = qs.get_object_type(db, str(args.get("object_id") or ""))
+                if not detail or detail.status != "published":
+                    return {"error": "对象不存在或未发布"}, "对象未命中", True
+                return self._compact_object_detail(detail), f"对象「{detail.display_name}」{len(detail.properties)} 字段", False
+            if name == "search_relations":
+                kw = str(args.get("keyword") or "").strip() or None
+                page = qs.list_relation_types(
+                    db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                )
+                items = [self._compact_relation(r) for r in page.items]
+                return items, f"命中 {len(items)} 个关系", False
+            if name == "search_logics":
+                kw = str(args.get("keyword") or "").strip() or None
+                page = qs.list_business_logics(
+                    db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                )
+                items = [self._compact_logic_summary(l) for l in page.items]
+                return items, f"命中 {len(items)} 个口径", False
+            if name == "get_logic":
+                detail = qs.get_business_logic(db, str(args.get("logic_id") or ""))
+                if not detail or detail.status != "published":
+                    return {"error": "业务逻辑不存在或未发布"}, "口径未命中", True
+                return self._compact_logic_detail(detail), f"口径「{detail.display_name}」", False
+            if name == "get_domain_overview":
+                graph = qs.get_ontology_grouped_graph(db, ontology_id)
+                overview = self._compact_overview(graph)
+                return overview, f"{overview['cluster_count']} 个业务板块 / {overview['total_object_count']} 对象", False
+            if name == "run_sql":
+                return self._dispatch_run_sql(db, args=args)
+            return {"error": f"未知工具：{name}"}, "未知工具", True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("agent tool %s failed: %s", name, exc)
+            return {"error": str(exc)[:300]}, f"工具异常：{type(exc).__name__}", True
+
+    @staticmethod
+    def _extract_sql_from_text(text: str | None) -> str | None:
+        """从答案正文里抽取 ```sql 围栏块（兜底：模型未走 run_sql 时不丢 SQL）。"""
+        if not text:
+            return None
+        m = re.search(r"```sql\s+(.*?)```", text, re.S | re.I)
+        if not m:
+            m = re.search(r"```\s*(SELECT\b.*?)```", text, re.S | re.I)
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def _steps_to_caliber(
+        steps: list[dict], referenced_objects: list[dict], referenced_logics: list[dict]
+    ) -> list[dict]:
+        """由工具轨迹派生口径拆解卡（决策点3：保留字段，内容由 steps 生成，而非逼模型吐 JSON）。"""
+        obj_by_id = {o["id"]: o for o in referenced_objects if o.get("id")}
+        logic_by_id = {l["id"]: l for l in referenced_logics if l.get("id")}
+        items: list[dict] = []
+        for s in steps:
+            tool = s.get("tool")
+            a = s.get("arguments") or {}
+            if tool == "get_object":
+                ref = obj_by_id.get(a.get("object_id"))
+                items.append({
+                    "label": "对象口径",
+                    "description": s.get("summary") or "",
+                    "references": [{"kind": "object_type", **ref}] if ref else [],
+                })
+            elif tool == "get_logic":
+                ref = logic_by_id.get(a.get("logic_id"))
+                items.append({
+                    "label": "逻辑口径",
+                    "description": s.get("summary") or "",
+                    "references": [{"kind": "business_logic", **ref}] if ref else [],
+                })
+            elif tool == "run_sql" and s.get("status") == "succeeded":
+                items.append({"label": "数据查询", "description": s.get("summary") or "", "references": []})
+        return items
+
+    async def _run_agent_loop(
         self,
-        *,
-        domain: DomainContext,
-        ontology: Ontology,
-        objects: list[_ObjectSnapshot],
-        relations: list[RelationType],
-        logics: list[BusinessLogic],
-    ) -> str:
-        lines: list[str] = []
-        lines.append(f"# 数据域：{domain.name}")
-        if domain.description:
-            lines.append(domain.description)
-        lines.append(f"本体版本：v{ontology.version}（已发布）")
-        lines.append("")
-
-        lines.append("## 业务对象")
-        if not objects:
-            lines.append("（暂无业务对象）")
-        for o in objects:
-            desc = f" — {o.description}" if o.description else ""
-            lines.append(f"- {o.display_name}（{o.name}）{desc}")
-            for p in o.properties:
-                dtype = f"[{p.data_type}]" if p.data_type else ""
-                semantic = f" <{p.semantic_type}>" if p.semantic_type else ""
-                pdesc = f" // {p.description}" if p.description else ""
-                lines.append(f"    · {p.display_name}（{p.name}）{dtype}{semantic}{pdesc}")
-        lines.append("")
-
-        lines.append("## 业务关系")
-        if not relations:
-            lines.append("（暂无业务关系）")
-        obj_name_map = {o.id: o.display_name for o in objects}
-        for r in relations:
-            src = obj_name_map.get(r.source_object_type_id, "—")
-            tgt = obj_name_map.get(r.target_object_type_id, "—")
-            card = r.cardinality or ""
-            desc = f" // {r.description}" if r.description else ""
-            lines.append(f"- {src} --[{r.display_name} {card}]--> {tgt}{desc}")
-        lines.append("")
-
-        lines.append("## 业务逻辑")
-        if not logics:
-            lines.append("（暂无业务逻辑）")
-        for logic in logics:
-            desc = f" // {logic.description}" if logic.description else ""
-            summary = f" 口径：{logic.expression_summary}" if logic.expression_summary else ""
-            lines.append(f"- {logic.display_name}（{logic.logic_type}）{desc}{summary}")
-        return "\n".join(lines)
-
-    # ------------------------------------------------------------------ llm
-
-    def _llm_answer(
-        self,
+        db: Session,
         *,
         runtime: Any,
+        domain: DomainContext,
+        ontology: Ontology,
         question: str,
-        knowledge: str,
         history: list[dict],
+        resolver: "_ReferenceResolver",
+        seed_objects: list[_ObjectSnapshot],
+        seed_logics: list[BusinessLogic],
     ) -> dict:
-        client = OpenAI(
+        """Claude Code 式多步工具编排：LLM 自主检索本体 / 执行只读 SQL，再作答。"""
+        client = AsyncOpenAI(
             api_key=runtime.api_key,
             base_url=runtime.api_base_url,
-            http_client=make_http_client(),
+            timeout=env_settings.llm_timeout_seconds,
+            http_client=make_async_http_client(),
         )
-        system_prompt = (
-            "你是企业数据问答助手（ChatBI）。基于提供的本体知识（业务对象、字段、关系、业务逻辑），"
-            "回答用户的业务提问。\n\n"
-            "要求：\n"
-            "1. 用中文回答，先给出口径解读，再给出可执行建议。\n"
-            "2. 如果问题涉及具体查询，必须输出 caliber_decomposition（口径拆解），"
-            "将问题拆解为若干步骤（主对象 / 度量 / 维度 / 时间范围 / 过滤条件 / 聚合方式 等），"
-            "每个 item 包含 label、description、references 数组；"
-            "references 中每个元素需带 kind（object_type/property/relation_type/business_logic）"
-            "以及对应的 id、name、display_name。优先使用本体知识中的真实 id。\n"
-            "3. 给出 suggested_sql，表名和字段名必须严格使用本体知识中括号内的标识符（name），"
-            "不得臆造或翻译为英文。SQL 应与口径拆解一一对应。\n"
-            "4. referenced_objects / referenced_logics 为数组，元素含 id/name/display_name；"
-            "必须引用本体知识中真实存在的实体，禁止编造对象名。\n"
-            "5. 如果问题与本体知识无关、无法命中任何对象/逻辑，不要猜测；"
-            "answer 明确说明无法基于当前本体回答，referenced_* 置空数组，suggested_sql 为 null。\n"
-            "6. 严格输出 JSON："
-            "{answer, suggested_sql, caliber_decomposition, referenced_objects, referenced_logics}。\n"
-            "   - answer 为 Markdown 字符串；\n"
-            "   - suggested_sql 为字符串或 null；\n"
-            "   - caliber_decomposition 为数组，元素 {label, description, references:[{kind,id,name,display_name}]}；\n"
-            "   - referenced_objects / referenced_logics 为数组，元素含 id/name/display_name。"
-        )
-        messages = [{"role": "system", "content": system_prompt}]
+
+        seed_lines: list[str] = []
+        if seed_objects:
+            seed_lines.append(
+                "可能相关的业务对象：" + "、".join(f"{o.display_name}({o.name})" for o in seed_objects[:5])
+            )
+        if seed_logics:
+            seed_lines.append(
+                "可能相关的业务逻辑：" + "、".join(f"{l.display_name}({l.name})" for l in seed_logics[:5])
+            )
+        seed_hint = "\n".join(seed_lines) or "（未预匹配到实体，请用工具检索）"
+
+        messages: list[dict] = [
+            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}\n\n当前数据域：{domain.name}"}
+        ]
         for item in history[-6:]:
             role = item.get("role")
             content = item.get("content")
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": str(content)})
         messages.append(
-            {
-                "role": "user",
-                "content": f"本体知识：\n\n{knowledge}\n\n用户提问：{question}",
-            }
+            {"role": "user", "content": f"检索线索：\n{seed_hint}\n\n用户提问：{question}"}
         )
 
-        response = client.chat.completions.create(
-            model=runtime.model,
-            messages=messages,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content or "{}"
-        raw = json.loads(content)
-        return {
-            "answer": str(raw.get("answer") or "").strip() or "（模型未返回回答）",
-            "suggested_sql": raw.get("suggested_sql"),
-            "caliber_decomposition": self._normalize_caliber(
-                raw.get("caliber_decomposition")
-            ),
-            "referenced_objects": self._normalize_refs(raw.get("referenced_objects")),
-            "referenced_logics": self._normalize_refs(raw.get("referenced_logics")),
-        }
+        steps: list[dict] = []
+        referenced_objects: list[dict] = []
+        referenced_logics: list[dict] = []
+        seen_obj: set[str] = set()
+        seen_logic: set[str] = set()
+        data_result: dict | None = None
+        last_sql: str | None = None
+        grounded_hit = False  # 是否真正命中过本体数据（供接地判定，避免丢弃有效答案）
+        answer = ""
 
-    @staticmethod
-    def _normalize_refs(value: Any) -> list[dict]:
-        if not isinstance(value, list):
-            return []
-        result: list[dict] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            result.append(
-                {
-                    "id": str(item.get("id") or "") or None,
-                    "name": str(item.get("name") or "") or None,
-                    "display_name": str(item.get("display_name") or "") or None,
-                }
+        for _ in range(_AGENT_MAX_STEPS):
+            resp = await client.chat.completions.create(
+                model=runtime.model,
+                messages=messages,
+                tools=_AGENT_TOOL_SCHEMAS,
+                tool_choice="auto",
             )
-        return [r for r in result if r["id"] or r["name"]]
+            msg = resp.choices[0].message
+            tool_calls = msg.tool_calls or []
+            if not tool_calls:
+                answer = (msg.content or "").strip()
+                break
 
-    @staticmethod
-    def _normalize_caliber(value: Any) -> list[dict]:
-        if not isinstance(value, list):
-            return []
-        items: list[dict] = []
-        for raw in value:
-            if not isinstance(raw, dict):
-                continue
-            refs = raw.get("references") or raw.get("refs") or []
-            ref_list: list[dict] = []
-            if isinstance(refs, list):
-                for r in refs:
-                    if not isinstance(r, dict):
-                        continue
-                    kind = str(r.get("kind") or "").strip().lower()
-                    if kind not in {
-                        "object_type",
-                        "property",
-                        "relation_type",
-                        "business_logic",
-                    }:
-                        # 容错：尝试根据常见别名映射
-                        alias = {
-                            "object": "object_type",
-                            "entity": "object_type",
-                            "logic": "business_logic",
-                            "businesslogic": "business_logic",
-                            "relation": "relation_type",
-                            "rel": "relation_type",
-                            "field": "property",
-                            "prop": "property",
-                        }.get(kind)
-                        kind = alias or "object_type"
-                    ref_list.append(
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
                         {
-                            "kind": kind,
-                            "id": str(r.get("id") or "") or None,
-                            "name": str(r.get("name") or "") or None,
-                            "display_name": str(r.get("display_name") or "") or None,
+                            "id": t.id,
+                            "type": "function",
+                            "function": {"name": t.function.name, "arguments": t.function.arguments},
                         }
-                    )
-            items.append(
-                {
-                    "label": str(raw.get("label") or "").strip() or "口径项",
-                    "description": (str(raw.get("description") or "").strip() or None),
-                    "references": ref_list,
+                        for t in tool_calls
+                    ],
                 }
             )
-        return items
+            for t in tool_calls:
+                tool_name = t.function.name
+                try:
+                    call_args = json.loads(t.function.arguments or "{}")
+                    if not isinstance(call_args, dict):
+                        call_args = {}
+                except (json.JSONDecodeError, TypeError):
+                    call_args = {}
+
+                result, summary, is_error = await asyncio.to_thread(
+                    self._dispatch_agent_tool,
+                    db,
+                    domain_id=domain.id,
+                    ontology_id=ontology.id,
+                    name=tool_name,
+                    args=call_args,
+                )
+
+                # 从工具轨迹收割结构化产物
+                if not is_error and (
+                    (tool_name.startswith("search_") and isinstance(result, list) and result)
+                    or (tool_name in ("get_object", "get_logic", "get_domain_overview"))
+                    or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
+                ):
+                    grounded_hit = True
+                if isinstance(result, dict):
+                    if tool_name == "get_object" and result.get("id") and result["id"] not in seen_obj:
+                        seen_obj.add(result["id"])
+                        referenced_objects.append(
+                            {"id": result["id"], "name": result.get("name"), "display_name": result.get("display_name")}
+                        )
+                    elif tool_name == "get_logic" and result.get("id") and result["id"] not in seen_logic:
+                        seen_logic.add(result["id"])
+                        referenced_logics.append(
+                            {"id": result["id"], "name": result.get("name"), "display_name": result.get("display_name")}
+                        )
+                    elif tool_name == "run_sql":
+                        if result.get("sql"):
+                            last_sql = result["sql"]
+                        if result.get("executed"):
+                            data_result = {
+                                "columns": result.get("columns") or [],
+                                "rows": result.get("rows") or [],
+                                "truncated": bool(result.get("truncated")),
+                            }
+
+                steps.append(
+                    {
+                        "index": len(steps),
+                        "tool": tool_name,
+                        "arguments": call_args,
+                        "status": "failed" if is_error else "succeeded",
+                        "summary": summary,
+                    }
+                )
+
+                result_text = json.dumps(result, ensure_ascii=False, default=str)
+                if len(result_text) > _TOOL_RESULT_MAX_CHARS:
+                    result_text = result_text[:_TOOL_RESULT_MAX_CHARS] + "…(结果过长已截断)"
+                messages.append({"role": "tool", "tool_call_id": t.id, "content": result_text})
+        else:
+            # 步数耗尽仍未收敛：强制不带工具收尾作答
+            final = await client.chat.completions.create(
+                model=runtime.model,
+                messages=messages
+                + [{"role": "user", "content": "请基于以上工具结果直接给出最终回答，不要再调用工具。"}],
+            )
+            answer = (final.choices[0].message.content or "").strip()
+
+        # 兜底：模型若把 SQL 写进正文却没走 run_sql，从围栏块抽出，避免前端丢弃 SQL
+        if not last_sql:
+            last_sql = self._extract_sql_from_text(answer)
+
+        return {
+            "answer": answer or "（模型未返回回答）",
+            "suggested_sql": last_sql,
+            "caliber_decomposition": self._steps_to_caliber(steps, referenced_objects, referenced_logics),
+            "referenced_objects": referenced_objects,
+            "referenced_logics": referenced_logics,
+            "steps": steps,
+            "data_result": data_result,
+            "_grounded": grounded_hit,
+        }
 
     # ------------------------------------------------------------------ mock
 

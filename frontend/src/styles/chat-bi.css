@@ -1077,3 +1077,129 @@
   padding: 4px 12px;
   line-height: 1.4;
 }
+
+/* Data Agent · P1 工具编排步骤轨迹 */
+.chatbi-steps {
+  margin: 0 0 10px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--om-neutral-soft, #f8fafc);
+  overflow: hidden;
+}
+.chatbi-steps-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--om-text-secondary, #475569);
+  text-align: left;
+}
+.chatbi-steps-toggle:hover {
+  background: var(--om-neutral-hover, #eef2f7);
+}
+.chatbi-steps-caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--om-text-tertiary, #94a3b8);
+}
+.chatbi-steps-caret.open {
+  transform: rotate(90deg);
+}
+.chatbi-steps-list {
+  margin: 0;
+  padding: 4px 10px 8px 10px;
+  list-style: none;
+  border-top: 1px solid var(--om-border, #e2e8f0);
+}
+.chatbi-step {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.chatbi-step-tool {
+  font-weight: 600;
+  color: var(--om-text-primary, #1e293b);
+  white-space: nowrap;
+}
+.chatbi-step-tool::before {
+  content: "●";
+  color: var(--om-success, #16a34a);
+  margin-right: 5px;
+  font-size: 9px;
+  vertical-align: middle;
+}
+.chatbi-step--failed .chatbi-step-tool::before {
+  color: var(--om-error, #dc2626);
+}
+.chatbi-step-arg {
+  font-family: var(--om-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--om-text-secondary, #475569);
+  background: var(--om-neutral-hover, #eef2f7);
+  border-radius: 4px;
+  padding: 0 5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chatbi-step-summary {
+  color: var(--om-text-tertiary, #94a3b8);
+}
+
+/* Data Agent · P1 run_sql 结果表格 */
+.chatbi-result {
+  margin: 10px 0;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.chatbi-result-title {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--om-text-secondary, #475569);
+  background: var(--om-neutral-soft, #f8fafc);
+  border-bottom: 1px solid var(--om-border, #e2e8f0);
+}
+.chatbi-result-scroll {
+  max-height: 320px;
+  overflow: auto;
+}
+.chatbi-result-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.chatbi-result-table th,
+.chatbi-result-table td {
+  border-bottom: 1px solid var(--om-border, #eef2f7);
+  padding: 5px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+.chatbi-result-table th {
+  position: sticky;
+  top: 0;
+  background: var(--om-neutral-soft, #f8fafc);
+  font-weight: 600;
+  color: var(--om-text-primary, #1e293b);
+}
+.chatbi-result-table tbody tr:hover {
+  background: var(--om-neutral-soft, #f8fafc);
+}
+.chatbi-result-more {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--om-text-tertiary, #94a3b8);
+  background: var(--om-neutral-soft, #f8fafc);
+}

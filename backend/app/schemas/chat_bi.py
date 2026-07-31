@@ -26,6 +26,24 @@ class ChatBiCaliberItem(BaseModel):
     references: list[ChatBiCaliberReference] = Field(default_factory=list)
 
 
+class ChatBiAgentStep(BaseModel):
+    """Agent 工具编排的一步轨迹（供前端可折叠步骤条 + 审计回放）。"""
+
+    index: int
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: str = "succeeded"  # succeeded / failed
+    summary: str | None = None
+
+
+class ChatBiDataResult(BaseModel):
+    """run_sql 返回的真实数据（供前端结果表格）。"""
+
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class ChatBiAskRequest(BaseModel):
     domain_id: str
     question: str
@@ -44,6 +62,9 @@ class ChatBiAnswer(BaseModel):
     referenced_logics: list[ChatBiReference] = Field(default_factory=list)
     used_mock: bool = False
     grounding_refused: bool = False
+    # Agent 工具编排（P1）：过程轨迹 + run_sql 真实结果。旧数据/Mock 路径可为空。
+    steps: list[ChatBiAgentStep] = Field(default_factory=list)
+    data_result: ChatBiDataResult | None = None
     conversation_id: str | None = None
     conversation_title: str | None = None
 
