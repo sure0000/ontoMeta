@@ -1,18 +1,20 @@
 import { DatabaseOutlined, WarningOutlined } from "@ant-design/icons";
 import {
   Alert,
+  Button,
   Descriptions,
   Divider,
   Empty,
   Form,
   Input,
   Modal,
+  Segmented,
   Select,
   Spin,
+  Steps,
   Table,
   Tabs,
   Tag,
-  Transfer,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -35,6 +37,14 @@ const ENGINE_OPTIONS = ["hive", "doris", "starrocks", "clickhouse", "iceberg"].m
 const ENGINE_VALUES = new Set(ENGINE_OPTIONS.map((e) => e.value));
 // 推导不出引擎时的回退（与后端 DEFAULT_ENGINE 对齐）。
 const DEFAULT_ENGINE = "hive";
+
+// 数仓分层（阶段）顺序与展示名。
+const LAYER_ORDER = ["dim", "dwd", "ads"];
+const LAYER_LABEL: Record<string, string> = {
+  dim: "维度层 DIM",
+  dwd: "明细层 DWD",
+  ads: "应用层 ADS",
+};
 
 // 同步方式：复用后端 LoadStrategy，作为本次物化运行期的一次性选择（不写回契约）。
 const LOAD_STRATEGY_OPTIONS: { value: MaterializationLoadStrategy; label: string }[] =
@@ -60,7 +70,6 @@ interface FormValues {
   target_datasource_id: string;
   load_strategy: MaterializationLoadStrategy;
   database_prefix?: string;
-  partition_key?: string;
 }
 
 /** 由数据源类型推导物化引擎（DDL/ETL 方言）。仅仓库类型可作物化目标，否则返回 null。 */
@@ -98,6 +107,11 @@ export function MaterializeModal({
   const [allTargets, setAllTargets] = useState<
     { key: string; contract: MaterializationContract }[]
   >([]);
+  // 每个实体（契约 id）的分区键编辑值，默认取契约推导值。
+  const [rowPk, setRowPk] = useState<Record<string, string>>({});
+  // 多步向导：0=目标与策略，1=按层配置；activeLayer=当前查看的分层。
+  const [step, setStep] = useState(0);
+  const [activeLayer, setActiveLayer] = useState<string | null>(null);
   const [result, setResult] = useState<MaterializationRun | null>(null);
   const [runs, setRuns] = useState<MaterializationRun[]>([]);
   const [activeTab, setActiveTab] = useState<"run" | "history">("run");
@@ -106,15 +120,16 @@ export function MaterializeModal({
 
   const scoped = Boolean(scopeTargetId);
   const isDraft = Boolean(ontologyStatus && ontologyStatus !== "published");
-  // 表名预览与分区项随库前缀/同步方式实时变化。
+  // 表名预览随库前缀实时变化。
   const dbPrefix = Form.useWatch("database_prefix", form);
-  const loadStrategy = Form.useWatch("load_strategy", form);
 
   useEffect(() => {
     if (!open) return;
     setResult(null);
     setActiveTab("run");
     setScopeError(null);
+    setStep(0);
+    setActiveLayer(null);
     setLoading(true);
     void (async () => {
       try {
@@ -149,6 +164,7 @@ export function MaterializeModal({
             const key = hit.target_name ?? hit.target_id;
             setAllTargets([{ key, contract: hit }]);
             setTargetKeys([key]);
+            setRowPk({ [hit.id]: hit.partition_key ?? "" });
           }
           return;
         }
@@ -171,6 +187,7 @@ export function MaterializeModal({
           .filter((t) => t.key);
         setAllTargets(targets);
         setTargetKeys(targets.map((t) => t.key)); // 默认全选
+        setRowPk(Object.fromEntries(cs.map((c) => [c.id, c.partition_key ?? ""])));
       } catch (err) {
         message.error(err instanceof Error ? err.message : "加载失败");
       } finally {
@@ -197,14 +214,14 @@ export function MaterializeModal({
     // 引擎由所选数据源类型推导；推导不出则回退默认引擎（不拦截物化）。
     const ds = dataSources.find((d) => d.id === values.target_datasource_id);
     const engine = engineOfKind(ds?.kind) ?? DEFAULT_ENGINE;
-    // 增量 + 指定分区键：按契约 id 写入 overrides（写回并钉住所选实体的分区键）。
-    const partitionKey = values.partition_key?.trim();
-    const overrides: Record<string, { partition_key: string }> = {};
-    if (values.load_strategy === "incremental" && partitionKey) {
-      for (const t of allTargets) {
-        if (targetKeys.includes(t.key)) {
-          overrides[t.contract.id] = { partition_key: partitionKey };
-        }
+    // 分区键（建分区表结构，全量/增量均生效）：按实体收集差异写入 overrides，
+    // 写回并钉住各实体契约的分区键。
+    const overrides: Record<string, { partition_key: string | null }> = {};
+    for (const t of allTargets) {
+      if (!targetKeys.includes(t.key)) continue;
+      const pk = (rowPk[t.contract.id] ?? "").trim() || null;
+      if (pk !== (t.contract.partition_key ?? null)) {
+        overrides[t.contract.id] = { partition_key: pk };
       }
     }
     setRunning(true);
@@ -238,12 +255,83 @@ export function MaterializeModal({
     }
   };
 
+  // 待物化实体按分层（阶段）分组，供多步向导逐层配置。
+  const groups = LAYER_ORDER.map((L) => ({
+    layer: L,
+    rows: allTargets.filter((t) => t.contract.target_layer === L),
+  })).filter((g) => g.rows.length);
+  const curLayer = activeLayer ?? groups[0]?.layer ?? null;
+  const curRows = groups.find((g) => g.layer === curLayer)?.rows ?? [];
+
+  const goNext = async () => {
+    try {
+      await form.validateFields(["target_datasource_id"]);
+    } catch {
+      return;
+    }
+    setStep(1);
+  };
+
+  type Row = { key: string; contract: MaterializationContract };
+  const pkInput = (c: MaterializationContract) => (
+    <Input
+      size="small"
+      placeholder={c.partition_key ?? "如 dt"}
+      value={rowPk[c.id] ?? ""}
+      onChange={(e) => {
+        const v = e.target.value;
+        setRowPk((m) => ({ ...m, [c.id]: v }));
+      }}
+    />
+  );
+  const entityTable = (rows: Row[]) => (
+    <Table
+      size="small"
+      rowKey={(r) => r.key}
+      dataSource={rows}
+      pagination={false}
+      scroll={{ y: 220 }}
+      rowSelection={{
+        selectedRowKeys: targetKeys.filter((k) => rows.some((r) => r.key === k)),
+        onChange: (keys) => {
+          const layerKeys = new Set(rows.map((r) => r.key));
+          setTargetKeys((prev) => [
+            ...prev.filter((k) => !layerKeys.has(k)),
+            ...(keys as string[]),
+          ]);
+        },
+      }}
+      columns={[
+        {
+          title: "实体",
+          key: "entity",
+          render: (_, r) =>
+            r.contract.target_display_name ??
+            r.contract.target_name ??
+            r.contract.target_id,
+        },
+        {
+          title: "目标表",
+          key: "table",
+          render: (_, r) => (
+            <code className="muted" style={{ fontSize: 11 }}>
+              {tableNameOf(r.contract, dbPrefix)}
+            </code>
+          ),
+        },
+        {
+          title: "分区键",
+          key: "partition",
+          width: 160,
+          render: (_, r) => pkInput(r.contract),
+        },
+      ]}
+    />
+  );
+
   const runTab = (
     <>
-      <div
-        className="muted"
-        style={{ marginBottom: 12, fontSize: 12, lineHeight: 1.6 }}
-      >
+      <div className="muted" style={{ marginBottom: 12, fontSize: 12, lineHeight: 1.6 }}>
         <WarningOutlined style={{ color: "#faad14", marginRight: 6 }} />
         破坏性操作：对目标库建表并覆盖写入（INSERT OVERWRITE），会重写整表/分区。
         {isDraft && (
@@ -252,95 +340,103 @@ export function MaterializeModal({
           </span>
         )}
       </div>
+      <Steps
+        size="small"
+        current={step}
+        items={[{ title: "目标与策略" }, { title: "按层配置" }]}
+        style={{ marginBottom: 16 }}
+      />
       <Form form={form} layout="vertical" initialValues={{ load_strategy: "full" }}>
-        <Form.Item
-          name="target_datasource_id"
-          label="目标数据源"
-          rules={[{ required: true, message: "请选择目标数据源" }]}
-          extra={
-            <>
-              引擎由数据源类型自动决定。新增 / 编辑 / 测试请到{" "}
-              <Link to="/settings">系统设置 → 数据源</Link>。
-            </>
-          }
-        >
-          <Select
-            placeholder="选择目标数据源"
-            options={dataSources.map((d) => ({
-              value: d.id,
-              title:
-                d.status === "ok"
-                  ? undefined
-                  : "该连接未测试或状态异常，建议先到设置里测试",
-              label: `${d.name} · ${d.kind} · ${d.status === "ok" ? "已连通" : d.status}`,
-            }))}
-            notFoundContent={
-              <Empty description="尚无数据源，请到 系统设置 → 数据源 添加" />
+        {/* 第 1 步字段常驻挂载（display 切换），保证分区/表名预览的 watch 稳定 */}
+        <div style={{ display: step === 0 ? "block" : "none" }}>
+          <Form.Item
+            name="target_datasource_id"
+            label="目标数据源"
+            rules={[{ required: true, message: "请选择目标数据源" }]}
+            extra={
+              <>
+                引擎由数据源类型自动决定。新增 / 编辑 / 测试请到{" "}
+                <Link to="/settings">系统设置 → 数据源</Link>。
+              </>
             }
-          />
-        </Form.Item>
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <Form.Item
-            name="load_strategy"
-            label="同步方式"
-            style={{ flex: 1, minWidth: 260 }}
-            extra="全量覆盖（默认）/ 增量按分区键追加 / CDC 请改用同步作业"
           >
-            <Select options={LOAD_STRATEGY_OPTIONS} />
+            <Select
+              placeholder="选择目标数据源"
+              options={dataSources.map((d) => ({
+                value: d.id,
+                title:
+                  d.status === "ok"
+                    ? undefined
+                    : "该连接未测试或状态异常，建议先到设置里测试",
+                label: `${d.name} · ${d.kind} · ${d.status === "ok" ? "已连通" : d.status}`,
+              }))}
+              notFoundContent={
+                <Empty description="尚无数据源，请到 系统设置 → 数据源 添加" />
+              }
+            />
           </Form.Item>
-          <Form.Item
-            name="database_prefix"
-            label="库名前缀（可选）"
-            style={{ flex: 1, minWidth: 200 }}
-            extra="如 erp → dim_erp；留空则用 dim / dwd / ads"
-          >
-            <Input placeholder="留空则用 dim / dwd / ads" allowClear />
-          </Form.Item>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Form.Item
+              name="load_strategy"
+              label="同步方式"
+              style={{ flex: 1, minWidth: 260 }}
+              extra="全量覆盖（默认）/ 增量按分区键追加 / CDC 请改用同步作业"
+            >
+              <Select options={LOAD_STRATEGY_OPTIONS} />
+            </Form.Item>
+            <Form.Item
+              name="database_prefix"
+              label="库名前缀（可选）"
+              style={{ flex: 1, minWidth: 200 }}
+              extra="如 erp → dim_erp；留空则用 dim / dwd / ads"
+            >
+              <Input placeholder="留空则用 dim / dwd / ads" allowClear />
+            </Form.Item>
+          </div>
         </div>
-        {loadStrategy === "incremental" && (
-          <Form.Item
-            name="partition_key"
-            label="分区键"
-            extra="增量装载按此列分区（水位由调度器注入）；留空则沿用各实体契约既定分区键"
-          >
-            <Input placeholder="如 dt / ds / stat_date" allowClear />
-          </Form.Item>
-        )}
-        <Form.Item
-          label={scoped ? "物化实体 → 目标表" : "待物化实体 → 目标表（默认全选）"}
-          extra="目标表名按「层[_库前缀].实体名」规则生成，供后续治理对照"
-        >
-          {scoped ? (
+
+        {step === 1 &&
+          (scoped ? (
             scopeError ? (
               <Alert type="warning" showIcon message={scopeError} />
             ) : allTargets[0] ? (
-              <span>
-                <Tag color="blue">{scopeLabel ?? allTargets[0].contract.target_display_name ?? "—"}</Tag>
-                <code style={{ fontSize: 12 }}>{tableNameOf(allTargets[0].contract, dbPrefix)}</code>
-              </span>
+              <div>
+                <Tag color="blue">
+                  {scopeLabel ?? allTargets[0].contract.target_display_name ?? "—"}
+                </Tag>
+                <code style={{ fontSize: 12 }}>
+                  {tableNameOf(allTargets[0].contract, dbPrefix)}
+                </code>
+                <div style={{ marginTop: 8 }}>
+                  分区键：
+                  <span style={{ display: "inline-block", width: 200, marginLeft: 4 }}>
+                    {pkInput(allTargets[0].contract)}
+                  </span>
+                </div>
+              </div>
             ) : (
               <Tag>—</Tag>
             )
           ) : (
-            <Transfer
-              dataSource={allTargets}
-              titles={["不物化", "物化"]}
-              targetKeys={targetKeys}
-              onChange={(keys) => setTargetKeys(keys as string[])}
-              render={(item) => (
-                <span>
-                  {item.contract.target_display_name ??
-                    item.contract.target_name ??
-                    item.contract.target_id}
-                  <code className="muted" style={{ marginLeft: 6, fontSize: 11 }}>
-                    {tableNameOf(item.contract, dbPrefix)}
-                  </code>
-                </span>
-              )}
-              listStyle={{ width: 320, height: 240 }}
-            />
-          )}
-        </Form.Item>
+            <>
+              <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
+                已选 {targetKeys.length}/{allTargets.length} 个实体。分区键默认取契约推导值，
+                可逐行改（用于建分区表 PARTITIONED BY，全量/增量均生效）；目标表名按「层[_库前缀].实体名」规则生成。
+              </div>
+              <Segmented
+                value={curLayer ?? undefined}
+                onChange={(v) => setActiveLayer(v as string)}
+                options={groups.map((g) => ({
+                  label: `${LAYER_LABEL[g.layer] ?? g.layer}（${
+                    g.rows.filter((r) => targetKeys.includes(r.key)).length
+                  }/${g.rows.length}）`,
+                  value: g.layer,
+                }))}
+                style={{ marginBottom: 12 }}
+              />
+              {entityTable(curRows)}
+            </>
+          ))}
       </Form>
 
       {result && <MaterializeReceiptView run={result} />}
@@ -358,15 +454,38 @@ export function MaterializeModal({
       }
       onOk={submit}
       onCancel={onClose}
-      okText={result ? "再次物化" : "执行物化"}
-      okButtonProps={{
-        loading: running,
-        danger: true,
-        disabled: scoped && (Boolean(scopeError) || targetKeys.length === 0),
-        // 「历史」页只读，隐藏执行按钮。
-        style: activeTab === "history" ? { display: "none" } : undefined,
-      }}
-      cancelText="关闭"
+      footer={
+        activeTab === "history"
+          ? null
+          : [
+              <Button key="close" onClick={onClose}>
+                关闭
+              </Button>,
+              ...(step === 1 && !result
+                ? [
+                    <Button key="prev" onClick={() => setStep(0)}>
+                      上一步
+                    </Button>,
+                  ]
+                : []),
+              step === 0 ? (
+                <Button key="next" type="primary" onClick={goNext}>
+                  下一步
+                </Button>
+              ) : (
+                <Button
+                  key="run"
+                  type="primary"
+                  danger
+                  loading={running}
+                  disabled={targetKeys.length === 0 || (scoped && Boolean(scopeError))}
+                  onClick={submit}
+                >
+                  {result ? "再次物化" : "执行物化"}
+                </Button>
+              ),
+            ]
+      }
       width={720}
       destroyOnClose
     >
