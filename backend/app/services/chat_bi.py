@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -61,11 +62,14 @@ _AGENT_SYSTEM_PROMPT = (
     "你可以多步调用工具来检索本体（业务对象/字段/关系/业务逻辑）并执行只读 SQL，"
     "像分析师一样先查清口径再作答。\n\n"
     "工作纪律：\n"
+    "0. 【铁律·数据来源】只能基于工具**实际返回**的数据作答：对象/字段/关系/口径/数值/统计"
+    "一律**只能来自工具结果**，工具没返回的内容绝不可编造或凭常识补充；"
+    "所有内容**仅限已发布(published)本体**，不得提及或杜撰未发布的草稿。\n"
     "1. 先用 search_objects / search_logics / search_relations 找到相关实体，"
     "再用 get_object / get_logic 拿字段与口径细节；不要臆造对象名或字段名。"
     "检索关键词优先用**中文**（本体以中文命名，英文词多半命不中）。\n"
-    "1b. 概览/列举类问题（如“有哪些对象/本体/业务板块”）**先调用 get_domain_overview**，"
-    "一次拿到板块与总量，不要逐个猜关键词穷举。\n"
+    "1b. 概览/列举类问题（如“有哪些对象/本体”）**先调用 get_domain_overview**，"
+    "严格基于它返回的已发布对象总数与清单作答，不要逐个猜关键词穷举、更不要编造数量或对象名。\n"
     "2. 若问题需要具体数值/明细，用 get_object 拿到真实字段后写 SQL；"
     "**只要你写了查询 SQL，就必须通过 run_sql 提交**（哪怕只为取数/校验），"
     "不要仅在正文里贴 SQL 而不调用 run_sql。表名/字段名必须来自本体。\n"
@@ -154,8 +158,8 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "get_domain_overview",
             "description": (
-                "获取当前数据域的整体概览：对象/关系总量、业务板块（聚类）及其规模。"
-                "回答“有哪些对象/本体/业务板块”这类概览问题时首选此工具，一次拿全，无需逐个猜关键词。"
+                "获取当前数据域【已发布本体】的概览：已发布业务对象与关系的总数，并列举已发布对象名。"
+                "回答“有哪些对象/本体”这类概览问题时首选此工具。**仅含已发布内容，不含未发布草稿**。"
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -350,6 +354,114 @@ class ChatBiService:
             }
         )
         return payload
+
+    async def ask_stream(
+        self,
+        db: Session,
+        *,
+        domain_id: str,
+        question: str,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[dict]:
+        """ask() 的流式版：yield step_start / step_done / token / done。
+
+        done.payload 与 ask() 返回结构一致；透传工具步骤与逐字答案，供 SSE 端点包装。
+        Mock / 无本体 / 未接地等无过程可流的情况直接产出终态 done。
+        """
+        domain = db.get(DomainContext, domain_id)
+        if not domain:
+            raise ValueError("数据域不存在")
+
+        ontology = self.query_service.get_published_ontology(db, domain_id)
+        if not ontology:
+            yield {
+                "type": "done",
+                "payload": {
+                    "domain_id": domain_id,
+                    "domain_name": domain.name,
+                    "ontology_id": None,
+                    "answer": (
+                        f"「{domain.name}」当前还没有已发布的本体。"
+                        "请先在「本体建模」中完成草稿编辑并发布，"
+                        "Data Agent 会基于已发布本体的对象、字段、关系与业务逻辑进行解读。"
+                    ),
+                    "suggested_sql": None,
+                    "referenced_objects": [],
+                    "referenced_logics": [],
+                    "used_mock": True,
+                },
+            }
+            return
+
+        snapshots = self._load_ontology_snapshot(db, ontology.id)
+        relations = self._load_relations(db, ontology.id)
+        logics = self._load_logics(db, ontology.id)
+        grounded_objects = self._match_objects(question, snapshots)
+        grounded_logics = self._match_logics(question, logics)
+        runtime = self.settings_service.get_llm_runtime(db)
+        use_mock = runtime.use_mock or not runtime.api_key
+        resolver = _ReferenceResolver(objects=snapshots, relations=relations, logics=logics)
+
+        if use_mock:
+            # Mock 无过程可流：直接产出终态 done（逻辑与 ask() 的 mock 分支一致）
+            if not grounded_objects and not grounded_logics:
+                yield {"type": "done", "payload": self._ungrounded_refusal(
+                    domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)}
+                return
+            payload = self._mock_answer(
+                question=question, snapshots=snapshots, relations=relations, logics=logics,
+                matched_objects=grounded_objects, matched_logics=grounded_logics)
+            payload = resolver.resolve_payload(payload)
+            payload = self._enforce_grounded_refs(
+                payload, grounded_objects=grounded_objects, grounded_logics=grounded_logics, resolver=resolver)
+            if not payload.get("referenced_objects") and not payload.get("referenced_logics"):
+                yield {"type": "done", "payload": self._ungrounded_refusal(
+                    domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)}
+                return
+            if payload.get("suggested_sql"):
+                payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
+            payload.update({"domain_id": domain_id, "domain_name": domain.name,
+                            "ontology_id": ontology.id, "used_mock": True})
+            yield {"type": "done", "payload": payload}
+            return
+
+        # Agent 流式路径：透传事件流，done 事件走与 ask() 相同的后处理
+        payload: dict | None = None
+        try:
+            async for ev in self._stream_agent_events(
+                db, runtime=runtime, domain=domain, ontology=ontology,
+                question=question, history=history or [],
+                seed_objects=grounded_objects, seed_logics=grounded_logics,
+            ):
+                if ev["type"] == "done":
+                    payload = ev["payload"]
+                else:
+                    yield ev  # step_start / step_done / token 透传
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ChatBI agent stream failed: %s", exc)
+            yield {"type": "error", "message": self._friendly_llm_error(exc)}
+            payload = self._mock_answer(
+                question=question, snapshots=snapshots, relations=relations, logics=logics,
+                matched_objects=grounded_objects, matched_logics=grounded_logics)
+            payload.setdefault("steps", [])
+            payload["answer"] = f"> {self._friendly_llm_error(exc)}\n\n{payload['answer']}"
+
+        payload = payload or {"answer": "（模型未返回回答）", "steps": []}
+        payload = resolver.resolve_payload(payload)
+        grounded = bool(
+            payload.pop("_grounded", False)
+            or payload.get("referenced_objects")
+            or payload.get("referenced_logics")
+            or payload.get("data_result")
+        )
+        if not grounded:
+            payload = self._ungrounded_refusal(
+                domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)
+        if payload.get("suggested_sql"):
+            payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
+        payload.update({"domain_id": domain_id, "domain_name": domain.name,
+                        "ontology_id": ontology.id, "used_mock": use_mock})
+        yield {"type": "done", "payload": payload}
 
     def suggest_questions(self, db: Session, domain_id: str) -> list[str]:
         """基于已发布本体生成若干示例提问，供前端首屏展示。"""
@@ -779,22 +891,6 @@ class ChatBiService:
         ]
         return base
 
-    @staticmethod
-    def _compact_overview(graph: Any) -> dict:
-        d = graph.model_dump(mode="json") if hasattr(graph, "model_dump") else dict(graph)
-        clusters = sorted(
-            d.get("clusters") or [], key=lambda c: c.get("node_count") or 0, reverse=True
-        )
-        return {
-            "total_object_count": d.get("total_object_count"),
-            "total_relation_count": d.get("total_relation_count"),
-            "cluster_count": len(d.get("clusters") or []),
-            "top_clusters": [
-                {"name": c.get("name"), "object_count": c.get("node_count")}
-                for c in clusters[:25]
-            ],
-        }
-
     def _dispatch_run_sql(self, db: Session, *, args: dict) -> tuple[Any, str, bool]:
         from app.services import data_app_executor
 
@@ -880,9 +976,23 @@ class ChatBiService:
                     return {"error": "业务逻辑不存在或未发布"}, "口径未命中", True
                 return self._compact_logic_detail(detail), f"口径「{detail.display_name}」", False
             if name == "get_domain_overview":
-                graph = qs.get_ontology_grouped_graph(db, ontology_id)
-                overview = self._compact_overview(graph)
-                return overview, f"{overview['cluster_count']} 个业务板块 / {overview['total_object_count']} 对象", False
+                # 只统计/列举【已发布】对象与关系；grouped_graph 混入未发布草稿，不能用于概览
+                obj_page = qs.list_object_types(
+                    db, ontology_id=ontology_id, published_only=True, limit=100
+                )
+                rel_page = qs.list_relation_types(
+                    db, ontology_id=ontology_id, published_only=True, limit=1
+                )
+                overview = {
+                    "published_object_count": obj_page.total,
+                    "published_relation_count": rel_page.total,
+                    "objects": [
+                        {"display_name": o.display_name, "name": o.name, "table_role": o.table_role}
+                        for o in obj_page.items
+                    ],
+                    "note": "仅统计并列举【已发布(published)】的业务对象与关系；未发布的建模草稿不计入。",
+                }
+                return overview, f"{obj_page.total} 个已发布对象 / {rel_page.total} 个已发布关系", False
             if name == "run_sql":
                 return self._dispatch_run_sql(db, args=args)
             return {"error": f"未知工具：{name}"}, "未知工具", True
@@ -908,28 +1018,53 @@ class ChatBiService:
         obj_by_id = {o["id"]: o for o in referenced_objects if o.get("id")}
         logic_by_id = {l["id"]: l for l in referenced_logics if l.get("id")}
         items: list[dict] = []
+        seen_obj: set[str] = set()
+        seen_logic: set[str] = set()
         for s in steps:
+            # 只保留成功步：失败的检索（如模型把英文名当 object_id 猜错）不应铸成口径卡
+            if s.get("status") != "succeeded":
+                continue
             tool = s.get("tool")
             a = s.get("arguments") or {}
             if tool == "get_object":
                 ref = obj_by_id.get(a.get("object_id"))
+                # 未解析到引用的对象卡是噪声；同一对象（失败后重试命中）只留一张
+                if not ref or ref["id"] in seen_obj:
+                    continue
+                seen_obj.add(ref["id"])
                 items.append({
                     "label": "对象口径",
                     "description": s.get("summary") or "",
-                    "references": [{"kind": "object_type", **ref}] if ref else [],
+                    "references": [{"kind": "object_type", **ref}],
                 })
             elif tool == "get_logic":
                 ref = logic_by_id.get(a.get("logic_id"))
+                if not ref or ref["id"] in seen_logic:
+                    continue
+                seen_logic.add(ref["id"])
                 items.append({
                     "label": "逻辑口径",
                     "description": s.get("summary") or "",
-                    "references": [{"kind": "business_logic", **ref}] if ref else [],
+                    "references": [{"kind": "business_logic", **ref}],
                 })
-            elif tool == "run_sql" and s.get("status") == "succeeded":
+            elif tool == "run_sql":
                 items.append({"label": "数据查询", "description": s.get("summary") or "", "references": []})
         return items
 
-    async def _run_agent_loop(
+    async def _stream_final_answer(
+        self, client: AsyncOpenAI, model: str, messages: list[dict], *, nudge: str | None = None
+    ) -> AsyncIterator[str]:
+        """最终作答轮：不带工具、stream=True 逐 token 产出（真·逐字流式）。"""
+        msgs = messages if nudge is None else messages + [{"role": "user", "content": nudge}]
+        stream = await client.chat.completions.create(model=model, messages=msgs, stream=True)
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                yield delta
+
+    async def _stream_agent_events(
         self,
         db: Session,
         *,
@@ -938,11 +1073,14 @@ class ChatBiService:
         ontology: Ontology,
         question: str,
         history: list[dict],
-        resolver: "_ReferenceResolver",
         seed_objects: list[_ObjectSnapshot],
         seed_logics: list[BusinessLogic],
-    ) -> dict:
-        """Claude Code 式多步工具编排：LLM 自主检索本体 / 执行只读 SQL，再作答。"""
+    ) -> AsyncIterator[dict]:
+        """多步工具编排的事件流：yield step_start / step_done / token / done。
+
+        流式与非流式共用此核心；`_run_agent_loop` 只是消费到 done 后聚合返回。
+        接地判定 / 引用归一 / SQL 美化等收尾在 ask()/ask_stream() 的 done 后处理里做。
+        """
         client = AsyncOpenAI(
             api_key=runtime.api_key,
             base_url=runtime.api_base_url,
@@ -953,25 +1091,31 @@ class ChatBiService:
         seed_lines: list[str] = []
         if seed_objects:
             seed_lines.append(
-                "可能相关的业务对象：" + "、".join(f"{o.display_name}({o.name})" for o in seed_objects[:5])
+                "· 业务对象：" + "、".join(f"{o.display_name}({o.name})" for o in seed_objects[:5])
             )
         if seed_logics:
             seed_lines.append(
-                "可能相关的业务逻辑：" + "、".join(f"{l.display_name}({l.name})" for l in seed_logics[:5])
+                "· 业务逻辑：" + "、".join(f"{l.display_name}({l.name})" for l in seed_logics[:5])
             )
-        seed_hint = "\n".join(seed_lines) or "（未预匹配到实体，请用工具检索）"
+        # 候选作为 system 弱提示，并明确其性质，避免模型把它当成"用户提到的对象"而答非所问
+        seed_note = ""
+        if seed_lines:
+            seed_note = (
+                "\n\n【系统预匹配候选】以下是系统按关键词猜测的可能相关实体，"
+                "仅作为检索起点参考，**可能与本次问题无关**；若无关请忽略，"
+                "**切勿声称用户提到了这些对象**、也不要在回答里节外生枝地回应它们：\n"
+                + "\n".join(seed_lines)
+            )
 
         messages: list[dict] = [
-            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}\n\n当前数据域：{domain.name}"}
+            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}\n\n当前数据域：{domain.name}{seed_note}"}
         ]
         for item in history[-6:]:
             role = item.get("role")
             content = item.get("content")
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": str(content)})
-        messages.append(
-            {"role": "user", "content": f"检索线索：\n{seed_hint}\n\n用户提问：{question}"}
-        )
+        messages.append({"role": "user", "content": question})
 
         steps: list[dict] = []
         referenced_objects: list[dict] = []
@@ -980,7 +1124,7 @@ class ChatBiService:
         seen_logic: set[str] = set()
         data_result: dict | None = None
         last_sql: str | None = None
-        grounded_hit = False  # 是否真正命中过本体数据（供接地判定，避免丢弃有效答案）
+        grounded_hit = False
         answer = ""
 
         for _ in range(_AGENT_MAX_STEPS):
@@ -993,7 +1137,11 @@ class ChatBiService:
             msg = resp.choices[0].message
             tool_calls = msg.tool_calls or []
             if not tool_calls:
-                answer = (msg.content or "").strip()
+                # 收敛：最终作答轮改流式逐字产出
+                async for tok in self._stream_final_answer(client, runtime.model, messages):
+                    answer += tok
+                    yield {"type": "token", "delta": tok}
+                answer = answer.strip()
                 break
 
             messages.append(
@@ -1010,6 +1158,13 @@ class ChatBiService:
                     ],
                 }
             )
+            # 工具间的模型自述：作为 thought 伪步穿插进轨迹（贴近 Claude Code 的"先说再做"），
+            # 既实时流给前端、也落进 steps 持久化；_steps_to_caliber 因 tool 不匹配自动忽略它。
+            thought = (msg.content or "").strip()
+            if thought:
+                t_idx = len(steps)
+                steps.append({"index": t_idx, "kind": "thought", "tool": "", "text": thought})
+                yield {"type": "thought", "index": t_idx, "text": thought}
             for t in tool_calls:
                 tool_name = t.function.name
                 try:
@@ -1018,6 +1173,9 @@ class ChatBiService:
                         call_args = {}
                 except (json.JSONDecodeError, TypeError):
                     call_args = {}
+
+                idx = len(steps)
+                yield {"type": "step_start", "index": idx, "tool": tool_name, "arguments": call_args}
 
                 result, summary, is_error = await asyncio.to_thread(
                     self._dispatch_agent_tool,
@@ -1056,42 +1214,82 @@ class ChatBiService:
                                 "truncated": bool(result.get("truncated")),
                             }
 
+                step_status = "failed" if is_error else "succeeded"
                 steps.append(
-                    {
-                        "index": len(steps),
-                        "tool": tool_name,
-                        "arguments": call_args,
-                        "status": "failed" if is_error else "succeeded",
-                        "summary": summary,
-                    }
+                    {"index": idx, "tool": tool_name, "arguments": call_args, "status": step_status, "summary": summary}
                 )
+                yield {"type": "step_done", "index": idx, "status": step_status, "summary": summary}
 
                 result_text = json.dumps(result, ensure_ascii=False, default=str)
                 if len(result_text) > _TOOL_RESULT_MAX_CHARS:
                     result_text = result_text[:_TOOL_RESULT_MAX_CHARS] + "…(结果过长已截断)"
                 messages.append({"role": "tool", "tool_call_id": t.id, "content": result_text})
         else:
-            # 步数耗尽仍未收敛：强制不带工具收尾作答
-            final = await client.chat.completions.create(
-                model=runtime.model,
-                messages=messages
-                + [{"role": "user", "content": "请基于以上工具结果直接给出最终回答，不要再调用工具。"}],
-            )
-            answer = (final.choices[0].message.content or "").strip()
+            # 步数耗尽仍未收敛：强制不带工具、流式收尾
+            async for tok in self._stream_final_answer(
+                client,
+                runtime.model,
+                messages,
+                nudge="请基于以上工具结果直接给出最终回答，不要再调用工具。",
+            ):
+                answer += tok
+                yield {"type": "token", "delta": tok}
+            answer = answer.strip()
 
         # 兜底：模型若把 SQL 写进正文却没走 run_sql，从围栏块抽出，避免前端丢弃 SQL
         if not last_sql:
             last_sql = self._extract_sql_from_text(answer)
 
-        return {
-            "answer": answer or "（模型未返回回答）",
-            "suggested_sql": last_sql,
-            "caliber_decomposition": self._steps_to_caliber(steps, referenced_objects, referenced_logics),
-            "referenced_objects": referenced_objects,
-            "referenced_logics": referenced_logics,
-            "steps": steps,
-            "data_result": data_result,
-            "_grounded": grounded_hit,
+        yield {
+            "type": "done",
+            "payload": {
+                "answer": answer or "（模型未返回回答）",
+                "suggested_sql": last_sql,
+                "caliber_decomposition": self._steps_to_caliber(steps, referenced_objects, referenced_logics),
+                "referenced_objects": referenced_objects,
+                "referenced_logics": referenced_logics,
+                "steps": steps,
+                "data_result": data_result,
+                "_grounded": grounded_hit,
+            },
+        }
+
+    async def _run_agent_loop(
+        self,
+        db: Session,
+        *,
+        runtime: Any,
+        domain: DomainContext,
+        ontology: Ontology,
+        question: str,
+        history: list[dict],
+        resolver: "_ReferenceResolver",
+        seed_objects: list[_ObjectSnapshot],
+        seed_logics: list[BusinessLogic],
+    ) -> dict:
+        """非流式包装：消费事件流、聚合 done.payload 返回（供 ask() agent 路径复用）。"""
+        payload: dict | None = None
+        async for ev in self._stream_agent_events(
+            db,
+            runtime=runtime,
+            domain=domain,
+            ontology=ontology,
+            question=question,
+            history=history,
+            seed_objects=seed_objects,
+            seed_logics=seed_logics,
+        ):
+            if ev["type"] == "done":
+                payload = ev["payload"]
+        return payload or {
+            "answer": "（模型未返回回答）",
+            "suggested_sql": None,
+            "caliber_decomposition": [],
+            "referenced_objects": [],
+            "referenced_logics": [],
+            "steps": [],
+            "data_result": None,
+            "_grounded": False,
         }
 
     # ------------------------------------------------------------------ mock

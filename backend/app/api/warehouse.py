@@ -14,11 +14,13 @@ from app.api.deps import (
     agent_pipeline,
     datahub_writeback,
     materialization_contract_service,
+    settings_service,
     warehouse_generator,
 )
 from app.database import get_db
 from app.models import MaterializationContract, Ontology
 from app.models.agent import ArtifactStatus
+from app.models.ontology import OntologyStatus
 from app.schemas import (
     MaterializationContractOut,
     MaterializationContractSyncResult,
@@ -38,9 +40,11 @@ from app.warehouse.adapters.base import UnimplementedAdapter
 router = APIRouter()
 
 
-def _require_ontology(db: Session, ontology_id: str) -> None:
-    if db.query(Ontology).filter(Ontology.id == ontology_id).first() is None:
+def _require_ontology(db: Session, ontology_id: str) -> Ontology:
+    ontology = db.query(Ontology).filter(Ontology.id == ontology_id).first()
+    if ontology is None:
         raise HTTPException(status_code=404, detail="本体不存在")
+    return ontology
 
 
 def _require_engine(engine: str) -> str:
@@ -157,11 +161,18 @@ def generate_warehouse_etl(
     ontology_id: str,
     engine: str = Query(DEFAULT_ENGINE),
     database_prefix: str | None = Query(None),
+    load_strategy: str | None = Query(
+        None, description="full/incremental/cdc；缺省 full（INSERT OVERWRITE）"
+    ),
     db: Session = Depends(get_db),
 ):
     _require_ontology(db, ontology_id)
     return warehouse_generator.generate_etl_sql(
-        db, ontology_id, _require_engine(engine), database_prefix=database_prefix
+        db,
+        ontology_id,
+        _require_engine(engine),
+        database_prefix=database_prefix,
+        load_strategy=load_strategy,
     )
 
 
@@ -241,6 +252,8 @@ def _materialize_out(artifact) -> MaterializeResult:
         name=artifact.name or "物化",
         receipt=receipt,
         executed_at=artifact.executed_at,
+        operator=artifact.confirmed_by,
+        created_at=artifact.created_at,
     )
 
 
@@ -253,13 +266,16 @@ def materialize_ontology(
     payload: MaterializeRequest,
     db: Session = Depends(get_db),
 ):
-    """把已发布本体物化到目标数据源：生成 DDL/ETL 并真正建表落数。
+    """把本体物化到目标数据源：生成 DDL/ETL 并真正建表落数。
 
-    弹窗即人工确认面，故直接置 ``confirmed`` 后执行（物化非高危，无 dry-run 门禁）；
-    全程复用治理制品流水线，产出可审计的执行回执。执行失败不抛 5xx——回执里带
-    ``ok=false`` 与逐条错误，由前端呈现。
+    可对当前工作本体（草稿或已发布）执行——门槛仅在于 ``publisher`` 角色与所选目标库；
+    归档本体不可物化。弹窗即人工确认面，故直接置 ``confirmed`` 后执行（物化非高危，无
+    dry-run 门禁）；全程复用治理制品流水线，产出可审计的执行回执。执行失败不抛 5xx——
+    回执里带 ``ok=false`` 与逐条错误，由前端呈现。
     """
-    _require_ontology(db, ontology_id)
+    ontology = _require_ontology(db, ontology_id)
+    if ontology.status == OntologyStatus.ARCHIVED.value:
+        raise HTTPException(status_code=400, detail="归档本体不可物化")
     _require_engine(payload.engine)
 
     context = {
@@ -267,6 +283,7 @@ def materialize_ontology(
         "target_datasource_id": payload.target_datasource_id,
         "engine": payload.engine,
         "database_prefix": payload.database_prefix,
+        "load_strategy": payload.load_strategy,
         "selected_targets": payload.selected_targets,
         "overrides": payload.overrides,
     }

@@ -95,6 +95,7 @@ def run(
     target_datasource_id: str,
     engine: str,
     database_prefix: str | None = None,
+    load_strategy: str | None = None,
     selected_targets: list[str] | None = None,
     overrides: dict[str, dict[str, Any]] | None = None,
     sync_contracts: bool = True,
@@ -123,11 +124,17 @@ def run(
     for contract_id, patch in (overrides or {}).items():
         _contract_service.update(db, contract_id, patch)
 
+    # 同步方式为本次物化运行期的一次性选择：只作用于本次生成的 ETL，不写回契约
+    # （避免默认全量把契约既定的增量策略钉死；契约策略仍由契约编辑/同步作业各自维护）。
     ddl = _generator.generate_ddl(
         db, ontology_id, engine, database_prefix=database_prefix
     )
     etl = _generator.generate_etl_sql(
-        db, ontology_id, engine, database_prefix=database_prefix
+        db,
+        ontology_id,
+        engine,
+        database_prefix=database_prefix,
+        load_strategy=load_strategy,
     )
 
     selected = set(selected_targets) if selected_targets else None
@@ -151,7 +158,7 @@ def run(
         "tables": [q for q, _ in ddl_items],
         "ddl": ddl_receipt,
         "etl": etl_receipt,
-        "warnings": ddl.get("warnings", []),
+        "warnings": (ddl.get("warnings") or []) + (etl.get("warnings") or []),
         "unsupported": (ddl.get("unsupported") or []) + (etl.get("unsupported") or []),
         "ok": ok,
     }

@@ -29,8 +29,40 @@ function MarkdownLite({ content }: { content: string }) {
             </pre>
           );
         }
+        if (block.type === "table") {
+          return <MarkdownTable key={key++} header={block.header} rows={block.rows} />;
+        }
         return <Line key={key++} raw={block.raw} />;
       })}
+    </div>
+  );
+}
+
+function MarkdownTable({ header, rows }: { header: string[]; rows: string[][] }) {
+  return (
+    <div className="chatbi-md-tablewrap">
+      <table className="chatbi-md-table">
+        <thead>
+          <tr>
+            {header.map((cell, i) => (
+              <th key={i}>
+                <InlineRender text={cell} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri}>
+              {row.map((cell, ci) => (
+                <td key={ci}>
+                  <InlineRender text={cell} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -190,7 +222,10 @@ export function ChatBubble({
             {!isUser && message.payload?.steps && message.payload.steps.length > 0 && (
               <StepTrace steps={message.payload.steps} />
             )}
-            <MarkdownLite content={message.content} />
+            <div className="chatbi-answer-wrap">
+              <MarkdownLite content={message.content} />
+              {message.streaming && <span className="chatbi-answer-caret" />}
+            </div>
             {message.payload?.caliber_decomposition &&
               message.payload.caliber_decomposition.length > 0 && (
                 <CaliberDecomposition
@@ -265,56 +300,88 @@ export function ChatBubble({
   );
 }
 
-const STEP_TOOL_LABELS: Record<string, string> = {
-  search_objects: "检索对象",
-  get_object: "读取对象",
-  search_relations: "检索关系",
-  search_logics: "检索口径",
-  get_logic: "读取口径",
-  run_sql: "执行 SQL",
+const STEP_TOOL_META: Record<string, { icon: string; verb: string }> = {
+  search_objects: { icon: "🔍", verb: "检索对象" },
+  get_object: { icon: "📖", verb: "读取对象详情" },
+  search_relations: { icon: "🔗", verb: "检索关系" },
+  search_logics: { icon: "🧮", verb: "检索口径" },
+  get_logic: { icon: "📐", verb: "读取口径详情" },
+  get_domain_overview: { icon: "🗺️", verb: "获取数据域概览" },
+  run_sql: { icon: "⚡", verb: "执行 SQL 查询" },
 };
 
-function stepArgHint(step: ChatBiAgentStep): string {
-  const a = (step.arguments ?? {}) as Record<string, unknown>;
-  if (step.tool === "run_sql") return String(a.sql ?? "").replace(/\s+/g, " ").slice(0, 72);
-  if (a.keyword != null) return String(a.keyword);
-  if (a.object_id != null) return String(a.object_id).slice(0, 8);
-  if (a.logic_id != null) return String(a.logic_id).slice(0, 8);
-  return "";
+/** 把 (工具 + 入参) 翻译成一句人话动作 + 图标。 */
+function stepAction(step: ChatBiAgentStep): { icon: string; text: string } {
+  const meta = STEP_TOOL_META[step.tool] ?? { icon: "•", verb: step.tool };
+  const args = step.arguments as Record<string, unknown> | undefined;
+  if (step.tool === "run_sql") {
+    const sql = String(args?.sql ?? "").replace(/\s+/g, " ").trim();
+    return {
+      icon: meta.icon,
+      text: sql ? `${meta.verb}：${sql.slice(0, 48)}${sql.length > 48 ? "…" : ""}` : meta.verb,
+    };
+  }
+  const kw = args?.keyword;
+  const text = kw != null && String(kw) ? `${meta.verb}「${String(kw)}」` : meta.verb;
+  return { icon: meta.icon, text };
 }
 
 function StepTrace({ steps }: { steps: ChatBiAgentStep[] }) {
+  const running = steps.some((s) => s.status === "running");
   const hasFailed = steps.some((s) => s.status === "failed");
-  // 决策点2：默认折叠，失败自动展开
-  const [open, setOpen] = useState(hasFailed);
+  const toolCount = steps.filter((s) => s.kind !== "thought").length;
+  // 进行中/失败自动展开，其余默认折叠；用户手动点击后固定
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = manualOpen ?? (running || hasFailed);
+  const headText = running
+    ? `思考中 · 已执行 ${toolCount} 步`
+    : `已执行 ${toolCount} 步工具编排${hasFailed ? " · 含失败" : ""}`;
   return (
     <div className="chatbi-steps">
       <button
         type="button"
         className="chatbi-steps-toggle"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setManualOpen(!open)}
       >
         <span className={`chatbi-steps-caret${open ? " open" : ""}`}>▸</span>
-        已执行 {steps.length} 步工具编排{hasFailed ? " · 含失败" : ""}
+        {running && <span className="chatbi-steps-spin" />}
+        {headText}
       </button>
       {open && (
         <ol className="chatbi-steps-list">
-          {steps.map((s) => (
-            <li
-              key={s.index}
-              className={`chatbi-step chatbi-step--${s.status ?? "succeeded"}`}
-            >
-              <span className="chatbi-step-tool">
-                {STEP_TOOL_LABELS[s.tool] ?? s.tool}
-              </span>
-              {stepArgHint(s) && (
-                <code className="chatbi-step-arg">{stepArgHint(s)}</code>
-              )}
-              {s.summary && (
-                <span className="chatbi-step-summary">{s.summary}</span>
-              )}
-            </li>
-          ))}
+          {steps.map((s) => {
+            if (s.kind === "thought") {
+              return (
+                <li key={s.index} className="chatbi-step chatbi-step--thought">
+                  <span className="chatbi-step-emoji">💭</span>
+                  <span className="chatbi-step-thought">{s.text}</span>
+                </li>
+              );
+            }
+            const { icon, text } = stepAction(s);
+            const status = s.status ?? "succeeded";
+            return (
+              <li key={s.index} className={`chatbi-step chatbi-step--${status}`}>
+                <span className="chatbi-step-icon">
+                  {status === "running" ? (
+                    <span className="chatbi-step-spin" />
+                  ) : status === "failed" ? (
+                    "✗"
+                  ) : (
+                    "✓"
+                  )}
+                </span>
+                <span className="chatbi-step-emoji">{icon}</span>
+                <span className="chatbi-step-text">
+                  {text}
+                  {status === "running" ? "…" : ""}
+                </span>
+                {status !== "running" && s.summary && (
+                  <span className="chatbi-step-summary">· {s.summary}</span>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

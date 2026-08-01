@@ -17,6 +17,7 @@ import {
   Select,
   Space,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -25,7 +26,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { OntologyGraphView } from "../components/graph";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
-import { MaterializationContractPanel } from "../components/MaterializationContractPanel";
+import { MaterializeModal } from "../components/MaterializeModal";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -197,6 +198,7 @@ export function RelationTypeDetailPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [prePublishing, setPrePublishing] = useState(false);
+  const [materializeOpen, setMaterializeOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form] = Form.useForm<RelationForm>();
 
@@ -475,6 +477,16 @@ export function RelationTypeDetailPage() {
         extra={
           <Space>
             <StatusBadge status={rel.status} />
+            {rel.mapping_object_type_id && (
+              <Tooltip title="把该业务关系物化到目标存储（建表落数，需 publisher 角色）">
+                <Button
+                  icon={<DatabaseOutlined />}
+                  onClick={() => setMaterializeOpen(true)}
+                >
+                  物化
+                </Button>
+              </Tooltip>
+            )}
             {inWorkspace ? (
               <EntityEditToolbar
                 saving={saving}
@@ -715,11 +727,16 @@ export function RelationTypeDetailPage() {
         </SectionCard>
       )}
 
-      {inWorkspace && (
-        <MaterializationContractPanel
+      {rel.ontology_id && (
+        <MaterializeModal
+          open={materializeOpen}
+          onClose={() => setMaterializeOpen(false)}
           ontologyId={rel.ontology_id}
-          targetKind="relation_type"
-          targetId={rel.id}
+          // 单实体物化：以该关系自身的发布状态给出草稿警示，
+          // 不能用 inWorkspace 一刀切当草稿——工作区里的关系也可能已发布。
+          ontologyStatus={rel.status}
+          scopeTargetId={rel.id}
+          scopeLabel={rel.display_name}
         />
       )}
     </PageContainer>

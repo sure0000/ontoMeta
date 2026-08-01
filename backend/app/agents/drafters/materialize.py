@@ -26,6 +26,7 @@ class MaterializeDrafter(Drafter):
             "target_datasource_id": context["target_datasource_id"],
             "engine": context.get("engine") or "hive",
             "database_prefix": context.get("database_prefix"),
+            "load_strategy": context.get("load_strategy"),
             "selected_targets": list(context.get("selected_targets") or []) or None,
             "overrides": dict(context.get("overrides") or {}),
         }

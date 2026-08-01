@@ -54,12 +54,16 @@ class MaterializationContractSyncResult(BaseModel):
 
 
 class MaterializeRequest(BaseModel):
-    """本体一键物化请求：把已发布本体落到某个目标数据源。"""
+    """本体一键物化请求：把当前工作本体（草稿或已发布）落到某个目标数据源。"""
 
     target_datasource_id: str = Field(description="目标存储（DataSource）id，其 dsn 即落库连接串")
     engine: str = Field("hive", description="目标数仓引擎（决定 DDL/ETL 方言）")
     database_prefix: str | None = Field(
         None, description="库名后缀，如 erp → dim_erp"
+    )
+    load_strategy: str | None = Field(
+        None,
+        description="同步方式：full/incremental/cdc；写回选中契约并影响 ETL。空=沿用契约既定策略",
     )
     selected_targets: list[str] | None = Field(
         None, description="勾选要物化的实体名；空/None = 全部可物化实体"
@@ -81,3 +85,6 @@ class MaterializeResult(BaseModel):
     name: str
     receipt: dict | None = None
     executed_at: datetime | None = None
+    operator: str | None = None
+    created_at: datetime | None = None
+

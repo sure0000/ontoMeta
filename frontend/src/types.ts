@@ -629,9 +629,13 @@ export interface ChatBiCaliberItem {
 
 export interface ChatBiAgentStep {
   index: number;
+  /** "tool"（默认）= 工具调用步；"thought" = 工具间的模型自述，按时序穿插展示。 */
+  kind?: "tool" | "thought";
   tool: string;
+  /** kind==="thought" 时的思考文本。 */
+  text?: string;
   arguments?: Record<string, unknown>;
-  status?: "succeeded" | "failed";
+  status?: "running" | "succeeded" | "failed";
   summary?: string | null;
 }
 
@@ -657,6 +661,15 @@ export interface ChatBiAnswer {
   conversation_id?: string | null;
   conversation_title?: string | null;
 }
+
+export type ChatBiStreamEvent =
+  | { type: "meta"; conversation_id: string; conversation_title?: string | null }
+  | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
+  | { type: "step_done"; index: number; status: "succeeded" | "failed"; summary?: string | null }
+  | { type: "thought"; index: number; text: string }
+  | { type: "token"; delta: string }
+  | { type: "done"; payload: ChatBiAnswer }
+  | { type: "error"; message: string };
 
 export interface ChatBiSuggestions {
   domain_id: string;
@@ -1017,6 +1030,7 @@ export interface MaterializeRequestInput {
   target_datasource_id: string;
   engine: string;
   database_prefix?: string | null;
+  load_strategy?: MaterializationLoadStrategy | null;
   selected_targets?: string[] | null;
   overrides?: Record<string, MaterializationContractUpdateInput>;
   intent?: string;
@@ -1031,6 +1045,8 @@ export interface MaterializationRun {
   name: string;
   receipt?: MaterializationReceipt | null;
   executed_at?: string | null;
+  operator?: string | null;
+  created_at?: string | null;
 }
 
 // ---- RBAC 主体与角色（M0）----

@@ -259,10 +259,37 @@ def test_etl_falls_back_to_same_column_name(client, admin_headers):
         headers=admin_headers, params={"database_prefix": "erp"},
     ).json()["statements"]
     sql = stmts["dim_erp.customer"]
+    # 缺省同步方式 = full → INSERT OVERWRITE（正向生成既有行为不变）。
     assert "INSERT OVERWRITE TABLE dim_erp.customer" in sql
     assert "`customer_id` AS `customer_id`" in sql
     # 源表由 source_ref(URN) 解析而来
     assert "FROM erp_ods.tab_customer;" in sql
+
+
+def test_etl_load_strategy_incremental(client, admin_headers):
+    """同步方式=增量 → INSERT INTO + 分区键水位谓词（物化弹窗单选驱动，缺省仍为覆盖）。"""
+    ids = _seed("etlinc")
+    _sync(client, admin_headers, ids["ontology_id"])
+    base = f"/api/ontologies/{ids['ontology_id']}/warehouse/etl"
+    params = {"database_prefix": "erp"}
+    # 缺省：覆盖
+    full_sql = client.get(base, headers=admin_headers, params=params).json()[
+        "statements"
+    ]["dim_erp.customer"]
+    assert full_sql.startswith("INSERT OVERWRITE TABLE dim_erp.customer")
+    # 显式增量：追加 + 水位
+    inc = client.get(
+        base, headers=admin_headers, params={**params, "load_strategy": "incremental"}
+    ).json()
+    inc_sql = inc["statements"]["dim_erp.customer"]
+    assert "INSERT INTO TABLE dim_erp.customer" in inc_sql
+    assert ":watermark" in inc_sql
+    # CDC：物化内不承载 → 回退覆盖 + 明确 warning
+    cdc = client.get(
+        base, headers=admin_headers, params={**params, "load_strategy": "cdc"}
+    ).json()
+    assert cdc["statements"]["dim_erp.customer"].startswith("INSERT OVERWRITE TABLE")
+    assert any(w["feature"] == "cdc" for w in cdc["warnings"])
 
 
 def test_etl_skips_ads_layer(client, admin_headers):

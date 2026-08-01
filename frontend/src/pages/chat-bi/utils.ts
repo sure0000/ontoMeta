@@ -5,6 +5,8 @@ export interface ChatMessage {
   content: string;
   payload?: ChatBiAnswer;
   pending?: boolean;
+  /** 正在逐字流式产出最终答案（用于末尾闪烁光标）。 */
+  streaming?: boolean;
   error?: boolean;
 }
 
@@ -114,14 +116,25 @@ export function tokenizeSqlLine(line: string): Array<{ text: string; kind: "comm
   return tokens;
 }
 
-export function splitMarkdownBlocks(content: string): Array<
+export type MarkdownBlock =
   | { type: "code"; lang: string; code: string }
-  | { type: "line"; raw: string }
-> {
-  const blocks: Array<
-    | { type: "code"; lang: string; code: string }
-    | { type: "line"; raw: string }
-  > = [];
+  | { type: "table"; header: string[]; rows: string[][] }
+  | { type: "line"; raw: string };
+
+function parseTableRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|")) t = t.slice(0, -1);
+  return t.split("|").map((c) => c.trim());
+}
+
+function isTableSeparator(line: string): boolean {
+  const t = line.trim();
+  return t.includes("-") && /^\|?[\s:|-]+\|?$/.test(t);
+}
+
+export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = [];
   const lines = content.split("\n");
   let i = 0;
   while (i < lines.length) {
@@ -139,6 +152,22 @@ export function splitMarkdownBlocks(content: string): Array<
       if (lang !== "sql") {
         blocks.push({ type: "code", lang, code: codeLines.join("\n") });
       }
+      continue;
+    }
+    // GFM 表格：当前行是 | 开头的表头，紧接一行分隔线 |---|---|
+    if (
+      line.trim().startsWith("|") &&
+      i + 1 < lines.length &&
+      isTableSeparator(lines[i + 1])
+    ) {
+      const header = parseTableRow(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
+      blocks.push({ type: "table", header, rows });
       continue;
     }
     blocks.push({ type: "line", raw: line });

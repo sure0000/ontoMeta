@@ -469,11 +469,17 @@ class WarehouseGenerator:
         engine: str,
         *,
         database_prefix: str | None = None,
+        load_strategy: str | None = None,
     ) -> dict:
         """ODS → 目标层的字段映射 SQL。
 
         源表由 ``ObjectType.source_ref``（DataHub URN）定位；列映射用
         ``Property.source_field_ref``，缺失时回退同名字段（真实源常无此字段）。
+
+        ``load_strategy`` 决定装载语句：``full``（默认）→ ``INSERT OVERWRITE``（权威覆盖）；
+        ``incremental`` → ``INSERT INTO``（追加；有分区键则加分区谓词占位，水位由调度器注入）；
+        ``cdc`` → 同库 INSERT 无法表达变更捕获，回退为覆盖并在 ``warnings`` 明示应走同步作业。
+        为物化运行期的一次性选择（弹窗单选全局生效）；缺省 ``full`` 保持既有正向生成行为不变。
         """
         plan = self.build_logical_schema(
             db, ontology_id, database_prefix=database_prefix
@@ -482,6 +488,8 @@ class WarehouseGenerator:
         source_refs = self._source_refs(db, ontology_id)
         field_refs = self._field_refs(db, ontology_id)
 
+        strategy = (load_strategy or "full").strip().lower() or "full"
+        warnings: list[dict] = []
         statements: dict[str, str] = {}
         for table in plan.schema.tables:
             if table.layer == "ads":
@@ -495,14 +503,42 @@ class WarehouseGenerator:
                 f"  {adapter.quote_identifier(mapping.get(c.name) or c.name)} AS {adapter.quote_identifier(c.name)}"
                 for c in table.columns
             ]
-            sql = (
-                f"INSERT OVERWRITE TABLE {table.qualified_name}\n"
-                f"SELECT\n" + ",\n".join(select_lines) + f"\nFROM {source};"
-            )
+            select_body = "SELECT\n" + ",\n".join(select_lines) + f"\nFROM {source}"
+            if strategy == "incremental":
+                where = ""
+                if table.partition_key:
+                    pk = adapter.quote_identifier(table.partition_key)
+                    where = f"\nWHERE {pk} >= :watermark"
+                    plan.note(
+                        table.qualified_name,
+                        f"增量装载：分区键 {table.partition_key} 的水位 :watermark 需由调度器注入",
+                    )
+                else:
+                    warnings.append(
+                        {
+                            "target": table.qualified_name,
+                            "feature": "incremental",
+                            "detail": "增量装载但契约未配分区键，退化为无谓词追加，"
+                            "可能产生重复，请配置分区键或去重逻辑",
+                        }
+                    )
+                sql = f"INSERT INTO TABLE {table.qualified_name}\n{select_body}{where};"
+            else:
+                if strategy == "cdc":
+                    warnings.append(
+                        {
+                            "target": table.qualified_name,
+                            "feature": "cdc",
+                            "detail": "CDC 无法用同库 INSERT 表达，本次按全量覆盖执行；"
+                            "如需变更捕获请改用同步作业（SeaTunnel）",
+                        }
+                    )
+                sql = f"INSERT OVERWRITE TABLE {table.qualified_name}\n{select_body};"
             statements[table.qualified_name] = adapter.translate_sql(sql)
         return {
             "engine": engine,
             "statements": statements,
+            "warnings": warnings,
             "unsupported": plan.unsupported,
         }
 
