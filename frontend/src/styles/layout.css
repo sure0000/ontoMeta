@@ -214,6 +214,7 @@
   overflow: hidden;
 }
 .page-container--full > .ant-spin-nested-loading,
+.page-container--full > .ant-spin-section,
 .page-container--full > .ant-spin {
   flex: 1;
   min-height: 0;
@@ -223,6 +224,7 @@
   flex-direction: column;
 }
 .page-container--full > .ant-spin-nested-loading > .ant-spin-container,
+.page-container--full > .ant-spin-section > .ant-spin-container,
 .page-container--full > .ant-spin > .ant-spin-container {
   flex: 1;
   min-height: 0;

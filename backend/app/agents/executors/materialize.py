@@ -33,7 +33,11 @@ class MaterializeExecutor(Executor):
                 db, ontology_id, engine, database_prefix=spec.get("database_prefix")
             )
             etl = _generator.generate_etl_sql(
-                db, ontology_id, engine, database_prefix=spec.get("database_prefix")
+                db,
+                ontology_id,
+                engine,
+                database_prefix=spec.get("database_prefix"),
+                load_strategy=spec.get("load_strategy"),
             )
         return {
             "engine": engine,
@@ -64,6 +68,7 @@ class MaterializeExecutor(Executor):
                 target_datasource_id=spec["target_datasource_id"],
                 engine=spec.get("engine") or "hive",
                 database_prefix=spec.get("database_prefix"),
+                load_strategy=spec.get("load_strategy"),
                 selected_targets=spec.get("selected_targets"),
                 overrides=spec.get("overrides"),
             )

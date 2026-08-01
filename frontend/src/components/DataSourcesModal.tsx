@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   Button,
+  Checkbox,
   Form,
   Input,
+  InputNumber,
   message,
   Modal,
   Popconfirm,
@@ -15,10 +17,108 @@ import { PlusOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import type { DataSource } from "../types";
 
-const KIND_OPTIONS = ["sqlite", "duckdb", "postgres", "mysql", "cube", "mock"].map((v) => ({
-  label: v,
-  value: v,
+// 各数据源类型的连接表单形态与 DSN 组装方式。
+// host 类：拼 SQLAlchemy URL（账号/密码分列填写、URL 编码）；file 类：填路径；
+// cube：dsn 存 Cube API 地址；mock：内置样例无需连接。
+type ConnField = "path" | "host" | "port" | "database" | "user" | "password" | "url";
+
+interface ConnFormValues {
+  name: string;
+  kind: string;
+  path?: string;
+  host?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  password?: string;
+  url?: string;
+  raw_dsn?: string;
+  mapping?: string;
+}
+
+const KIND_PROFILES: Record<
+  string,
+  {
+    label: string;
+    fields: ConnField[];
+    scheme?: string;
+    defaultPort?: number;
+    build?: (v: ConnFormValues) => string | undefined;
+  }
+> = {
+  postgres: {
+    label: "PostgreSQL",
+    fields: ["host", "port", "database", "user", "password"],
+    scheme: "postgresql+psycopg",
+    defaultPort: 5432,
+  },
+  mysql: {
+    label: "MySQL",
+    fields: ["host", "port", "database", "user", "password"],
+    scheme: "mysql+pymysql",
+    defaultPort: 3306,
+  },
+  hive: {
+    label: "Hive（数仓）",
+    fields: ["host", "port", "database", "user", "password"],
+    scheme: "hive",
+    defaultPort: 10000,
+  },
+  doris: {
+    label: "Doris（数仓）",
+    fields: ["host", "port", "database", "user", "password"],
+    scheme: "mysql+pymysql", // Doris 走 MySQL 线协议
+    defaultPort: 9030,
+  },
+  starrocks: {
+    label: "StarRocks（数仓）",
+    fields: ["host", "port", "database", "user", "password"],
+    scheme: "mysql+pymysql", // StarRocks 走 MySQL 线协议
+    defaultPort: 9030,
+  },
+  clickhouse: {
+    label: "ClickHouse（数仓）",
+    fields: ["host", "port", "database", "user", "password"],
+    scheme: "clickhouse+native",
+    defaultPort: 9000,
+  },
+  sqlite: {
+    label: "SQLite（文件）",
+    fields: ["path"],
+    build: (v) => (v.path?.trim() ? `sqlite:///${v.path.trim()}` : undefined),
+  },
+  duckdb: {
+    label: "DuckDB（文件）",
+    fields: ["path"],
+    build: (v) => (v.path?.trim() ? `duckdb:///${v.path.trim()}` : undefined),
+  },
+  cube: {
+    label: "Cube 语义层",
+    fields: ["url"],
+    build: (v) => v.url?.trim() || undefined,
+  },
+  mock: { label: "Mock（内置样例）", fields: [] },
+};
+
+const KIND_OPTIONS = Object.entries(KIND_PROFILES).map(([value, p]) => ({
+  value,
+  label: p.label,
 }));
+
+/** 按类型把结构化字段拼成 dsn_secret_ref；无连接信息时返回 undefined。 */
+function buildConnDsn(kind: string, v: ConnFormValues): string | undefined {
+  const p = KIND_PROFILES[kind];
+  if (!p) return undefined;
+  if (p.build) return p.build(v);
+  if (!p.scheme || !v.host?.trim()) return undefined; // host 类无主机即视为未填
+  const auth = v.user
+    ? `${encodeURIComponent(v.user)}${v.password ? `:${encodeURIComponent(v.password)}` : ""}@`
+    : "";
+  const port = v.port ?? p.defaultPort;
+  const hostPort = port ? `${v.host.trim()}:${port}` : v.host.trim();
+  const db = v.database?.trim() ? `/${v.database.trim()}` : "";
+  return `${p.scheme}://${auth}${hostPort}${db}`;
+}
 
 const STATUS_COLOR: Record<string, string> = {
   ok: "success",
@@ -33,10 +133,38 @@ export function DataSourcesModal({
   open: boolean;
   onClose: () => void;
 }) {
+  return (
+    <Modal
+      title="数据源管理"
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      width={720}
+      destroyOnClose
+    >
+      <DataSourcesPanel />
+    </Modal>
+  );
+}
+
+/** 数据源管理面板：登记 / 测试 / 删除可写连接。供物化落库与数据应用取数复用；
+ *  可内嵌于设置页 Tab，或包在 {@link DataSourcesModal} 里从数据应用编辑器打开。
+ *  新增 / 编辑通过弹框填写，连接按类型给结构化表单（账号密码分列）。 */
+export function DataSourcesPanel() {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [form] = Form.useForm();
+  const [formOpen, setFormOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // null=新增；非空=正在编辑该数据源 id（连接为密文不回显，留空即保持原连接）。
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [rawMode, setRawMode] = useState(false); // 高级：直接填连接串
+  const [initialVals, setInitialVals] = useState<Partial<ConnFormValues>>({
+    kind: "postgres",
+  });
+  const [form] = Form.useForm<ConnFormValues>();
+  const kind = Form.useWatch("kind", form) ?? initialVals.kind ?? "postgres";
+  const profile = KIND_PROFILES[kind] ?? KIND_PROFILES.postgres;
+  const required = !editingId && !rawMode; // 新增且非高级模式时，连接字段必填
 
   const load = () => {
     setLoading(true);
@@ -48,11 +176,40 @@ export function DataSourcesModal({
   };
 
   useEffect(() => {
-    if (open) load();
-  }, [open]);
+    load();
+  }, []);
 
-  const handleAdd = async () => {
-    const values = await form.validateFields();
+  const openAdd = () => {
+    setEditingId(null);
+    setRawMode(false);
+    setInitialVals({ kind: "postgres" });
+    setFormOpen(true);
+  };
+
+  const openEdit = (row: DataSource) => {
+    setEditingId(row.id);
+    setRawMode(false);
+    setInitialVals({
+      name: row.name,
+      kind: row.kind,
+      mapping: row.mapping ? JSON.stringify(row.mapping) : "",
+    });
+    setFormOpen(true);
+  };
+
+  const closeForm = () => {
+    setFormOpen(false);
+    setEditingId(null);
+    setRawMode(false);
+  };
+
+  const handleSubmit = async () => {
+    let values: ConnFormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
     let mapping: Record<string, unknown> | undefined;
     if (values.mapping?.trim()) {
       try {
@@ -62,19 +219,42 @@ export function DataSourcesModal({
         return;
       }
     }
+    const dsn = rawMode
+      ? values.raw_dsn?.trim() || undefined
+      : buildConnDsn(values.kind, values);
+    if (!editingId && values.kind !== "mock" && !dsn) {
+      message.error("请填写连接信息");
+      return;
+    }
+    setSaving(true);
     try {
-      await api.createDataSource({
-        name: values.name,
-        kind: values.kind,
-        dsn_secret_ref: values.dsn_secret_ref,
-        mapping,
-      });
-      message.success("已添加数据源");
-      form.resetFields();
-      setAdding(false);
+      if (editingId) {
+        // 编辑：连接/映射留空即不改（后端 PATCH 为 exclude_unset）。
+        const body: {
+          name: string;
+          kind: string;
+          dsn_secret_ref?: string;
+          mapping?: Record<string, unknown>;
+        } = { name: values.name, kind: values.kind };
+        if (dsn) body.dsn_secret_ref = dsn;
+        if (mapping) body.mapping = mapping;
+        await api.updateDataSource(editingId, body);
+        message.success("已保存修改");
+      } else {
+        await api.createDataSource({
+          name: values.name,
+          kind: values.kind,
+          dsn_secret_ref: dsn,
+          mapping,
+        });
+        message.success("已添加数据源");
+      }
+      closeForm();
       load();
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "添加失败");
+      message.error(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -97,49 +277,140 @@ export function DataSourcesModal({
     }
   };
 
+  // 按当前类型渲染结构化连接字段。
+  const connFields = (
+    <Space align="start" wrap>
+      {profile.fields.includes("path") && (
+        <Form.Item
+          name="path"
+          label="文件路径"
+          rules={required ? [{ required: true, message: "请填写文件路径" }] : undefined}
+          extra="绝对路径，如 /data/app.db"
+        >
+          <Input placeholder="/data/app.db" style={{ width: 320 }} />
+        </Form.Item>
+      )}
+      {profile.fields.includes("url") && (
+        <Form.Item
+          name="url"
+          label="Cube API 地址"
+          rules={required ? [{ required: true, message: "请填写 Cube API 地址" }] : undefined}
+          extra="如 https://cube.host/cubejs-api/v1"
+        >
+          <Input placeholder="https://cube.host/cubejs-api/v1" style={{ width: 320 }} />
+        </Form.Item>
+      )}
+      {profile.fields.includes("host") && (
+        <Form.Item
+          name="host"
+          label="主机"
+          rules={required ? [{ required: true, message: "请填写主机" }] : undefined}
+        >
+          <Input placeholder="10.0.0.1 或 host" style={{ width: 160 }} />
+        </Form.Item>
+      )}
+      {profile.fields.includes("port") && (
+        <Form.Item name="port" label="端口" extra={`默认 ${profile.defaultPort ?? "—"}`}>
+          <InputNumber
+            style={{ width: 100 }}
+            min={1}
+            max={65535}
+            placeholder={String(profile.defaultPort ?? "")}
+          />
+        </Form.Item>
+      )}
+      {profile.fields.includes("database") && (
+        <Form.Item name="database" label="库名 / Schema">
+          <Input placeholder="可选" style={{ width: 140 }} />
+        </Form.Item>
+      )}
+      {profile.fields.includes("user") && (
+        <Form.Item name="user" label="账号">
+          <Input placeholder="数据库账号" style={{ width: 140 }} autoComplete="off" />
+        </Form.Item>
+      )}
+      {profile.fields.includes("password") && (
+        <Form.Item name="password" label="密码">
+          <Input.Password
+            placeholder="数据库密码"
+            style={{ width: 160 }}
+            autoComplete="new-password"
+          />
+        </Form.Item>
+      )}
+      {profile.fields.length === 0 && !rawMode && (
+        <span className="muted">Mock 数据源使用内置样例，无需填写连接。</span>
+      )}
+    </Space>
+  );
+
   return (
-    <Modal
-      title="数据源管理"
-      open={open}
-      onCancel={onClose}
-      footer={null}
-      width={720}
-    >
+    <>
       <Space style={{ marginBottom: 12 }}>
-        <Button icon={<PlusOutlined />} onClick={() => setAdding((v) => !v)}>
+        <Button icon={<PlusOutlined />} type="primary" onClick={openAdd}>
           新增数据源
         </Button>
       </Space>
 
-      {adding && (
-        <Form form={form} layout="vertical" style={{ marginBottom: 16 }}>
+      <Modal
+        title={editingId ? "编辑数据源" : "新增数据源"}
+        open={formOpen}
+        onOk={handleSubmit}
+        onCancel={closeForm}
+        okText={editingId ? "保存修改" : "保存"}
+        confirmLoading={saving}
+        destroyOnClose
+        width={640}
+      >
+        <Form form={form} layout="vertical" initialValues={initialVals}>
           <Space align="start" wrap>
             <Form.Item name="name" label="名称" rules={[{ required: true }]}>
-              <Input placeholder="如 生产库-只读" style={{ width: 160 }} />
+              <Input placeholder="如 生产库-只读" style={{ width: 220 }} />
             </Form.Item>
-            <Form.Item name="kind" label="类型" initialValue="sqlite">
-              <Select options={KIND_OPTIONS} style={{ width: 120 }} />
-            </Form.Item>
-            <Form.Item
-              name="dsn_secret_ref"
-              label="连接串（SQLAlchemy URL）"
-              tooltip="如 sqlite:////abs/path.db、postgresql+psycopg://user:pwd@host/db（建议只读账号）"
-            >
-              <Input placeholder="sqlite:////data/app.db" style={{ width: 300 }} />
+            <Form.Item name="kind" label="类型">
+              <Select options={KIND_OPTIONS} style={{ width: 180 }} />
             </Form.Item>
           </Space>
+
+          {editingId && (
+            <div className="muted" style={{ marginBottom: 8 }}>
+              连接信息为密文，不回显；留空＝保持原连接不变，要更换请重新完整填写。
+            </div>
+          )}
+
+          {rawMode ? (
+            <Form.Item
+              name="raw_dsn"
+              label="连接串（SQLAlchemy URL）"
+              rules={required ? [{ required: true, message: "请填写连接串" }] : undefined}
+              tooltip="如 postgresql+psycopg://user:pwd@host:5432/db；账号密码含特殊字符请自行编码"
+            >
+              <Input placeholder="postgresql+psycopg://user:pwd@host:5432/db" />
+            </Form.Item>
+          ) : (
+            connFields
+          )}
+
+          {kind !== "mock" && (
+            <Checkbox
+              checked={rawMode}
+              onChange={(e) => setRawMode(e.target.checked)}
+              style={{ marginBottom: 12 }}
+            >
+              高级：直接填写连接串
+            </Checkbox>
+          )}
+
           <Form.Item
             name="mapping"
             label="物理映射（可选 JSON）"
             tooltip='本体名→物理名，如 {"tables":{"orders":"t_orders"},"columns":{"amount":"amt"}}'
+            extra={editingId ? "留空＝保持原映射不变" : undefined}
           >
             <Input.TextArea rows={2} placeholder='{"tables":{},"columns":{}}' />
           </Form.Item>
-          <Button type="primary" onClick={handleAdd}>
-            保存
-          </Button>
         </Form>
-      )}
+      </Modal>
 
       <Table
         className="om-table"
@@ -161,6 +432,9 @@ export function DataSourcesModal({
             key: "actions",
             render: (_: unknown, row: DataSource) => (
               <Space>
+                <Button size="small" onClick={() => openEdit(row)}>
+                  编辑
+                </Button>
                 <Button size="small" onClick={() => handleTest(row.id)}>
                   测试
                 </Button>
@@ -174,6 +448,6 @@ export function DataSourcesModal({
           },
         ]}
       />
-    </Modal>
+    </>
   );
 }

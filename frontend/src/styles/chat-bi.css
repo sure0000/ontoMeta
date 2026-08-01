@@ -1203,3 +1203,106 @@
   color: var(--om-text-tertiary, #94a3b8);
   background: var(--om-neutral-soft, #f8fafc);
 }
+
+/* Data Agent · 回答正文 markdown 表格 */
+.chatbi-md-tablewrap {
+  margin: 10px 0;
+  overflow-x: auto;
+}
+.chatbi-md-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.chatbi-md-table th,
+.chatbi-md-table td {
+  border: 1px solid var(--om-border, #e2e8f0);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.chatbi-md-table th {
+  background: var(--om-neutral-soft, #f8fafc);
+  font-weight: 600;
+  color: var(--om-text-primary, #1e293b);
+  white-space: nowrap;
+}
+.chatbi-md-table tbody tr:nth-child(even) {
+  background: var(--om-neutral-soft, #fafcff);
+}
+
+/* Data Agent · P2 实时步骤（spinner + 状态图标 + 人话动作） */
+@keyframes chatbi-spin { to { transform: rotate(360deg); } }
+.chatbi-steps-spin,
+.chatbi-step-spin {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--om-border, #cbd5e1);
+  border-top-color: var(--om-primary, #3b82f6);
+  border-radius: 50%;
+  animation: chatbi-spin 0.7s linear infinite;
+  vertical-align: middle;
+}
+.chatbi-steps-spin {
+  margin-right: 6px;
+}
+.chatbi-step {
+  align-items: center;
+}
+.chatbi-step-icon {
+  display: inline-flex;
+  width: 14px;
+  justify-content: center;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.chatbi-step--succeeded .chatbi-step-icon {
+  color: var(--om-success, #16a34a);
+}
+.chatbi-step--failed .chatbi-step-icon {
+  color: var(--om-error, #dc2626);
+}
+.chatbi-step-emoji {
+  flex: 0 0 auto;
+}
+.chatbi-step-text {
+  color: var(--om-text-primary, #1e293b);
+}
+.chatbi-step--running .chatbi-step-text {
+  color: var(--om-text-secondary, #475569);
+}
+
+/* 工具间的模型自述：像 Claude Code 一样先说再做，弱化为引注风格 */
+.chatbi-step--thought {
+  align-items: flex-start;
+}
+.chatbi-step--thought .chatbi-step-emoji {
+  margin-top: 1px;
+  opacity: 0.75;
+}
+.chatbi-step-thought {
+  color: var(--om-text-secondary, #475569);
+  font-style: italic;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* 最终答案逐字流式时的闪烁光标 */
+.chatbi-answer-wrap {
+  display: inline;
+}
+.chatbi-answer-caret {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--om-primary, #2563eb);
+  border-radius: 1px;
+  animation: chatbi-caret-blink 1s steps(2, start) infinite;
+}
+@keyframes chatbi-caret-blink {
+  to { opacity: 0; }
+}

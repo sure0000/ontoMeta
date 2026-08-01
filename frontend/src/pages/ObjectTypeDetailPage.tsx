@@ -24,6 +24,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -33,7 +34,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
-import { MaterializationContractPanel } from "../components/MaterializationContractPanel";
+import { MaterializeModal } from "../components/MaterializeModal";
 import { ObjectRelationGraph } from "../components/ObjectRelationGraph";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -253,6 +254,7 @@ export function ObjectTypeDetailPage() {
   const [convertForm] = Form.useForm<ConvertForm>();
   const [peerObjects, setPeerObjects] = useState<ObjectTypeSummary[]>([]);
   const [activeTab, setActiveTab] = useState("basic");
+  const [materializeOpen, setMaterializeOpen] = useState(false);
   const [datasetOptions, setDatasetOptions] = useState<DataHubDatasetOption[]>([]);
   const [datasetSearching, setDatasetSearching] = useState(false);
   const [ensuringDataset, setEnsuringDataset] = useState(false);
@@ -829,6 +831,16 @@ export function ObjectTypeDetailPage() {
           <Space>
             <StatusBadge status={obj.status} />
             <ProvenanceBadge provenance={obj} />
+            {obj.table_role === "business_object" && (
+              <Tooltip title="把该业务对象物化到目标存储（建表落数，需 publisher 角色）">
+                <Button
+                  icon={<DatabaseOutlined />}
+                  onClick={() => setMaterializeOpen(true)}
+                >
+                  物化
+                </Button>
+              </Tooltip>
+            )}
             {inWorkspace ? (
               <EntityEditToolbar
                 saving={saving}
@@ -845,6 +857,19 @@ export function ObjectTypeDetailPage() {
           </Space>
         }
       />
+
+      {obj.table_role === "business_object" && obj.ontology_id && (
+        <MaterializeModal
+          open={materializeOpen}
+          onClose={() => setMaterializeOpen(false)}
+          ontologyId={obj.ontology_id}
+          // 单实体物化：以该对象自身的发布状态给出草稿警示，
+          // 不能用 inWorkspace 一刀切当草稿——工作区里的对象也可能已发布。
+          ontologyStatus={obj.status}
+          scopeTargetId={obj.id}
+          scopeLabel={obj.display_name}
+        />
+      )}
 
       {error && (
         <Alert
@@ -977,26 +1002,6 @@ export function ObjectTypeDetailPage() {
                           <DecisionEvidencePanel obj={obj} />
                         </div>
                       </>
-                    ),
-                  },
-                ]
-              : []),
-            ...(inWorkspace
-              ? [
-                  {
-                    key: "materialization",
-                    label: (
-                      <span>
-                        <DatabaseOutlined style={{ marginRight: 6 }} />
-                        物化契约
-                      </span>
-                    ),
-                    children: (
-                      <MaterializationContractPanel
-                        ontologyId={obj.ontology_id}
-                        targetKind="object_type"
-                        targetId={obj.id}
-                      />
                     ),
                   },
                 ]

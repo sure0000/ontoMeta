@@ -1,4 +1,8 @@
+import json
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import chat_bi_service
@@ -20,6 +24,7 @@ from app.schemas import (
 )
 
 router = APIRouter()
+logger = logging.getLogger("ontometa.chat_bi_api")
 
 @router.get(
     "/chat-bi/conversations", response_model=list[ChatBiConversationSummary]
@@ -185,6 +190,83 @@ async def chat_bi_ask(data: ChatBiAskRequest, db: Session = Depends(get_db)):
         return payload
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/chat-bi/ask/stream")
+async def chat_bi_ask_stream(data: ChatBiAskRequest, db: Session = Depends(get_db)):
+    """SSE 流式问答：实时推送 agent 工具步骤与逐字答案。
+
+    事件（`data: {json}\\n\\n`）：meta / step_start / step_done / token / done / error。
+    会话创建与 user 消息在流开始前落库；assistant 消息在 done 后落库。
+    """
+    conversation_id = data.conversation_id
+    if conversation_id:
+        conv = chat_bi_service.get_conversation(db, conversation_id)
+        if not conv:
+            raise HTTPException(status_code=404, detail="对话不存在")
+        if conv.domain_id != data.domain_id:
+            raise HTTPException(
+                status_code=400,
+                detail="会话不属于当前数据域，请切换到正确数据域或新建会话",
+            )
+        conversation_title = conv.title
+    else:
+        conv_dict = chat_bi_service.create_conversation(
+            db, domain_id=data.domain_id, title=data.question[:50]
+        )
+        conversation_id = conv_dict["id"]
+        conversation_title = conv_dict["title"]
+
+    chat_bi_service.save_message(db, conversation_id, "user", data.question)
+
+    def sse(event: dict) -> str:
+        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    async def event_gen():
+        yield sse({
+            "type": "meta",
+            "conversation_id": conversation_id,
+            "conversation_title": conversation_title,
+        })
+        try:
+            async for ev in chat_bi_service.ask_stream(
+                db,
+                domain_id=data.domain_id,
+                question=data.question,
+                history=data.history,
+            ):
+                if ev.get("type") == "done":
+                    payload = ev["payload"]
+                    payload["conversation_id"] = conversation_id
+                    payload["conversation_title"] = conversation_title
+                    yield sse(ev)
+                    chat_bi_service.save_message(
+                        db,
+                        conversation_id,
+                        "assistant",
+                        payload.get("answer", ""),
+                        payload={
+                            k: v for k, v in payload.items()
+                            if k not in ("domain_id", "domain_name")
+                        },
+                    )
+                else:
+                    yield sse(ev)
+        except ValueError as exc:
+            yield sse({"type": "error", "message": str(exc)})
+        except Exception:  # noqa: BLE001
+            logger.exception("ChatBI stream endpoint failed")
+            yield sse({"type": "error", "message": "服务异常，请重试"})
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # 禁 nginx 缓冲，确保逐块下发
+        },
+    )
 
 
 @router.get("/chat-bi/suggestions", response_model=ChatBiSuggestions)

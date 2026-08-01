@@ -179,6 +179,16 @@ def _backend_of(dsn: str) -> str:
     return prefix
 
 
+def backend_of(dsn: str | None) -> str | None:
+    """公有包装：由 DSN scheme 推断后端名（sqlite/duckdb/postgres/mysql/hive/doris/…）。
+
+    供物化目标匹配「DataHub 平台 ↔ 已登记连接」使用；``dsn`` 为空时返回 None。
+    """
+    if not dsn:
+        return None
+    return _backend_of(dsn)
+
+
 def execute_sql(
     *,
     dsn: str,

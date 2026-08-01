@@ -15,6 +15,7 @@ import type {
   ChatBiConversation,
   ChatBiHistoryItem,
   ChatBiMessageItem,
+  ChatBiStreamEvent,
   ChatBiSuggestions,
   Confirmation,
   DataHubDatasetOption,
@@ -704,6 +705,60 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  /** SSE 流式问答：逐事件回调（meta/step_start/step_done/token/done/error）。 */
+  askChatBiStream: async (
+    body: {
+      domain_id: string;
+      question: string;
+      history?: ChatBiHistoryItem[];
+      conversation_id?: string;
+    },
+    onEvent: (ev: ChatBiStreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    const token = getAdminToken();
+    if (token) headers.set("X-Admin-Token", token);
+    const res = await fetch("/api/chat-bi/ask/stream", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      let detail = `请求失败 (${res.status})`;
+      try {
+        const j = (await res.json()) as { detail?: string };
+        if (j.detail) detail = j.detail;
+      } catch {
+        // ignore
+      }
+      throw new ApiError(detail, res.status);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = chunk.trim();
+        if (!line.startsWith("data:")) continue;
+        const jsonStr = line.slice(5).trim();
+        if (!jsonStr) continue;
+        try {
+          onEvent(JSON.parse(jsonStr) as ChatBiStreamEvent);
+        } catch {
+          // 忽略半包/坏行
+        }
+      }
+    }
+  },
 
   chatBiSuggestions: (domainId: string) =>
     request<ChatBiSuggestions>(

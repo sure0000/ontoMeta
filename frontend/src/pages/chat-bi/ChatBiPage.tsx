@@ -26,6 +26,7 @@ import { api } from "../../api";
 import { PageContainer } from "../../components/PageContainer";
 import { useApi } from "../../hooks/useApi";
 import type {
+  ChatBiAgentStep,
   ChatBiAnswer,
   ChatBiCategoryItem,
   ChatBiConversation,
@@ -856,38 +857,103 @@ const ChatBiMain = memo(function ChatBiMain({
       setSubmitting(true);
 
       try {
-        const answer = await api.askChatBi({
-          domain_id: domainId,
-          question: trimmed,
-          history,
-          conversation_id: activeConversationId ?? undefined,
-        });
-
-        if (!activeConversationId && answer.conversation_id) {
-          skipLoadForIdRef.current = answer.conversation_id;
-          onConversationActivity({
-            id: answer.conversation_id,
-            title: answer.conversation_title,
-            last_message_preview: trimmed.slice(0, 80),
-            isNew: true,
-          });
-        } else if (answer.conversation_id) {
-          onConversationActivity({
-            id: answer.conversation_id,
-            title: answer.conversation_title,
-            last_message_preview: trimmed.slice(0, 80),
-          });
-        }
-
-        setMessages((prev) => {
-          const next = [...prev];
-          next[next.length - 1] = {
-            role: "assistant",
-            content: answer.answer,
-            payload: answer,
-          };
-          return next;
-        });
+        await api.askChatBiStream(
+          {
+            domain_id: domainId,
+            question: trimmed,
+            history,
+            conversation_id: activeConversationId ?? undefined,
+          },
+          (ev) => {
+            if (ev.type === "meta") {
+              if (!activeConversationId && ev.conversation_id) {
+                skipLoadForIdRef.current = ev.conversation_id;
+                onConversationActivity({
+                  id: ev.conversation_id,
+                  title: ev.conversation_title ?? undefined,
+                  last_message_preview: trimmed.slice(0, 80),
+                  isNew: true,
+                });
+              } else if (ev.conversation_id) {
+                onConversationActivity({
+                  id: ev.conversation_id,
+                  title: ev.conversation_title ?? undefined,
+                  last_message_preview: trimmed.slice(0, 80),
+                });
+              }
+              return;
+            }
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const cur = { ...last };
+              // 收到任一事件即退出纯 pending（typing dots）态，转为实时展示步骤/答案
+              cur.pending = false;
+              const payload: ChatBiAnswer = {
+                domain_id: domainId,
+                domain_name: "",
+                answer: "",
+                used_mock: false,
+                ...(cur.payload ?? {}),
+                steps: [...(cur.payload?.steps ?? [])],
+              };
+              switch (ev.type) {
+                case "step_start":
+                  payload.steps = [
+                    ...(payload.steps ?? []),
+                    {
+                      index: ev.index,
+                      tool: ev.tool,
+                      arguments: ev.arguments,
+                      status: "running",
+                    } as ChatBiAgentStep,
+                  ];
+                  cur.payload = payload;
+                  break;
+                case "step_done":
+                  payload.steps = (payload.steps ?? []).map((s) =>
+                    s.index === ev.index
+                      ? { ...s, status: ev.status, summary: ev.summary }
+                      : s,
+                  );
+                  cur.payload = payload;
+                  break;
+                case "thought":
+                  payload.steps = [
+                    ...(payload.steps ?? []),
+                    {
+                      index: ev.index,
+                      kind: "thought",
+                      tool: "",
+                      text: ev.text,
+                      status: "succeeded",
+                    } as ChatBiAgentStep,
+                  ];
+                  cur.payload = payload;
+                  break;
+                case "token":
+                  cur.content =
+                    (cur.content === "思考中…" ? "" : cur.content) + ev.delta;
+                  cur.streaming = true;
+                  cur.payload = payload;
+                  break;
+                case "done":
+                  cur.content = ev.payload.answer;
+                  cur.payload = ev.payload;
+                  cur.streaming = false;
+                  break;
+                case "error":
+                  cur.content = `抱歉，回答失败：${ev.message}`;
+                  cur.error = true;
+                  cur.streaming = false;
+                  break;
+              }
+              next[next.length - 1] = cur;
+              return next;
+            });
+          },
+        );
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         setMessages((prev) => {

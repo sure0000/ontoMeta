@@ -39,6 +39,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PrincipalsPanel } from "../components/PrincipalsPanel";
 import { AgentsPanel } from "../components/AgentsPanel";
+import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
 import type {
@@ -602,6 +603,28 @@ export function SettingsPage() {
                     </Button>
                   </Form.Item>
                 </Form>
+              </SectionCard>
+            ),
+          },
+          {
+            key: "data-sources",
+            label: (
+              <span>
+                <DatabaseOutlined style={{ marginRight: 6 }} />
+                数据源
+              </span>
+            ),
+            children: (
+              <SectionCard title="数据源管理" icon={<DatabaseOutlined />}>
+                <Text
+                  type="secondary"
+                  style={{ display: "block", marginBottom: 16, fontSize: 13 }}
+                >
+                  这里登记的是「可写连接凭据」（SQLAlchemy 连接串），用于本体物化落库与数据应用取数。
+                  它与「DataHub」标签页不同：DataHub 只读取元数据、不提供可写凭据。物化弹窗里也能对
+                  未绑定平台就地补录一次凭据，登记后即可在此统一管理与测试。
+                </Text>
+                <DataSourcesPanel />
               </SectionCard>
             ),
           },

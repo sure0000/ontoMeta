@@ -1,10 +1,9 @@
-import { ApartmentOutlined, DatabaseOutlined } from "@ant-design/icons";
-import { Alert, Button, Spin } from "antd";
+import { ApartmentOutlined } from "@ant-design/icons";
+import { Alert, Spin } from "antd";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
-import { MaterializeModal } from "../components/MaterializeModal";
 import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -38,7 +37,6 @@ export function OntologyPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [roleFilter, setRoleFilter] = useState<string[]>(["business_object"]);
-  const [materializeOpen, setMaterializeOpen] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
@@ -162,26 +160,7 @@ export function OntologyPage() {
       <PageHeader
         icon={<ApartmentOutlined />}
         title={domain?.name ?? "本体浏览"}
-        extra={
-          publishedOntologyId ? (
-            <Button
-              type="primary"
-              icon={<DatabaseOutlined />}
-              onClick={() => setMaterializeOpen(true)}
-            >
-              物化
-            </Button>
-          ) : undefined
-        }
       />
-
-      {publishedOntologyId && (
-        <MaterializeModal
-          ontologyId={publishedOntologyId}
-          open={materializeOpen}
-          onClose={() => setMaterializeOpen(false)}
-        />
-      )}
 
       {error && (
         <Alert
