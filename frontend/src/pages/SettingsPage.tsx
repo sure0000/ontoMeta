@@ -169,9 +169,14 @@ export function SettingsPage() {
       frontend_url: datahubSettings.frontend_url,
       fabric: datahubSettings.fabric ?? "PROD",
     });
+  }, [datahubSettings, datahubForm]);
+
+  // 管理 Token 存在本机 localStorage，与服务端 bundle 无关：单独初始化，
+  // 否则鉴权失败（bundle 加载不出来）时 Token 输入框会不回显。
+  useEffect(() => {
     adminTokenForm.setFieldsValue({ token: getAdminToken() });
     setAdminTokenSaved(Boolean(getAdminToken()));
-  }, [datahubSettings, datahubForm, adminTokenForm]);
+  }, [adminTokenForm]);
 
   useEffect(() => {
     if (!draftGenerationSettings) return;
@@ -531,6 +536,7 @@ export function SettingsPage() {
           },
           {
             key: "datahub",
+            forceRender: true,
             label: (
               <span>
                 <CloudServerOutlined style={{ marginRight: 6 }} />
@@ -624,6 +630,7 @@ export function SettingsPage() {
           },
           {
             key: "draft-generation",
+            forceRender: true,
             label: (
               <span>
                 <ThunderboltOutlined style={{ marginRight: 6 }} />
@@ -718,6 +725,7 @@ export function SettingsPage() {
           },
           {
             key: "cube",
+            forceRender: true,
             label: (
               <span>
                 <DatabaseOutlined style={{ marginRight: 6 }} />
@@ -796,6 +804,7 @@ export function SettingsPage() {
           },
           {
             key: "security",
+            forceRender: true,
             label: (
               <span>
                 <SafetyCertificateOutlined style={{ marginRight: 6 }} />
