@@ -166,8 +166,9 @@ export function DataSourcesPanel() {
   const [loading, setLoading] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  // null=新增；非空=正在编辑该数据源 id（连接为密文不回显，留空即保持原连接）。
+  // null=新增；非空=正在编辑该数据源 id（密码不回显，留空即保持原密码）。
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingPwSet, setEditingPwSet] = useState(false); // 编辑的源是否已配密码
   const [rawMode, setRawMode] = useState(false); // 高级：直接填连接串
   const [initialVals, setInitialVals] = useState<Partial<ConnFormValues>>({
     kind: "postgres",
@@ -192,6 +193,7 @@ export function DataSourcesPanel() {
 
   const openAdd = () => {
     setEditingId(null);
+    setEditingPwSet(false);
     setRawMode(false);
     setInitialVals({ kind: "postgres" });
     setFormOpen(true);
@@ -199,10 +201,19 @@ export function DataSourcesPanel() {
 
   const openEdit = (row: DataSource) => {
     setEditingId(row.id);
+    setEditingPwSet(Boolean(row.password_set));
     setRawMode(false);
+    // 回显非机密连接字段：host 类给主机/端口/库/账号，文件类给路径，cube 给地址。
+    // 密码不回显，留空＝保持原密码（后端在 update 时沿用旧密码）。
     setInitialVals({
       name: row.name,
       kind: row.kind,
+      host: row.host ?? undefined,
+      port: row.port ?? undefined,
+      database: row.database ?? undefined,
+      user: row.username ?? undefined,
+      path: row.path ?? undefined,
+      url: row.url ?? undefined,
       mapping: row.mapping ? JSON.stringify(row.mapping) : "",
     });
     setFormOpen(true);
@@ -211,6 +222,7 @@ export function DataSourcesPanel() {
   const closeForm = () => {
     setFormOpen(false);
     setEditingId(null);
+    setEditingPwSet(false);
     setRawMode(false);
   };
 
@@ -341,9 +353,17 @@ export function DataSourcesPanel() {
         </Form.Item>
       )}
       {profile.fields.includes("password") && (
-        <Form.Item name="password" label="密码">
+        <Form.Item
+          name="password"
+          label="密码"
+          extra={
+            editingId && editingPwSet
+              ? "已配置密码，留空则保持原密码不变"
+              : undefined
+          }
+        >
           <Input.Password
-            placeholder="数据库密码"
+            placeholder={editingId && editingPwSet ? "留空＝不修改密码" : "数据库密码"}
             style={{ width: 160 }}
             autoComplete="new-password"
           />
@@ -385,7 +405,7 @@ export function DataSourcesPanel() {
 
           {editingId && (
             <div className="muted" style={{ marginBottom: 8 }}>
-              连接信息为密文，不回显；留空＝保持原连接不变，要更换请重新完整填写。
+              连接字段已回显（密码除外）；密码留空＝保持原密码不变，改动其它字段不会清空密码。
             </div>
           )}
 

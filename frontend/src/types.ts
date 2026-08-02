@@ -913,6 +913,15 @@ export interface DataSource {
   tested_at?: string | null;
   created_at: string;
   updated_at: string;
+  // 连接的非机密部分，供编辑弹窗回显（密码不回显，仅 password_set 标志）。
+  dsn_set?: boolean;
+  host?: string | null;
+  port?: number | null;
+  database?: string | null;
+  username?: string | null;
+  password_set?: boolean;
+  path?: string | null; // 文件类（sqlite/duckdb）
+  url?: string | null; // cube 语义层地址
 }
 
 export interface RuntimeFilter {

@@ -34,6 +34,16 @@ class DataSourceOut(BaseModel):
     tested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # 连接的非机密部分，供编辑弹窗回显（密码从不回显，只给 password_set 标志）。
+    # dsn 整体仍不下发；这里由后端从存量 DSN 解析出结构化字段。
+    dsn_set: bool = False
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    username: str | None = None
+    password_set: bool = False
+    path: str | None = None  # 文件类（sqlite/duckdb）的文件路径
+    url: str | None = None  # cube 语义层的 API 地址
 
     model_config = {"from_attributes": True}
 

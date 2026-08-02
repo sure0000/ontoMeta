@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import desc
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -52,6 +53,9 @@ logger = logging.getLogger("ontometa.data_app")
 
 APP_TYPES = {"data_table", "screen", "dashboard"}
 _AGG_FUNCS = {"sum", "count", "avg", "max", "min"}
+# 与前端 DataSourcesModal 的 KIND_PROFILES 对齐：host 类走结构化连接串、file 类是本地文件。
+_HOST_DSN_KINDS = {"postgres", "mysql", "hive", "doris", "starrocks", "clickhouse"}
+_FILE_DSN_KINDS = {"sqlite", "duckdb"}
 _TIME_WINDOW_DAYS = {
     "last_7d": 7,
     "last_30d": 30,
@@ -63,6 +67,26 @@ _TIME_WINDOW_DAYS = {
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _merge_dsn_password(new_dsn: str, old_dsn: str | None) -> str:
+    """编辑时连接字段回显但密码不回显：若新 DSN 没带密码而旧 DSN 有，则沿用旧密码。
+
+    这样用户改了主机/端口/库却把密码留空时不会把密码清掉（对齐「留空＝保持不变」）。
+    非 URL 形态（如 cube 的裸地址）解析失败时原样返回，不做合并。
+    """
+    if not old_dsn:
+        return new_dsn
+    try:
+        new_url = make_url(new_dsn)
+        old_url = make_url(old_dsn)
+    except Exception:  # noqa: BLE001 - 非 SQLAlchemy URL，无密码概念
+        return new_dsn
+    if new_url.password is None and old_url.password is not None:
+        return new_url.set(password=old_url.password).render_as_string(
+            hide_password=False
+        )
+    return new_dsn
 
 
 def _loads(value: str | None, default: Any) -> Any:
@@ -119,6 +143,10 @@ class DataAppService:
         ds = db.get(DataSource, ds_id)
         if not ds:
             raise ValueError("数据源不存在")
+        # 连接字段回显但密码不回显：新 DSN 缺密码时沿用旧密码，避免改主机顺手清空密码。
+        new_dsn = fields.get("dsn_secret_ref")
+        if new_dsn:
+            fields["dsn_secret_ref"] = _merge_dsn_password(new_dsn, ds.dsn_secret_ref)
         if "mapping" in fields:
             ds.mapping_json = _dumps(fields.pop("mapping"))
         for key, value in fields.items():
@@ -129,8 +157,48 @@ class DataAppService:
         return ds
 
     @staticmethod
+    def _dsn_components(kind: str, dsn: str | None) -> dict:
+        """把存量 DSN 拆成可回显的非机密字段。密码从不返回，只给 password_set。
+
+        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号
+        - 文件类（sqlite/duckdb）：取文件路径
+        - cube：dsn 存的就是 API 地址，原样给 url
+        解析失败时静默降级为空，不影响其它字段返回。
+        """
+        out: dict[str, Any] = {
+            "dsn_set": bool(dsn),
+            "host": None,
+            "port": None,
+            "database": None,
+            "username": None,
+            "password_set": False,
+            "path": None,
+            "url": None,
+        }
+        if not dsn:
+            return out
+        if kind in _HOST_DSN_KINDS:
+            try:
+                u = make_url(dsn)
+            except Exception:  # noqa: BLE001 - 存量脏数据不应 500
+                return out
+            out["host"] = u.host
+            out["port"] = u.port
+            out["database"] = u.database
+            out["username"] = u.username
+            out["password_set"] = bool(u.password)
+        elif kind in _FILE_DSN_KINDS:
+            try:
+                out["path"] = make_url(dsn).database
+            except Exception:  # noqa: BLE001
+                out["path"] = None
+        elif kind == "cube":
+            out["url"] = dsn
+        return out
+
+    @staticmethod
     def serialize_data_source(ds: DataSource) -> dict:
-        return {
+        base = {
             "id": ds.id,
             "name": ds.name,
             "kind": ds.kind,
@@ -140,6 +208,8 @@ class DataAppService:
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,
         }
+        base.update(DataAppService._dsn_components(ds.kind, ds.dsn_secret_ref))
+        return base
 
     def delete_data_source(self, db: Session, ds_id: str) -> None:
         ds = db.get(DataSource, ds_id)
