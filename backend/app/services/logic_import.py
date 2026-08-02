@@ -1,4 +1,4 @@
-"""业务逻辑代码导入服务:粘贴 SQL/代码 → LLM/Mock 解析 → 业务逻辑草稿。
+"""业务逻辑代码导入服务:粘贴 SQL/代码 → LLM 解析 → 业务逻辑草稿。
 
 业务逻辑与工作区/本体草稿分离,归属于数据域的「已发布本体」。
 本服务仅生成业务逻辑的定义(名称/类型/表达式/描述),引用对象与字段的挑选
@@ -85,34 +85,28 @@ def _first_meaningful_line(code: str) -> str:
 class LogicImportService:
     """从粘贴的代码文本解析生成业务逻辑草稿。
 
-    Mock 模式下使用规则启发式;LLM 模式下调用 OpenAI 兼容接口要求返回结构化 JSON。
-    构造方式与 OntologyDraftGenerator 一致,优先使用 SettingsService 配置的默认 LLM。
+    调用 OpenAI 兼容接口要求返回结构化 JSON;构造方式与 OntologyDraftGenerator 一致,
+    优先使用 SettingsService 配置的默认 LLM。未配置 LLM 时显式报错(不再回退启发式)。
     """
 
     def __init__(self, runtime_config=None) -> None:
         if runtime_config is None:
-            self.use_mock = settings.use_mock_llm or not settings.openai_api_key
-            self.client = (
-                OpenAI(
-                    api_key=settings.openai_api_key,
-                    http_client=make_http_client(),
-                )
-                if not self.use_mock
-                else None
-            )
+            api_key = settings.openai_api_key
+            base_url = None
             self.model = settings.openai_model
         else:
-            self.use_mock = runtime_config.use_mock or not runtime_config.api_key
-            self.client = (
-                OpenAI(
-                    api_key=runtime_config.api_key,
-                    base_url=runtime_config.api_base_url,
-                    http_client=make_http_client(),
-                )
-                if not self.use_mock
-                else None
-            )
+            api_key = runtime_config.api_key
+            base_url = runtime_config.api_base_url
             self.model = runtime_config.model
+        self.client = (
+            OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                http_client=make_http_client(),
+            )
+            if api_key
+            else None
+        )
 
     async def import_from_code(
         self,
@@ -130,10 +124,11 @@ class LogicImportService:
         if not code:
             raise ValueError("待解析的代码不能为空")
 
-        if self.use_mock:
-            parsed = self._parse_with_mock(code, source_type)
-        else:
-            parsed = await self._parse_with_llm(db, ontology, code, source_type)
+        if self.client is None:
+            raise ValueError(
+                "未配置 LLM 服务，无法解析业务逻辑代码（请在「设置 → LLM 服务」中配置）"
+            )
+        parsed = await self._parse_with_llm(db, ontology, code, source_type)
 
         name = self._ensure_unique_name(db, ontology.id, parsed["name"])
 
@@ -205,21 +200,6 @@ class LogicImportService:
                 change_summary=summary,
             )
         )
-
-    # --- Mock ---
-
-    def _parse_with_mock(self, code: str, source_type: str) -> dict:
-        display = _extract_display_from_comment(code) or _derive_display(code)
-        name = _slugify(display, _first_meaningful_line(code))
-        logic_type = _infer_logic_type(code)
-        description = _extract_display_from_comment(code) or _derive_description(code)
-        return {
-            "name": name,
-            "display_name": display,
-            "logic_type": logic_type,
-            "description": description,
-            "expression_summary": _truncate(code),
-        }
 
     # --- LLM ---
 

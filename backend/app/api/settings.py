@@ -33,7 +33,6 @@ def _llm_service_out(service) -> LlmServiceConfigOut:
         model=service.model,
         is_default=service.is_default,
         enabled=service.enabled,
-        use_mock=service.use_mock,
         api_key_set=bool(service.api_key),
         api_key_hint=mask_secret(service.api_key),
         created_at=service.created_at,
@@ -55,7 +54,7 @@ def _datahub_settings_out(row) -> DatahubSettingsOut:
         frontend_url=row.frontend_url,
         token_set=bool(row.token),
         token_hint=mask_secret(row.token),
-        use_mock=row.use_mock,
+        fabric=row.fabric or "PROD",
         updated_at=row.updated_at,
     )
 
@@ -146,12 +145,9 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         password_hint=mask_secret(row.password),
         token_set=bool(row.token),
         api_version=row.api_version,
-        dags_dir=row.dags_dir,
-        jobs_dir=row.jobs_dir,
-        warehouse_conn_id=row.warehouse_conn_id,
-        seatunnel_image=row.seatunnel_image,
         enabled=row.enabled,
-        available=bool(row.enabled and row.endpoint and row.dags_dir and row.jobs_dir),
+        # 投递目录已由 config 给默认（总非空），可用与否只看启用 + endpoint。
+        available=bool(row.enabled and row.endpoint),
         updated_at=row.updated_at,
     )
 
@@ -194,7 +190,6 @@ def _cube_settings_out(row) -> CubeSettingsOut:
         api_url=row.api_url,
         secret_set=bool(row.api_secret),
         secret_hint=mask_secret(row.api_secret),
-        use_mock=row.use_mock,
         preagg_refresh=row.preagg_refresh,
         tenant_dimension=row.tenant_dimension,
         timeout_seconds=row.timeout_seconds,

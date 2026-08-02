@@ -70,7 +70,7 @@ def _build_bundle(num_objects: int, fields_per_object: int) -> EvidenceBundle:
 
 
 def _mock_generator() -> OntologyDraftGenerator:
-    # conftest 设置 USE_MOCK_LLM=true → 实例 use_mock=True、client=None。
+    # 测试环境无 OPENAI_API_KEY → 实例 client=None，走确定性命名路径。
     return OntologyDraftGenerator()
 
 
@@ -115,7 +115,6 @@ class _GoodCompletions:
 
 def _stub_generator() -> OntologyDraftGenerator:
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodCompletions()))
     return gen
@@ -300,7 +299,6 @@ def test_zero_loss_under_bad_llm(monkeypatch):
 
     bundle = _build_bundle(num_objects=5, fields_per_object=3)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_BadCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -336,7 +334,6 @@ def test_zero_loss_under_top_level_array(monkeypatch):
 
     bundle = _build_bundle(num_objects=4, fields_per_object=3)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(
         chat=SimpleNamespace(completions=_TopLevelArrayCompletions())
@@ -370,7 +367,6 @@ def test_top_level_single_wrapper_array_is_unwrapped(monkeypatch):
 
     bundle = _build_bundle(num_objects=3, fields_per_object=2)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_WrappedCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -400,7 +396,6 @@ def test_zero_loss_partial_override(monkeypatch):
 
     bundle = _build_bundle(num_objects=4, fields_per_object=3)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_PartialCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -560,7 +555,6 @@ def test_object_and_relation_pipelines_checkpoint_independently(monkeypatch):
             )
 
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     completions = _FlakyRelationCompletions()
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -656,7 +650,6 @@ class _GoodFullCompletions:
 
 def _stub_full_generator() -> OntologyDraftGenerator:
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodFullCompletions()))
     return gen
@@ -701,7 +694,6 @@ def test_property_override_rejects_unknown_field_name(monkeypatch):
             )
 
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeFieldCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -772,7 +764,6 @@ class _GoodRelationCompletions:
 def test_relation_display_name_enriched_by_llm(monkeypatch):
     bundle = _build_bundle(num_objects=3, fields_per_object=2)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodRelationCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -800,7 +791,6 @@ def test_relation_override_rejects_invalid_term(monkeypatch):
             )
 
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_SentenceCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -828,7 +818,6 @@ def test_relation_override_rejects_unknown_name(monkeypatch):
             )
 
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeRelationCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -884,7 +873,6 @@ def test_generate_relations_only_single_shot(monkeypatch):
     供调用方按 source_dataset_urn 回链已入库对象，而不是假设这里重新命名了对象。"""
     bundle = _build_bundle(num_objects=3, fields_per_object=2)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_GoodRelationCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
@@ -902,7 +890,6 @@ def test_generate_relations_only_chunked(monkeypatch):
     """仅关系入口分块：多块并发执行，零丢失，且不发起对象命名调用。"""
     bundle = _build_bundle(num_objects=8, fields_per_object=2)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     completions = _GoodRelationCompletions()
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -921,7 +908,6 @@ def test_generate_relations_only_checkpoint_reuse(monkeypatch):
     """仅关系入口的分块结果同样按内容哈希落检查点，重试可复用、跳过 LLM。"""
     bundle = _build_bundle(num_objects=8, fields_per_object=2)
     gen = OntologyDraftGenerator()
-    gen.use_mock = False
     gen.model = "stub"
     completions = _GoodRelationCompletions()
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -954,7 +940,6 @@ def test_object_and_relation_only_entries_compose_to_full_generate(monkeypatch):
     object_types, properties = asyncio.run(gen_objects.generate_object_types(bundle))
 
     gen_relations = OntologyDraftGenerator()
-    gen_relations.use_mock = False
     gen_relations.model = "stub"
     gen_relations.client = SimpleNamespace(
         chat=SimpleNamespace(completions=_GoodRelationCompletions())

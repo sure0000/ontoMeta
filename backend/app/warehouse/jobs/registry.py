@@ -7,12 +7,16 @@ Planner 只通过这里拿 Adapter——不得直接 import 具体工具实现�
 from __future__ import annotations
 
 from app.warehouse.jobs.base import SyncToolAdapter
+from app.warehouse.jobs.datax import DataXAdapter
+from app.warehouse.jobs.flink import FlinkAdapter
 from app.warehouse.jobs.seatunnel import SeaTunnelAdapter
 
 # 默认搬运工具：仓库既有 SyncExecutor 已在产其配置，且 BM 已纳管，不新增运维面。
 DEFAULT_SYNC_TOOL = "seatunnel"
 
-_TOOLS: dict[str, SyncToolAdapter] = {a.name: a for a in (SeaTunnelAdapter(),)}
+_TOOLS: dict[str, SyncToolAdapter] = {
+    a.name: a for a in (SeaTunnelAdapter(), DataXAdapter(), FlinkAdapter())
+}
 
 
 class UnknownSyncToolError(KeyError):

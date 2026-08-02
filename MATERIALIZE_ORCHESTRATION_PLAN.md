@@ -40,7 +40,7 @@
 |---|---|---|---|---|
 | **M9** | JobSpec + SeaTunnel Adapter + JobPlanner | 无 | ✅ 完全可以 | ✅ 已交付 |
 | **M10** | DAG 生成 + Airflow 触发/回读 + 前端改造 | Airflow（+ 任一目标库） | 代码可，联调不可 | ✅ 代码已交付，⏳ 联调待镜像 |
-| **M11** | 血缘注册（插件为主 + 兜底 emitter） | Airflow + DataHub（已有） | ❌ | 待办 |
+| **M11** | 血缘注册（插件为主 + 兜底 emitter） | Airflow + DataHub（已有） | ✅ 代码已交付，⏳ 联调待镜像 |
 | **M12** | CDC/水位、质量校验、DataX/Flink Adapter | 全栈 | ❌ | 待办 |
 
 **M9 交付物**：`app/warehouse/jobs/{base,seatunnel,registry}.py`、`app/services/job_planner.py`，
@@ -132,6 +132,13 @@ curl -s localhost:8081/openapi.json | grep -o '/api/v[0-9]*/dags/{dag_id}/dagRun
 
 ## 4. M11 · 血缘自动注册
 
+> **状态：✅ 代码已交付**（`app/services/lineage_emitter.py`、`connectors/datahub.build_dataset_urn`
+> + `add_lineage_edge`/`updateLineage` mutation、runner 注入 `target_urn_builder`、
+> `GET/POST .../materialize/{artifact_id}/lineage[-plan]`、前端「兜底回补血缘」按钮；
+> 测试 `test_lineage_emitter.py`（7）+ DAG outlets 注入用例）。⏳ 与真实 DataHub 的联调待起栈。
+> **字段级血缘**：列映射已算进计划并在回执暴露供审计，但表级 `updateLineage` GraphQL 不携带
+> `fineGrainedLineages`，字段级需 aspect 级 emitter 且受目标版本支持度制约，当前**只上报表级**。
+
 **目标**：一次物化跑完，DataHub 里能查到 `源表 → 目标表` 的血缘和对应的 DataJob。
 
 ### 任务
@@ -154,6 +161,19 @@ curl -s localhost:8081/openapi.json | grep -o '/api/v[0-9]*/dags/{dag_id}/dagRun
 ---
 
 ## 5. M12 · CDC / 水位 / 质量校验 / 其他 Adapter
+
+> **部分已交付（工具可插拔 + 弹窗选工具）**：
+> - DataX / Flink Adapter 已补齐（`app/warehouse/jobs/{datax,flink}.py`），连同 SeaTunnel
+>   共三个；DataX 无 CDC（`supports("cdc")=False`），Flink 支持 CDC。适配器自带
+>   `docker_image` 与 `airflow_command`，DAG 骨架对工具无感（逐任务读 `image`/`command`）。
+> - **搬运工具与同步策略改由物化弹窗选**：`MaterializeRequest.sync_tool`
+>   → `JobPlanner`/`AirflowDagBuilder` 的 `tool`；`GET /warehouse/sync-tools` 暴露可选项。
+> - **设置页只留 Airflow 连接信息**（endpoint/鉴权/api_version/enabled）：
+>   `seatunnel_image` 归入工具 Adapter；`warehouse_conn_id` 由目标数据源推导
+>   （`ontometa_ds_<slug>`）；`dags_dir`/`jobs_dir` 归部署基础设施（`config.airflow_dags_dir/jobs_dir`，
+>   缺省指向 `docker/orchestration`）。已减 `airflow_settings` 四列（迁移 `d9e0f1a2b3c4`）。
+>
+> **待办**：DataX/Flink 真实联调（镜像、CDC 实现、Flink pipeline 转 YAML）、质量校验任务。
 
 - `load_strategy=cdc` 的契约路由到 CDC 实现（SeaTunnel-CDC 或 Flink CDC）。
 - 每张表的 sync 任务后可选挂质量校验任务（行数比对/主键唯一性）。

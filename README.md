@@ -44,7 +44,7 @@ docker compose up --build -d
 - API / OpenAPI：http://localhost:8000/docs  
 - 健康检查：`GET http://localhost:8000/health`  
 - 默认管理 Token：`dev-admin-token-change-me`（与 Compose 环境变量一致）  
-- Compose 默认 `USE_MOCK_DATAHUB=true`、`USE_MOCK_LLM=true`，无需本机 DataHub/OpenAI
+- 未配置 DataHub / OpenAI / Cube 时，对应功能走确定性路径或显式报错（不再内置 Mock 开关）
 
 停止：`docker compose down`（数据卷 `ontometa_pg` 会保留）。
 
@@ -70,7 +70,7 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
-本地无 DataHub / OpenAI 时，可在 `backend/.env` 中设置 `USE_MOCK_DATAHUB=true`（`.env.example` 默认 `false`）与 `USE_MOCK_LLM=true`（默认已是）。
+本地无 DataHub / OpenAI 时，未配置的服务会在调用时显式报错（未配 LLM 时本体草稿以证据确定性命名兽底，不报错）；配齐对应 `DATAHUB_*` / `OPENAI_API_KEY` 即走真实服务。
 
 **管理鉴权（必填）**：在 `backend/.env` 设置 `ONTOMETA_ADMIN_TOKEN`（见 `.env.example`）。前端打开「设置 → 管理鉴权」填入相同 Token，或设置 `VITE_ONTOMETA_ADMIN_TOKEN`。
 
@@ -120,8 +120,6 @@ npm run dev
 | `API_KEY_HASH_PEPPER` | 外部 API Key 哈希 pepper（可选） | — |
 | `DATABASE_URL` | 开发 SQLite；生产 / Compose 用 PostgreSQL | `sqlite:///./ontometa.db` |
 | `DEBUG` | `false` 时 500 响应脱敏 | `true` |
-| `USE_MOCK_DATAHUB` | 使用 Mock 数据 | `false` |
-| `USE_MOCK_LLM` | 使用规则引擎代替 LLM | `true` |
 | `DATAHUB_GMS_URL` | DataHub GMS API 地址 | `http://localhost:8080` |
 | `DATAHUB_FRONTEND_URL` | DataHub 前端地址 | `http://localhost:9002` |
 | `DATAHUB_MAX_CONCURRENCY` | DataHub 拉取并发 | `5` |

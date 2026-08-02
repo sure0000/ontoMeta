@@ -258,7 +258,7 @@ class ChatBiService:
         grounded_logics = self._match_logics(question, logics)
 
         runtime = self.settings_service.get_llm_runtime(db)
-        use_mock = runtime.use_mock or not runtime.api_key
+        use_mock = not runtime.api_key
 
         # 名称 -> 实体 索引用全量本体：把 LLM/工具输出的名称/伪 id 归一到真实 id 供前端跳转
         resolver = _ReferenceResolver(
@@ -399,7 +399,7 @@ class ChatBiService:
         grounded_objects = self._match_objects(question, snapshots)
         grounded_logics = self._match_logics(question, logics)
         runtime = self.settings_service.get_llm_runtime(db)
-        use_mock = runtime.use_mock or not runtime.api_key
+        use_mock = not runtime.api_key
         resolver = _ReferenceResolver(objects=snapshots, relations=relations, logics=logics)
 
         if use_mock:

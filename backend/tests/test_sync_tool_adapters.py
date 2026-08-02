@@ -118,3 +118,78 @@ def test_cdc_from_unsupported_platform_raises():
 def test_unknown_mode_rejected_at_spec_level():
     with pytest.raises(ValueError, match="装载方式"):
         _job("no-such-mode")
+
+
+# ---------- 工具可插拔：datax / flink ----------
+
+
+def test_registry_lists_three_tools():
+    tools = list_sync_tools()
+    assert set(tools) >= {"seatunnel", "datax", "flink"}
+
+
+def test_each_adapter_declares_image_and_command():
+    """镜像与命令属工具自身（不在设置页）；command 携带水位模板供 Airflow 渲染。"""
+    for tool in ("seatunnel", "datax", "flink"):
+        a = get_job_adapter(tool)
+        assert a.docker_image
+        cmd = a.airflow_command("/jobs/x.json")
+        assert isinstance(cmd, list) and "/jobs/x.json" in cmd
+        assert any("data_interval_start" in part for part in cmd)
+
+
+def test_datax_renders_reader_writer_and_no_credentials():
+    conf = get_job_adapter("datax").render(_job())
+    content = conf["job"]["content"][0]
+    assert content["reader"]["name"] == "mysqlreader"
+    assert content["writer"]["name"] == "hdfswriter"
+    # 列映射：reader 取源列、writer 写目标列（靠列序对齐）
+    assert content["reader"]["parameter"]["column"] == ["cust_id", "cust_name"]
+    assert content["writer"]["parameter"]["column"] == ["customer_id", "customer_name"]
+    blob = json.dumps(conf, ensure_ascii=False)
+    assert "${ERP_READONLY_PASSWORD}" in blob
+    for value in re.findall(r'"password"\s*:\s*"([^"]*)"', blob):
+        assert value.startswith("${")
+
+
+def test_datax_has_no_cdc():
+    a = get_job_adapter("datax")
+    assert a.supports("full") is True
+    assert a.supports("incremental") is True
+    assert a.supports("cdc") is False
+
+
+def test_datax_incremental_uses_watermark_where():
+    conf = get_job_adapter("datax").render(_job("incremental", partition_key="created_at"))
+    where = conf["job"]["content"][0]["reader"]["parameter"]["where"]
+    assert "${watermark}" in where and "created_at" in where
+
+
+def test_flink_supports_cdc_and_renders_pipeline():
+    a = get_job_adapter("flink")
+    assert a.supports("cdc") is True
+    assert a.supports_cdc_from("mariadb") is True
+    assert a.supports_cdc_from("oracle") is False
+    conf = a.render(_job("cdc"))
+    assert conf["source"]["connector"] == "mysql-cdc"
+    assert conf["sink"]["connector"] == "hive"
+    # 列改名在 transform 段：源列 → 目标列
+    assert {"source": "cust_id", "target": "customer_id"} in conf["transform"]
+
+
+def test_flink_no_credentials_and_no_auto_create():
+    conf = get_job_adapter("flink").render(_job())
+    assert conf["sink"]["sink.auto-create"] is False
+    blob = json.dumps(conf, ensure_ascii=False)
+    for key in ("username", "password", "url"):
+        for value in re.findall(rf'"{key}"\s*:\s*"([^"]*)"', blob):
+            assert value.startswith("${")
+
+
+def test_all_adapters_render_idempotently():
+    spec = _job()
+    for tool in ("seatunnel", "datax", "flink"):
+        a = get_job_adapter(tool)
+        x = json.dumps(a.render(spec), sort_keys=True, ensure_ascii=False)
+        y = json.dumps(a.render(spec), sort_keys=True, ensure_ascii=False)
+        assert x == y

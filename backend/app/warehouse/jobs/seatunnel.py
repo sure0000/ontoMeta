@@ -42,9 +42,23 @@ _SINK_PLUGINS: dict[str, str] = {
 
 class SeaTunnelAdapter(SyncToolAdapter):
     name = "seatunnel"
+    # 与 docker/orchestration/.env.example 的 IMG_SEATUNNEL 对齐。
+    docker_image = "apache/seatunnel:2.3.11"
 
     def supports(self, mode: str) -> bool:
         return mode in {"full", "incremental", "cdc"}
+
+    def airflow_command(self, config_path: str) -> list[str]:
+        # 水位由调度器注入 ${watermark}（Airflow 的 data_interval_start），补数自动回区间。
+        return [
+            "/opt/seatunnel/bin/seatunnel.sh",
+            "--config",
+            config_path,
+            "-e",
+            "local",
+            "-i",
+            "watermark={{ data_interval_start }}",
+        ]
 
     def supports_cdc_from(self, platform: str) -> bool:
         return platform.lower() in _CDC_PLUGINS

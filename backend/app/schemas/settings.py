@@ -18,7 +18,6 @@ class LlmServiceConfigOut(BaseModel):
     model: str
     is_default: bool
     enabled: bool
-    use_mock: bool
     api_key_set: bool
     api_key_hint: str | None = None
     created_at: datetime
@@ -39,7 +38,6 @@ class LlmServiceConfigCreate(BaseModel):
     model: str
     is_default: bool = False
     enabled: bool = True
-    use_mock: bool = False
 
 
 class LlmServiceConfigUpdate(BaseModel):
@@ -50,7 +48,6 @@ class LlmServiceConfigUpdate(BaseModel):
     model: str | None = None
     is_default: bool | None = None
     enabled: bool | None = None
-    use_mock: bool | None = None
 
 
 class LlmConnectionTestRequest(BaseModel):
@@ -75,7 +72,7 @@ class DatahubSettingsOut(BaseModel):
     frontend_url: str
     token_set: bool
     token_hint: str | None = None
-    use_mock: bool
+    fabric: str = "PROD"
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -85,7 +82,7 @@ class DatahubSettingsUpdate(BaseModel):
     gms_url: str
     frontend_url: str
     token: str | None = None
-    use_mock: bool = False
+    fabric: str = "PROD"
 
 
 class DraftGenerationSettingsOut(BaseModel):
@@ -105,7 +102,6 @@ class CubeSettingsOut(BaseModel):
     api_url: str
     secret_set: bool
     secret_hint: str | None = None
-    use_mock: bool
     preagg_refresh: str
     tenant_dimension: str | None = None
     timeout_seconds: int
@@ -123,12 +119,8 @@ class AirflowSettingsOut(BaseModel):
     password_hint: str | None = None
     token_set: bool = False
     api_version: str
-    dags_dir: str
-    jobs_dir: str
-    warehouse_conn_id: str
-    seatunnel_image: str
     enabled: bool
-    # 启用且投递目录齐全才算真的可用；否则物化回落到 direct 开发模式。
+    # 启用且 endpoint 已填才算真的可用；否则物化无法执行（不再有直连回退）。
     available: bool
     updated_at: datetime
 
@@ -141,17 +133,12 @@ class AirflowSettingsUpdate(BaseModel):
     password: str | None = None  # 不传 = 保留原值
     token: str | None = None
     api_version: str = "v1"
-    dags_dir: str = ""
-    jobs_dir: str = ""
-    warehouse_conn_id: str = "warehouse_default"
-    seatunnel_image: str = "apache/seatunnel:2.3.11"
     enabled: bool = False
 
 
 class CubeSettingsUpdate(BaseModel):
     api_url: str
     api_secret: str | None = None
-    use_mock: bool = True
     preagg_refresh: str = "1 hour"
     tenant_dimension: str | None = None
     timeout_seconds: int = Field(default=30, ge=1, le=600)

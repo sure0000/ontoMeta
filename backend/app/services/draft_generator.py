@@ -215,30 +215,25 @@ class OntologyDraftGenerator:
     ) -> None:
         timeout = settings.llm_timeout_seconds
         if runtime_config is None:
-            self.use_mock = settings.use_mock_llm or not settings.openai_api_key
-            self.client = (
-                AsyncOpenAI(
-                    api_key=settings.openai_api_key,
-                    timeout=timeout,
-                    http_client=make_async_http_client(),
-                )
-                if not self.use_mock
-                else None
-            )
+            api_key = settings.openai_api_key
+            base_url = None
             self.model = settings.openai_model
         else:
-            self.use_mock = runtime_config.use_mock or not runtime_config.api_key
-            self.client = (
-                AsyncOpenAI(
-                    api_key=runtime_config.api_key,
-                    base_url=runtime_config.api_base_url,
-                    timeout=timeout,
-                    http_client=make_async_http_client(),
-                )
-                if not self.use_mock
-                else None
-            )
+            api_key = runtime_config.api_key
+            base_url = runtime_config.api_base_url
             self.model = runtime_config.model
+        # 未配置 LLM(无 api_key) → client=None：结构仍由证据确定性组装，只是跳过
+        # 「业务命名增强」这一步(用证据 candidate_name),不臆造数据,也不报错。
+        self.client = (
+            AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                http_client=make_async_http_client(),
+            )
+            if api_key
+            else None
+        )
         # 分块流水线的并发度：可由设置页动态调整(见 SettingsService.get_draft_generation_runtime)，
         # 未显式传入时回退到静态环境配置，保持测试里 OntologyDraftGenerator() 的直接构造方式不变。
         self.object_chunk_concurrency = (
@@ -258,8 +253,8 @@ class OntologyDraftGenerator:
         progress_cb: ProgressCallback | None = None,
         checkpoint: CheckpointStore | None = None,
     ) -> OntologyDraftOutput:
-        # Mock 路径：无 LLM，纯确定性命名。
-        if self.use_mock:
+        # 无 LLM：纯确定性命名(证据 candidate_name)，结构零丢失。
+        if self.client is None:
             return self._build_draft_from_evidence(evidence, {}, {}, {}, {})
         # 分批闸门：表数与字符预算都在限额内才一次拿到命名增强，否则分块。
         fits_table_batch = len(evidence.object_types) <= settings.draft_chunk_table_batch_size
@@ -645,7 +640,7 @@ class OntologyDraftGenerator:
         供「仅生成业务对象」入口使用，可与 ``generate_relations`` 完全并行——
         两者互不等待、各自独立分块与并发，契合「对象/关系分开触发」的诉求。
         """
-        if self.use_mock:
+        if self.client is None:
             overrides, property_overrides, role_overrides = {}, {}, {}
         else:
             fits_table_batch = (
@@ -688,7 +683,7 @@ class OntologyDraftGenerator:
         原样是证据 candidate_name，调用方需按 source_dataset_urn 回链已入库的
         ObjectType，而不是假设这里产出了新的对象命名。
         """
-        if self.use_mock:
+        if self.client is None:
             relation_overrides = {}
         else:
             fits_relation_batch = (

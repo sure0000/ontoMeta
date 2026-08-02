@@ -29,8 +29,8 @@ class MaterializeDrafter(Drafter):
             "database_overrides": dict(context.get("database_overrides") or {}),
             "table_overrides": dict(context.get("table_overrides") or {}),
             "load_strategy": context.get("load_strategy"),
-            # orchestrated（默认，交 Airflow 编排）/ direct（直连落库，开发模式）
-            "execute_mode": context.get("execute_mode"),
+            # 搬运工具（seatunnel/datax/flink）；空 = 默认 seatunnel。
+            "sync_tool": context.get("sync_tool"),
             "selected_targets": list(context.get("selected_targets") or []) or None,
             "overrides": dict(context.get("overrides") or {}),
         }

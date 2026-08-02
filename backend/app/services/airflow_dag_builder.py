@@ -30,7 +30,6 @@ from app.warehouse.jobs import JobPlan, JobSpec, get_job_adapter
 # 与 docker/orchestration/docker-compose.yml 的挂载点一致。
 DEFAULT_JOBS_MOUNT = "/opt/seatunnel/jobs"
 DEFAULT_WAREHOUSE_CONN_ID = "warehouse_default"
-DEFAULT_SEATUNNEL_IMAGE = "apache/seatunnel:2.3.11"
 # 层的执行顺序；未列出的层排在最后（顺序稳定，保证幂等）。
 _LAYER_ORDER = ("dim", "dwd", "dws", "ads")
 
@@ -96,12 +95,13 @@ class AirflowDagBuilder:
         tool: str | None = None,
         engine: str = "hive",
         warehouse_conn_id: str = DEFAULT_WAREHOUSE_CONN_ID,
-        seatunnel_image: str = DEFAULT_SEATUNNEL_IMAGE,
         jobs_mount: str = DEFAULT_JOBS_MOUNT,
         target_urn_builder=None,
     ) -> DagBundle:
         """产出 DAG 包。
 
+        ``tool`` 决定搬运工具（seatunnel/datax/flink）——镜像与运行命令都由该工具的
+        Adapter 提供，DAG 骨架对工具无感（只读每个任务自带的 ``image``/``command``）。
         ``schedule`` 为契约的 refresh_cron（空 = 只手动触发）；
         ``target_urn_builder`` 供 M11 注入目标表 URN 构造（需部署环境的 fabric，M10 不臆造）。
         """
@@ -113,11 +113,16 @@ class AirflowDagBuilder:
         for job in plan.jobs:
             filename = f"{dag_id}__{job.name}.json"
             job_files[filename] = adapter.render(job)
+            config_file = f"{jobs_mount}/{filename}"
             tasks.append(
                 {
                     "task_id": job.name,
                     "layer": job.layer,
-                    "config_file": f"{jobs_mount}/{filename}",
+                    "config_file": config_file,
+                    # 镜像与命令由工具 Adapter 提供，DAG 骨架据此起 DockerOperator，
+                    # 换工具只改这两个字段，不动骨架——这是「工具可插拔」的落地形式。
+                    "image": adapter.docker_image,
+                    "command": adapter.airflow_command(config_file),
                     "target": job.target.qualified,
                     "mode": job.mode,
                     # 血缘：上游用本体的 source_ref（本就是 DataHub URN）。
@@ -136,7 +141,6 @@ class AirflowDagBuilder:
             "tool": adapter.name,
             "schedule": schedule or None,
             "warehouse_conn_id": warehouse_conn_id,
-            "seatunnel_image": seatunnel_image,
             # 建表语句按目标表名排序，保证幂等
             "ddl": [ddl_statements[k] for k in sorted(ddl_statements)],
             "ddl_targets": sorted(ddl_statements),
@@ -199,18 +203,11 @@ with DAG(
     for task in _SPEC["tasks"]:
         op = DockerOperator(
             task_id=task["task_id"],
-            image=_SPEC["seatunnel_image"],
-            # 水位由调度器注入：SeaTunnel 配置里的 ${{watermark}} 取本次数据区间起点，
-            # 补数（backfill）时自动回到对应区间，不需要人改配置。
-            command=[
-                "/opt/seatunnel/bin/seatunnel.sh",
-                "--config",
-                task["config_file"],
-                "-e",
-                "local",
-                "-i",
-                "watermark={{{{ data_interval_start }}}}",
-            ],
+            image=task["image"],
+            # 镜像与命令由搬运工具（seatunnel/datax/flink）的 Adapter 产出；
+            # command 是 DockerOperator 的模板字段，里面的 {{{{ data_interval_start }}}}
+            # 由 Airflow 在运行时渲染为本次数据区间起点（水位），补数自动回区间。
+            command=task["command"],
             mounts_tmp_dir=False,
             auto_remove="success",
             network_mode="bridge",

@@ -31,8 +31,6 @@ _DOMAIN_URN = "urn:li:domain:sales"
 class _RecordingConnector:
     """记录 GraphQL 请求体，用于断言 mutation 结构。"""
 
-    use_mock = False
-
     def __init__(self, fail_on: str | None = None):
         self.calls: list[tuple[str, dict]] = []
         self._fail_on = fail_on
@@ -181,19 +179,16 @@ def test_single_failure_does_not_abort_batch(client):
     assert "模拟 DataHub 拒绝" in result["errors"][0]["error"]
 
 
-def test_mock_mode_makes_no_http_calls(client):
-    """USE_MOCK_DATAHUB 下不得发起任何真实写入。"""
-
-    class _MockConn(_RecordingConnector):
-        use_mock = True
-
-    conn = _MockConn()
+def test_apply_with_injected_connector_records_calls(client):
+    """注入可控 connector：全部 mutation 成功，回执不包含 mock 标志。"""
+    conn = _RecordingConnector()
     result = asyncio.run(DataHubWritebackService().apply(
         SessionLocal(), _seed(OntologyStatus.PUBLISHED.value), connector=conn
     ))
-    assert conn.calls == []
+    assert conn.calls  # 真实发了 mutation（不再有 mock 短路）
     assert result["applied"] > 0
-    assert result["mock"] is True
+    assert result["failed"] == 0
+    assert "mock" not in result
 
 
 # ---------- API ----------
@@ -228,12 +223,3 @@ def test_writeback_requires_publisher(client, admin_headers):
     assert resp.status_code == 403
     client.delete(f"/api/principals/{created['id']}", headers=admin_headers)
 
-
-def test_writeback_endpoint_in_mock_mode(client, admin_headers):
-    """测试环境 USE_MOCK_DATAHUB=true —— 端点可用且不发真实请求。"""
-    ontology_id = _seed(OntologyStatus.PUBLISHED.value)
-    body = client.post(
-        f"/api/ontologies/{ontology_id}/datahub/writeback", headers=admin_headers, json={}
-    ).json()
-    assert body["mock"] is True
-    assert body["failed"] == 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 
 from openai import OpenAI
@@ -17,9 +18,25 @@ from app.models import (
 from app.services.common import make_http_client
 
 # 自建/OpenAI 兼容端点(vLLM、Ollama、LM Studio、企业网关等)常无需鉴权：
-# 缺 API Key 时不应回退 Mock，而是用占位符满足 OpenAI SDK 的非空 key 要求。
+# 缺 API Key 时用占位符满足 OpenAI SDK 的非空 key 要求。
 OPENAI_COMPATIBLE_PROVIDERS = {"openai-compatible"}
 OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "EMPTY"
+
+# 产物投递目录属部署基础设施（不在设置页配）：优先用 config 环境变量，
+# 缺省落到仓库自带的 docker/orchestration 本地验证栈目录（与 compose 挂载点对齐）。
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _default_dags_dir() -> str:
+    return env_settings.airflow_dags_dir or str(
+        _REPO_ROOT / "docker" / "orchestration" / "dags"
+    )
+
+
+def _default_jobs_dir() -> str:
+    return env_settings.airflow_jobs_dir or str(
+        _REPO_ROOT / "docker" / "orchestration" / "seatunnel" / "jobs"
+    )
 
 DEEPSEEK_MODELS = [
     {
@@ -54,7 +71,7 @@ class DatahubRuntimeConfig:
     gms_url: str
     frontend_url: str
     token: str | None
-    use_mock: bool
+    fabric: str = "PROD"
 
 
 @dataclass
@@ -62,7 +79,6 @@ class LlmRuntimeConfig:
     api_base_url: str
     api_key: str | None
     model: str
-    use_mock: bool
 
 
 @dataclass
@@ -73,22 +89,21 @@ class DraftGenerationRuntimeConfig:
 
 @dataclass
 class AirflowRuntimeConfig:
-    """Airflow 编排的运行期配置。``available`` 为假时物化回落到 direct 直连（开发模式）。"""
+    """Airflow 编排的运行期配置。``available`` 为假时物化无法执行（报错，不再回退直连）。"""
 
     endpoint: str
     username: str | None
     password: str | None
     token: str | None
     api_version: str
+    # 投递目录不在设置页配：属部署基础设施，由 config.airflow_dags_dir/jobs_dir 给默认。
     dags_dir: str
     jobs_dir: str
-    warehouse_conn_id: str
-    seatunnel_image: str
     enabled: bool
 
     @property
     def available(self) -> bool:
-        # 没有投递目录就没法把 DAG 交出去，此时「启用」是假的，不如明说。
+        # 没有投递目录就没法把 DAG 交出去（缺省已由 config 给了），未启用/无 endpoint 也不可用。
         return bool(self.enabled and self.endpoint and self.dags_dir and self.jobs_dir)
 
 
@@ -96,7 +111,6 @@ class AirflowRuntimeConfig:
 class CubeRuntimeConfig:
     api_url: str
     api_secret: str | None
-    use_mock: bool
     preagg_refresh: str
     tenant_dimension: str | None
     timeout_seconds: int
@@ -200,7 +214,7 @@ class SettingsService:
             gms_url=row.gms_url,
             frontend_url=row.frontend_url,
             token=row.token,
-            use_mock=row.use_mock,
+            fabric=row.fabric or "PROD",
         )
 
     def get_draft_generation_settings(self, db: Session) -> DraftGenerationSetting:
@@ -250,10 +264,9 @@ class SettingsService:
             password=row.password,
             token=row.token,
             api_version=row.api_version,
-            dags_dir=row.dags_dir,
-            jobs_dir=row.jobs_dir,
-            warehouse_conn_id=row.warehouse_conn_id,
-            seatunnel_image=row.seatunnel_image,
+            # 投递目录不在 DB：由 config 给默认（部署基础设施，可环境变量覆盖）。
+            dags_dir=_default_dags_dir(),
+            jobs_dir=_default_jobs_dir(),
             enabled=row.enabled,
         )
 
@@ -278,7 +291,6 @@ class SettingsService:
         return CubeRuntimeConfig(
             api_url=row.api_url,
             api_secret=row.api_secret,
-            use_mock=row.use_mock or not row.api_secret,
             preagg_refresh=row.preagg_refresh,
             tenant_dimension=(row.tenant_dimension or None),
             timeout_seconds=row.timeout_seconds,
@@ -296,9 +308,7 @@ class SettingsService:
         if service:
             provider = (service.provider or "").lower()
             keyless_ok = provider in OPENAI_COMPATIBLE_PROVIDERS
-            has_key = bool(service.api_key)
-            # 云端提供商缺 Key 仍回退 Mock(安全默认)；自建 OpenAI 兼容端点允许无 Key 直连
-            use_mock = service.use_mock or (not has_key and not keyless_ok)
+            # 自建 OpenAI 兼容端点允许无 Key 直连（用占位符满足 SDK 非空要求）。
             api_key = service.api_key or (
                 OPENAI_COMPATIBLE_PLACEHOLDER_KEY if keyless_ok else None
             )
@@ -306,20 +316,18 @@ class SettingsService:
                 api_base_url=service.api_base_url,
                 api_key=api_key,
                 model=service.model,
-                use_mock=use_mock,
             )
         return LlmRuntimeConfig(
             api_base_url="https://api.deepseek.com",
             api_key=env_settings.openai_api_key,
             model=env_settings.openai_model,
-            use_mock=env_settings.use_mock_llm or not env_settings.openai_api_key,
         )
 
     def test_llm_connection(self, db: Session, data: dict) -> dict:
         """真实拨测一个 LLM 配置：发一次最小 chat 请求，返回连通性与耗时。
 
         编辑态表单常留空 api_key(表示保持原值)，此时用 service_id 取回已存密钥；
-        自建 OpenAI 兼容端点无鉴权时用占位符 Key 直连。测试忽略 use_mock —— Mock 无需拨测。
+        自建 OpenAI 兼容端点无鉴权时用占位符 Key 直连。
         """
         provider = (data.get("provider") or "").lower()
         keyless_ok = provider in OPENAI_COMPATIBLE_PROVIDERS
@@ -371,7 +379,6 @@ class SettingsService:
                     gms_url=env_settings.datahub_gms_url,
                     frontend_url=env_settings.datahub_frontend_url,
                     token=env_settings.datahub_token,
-                    use_mock=env_settings.use_mock_datahub,
                 )
             )
             db.commit()
@@ -386,7 +393,6 @@ class SettingsService:
                     model="deepseek-v4-flash",
                     is_default=True,
                     enabled=True,
-                    use_mock=env_settings.use_mock_llm,
                 )
             )
             db.commit()
@@ -408,7 +414,6 @@ class SettingsService:
                     id="default",
                     api_url=env_settings.cube_api_url,
                     api_secret=env_settings.cube_api_secret,
-                    use_mock=env_settings.use_mock_cube,
                     preagg_refresh=env_settings.cube_preagg_refresh,
                     tenant_dimension=env_settings.cube_tenant_dimension,
                     timeout_seconds=int(env_settings.cube_timeout_seconds),
@@ -417,7 +422,7 @@ class SettingsService:
             db.commit()
 
         if not db.get(AirflowSetting, "default"):
-            # 默认不启用：没有 Airflow 的环境保持现有 direct 直连行为不变。
+            # 默认不启用：需在设置页填 endpoint 并启用后才能物化（物化一律走 Airflow 编排）。
             db.add(AirflowSetting(id="default"))
             db.commit()
 

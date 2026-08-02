@@ -30,15 +30,12 @@ services:
       DATABASE_URL: postgresql+psycopg://ontometa:ontometa@postgres:5432/ontometa
       ONTOMETA_ADMIN_TOKEN: ${ONTOMETA_ADMIN_TOKEN:-dev-admin-token-change-me}
       DEBUG: ${DEBUG:-false}
-      USE_MOCK_DATAHUB: ${USE_MOCK_DATAHUB:-true}
-      USE_MOCK_LLM: ${USE_MOCK_LLM:-true}
       DATAHUB_GMS_URL: ${DATAHUB_GMS_URL:-http://host.docker.internal:8080}
       DATAHUB_FRONTEND_URL: ${DATAHUB_FRONTEND_URL:-http://localhost:9002}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       API_KEY_HASH_PEPPER: ${API_KEY_HASH_PEPPER:-}
       MAX_CONCURRENT_DRAFT_GENERATIONS: ${MAX_CONCURRENT_DRAFT_GENERATIONS:-2}
       EXTERNAL_API_RATE_LIMIT_PER_MINUTE: ${EXTERNAL_API_RATE_LIMIT_PER_MINUTE:-60}
-      USE_MOCK_CUBE: ${USE_MOCK_CUBE:-true}
       CUBE_API_URL: ${CUBE_API_URL:-http://cube:4000}
       CUBE_API_SECRET: ${CUBE_API_SECRET:-}
       CUBE_PREAGG_REFRESH: ${CUBE_PREAGG_REFRESH:-1 hour}
@@ -63,7 +60,7 @@ services:
   #   ports:
   #     - "6379:6379"
 
-  # 可选：Cube 语义层（外挂执行/缓存/预聚合）。启用后设 USE_MOCK_CUBE=false 与 CUBE_API_SECRET。
+  # 可选：Cube 语义层（外挂执行/缓存/预聚合）。启用后填写 CUBE_API_SECRET。
   # ontoMeta 通过 GET /api/ontologies/{id}/cube-model 生成 model，落到 ./cube/model 后由 Cube 加载。
   # cube:
   #   image: cubejs/cube:latest

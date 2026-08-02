@@ -1,4 +1,4 @@
-"""CubeConnector：模型生成、绑定→查询翻译、Mock 查询、JWT、Cube 数据源预览。"""
+"""CubeConnector：模型生成、绑定→查询翻译、JWT、Cube 数据源预览。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def test_cube_name():
 
 
 def test_generate_model():
-    conn = CubeConnector(use_mock=True)
+    conn = CubeConnector()
     model = conn.generate_model(
         objects=[
             {
@@ -54,7 +54,7 @@ def test_generate_model():
 
 
 def test_build_query():
-    conn = CubeConnector(use_mock=True)
+    conn = CubeConnector()
     q = conn.build_query(
         object_name="orders",
         measures=[{"ref": {"kind": "property", "name": "amount"}, "agg": "sum"}],
@@ -74,7 +74,7 @@ def test_build_query():
 
 
 def test_build_query_business_logic_measure():
-    conn = CubeConnector(use_mock=True)
+    conn = CubeConnector()
     q = conn.build_query(
         object_name="orders",
         measures=[{"ref": {"kind": "business_logic", "name": "gmv"}, "agg": "sum"}],
@@ -83,18 +83,8 @@ def test_build_query_business_logic_measure():
     assert q["measures"] == ["Orders.gmv"]  # 业务逻辑度量不加 _agg 后缀
 
 
-def test_mock_query_deterministic():
-    conn = CubeConnector(use_mock=True)
-    q = {"measures": ["Orders.amount_sum"], "dimensions": ["Orders.channel"], "limit": 10}
-    cols1, rows1 = conn.query(q)
-    cols2, rows2 = conn.query(q)
-    assert [c["key"] for c in cols1] == ["Orders.channel", "Orders.amount_sum"]
-    assert rows1 == rows2  # 确定性
-    assert rows1 and "Orders.channel" in rows1[0]
-
-
 def test_build_token_hs256():
-    conn = CubeConnector(api_secret="s3cr3t", use_mock=False)
+    conn = CubeConnector(api_secret="s3cr3t")
     token = conn.build_token({"tenant": "t1"})
     header_b64, payload_b64, sig_b64 = token.split(".")
 
@@ -110,10 +100,15 @@ def test_build_token_hs256():
     assert _b64url_decode(sig_b64) == expected
 
 
-def test_use_mock_when_no_secret():
-    # 未配置密钥 → 强制 mock，即使 use_mock=False
-    conn = CubeConnector(api_secret=None, use_mock=False)
-    assert conn.use_mock is True
+def test_build_token_requires_secret():
+    # 未配置密钥 → 生成令牌显式报错（不再回退 mock）
+    import pytest
+
+    from app.connectors.cube import CubeExecutionError
+
+    conn = CubeConnector(api_secret=None)
+    with pytest.raises(CubeExecutionError):
+        conn.build_token({})
 
 
 # ----------------------------------------------------- preview via cube source
@@ -155,14 +150,25 @@ def test_cube_model_endpoint(client, admin_headers):
     assert "amount_sum" in orders["measures"]
 
 
-def test_preview_via_cube_source(client, admin_headers):
+def test_preview_via_cube_source(client, admin_headers, monkeypatch):
+    from app.connectors.cube import CubeConnector
     from app.services.data_app import DataAppService
+
+    # Cube 不再内置 mock：注入一个确定性 query 档，以 cube-形状的列/行回复预览，
+    # 让这条端到端测试无需真实 Cube 服务即可验证 绑定→查询→预览 整条链。
+    def _stub_query(self, cube_query, *, security_context=None):
+        keys = list(cube_query.get("dimensions") or []) + list(cube_query.get("measures") or [])
+        columns = [{"key": k, "title": k.split(".")[-1]} for k in keys]
+        rows = [{k: (i if "amount" in k else f"ch-{i}") for k in keys} for i in range(3)]
+        return columns, rows
+
+    monkeypatch.setattr(CubeConnector, "query", _stub_query)
 
     domain_id, _ont, obj_id, channel_id, amount_id = _seed_published_ontology()
     db = SessionLocal()
     try:
         svc = DataAppService()
-        # Cube 数据源（mock 默认开启）
+        # Cube 数据源
         ds_source = svc.create_data_source(db, name="cube", kind="cube", dsn_secret_ref=None)
         app = svc.create_app(
             db,
@@ -210,7 +216,7 @@ def test_preview_via_cube_source(client, admin_headers):
 
 
 def test_generate_model_pre_aggregations_and_refresh():
-    conn = CubeConnector(use_mock=True)
+    conn = CubeConnector()
     model = conn.generate_model(
         objects=[
             {
@@ -239,7 +245,7 @@ def test_generate_model_pre_aggregations_and_refresh():
 
 
 def test_generate_model_joins():
-    conn = CubeConnector(use_mock=True)
+    conn = CubeConnector()
     model = conn.generate_model(
         objects=[
             {
@@ -265,7 +271,7 @@ def test_security_context_and_model_files_rls(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "cube_tenant_dimension", "tenant_id")
-    conn = CubeConnector(use_mock=True)
+    conn = CubeConnector()
     ctx = conn.build_security_context(tenant="t1", scopes=["dataapps:read"], app_id="app1", app_name="A")
     assert ctx["tenant"] == "t1"
     assert ctx["scopes"] == ["dataapps:read"]
@@ -309,7 +315,6 @@ def test_cube_settings_api_roundtrip(client, admin_headers):
     # 读取默认
     res = client.get("/api/settings/cube", headers=admin_headers)
     assert res.status_code == 200, res.text
-    assert res.json()["use_mock"] is True
     assert res.json()["secret_set"] is False
 
     # 更新（含密钥与租户列）
@@ -319,7 +324,6 @@ def test_cube_settings_api_roundtrip(client, admin_headers):
         json={
             "api_url": "http://cube:4000",
             "api_secret": "topsecret",
-            "use_mock": False,
             "preagg_refresh": "15 minute",
             "tenant_dimension": "tenant_id",
             "timeout_seconds": 20,
@@ -339,7 +343,6 @@ def test_cube_settings_api_roundtrip(client, admin_headers):
         headers=admin_headers,
         json={
             "api_url": "http://cube:4000",
-            "use_mock": False,
             "preagg_refresh": "1 hour",
             "tenant_dimension": "tenant_id",
             "timeout_seconds": 30,
@@ -365,7 +368,6 @@ def test_cube_model_uses_db_settings(client, admin_headers):
         json={
             "api_url": "http://cube:4000",
             "api_secret": "sk",
-            "use_mock": True,
             "preagg_refresh": "45 minute",
             "tenant_dimension": "tenant_id",
             "timeout_seconds": 30,

@@ -30,145 +30,6 @@ _RETRYABLE_TRANSPORT_ERRORS = (
 )
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
-MOCK_DOMAINS: list[DomainInput] = [
-    DomainInput(
-        id="urn:li:domain:customer",
-        name="客户域",
-        description="客户主数据、会员、标签等相关数据资产",
-        owner="客户数据团队",
-    ),
-    DomainInput(
-        id="urn:li:domain:order",
-        name="订单域",
-        description="订单、支付、履约相关数据资产",
-        owner="交易数据团队",
-    ),
-    DomainInput(
-        id="urn:li:domain:product",
-        name="商品域",
-        description="商品、品类、库存相关数据资产",
-        owner="商品数据团队",
-    ),
-]
-
-MOCK_DATASETS: dict[str, list[DatasetInput]] = {
-    "urn:li:domain:customer": [
-        DatasetInput(
-            urn="urn:li:dataset:(urn:li:dataPlatform:hive,customer.dim_customer,PROD)",
-            name="dim_customer",
-            display_name="客户维表",
-            description="客户主数据维表，包含客户基本信息与等级",
-            platform="hive",
-            container="customer",
-            row_count=100000,
-            glossary_terms=["客户"],
-            fields=[
-                FieldInput(name="customer_id", display_name="客户ID", data_type="bigint", is_primary_key=True, unique_count=100000),
-                FieldInput(name="customer_name", display_name="客户名称", data_type="string"),
-                FieldInput(
-                    name="customer_level",
-                    display_name="客户等级",
-                    data_type="string",
-                    sample_values=["普通", "黄金", "铂金"],
-                ),
-                FieldInput(name="register_date", display_name="注册日期", data_type="date"),
-            ],
-        ),
-        DatasetInput(
-            urn="urn:li:dataset:(urn:li:dataPlatform:hive,customer.ads_customer_tag,PROD)",
-            name="ads_customer_tag",
-            display_name="客户标签表",
-            description="客户标签计算结果",
-            platform="hive",
-            container="customer",
-            fields=[
-                FieldInput(name="customer_id", display_name="客户ID", data_type="bigint", is_primary_key=True),
-                FieldInput(name="high_value_tag", display_name="高价值标签", data_type="boolean"),
-            ],
-        ),
-    ],
-    "urn:li:domain:order": [
-        DatasetInput(
-            urn="urn:li:dataset:(urn:li:dataPlatform:hive,order.fact_order,PROD)",
-            name="fact_order",
-            display_name="订单事实表",
-            description="订单交易事实表",
-            platform="hive",
-            container="order",
-            fields=[
-                FieldInput(name="order_id", display_name="订单ID", data_type="bigint", is_primary_key=True),
-                FieldInput(
-                    name="customer_id",
-                    display_name="客户ID",
-                    data_type="bigint",
-                    is_foreign_key=True,
-                    foreign_key_target="dim_customer.customer_id",
-                ),
-                FieldInput(name="order_amount", display_name="订单金额", data_type="decimal"),
-                FieldInput(
-                    name="order_status",
-                    display_name="订单状态",
-                    data_type="string",
-                    sample_values=["待支付", "已支付", "已发货", "已完成"],
-                ),
-                FieldInput(name="order_time", display_name="下单时间", data_type="timestamp"),
-            ],
-        ),
-    ],
-    "urn:li:domain:product": [
-        DatasetInput(
-            urn="urn:li:dataset:(urn:li:dataPlatform:hive,product.dim_product,PROD)",
-            name="dim_product",
-            display_name="商品维表",
-            description="商品主数据",
-            platform="hive",
-            container="product",
-            fields=[
-                FieldInput(name="product_id", display_name="商品ID", data_type="bigint", is_primary_key=True),
-                FieldInput(name="product_name", display_name="商品名称", data_type="string"),
-                FieldInput(name="brand", display_name="品牌", data_type="string"),
-                FieldInput(name="category", display_name="品类", data_type="string"),
-            ],
-        ),
-    ],
-}
-
-MOCK_LINEAGES: dict[str, list[LineageInput]] = {
-    "urn:li:domain:order": [
-        LineageInput(
-            source_urn="urn:li:dataset:(urn:li:dataPlatform:hive,customer.dim_customer,PROD)",
-            target_urn="urn:li:dataset:(urn:li:dataPlatform:hive,order.fact_order,PROD)",
-        ),
-    ],
-    "urn:li:domain:customer": [
-        LineageInput(
-            source_urn="urn:li:dataset:(urn:li:dataPlatform:hive,customer.dim_customer,PROD)",
-            target_urn="urn:li:dataset:(urn:li:dataPlatform:hive,customer.ads_customer_tag,PROD)",
-        ),
-    ],
-}
-
-MOCK_LOGIC: dict[str, list[LogicEvidenceInput]] = {
-    "urn:li:domain:customer": [
-        LogicEvidenceInput(
-            source_type="sql",
-            source_ref="customer.ads_customer_tag",
-            name="high_value_tag",
-            expression="order_amount_90d >= 10000 AND order_count_90d >= 5",
-            description="近90天高价值客户标签规则",
-        ),
-    ],
-    "urn:li:domain:order": [
-        LogicEvidenceInput(
-            source_type="sql",
-            source_ref="order.fact_order",
-            name="gmv",
-            expression="SUM(order_amount) WHERE order_status = 'paid'",
-            description="已支付订单 GMV 指标",
-        ),
-    ],
-}
-
 _SAMPLE_VALUES_PER_FIELD = 5
 _SAMPLE_VALUE_MAX_LENGTH = 60
 
@@ -412,6 +273,17 @@ def _extract_platform(urn: str) -> str | None:
     return head[len(prefix) :] or None if head.startswith(prefix) else None
 
 
+def build_dataset_urn(platform: str, name: str, fabric: str = "PROD") -> str:
+    """构造 Dataset URN，与 ``_extract_dataset_name`` / ``_extract_platform`` 互逆。
+
+    ``name`` 为 ``库.表``（或无库时的表名），``fabric`` 为 DataHub 环境标
+    （PROD/DEV/…）。目标表 URN 需要它才能确定——``JobSpec`` 刻意不构造目标 URN
+    正是因为 fabric 属于部署环境，编译期无从得知。此函数是**唯一**的目标 URN 构造点，
+    血缘上报（兜底 emitter）与 DAG outlets 注入都走它，保证两条路径产同一份 URN。
+    """
+    return f"urn:li:dataset:(urn:li:dataPlatform:{platform},{name},{fabric})"
+
+
 def _extract_container_name(raw: dict) -> str | None:
     container = raw.get("container") or {}
     props = container.get("properties") or {}
@@ -539,15 +411,12 @@ class DataHubConnector:
             self.api_url = env_settings.datahub_gms_url.rstrip("/")
             self.frontend_url = env_settings.datahub_frontend_url.rstrip("/")
             self.token = env_settings.datahub_token
-            self.use_mock = env_settings.use_mock_datahub
         else:
             self.api_url = runtime_config.gms_url.rstrip("/")
             self.frontend_url = runtime_config.frontend_url.rstrip("/")
             self.token = runtime_config.token
-            self.use_mock = runtime_config.use_mock
 
         # 懒初始化的复用 httpx 客户端，连接池跨多次 GraphQL 请求复用。
-        # mock 模式下不会发起任何 HTTP 请求，无需创建。
         self._client: httpx.AsyncClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -566,8 +435,6 @@ class DataHubConnector:
             self._client = None
 
     async def list_domains(self) -> list[DomainInput]:
-        if self.use_mock:
-            return MOCK_DOMAINS
         return await self._fetch_domains_from_api()
 
     async def fetch_domain_bundle(
@@ -576,33 +443,12 @@ class DataHubConnector:
         *,
         include_logic_evidences: bool = False,
     ) -> DataHubDomainBundle:
-        if self.use_mock:
-            domain = next((d for d in MOCK_DOMAINS if d.id == datahub_domain_id), None)
-            if not domain:
-                raise ValueError(f"Domain not found: {datahub_domain_id}")
-            return DataHubDomainBundle(
-                domain=domain,
-                datasets=MOCK_DATASETS.get(datahub_domain_id, []),
-                lineages=MOCK_LINEAGES.get(datahub_domain_id, []),
-                logic_evidences=(
-                    MOCK_LOGIC.get(datahub_domain_id, [])
-                    if include_logic_evidences
-                    else []
-                ),
-            )
         return await self._fetch_domain_bundle_from_api(
             datahub_domain_id,
             include_logic_evidences=include_logic_evidences,
         )
 
     async def get_dataset_by_urn(self, dataset_urn: str) -> DatasetInput:
-        if self.use_mock:
-            for items in MOCK_DATASETS.values():
-                for dataset in items:
-                    if dataset.urn == dataset_urn:
-                        return dataset
-            raise ValueError(f"DataHub dataset not found: {dataset_urn}")
-
         entities = await self._fetch_dataset_entities([dataset_urn])
         if not entities:
             raise ValueError(f"DataHub dataset not found: {dataset_urn}")
@@ -620,21 +466,6 @@ class DataHubConnector:
         return f"{self.frontend_url}/dataset/{quote(urn, safe='')}"
 
     async def search_datasets(self, query: str = "") -> list[DatasetInput]:
-        if self.use_mock:
-            keyword = query.strip().lower()
-            all_datasets: list[DatasetInput] = []
-            for items in MOCK_DATASETS.values():
-                all_datasets.extend(items)
-            if not keyword:
-                return all_datasets
-            return [
-                ds
-                for ds in all_datasets
-                if keyword in (ds.name or "").lower()
-                or keyword in (ds.display_name or "").lower()
-                or keyword in (ds.description or "").lower()
-                or keyword in ds.urn.lower()
-            ]
         return await self._search_datasets_from_api(query)
 
     async def _search_datasets_from_api(self, query: str) -> list[DatasetInput]:
@@ -938,6 +769,20 @@ mutation setDomain($entityUrn: String!, $domainUrn: String!) {
 }
 """
 
+# 血缘上报（M11 兜底路径）。updateLineage 是 DataHub 开源 GraphQL 的 canonical
+# mutation（datahub-graphql-core，master，未 @deprecated）：
+#   updateLineage(input: UpdateLineageInput!): Boolean
+#   UpdateLineageInput = {edgesToAdd: [LineageEdge!], edgesToRemove: [LineageEdge!]}
+#   LineageEdge = {upstreamUrn: String!, downstreamUrn: String!}
+# 加同一条边是幂等的（已存在则无副作用）——与 Airflow 插件重复上报不冲突。
+# ⚠ 仅**表级**：字段级血缘（fineGrainedLineages）不在此 GraphQL 里，需 aspect
+# 级 emitter，且受目标 DataHub 版本支持度制约（见 lineage_emitter 的说明）。
+_MUTATION_UPDATE_LINEAGE = """
+mutation updateLineage($input: UpdateLineageInput!) {
+  updateLineage(input: $input)
+}
+"""
+
 
 class DataHubWriteError(RuntimeError):
     """回写失败。保留原始 URN 与操作，便于定位与重放。"""
@@ -951,9 +796,6 @@ class DataHubWriteError(RuntimeError):
 
 async def _mutate(connector: "DataHubConnector", operation: str, urn: str,
                   query: str, variables: dict) -> bool:
-    if connector.use_mock:
-        logger.info("mock datahub: skip %s @ %s", operation, urn)
-        return True
     try:
         data = await connector._graphql(query, variables)
     except Exception as exc:  # noqa: BLE001
@@ -1002,4 +844,24 @@ async def set_domain(connector: "DataHubConnector", urn: str, domain_urn: str) -
     return await _mutate(
         connector, "setDomain", urn, _MUTATION_SET_DOMAIN,
         {"entityUrn": urn, "domainUrn": domain_urn},
+    )
+
+
+async def add_lineage_edge(
+    connector: "DataHubConnector", upstream_urn: str, downstream_urn: str
+) -> bool:
+    """上报一条表级血缘：``upstream_urn``（源表）→ ``downstream_urn``（目标表）。
+
+    幂等：DataHub 对已存在的边不重复建。以 downstream 作定位 URN（血缘挂在下游侧）。
+    """
+    return await _mutate(
+        connector, "updateLineage", downstream_urn, _MUTATION_UPDATE_LINEAGE,
+        {
+            "input": {
+                "edgesToAdd": [
+                    {"upstreamUrn": upstream_urn, "downstreamUrn": downstream_urn}
+                ],
+                "edgesToRemove": [],
+            }
+        },
     )

@@ -97,9 +97,16 @@ class JobPlan:
 
 
 class SyncToolAdapter(ABC):
-    """搬运工具适配器。工具特定逻辑**只允许**存在于其实现中。"""
+    """搬运工具适配器。工具特定逻辑**只允许**存在于其实现中。
+
+    除了把 JobSpec 渲染成作业配置（``render``），适配器还声明**怎么让 Airflow 跑它**：
+    ``docker_image`` 是执行镜像，``airflow_command`` 是 DockerOperator 的命令。镜像/命令
+    属于工具本身（不同工具不同），故收拢到适配器而非设置页——设置页只管 Airflow 怎么连。
+    """
 
     name: str
+    # 该工具的默认执行镜像（DockerOperator 用）。与 docker/orchestration 的镜像保持一致。
+    docker_image: str
 
     @abstractmethod
     def render(self, job: JobSpec) -> dict:
@@ -112,6 +119,14 @@ class SyncToolAdapter(ABC):
     @abstractmethod
     def supports(self, mode: str) -> bool:
         """该工具是否支持此装载方式。不支持的必须显式返回 False，不静默降级。"""
+
+    @abstractmethod
+    def airflow_command(self, config_path: str) -> list[str]:
+        """DockerOperator 跑该工具的命令。``config_path`` 是容器内的作业配置路径。
+
+        水位用 Airflow 模板 ``{{ data_interval_start }}`` 注入（DockerOperator 的
+        ``command`` 是模板字段，运行时会被渲染），各工具自定义怎么传。
+        """
 
     def supports_cdc_from(self, platform: str) -> bool:
         """该工具能否对此源平台做 CDC。默认否——CDC 连接器是逐平台实现的，

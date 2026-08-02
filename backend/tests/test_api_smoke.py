@@ -1,4 +1,4 @@
-"""最小 API 冒烟：health / 管理鉴权 / domains(mock) / external v1。"""
+"""最小 API 冒烟：health / 管理鉴权 / domains / external v1。"""
 
 from __future__ import annotations
 
@@ -23,15 +23,11 @@ def test_admin_auth_wrong_token(client):
     assert "无效" in res.json()["detail"]
 
 
-def test_admin_auth_ok_and_list_domains_mock(client, admin_headers):
+def test_admin_auth_ok_and_list_domains(client, admin_headers):
+    # 无真实 DataHub 时，sync_domains 内部容错回退本地缓存，端点仍返回 200 + list。
     res = client.get("/api/domains", headers=admin_headers)
     assert res.status_code == 200, res.text
-    domains = res.json()
-    assert isinstance(domains, list)
-    assert len(domains) >= 1
-    names = {d["name"] for d in domains}
-    # MOCK_DOMAINS: 客户域 / 订单域 / 商品域
-    assert "客户域" in names or any("域" in n for n in names)
+    assert isinstance(res.json(), list)
 
 
 def test_mcp_discovery_exempt_from_admin(client):

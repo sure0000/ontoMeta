@@ -307,7 +307,7 @@ def extract_filter_info(filter_node):
 
 def main() -> int:
     svc = ExpressionFormatterService.__new__(ExpressionFormatterService)
-    svc.use_mock = True  # 不实际调 LLM,只测归一化
+    svc.client = None  # 不实际调 LLM,只测归一化
     failed = 0
     for idx, (desc, text_refs, ref_ids, llm_out, expect, expect_op, expect_val) in enumerate(CASES, 1):
         segments = make_segments(text_refs)

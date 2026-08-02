@@ -29,9 +29,11 @@ import type {
   MaterializationContract,
   MaterializationContractUpdateInput,
   MaterializationLoadStrategy,
-  MaterializationPhaseReceipt,
   MaterializationRun,
   MaterializeStatus,
+  LineageEmitResult,
+  SyncTool,
+  SyncToolInfo,
 } from "../types";
 import { LABELS, StatusBadge } from "./StatusBadge";
 
@@ -85,6 +87,7 @@ interface Props {
 interface FormValues {
   target_datasource_id: string;
   target_database: string;
+  sync_tool: SyncTool;
 }
 
 /** 由数据源类型推导物化引擎（DDL/ETL 方言）。仅仓库类型可作物化目标，否则返回 null。 */
@@ -159,6 +162,7 @@ export function MaterializeModal({
   const [activeLayer, setActiveLayer] = useState<string | null>(null);
   const [result, setResult] = useState<MaterializationRun | null>(null);
   const [runs, setRuns] = useState<MaterializationRun[]>([]);
+  const [syncTools, setSyncTools] = useState<SyncToolInfo[]>([]);
   const [activeTab, setActiveTab] = useState<"run" | "history">("run");
   // 单实体物化：命中契约不可物化 / 尚未生成时的原因，禁用执行并提示。
   const [scopeError, setScopeError] = useState<string | null>(null);
@@ -210,11 +214,19 @@ export function MaterializeModal({
     setLoading(true);
     void (async () => {
       try {
-        const [ds, runList] = await Promise.all([
+        const [ds, runList, toolInfo] = await Promise.all([
           api.listDataSources(),
           api.listMaterializationRuns(ontologyId),
+          api.getSyncTools().catch(() => null),
         ]);
         setDataSources(ds);
+        if (toolInfo) {
+          setSyncTools(toolInfo.tools);
+          // 搬运工具默认取后端 default（通常 seatunnel），可在弹窗改。
+          if (!form.getFieldValue("sync_tool")) {
+            form.setFieldValue("sync_tool", toolInfo.default);
+          }
+        }
         setRuns(runList);
         if (scopeTargetId) {
           // 单实体：取全部契约按 target_id 命中，校验其是否配置为物化。
@@ -370,6 +382,7 @@ export function MaterializeModal({
       const run = await api.materializeOntology(ontologyId, {
         target_datasource_id: values.target_datasource_id,
         engine,
+        sync_tool: values.sync_tool,
         // 同步方式逐实体来自各自契约（上面已写回），故不传全局覆盖。
         ...(Object.keys(databaseOverrides).length
           ? { database_overrides: databaseOverrides }
@@ -386,15 +399,10 @@ export function MaterializeModal({
         ...(Object.keys(overrides).length ? { overrides } : {}),
       });
       setResult(run);
-      const orchestrated = run.receipt?.execute_mode === "orchestrated";
       if (!run.ok) {
-        message.warning(
-          orchestrated ? "作业已生成，但触发失败，请查看回执" : "物化已执行，但存在失败项，请查看回执",
-        );
-      } else if (orchestrated) {
-        message.success("作业已提交，正在按调度执行");
+        message.warning("作业已生成，但触发失败，请查看回执");
       } else {
-        message.success("物化完成：建表与数据装载均成功");
+        message.success("作业已提交，正在按调度执行");
       }
       // 刷新历史，让本次执行进入记录列表。
       api
@@ -616,6 +624,25 @@ export function MaterializeModal({
               description={dbError}
             />
           )}
+          <Form.Item
+            name="sync_tool"
+            label="搬运工具"
+            extra="生成对应工具的 Airflow 作业交给调度器执行；CDC 只有支持的工具可选。镜像由工具自身定。"
+          >
+            <Select<SyncTool>
+              placeholder="选择搬运工具"
+              options={syncTools.map((t) => ({
+                value: t.name,
+                label: (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    {t.name}
+                    {t.cdc && <Tag color="blue" style={{ marginInlineEnd: 0 }}>CDC</Tag>}
+                    <span className="muted" style={{ fontSize: 12 }}>{t.image}</span>
+                  </span>
+                ),
+              }))}
+            />
+          </Form.Item>
         </div>
 
         {step === 1 &&
@@ -748,8 +775,6 @@ function MaterializeRunsTable({ runs }: { runs: MaterializationRun[] }) {
   if (runs.length === 0) {
     return <Empty description="尚无物化执行记录" />;
   }
-  const phaseText = (p?: { executed: number; failed: number; total: number }) =>
-    p ? `${p.executed}/${p.total}${p.failed ? ` 失${p.failed}` : ""}` : "—";
   const columns: ColumnsType<MaterializationRun> = [
     {
       title: "时间",
@@ -791,13 +816,14 @@ function MaterializeRunsTable({ runs }: { runs: MaterializationRun[] }) {
       ),
     },
     {
-      title: "建表 / 装载",
-      key: "phases",
-      width: 130,
+      title: "作业 / 调度",
+      key: "jobs",
+      width: 150,
       render: (_, r) =>
         r.receipt ? (
           <span className="muted">
-            建 {phaseText(r.receipt.ddl)} · 装 {phaseText(r.receipt.etl)}
+            建表 {r.receipt.tables?.length ?? 0} · 搬运 {r.receipt.jobs?.length ?? 0}
+            {r.receipt.schedule ? " · 定时" : ""}
           </span>
         ) : (
           "—"
@@ -839,6 +865,8 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
   const r = run.receipt!;
   const [status, setStatus] = useState<MaterializeStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [lineageBusy, setLineageBusy] = useState(false);
+  const [lineageResult, setLineageResult] = useState<LineageEmitResult | null>(null);
 
   useEffect(() => {
     if (!run.artifact_id || !r.dag_run_id) return;
@@ -866,6 +894,26 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
   }, [run.artifact_id, r.dag_run_id]);
 
   const state = status?.state ?? r.state;
+  const succeeded = state === "success";
+
+  const emitLineage = () => {
+    if (!run.artifact_id) return;
+    setLineageBusy(true);
+    api
+      .emitMaterializeLineage(run.artifact_id)
+      .then((res) => {
+        setLineageResult(res);
+        if (res.failed && res.failed > 0) {
+          message.warning(`血缘上报：${res.applied ?? 0} 成功 / ${res.failed} 失败`);
+        } else {
+          message.success(`血缘已上报 ${res.applied ?? 0} 条（重复上报幂等）`);
+        }
+      })
+      .catch((err: unknown) =>
+        message.error(err instanceof Error ? err.message : "血缘上报失败"),
+      )
+      .finally(() => setLineageBusy(false));
+  };
   return (
     <>
       <Divider style={{ margin: "12px 0" }} />
@@ -937,77 +985,49 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
             ))}
           </Descriptions.Item>
         )}
+        <Descriptions.Item label="血缘">
+          <span className="muted" style={{ fontSize: 12 }}>
+            主路径由 Airflow 的 DataHub 插件自动上报；插件缺位时可在此兜底回补（表级，重复幂等）。
+          </span>
+          <div style={{ marginTop: 6 }}>
+            <Button
+              size="small"
+              loading={lineageBusy}
+              disabled={!succeeded}
+              onClick={emitLineage}
+            >
+              兜底回补血缘
+            </Button>
+            {!succeeded && (
+              <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                运行成功后可回补
+              </span>
+            )}
+            {lineageResult && (
+              <span style={{ marginLeft: 8, fontSize: 12 }}>
+                已上报 {lineageResult.applied ?? 0} / 共 {lineageResult.applicable} 条
+                {lineageResult.failed ? `，失败 ${lineageResult.failed}` : ""}
+              </span>
+            )}
+          </div>
+        </Descriptions.Item>
       </Descriptions>
     </>
   );
 }
 
-/** 执行回执。编排模式看 DagRun，直连模式看 DDL/ETL 两阶段——两者不是同一回事，分开呈现。 */
+/** 执行回执。物化总是交 Airflow 编排，看 DagRun；无 target 的纯错误回执直接报错。 */
 function MaterializeReceiptView({ run }: { run: MaterializationRun }) {
   const r = run.receipt;
-  if (!r) {
+  if (!r || !r.target_datasource) {
     return (
-      <Alert type="error" showIcon message={`执行失败（${run.status}）`} />
-    );
-  }
-  if (r.execute_mode === "orchestrated") {
-    return <OrchestratedReceiptView run={run} />;
-  }
-  const phase = (label: string, p: MaterializationPhaseReceipt | undefined) => {
-    if (!p) return null;
-    if (p.skipped) {
-      return (
-        <Descriptions.Item label={label}>
-          <Tag>已跳过</Tag>
-          <span className="muted">{p.skip_reason}</span>
-        </Descriptions.Item>
-      );
-    }
-    const failed = p.failed > 0 || p.error;
-    return (
-      <Descriptions.Item label={label}>
-        <Tag color={failed ? "red" : "green"}>
-          成功 {p.executed} / 失败 {p.failed} / 共 {p.total}
-        </Tag>
-        {p.error && <div style={{ color: "#cf1322", marginTop: 4 }}>{p.error}</div>}
-      </Descriptions.Item>
-    );
-  };
-  return (
-    <>
-      <Divider style={{ margin: "12px 0" }} />
       <Alert
-        type={run.ok ? "success" : "warning"}
+        type="error"
         showIcon
-        style={{ marginBottom: 12 }}
-        message={run.ok ? "物化成功" : "物化已执行，存在失败项"}
-        description="开发模式：由 ontoMeta 直连目标库执行。跨源搬运请改用调度执行。"
+        message={`执行失败（${run.status}）`}
+        description={r?.error ?? undefined}
       />
-      <Descriptions column={1} size="small" bordered>
-        <Descriptions.Item label="目标存储">
-          {r.target_datasource.name}（{r.engine}）
-        </Descriptions.Item>
-        {phase("建表 DDL", r.ddl)}
-        {phase("数据装载 ETL", r.etl)}
-        {r.warnings && r.warnings.length > 0 && (
-          <Descriptions.Item label="提示">
-            {r.warnings.map((w, i) => (
-              <div key={i} style={{ color: "#d46b08" }}>
-                {w.target}（{w.feature}）：{w.detail}
-              </div>
-            ))}
-          </Descriptions.Item>
-        )}
-        {r.unsupported && r.unsupported.length > 0 && (
-          <Descriptions.Item label="未生成">
-            {r.unsupported.map((u, i) => (
-              <div key={i} className="muted">
-                {u.target}：{u.reason}
-              </div>
-            ))}
-          </Descriptions.Item>
-        )}
-      </Descriptions>
-    </>
-  );
+    );
+  }
+  return <OrchestratedReceiptView run={run} />;
 }

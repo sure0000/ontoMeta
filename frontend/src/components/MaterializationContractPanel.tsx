@@ -56,17 +56,15 @@ function matchTableOutcome(
   entityName: string | null | undefined,
 ): TableOutcome | null {
   if (!entityName) return null;
-  const hit = (list?: { target?: string; ok: boolean; error?: string }[]) =>
-    list?.find((ps) => (ps.target ?? "").split(".").pop() === entityName);
-  // runs 已按最新在前排序：返回第一个触及该表的执行结果。
+  // 物化一律交 Airflow 编排：回执不再有逐表 DDL/ETL 结果，改看本表是否在本次
+  // 提交的 tables 里 + 本次提交是否成功（逐表萼地的成败看 Airflow DagRun）。
+  const touches = (tables?: string[]) =>
+    (tables ?? []).some((t) => t.split(".").pop() === entityName);
+  // runs 已按最新在前排序：返回第一个触及该表的提交。
   for (const run of runs) {
     const r = run.receipt;
-    if (!r) continue;
-    const d = hit(r.ddl?.per_statement);
-    const e = hit(r.etl?.per_statement);
-    if (!d && !e) continue;
-    const failed = (d && !d.ok) || (e && !e.ok);
-    return { ok: !failed, at: run.executed_at, error: d?.error || e?.error };
+    if (!r || !touches(r.tables)) continue;
+    return { ok: run.ok, at: run.executed_at, error: r.error ?? undefined };
   }
   return null;
 }

@@ -73,16 +73,16 @@ class MaterializeRequest(BaseModel):
         None,
         description="同步方式：full/incremental/cdc；写回选中契约并影响 ETL。空=沿用契约既定策略",
     )
+    sync_tool: str | None = Field(
+        None,
+        description="搬运工具：seatunnel/datax/flink；决定生成的 Airflow 作业配置与执行镜像。空=默认 seatunnel",
+    )
     selected_targets: list[str] | None = Field(
         None, description="勾选要物化的实体名；空/None = 全部可物化实体"
     )
     overrides: dict[str, dict] = Field(
         default_factory=dict,
         description="{contract_id: {字段: 值}} 人工覆盖的存储策略/层/表名等，写回契约并钉住",
-    )
-    execute_mode: str | None = Field(
-        None,
-        description="orchestrated=交 Airflow 编排（默认）；direct=ontoMeta 直连落库（开发模式）",
     )
     intent: str | None = None
     operator: str | None = None

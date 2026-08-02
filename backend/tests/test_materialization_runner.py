@@ -1,8 +1,7 @@
-"""物化编排 materialization_runner.run 的编排逻辑（execute_write 被替身，不需活集群）。
+"""物化编排 materialization_runner.run：总是交 Airflow 编排（不再有直连落库）。
 
-真实落库由 test_data_app_executor_write.py 覆盖；这里只验证 runner 如何 组织生成、
-按勾选裁剪、DDL 失败时跳过 ETL、前置校验报错、把回执按表归位。生成器按 hive 引擎
-产出真实 DDL，故也顺带验证"契约 → 生成 → 待执行语句"这条链路通。
+验证：产出 DAG + 搬运作业并触发一次运行、按勾选/覆盖裁剪与重命名、触发失败不丢产物、
+前置校验（无数据源/无 dsn/未配 Airflow）报错。生成器按 hive 引擎产出真实 DDL。
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ def _init_db(client):
 
     with SessionLocal() as db:
         SettingsService().update_airflow_settings(
-            db, {"enabled": False, "dags_dir": "", "jobs_dir": ""}
+            db, {"enabled": False}
         )
 
 
@@ -146,33 +145,9 @@ class _Recorder:
         }
 
 
-def test_run_generates_and_executes_ddl_then_etl(monkeypatch):
-    ids = _seed("full")
-    rec = _Recorder()
-    monkeypatch.setattr(data_app_executor, "execute_write", rec)
-
-    with SessionLocal() as db:
-        receipt = materialization_runner.run(
-            db,
-            ids["ontology_id"],
-            target_datasource_id=ids["datasource_id"],
-            engine="hive",
-        )
-
-    # 两阶段都被调用（DDL 成功 → ETL 继续）
-    assert len(rec.calls) == 2
-    # DDL 阶段真的生成了建表语句（至少 customer/sales_order 两张业务对象维表）
-    assert receipt["ddl"]["total"] >= 2
-    assert receipt["ok"] is True
-    # 回执把逐条结果归位到 qualified 表名
-    assert all("target" in ps for ps in receipt["ddl"]["per_statement"])
-    assert any(ps["target"].endswith(".customer") for ps in receipt["ddl"]["per_statement"])
-
-
-def test_selected_targets_filters_tables(monkeypatch):
+def test_selected_targets_filters_tables(tmp_path, monkeypatch):
     ids = _seed("filter")
-    rec = _Recorder()
-    monkeypatch.setattr(data_app_executor, "execute_write", rec)
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
 
     with SessionLocal() as db:
         receipt = materialization_runner.run(
@@ -181,17 +156,17 @@ def test_selected_targets_filters_tables(monkeypatch):
             target_datasource_id=ids["datasource_id"],
             engine="hive",
             selected_targets=["customer"],
+            artifact_id="art-filter",
         )
     # 只物化 customer 一张表
-    assert receipt["ddl"]["total"] == 1
     assert receipt["tables"] == [t for t in receipt["tables"] if t.endswith(".customer")]
+    assert len(receipt["tables"]) == 1
 
 
-def test_database_and_table_overrides_rename_targets(monkeypatch):
-    """人工指定的目标库/表名要贯穿 DDL 与 ETL——两边名字必须一致，否则装载会落到空表。"""
+def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
+    """人工指定的目标库/表名要贯穿到产物（建表 DDL 与搬运作业同一目标）。"""
     ids = _seed("rename")
-    rec = _Recorder()
-    monkeypatch.setattr(data_app_executor, "execute_write", rec)
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
 
     with SessionLocal() as db:
         service = materialization_runner._contract_service
@@ -209,76 +184,34 @@ def test_database_and_table_overrides_rename_targets(monkeypatch):
             database_overrides={"dim": "warehouse_prod"},
             table_overrides={customer_contract.id: "dim_customer"},
             selected_targets=["customer"],
+            artifact_id="art-rename",
         )
 
     # 勾选按实体名，改名后仍要命中（不能因为改名把自己裁掉）
     assert receipt["tables"] == ["warehouse_prod.dim_customer"]
-    assert receipt["ddl"]["total"] == 1
-    assert "`warehouse_prod`.`dim_customer`" in rec.calls[0][0]
-    # ETL 若有语句，必须指向同一张表（否则装载会落到另一张空表）
-    assert all(t.startswith("warehouse_prod.") for t in receipt["etl"]["targets"])
+    # 建表 DDL 落盘到 DAG spec，重命名后的表名在其中
+    import json as _json
 
-
-def test_etl_follows_each_contract_load_strategy(monkeypatch):
-    """同步方式逐实体设：物化按各表契约的策略生成装载语句，而非一刀切全量。"""
-    ids = _seed("perentity")
-    rec = _Recorder()
-    monkeypatch.setattr(data_app_executor, "execute_write", rec)
-
-    with SessionLocal() as db:
-        service = materialization_runner._contract_service
-        service.sync(db, ids["ontology_id"])
-        contracts = service.list_contracts(db, ids["ontology_id"])
-        names = service.resolve_target_names(db, contracts)
-        by_name = {names.get(c.target_id, (None,))[0]: c for c in contracts}
-        # customer 走增量（按分区键追加），sales_order 保持全量覆盖
-        service.update(
-            db,
-            by_name["customer"].id,
-            {"load_strategy": "incremental", "partition_key": "created_at"},
-        )
-        service.update(db, by_name["sales_order"].id, {"load_strategy": "full"})
-        materialization_runner.run(
-            db,
-            ids["ontology_id"],
-            target_datasource_id=ids["datasource_id"],
-            engine="hive",
-        )
-
-    etl_sql = "\n".join(rec.calls[1])
-    assert "INSERT INTO TABLE dim.customer" in etl_sql
-    assert "INSERT OVERWRITE TABLE dim.sales_order" in etl_sql
-
-
-def test_ddl_failure_skips_etl(monkeypatch):
-    ids = _seed("ddlfail")
-    rec = _Recorder(fail_first=True)
-    monkeypatch.setattr(data_app_executor, "execute_write", rec)
-
-    with SessionLocal() as db:
-        receipt = materialization_runner.run(
-            db,
-            ids["ontology_id"],
-            target_datasource_id=ids["datasource_id"],
-            engine="hive",
-        )
-    # ETL 未被调用（只有一次 DDL 调用）
-    assert len(rec.calls) == 1
-    assert receipt["etl"].get("skipped") is True
-    assert receipt["ok"] is False
+    spec_path = next((tmp_path / "dags").glob("*.json"))
+    spec = _json.loads(spec_path.read_text(encoding="utf-8"))
+    assert any("warehouse_prod" in s and "dim_customer" in s for s in spec["ddl"])
 
 
 def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
-    """把 Airflow 配成可用，并把 REST 调用换成记录器（不需要真实 Airflow）。"""
+    """把 Airflow 配成可用，并把 REST 调用换成记录器（不需要真实 Airflow）。
+
+    投递目录不再入设置，改由 config 环境变量给默认：直接 monkeypatch 成 tmp 路径。
+    """
+    from app.config import settings as env_settings
     from app.services.settings_service import SettingsService
 
+    monkeypatch.setattr(env_settings, "airflow_dags_dir", str(tmp_path / "dags"))
+    monkeypatch.setattr(env_settings, "airflow_jobs_dir", str(tmp_path / "jobs"))
     with SessionLocal() as db:
         SettingsService().update_airflow_settings(
             db,
             {
                 "endpoint": "http://airflow:8080",
-                "dags_dir": str(tmp_path / "dags"),
-                "jobs_dir": str(tmp_path / "jobs"),
                 "enabled": True,
             },
         )
@@ -365,10 +298,9 @@ def test_orchestrated_reports_trigger_failure_without_losing_artifacts(tmp_path,
     assert list((tmp_path / "dags").iterdir())  # 产物仍在，可人工排查后重试
 
 
-def test_orchestrated_requires_configured_airflow(monkeypatch):
-    """显式要求编排却没配 Airflow —— 报错说清怎么办，不静默回落到直连落库。"""
-    ids = _seed("orchunset")
-    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+def test_errors_when_airflow_unavailable(monkeypatch):
+    """未配可用 Airflow 时直接报错——不再静默回退到直连落库。"""
+    ids = _seed("unset")
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError, match="Airflow"):
             materialization_runner.run(
@@ -376,24 +308,7 @@ def test_orchestrated_requires_configured_airflow(monkeypatch):
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
                 engine="hive",
-                execute_mode="orchestrated",
             )
-
-
-def test_defaults_to_direct_when_airflow_unavailable(monkeypatch):
-    """没有 Airflow 的开发机保持既有行为：直连落库，链路照样跑通。"""
-    ids = _seed("fallback")
-    rec = _Recorder()
-    monkeypatch.setattr(data_app_executor, "execute_write", rec)
-    with SessionLocal() as db:
-        receipt = materialization_runner.run(
-            db,
-            ids["ontology_id"],
-            target_datasource_id=ids["datasource_id"],
-            engine="hive",
-        )
-    assert receipt["execute_mode"] == "direct"
-    assert len(rec.calls) == 2  # DDL + ETL 都直连执行了
 
 
 def test_missing_datasource_raises(monkeypatch):

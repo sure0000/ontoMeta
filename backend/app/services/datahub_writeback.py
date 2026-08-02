@@ -199,7 +199,6 @@ class DataHubWritebackService:
             "applied": applied,
             "failed": len(errors),
             "errors": errors,
-            "mock": bool(getattr(connector, "use_mock", False)),
         }
 
     @staticmethod

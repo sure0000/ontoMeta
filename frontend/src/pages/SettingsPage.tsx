@@ -63,14 +63,13 @@ type LlmFormValues = {
   model: string;
   is_default: boolean;
   enabled: boolean;
-  use_mock: boolean;
 };
 
 type DatahubFormValues = {
   gms_url: string;
   frontend_url: string;
   token?: string;
-  use_mock: boolean;
+  fabric: string;
 };
 
 type DraftGenerationFormValues = {
@@ -81,7 +80,6 @@ type DraftGenerationFormValues = {
 type CubeFormValues = {
   api_url: string;
   api_secret?: string;
-  use_mock: boolean;
   preagg_refresh: string;
   tenant_dimension?: string;
   timeout_seconds: number;
@@ -169,7 +167,7 @@ export function SettingsPage() {
     datahubForm.setFieldsValue({
       gms_url: datahubSettings.gms_url,
       frontend_url: datahubSettings.frontend_url,
-      use_mock: datahubSettings.use_mock,
+      fabric: datahubSettings.fabric ?? "PROD",
     });
     adminTokenForm.setFieldsValue({ token: getAdminToken() });
     setAdminTokenSaved(Boolean(getAdminToken()));
@@ -187,7 +185,6 @@ export function SettingsPage() {
     if (!cubeSettings) return;
     cubeForm.setFieldsValue({
       api_url: cubeSettings.api_url,
-      use_mock: cubeSettings.use_mock,
       preagg_refresh: cubeSettings.preagg_refresh,
       tenant_dimension: cubeSettings.tenant_dimension ?? "",
       timeout_seconds: cubeSettings.timeout_seconds,
@@ -201,7 +198,6 @@ export function SettingsPage() {
       const updated = await api.updateCubeSettings({
         api_url: values.api_url,
         api_secret: values.api_secret?.trim() ? values.api_secret.trim() : undefined,
-        use_mock: values.use_mock,
         preagg_refresh: values.preagg_refresh,
         tenant_dimension: values.tenant_dimension?.trim() || null,
         timeout_seconds: values.timeout_seconds,
@@ -228,7 +224,6 @@ export function SettingsPage() {
       model: llmModels.find((m) => !m.deprecated)?.id ?? "deepseek-v4-flash",
       is_default: llmServices.length === 0,
       enabled: true,
-      use_mock: false,
     });
     setLlmModalOpen(true);
   };
@@ -247,7 +242,6 @@ export function SettingsPage() {
         model: detail.model,
         is_default: detail.is_default,
         enabled: detail.enabled,
-        use_mock: detail.use_mock,
       });
       setLlmModalOpen(true);
     } catch (err) {
@@ -342,7 +336,7 @@ export function SettingsPage() {
             gms_url: values.gms_url.trim(),
             frontend_url: values.frontend_url.trim(),
             token: values.token?.trim() ? values.token.trim() : undefined,
-            use_mock: values.use_mock,
+            fabric: values.fabric?.trim() || "PROD",
           });
           setBundle((prev) =>
             prev ? { ...prev, datahubSettings: updated } : prev,
@@ -437,7 +431,6 @@ export function SettingsPage() {
           <Tag color={record.enabled ? "success" : "default"}>
             {record.enabled ? "启用" : "停用"}
           </Tag>
-          {record.use_mock && <Tag color="gold">Mock</Tag>}
           {record.api_key_set ? (
             <Tag>Key 已配置</Tag>
           ) : (
@@ -592,12 +585,11 @@ export function SettingsPage() {
                     <Input.Password placeholder="Bearer Token（可选）" />
                   </Form.Item>
                   <Form.Item
-                    label="使用 Mock 数据"
-                    name="use_mock"
-                    valuePropName="checked"
-                    extra="开启后不连接真实 DataHub，使用内置示例数据"
+                    label="环境标 Fabric"
+                    name="fabric"
+                    extra="构造物化目标表 URN 时的 DataHub 环境标（PROD/DEV/…），血缘上报与之对齐"
                   >
-                    <Switch />
+                    <Input placeholder="PROD" />
                   </Form.Item>
                   <Form.Item>
                     <Button type="primary" onClick={handleDatahubSave} loading={datahubSaving}>
@@ -749,17 +741,9 @@ export function SettingsPage() {
                   showIcon
                   style={{ marginBottom: 16 }}
                   message="所有 Cube 配置均在此管理，无需环境变量/配置文件，保存后立即生效"
-                  description="Cube 作为外挂语义层承担执行/缓存/预聚合定时刷新/行级权限。关闭 Mock 并填写密钥后即走真实 Cube。"
+                  description="Cube 作为外挂语义层承担执行/缓存/预聚合定时刷新/行级权限。填写密钥后即走真实 Cube；未配密钥时执行查询会显式报错。"
                 />
                 <Form form={cubeForm} layout="vertical" style={{ maxWidth: 640 }}>
-                  <Form.Item
-                    label="使用 Mock（不连真实 Cube）"
-                    name="use_mock"
-                    valuePropName="checked"
-                    extra="开启后返回确定性示例数据，本地零依赖可跑；未填密钥时也自动走 Mock"
-                  >
-                    <Switch />
-                  </Form.Item>
                   <Form.Item
                     label="Cube API 地址"
                     name="api_url"
@@ -976,14 +960,6 @@ export function SettingsPage() {
           <Form.Item label="启用" name="enabled" valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Form.Item
-            label="使用 Mock 生成"
-            name="use_mock"
-            valuePropName="checked"
-            extra="开启后跳过真实 LLM 调用，使用规则生成草稿"
-          >
-            <Switch />
-          </Form.Item>
           <Form.Item label="连接测试" extra="向该地址/模型发一次最小请求，验证连通性（不会保存配置）">
             <Space direction="vertical" style={{ width: "100%" }} size={8}>
               <Button
@@ -1034,9 +1010,6 @@ export function SettingsPage() {
             </Descriptions.Item>
             <Descriptions.Item label="启用状态">
               {viewingLlm.enabled ? "启用" : "停用"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Mock 模式">
-              {viewingLlm.use_mock ? "是" : "否"}
             </Descriptions.Item>
             <Descriptions.Item label="创建时间">
               {new Date(viewingLlm.created_at).toLocaleString()}

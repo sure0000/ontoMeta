@@ -8,8 +8,8 @@
    timeDimensions），调用 Cube Load API 执行，返回统一的 columns/rows。
 3. `build_token()`：用 HS256 生成 Cube 需要的 JWT（含 securityContext 行级权限）。
 
-无外部依赖即可运行：`use_mock_cube=true`（默认）或未配置密钥时返回确定性 Mock。
-真实 Cube 环境只需设置 `CUBE_API_URL` / `CUBE_API_SECRET` 并置 `USE_MOCK_CUBE=false`。
+真实 Cube 环境需设置 `CUBE_API_URL` / `CUBE_API_SECRET`（或在设置页配置）；未配置
+密钥时执行查询会显式报错（不再回退示例数据）。
 
 Cube 的 Refresh Worker（预聚合定时刷新）由 Cube 侧承担，ontoMeta 不做进程内调度。
 """
@@ -62,16 +62,12 @@ class CubeConnector:
         *,
         api_url: str | None = None,
         api_secret: str | None = None,
-        use_mock: bool | None = None,
         preagg_refresh: str | None = None,
         tenant_dimension: str | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
         self.api_url = (api_url or settings.cube_api_url or "").rstrip("/")
         self.api_secret = api_secret if api_secret is not None else settings.cube_api_secret
-        self.use_mock = (
-            settings.use_mock_cube if use_mock is None else use_mock
-        ) or not self.api_secret
         self.preagg_refresh = preagg_refresh or settings.cube_preagg_refresh
         self.tenant_dimension = (
             tenant_dimension if tenant_dimension is not None else settings.cube_tenant_dimension
@@ -86,7 +82,6 @@ class CubeConnector:
         return cls(
             api_url=runtime.api_url,
             api_secret=runtime.api_secret,
-            use_mock=runtime.use_mock,
             preagg_refresh=runtime.preagg_refresh,
             tenant_dimension=runtime.tenant_dimension,
             timeout_seconds=runtime.timeout_seconds,
@@ -276,10 +271,7 @@ class CubeConnector:
     # ------------------------------------------------------------------ exec
 
     def query(self, cube_query: dict[str, Any], *, security_context: dict | None = None) -> tuple[list[dict], list[dict]]:
-        """执行 Cube 查询，返回 (columns, rows)。Mock 模式下返回确定性示例数据。"""
-        if self.use_mock:
-            return self._mock_query(cube_query)
-
+        """执行 Cube 查询，返回 (columns, rows)。未配置密钥时 build_token 会显式报错。"""
         token = self.build_token(security_context or {})
         url = f"{self.api_url}/cubejs-api/v1/load"
         try:
@@ -408,23 +400,3 @@ class CubeConnector:
             "  },\n"
             "};\n"
         )
-
-    def _mock_query(self, cube_query: dict[str, Any]) -> tuple[list[dict], list[dict]]:
-        dims = cube_query.get("dimensions") or []
-        measures = cube_query.get("measures") or []
-        columns = [{"key": k, "title": k.split(".")[-1]} for k in [*dims, *measures]]
-        if not columns:
-            columns = [{"key": "value", "title": "value"}]
-        n = 6
-        rows: list[dict[str, Any]] = []
-        for i in range(n):
-            row: dict[str, Any] = {}
-            for k in dims:
-                row[k] = f"{k.split('.')[-1]}-{chr(65 + (i % 6))}"
-            for k in measures:
-                seed = int(hashlib.md5(f"{k}:{i}".encode()).hexdigest(), 16)
-                row[k] = seed % 10000
-            if not dims and not measures:
-                row["value"] = i
-            rows.append(row)
-        return columns, rows

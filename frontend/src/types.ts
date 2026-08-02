@@ -530,7 +530,6 @@ export interface LlmServiceConfig {
   model: string;
   is_default: boolean;
   enabled: boolean;
-  use_mock: boolean;
   api_key_set: boolean;
   api_key_hint?: string;
   api_key?: string;
@@ -550,7 +549,7 @@ export interface DatahubSettings {
   frontend_url: string;
   token_set: boolean;
   token_hint?: string;
-  use_mock: boolean;
+  fabric: string;
   updated_at: string;
 }
 
@@ -564,7 +563,6 @@ export interface CubeSettings {
   api_url: string;
   secret_set: boolean;
   secret_hint?: string | null;
-  use_mock: boolean;
   preagg_refresh: string;
   tenant_dimension?: string | null;
   timeout_seconds: number;
@@ -579,12 +577,8 @@ export interface AirflowSettings {
   password_hint?: string | null;
   token_set: boolean;
   api_version: string;
-  dags_dir: string;
-  jobs_dir: string;
-  warehouse_conn_id: string;
-  seatunnel_image: string;
   enabled: boolean;
-  /** 启用且投递目录齐全才算真的可用；否则物化回落到 direct 开发模式。 */
+  /** 启用且 endpoint 已填才算真的可用；否则物化报错无法执行。 */
   available: boolean;
   updated_at: string;
 }
@@ -969,6 +963,15 @@ export type MaterializationTargetKind =
   | "business_logic";
 export type MaterializationLayer = "dim" | "dwd" | "dws" | "ads";
 export type MaterializationLoadStrategy = "full" | "incremental" | "cdc";
+export type SyncTool = "seatunnel" | "datax" | "flink";
+
+/** 可选搬运工具及其能力（GET /warehouse/sync-tools）。 */
+export interface SyncToolInfo {
+  name: SyncTool;
+  image: string;
+  modes: MaterializationLoadStrategy[];
+  cdc: boolean;
+}
 export type MaterializationScdType = "none" | "scd1" | "scd2";
 
 export interface MaterializationContract {
@@ -1012,37 +1015,15 @@ export interface MaterializationContractSyncResult {
   total: number;
 }
 
-/** 一次落库执行的逐条结果（DDL/ETL 各一批）。 */
-export interface MaterializationPhaseReceipt {
-  total: number;
-  executed: number;
-  failed: number;
-  error?: string | null;
-  skipped?: boolean;
-  skip_reason?: string;
-  targets?: string[];
-  per_statement?: {
-    index: number;
-    ok: boolean;
-    target?: string;
-    error?: string;
-    rolled_back?: boolean;
-    sql?: string;
-  }[];
-}
-
 export interface MaterializationReceipt {
   ontology_id: string;
-  /** orchestrated=交 Airflow 编排（默认）；direct=ontoMeta 直连落库（开发模式）。 */
-  execute_mode?: "orchestrated" | "direct";
+  /** 物化总是交 Airflow 编排（已去除直连落库模式）。 */
+  execute_mode?: "orchestrated";
   target_datasource: { id: string; name: string; kind: string };
   engine: string;
   database_prefix?: string | null;
   tables: string[];
-  /** 以下两段仅 direct 模式有：编排模式下落库由 Airflow 执行，成败看 DagRun。 */
-  ddl?: MaterializationPhaseReceipt;
-  etl?: MaterializationPhaseReceipt;
-  /** 以下为 orchestrated 模式的提交回执。 */
+  /** orchestrated 提交回执：建表与搬运由 Airflow 执行，成败看 DagRun。 */
   dag_id?: string;
   dag_run_id?: string;
   state?: string;
@@ -1070,6 +1051,28 @@ export interface MaterializeStatus {
   tasks: { task_id: string; state: string | null; try_number?: number }[];
 }
 
+/** M11：物化血缘上报计划/回执（源表 → 目标表）。 */
+export interface LineageEdgeView {
+  source_urn: string;
+  target_urn: string;
+  target_table: string;
+  columns: { source: string; target: string }[];
+  skipped_reason: string | null;
+}
+
+export interface LineageEmitResult {
+  ontology_id: string;
+  blocked_reason: string | null;
+  total: number;
+  applicable: number;
+  skipped: number;
+  column_mappings: number;
+  edges: LineageEdgeView[];
+  applied?: number;
+  failed?: number;
+  errors?: { target: string; source_urn: string; error: string }[];
+}
+
 export interface MaterializeRequestInput {
   target_datasource_id: string;
   engine: string;
@@ -1079,10 +1082,10 @@ export interface MaterializeRequestInput {
   /** 契约 id → 物理表名；缺省用实体技术名。 */
   table_overrides?: Record<string, string>;
   load_strategy?: MaterializationLoadStrategy | null;
+  /** 搬运工具：seatunnel/datax/flink；空 = 后端默认 seatunnel。 */
+  sync_tool?: SyncTool | null;
   selected_targets?: string[] | null;
   overrides?: Record<string, MaterializationContractUpdateInput>;
-  /** 缺省由后端决定：配了 Airflow 走 orchestrated，否则 direct。 */
-  execute_mode?: "orchestrated" | "direct";
   intent?: string;
   operator?: string;
 }

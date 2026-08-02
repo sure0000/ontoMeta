@@ -6,6 +6,7 @@ from app.services.data_app import DataAppService
 from app.services.datahub_writeback import DataHubWritebackService
 from app.services.edit import EditService
 from app.services.expression_formatter import ExpressionFormatterService
+from app.services.lineage_emitter import LineageEmitter
 from app.services.logic_import import LogicImportService
 from app.services.materialization_contract import MaterializationContractService
 from app.services.ontology_revision import OntologyRevisionService
@@ -32,3 +33,4 @@ warehouse_generator = WarehouseGenerator()
 principal_service = PrincipalService()
 agent_pipeline = AgentPipelineService()
 datahub_writeback = DataHubWritebackService()
+lineage_emitter = LineageEmitter()

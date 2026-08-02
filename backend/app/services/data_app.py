@@ -553,7 +553,7 @@ class DataAppService:
                     "compiled_sql": result.get("sql"),
                     "columns": columns,
                     "rows": rows,
-                    "used_mock": self._cube_connector(db, source).use_mock,
+                    "used_mock": False,
                     "warnings": warnings,
                 }
             except CubeExecutionError as exc:

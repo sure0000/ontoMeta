@@ -87,6 +87,21 @@ def test_tasks_declare_lineage_inlets():
     assert task["outlets"] == []
 
 
+def test_target_urn_builder_injects_outlets():
+    """M11：注入 target_urn_builder 后，outlets 填真实目标表 URN，供插件上报下游血缘。"""
+    from app.connectors.datahub import build_dataset_urn
+
+    bundle = _bundle(
+        target_urn_builder=lambda job: build_dataset_urn(
+            job.target.platform, job.target.qualified, "PROD"
+        )
+    )
+    task = bundle.spec["tasks"][0]
+    assert task["outlets"] == [
+        "urn:li:dataset:(urn:li:dataPlatform:hive,dim.customer,PROD)"
+    ]
+
+
 def test_no_credentials_in_dag_or_spec():
     """产物里只能有 conn_id 与占位符。"""
     bundle = _bundle()
@@ -107,7 +122,29 @@ def test_schedule_comes_from_contract_cron():
 
 def test_watermark_injected_by_scheduler():
     """增量水位由 Airflow 的 data_interval_start 注入，不再是无人赋值的占位符。"""
-    assert "data_interval_start" in _bundle().dag_source
+    # 命令由工具 Adapter 产出并落入 spec 的每个 task；DockerOperator 的 command 是模板字段。
+    task = _bundle().spec["tasks"][0]
+    assert any("data_interval_start" in part for part in task["command"])
+
+
+def test_tasks_carry_tool_image_and_command():
+    """镜像与命令按工具逐任务写入 spec，DAG 骨架对工具无感（工具可插拔的落地）。"""
+    # 默认 seatunnel
+    st = _bundle().spec["tasks"][0]
+    assert st["image"] == "apache/seatunnel:2.3.11"
+    assert st["command"][0].endswith("seatunnel.sh")
+    # datax
+    dx = _bundle(tool="datax").spec
+    assert dx["tool"] == "datax"
+    assert dx["tasks"][0]["image"] == "ontometa/datax:latest"
+    assert "datax.py" in " ".join(dx["tasks"][0]["command"])
+    # flink
+    fl = _bundle(tool="flink").spec
+    assert fl["tool"] == "flink"
+    assert fl["tasks"][0]["image"] == "apache/flink:1.18"
+    # DAG 骨架不硬编镜像：读 task 的 image/command
+    assert 'image=task["image"]' in _bundle().dag_source
+    assert "seatunnel_image" not in json.dumps(_bundle().spec)
 
 
 def test_build_is_idempotent():

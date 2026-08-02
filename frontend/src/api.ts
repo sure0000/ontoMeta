@@ -52,6 +52,9 @@ import type {
   MaterializationRun,
   MaterializeRequestInput,
   MaterializeStatus,
+  SyncTool,
+  SyncToolInfo,
+  LineageEmitResult,
   Principal,
   PrincipalCreated,
   PrincipalRole,
@@ -616,7 +619,6 @@ export const api = {
     model: string;
     is_default?: boolean;
     enabled?: boolean;
-    use_mock?: boolean;
   }) =>
     request<LlmServiceConfig>("/api/settings/llm-services", {
       method: "POST",
@@ -633,7 +635,6 @@ export const api = {
       model?: string;
       is_default?: boolean;
       enabled?: boolean;
-      use_mock?: boolean;
     },
   ) =>
     request<LlmServiceConfig>(`/api/settings/llm-services/${id}`, {
@@ -664,7 +665,7 @@ export const api = {
     gms_url: string;
     frontend_url: string;
     token?: string;
-    use_mock?: boolean;
+    fabric?: string;
   }) =>
     request<DatahubSettings>("/api/settings/datahub", {
       method: "PUT",
@@ -690,10 +691,6 @@ export const api = {
     password?: string;
     token?: string;
     api_version: string;
-    dags_dir: string;
-    jobs_dir: string;
-    warehouse_conn_id: string;
-    seatunnel_image: string;
     enabled: boolean;
   }) =>
     request<AirflowSettings>("/api/settings/airflow", {
@@ -709,7 +706,6 @@ export const api = {
   updateCubeSettings: (body: {
     api_url: string;
     api_secret?: string;
-    use_mock: boolean;
     preagg_refresh: string;
     tenant_dimension?: string | null;
     timeout_seconds: number;
@@ -1162,10 +1158,26 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** 可选搬运工具及其能力（供物化弹窗选择）。 */
+  getSyncTools: () =>
+    request<{ default: SyncTool; tools: SyncToolInfo[] }>(
+      "/api/warehouse/sync-tools",
+    ),
   /** 本体一键物化：生成 DDL/ETL 并对目标数据源真正建表落数。需 publisher 角色。 */
   /** 编排物化的运行状态（Airflow DagRun）。仅 orchestrated 回执可查。 */
   getMaterializeStatus: (artifactId: string) =>
     request<MaterializeStatus>(`/api/warehouse/materialize/${artifactId}/status`),
+  /** M11：本次物化将上报的 源表→目标表 血缘（纯读）。 */
+  getMaterializeLineagePlan: (artifactId: string) =>
+    request<LineageEmitResult>(
+      `/api/warehouse/materialize/${artifactId}/lineage-plan`,
+    ),
+  /** M11：兜底上报表级血缘到 DataHub（插件缺位时用，重复幂等）。 */
+  emitMaterializeLineage: (artifactId: string) =>
+    request<LineageEmitResult>(
+      `/api/warehouse/materialize/${artifactId}/lineage`,
+      { method: "POST" },
+    ),
   materializeOntology: (ontologyId: string, body: MaterializeRequestInput) =>
     request<MaterializationRun>(
       `/api/ontologies/${ontologyId}/warehouse/materialize`,

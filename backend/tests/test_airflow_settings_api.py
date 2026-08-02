@@ -1,7 +1,7 @@
-"""Airflow 编排配置端点 + 物化运行状态端点。
+"""Airflow 编排连接配置端点 + 物化运行状态端点。
 
-凭据只回「是否已设 + 掩码」；``available`` 是「真的能用」而非「勾了启用」——
-少了投递目录就编排不了，此时必须诚实报 false，否则物化会在提交阶段才炸。
+凭据只回「是否已设 + 掩码」；``available`` 是「真的能用」（启用 + endpoint）而非仅「勾了启用」。
+投递目录不再入设置（属部署基础设施，由 config 给默认）。
 """
 
 from __future__ import annotations
@@ -27,11 +27,12 @@ def _reset_airflow(client, admin_headers):
 def test_defaults_to_disabled(client, admin_headers):
     body = client.get("/api/settings/airflow", headers=admin_headers).json()
     assert body["enabled"] is False
-    assert body["available"] is False  # 没配就是不可用，物化据此回落到 direct
+    assert body["available"] is False  # 没配就是不可用，物化会直接报错
     assert body["api_version"] == "v1"
 
 
-def test_enabled_without_dirs_is_not_available(client, admin_headers, tmp_path):
+def test_enabled_with_endpoint_is_available(client, admin_headers):
+    # 投递目录不再入设置（由 config 给默认），可用与否只看启用 + endpoint。
     r = client.put(
         "/api/settings/airflow",
         json={"endpoint": "http://airflow:8080", "enabled": True},
@@ -39,20 +40,15 @@ def test_enabled_without_dirs_is_not_available(client, admin_headers, tmp_path):
     )
     assert r.status_code == 200, r.text
     assert r.json()["enabled"] is True
-    # 勾了启用但没有 DAG 投递目录 → 编排不了，如实报 false
-    assert r.json()["available"] is False
+    assert r.json()["available"] is True
 
+    # 未启用 → 不可用，物化无法执行
     r = client.put(
         "/api/settings/airflow",
-        json={
-            "endpoint": "http://airflow:8080",
-            "dags_dir": str(tmp_path / "dags"),
-            "jobs_dir": str(tmp_path / "jobs"),
-            "enabled": True,
-        },
+        json={"endpoint": "http://airflow:8080", "enabled": False},
         headers=admin_headers,
     )
-    assert r.json()["available"] is True
+    assert r.json()["available"] is False
 
 
 def test_password_is_masked_and_preserved(client, admin_headers):
@@ -74,14 +70,14 @@ def test_password_is_masked_and_preserved(client, admin_headers):
     assert client.get("/api/settings/airflow", headers=admin_headers).json()["password_set"]
 
 
-def test_status_rejects_direct_mode_receipt(client, admin_headers):
-    """直连执行没有 DagRun 可查——明确报错，不返回一个空状态糊弄前端。"""
+def test_status_rejects_receipt_without_dagrun(client, admin_headers):
+    """回执里没 DagRun 信息（如旧的直连回执/提交未成功）——明确报错，不返回空状态糊弄前端。"""
     with SessionLocal() as db:
         artifact = GovernanceArtifact(
             kind="materialize",
-            name="直连物化",
+            name="无 DagRun 回执",
             status="succeeded",
-            execution_receipt_json=json.dumps({"execute_mode": "direct", "ok": True}),
+            execution_receipt_json=json.dumps({"ok": True}),
         )
         db.add(artifact)
         db.commit()
@@ -89,7 +85,7 @@ def test_status_rejects_direct_mode_receipt(client, admin_headers):
 
     r = client.get(f"/api/warehouse/materialize/{artifact_id}/status", headers=admin_headers)
     assert r.status_code == 400
-    assert "直连" in r.json()["detail"]
+    assert "DagRun" in r.json()["detail"]
 
 
 def test_status_404_for_unknown_artifact(client, admin_headers):

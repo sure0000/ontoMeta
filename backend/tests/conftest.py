@@ -14,10 +14,8 @@ for suffix in ("", "-wal", "-shm"):
 
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 os.environ["ONTOMETA_ADMIN_TOKEN"] = "test-admin-token"
-os.environ["USE_MOCK_DATAHUB"] = "true"
-os.environ["USE_MOCK_LLM"] = "true"
 os.environ["DEBUG"] = "true"
-# 避免本地 .env 中的真实 DataHub/LLM 干扰（env 已优先，此处显式清空可选）
+# 避免本地 .env 中的真实 DataHub/LLM 干扰：不配 api_key → 服务走确定性/报错路径，不发真实调用。
 os.environ.pop("OPENAI_API_KEY", None)
 
 import pytest

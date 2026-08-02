@@ -16,18 +16,20 @@ class Settings(BaseSettings):
     datahub_gms_url: str = "http://localhost:8080"
     datahub_frontend_url: str = "http://localhost:9002"
     datahub_token: str | None = None
-    use_mock_datahub: bool = False
+
+    # Airflow 编排的产物投递目录（方案 A：生成 DAG/作业配置文件 → Airflow 读共享卷）。
+    # 属部署基础设施（与 Airflow 容器的挂载点对齐），不在设置页配；缺省由
+    # settings_service 解析为 docker/orchestration 下的本地验证栈目录，可用环境变量覆盖。
+    airflow_dags_dir: str = ""
+    airflow_jobs_dir: str = ""
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
-    use_mock_llm: bool = True
     llm_timeout_seconds: float = 300.0
 
     # Cube 语义层（可选外挂）：ontoMeta 生成 Cube data model 并调用其 Load API。
-    # 未配置或 use_mock_cube=true 时走确定性 Mock，本地零依赖可跑。
     cube_api_url: str = "http://localhost:4000"
     cube_api_secret: str | None = None
-    use_mock_cube: bool = True
     cube_timeout_seconds: float = 30.0
     # 预聚合定时刷新间隔（交给 Cube Refresh Worker）
     cube_preagg_refresh: str = "1 hour"

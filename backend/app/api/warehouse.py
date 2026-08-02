@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import (
     agent_pipeline,
     datahub_writeback,
+    lineage_emitter,
     materialization_contract_service,
     settings_service,
     warehouse_generator,
@@ -125,6 +126,26 @@ def update_materialization_contract(
 
 
 # ---------- M3：本体 → 物理正向生成 ----------
+
+
+@router.get("/warehouse/sync-tools")
+def list_warehouse_sync_tools():
+    """可选搬运工具及其能力（供物化弹窗选择）。镜像与命令由各工具 Adapter 定。"""
+    from app.warehouse.jobs import get_job_adapter
+    from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL, list_sync_tools
+
+    tools = []
+    for name in list_sync_tools():
+        a = get_job_adapter(name)
+        tools.append(
+            {
+                "name": a.name,
+                "image": a.docker_image,
+                "modes": [m for m in ("full", "incremental", "cdc") if a.supports(m)],
+                "cdc": a.supports("cdc"),
+            }
+        )
+    return {"default": DEFAULT_SYNC_TOOL, "tools": tools}
 
 
 @router.get("/warehouse/engines")
@@ -286,9 +307,9 @@ def materialize_ontology(
         "database_overrides": payload.database_overrides,
         "table_overrides": payload.table_overrides,
         "load_strategy": payload.load_strategy,
+        "sync_tool": payload.sync_tool,
         "selected_targets": payload.selected_targets,
         "overrides": payload.overrides,
-        "execute_mode": payload.execute_mode,
     }
     try:
         artifact = agent_pipeline.draft(
@@ -334,10 +355,6 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
         receipt = json.loads(artifact.execution_receipt_json or "{}")
     except (TypeError, ValueError):
         receipt = {}
-    if receipt.get("execute_mode") != "orchestrated":
-        raise HTTPException(
-            status_code=400, detail="该物化为直连执行（开发模式），无调度运行状态可查"
-        )
 
     dag_id, run_id = receipt.get("dag_id"), receipt.get("dag_run_id")
     if not dag_id or not run_id:
@@ -413,3 +430,70 @@ def datahub_writeback_apply(ontology_id: str, db: Session = Depends(get_db)):
         return datahub_writeback.apply_sync(db, ontology_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------- M11：物化血缘兜底上报 ----------
+
+def _lineage_kwargs_from_artifact(artifact) -> dict:
+    """从物化制品的 spec 重建血缘计划入参。
+
+    血缘要与**实际物化的那一次**对应，故直接用制品落盘的 spec（引擎/库表
+    覆盖/勾选实体），而不是重新算一遍参数——后者可能与当时不一致。
+    """
+    import json
+
+    try:
+        spec = json.loads(artifact.spec_json or "{}")
+    except (TypeError, ValueError):
+        spec = {}
+    return {
+        "engine": spec.get("engine") or "hive",
+        "database_prefix": spec.get("database_prefix"),
+        "database_overrides": spec.get("database_overrides"),
+        "table_overrides": spec.get("table_overrides"),
+        "selected_targets": spec.get("selected_targets"),
+    }
+
+
+def _lineage_artifact(db: Session, artifact_id: str):
+    from app.models.agent import GovernanceArtifact
+
+    artifact = db.get(GovernanceArtifact, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="物化制品不存在")
+    if artifact.kind != "materialize":
+        raise HTTPException(status_code=400, detail="该制品不是物化制品，无血缘可上报")
+    ontology_id = None
+    try:
+        import json
+
+        ontology_id = (json.loads(artifact.spec_json or "{}") or {}).get("ontology_id")
+    except (TypeError, ValueError):
+        pass
+    ontology_id = ontology_id or artifact.ontology_id
+    if not ontology_id:
+        raise HTTPException(status_code=400, detail="制品未关联本体，无法上报血缘")
+    return artifact, ontology_id
+
+
+@router.get("/warehouse/materialize/{artifact_id}/lineage-plan")
+def materialize_lineage_plan(artifact_id: str, db: Session = Depends(get_db)):
+    """列出本次物化将上报的 源表→目标表 血缘。纯读，不触碰 DataHub。"""
+    artifact, ontology_id = _lineage_artifact(db, artifact_id)
+    plan = lineage_emitter.build_plan(
+        db, ontology_id, **_lineage_kwargs_from_artifact(artifact)
+    )
+    return plan.to_dict()
+
+
+@router.post("/warehouse/materialize/{artifact_id}/lineage")
+def materialize_lineage_apply(artifact_id: str, db: Session = Depends(get_db)):
+    """兜底上报本次物化的表级血缘到 DataHub。
+
+    主路径是 Airflow 插件自动上报；插件缺位/未接入时用本端口补。
+    两条路径产同一份 URN，重复上报幂等。
+    """
+    artifact, ontology_id = _lineage_artifact(db, artifact_id)
+    return lineage_emitter.apply_sync(
+        db, ontology_id, **_lineage_kwargs_from_artifact(artifact)
+    )

@@ -74,13 +74,13 @@ class MaterializeExecutor(Executor):
                 ontology_id,
                 target_datasource_id=spec["target_datasource_id"],
                 engine=spec.get("engine") or "hive",
+                sync_tool=spec.get("sync_tool"),
                 database_prefix=spec.get("database_prefix"),
                 database_overrides=spec.get("database_overrides"),
                 table_overrides=spec.get("table_overrides"),
                 load_strategy=spec.get("load_strategy"),
                 selected_targets=spec.get("selected_targets"),
                 overrides=spec.get("overrides"),
-                execute_mode=spec.get("execute_mode"),
                 # run_id 取制品 id：重复提交在 Airflow 侧因 run_id 冲突而幂等
                 artifact_id=context.get("artifact_id"),
             )

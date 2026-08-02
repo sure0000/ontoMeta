@@ -818,28 +818,23 @@ class ExpressionFormatterService:
 
     def __init__(self, runtime_config=None) -> None:
         if runtime_config is None:
-            self.use_mock = settings.use_mock_llm or not settings.openai_api_key
-            self.client = (
-                OpenAI(
-                    api_key=settings.openai_api_key,
-                    http_client=make_http_client(),
-                )
-                if not self.use_mock
-                else None
-            )
+            api_key = settings.openai_api_key
+            base_url = None
             self.model = settings.openai_model
         else:
-            self.use_mock = runtime_config.use_mock or not runtime_config.api_key
-            self.client = (
-                OpenAI(
-                    api_key=runtime_config.api_key,
-                    base_url=runtime_config.api_base_url,
-                    http_client=make_http_client(),
-                )
-                if not self.use_mock
-                else None
-            )
+            api_key = runtime_config.api_key
+            base_url = runtime_config.api_base_url
             self.model = runtime_config.model
+        # 未配置 LLM(无 api_key) → client=None：走确定性 ``_mock_format`` 组装 AST。
+        self.client = (
+            OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                http_client=make_http_client(),
+            )
+            if api_key
+            else None
+        )
 
     async def format(
         self,
@@ -862,7 +857,7 @@ class ExpressionFormatterService:
             raise ValueError("表达式草稿为空")
         refs = _resolve_refs(db, ontology.id, refs)
 
-        if self.use_mock:
+        if self.client is None:
             ast = _mock_format(segments, refs, logic_type, description)
         else:
             ast = await asyncio.to_thread(
