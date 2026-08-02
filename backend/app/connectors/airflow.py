@@ -91,14 +91,28 @@ class AirflowClient:
     # ---------- 操作 ----------
 
     def health(self) -> dict:
-        """健康检查走的是 ``/health``，不带 API 版本前缀。"""
+        """健康检查走的是 ``/health``（Airflow 2.x 无需鉴权、不带 API 版本前缀）。
+
+        与 ``_request`` 对齐：带上鉴权、原样带出错误体、非 JSON 也给可读错误。
+        反向代理/受保护部署下 ``/health`` 可能要鉴权或回登录页，否则测试按钮只会
+        吐一个没信息的 ``HTTP 4xx``（甚至抛未捕获的 ``ValueError``）。
+        """
         try:
-            response = self._client.get(f"{self.endpoint}/health", headers=self._headers())
+            response = self._client.get(
+                f"{self.endpoint}/health",
+                headers=self._headers(),
+                auth=self._auth if not self._token else None,
+            )
         except httpx.HTTPError as exc:
             raise AirflowError("health", exc) from exc
         if response.status_code >= 400:
-            raise AirflowError("health", f"HTTP {response.status_code}")
-        return response.json()
+            raise AirflowError("health", f"HTTP {response.status_code} {response.text[:300]}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise AirflowError(
+                "health", f"响应不是 JSON（可能是登录页/反向代理）：{response.text[:200]}"
+            ) from exc
 
     def unpause_dag(self, dag_id: str) -> dict:
         """新 DAG 默认可能是暂停态，触发前先取消暂停，否则 run 会一直排队不跑。"""
