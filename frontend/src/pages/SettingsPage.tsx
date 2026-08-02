@@ -1,4 +1,5 @@
 import {
+  ApiOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
   DeleteOutlined,
@@ -39,6 +40,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PrincipalsPanel } from "../components/PrincipalsPanel";
 import { AgentsPanel } from "../components/AgentsPanel";
+import { AirflowSettingsPanel } from "../components/AirflowSettingsPanel";
 import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
@@ -707,6 +709,20 @@ export function SettingsPage() {
               </span>
             ),
             children: <AgentsPanel />,
+          },
+          {
+            key: "airflow",
+            label: (
+              <span>
+                <ApiOutlined style={{ marginRight: 6 }} />
+                物化调度
+              </span>
+            ),
+            children: (
+              <SectionCard title="Airflow 编排配置" icon={<ApiOutlined />}>
+                <AirflowSettingsPanel />
+              </SectionCard>
+            ),
           },
           {
             key: "cube",

@@ -1,0 +1,139 @@
+# 物化编排验证栈：Airflow（调度 + 血缘上报）+ SeaTunnel（搬运）+ 可选 Doris（目标数仓）
+#
+# 本文件**只补齐本机缺的服务**。DataHub / ERPNext / Bigtop Manager 已在本机各自的 compose 里跑着，
+# 这里以 external network 接入，不重复起一套。
+#
+# 用法（仓库根目录）：
+#   make orch-preflight        # 先验镜像能否拉到（本机 Docker Hub 直连实测不通，需镜像源）
+#   make orch-up-airflow       # Airflow + 元数据库
+#   make orch-up-sync          # 追加 SeaTunnel
+#   make orch-up-warehouse     # 追加 Doris（目标数仓，镜像较大）
+#   make orch-down
+#
+# 端口（已避开本机 80/3306/3308/5180/8000/8080/8082/9002/9092/9200/15432 等占用）：
+#   Airflow Web   http://localhost:8081
+#   SeaTunnel Zeta REST        localhost:5801
+#   Doris FE HTTP http://localhost:8030   MySQL 协议 localhost:9030
+
+name: ontometa-orch
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow.Dockerfile
+    args:
+      AIRFLOW_IMAGE: ${IMG_AIRFLOW:-apache/airflow:2.10.5}
+      DATAHUB_PLUGIN_VERSION: ${DATAHUB_PLUGIN_VERSION:-1.6.0}
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    # DataHub 血缘上报：插件按此 conn_id 找 GMS。conn 本身由 airflow-init 用 GMS 地址创建。
+    AIRFLOW__DATAHUB__CONN_ID: datahub_rest_default
+    AIRFLOW__DATAHUB__CAPTURE_EXECUTIONS: "true"
+    # ontoMeta 侧 REST（回读/触发的反向调用，供 DAG Factory 备选方案用）
+    ONTOMETA_API: ${ONTOMETA_API:-http://host.docker.internal:8000}
+    ONTOMETA_ADMIN_TOKEN: ${ONTOMETA_ADMIN_TOKEN:-dev-admin-token-change-me}
+  volumes:
+    # ontoMeta 生成的 DAG 落在这里（对应方案 A：产物即制品，可 diff 可回滚）
+    - ${ORCH_DAGS_DIR:-./dags}:/opt/airflow/dags
+    - ${ORCH_JOBS_DIR:-./seatunnel/jobs}:/opt/seatunnel/jobs
+    - ./logs:/opt/airflow/logs
+    # DockerOperator 起 SeaTunnel 任务容器用；生产改走 SeaTunnel REST，届时可去掉
+    - /var/run/docker.sock:/var/run/docker.sock
+  networks: [orch, datahub, erpnext]
+
+services:
+  airflow-db:
+    image: ${IMG_POSTGRES:-postgres:16-alpine}
+    profiles: ["airflow", "all"]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - orch_airflow_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [orch]
+
+  # 一次性：建库、建管理员、登记 DataHub 与目标库连接。
+  airflow-init:
+    <<: *airflow-common
+    profiles: ["airflow", "all"]
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create --username admin --password admin \
+          --firstname a --lastname d --role Admin --email admin@example.com || true
+        airflow connections delete datahub_rest_default || true
+        airflow connections add datahub_rest_default \
+          --conn-type datahub-rest --conn-host "$${DATAHUB_GMS_URL}"
+        echo "airflow-init done"
+    environment:
+      <<: *airflow-env
+      DATAHUB_GMS_URL: ${DATAHUB_GMS_URL:-http://datahub-datahub-gms-quickstart-1:8080}
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+
+  airflow:
+    <<: *airflow-common
+    profiles: ["airflow", "all"]
+    command: standalone
+    ports:
+      - "8081:8080"
+    environment:
+      <<: *airflow-env
+      DATAHUB_GMS_URL: ${DATAHUB_GMS_URL:-http://datahub-datahub-gms-quickstart-1:8080}
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  # 常驻实例，供手工调试与（可选）Zeta REST 提交；Airflow 的每个搬运任务默认另起一次性容器。
+  seatunnel:
+    image: ${IMG_SEATUNNEL:-apache/seatunnel:2.3.11}
+    profiles: ["sync", "all"]
+    command: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ${ORCH_JOBS_DIR:-./seatunnel/jobs}:/opt/seatunnel/jobs
+    ports:
+      - "5801:5801"
+    networks: [orch, datahub, erpnext]
+
+  # 目标数仓。与仓库既有 Doris Dialect Adapter 对齐，单容器、MySQL 线协议便于校验建表结果。
+  doris:
+    image: ${IMG_DORIS:-apache/doris:doris-all-in-one-2.1.0}
+    profiles: ["warehouse", "all"]
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+      - "8040:8040"
+    volumes:
+      - orch_doris:/opt/apache-doris
+    networks: [orch]
+
+networks:
+  orch:
+  # 已在本机运行的栈，直接接入，不重起。缺任一网络时用 `docker network ls` 核对实际名字。
+  datahub:
+    external: true
+    name: ${DATAHUB_NETWORK:-datahub_network}
+  erpnext:
+    external: true
+    name: ${ERPNEXT_NETWORK:-erpnext_frappe_network}
+
+volumes:
+  orch_airflow_pg:
+  orch_doris:

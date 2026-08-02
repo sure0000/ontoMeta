@@ -28,8 +28,9 @@ import re
 from typing import Any
 
 import sqlparse
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect as sa_inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import NoSuchModuleError
 
 from app.warehouse import get_adapter
 
@@ -89,6 +90,33 @@ def _get_engine(dsn: str) -> Engine:
         engine = create_engine(dsn, pool_pre_ping=True)
         _engine_cache[dsn] = engine
     return engine
+
+
+# 数仓/数据库驱动按需自行安装（见 requirements.txt 末尾），未装时提示装哪个包。
+_DRIVER_HINTS: dict[str, str] = {
+    "mysql": "pymysql",
+    "doris": "pymysql",
+    "starrocks": "pymysql",
+    "postgres": "psycopg[binary]",
+    "hive": '"pyhive[hive]" thrift thrift-sasl',
+    "kyuubi": '"pyhive[hive]" thrift thrift-sasl',
+    "clickhouse": "clickhouse-sqlalchemy",
+    "duckdb": "duckdb-engine",
+}
+
+
+def _engine_or_error(dsn: str) -> Engine:
+    """建引擎；驱动缺失是部署问题而非代码错误，给出装哪个包的可执行提示。
+
+    ``create_engine`` 会立即导入 DBAPI，故驱动没装时在这里就炸——不接住会以 500
+    暴露 ``ModuleNotFoundError``，用户看不出要装什么。
+    """
+    try:
+        return _get_engine(dsn)
+    except (ImportError, NoSuchModuleError) as exc:
+        hint = _DRIVER_HINTS.get(_backend_of(dsn))
+        install = f"；请在后端环境安装：pip install {hint}" if hint else ""
+        raise ExecutionError(f"缺少该数据源的数据库驱动（{exc}）{install}") from exc
 
 
 def is_read_only(sql: str) -> tuple[bool, str | None]:
@@ -207,7 +235,7 @@ def execute_sql(
     prepared = _translate_dialect(prepared, backend)
     prepared = _ensure_limit(prepared, limit)
 
-    engine = _get_engine(dsn)
+    engine = _engine_or_error(dsn)
     try:
         with engine.connect() as conn:
             if backend == "postgres":
@@ -261,7 +289,7 @@ def execute_write(
     error: str | None = None
 
     try:
-        engine = _get_engine(dsn)
+        engine = _engine_or_error(dsn)
         with engine.begin() as conn:
             if backend == "postgres":
                 conn.exec_driver_sql(
@@ -301,3 +329,53 @@ def execute_write(
         "error": error,
         "per_statement": per_statement,
     }
+
+
+# 各引擎的系统库，物化目标里没有意义，列表中直接滤掉。
+_SYSTEM_SCHEMAS = {
+    "information_schema",
+    "performance_schema",
+    "mysql",
+    "sys",
+    "pg_catalog",
+    "pg_toast",
+    "__internal_schema",  # Doris / StarRocks
+    "_statistics_",
+    "system",  # ClickHouse
+}
+
+
+def list_databases(dsn: str) -> list[str]:
+    """列出目标源上的库（schema）名，供物化时选落库位置。
+
+    走 SQLAlchemy Inspector（各方言自己知道该查什么），失败再退到 ``SHOW DATABASES``
+    ——数仓引擎的方言实现参差，退化一次好过让用户面对空列表。
+    """
+    engine = _engine_or_error(dsn)
+    names: list[str] = []
+    try:
+        names = list(sa_inspect(engine).get_schema_names())
+    except Exception as exc:  # noqa: BLE001 —— 方言不支持 get_schema_names
+        logger.info("get_schema_names unsupported, falling back to SHOW DATABASES: %s", exc)
+        try:
+            with engine.connect() as conn:
+                names = [str(row[0]) for row in conn.exec_driver_sql("SHOW DATABASES")]
+        except Exception as exc2:  # noqa: BLE001
+            raise ExecutionError(f"读取库列表失败：{exc2}") from exc2
+    return sorted(n for n in names if n and n.lower() not in _SYSTEM_SCHEMAS)
+
+
+def list_tables(dsn: str, database: str | None = None) -> list[str]:
+    """列出某个库下的表名（含视图），供物化时推荐表名与提示「已存在」。"""
+    engine = _engine_or_error(dsn)
+    schema = (database or "").strip() or None
+    try:
+        inspector = sa_inspect(engine)
+        names = set(inspector.get_table_names(schema=schema))
+        try:
+            names |= set(inspector.get_view_names(schema=schema))
+        except Exception:  # noqa: BLE001 —— 视图列举非必需，取不到就只给表
+            pass
+    except Exception as exc:  # noqa: BLE001
+        raise ExecutionError(f"读取表列表失败：{exc}") from exc
+    return sorted(names)

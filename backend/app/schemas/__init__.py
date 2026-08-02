@@ -156,6 +156,8 @@ from app.schemas.ontology import (
     VersionSnapshotOut,
 )
 from app.schemas.settings import (
+    AirflowSettingsOut,
+    AirflowSettingsUpdate,
     CubeSettingsOut,
     CubeSettingsUpdate,
     DatahubSettingsOut,
@@ -288,6 +290,8 @@ __all__ = [
     "LlmConnectionTestResult",
     "DatahubSettingsOut",
     "DatahubSettingsUpdate",
+    "AirflowSettingsOut",
+    "AirflowSettingsUpdate",
     "CubeSettingsOut",
     "CubeSettingsUpdate",
     "DraftGenerationSettingsOut",

@@ -26,7 +26,11 @@ class MaterializeDrafter(Drafter):
             "target_datasource_id": context["target_datasource_id"],
             "engine": context.get("engine") or "hive",
             "database_prefix": context.get("database_prefix"),
+            "database_overrides": dict(context.get("database_overrides") or {}),
+            "table_overrides": dict(context.get("table_overrides") or {}),
             "load_strategy": context.get("load_strategy"),
+            # orchestrated（默认，交 Airflow 编排）/ direct（直连落库，开发模式）
+            "execute_mode": context.get("execute_mode"),
             "selected_targets": list(context.get("selected_targets") or []) or None,
             "overrides": dict(context.get("overrides") or {}),
         }

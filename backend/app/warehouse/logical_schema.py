@@ -42,10 +42,20 @@ class LogicalTable:
     constraints: tuple[LogicalConstraint, ...] = ()
     partition_key: str | None = None
     scd_type: str = "none"
+    # 该表自身的装载方式（来自物化契约）。生成 ETL 时逐表生效，除非调用方给了全局覆盖。
+    load_strategy: str = "full"
+    # 承载该表的本体实体技术名。``name`` 是物理表名，可被人工改写（物化弹窗里指定表名），
+    # 而回溯本体（取源表 / 字段映射）必须用实体名，故两者分开存。空 = 与 ``name`` 同。
+    entity_name: str | None = None
 
     @property
     def qualified_name(self) -> str:
         return f"{self.database}.{self.name}" if self.database else self.name
+
+    @property
+    def source_name(self) -> str:
+        """回溯本体实体时用的键（物理表名被改写后仍指得回原实体）。"""
+        return self.entity_name or self.name
 
     def column(self, name: str) -> LogicalColumn | None:
         return next((c for c in self.columns if c.name == name), None)

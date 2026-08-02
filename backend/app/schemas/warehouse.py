@@ -59,7 +59,15 @@ class MaterializeRequest(BaseModel):
     target_datasource_id: str = Field(description="目标存储（DataSource）id，其 dsn 即落库连接串")
     engine: str = Field("hive", description="目标数仓引擎（决定 DDL/ETL 方言）")
     database_prefix: str | None = Field(
-        None, description="库名后缀，如 erp → dim_erp"
+        None, description="库名后缀，如 erp → dim_erp；被 database_overrides 命中的层不受其影响"
+    )
+    database_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        description="{分层: 目标库名}，人工指定该层落到哪个库；缺省按「层[_前缀]」生成",
+    )
+    table_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        description="{contract_id: 物理表名}，人工指定的表名；缺省用实体技术名",
     )
     load_strategy: str | None = Field(
         None,
@@ -71,6 +79,10 @@ class MaterializeRequest(BaseModel):
     overrides: dict[str, dict] = Field(
         default_factory=dict,
         description="{contract_id: {字段: 值}} 人工覆盖的存储策略/层/表名等，写回契约并钉住",
+    )
+    execute_mode: str | None = Field(
+        None,
+        description="orchestrated=交 Airflow 编排（默认）；direct=ontoMeta 直连落库（开发模式）",
     )
     intent: str | None = None
     operator: str | None = None

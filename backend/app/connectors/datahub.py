@@ -395,6 +395,23 @@ def _extract_dataset_name(urn: str) -> str:
     return urn
 
 
+def _extract_platform(urn: str) -> str | None:
+    """从 dataset URN 取源平台，如 ``mariadb``。
+
+    URN 形如 ``urn:li:dataset:(urn:li:dataPlatform:mariadb,db.tab,PROD)``。
+    平台决定搬运作业用哪个连接器（见 ``app/warehouse/jobs/``），取不到即返回 None，
+    由调用方显式处理，不猜一个默认值。
+    """
+    if not urn or not urn.startswith("urn:li:dataset:"):
+        return None
+    inner = urn[len("urn:li:dataset:") :]
+    if not (inner.startswith("(") and inner.endswith(")")):
+        return None
+    head = inner[1:-1].split(",")[0]
+    prefix = "urn:li:dataPlatform:"
+    return head[len(prefix) :] or None if head.startswith(prefix) else None
+
+
 def _extract_container_name(raw: dict) -> str | None:
     container = raw.get("container") or {}
     props = container.get("properties") or {}

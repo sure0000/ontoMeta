@@ -114,6 +114,40 @@ class CubeSettingsOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AirflowSettingsOut(BaseModel):
+    """Airflow 编排配置。凭据只回传「是否已设 + 掩码」，不回明文。"""
+
+    endpoint: str
+    username: str | None = None
+    password_set: bool = False
+    password_hint: str | None = None
+    token_set: bool = False
+    api_version: str
+    dags_dir: str
+    jobs_dir: str
+    warehouse_conn_id: str
+    seatunnel_image: str
+    enabled: bool
+    # 启用且投递目录齐全才算真的可用；否则物化回落到 direct 开发模式。
+    available: bool
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AirflowSettingsUpdate(BaseModel):
+    endpoint: str
+    username: str | None = None
+    password: str | None = None  # 不传 = 保留原值
+    token: str | None = None
+    api_version: str = "v1"
+    dags_dir: str = ""
+    jobs_dir: str = ""
+    warehouse_conn_id: str = "warehouse_default"
+    seatunnel_image: str = "apache/seatunnel:2.3.11"
+    enabled: bool = False
+
+
 class CubeSettingsUpdate(BaseModel):
     api_url: str
     api_secret: str | None = None

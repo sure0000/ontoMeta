@@ -40,7 +40,13 @@ from app.models.agent import (
     HIGH_RISK_KINDS,
 )
 from app.models.principal import Principal, Role, role_rank, role_satisfies
-from app.models.settings import DatahubSetting, DraftGenerationSetting, LlmServiceConfig, CubeSetting
+from app.models.settings import (
+    AirflowSetting,
+    CubeSetting,
+    DatahubSetting,
+    DraftGenerationSetting,
+    LlmServiceConfig,
+)
 from app.models.warehouse import (
     LoadStrategy,
     MaterializationContract,
@@ -69,6 +75,7 @@ __all__ = [
     "EntityChangeLog",
     "DraftGenerationTask",
     "LlmServiceConfig",
+    "AirflowSetting",
     "DatahubSetting",
     "DraftGenerationSetting",
     "CubeSetting",

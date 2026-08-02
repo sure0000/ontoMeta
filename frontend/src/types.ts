@@ -571,6 +571,24 @@ export interface CubeSettings {
   updated_at: string;
 }
 
+/** Airflow 编排配置。凭据只回「是否已设 + 掩码」，不回明文。 */
+export interface AirflowSettings {
+  endpoint: string;
+  username?: string | null;
+  password_set: boolean;
+  password_hint?: string | null;
+  token_set: boolean;
+  api_version: string;
+  dags_dir: string;
+  jobs_dir: string;
+  warehouse_conn_id: string;
+  seatunnel_image: string;
+  enabled: boolean;
+  /** 启用且投递目录齐全才算真的可用；否则物化回落到 direct 开发模式。 */
+  available: boolean;
+  updated_at: string;
+}
+
 export interface ChatBiConversation {
   id: string;
   domain_id: string;
@@ -1015,24 +1033,56 @@ export interface MaterializationPhaseReceipt {
 
 export interface MaterializationReceipt {
   ontology_id: string;
+  /** orchestrated=交 Airflow 编排（默认）；direct=ontoMeta 直连落库（开发模式）。 */
+  execute_mode?: "orchestrated" | "direct";
   target_datasource: { id: string; name: string; kind: string };
   engine: string;
   database_prefix?: string | null;
   tables: string[];
-  ddl: MaterializationPhaseReceipt;
-  etl: MaterializationPhaseReceipt;
+  /** 以下两段仅 direct 模式有：编排模式下落库由 Airflow 执行，成败看 DagRun。 */
+  ddl?: MaterializationPhaseReceipt;
+  etl?: MaterializationPhaseReceipt;
+  /** 以下为 orchestrated 模式的提交回执。 */
+  dag_id?: string;
+  dag_run_id?: string;
+  state?: string;
+  run_url?: string;
+  schedule?: string | null;
+  jobs?: string[];
+  artifacts?: Record<string, string>;
+  error?: string | null;
+  schema_notes?: { target: string; reason: string }[];
   warnings?: { target: string; feature: string; detail: string }[];
   unsupported?: { target: string; reason: string }[];
   ok: boolean;
+}
+
+/** 编排物化的运行状态（轮询 status 端点获得；权威在 Airflow，前端不缓存）。 */
+export interface MaterializeStatus {
+  artifact_id: string;
+  dag_id: string;
+  dag_run_id: string;
+  state: string | null;
+  terminal: boolean;
+  start_date?: string | null;
+  end_date?: string | null;
+  run_url: string;
+  tasks: { task_id: string; state: string | null; try_number?: number }[];
 }
 
 export interface MaterializeRequestInput {
   target_datasource_id: string;
   engine: string;
   database_prefix?: string | null;
+  /** 分层 → 目标库名；命中的层不再按「层[_前缀]」生成库名。 */
+  database_overrides?: Record<string, string>;
+  /** 契约 id → 物理表名；缺省用实体技术名。 */
+  table_overrides?: Record<string, string>;
   load_strategy?: MaterializationLoadStrategy | null;
   selected_targets?: string[] | null;
   overrides?: Record<string, MaterializationContractUpdateInput>;
+  /** 缺省由后端决定：配了 Airflow 走 orchestrated，否则 direct。 */
+  execute_mode?: "orchestrated" | "direct";
   intent?: string;
   operator?: string;
 }

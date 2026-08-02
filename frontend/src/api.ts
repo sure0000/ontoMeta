@@ -19,6 +19,7 @@ import type {
   ChatBiSuggestions,
   Confirmation,
   DataHubDatasetOption,
+  AirflowSettings,
   DatahubSettings,
   CubeSettings,
   DomainContext,
@@ -50,6 +51,7 @@ import type {
   MaterializationTargetKind,
   MaterializationRun,
   MaterializeRequestInput,
+  MaterializeStatus,
   Principal,
   PrincipalCreated,
   PrincipalRole,
@@ -681,6 +683,28 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  getAirflowSettings: () => request<AirflowSettings>("/api/settings/airflow"),
+  updateAirflowSettings: (body: {
+    endpoint: string;
+    username?: string | null;
+    password?: string;
+    token?: string;
+    api_version: string;
+    dags_dir: string;
+    jobs_dir: string;
+    warehouse_conn_id: string;
+    seatunnel_image: string;
+    enabled: boolean;
+  }) =>
+    request<AirflowSettings>("/api/settings/airflow", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  testAirflowConnection: () =>
+    request<{ ok: boolean; health: Record<string, unknown> }>("/api/settings/airflow/test", {
+      method: "POST",
+    }),
+
   getCubeSettings: () => request<CubeSettings>("/api/settings/cube"),
   updateCubeSettings: (body: {
     api_url: string;
@@ -1009,6 +1033,13 @@ export const api = {
     request<{ status: string }>(`/api/data-sources/${id}`, { method: "DELETE" }),
   testDataSource: (id: string) =>
     request<DataSource>(`/api/data-sources/${id}/test`, { method: "POST" }),
+  // 目标源内省：物化时选落库位置 / 推荐表名用。
+  listDataSourceDatabases: (id: string) =>
+    request<{ databases: string[] }>(`/api/data-sources/${id}/databases`),
+  listDataSourceTables: (id: string, database?: string) => {
+    const qs = database ? `?database=${encodeURIComponent(database)}` : "";
+    return request<{ tables: string[] }>(`/api/data-sources/${id}/tables${qs}`);
+  },
 
   // Widgets（可复用图表资产）
   listWidgets: (params?: { domainId?: string; q?: string; widgetType?: string }) => {
@@ -1132,6 +1163,9 @@ export const api = {
     }),
 
   /** 本体一键物化：生成 DDL/ETL 并对目标数据源真正建表落数。需 publisher 角色。 */
+  /** 编排物化的运行状态（Airflow DagRun）。仅 orchestrated 回执可查。 */
+  getMaterializeStatus: (artifactId: string) =>
+    request<MaterializeStatus>(`/api/warehouse/materialize/${artifactId}/status`),
   materializeOntology: (ontologyId: string, body: MaterializeRequestInput) =>
     request<MaterializationRun>(
       `/api/ontologies/${ontologyId}/warehouse/materialize`,

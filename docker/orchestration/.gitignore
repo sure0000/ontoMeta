@@ -1,0 +1,6 @@
+.env
+logs/
+dags/*
+!dags/.gitkeep
+seatunnel/jobs/*
+!seatunnel/jobs/.gitkeep

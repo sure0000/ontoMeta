@@ -86,6 +86,28 @@ def test_data_source(ds_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/data-sources/{ds_id}/databases")
+def list_data_source_databases(ds_id: str, db: Session = Depends(get_db)):
+    """目标源上的库列表，供物化弹窗选落库位置。"""
+    try:
+        return {"databases": data_app_service.list_databases(db, ds_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/data-sources/{ds_id}/tables")
+def list_data_source_tables(
+    ds_id: str,
+    database: str | None = Query(None, description="库名；缺省用连接串里的默认库"),
+    db: Session = Depends(get_db),
+):
+    """某个库下已有的表，供物化弹窗推荐表名并提示「已存在」。"""
+    try:
+        return {"tables": data_app_service.list_tables(db, ds_id, database)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ------------------------------------------------------------------ data apps
 
 

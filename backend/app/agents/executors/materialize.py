@@ -30,13 +30,20 @@ class MaterializeExecutor(Executor):
         selected = set(spec.get("selected_targets") or []) or None
         with SessionLocal() as db:
             ddl = _generator.generate_ddl(
-                db, ontology_id, engine, database_prefix=spec.get("database_prefix")
+                db,
+                ontology_id,
+                engine,
+                database_prefix=spec.get("database_prefix"),
+                database_overrides=spec.get("database_overrides"),
+                table_overrides=spec.get("table_overrides"),
             )
             etl = _generator.generate_etl_sql(
                 db,
                 ontology_id,
                 engine,
                 database_prefix=spec.get("database_prefix"),
+                database_overrides=spec.get("database_overrides"),
+                table_overrides=spec.get("table_overrides"),
                 load_strategy=spec.get("load_strategy"),
             )
         return {
@@ -68,8 +75,13 @@ class MaterializeExecutor(Executor):
                 target_datasource_id=spec["target_datasource_id"],
                 engine=spec.get("engine") or "hive",
                 database_prefix=spec.get("database_prefix"),
+                database_overrides=spec.get("database_overrides"),
+                table_overrides=spec.get("table_overrides"),
                 load_strategy=spec.get("load_strategy"),
                 selected_targets=spec.get("selected_targets"),
                 overrides=spec.get("overrides"),
+                execute_mode=spec.get("execute_mode"),
+                # run_id 取制品 id：重复提交在 Airflow 侧因 run_id 冲突而幂等
+                artifact_id=context.get("artifact_id"),
             )
         return receipt

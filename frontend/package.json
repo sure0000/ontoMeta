@@ -17,9 +17,11 @@
     "@floating-ui/react": "^0.27.19",
     "@types/react-grid-layout": "^1.3.6",
     "antd": "^6.5.0",
+    "cronstrue": "^3.24.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-grid-layout": "^2.2.3",
+    "react-grid-layout": "^2.2.4",
+    "react-js-cron": "^6.0.2",
     "react-router-dom": "^7.1.0"
   },
   "devDependencies": {

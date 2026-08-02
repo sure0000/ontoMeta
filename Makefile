@@ -1,7 +1,8 @@
 # ontoMeta 本地开发常用命令（Batch B0 / B2 / B3）
 # 用法：在仓库根目录执行 make <target>
 
-.PHONY: help install install-backend install-frontend backend frontend health migrate test compose-up compose-down start stop restart status
+.PHONY: help install install-backend install-frontend backend frontend health migrate test compose-up compose-down start stop restart status \
+	orch-preflight orch-up-airflow orch-up-sync orch-up-warehouse orch-up-all orch-down orch-logs
 
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 BACKEND := $(ROOT)backend
@@ -23,6 +24,12 @@ help:
 	@echo "  make status            查看服务状态"
 	@echo "  make compose-up        docker compose up --build -d"
 	@echo "  make compose-down      docker compose down"
+	@echo "  --- 物化编排验证栈 ---"
+	@echo "  make orch-preflight    起栈前检查（镜像/网络/端口/已有服务）"
+	@echo "  make orch-up-airflow   起 Airflow（含 DataHub 血缘插件）"
+	@echo "  make orch-up-sync      起 SeaTunnel"
+	@echo "  make orch-up-warehouse 起 Doris（目标数仓）"
+	@echo "  make orch-down         停整个编排栈"
 
 install: install-backend install-frontend
 
@@ -70,3 +77,27 @@ compose-up:
 
 compose-down:
 	docker compose down
+
+# ---- 物化编排验证栈（Airflow + SeaTunnel + 可选 Doris），见 docker/orchestration/README.md ----
+ORCH := docker compose -f $(ROOT)docker/orchestration/docker-compose.yml
+
+orch-preflight:
+	@bash "$(ROOT)docker/orchestration/preflight.sh"
+
+orch-up-airflow: orch-preflight
+	$(ORCH) --profile airflow up -d --build
+
+orch-up-sync:
+	$(ORCH) --profile sync up -d
+
+orch-up-warehouse:
+	$(ORCH) --profile warehouse up -d
+
+orch-up-all: orch-preflight
+	$(ORCH) --profile all up -d --build
+
+orch-down:
+	$(ORCH) --profile all down
+
+orch-logs:
+	$(ORCH) --profile all logs -f --tail=100

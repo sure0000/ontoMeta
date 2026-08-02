@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.connectors.datahub import _extract_dataset_name
+from app.connectors.datahub import _extract_dataset_name, _field_path
 from app.models import (
     BusinessLogic,
     MaterializationContract,
@@ -40,6 +40,47 @@ from app.warehouse import (
 
 # 缺乏证据时的外键回退约定，与 connectors/cube.py 保持一致。
 _DEFAULT_REF_COLUMN = "id"
+
+
+def _physical_field(source_field_ref: str | None) -> str | None:
+    """``Property.source_field_ref`` → 物理列名。
+
+    回采写入的是 DataHub 的 schemaField 标识，形如
+    ``urn:li:dataset:(urn:li:dataPlatform:mariadb,db.tab,PROD)#doctype``——
+    直接当列名用会生成 ``SELECT `urn:li:dataset:(...)#doctype` AS ...`` 这种必然报错的 SQL。
+    取 ``#`` 之后的字段路径，再按 ``connectors/datahub._field_path`` 的既有约定取末段。
+    """
+    ref = (source_field_ref or "").strip()
+    if not ref:
+        return None
+    if "#" in ref:
+        ref = ref.rpartition("#")[2]
+    return _field_path(ref) or None
+
+
+@dataclass(frozen=True)
+class TargetNaming:
+    """目标物理命名策略：库名与表名怎么定。
+
+    默认沿用「层[_前缀].实体名」的机器约定；物化弹窗里人工选的目标库、改的表名以
+    ``databases`` / ``tables`` 覆盖之——覆盖只作用于本次生成（不写回契约），故 DDL、
+    ETL、外键引用都由同一个 plan 派生，三者名字必然一致。
+    """
+
+    prefix: str | None = None
+    # 层（dim/dwd/ads）→ 目标库名。命中则完全取代「层[_前缀]」。
+    databases: dict[str, str] = field(default_factory=dict)
+    # 物化契约 id → 物理表名。命中则取代实体技术名。
+    tables: dict[str, str] = field(default_factory=dict)
+
+    def database_of(self, layer: str) -> str:
+        override = (self.databases.get(layer) or "").strip()
+        if override:
+            return override
+        return f"{layer}_{self.prefix}" if self.prefix else layer
+
+    def table_of(self, contract: MaterializationContract, default: str) -> str:
+        return (self.tables.get(contract.id) or "").strip() or default
 
 
 @dataclass
@@ -137,9 +178,24 @@ class WarehouseGenerator:
     # ---------- 编译 ----------
 
     def build_logical_schema(
-        self, db: Session, ontology_id: str, *, database_prefix: str | None = None
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        database_prefix: str | None = None,
+        database_overrides: dict[str, str] | None = None,
+        table_overrides: dict[str, str] | None = None,
     ) -> LogicalPlan:
-        """本体 + 物化契约 → 引擎无关的 LogicalSchema。"""
+        """本体 + 物化契约 → 引擎无关的 LogicalSchema。
+
+        ``database_overrides``（层 → 库名）与 ``table_overrides``（契约 id → 表名）
+        是物化弹窗里人工指定的落库位置，见 {@link TargetNaming}。
+        """
+        naming = TargetNaming(
+            prefix=database_prefix,
+            databases=dict(database_overrides or {}),
+            tables=dict(table_overrides or {}),
+        )
         objects = (
             db.query(ObjectType)
             .options(joinedload(ObjectType.properties))
@@ -166,7 +222,7 @@ class WarehouseGenerator:
 
         # ---- 对象 → 表 ----
         fks_by_object = self._foreign_keys_by_object(
-            relations, obj_by_id, contracts, database_prefix, plan
+            relations, obj_by_id, contracts, naming, plan
         )
         for obj in objects:
             contract = contracts.get((TargetKind.OBJECT_TYPE.value, obj.id))
@@ -177,21 +233,17 @@ class WarehouseGenerator:
                 continue
             tables.append(
                 self._object_to_table(
-                    obj, contract, fks_by_object.get(obj.id, []), database_prefix, plan
+                    obj, contract, fks_by_object.get(obj.id, []), naming, plan
                 )
             )
 
         # ---- 关系（事实表/桥表）→ 表 ----
         tables.extend(
-            self._relation_tables(
-                relations, obj_by_id, contracts, database_prefix, plan
-            )
+            self._relation_tables(relations, obj_by_id, contracts, naming, plan)
         )
 
         # ---- 业务逻辑 → ADS ----
-        tables.extend(
-            self._logic_tables(db, ontology_id, contracts, database_prefix, plan)
-        )
+        tables.extend(self._logic_tables(db, ontology_id, contracts, naming, plan))
 
         plan.schema = LogicalSchema(
             ontology_id=ontology_id,
@@ -199,15 +251,12 @@ class WarehouseGenerator:
         )
         return plan
 
-    def _database_of(self, layer: str, prefix: str | None) -> str:
-        return f"{layer}_{prefix}" if prefix else layer
-
     def _object_to_table(
         self,
         obj: ObjectType,
         contract: MaterializationContract,
         foreign_keys: list[LogicalConstraint],
-        prefix: str | None,
+        naming: TargetNaming,
         plan: LogicalPlan,
     ) -> LogicalTable:
         columns = tuple(
@@ -230,14 +279,16 @@ class WarehouseGenerator:
         constraints.extend(foreign_keys)
 
         return LogicalTable(
-            name=obj.name,
-            database=self._database_of(contract.target_layer, prefix),
+            name=naming.table_of(contract, obj.name),
+            entity_name=obj.name,
+            database=naming.database_of(contract.target_layer),
             layer=contract.target_layer,
             comment=_comment_of(obj.display_name, obj.description),
             columns=columns,
             constraints=tuple(constraints),
             partition_key=contract.partition_key,
             scd_type=contract.scd_type,
+            load_strategy=contract.load_strategy,
         )
 
     @staticmethod
@@ -257,7 +308,7 @@ class WarehouseGenerator:
         relations: list[RelationType],
         obj_by_id: dict[str, ObjectType],
         contracts: dict,
-        prefix: str | None,
+        naming: TargetNaming,
         plan: LogicalPlan,
     ) -> dict[str, list[LogicalConstraint]]:
         """外键型关系 → 源对象上的外键声明。
@@ -299,12 +350,13 @@ class WarehouseGenerator:
                 or self._primary_key_of(tgt)
                 or _DEFAULT_REF_COLUMN
             )
-            ref_db = self._database_of(tgt_contract.target_layer, prefix)
+            ref_db = naming.database_of(tgt_contract.target_layer)
+            ref_table = naming.table_of(tgt_contract, tgt.name)
             out.setdefault(src.id, []).append(
                 LogicalConstraint(
                     kind="foreign_key",
                     columns=(str(fk),),
-                    ref_table=f"{ref_db}.{tgt.name}",
+                    ref_table=f"{ref_db}.{ref_table}",
                     ref_columns=(str(ref_col),),
                 )
             )
@@ -317,7 +369,7 @@ class WarehouseGenerator:
         relations: list[RelationType],
         obj_by_id: dict[str, ObjectType],
         contracts: dict,
-        prefix: str | None,
+        naming: TargetNaming,
         plan: LogicalPlan,
     ) -> list[LogicalTable]:
         """事实表/桥表型关系 → DWD 明细表，列取自其实现表。"""
@@ -356,8 +408,9 @@ class WarehouseGenerator:
                 comment_bits.append(f"{src.display_name} → {tgt.display_name}")
             tables.append(
                 LogicalTable(
-                    name=impl.name,
-                    database=self._database_of(contract.target_layer, prefix),
+                    name=naming.table_of(contract, impl.name),
+                    entity_name=impl.name,
+                    database=naming.database_of(contract.target_layer),
                     layer=contract.target_layer,
                     comment=" · ".join(comment_bits),
                     columns=tuple(
@@ -372,6 +425,7 @@ class WarehouseGenerator:
                     ),
                     partition_key=contract.partition_key,
                     scd_type=contract.scd_type,
+                    load_strategy=contract.load_strategy,
                 )
             )
         return tables
@@ -381,7 +435,7 @@ class WarehouseGenerator:
         db: Session,
         ontology_id: str,
         contracts: dict,
-        prefix: str | None,
+        naming: TargetNaming,
         plan: LogicalPlan,
     ) -> list[LogicalTable]:
         """业务逻辑 → ADS 指标表。
@@ -408,8 +462,9 @@ class WarehouseGenerator:
                 continue
             tables.append(
                 LogicalTable(
-                    name=logic.name,
-                    database=self._database_of(contract.target_layer, prefix),
+                    name=naming.table_of(contract, logic.name),
+                    entity_name=logic.name,
+                    database=naming.database_of(contract.target_layer),
                     layer=contract.target_layer,
                     comment=_comment_of(logic.display_name, logic.expression_summary),
                     columns=(
@@ -420,6 +475,7 @@ class WarehouseGenerator:
                     ),
                     partition_key="stat_date",
                     scd_type=contract.scd_type,
+                    load_strategy=contract.load_strategy,
                 )
             )
         return tables
@@ -433,9 +489,15 @@ class WarehouseGenerator:
         engine: str,
         *,
         database_prefix: str | None = None,
+        database_overrides: dict[str, str] | None = None,
+        table_overrides: dict[str, str] | None = None,
     ) -> dict:
         plan = self.build_logical_schema(
-            db, ontology_id, database_prefix=database_prefix
+            db,
+            ontology_id,
+            database_prefix=database_prefix,
+            database_overrides=database_overrides,
+            table_overrides=table_overrides,
         )
         adapter = get_adapter(engine)
         statements: dict[str, str] = {}
@@ -469,36 +531,52 @@ class WarehouseGenerator:
         engine: str,
         *,
         database_prefix: str | None = None,
+        database_overrides: dict[str, str] | None = None,
+        table_overrides: dict[str, str] | None = None,
         load_strategy: str | None = None,
+        per_contract_strategy: bool = False,
     ) -> dict:
         """ODS → 目标层的字段映射 SQL。
 
         源表由 ``ObjectType.source_ref``（DataHub URN）定位；列映射用
         ``Property.source_field_ref``，缺失时回退同名字段（真实源常无此字段）。
 
-        ``load_strategy`` 决定装载语句：``full``（默认）→ ``INSERT OVERWRITE``（权威覆盖）；
+        装载方式决定装载语句：``full`` → ``INSERT OVERWRITE``（权威覆盖）；
         ``incremental`` → ``INSERT INTO``（追加；有分区键则加分区谓词占位，水位由调度器注入）；
-        ``cdc`` → 同库 INSERT 无法表达变更捕获，回退为覆盖并在 ``warnings`` 明示应走同步作业。
-        为物化运行期的一次性选择（弹窗单选全局生效）；缺省 ``full`` 保持既有正向生成行为不变。
+        ``cdc`` → 同库 INSERT 无法表达变更捕获，回退为覆盖并在 ``warnings`` 明示应写同步作业。
+
+        取哪个方式，按优先级：显式传入的 ``load_strategy``（全局覆盖）→
+        ``per_contract_strategy`` 时各表契约自身的策略 → ``full``。
+        默认不读契约策略，是为保住正向生成端点「缺省即覆盖」的既有语义；物化弹窗
+        逐实体选同步方式，故由 runner 显式开启 ``per_contract_strategy``。
         """
         plan = self.build_logical_schema(
-            db, ontology_id, database_prefix=database_prefix
+            db,
+            ontology_id,
+            database_prefix=database_prefix,
+            database_overrides=database_overrides,
+            table_overrides=table_overrides,
         )
         adapter = get_adapter(engine)
         source_refs = self._source_refs(db, ontology_id)
         field_refs = self._field_refs(db, ontology_id)
 
-        strategy = (load_strategy or "full").strip().lower() or "full"
+        override = (load_strategy or "").strip().lower() or None
         warnings: list[dict] = []
         statements: dict[str, str] = {}
         for table in plan.schema.tables:
             if table.layer == "ads":
                 continue  # ADS 由 MetricSpec 生成（M6），非字段搬运
-            source = source_refs.get(table.name)
+            strategy = override or (
+                (table.load_strategy or "full").strip().lower()
+                if per_contract_strategy
+                else "full"
+            )
+            source = source_refs.get(table.source_name)
             if not source:
                 plan.note(table.qualified_name, "对象无 source_ref，无法定位源表")
                 continue
-            mapping = field_refs.get(table.name, {})
+            mapping = field_refs.get(table.source_name, {})
             select_lines = [
                 f"  {adapter.quote_identifier(mapping.get(c.name) or c.name)} AS {adapter.quote_identifier(c.name)}"
                 for c in table.columns
@@ -626,9 +704,11 @@ class WarehouseGenerator:
             .filter(ObjectType.ontology_id == ontology_id)
             .all()
         ):
-            mapping = {
-                p.name: p.source_field_ref for p in obj.properties if p.source_field_ref
-            }
+            mapping = {}
+            for p in obj.properties:
+                physical = _physical_field(p.source_field_ref)
+                if physical:
+                    mapping[p.name] = physical
             if mapping:
                 out[obj.name] = mapping
         return out
@@ -711,7 +791,8 @@ class WarehouseGenerator:
             db, ontology_id, database_prefix=database_prefix
         )
         return {
-            "tables": {t.name: t.qualified_name for t in plan.schema.tables},
+            # 键是本体实体名（表名被人工改写时仍以实体名为源侧键），值是物理全名。
+            "tables": {t.source_name: t.qualified_name for t in plan.schema.tables},
             "columns": {},
             "unsupported": plan.unsupported,
         }

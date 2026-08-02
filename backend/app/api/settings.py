@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import settings_service
 from app.database import get_db
 from app.schemas import (
+    AirflowSettingsOut,
+    AirflowSettingsUpdate,
     CubeSettingsOut,
     CubeSettingsUpdate,
     DatahubSettingsOut,
@@ -134,6 +136,57 @@ def update_draft_generation_settings(
     data: DraftGenerationSettingsUpdate, db: Session = Depends(get_db)
 ):
     return settings_service.update_draft_generation_settings(db, data.model_dump())
+
+
+def _airflow_settings_out(row) -> AirflowSettingsOut:
+    return AirflowSettingsOut(
+        endpoint=row.endpoint,
+        username=row.username,
+        password_set=bool(row.password),
+        password_hint=mask_secret(row.password),
+        token_set=bool(row.token),
+        api_version=row.api_version,
+        dags_dir=row.dags_dir,
+        jobs_dir=row.jobs_dir,
+        warehouse_conn_id=row.warehouse_conn_id,
+        seatunnel_image=row.seatunnel_image,
+        enabled=row.enabled,
+        available=bool(row.enabled and row.endpoint and row.dags_dir and row.jobs_dir),
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/settings/airflow", response_model=AirflowSettingsOut)
+def get_airflow_settings(db: Session = Depends(get_db)):
+    return _airflow_settings_out(settings_service.get_airflow_settings(db))
+
+
+@router.put("/settings/airflow", response_model=AirflowSettingsOut)
+def update_airflow_settings(data: AirflowSettingsUpdate, db: Session = Depends(get_db)):
+    return _airflow_settings_out(
+        settings_service.update_airflow_settings(db, data.model_dump())
+    )
+
+
+@router.post("/settings/airflow/test")
+def test_airflow_connection(db: Session = Depends(get_db)):
+    """连通性测试：打 Airflow 的 /health。与数据源「测试」按钮同一意图。"""
+    from app.connectors.airflow import AirflowClient, AirflowError
+
+    cfg = settings_service.get_airflow_runtime(db)
+    client = AirflowClient(
+        cfg.endpoint,
+        username=cfg.username,
+        password=cfg.password,
+        token=cfg.token,
+        api_version=cfg.api_version,
+    )
+    try:
+        return {"ok": True, "health": client.health()}
+    except AirflowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        client.close()
 
 
 def _cube_settings_out(row) -> CubeSettingsOut:

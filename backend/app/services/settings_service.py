@@ -7,7 +7,13 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from app.config import settings as env_settings
-from app.models import DatahubSetting, DraftGenerationSetting, LlmServiceConfig, CubeSetting
+from app.models import (
+    AirflowSetting,
+    CubeSetting,
+    DatahubSetting,
+    DraftGenerationSetting,
+    LlmServiceConfig,
+)
 from app.services.common import make_http_client
 
 # 自建/OpenAI 兼容端点(vLLM、Ollama、LM Studio、企业网关等)常无需鉴权：
@@ -63,6 +69,27 @@ class LlmRuntimeConfig:
 class DraftGenerationRuntimeConfig:
     object_chunk_concurrency: int
     relation_chunk_concurrency: int
+
+
+@dataclass
+class AirflowRuntimeConfig:
+    """Airflow 编排的运行期配置。``available`` 为假时物化回落到 direct 直连（开发模式）。"""
+
+    endpoint: str
+    username: str | None
+    password: str | None
+    token: str | None
+    api_version: str
+    dags_dir: str
+    jobs_dir: str
+    warehouse_conn_id: str
+    seatunnel_image: str
+    enabled: bool
+
+    @property
+    def available(self) -> bool:
+        # 没有投递目录就没法把 DAG 交出去，此时「启用」是假的，不如明说。
+        return bool(self.enabled and self.endpoint and self.dags_dir and self.jobs_dir)
 
 
 @dataclass
@@ -197,6 +224,37 @@ class SettingsService:
         return DraftGenerationRuntimeConfig(
             object_chunk_concurrency=row.object_chunk_concurrency,
             relation_chunk_concurrency=row.relation_chunk_concurrency,
+        )
+
+    def get_airflow_settings(self, db: Session) -> AirflowSetting:
+        self.ensure_defaults(db)
+        row = db.get(AirflowSetting, "default")
+        assert row is not None
+        return row
+
+    def update_airflow_settings(self, db: Session, data: dict) -> AirflowSetting:
+        row = self.get_airflow_settings(db)
+        for key, value in data.items():
+            if key in ("password", "token") and value is None:
+                continue  # 不传则保留原凭据
+            setattr(row, key, value)
+        db.commit()
+        db.refresh(row)
+        return row
+
+    def get_airflow_runtime(self, db: Session) -> AirflowRuntimeConfig:
+        row = self.get_airflow_settings(db)
+        return AirflowRuntimeConfig(
+            endpoint=row.endpoint,
+            username=row.username,
+            password=row.password,
+            token=row.token,
+            api_version=row.api_version,
+            dags_dir=row.dags_dir,
+            jobs_dir=row.jobs_dir,
+            warehouse_conn_id=row.warehouse_conn_id,
+            seatunnel_image=row.seatunnel_image,
+            enabled=row.enabled,
         )
 
     def get_cube_settings(self, db: Session) -> CubeSetting:
@@ -356,6 +414,11 @@ class SettingsService:
                     timeout_seconds=int(env_settings.cube_timeout_seconds),
                 )
             )
+            db.commit()
+
+        if not db.get(AirflowSetting, "default"):
+            # 默认不启用：没有 Airflow 的环境保持现有 direct 直连行为不变。
+            db.add(AirflowSetting(id="default"))
             db.commit()
 
         SettingsService._defaults_initialized = True

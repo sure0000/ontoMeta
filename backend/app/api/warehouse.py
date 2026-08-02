@@ -283,9 +283,12 @@ def materialize_ontology(
         "target_datasource_id": payload.target_datasource_id,
         "engine": payload.engine,
         "database_prefix": payload.database_prefix,
+        "database_overrides": payload.database_overrides,
+        "table_overrides": payload.table_overrides,
         "load_strategy": payload.load_strategy,
         "selected_targets": payload.selected_targets,
         "overrides": payload.overrides,
+        "execute_mode": payload.execute_mode,
     }
     try:
         artifact = agent_pipeline.draft(
@@ -305,8 +308,76 @@ def materialize_ontology(
     artifact.user_created = True
     db.commit()
 
-    artifact = agent_pipeline.execute(db, artifact.id, context=context)
+    # 制品 id 进 context：orchestrated 用它作 DagRun 的确定性 run_id，重复提交即幂等。
+    artifact = agent_pipeline.execute(
+        db, artifact.id, context={**context, "artifact_id": artifact.id}
+    )
     return _materialize_out(artifact)
+
+
+@router.get("/warehouse/materialize/{artifact_id}/status")
+def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
+    """回读一次编排物化的运行状态（供弹窗轮询）。
+
+    **只读**：状态的权威在 Airflow，这里不缓存、不改制品——回执记录的是「提交了什么」，
+    运行到哪一步随时可能变，缓存一份只会出现两个互相矛盾的事实。
+    """
+    import json
+
+    from app.connectors.airflow import AirflowClient, AirflowError, is_terminal
+    from app.models.agent import GovernanceArtifact
+
+    artifact = db.get(GovernanceArtifact, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="物化制品不存在")
+    try:
+        receipt = json.loads(artifact.execution_receipt_json or "{}")
+    except (TypeError, ValueError):
+        receipt = {}
+    if receipt.get("execute_mode") != "orchestrated":
+        raise HTTPException(
+            status_code=400, detail="该物化为直连执行（开发模式），无调度运行状态可查"
+        )
+
+    dag_id, run_id = receipt.get("dag_id"), receipt.get("dag_run_id")
+    if not dag_id or not run_id:
+        raise HTTPException(status_code=400, detail="回执里没有 DagRun 信息，可能提交未成功")
+
+    airflow = settings_service.get_airflow_runtime(db)
+    client = AirflowClient(
+        airflow.endpoint,
+        username=airflow.username,
+        password=airflow.password,
+        token=airflow.token,
+        api_version=airflow.api_version,
+    )
+    try:
+        run = client.get_dag_run(dag_id, run_id)
+        tasks = client.list_task_instances(dag_id, run_id)
+    except AirflowError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+    state = run.get("state")
+    return {
+        "artifact_id": artifact_id,
+        "dag_id": dag_id,
+        "dag_run_id": run_id,
+        "state": state,
+        "terminal": is_terminal(state),
+        "start_date": run.get("start_date"),
+        "end_date": run.get("end_date"),
+        "run_url": client.run_url(dag_id, run_id),
+        "tasks": [
+            {
+                "task_id": t.get("task_id"),
+                "state": t.get("state"),
+                "try_number": t.get("try_number"),
+            }
+            for t in tasks
+        ],
+    }
 
 
 @router.get(

@@ -37,7 +37,13 @@ from app.models import (
 )
 from app.services.common import log_change
 from app.auth import hash_api_key
-from app.services.data_app_executor import ExecutionError, execute_sql, is_read_only
+from app.services.data_app_executor import (
+    ExecutionError,
+    execute_sql,
+    is_read_only,
+    list_databases as execute_list_databases,
+    list_tables as execute_list_tables,
+)
 from app.connectors.cube import CubeConnector, CubeExecutionError
 from app.services.ontology_query import OntologyQueryService
 from app.services.settings_service import SettingsService
@@ -163,6 +169,33 @@ class DataAppService:
         db.commit()
         db.refresh(ds)
         return ds
+
+    def _writable_dsn(self, db: Session, ds_id: str) -> str:
+        """取数据源的连接串；mock / 未配置连接的源无从内省，明确报错而非返回空列表。"""
+        ds = db.get(DataSource, ds_id)
+        if not ds:
+            raise ValueError("数据源不存在")
+        if ds.kind == "mock":
+            raise ValueError("Mock 数据源为内置样例，无库表可读取")
+        if not ds.dsn_secret_ref:
+            raise ValueError(f"数据源「{ds.name}」未配置连接串（dsn）")
+        return ds.dsn_secret_ref
+
+    def list_databases(self, db: Session, ds_id: str) -> list[str]:
+        """目标源上的库列表，供物化选落库位置。"""
+        dsn = self._writable_dsn(db, ds_id)
+        try:
+            return execute_list_databases(dsn)
+        except ExecutionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def list_tables(self, db: Session, ds_id: str, database: str | None) -> list[str]:
+        """某个库下已有的表，供物化推荐表名并提示「已存在（覆盖写）」。"""
+        dsn = self._writable_dsn(db, ds_id)
+        try:
+            return execute_list_tables(dsn, database)
+        except ExecutionError as exc:
+            raise ValueError(str(exc)) from exc
 
     # ----------------------------------------------------------------- app CRUD
 

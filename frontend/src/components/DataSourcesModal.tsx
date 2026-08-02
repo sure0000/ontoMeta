@@ -120,11 +120,22 @@ function buildConnDsn(kind: string, v: ConnFormValues): string | undefined {
   return `${p.scheme}://${auth}${hostPort}${db}`;
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  ok: "success",
-  error: "error",
-  untested: "default",
+// 连接测试状态的统一呈现（列表、物化选源等处复用，避免各写各的文案）。
+const STATUS_TAG: Record<string, { color: string; text: string }> = {
+  ok: { color: "success", text: "已连通" },
+  error: { color: "error", text: "连接失败" },
+  untested: { color: "default", text: "未测试" },
 };
+
+/** 数据源连接状态标签。未知状态原样显示，不假装成已知态。 */
+export function DataSourceStatusTag({ status }: { status: string }) {
+  const s = STATUS_TAG[status];
+  return (
+    <Tag color={s?.color ?? "default"} style={{ marginInlineEnd: 0 }}>
+      {s?.text ?? status}
+    </Tag>
+  );
+}
 
 export function DataSourcesModal({
   open,
@@ -425,7 +436,7 @@ export function DataSourcesPanel() {
           {
             title: "状态",
             dataIndex: "status",
-            render: (s: string) => <Tag color={STATUS_COLOR[s] ?? "default"}>{s}</Tag>,
+            render: (s: string) => <DataSourceStatusTag status={s} />,
           },
           {
             title: "操作",
