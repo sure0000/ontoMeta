@@ -105,3 +105,61 @@ def test_default_client_disables_proxy_env():
         assert c._client.trust_env is False
     finally:
         c.close()
+
+
+def test_secrets_are_proxied_and_never_persisted_by_ontometa(client, admin_headers, monkeypatch):
+    """凭据代填：值穿透到 runner 就没了，ontoMeta **不落库、不缓存**。
+
+    这是「凭据只有一个归属地」的落地形式——runner 的 /probe 有意义、DAG 产物里只有别名，
+    都建立在它上面。一旦 ontoMeta 存了副本，这套论证就不成立了，故用测试钉死。
+    """
+    import sqlite3
+
+    from app.config import settings as env_settings
+    from app.database import SessionLocal
+    from app.services import settings_service as ss_mod
+    from app.services.settings_service import SettingsService
+
+    with SessionLocal() as db:
+        SettingsService().update_airflow_settings(
+            db,
+            {
+                "endpoint": "http://airflow:8080",
+                "enabled": True,
+                "sync_runner_endpoint": "http://sync-runner:8098",
+                "sync_runner_token": "t0ken",
+            },
+        )
+
+    seen: dict = {}
+
+    class _FakeRunner:
+        def __init__(self, endpoint, *, token=None, **kw):
+            seen["token"] = token
+
+        def put_secret(self, alias, values):
+            seen["alias"], seen["values"] = alias, values
+            return {"alias": alias, "ok": True}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "app.connectors.sync_runner.SyncRunnerClient", _FakeRunner
+    )
+
+    secret = "pa55w0rd-should-not-be-stored"
+    resp = client.put(
+        "/api/settings/sync-runner/secrets/erp_readonly",
+        headers=admin_headers,
+        json={"values": {"url": "mysql+pymysql://ro@h:3306/db", "password": secret}},
+    )
+    assert resp.status_code == 200
+    # 确实转发给了 runner，并带上了 token
+    assert seen["alias"] == "erp_readonly"
+    assert seen["values"]["password"] == secret
+    assert seen["token"] == "t0ken"
+
+    # 关键：整个 ontoMeta 库里搜不到这个值
+    raw = sqlite3.connect(str(env_settings.database_url).replace("sqlite:///", "")).iterdump()
+    assert secret not in "\n".join(raw)

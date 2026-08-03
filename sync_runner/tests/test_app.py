@@ -116,3 +116,117 @@ def test_unsupported_combo_fails_loudly(tmp_path, monkeypatch):
 
 def test_get_unknown_job_404():
     assert client.get("/jobs/deadbeef").status_code == 404
+
+
+def test_probe_reports_unprobeable_alias_distinctly(monkeypatch):
+    """配了但没有可直连 URL 的别名（如 Hive 目标）不能报「连不通」。
+
+    Hive 的数据由 Zeta 集群经 metastore/HDFS 写，runner 手上只有 metastore 地址。
+    判成连不通会让人去修一个根本不存在的连接串——比不检查更糟。
+    """
+    monkeypatch.setenv("SYNC_CONN_ONTOMETA_DS_HIVE_DW_METASTORE_URI", "thrift://hms:9083")
+    body = client.post("/probe", json={"alias": "ontometa_ds_hive_dw"}).json()
+    assert body["reachable"] is False
+    assert body["checkable"] is False
+    assert "metastore_uri" in body["detail"]
+
+    # 完全没配的别名仍然是「连不通」，两者不能混为一谈
+    body = client.post("/probe", json={"alias": "nobody"}).json()
+    assert body["reachable"] is False and body["checkable"] is True
+
+
+# ---------- 连接配置（凭据只进不出） ----------
+
+
+def test_secret_write_requires_token_and_is_disabled_without_one(tmp_path, monkeypatch):
+    """没配 token 时写接口直接 403，而不是敞着让任何人改凭据。"""
+    monkeypatch.setenv("SYNC_SECRETS_DIR", str(tmp_path))
+    monkeypatch.delenv("SYNC_RUNNER_TOKEN", raising=False)
+    r = client.put("/secrets/erp_readonly", json={"url": "sqlite:///x.db"})
+    assert r.status_code == 403 and "SYNC_RUNNER_TOKEN" in r.json()["detail"]
+
+    monkeypatch.setenv("SYNC_RUNNER_TOKEN", "t0ken")
+    assert client.put("/secrets/erp_readonly", json={"url": "sqlite:///x.db"}).status_code == 401
+    r = client.put(
+        "/secrets/erp_readonly",
+        json={"url": "sqlite:///x.db"},
+        headers={"Authorization": "Bearer t0ken"},
+    )
+    assert r.status_code == 200
+
+
+def test_saved_secret_is_usable_and_never_returned_in_clear(tmp_path, monkeypatch):
+    """写进去能用（probe 通得过），但列出时机密键只报「已设置」。"""
+    monkeypatch.setenv("SYNC_SECRETS_DIR", str(tmp_path))
+    monkeypatch.setenv("SYNC_RUNNER_TOKEN", "t0ken")
+    auth = {"Authorization": "Bearer t0ken"}
+    db = tmp_path / "src.db"
+    with create_engine(f"sqlite:///{db}").begin() as conn:
+        conn.execute(text("CREATE TABLE t (id INTEGER)"))
+    client.put(
+        "/secrets/erp_readonly",
+        json={"url": f"sqlite:///{db}", "password": "s3cret", "metastore_uri": "thrift://h:9083"},
+        headers=auth,
+    )
+    assert client.post("/probe", json={"alias": "erp_readonly"}).json()["reachable"] is True
+
+    item = next(i for i in client.get("/secrets", headers=auth).json()["items"] if i["alias"] == "erp_readonly")
+    assert item["source"] == "store"
+    # 机密键不回明文；非机密键（地址）回明文，否则排查「连到哪去了」无从下手
+    assert item["values"]["password"] == "<已设置>"
+    assert "s3cret" not in str(item)
+    assert item["values"]["metastore_uri"] == "thrift://h:9083"
+
+
+def test_env_managed_alias_cannot_be_overwritten_by_api(tmp_path, monkeypatch):
+    """环境变量提供的别名不接受写入——它优先级更高，静默覆盖会「保存成功但不生效」。"""
+    monkeypatch.setenv("SYNC_SECRETS_DIR", str(tmp_path))
+    monkeypatch.setenv("SYNC_RUNNER_TOKEN", "t0ken")
+    monkeypatch.setenv("SYNC_CONN_PINNED_URL", "sqlite:///pinned.db")
+    auth = {"Authorization": "Bearer t0ken"}
+    r = client.put("/secrets/pinned", json={"url": "sqlite:///other.db"}, headers=auth)
+    assert r.status_code == 409 and "环境变量" in r.json()["detail"]
+    # 但要列得出来，否则「没有这个别名」与「有但改不了」分不清
+    item = next(i for i in client.get("/secrets", headers=auth).json()["items"] if i["alias"] == "pinned")
+    assert item["source"] == "env"
+
+
+def test_delete_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNC_SECRETS_DIR", str(tmp_path))
+    monkeypatch.setenv("SYNC_RUNNER_TOKEN", "t0ken")
+    auth = {"Authorization": "Bearer t0ken"}
+    client.put("/secrets/tmp_alias", json={"url": "sqlite:///a.db"}, headers=auth)
+    assert client.delete("/secrets/tmp_alias", headers=auth).json()["removed"] is True
+    assert client.delete("/secrets/tmp_alias", headers=auth).json()["removed"] is False
+
+
+def test_env_alias_is_split_on_known_field_not_last_underscore(tmp_path, monkeypatch):
+    """别名和字段名里都可能有下划线，按最后一个下划线切会切出错误的别名。"""
+    monkeypatch.setenv("SYNC_SECRETS_DIR", str(tmp_path))
+    monkeypatch.setenv("SYNC_RUNNER_TOKEN", "t0ken")
+    monkeypatch.setenv("SYNC_CONN_ONTOMETA_DS_HIVE_DW_METASTORE_URI", "thrift://h:9083")
+    items = {i["alias"]: i for i in client.get("/secrets", headers={"Authorization": "Bearer t0ken"}).json()["items"]}
+    assert "ontometa_ds_hive_dw" in items
+    assert items["ontometa_ds_hive_dw"]["values"] == {"metastore_uri": "thrift://h:9083"}
+    assert "ontometa_ds_hive_dw_metastore" not in items
+
+
+def test_password_embedded_in_url_is_not_returned(tmp_path, monkeypatch):
+    """URL 里内嵌的密码不能回给调用方。
+
+    只按键名判机密的话，``{"url": "mysql://root:pw@h/db"}`` 会被当成非机密整串回出去，
+    密码就跟着漏进 UI——而连接串带密码恰恰是最常见的写法。
+    """
+    monkeypatch.setenv("SYNC_SECRETS_DIR", str(tmp_path))
+    monkeypatch.setenv("SYNC_RUNNER_TOKEN", "t0ken")
+    auth = {"Authorization": "Bearer t0ken"}
+    client.put(
+        "/secrets/with_inline_pw",
+        json={"url": "mysql+pymysql://root:hunter2@db.internal:3306/erp"},
+        headers=auth,
+    )
+    body = client.get("/secrets", headers=auth).text
+    assert "hunter2" not in body
+    item = next(i for i in client.get("/secrets", headers=auth).json()["items"] if i["alias"] == "with_inline_pw")
+    # 主机/库名仍要看得见，否则排查「连到哪去了」无从下手
+    assert "db.internal:3306/erp" in item["values"]["url"]

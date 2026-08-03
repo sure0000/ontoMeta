@@ -19,7 +19,8 @@ import httpx
 from app.warehouse.jobs import JobSpec
 
 # ontoMeta 认识的 runner 契约版本。runner 的 GET /capabilities.contract_version 与此比对。
-EXPECTED_CONTRACT_VERSION = "1"
+# 2：capabilities 增 sink_modes（按「目标 × 装载方式」声明，见 job_planner._runner_reject）。
+EXPECTED_CONTRACT_VERSION = "2"
 
 
 class SyncRunnerError(RuntimeError):
@@ -57,10 +58,12 @@ class SyncRunnerClient:
         self,
         endpoint: str,
         *,
+        token: str | None = None,
         client: httpx.Client | None = None,
         timeout: float = 30.0,
     ):
         self.endpoint = (endpoint or "").rstrip("/")
+        self._token = token or None
         # trust_env=False：内网服务不走开发机 HTTP(S)_PROXY / ALL_PROXY，与 airflow/cube 连接器同处置。
         self._client = client or httpx.Client(trust_env=False, timeout=timeout)
 
@@ -70,6 +73,10 @@ class SyncRunnerClient:
     # ---------- 内部 ----------
 
     def _request(self, method: str, path: str, operation: str, **kwargs: Any) -> dict:
+        if self._token:
+            headers = dict(kwargs.pop("headers", None) or {})
+            headers.setdefault("Authorization", f"Bearer {self._token}")
+            kwargs["headers"] = headers
         try:
             response = self._client.request(method, f"{self.endpoint}{path}", **kwargs)
         except httpx.HTTPError as exc:
@@ -141,3 +148,21 @@ class SyncRunnerClient:
 
     def get_job_log(self, job_id: str) -> dict:
         return self._request("GET", f"/jobs/{job_id}/log", "get_job_log")
+
+    # ---------- 连接配置（凭据代填：只进不出，ontoMeta 不留副本） ----------
+
+    def list_secrets(self) -> list[dict]:
+        """已配的别名与哪些键已设。**runner 只回「已设置」，不回机密明文**，
+        故这份结果可以安全地直接给前端。"""
+        return list(self._request("GET", "/secrets", "list_secrets").get("items") or [])
+
+    def put_secret(self, alias: str, values: dict[str, str]) -> dict:
+        """把一个别名的连接配置写进 runner 自己的存储。
+
+        **ontoMeta 不落库、不缓存**：值在这一次请求里穿过去就没了。这是「凭据只有一个
+        归属地」的落地形式——设置页只是代填的输入框，不是凭据库。
+        """
+        return self._request("PUT", f"/secrets/{alias}", "put_secret", json=values)
+
+    def delete_secret(self, alias: str) -> dict:
+        return self._request("DELETE", f"/secrets/{alias}", "delete_secret")
