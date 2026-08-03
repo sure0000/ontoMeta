@@ -25,6 +25,20 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
         token=None,
         api_version="v1",
         dags_dir=str(dags_dir),
+        # 执行通道：生产默认就是 runner，测试基线与之一致（runner 侧由 _FakeRunner 伪造）。
+        sync_channel="runner",
+        sync_runner_endpoint="http://sync-runner:8088",
+        sync_runner_token=None,
+        # 编排旋钮现在全在设置行上（不再有环境变量），基线取与库默认一致的值。
+        max_tasks_per_dag=50,
+        max_active_tasks_per_dag=16,
+        dag_parse_timeout=60.0,
+        preflight_sentinel_timeout=20.0,
+        staging_swap=True,
+        docker_network="bridge",
+        drivers_dir="",
+        sync_tool_images={},
+        jobs_dir="",
     )
     available = over.pop("available", None)
     base.update(over)
@@ -62,6 +76,30 @@ def _make_handler(
     return handler
 
 
+class _FakeRunner:
+    """伪 sync-runner：capabilities / probe 可逐用例定制，不起真实服务。"""
+
+    caps: dict = {}
+    probes: dict = {}
+    raises: Exception | None = None
+
+    def __init__(self, endpoint, **kwargs):
+        self.endpoint = endpoint
+
+    def capabilities(self) -> dict:
+        if type(self).raises is not None:
+            raise type(self).raises
+        return type(self).caps
+
+    def probe(self, alias, **kwargs) -> dict:
+        return type(self).probes.get(
+            alias, {"alias": alias, "reachable": True, "detail": "连接正常"}
+        )
+
+    def close(self) -> None:
+        pass
+
+
 def _install(
     monkeypatch,
     tmp_path,
@@ -73,7 +111,19 @@ def _install(
     runtime_over=None,
     sentinel_timeout=0.3,
     max_tasks=50,
+    runner_caps=None,
+    runner_probes=None,
+    runner_raises=None,
 ):
+    _FakeRunner.caps = runner_caps or {
+        "contract_version": pf.EXPECTED_CONTRACT_VERSION,
+        "sinks": ["doris", "hive"],
+        "drivers": ["mysql", "doris"],
+    }
+    _FakeRunner.probes = runner_probes or {}
+    _FakeRunner.raises = runner_raises
+    monkeypatch.setattr(pf, "SyncRunnerClient", _FakeRunner)
+
     def factory(endpoint, **kwargs):
         kwargs.pop("client", None)
         return AirflowClient(
@@ -82,11 +132,12 @@ def _install(
 
     runtime_over = dict(runtime_over or {})
     runtime_dir = runtime_over.pop("dags_dir", str(tmp_path))
+    # 这两个旋钮已从环境变量搬进设置行，故由 runtime 携带（用例仍可用同名参数覆盖）。
+    runtime_over.setdefault("preflight_sentinel_timeout", sentinel_timeout)
+    runtime_over.setdefault("max_tasks_per_dag", max_tasks)
     runtime = _runtime(runtime_dir, **runtime_over)
     monkeypatch.setattr(pf, "AirflowClient", factory)
     monkeypatch.setattr(pf._settings, "get_airflow_runtime", lambda db: runtime)
-    monkeypatch.setattr(pf._env, "ontometa_preflight_sentinel_timeout", sentinel_timeout)
-    monkeypatch.setattr(pf._env, "ontometa_max_tasks_per_dag", max_tasks)
     monkeypatch.setattr(
         pf._contract_service, "list_contracts", lambda db, oid, **kw: list(contracts)
     )
@@ -113,6 +164,11 @@ def test_all_green_is_ok(monkeypatch, tmp_path):
     assert items["warehouse_conn"].status == pf.PASS
     assert items["dag_dir_visible"].status == pf.PASS
     assert items["batch_size"].status == pf.PASS
+    # 执行通道也算进「全绿」：否则会出现 preflight 全绿、点提交才报 runner 不可达。
+    assert items["sync_runner"].status == pf.PASS
+    assert items["sync_runner_sink"].status == pf.PASS
+    assert items["sync_runner_source"].status == pf.PASS
+    assert items["sync_runner_target"].status == pf.PASS
 
 
 def test_sentinel_file_is_cleaned_up(monkeypatch, tmp_path):
@@ -229,6 +285,108 @@ def test_selected_targets_narrow_batch_count(monkeypatch, tmp_path):
     )
     # 只勾了 1 个实体，未超上限 1 → pass（而非按全量 2 判超限）。
     assert _by_key(report)["batch_size"].status == pf.PASS
+
+
+def test_runner_unreachable_blocks(monkeypatch, tmp_path):
+    """runner 连不上必须在提交前红——否则 preflight 全绿、点提交才报同一件事。"""
+    from app.connectors.sync_runner import SyncRunnerError
+
+    db = _install(
+        monkeypatch,
+        tmp_path,
+        _make_handler(),
+        runner_raises=SyncRunnerError("capabilities", "Connection refused"),
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_runner"]
+    assert item.status == pf.FAIL and item.blocking is True
+    assert "healthz" in item.next_step
+    assert report.ok is False
+
+
+def test_runner_contract_mismatch_blocks(monkeypatch, tmp_path):
+    db = _install(
+        monkeypatch,
+        tmp_path,
+        _make_handler(),
+        runner_caps={"contract_version": "99", "sinks": ["hive"]},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_runner"]
+    assert item.status == pf.FAIL and item.blocking is True
+    assert "99" in item.detail and pf.EXPECTED_CONTRACT_VERSION in item.detail
+    # 契约不匹配后不再往下探 alias：线格式都对不上，探测结果没有参考价值
+    assert "sync_runner_source" not in _by_key(report)
+
+
+def test_runner_missing_endpoint_blocks(monkeypatch, tmp_path):
+    db = _install(
+        monkeypatch, tmp_path, _make_handler(), runtime_over={"sync_runner_endpoint": ""}
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_runner"]
+    assert item.status == pf.FAIL and item.blocking is True
+    assert "SYNC_RUNNER_ENDPOINT" in item.next_step
+
+
+def test_unsupported_sink_fails_without_blocking(monkeypatch, tmp_path):
+    """执行侧没有该引擎的 sink：本次只建表不搬数——必须红着说清，但不拦「只想建表」的人。"""
+    db = _install(
+        monkeypatch,
+        tmp_path,
+        _make_handler(),
+        runner_caps={"contract_version": pf.EXPECTED_CONTRACT_VERSION, "sinks": ["doris"]},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_runner_sink"]
+    assert item.status == pf.FAIL and item.blocking is False
+    assert "只建表" in item.detail
+    assert report.ok is True  # 非阻断，仍可提交
+
+
+def test_unreachable_alias_blocks_with_secret_hint(monkeypatch, tmp_path):
+    db = _install(
+        monkeypatch,
+        tmp_path,
+        _make_handler(),
+        runner_probes={
+            "erp_readonly": {
+                "alias": "erp_readonly",
+                "reachable": False,
+                "detail": "别名「erp_readonly」在 runner 侧没有配置连接",
+            }
+        },
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    items = _by_key(report)
+    assert items["sync_runner_source"].status == pf.FAIL
+    assert items["sync_runner_source"].blocking is True
+    assert "SYNC_CONN_" in items["sync_runner_source"].next_step
+    # 目标仓那条独立判定，不受源库连不通影响
+    assert items["sync_runner_target"].status == pf.PASS
+    assert report.ok is False
+
+
+def test_docker_channel_states_what_cannot_be_checked(monkeypatch, tmp_path):
+    """docker 通道：不假装能查 docker.sock/网络名/驱动，但要如实说明这是残余风险。"""
+    db = _install(
+        monkeypatch, tmp_path, _make_handler(), runtime_over={"sync_channel": "docker"}
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_channel"]
+    assert item.status == pf.WARN and item.blocking is False
+    assert "docker.sock" in item.next_step
+    assert "sync_runner" not in _by_key(report)  # 不是 runner 通道就不探 runner
+    assert report.ok is True
+
+
+def test_runner_checked_even_when_airflow_down(monkeypatch, tmp_path):
+    """Airflow 挂着也要把执行通道问清楚：一次 preflight 应尽量把能问的都问了。"""
+    db = _install(
+        monkeypatch, tmp_path, _make_handler(), runtime_over={"available": False}
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
+    assert _by_key(report)["sync_runner"].status == pf.PASS
 
 
 def test_preflight_endpoint_wires_and_serializes(client, admin_headers, monkeypatch):

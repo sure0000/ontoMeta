@@ -23,16 +23,20 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from app.config import Settings
 from app.connectors.airflow import AirflowClient, AirflowError
+from app.connectors.sync_runner import (
+    EXPECTED_CONTRACT_VERSION,
+    SyncRunnerClient,
+    SyncRunnerError,
+)
 from app.models.data_app import DataSource
+from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 from app.services.materialization_contract import MaterializationContractService
 from app.services.materialization_runner import _warehouse_conn_id
 from app.services.settings_service import SettingsService
 
 _settings = SettingsService()
 _contract_service = MaterializationContractService()
-_env = Settings()
 
 # 状态取值。warn 不阻断提交，fail 视 blocking 决定是否阻断。
 PASS = "pass"
@@ -113,7 +117,9 @@ def run_preflight(
                 next_step="先解决上一项 Airflow 连通性。",
             )
         )
-        _add_conn_and_batch(report, db, ontology_id, ds, selected_targets, airflow)
+        _add_conn_and_batch(
+            report, db, ontology_id, ds, selected_targets, airflow, engine
+        )
         return report
 
     client = AirflowClient(
@@ -131,7 +137,8 @@ def run_preflight(
     finally:
         client.close()
 
-    _check_batch_size(report, db, ontology_id, selected_targets)
+    _check_execution_channel(report, airflow, ds, engine)
+    _check_batch_size(report, db, ontology_id, selected_targets, airflow.max_tasks_per_dag)
     return report
 
 
@@ -360,13 +367,13 @@ def _check_dag_dir_visible(
                 blocking=True,
                 detail=f"ontoMeta 写不进 DAG 投递目录：{exc}",
                 next_step=(
-                    f"确认 {dags_dir} 存在且 ontoMeta 进程有写权限（airflow_dags_dir 环境变量）。"
+                    f"确认 {dags_dir} 存在且 ontoMeta 进程有写权限（设置页 → Airflow → DAG 投递目录）。"
                 ),
             )
         )
         return
 
-    timeout = _env.ontometa_preflight_sentinel_timeout
+    timeout = airflow.preflight_sentinel_timeout
     deadline = time.monotonic() + timeout
     seen = False
     try:
@@ -414,6 +421,220 @@ def _check_dag_dir_visible(
         )
 
 
+def _check_execution_channel(report: PreflightReport, airflow, ds, engine: str) -> None:
+    """执行通道的前置条件。
+
+    runner 通道能在提交前问清楚的，全在这里问掉——runner 的 ``/probe`` 端点本就是为
+    preflight 写的。少了这几项，会出现「preflight 全绿 → 点提交才报 sync-runner 不可达」，
+    「全绿即可提交」这个契约就不成立了。
+    """
+    channel = (airflow.sync_channel or "runner").lower()
+    if channel != "runner":
+        report.add(
+            PreflightItem(
+                key="sync_channel",
+                label="执行通道",
+                status=WARN,
+                blocking=False,
+                detail=f"当前通道为 {channel}：Airflow 经 docker.sock 起兄弟容器搬运。",
+                next_step=(
+                    "docker.sock 可达性、搬运容器的网络名、JDBC 驱动挂载只有真起容器才知道，"
+                    "preflight 查不了，失败会出现在 Airflow 任务日志里。改用 runner 通道"
+                    "（SYNC_CHANNEL=runner）可消掉这几类。"
+                ),
+            )
+        )
+        return
+
+    endpoint = airflow.sync_runner_endpoint
+    if not endpoint:
+        report.add(
+            PreflightItem(
+                key="sync_runner",
+                label="sync-runner",
+                status=FAIL,
+                blocking=True,
+                detail="通道为 runner，但未配置 sync-runner 地址。",
+                next_step=(
+                    "设 SYNC_RUNNER_ENDPOINT 指向常驻 runner（镜像见 "
+                    "docker/sync-runner/Dockerfile）；或把 SYNC_CHANNEL 设回 docker。"
+                ),
+            )
+        )
+        return
+
+    client = SyncRunnerClient(endpoint, token=airflow.sync_runner_token)
+    try:
+        try:
+            caps = client.capabilities()
+        except SyncRunnerError as exc:
+            report.add(
+                PreflightItem(
+                    key="sync_runner",
+                    label="sync-runner",
+                    status=FAIL,
+                    blocking=True,
+                    detail=str(exc),
+                    next_step=(
+                        f"确认 runner 在 {endpoint} 起着（GET /healthz 应回 ok），"
+                        "且 ontoMeta 到它的网络可达。"
+                    ),
+                )
+            )
+            return
+
+        got = caps.get("contract_version")
+        if got != EXPECTED_CONTRACT_VERSION:
+            report.add(
+                PreflightItem(
+                    key="sync_runner",
+                    label="sync-runner",
+                    status=FAIL,
+                    blocking=True,
+                    detail=(
+                        f"契约版本不匹配：runner={got}，ontoMeta 认识 "
+                        f"{EXPECTED_CONTRACT_VERSION}。"
+                    ),
+                    next_step="升级版本较低的一侧，使两边线格式一致后重试。",
+                )
+            )
+            return
+        report.add(
+            PreflightItem(
+                key="sync_runner",
+                label="sync-runner",
+                status=PASS,
+                blocking=True,
+                detail=(
+                    f"{endpoint} 可达，契约版本 {got}，已装驱动："
+                    f"{', '.join(caps.get('drivers') or []) or '无'}。"
+                ),
+            )
+        )
+
+        _check_runner_sink(report, caps, engine)
+        # 源/目标连接：runner 按 alias 自解析，探不通就是搬运任务一定会失败。
+        _check_runner_alias(report, client, "sync_runner_source", "源库连接", DEFAULT_SOURCE_ALIAS)
+        if ds is not None:
+            _check_runner_alias(
+                report, client, "sync_runner_target", "目标仓连接", _warehouse_conn_id(ds)
+            )
+    finally:
+        client.close()
+
+
+def _check_runner_sink(report: PreflightReport, caps: dict, engine: str) -> None:
+    """执行侧有没有这个目标引擎的 sink。没有 = 所有表都会落进 unsupported，只建表不搬数。
+
+    **不阻断**：只建表本身是合法用法，硬拦会挡住「我就是只想建表」的人（§7 阻断项与
+    提醒项分开）。但必须红着说清「本次不会搬任何数据」，不能让人以为搬了。
+    """
+    sinks = [s.lower() for s in (caps.get("sinks") or [])]
+    if (engine or "").lower() in sinks:
+        # 该目标支持哪些装载方式一并说清：runner 可能能写这个目标、却只支持其中一种
+        # 装载方式（如 Hive 只做全量），不说的话增量表会在提交后落进 unsupported，
+        # 而用户刚在这里看过一个绿灯。
+        modes = (caps.get("sink_modes") or {}).get((engine or "").lower())
+        suffix = f"，装载方式：{', '.join(modes)}" if modes else ""
+        report.add(
+            PreflightItem(
+                key="sync_runner_sink",
+                label="目标引擎支持",
+                status=PASS,
+                blocking=False,
+                detail=f"runner 支持写入 {engine}{suffix}。",
+                next_step=(
+                    f"{engine} 只支持 {', '.join(modes)}；其余装载方式的表会列进 "
+                    "unsupported，需要的话改用 docker 通道。"
+                )
+                if modes and set(modes) != {"full", "incremental", "cdc"}
+                else None,
+            )
+        )
+        return
+    report.add(
+        PreflightItem(
+            key="sync_runner_sink",
+            label="目标引擎支持",
+            status=FAIL,
+            blocking=False,
+            detail=(
+                f"runner 不支持写入 {engine}（它声明的 sink：{', '.join(sinks) or '无'}）。"
+                "本次将只建表、不搬任何数据，全部表会列进 unsupported。"
+            ),
+            next_step=(
+                f"换一个 runner 支持的目标引擎；或改用 docker 通道"
+                f"（SYNC_CHANNEL=docker）走 SeaTunnel 的 {engine} sink。"
+            ),
+        )
+    )
+
+
+def _check_runner_alias(
+    report: PreflightReport,
+    client: SyncRunnerClient,
+    key: str,
+    label: str,
+    alias: str,
+) -> None:
+    """探一个 alias 在 runner 侧连不连得通。凭据只在 runner 一侧，故只有它能回答。"""
+    try:
+        result = client.probe(alias)
+    except SyncRunnerError as exc:
+        report.add(
+            PreflightItem(
+                key=key,
+                label=label,
+                status=WARN,
+                blocking=False,
+                detail=f"探测别名「{alias}」时出错：{exc}",
+                next_step=f"手动确认 runner 侧 {alias} 的连接配置。",
+            )
+        )
+        return
+    if result.get("reachable"):
+        report.add(
+            PreflightItem(
+                key=key,
+                label=label,
+                status=PASS,
+                blocking=True,
+                detail=f"别名「{alias}」在 runner 侧连接正常。",
+            )
+        )
+        return
+    if result.get("checkable") is False:
+        # 探不了 ≠ 连不通（如 Hive 目标由 Zeta 经 metastore 写，runner 手上没有可连的串）。
+        # 当成失败会让人去修一个不存在的连接串，比不检查更糟。
+        report.add(
+            PreflightItem(
+                key=key,
+                label=label,
+                status=WARN,
+                blocking=False,
+                detail=result.get("detail") or f"别名「{alias}」无法由 runner 直接探测。",
+                next_step=(
+                    "这一项 preflight 保证不了：执行侧（如 SeaTunnel 集群）到该目标的连通性"
+                    "只有真跑一次才知道，失败会出现在搬运任务日志里。"
+                ),
+            )
+        )
+        return
+    report.add(
+        PreflightItem(
+            key=key,
+            label=label,
+            status=FAIL,
+            blocking=True,
+            detail=f"别名「{alias}」连不通：{result.get('detail') or '未知原因'}",
+            next_step=(
+                f"在 runner 侧配好该别名的连接串（环境变量 SYNC_CONN_<别名大写>_URL，"
+                f"或 $SYNC_SECRETS_DIR/{alias}.json），并确认 runner 到该库网络可达。"
+            ),
+        )
+    )
+
+
 def _selected_contracts(
     db: Session, ontology_id: str, selected_targets: list[str] | None
 ):
@@ -435,10 +656,11 @@ def _check_batch_size(
     db: Session,
     ontology_id: str,
     selected_targets: list[str] | None,
+    limit_per_dag: int,
 ) -> None:
-    """表数 vs 单 DAG 上限。M16 前不会自动分批，故超限只提醒「本次仍塞进一个 DAG」。"""
+    """表数 vs 单 DAG 上限。超限会自动按上限拆成多个 DAG（M16），这里只是先说清会拆几个。"""
     count = len(_selected_contracts(db, ontology_id, selected_targets))
-    limit = _env.ontometa_max_tasks_per_dag
+    limit = limit_per_dag
     if count > limit:
         report.add(
             PreflightItem(
@@ -448,8 +670,8 @@ def _check_batch_size(
                 blocking=False,
                 detail=f"本次 {count} 张表，超过单 DAG 上限 {limit}。",
                 next_step=(
-                    "当前版本仍会塞进一个 DAG（自动分批见 M16）；可先勾选一部分实体分批"
-                    "提交，避免一次拉起过多并发容器、且单表失败拖红整轮。"
+                    "会按 cron 分组后自动拆成多个 DAG（M16），每批各自触发、可单独重跑，"
+                    "无需人工分批；提交耗时会随批数增加。"
                 ),
             )
         )
@@ -472,8 +694,13 @@ def _add_conn_and_batch(
     ds: DataSource | None,
     selected_targets: list[str] | None,
     airflow,
+    engine: str,
 ) -> None:
-    """Airflow 不可达时的补充项：建表连接无从查（标 fail），批次规模仍可本地算。"""
+    """Airflow 不可达时的补充项。
+
+    建表连接无从查（标 fail），但**执行通道与批次规模跟 Airflow 无关**，照查不误——
+    一次 preflight 应尽量把能问的都问了，而不是因为第一项红了就少报几条。
+    """
     conn_id = _warehouse_conn_id(ds) if ds is not None else "?"
     report.add(
         PreflightItem(
@@ -485,4 +712,5 @@ def _add_conn_and_batch(
             next_step="先解决 Airflow 连通性。",
         )
     )
-    _check_batch_size(report, db, ontology_id, selected_targets)
+    _check_execution_channel(report, airflow, ds, engine)
+    _check_batch_size(report, db, ontology_id, selected_targets, airflow.max_tasks_per_dag)

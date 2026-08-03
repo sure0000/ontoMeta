@@ -20,6 +20,7 @@ import type {
   Confirmation,
   DataHubDatasetOption,
   AirflowSettings,
+  SyncRunnerSecret,
   DatahubSettings,
   CubeSettings,
   DomainContext,
@@ -686,6 +687,19 @@ export const api = {
     }),
 
   getAirflowSettings: () => request<AirflowSettings>("/api/settings/airflow"),
+  // 连接配置是**代填**：值发给 runner 就没了，ontoMeta 不落库、也读不回明文。
+  listSyncRunnerSecrets: () =>
+    request<SyncRunnerSecret[]>("/api/settings/sync-runner/secrets"),
+  putSyncRunnerSecret: (alias: string, values: Record<string, string>) =>
+    request<{ alias: string; ok: boolean }>(
+      `/api/settings/sync-runner/secrets/${encodeURIComponent(alias)}`,
+      { method: "PUT", body: JSON.stringify({ values }) },
+    ),
+  deleteSyncRunnerSecret: (alias: string) =>
+    request<{ alias: string; removed: boolean }>(
+      `/api/settings/sync-runner/secrets/${encodeURIComponent(alias)}`,
+      { method: "DELETE" },
+    ),
   updateAirflowSettings: (body: {
     endpoint: string;
     username?: string | null;
@@ -693,6 +707,20 @@ export const api = {
     token?: string;
     api_version: string;
     enabled: boolean;
+    // 编排配置全部在设置页管理，不再需要配置文件。
+    dags_dir?: string;
+    jobs_dir?: string;
+    sync_channel?: string;
+    sync_runner_endpoint?: string;
+    sync_runner_token?: string;
+    docker_network?: string;
+    drivers_dir?: string;
+    sync_tool_images?: string;
+    max_tasks_per_dag?: number;
+    max_active_tasks_per_dag?: number;
+    dag_parse_timeout?: number;
+    preflight_sentinel_timeout?: number;
+    staging_swap?: boolean;
   }) =>
     request<AirflowSettings>("/api/settings/airflow", {
       method: "PUT",

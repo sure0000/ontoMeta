@@ -111,7 +111,10 @@ class CubeSettingsOut(BaseModel):
 
 
 class AirflowSettingsOut(BaseModel):
-    """Airflow 编排配置。凭据只回传「是否已设 + 掩码」，不回明文。"""
+    """Airflow 编排配置。凭据只回传「是否已设 + 掩码」，不回明文。
+
+    编排的全部可调项都在这里回传：不需要改任何配置文件，设置页即唯一入口。
+    """
 
     endpoint: str
     username: str | None = None
@@ -122,6 +125,22 @@ class AirflowSettingsOut(BaseModel):
     enabled: bool
     # 启用且 endpoint 已填才算真的可用；否则物化无法执行（不再有直连回退）。
     available: bool
+    # ---- 投递目录 ----
+    dags_dir: str = ""
+    jobs_dir: str = ""
+    # ---- 执行通道 ----
+    sync_channel: str = "runner"
+    sync_runner_endpoint: str = ""
+    sync_runner_token_set: bool = False
+    docker_network: str = "bridge"
+    drivers_dir: str = ""
+    sync_tool_images: str = ""
+    # ---- DAG 形状与时序 ----
+    max_tasks_per_dag: int = 50
+    max_active_tasks_per_dag: int = 16
+    dag_parse_timeout: float = 60.0
+    preflight_sentinel_timeout: float = 20.0
+    staging_swap: bool = True
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -134,6 +153,21 @@ class AirflowSettingsUpdate(BaseModel):
     token: str | None = None
     api_version: str = "v1"
     enabled: bool = False
+    dags_dir: str = ""
+    jobs_dir: str = ""
+    # runner：Airflow 任务向常驻 sync-runner 发 HTTP；docker：经 docker.sock 起搬运容器。
+    sync_channel: str = Field(default="runner", pattern="^(runner|docker)$")
+    sync_runner_endpoint: str = ""
+    sync_runner_token: str | None = None  # 不传 = 保留原值
+    docker_network: str = "bridge"
+    drivers_dir: str = ""
+    sync_tool_images: str = ""
+    max_tasks_per_dag: int = Field(default=50, ge=1, le=1000)
+    max_active_tasks_per_dag: int = Field(default=16, ge=1, le=256)
+    # 要大于 Airflow 的 dag_dir_list_interval，否则首次提交必报「尚未解析到」。
+    dag_parse_timeout: float = Field(default=60.0, ge=0, le=3600)
+    preflight_sentinel_timeout: float = Field(default=20.0, ge=0, le=600)
+    staging_swap: bool = True
 
 
 class CubeSettingsUpdate(BaseModel):
@@ -142,3 +176,25 @@ class CubeSettingsUpdate(BaseModel):
     preagg_refresh: str = "1 hour"
     tenant_dimension: str | None = None
     timeout_seconds: int = Field(default=30, ge=1, le=600)
+
+
+class SyncRunnerSecretOut(BaseModel):
+    """runner 侧一个别名的配置概览。**不含任何机密明文**——机密键只回「已设置」。"""
+
+    alias: str
+    # store：由设置页写入 runner 自己的存储，可改；env：部署时钉死的环境变量，只读。
+    source: str
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+class SyncRunnerSecretUpdate(BaseModel):
+    """写一个别名的连接配置。
+
+    值**穿透到 runner 就没了**：ontoMeta 不落库、不缓存——设置页只是代填的输入框，
+    不是凭据库（凭据只有一个归属地，见 MATERIALIZE_SYNC_STABILITY.md §3.1）。
+    传空串表示清掉该项。
+    """
+
+    values: dict[str, str] = Field(
+        description="如 {'url': 'mysql+pymysql://u:p@h:3306/db', 'metastore_uri': 'thrift://h:9083'}"
+    )

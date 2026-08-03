@@ -1,15 +1,32 @@
-/** Airflow 编排连接配置面板（M10）。
+/** Airflow 编排配置面板。
  *
- * 只管「怎么连 Airflow」（地址 / 鉴权 / REST 版本）。搬运工具与同步策略由物化弹窗逐次选；
- * 目标仓/源库的凭据都是 Airflow 侧的 Connection，ontoMeta 产出的 DAG 里只出现 conn_id；
- * DAG/作业投递目录属部署基础设施，由后端环境变量给默认。
+ * **编排的全部可调项都在这里，不需要改任何配置文件**：怎么连 Airflow、DAG 往哪投、
+ * 走哪条执行通道、分批与超时怎么定。环境变量只在首次建配置行时播一次种，此后以本页为准。
+ *
+ * 仍不在这里的：搬运工具与同步策略由物化弹窗逐次选；源库/目标库的凭据分别归 Airflow
+ * Connection（docker 通道）与 sync-runner 的 secrets（runner 通道）——凭据只有一个
+ * 归属地，ontoMeta 产出的 DAG 里只出现别名。
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Form, Input, Space, Switch, Tag, message } from "antd";
+import {
+  Alert,
+  Button,
+  Collapse,
+  Divider,
+  Form,
+  Input,
+  InputNumber,
+  Radio,
+  Space,
+  Switch,
+  Tag,
+  message,
+} from "antd";
 import { ApiOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import type { AirflowSettings } from "../types";
+import { SyncRunnerSecretsPanel } from "./SyncRunnerSecretsPanel";
 
 interface FormValues {
   endpoint: string;
@@ -17,6 +34,19 @@ interface FormValues {
   password?: string;
   api_version: string;
   enabled: boolean;
+  dags_dir: string;
+  jobs_dir: string;
+  sync_channel: string;
+  sync_runner_endpoint: string;
+  docker_network: string;
+  drivers_dir: string;
+  sync_tool_images: string;
+  max_tasks_per_dag: number;
+  max_active_tasks_per_dag: number;
+  dag_parse_timeout: number;
+  preflight_sentinel_timeout: number;
+  staging_swap: boolean;
+  sync_runner_token?: string;
 }
 
 export function AirflowSettingsPanel() {
@@ -36,6 +66,19 @@ export function AirflowSettingsPanel() {
           password: undefined, // 密文不回显，留空 = 保持不变
           api_version: s.api_version,
           enabled: s.enabled,
+          dags_dir: s.dags_dir,
+          jobs_dir: s.jobs_dir,
+          sync_channel: s.sync_channel,
+          sync_runner_endpoint: s.sync_runner_endpoint,
+          docker_network: s.docker_network,
+          drivers_dir: s.drivers_dir,
+          sync_tool_images: s.sync_tool_images,
+          max_tasks_per_dag: s.max_tasks_per_dag,
+          max_active_tasks_per_dag: s.max_active_tasks_per_dag,
+          dag_parse_timeout: s.dag_parse_timeout,
+          preflight_sentinel_timeout: s.preflight_sentinel_timeout,
+          staging_swap: s.staging_swap,
+          sync_runner_token: undefined, // 密文不回显，留空 = 保持不变
         });
       })
       .catch((err: unknown) =>
@@ -58,6 +101,7 @@ export function AirflowSettingsPanel() {
         ...values,
         username: values.username?.trim() || null,
         password: values.password?.trim() || undefined,
+        sync_runner_token: values.sync_runner_token?.trim() || undefined,
       });
       setSettings(updated);
       message.success("Airflow 配置已保存");
@@ -150,6 +194,144 @@ export function AirflowSettingsPanel() {
             <Input placeholder="v1" style={{ width: 100 }} />
           </Form.Item>
         </Space>
+        <Collapse
+          ghost
+          items={[
+            {
+              key: "delivery",
+              label: "DAG 投递",
+              children: (
+                <>
+                  <Form.Item
+                    label="DAG 目录"
+                    name="dags_dir"
+                    extra="必须是 Airflow 真正挂进容器的那个目录；两侧不一致时 DAG 落了盘也没人解析（提交前自检会验这一项）"
+                  >
+                    <Input placeholder="/opt/airflow/dags 在宿主机上的路径" />
+                  </Form.Item>
+                  <Form.Item
+                    label="作业配置目录"
+                    name="jobs_dir"
+                    extra="docker 通道的搬运作业配置落在这里，并挂进搬运容器；runner 通道不用"
+                  >
+                    <Input placeholder="…/seatunnel/jobs" />
+                  </Form.Item>
+                </>
+              ),
+            },
+            {
+              key: "channel",
+              label: "执行通道",
+              children: (
+                <>
+                  <Form.Item
+                    label="通道"
+                    name="sync_channel"
+                    extra="runner：Airflow 任务向常驻 sync-runner 发 HTTP（推荐）；docker：经 docker.sock 起搬运容器，docker.sock 可达性/网络名/驱动挂载只有真起容器才知道成不成立"
+                  >
+                    <Radio.Group
+                      optionType="button"
+                      options={[
+                        { label: "runner（常驻服务）", value: "runner" },
+                        { label: "docker（兄弟容器）", value: "docker" },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    label="sync-runner 地址"
+                    name="sync_runner_endpoint"
+                    extra="ontoMeta 与 Airflow worker 用的是同一个值，故要填两边都能解析的地址（容器名在宿主机上解析不了，127.0.0.1 在 worker 里指向它自己）"
+                  >
+                    <Input placeholder="http://sync-runner:8098" />
+                  </Form.Item>
+                  <Form.Item
+                    label="runner 访问令牌"
+                    name="sync_runner_token"
+                    extra={
+                      settings?.sync_runner_token_set
+                        ? "已配置，留空则保持不变。runner 侧需设同一个 SYNC_RUNNER_TOKEN"
+                        : "runner 侧设了 SYNC_RUNNER_TOKEN 才需要；管理下方的连接配置必须有它"
+                    }
+                  >
+                    <Input.Password
+                      placeholder="与 runner 的 SYNC_RUNNER_TOKEN 一致"
+                      autoComplete="new-password"
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    label="搬运容器网络"
+                    name="docker_network"
+                    extra="仅 docker 通道：搬运容器要能解析源库/数仓的容器名，默认 bridge 做不到"
+                  >
+                    <Input placeholder="bridge" style={{ width: 260 }} />
+                  </Form.Item>
+                  <Form.Item
+                    label="JDBC 驱动目录"
+                    name="drivers_dir"
+                    extra="仅 docker 通道：驱动因授权不随镜像分发，逐个 jar 挂进搬运容器"
+                  >
+                    <Input placeholder="…/seatunnel/drivers" />
+                  </Form.Item>
+                  <Form.Item
+                    label="搬运工具镜像覆盖"
+                    name="sync_tool_images"
+                    extra="仅 docker 通道：工具名=镜像，逗号分隔。DataX 无官方镜像，不在这里指到自建镜像就不可选"
+                  >
+                    <Input placeholder="datax=registry.internal/datax:3.0" />
+                  </Form.Item>
+                </>
+              ),
+            },
+            {
+              key: "shape",
+              label: "DAG 形状与时序",
+              children: (
+                <>
+                  <Space align="start" wrap>
+                    <Form.Item
+                      label="单 DAG 最大任务数"
+                      name="max_tasks_per_dag"
+                      extra="超出按此拆成多个 DAG"
+                    >
+                      <InputNumber min={1} max={1000} style={{ width: 160 }} />
+                    </Form.Item>
+                    <Form.Item
+                      label="单 DAG 并发上限"
+                      name="max_active_tasks_per_dag"
+                      extra="层内不再一次性全放开"
+                    >
+                      <InputNumber min={1} max={256} style={{ width: 160 }} />
+                    </Form.Item>
+                  </Space>
+                  <Space align="start" wrap>
+                    <Form.Item
+                      label="等 DAG 解析超时（秒）"
+                      name="dag_parse_timeout"
+                      extra="要大于 Airflow 的 dag_dir_list_interval（默认 300s），否则首次提交必报「尚未解析到」"
+                    >
+                      <InputNumber min={0} max={3600} style={{ width: 200 }} />
+                    </Form.Item>
+                    <Form.Item
+                      label="自检探针超时（秒）"
+                      name="preflight_sentinel_timeout"
+                      extra="提交前自检写一个 sentinel DAG，等它被解析到"
+                    >
+                      <InputNumber min={0} max={600} style={{ width: 200 }} />
+                    </Form.Item>
+                  </Space>
+                  <Form.Item
+                    label="全量装载走 staging + 原子切换"
+                    name="staging_swap"
+                    valuePropName="checked"
+                    extra="先搬进 staging 表、成功后再切换；关掉则直接写正式表，搬到一半失败会留下残缺数据"
+                  >
+                    <Switch />
+                  </Form.Item>
+                </>
+              ),
+            },
+          ]}
+        />
         <Form.Item>
           <Space>
             <Button type="primary" onClick={() => void save()} loading={saving}>
@@ -165,6 +347,10 @@ export function AirflowSettingsPanel() {
           </Space>
         </Form.Item>
       </Form>
+      <Divider plain>
+        搬运连接配置（存在 sync-runner 一侧）
+      </Divider>
+      <SyncRunnerSecretsPanel />
     </>
   );
 }

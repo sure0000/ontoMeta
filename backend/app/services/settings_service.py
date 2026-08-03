@@ -38,6 +38,23 @@ def _default_jobs_dir() -> str:
         _REPO_ROOT / "docker" / "orchestration" / "seatunnel" / "jobs"
     )
 
+
+def parse_tool_images(raw: str | None) -> dict[str, str]:
+    """``工具名=镜像,工具名=镜像`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。
+
+    设置页存的是这串原文（一个输入框比一张动态表格好填），解析放在读取侧。
+    """
+    mapping: dict[str, str] = {}
+    for item in (raw or "").split(","):
+        name, sep, image = item.partition("=")
+        if not sep:
+            continue
+        name, image = name.strip().lower(), image.strip()
+        if name and image:
+            mapping[name] = image
+    return mapping
+
+
 DEEPSEEK_MODELS = [
     {
         "id": "deepseek-v4-flash",
@@ -110,6 +127,15 @@ class AirflowRuntimeConfig:
     # docker_network/drivers_dir/sync_tool_images 这三项只服务 docker 旧通道。
     sync_channel: str
     sync_runner_endpoint: str
+    # 调 runner 的 Bearer token（runner 侧设了才需要）。
+    sync_runner_token: str | None
+    # DAG 形状与时序。dag_parse_timeout 要大于 Airflow 的 dag_dir_list_interval，
+    # 否则首次提交必然报「尚未解析到」。
+    max_tasks_per_dag: int
+    max_active_tasks_per_dag: int
+    dag_parse_timeout: float
+    preflight_sentinel_timeout: float
+    staging_swap: bool
     enabled: bool
 
     @property
@@ -260,7 +286,7 @@ class SettingsService:
     def update_airflow_settings(self, db: Session, data: dict) -> AirflowSetting:
         row = self.get_airflow_settings(db)
         for key, value in data.items():
-            if key in ("password", "token") and value is None:
+            if key in ("password", "token", "sync_runner_token") and value is None:
                 continue  # 不传则保留原凭据
             setattr(row, key, value)
         db.commit()
@@ -275,14 +301,21 @@ class SettingsService:
             password=row.password,
             token=row.token,
             api_version=row.api_version,
-            # 投递目录不在 DB：由 config 给默认（部署基础设施，可环境变量覆盖）。
-            dags_dir=_default_dags_dir(),
-            jobs_dir=_default_jobs_dir(),
-            docker_network=env_settings.airflow_docker_network,
-            drivers_dir=env_settings.airflow_sync_drivers_dir,
-            sync_tool_images=env_settings.sync_tool_image_map,
-            sync_channel=env_settings.sync_channel,
-            sync_runner_endpoint=env_settings.sync_runner_endpoint,
+            # 以下全部来自设置页那一行：环境变量只在建行时播过一次种，之后不再参与，
+            # 免得出现「改了 .env 却不生效」的两个事实源。
+            dags_dir=row.dags_dir or _default_dags_dir(),
+            jobs_dir=row.jobs_dir or _default_jobs_dir(),
+            docker_network=row.docker_network,
+            drivers_dir=row.drivers_dir,
+            sync_tool_images=parse_tool_images(row.sync_tool_images),
+            sync_channel=row.sync_channel,
+            sync_runner_endpoint=row.sync_runner_endpoint,
+            sync_runner_token=row.sync_runner_token or None,
+            max_tasks_per_dag=row.max_tasks_per_dag,
+            max_active_tasks_per_dag=row.max_active_tasks_per_dag,
+            dag_parse_timeout=row.dag_parse_timeout,
+            preflight_sentinel_timeout=row.preflight_sentinel_timeout,
+            staging_swap=row.staging_swap,
             enabled=row.enabled,
         )
 
@@ -439,7 +472,25 @@ class SettingsService:
 
         if not db.get(AirflowSetting, "default"):
             # 默认不启用：需在设置页填 endpoint 并启用后才能物化（物化一律走 Airflow 编排）。
-            db.add(AirflowSetting(id="default"))
+            # **环境变量只在这里播一次种**：编排配置此后以这一行为准，改 .env 不再生效。
+            # 这样已有部署升级时行为不变，又不会留下两个互相打架的事实源。
+            db.add(
+                AirflowSetting(
+                    id="default",
+                    dags_dir=_default_dags_dir(),
+                    jobs_dir=_default_jobs_dir(),
+                    sync_channel=env_settings.sync_channel or "runner",
+                    sync_runner_endpoint=env_settings.sync_runner_endpoint,
+                    docker_network=env_settings.airflow_docker_network,
+                    drivers_dir=env_settings.airflow_sync_drivers_dir,
+                    sync_tool_images=env_settings.sync_tool_images,
+                    max_tasks_per_dag=env_settings.ontometa_max_tasks_per_dag,
+                    max_active_tasks_per_dag=env_settings.ontometa_max_active_tasks_per_dag,
+                    dag_parse_timeout=env_settings.ontometa_dag_parse_timeout,
+                    preflight_sentinel_timeout=env_settings.ontometa_preflight_sentinel_timeout,
+                    staging_swap=env_settings.ontometa_staging_swap,
+                )
+            )
             db.commit()
 
         SettingsService._defaults_initialized = True

@@ -17,6 +17,8 @@ from app.schemas import (
     LlmModelOption,
     LlmServiceConfigCreate,
     LlmServiceConfigDetail,
+    SyncRunnerSecretOut,
+    SyncRunnerSecretUpdate,
     LlmServiceConfigOut,
     LlmServiceConfigUpdate,
 )
@@ -146,8 +148,21 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         token_set=bool(row.token),
         api_version=row.api_version,
         enabled=row.enabled,
-        # 投递目录已由 config 给默认（总非空），可用与否只看启用 + endpoint。
+        # 投递目录空时读取侧会退回默认（见 settings_service），可用与否只看启用 + endpoint。
         available=bool(row.enabled and row.endpoint),
+        dags_dir=row.dags_dir,
+        jobs_dir=row.jobs_dir,
+        sync_channel=row.sync_channel,
+        sync_runner_endpoint=row.sync_runner_endpoint,
+        sync_runner_token_set=bool(row.sync_runner_token),
+        docker_network=row.docker_network,
+        drivers_dir=row.drivers_dir,
+        sync_tool_images=row.sync_tool_images,
+        max_tasks_per_dag=row.max_tasks_per_dag,
+        max_active_tasks_per_dag=row.max_active_tasks_per_dag,
+        dag_parse_timeout=row.dag_parse_timeout,
+        preflight_sentinel_timeout=row.preflight_sentinel_timeout,
+        staging_swap=row.staging_swap,
         updated_at=row.updated_at,
     )
 
@@ -162,6 +177,69 @@ def update_airflow_settings(data: AirflowSettingsUpdate, db: Session = Depends(g
     return _airflow_settings_out(
         settings_service.update_airflow_settings(db, data.model_dump())
     )
+
+
+# ---------- sync-runner 的连接配置（凭据代填，ontoMeta 不留副本） ----------
+#
+# 为什么是代填而不是存在 ontoMeta：凭据只有一个归属地——值落在 runner 自己的存储里，
+# 这样 runner 的 /probe 才有意义，DAG 产物里也才只有别名。设置页在这里只是个输入框，
+# 请求穿过去就没了，**不落库、不缓存、不回读明文**。
+
+
+def _runner_client(db: Session):
+    from app.connectors.sync_runner import SyncRunnerClient
+
+    airflow = settings_service.get_airflow_runtime(db)
+    if not airflow.sync_runner_endpoint:
+        raise HTTPException(status_code=400, detail="未配置 sync-runner 地址")
+    return SyncRunnerClient(
+        airflow.sync_runner_endpoint, token=airflow.sync_runner_token
+    )
+
+
+@router.get("/settings/sync-runner/secrets", response_model=list[SyncRunnerSecretOut])
+def list_sync_runner_secrets(db: Session = Depends(get_db)):
+    """列出 runner 侧已配的别名。机密键只回「已设置」，明文不出 runner。"""
+    from app.connectors.sync_runner import SyncRunnerError
+
+    client = _runner_client(db)
+    try:
+        return client.list_secrets()
+    except SyncRunnerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+
+@router.put("/settings/sync-runner/secrets/{alias}")
+def put_sync_runner_secret(
+    alias: str, data: SyncRunnerSecretUpdate, db: Session = Depends(get_db)
+):
+    """把一个别名的连接配置写进 runner。**ontoMeta 不保存这些值。**"""
+    from app.connectors.sync_runner import SyncRunnerError
+
+    client = _runner_client(db)
+    try:
+        return client.put_secret(alias, data.values)
+    except SyncRunnerError as exc:
+        # runner 的 409/403 文本已经说清了原因（别名由环境变量管、runner 没设 token），
+        # 原样带出比再包一层更有用。
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+
+@router.delete("/settings/sync-runner/secrets/{alias}")
+def delete_sync_runner_secret(alias: str, db: Session = Depends(get_db)):
+    from app.connectors.sync_runner import SyncRunnerError
+
+    client = _runner_client(db)
+    try:
+        return client.delete_secret(alias)
+    except SyncRunnerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        client.close()
 
 
 @router.post("/settings/airflow/test")

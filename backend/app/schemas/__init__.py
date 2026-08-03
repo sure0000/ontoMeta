@@ -158,6 +158,8 @@ from app.schemas.ontology import (
 from app.schemas.settings import (
     AirflowSettingsOut,
     AirflowSettingsUpdate,
+    SyncRunnerSecretOut,
+    SyncRunnerSecretUpdate,
     CubeSettingsOut,
     CubeSettingsUpdate,
     DatahubSettingsOut,
@@ -295,6 +297,8 @@ __all__ = [
     "DatahubSettingsUpdate",
     "AirflowSettingsOut",
     "AirflowSettingsUpdate",
+    "SyncRunnerSecretOut",
+    "SyncRunnerSecretUpdate",
     "CubeSettingsOut",
     "CubeSettingsUpdate",
     "DraftGenerationSettingsOut",

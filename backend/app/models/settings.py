@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 import uuid
@@ -58,14 +58,18 @@ class DraftGenerationSetting(Base):
 
 
 class AirflowSetting(Base):
-    """Airflow 编排连接配置：单例配置行，在设置页管理。
+    """Airflow 编排配置：单例配置行，**全部在设置页管理，不需要配置文件**。
 
-    物化改由 Airflow 编排后（M10），落库一律由 Airflow 执行（不再有直连落库模式）。这里只存
-    **调度器怎么连**（endpoint / 鉴权 / API 版本）。其余信息不在此：
-    - 搬运工具（seatunnel/datax/flink）与同步策略由物化弹窗逐次选；镜像由工具 Adapter 定。
-    - 目标仓的 Airflow Connection id 由目标数据源推导（弹窗选的 target）。
-    - DAG/作业投递目录属部署基础设施，由 ``config.airflow_dags_dir/jobs_dir`` 给默认。
-    目标库与源库的凭据都是 Airflow 侧的 Connection，产物里只出现 conn_id。
+    物化改由 Airflow 编排后（M10），落库一律由 Airflow 执行（不再有直连落库模式）。
+    调度器怎么连、DAG 往哪投、走哪条执行通道、分批与超时怎么定，全在这一行里。
+
+    **环境变量只用于首次播种**（见 ``settings_service.ensure_defaults``）：新库建这一行时
+    从 ``config.Settings`` 取一次初值，此后以本行为准。这样既能让已有部署平滑过渡，
+    又不会出现「改了 .env 却不生效」这种两个事实源打架的情况。
+
+    仍**不在**这里的：搬运工具与同步策略由物化弹窗逐次选；目标仓的 Airflow Connection id
+    由目标数据源推导；源库/目标库的凭据分别归 Airflow Connection（docker 通道）与
+    sync-runner 的 secrets（runner 通道）——凭据只有一个归属地，产物里只出现别名。
     """
 
     __tablename__ = "airflow_settings"
@@ -79,6 +83,37 @@ class AirflowSetting(Base):
     api_version: Mapped[str] = mapped_column(String(10), default="v1")
     # 关掉即物化不可用（需启用才能编排）。未配 endpoint 时也视为不可用。
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ---- 投递：DAG 与作业配置落到哪个目录 ----
+    # 必须是 Airflow 真正挂进容器的那个目录，否则 DAG 落了盘也没人解析
+    # （preflight 的「DAG 目录双向可见」专治这一项）。
+    dags_dir: Mapped[str] = mapped_column(String(512), default="")
+    jobs_dir: Mapped[str] = mapped_column(String(512), default="")
+
+    # ---- 执行通道 ----
+    # runner：Airflow 任务向常驻 sync-runner 发 HTTP（默认）；
+    # docker：Airflow 经 docker.sock 起搬运容器（旧通道，保留作回退）。
+    sync_channel: Mapped[str] = mapped_column(String(16), default="runner")
+    sync_runner_endpoint: Mapped[str] = mapped_column(String(512), default="")
+    # ontoMeta 调 runner 的 Bearer token。runner 侧设了 SYNC_RUNNER_TOKEN 才需要；
+    # **写连接配置必须有它**（runner 没配 token 时写接口直接 403，不敞着）。
+    sync_runner_token: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 下面三项只服务 docker 通道，runner 通道下不生效。
+    docker_network: Mapped[str] = mapped_column(String(128), default="bridge")
+    drivers_dir: Mapped[str] = mapped_column(String(512), default="")
+    # ``工具名=镜像`` 逗号分隔。无官方镜像的工具（DataX）只有在这里配了才可选。
+    sync_tool_images: Mapped[str] = mapped_column(String(1024), default="")
+
+    # ---- DAG 形状与时序 ----
+    max_tasks_per_dag: Mapped[int] = mapped_column(Integer, default=50)
+    max_active_tasks_per_dag: Mapped[int] = mapped_column(Integer, default=16)
+    # 落盘后等 Airflow 解析到 DAG 的超时。要大于 Airflow 的 dag_dir_list_interval，
+    # 否则首次提交必然报「尚未解析到」（该值默认 300s，按你的部署实测调）。
+    dag_parse_timeout: Mapped[float] = mapped_column(Float, default=60.0)
+    preflight_sentinel_timeout: Mapped[float] = mapped_column(Float, default=20.0)
+    # 全量装载是否走 staging + 原子切换（搬到一半失败时正式表原封不动）。
+    staging_swap: Mapped[bool] = mapped_column(Boolean, default=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

@@ -42,7 +42,7 @@ def _init_db(client):
         )
 
 
-def _seed(tag: str, *, with_dsn: bool = True) -> dict:
+def _seed(tag: str, *, with_dsn: bool = True, orphan: bool = False) -> dict:
     with SessionLocal() as db:
         domain = DomainContext(
             datahub_domain_id=f"urn:li:domain:mr-{tag}", name=f"mr-{tag}"
@@ -73,6 +73,26 @@ def _seed(tag: str, *, with_dsn: bool = True) -> dict:
         )
         db.add_all([customer, order])
         db.flush()
+        if orphan:
+            # 无 source_ref → planner 产不出搬运作业，但表仍要建（回归用例的被测对象）。
+            manual_dim = ObjectType(
+                ontology_id=ontology.id,
+                name="manual_dim",
+                display_name="人工维度",
+                table_role="business_object",
+            )
+            db.add(manual_dim)
+            db.flush()
+            db.add(
+                Property(
+                    object_type_id=manual_dim.id,
+                    name="code",
+                    display_name="编码",
+                    data_type="string",
+                    semantic_type="identifier",
+                    required=True,
+                )
+            )
         # 有列才有可生成的 ETL SELECT；created_at 同时作为增量装载的分区键候选。
         db.add_all(
             [
@@ -200,38 +220,49 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
     assert any("warehouse_prod" in s and "dim_customer" in s for s in spec["ddl"])
 
 
+def _set_airflow(**fields):
+    """改设置行上的编排旋钮（原来是环境变量，现已全部入库）。"""
+    from app.services.settings_service import SettingsService
+
+    with SessionLocal() as db:
+        SettingsService().update_airflow_settings(db, fields)
+
+
 def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict, channel: str = "docker", capabilities: dict | None = None):
     """把 Airflow 配成可用，并把 REST 调用换成记录器（不需要真实 Airflow）。
 
-    投递目录不再入设置，改由 config 环境变量给默认：直接 monkeypatch 成 tmp 路径。
+    **编排配置全在设置行里**（不再有环境变量），故这里直接写设置行——测试因此走的是
+    生产同一条读取路径，而不是绕过它去 patch 一个已经不参与决策的 env 对象。
     ``channel`` 选执行通道：``docker`` 走旧兄弟容器通道；``runner`` 额外把 SyncRunnerClient
     换成返回给定 capabilities 的替身（不需要真实 runner）。
     """
-    from app.config import settings as env_settings
     from app.services.settings_service import SettingsService
 
-    monkeypatch.setattr(env_settings, "airflow_dags_dir", str(tmp_path / "dags"))
-    monkeypatch.setattr(env_settings, "airflow_jobs_dir", str(tmp_path / "jobs"))
-    monkeypatch.setattr(env_settings, "sync_channel", channel)
-    monkeypatch.setattr(
-        env_settings, "sync_runner_endpoint", "http://sync-runner:8088"
-    )
     with SessionLocal() as db:
         SettingsService().update_airflow_settings(
             db,
             {
                 "endpoint": "http://airflow:8080",
                 "enabled": True,
+                "dags_dir": str(tmp_path / "dags"),
+                "jobs_dir": str(tmp_path / "jobs"),
+                "sync_channel": channel,
+                "sync_runner_endpoint": "http://sync-runner:8088",
             },
         )
 
     if channel == "runner":
+        from app.connectors.sync_runner import EXPECTED_CONTRACT_VERSION
+
         caps = capabilities or {
-            "contract_version": "1",
-            "backends": ["native"],
+            # 跟着常量走：契约 bump 时这里不该变成又一处要手改的地方。
+            "contract_version": EXPECTED_CONTRACT_VERSION,
+            "backends": ["native", "seatunnel"],
             "sources": ["mysql", "mariadb"],
             "sinks": ["hive", "doris"],
             "modes": ["full", "incremental"],
+            # Hive 只做全量（seatunnel 档回读不了 Hive 水位），与真 runner 一致。
+            "sink_modes": {"hive": ["full"], "doris": ["full", "incremental"]},
         }
 
         class _FakeRunner:
@@ -337,12 +368,11 @@ def test_runner_channel_writes_pythonoperator_dag_and_records_channel(tmp_path, 
 
 def test_runner_channel_requires_endpoint(tmp_path, monkeypatch):
     """runner 通道但没配 runner 地址 → 提交前报错，不产出连不上 runner 的 DAG。"""
-    from app.config import settings as env_settings
 
     ids = _seed("runnernoep")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     _enable_airflow(tmp_path, monkeypatch, triggered={}, channel="runner")
-    monkeypatch.setattr(env_settings, "sync_runner_endpoint", "")
+    _set_airflow(sync_runner_endpoint="")
 
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError, match="sync-runner"):
@@ -465,10 +495,9 @@ def test_cron_grouping_one_dag_per_cron(tmp_path, monkeypatch):
 
 def test_batching_splits_group_over_max_tasks(tmp_path, monkeypatch):
     """M16：单组超上限 → 拆成 _b0/_b1 多个 DAG，每个 ≤ 上限。"""
-    from app.config import settings as env_settings
 
     ids = _seed("batchsplit")  # customer + sales_order，均无 cron → 同一 manual 组
-    monkeypatch.setattr(env_settings, "ontometa_max_tasks_per_dag", 1)
+    _set_airflow(max_tasks_per_dag=1)
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     _enable_airflow(tmp_path, monkeypatch, triggered={})
 
@@ -488,14 +517,48 @@ def test_batching_splits_group_over_max_tasks(tmp_path, monkeypatch):
     assert len({b["dag_run_id"] for b in batches}) == 2  # 单批可单独重跑
 
 
+def test_tables_without_sync_jobs_still_get_ddl(tmp_path, monkeypatch):
+    """回归：无搬运作业的表（ADS/缺 source_ref/装载方式不支持）也必须有 DAG 建它。
+
+    分批曾按「该批有作业的目标表」筛 DDL，于是这些表的 CREATE 不进任何 DAG，却仍出现在
+    回执的 tables 里——用户以为建了，实际一张也没有。
+    """
+    import json as _json
+
+    ids = _seed("orphanddl", orphan=True)
+    _set_cron_m16(ids["ontology_id"], {"customer": "0 2 * * *"})  # 制造多批，孤儿不能被吞
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="a-orphan",
+        )
+
+    built: set[str] = set()
+    for spec_path in sorted((tmp_path / "dags").glob("*.json")):
+        built.update(_json.loads(spec_path.read_text(encoding="utf-8"))["ddl_targets"])
+
+    # 回执说要物化的每张表，都真的有某个 DAG 会建它
+    assert set(receipt["tables"]) == built
+    assert any(t.endswith(".manual_dim") for t in built)
+    # 孤儿归 manual 批（无 cron），不挂到定时 DAG 上重复建
+    manual = next(b for b in receipt["batches"] if b["schedule"] is None)
+    assert any(t.endswith(".manual_dim") for t in manual["tables"])
+    assert not any(t.endswith(".manual_dim") for t in manual["jobs"])
+
+
 def test_unparsed_dag_recorded_not_triggered(tmp_path, monkeypatch):
     """落盘后等解析：Airflow 未解析到 → 不触发，回执记「尚未解析到」，产物仍在。"""
-    from app.config import settings as env_settings
 
     ids = _seed("noparse")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     _enable_airflow(tmp_path, monkeypatch, triggered={})
-    monkeypatch.setattr(env_settings, "ontometa_dag_parse_timeout", 0.2)
+    _set_airflow(dag_parse_timeout=0.2)
     monkeypatch.setattr(materialization_runner.time, "sleep", lambda s: None)
 
     class _NoParse:
@@ -531,6 +594,59 @@ def test_unparsed_dag_recorded_not_triggered(tmp_path, monkeypatch):
     assert receipt["ok"] is False
     assert all("尚未解析" in (b["error"] or "") for b in receipt["batches"])
     assert list((tmp_path / "dags").iterdir())  # 产物已落盘，可排查后重试
+
+
+def test_parse_wait_is_bounded_by_one_timeout_across_batches(tmp_path, monkeypatch):
+    """多批都没被解析到时，**总**等待受一个 timeout 约束，不随批数放大。
+
+    目录两侧不一致（失败模式 #3）正是这条路径要抓的场景。逐批各等一遍会把
+    「超时 × 批数」拖成十几分钟阻塞在一个 HTTP 请求里（734 张表约 15 批），
+    网关先超时，用户连「产物已落盘、去查目录」这句提示都拿不到。
+    """
+
+    ids = _seed("waitbound")
+    _set_airflow(max_tasks_per_dag=1)  # → 2 批
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    _set_airflow(dag_parse_timeout=10.0)
+
+    # 假时钟：sleep 不真睡，只推进时间——总耗时因而可断言且用例是秒级的。
+    clock = {"now": 0.0}
+    monkeypatch.setattr(materialization_runner.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        materialization_runner.time,
+        "sleep",
+        lambda s: clock.__setitem__("now", clock["now"] + s),
+    )
+
+    class _NoParse:
+        def __init__(self, *a, **kw):
+            pass
+
+        def dag_exists(self, dag_id):
+            return False
+
+        def run_url(self, dag_id, run_id):
+            return f"url/{dag_id}/{run_id}"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(materialization_runner, "AirflowClient", _NoParse)
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="a-waitbound",
+        )
+
+    assert len(receipt["batches"]) == 2
+    assert all("尚未解析" in (b["error"] or "") for b in receipt["batches"])
+    # 关键：等了一个超时，不是两个（轮询间隔 2s，故留一轮的余量）
+    assert clock["now"] <= 10.0 + 2
 
 
 def test_errors_when_airflow_unavailable(monkeypatch):

@@ -43,13 +43,8 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
     ids = _seed("run", dsn=f"sqlite:///{tmp_path / 'target.db'}")
 
     # 启用 Airflow 并把 REST 客户端换成替身（不需真实 Airflow）；投递目录指向 tmp。
-    from app.config import settings as env_settings
+    # 编排配置全在设置行里（不再有环境变量），故直接写设置行。
     from app.services import materialization_runner
-
-    monkeypatch.setattr(env_settings, "airflow_dags_dir", str(tmp_path / "dags"))
-    monkeypatch.setattr(env_settings, "airflow_jobs_dir", str(tmp_path / "jobs"))
-    # 这条端到端用例走 docker 通道（M14 前的既有行为）；runner 通道另有专测。
-    monkeypatch.setattr(env_settings, "sync_channel", "docker")
 
     class _FakeClient:
         def __init__(self, *a, **kw):
@@ -74,7 +69,14 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
     client.put(
         "/api/settings/airflow",
         headers=admin_headers,
-        json={"endpoint": "http://airflow:8080", "enabled": True},
+        json={
+            "endpoint": "http://airflow:8080",
+            "enabled": True,
+            "dags_dir": str(tmp_path / "dags"),
+            "jobs_dir": str(tmp_path / "jobs"),
+            # 这条端到端用例走 docker 通道（M14 前的既有行为）；runner 通道另有专测。
+            "sync_channel": "docker",
+        },
     )
     try:
         resp = client.post(

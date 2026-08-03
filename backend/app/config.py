@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # 两侧不一致」失败模式 #3）。Airflow 的 dag_dir_list_interval 默认 300s（⚠ 见
     # MATERIALIZE_SYNC_STABILITY.md §8.1），故超时不作硬失败、只降级为提醒。
     ontometa_preflight_sentinel_timeout: float = 20.0
+    # 全量装载是否走 staging + 原子切换（M15）：搬进 ``<表>__stg_<批次>``，成功后由
+    # Dialect Adapter 的切换语句换到正式表——搬到一半失败时正式表原封不动。关掉则退回
+    # 直接写正式表（失败即半张表/空表）。留这个开关是因为各引擎切换的原子性与代价需在
+    # 真实实例核实（⚠ MATERIALIZE_SYNC_STABILITY.md §8.3），真出问题要能一键退回。
+    ontometa_staging_swap: bool = True
 
     # 搬运执行通道（M14）：
     # - ``runner``：向常驻 sync-runner 发一次 HTTP，凭据由 runner 自解析，无宿主机路径/

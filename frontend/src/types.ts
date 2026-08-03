@@ -580,7 +580,32 @@ export interface AirflowSettings {
   enabled: boolean;
   /** 启用且 endpoint 已填才算真的可用；否则物化报错无法执行。 */
   available: boolean;
+  /** DAG 与作业配置的投递目录（必须是 Airflow 真正挂进容器的那个）。 */
+  dags_dir: string;
+  jobs_dir: string;
+  /** runner：向常驻 sync-runner 发 HTTP；docker：经 docker.sock 起搬运容器。 */
+  sync_channel: string;
+  sync_runner_endpoint: string;
+  /** 调 runner 的 token 是否已设（明文不回传）。 */
+  sync_runner_token_set: boolean;
+  /** 下面三项只服务 docker 通道。 */
+  docker_network: string;
+  drivers_dir: string;
+  sync_tool_images: string;
+  max_tasks_per_dag: number;
+  max_active_tasks_per_dag: number;
+  dag_parse_timeout: number;
+  preflight_sentinel_timeout: number;
+  staging_swap: boolean;
   updated_at: string;
+}
+
+/** runner 侧一个别名的连接配置概览。**不含机密明文**——机密键只回「已设置」。 */
+export interface SyncRunnerSecret {
+  alias: string;
+  /** store：设置页写入 runner 存储，可改；env：部署时钉死的环境变量，只读。 */
+  source: string;
+  values: Record<string, string>;
 }
 
 export interface ChatBiConversation {

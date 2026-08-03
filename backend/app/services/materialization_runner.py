@@ -20,8 +20,6 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import settings as env_settings
-
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
 from app.connectors.sync_runner import (
@@ -160,23 +158,65 @@ def _plan_batches(jobs, cron_by_entity: dict[str, str | None], max_tasks: int) -
     return batches
 
 
-def _wait_for_parse(client: AirflowClient, dag_id: str, timeout: float) -> bool:
-    """轮询 ``GET /dags/{id}`` 直到 Airflow 解析到该 DAG，或超时。
+def _assign_ddl(batches: list[dict], ddl_items: list[tuple[str, str]]) -> list[dict]:
+    """把建表语句分给各批，并保证**每张表都有人建**。
+
+    有搬运作业的表，建表跟着它那一批走。**没有任何搬运作业的表也必须建**——ADS 层
+    （由 MetricSpec 产出，不走搬运）、缺 ``source_ref``、装载方式不被执行侧支持的，
+    都属这一类。按批内作业的目标表筛 DDL 会把它们整个漏掉：表出现在回执的 ``tables``
+    里，却没有任何 DAG 会创建它。故这些「孤儿 DDL」归入 manual 批，没有就新开一个
+    只建表的批。
+
+    **不按 cron 分**：建表是幂等的一次性动作，挂到定时 DAG 上只会每轮重复跑一遍
+    CREATE，而这些表本来就没有「按节奏重跑」的语义。
+    """
+    by_target = dict(ddl_items)
+    assigned: set[str] = set()
+    for batch in batches:
+        targets = {job.target.qualified for job in batch["jobs"]}
+        batch["ddl"] = {q: by_target[q] for q in sorted(targets & set(by_target))}
+        assigned |= targets
+
+    orphans = {q: s for q, s in ddl_items if q not in assigned}
+    if orphans:
+        manual = next((b for b in batches if b["schedule"] is None), None)
+        if manual is None:
+            manual = {"suffix": "manual", "schedule": None, "jobs": (), "ddl": {}}
+            batches.append(manual)
+        manual["ddl"].update(orphans)
+    return batches
+
+
+def _wait_for_parse(
+    client: AirflowClient, dag_ids: list[str], timeout: float
+) -> set[str]:
+    """等 Airflow 解析到这批 DAG，返回**已解析到的** dag_id 集合。
 
     替代「落盘后立刻触发、404 被吞成回执 error」：首次提交常见于解析尚未完成，
     直接触发必 404。⚠ Airflow ``dag_dir_list_interval`` 默认 300s（§8.1），超时值
     由 ``ONTOMETA_DAG_PARSE_TIMEOUT`` 配；超时不抛，交由调用方记「尚未解析到」。
+
+    **一个总超时管整批，不是每个各等一遍**：这批文件在同一次写盘里全部落到同一个
+    dags 目录，Airflow 一次目录扫描就会全部认到——逐个各等 ``timeout`` 并不会让谁
+    更容易被认到，只会在目录两侧不一致（失败模式 #3，正是这里要抓的那个）时把
+    等待放大成「批数 × 超时」：734 张表约 15 批 × 60s ≈ 15 分钟阻塞在一个 HTTP
+    请求里，网关多半先超时，用户什么也拿不到。
     """
     deadline = time.monotonic() + timeout
-    while True:
-        try:
-            if client.dag_exists(dag_id):
-                return True
-        except AirflowError:
-            pass  # 鉴权/网络问题由触发那步的错误体带出，这里只管「在不在」
-        if time.monotonic() >= deadline:
-            return False
+    pending = list(dag_ids)
+    seen: set[str] = set()
+    while pending:
+        for dag_id in list(pending):
+            try:
+                if client.dag_exists(dag_id):
+                    seen.add(dag_id)
+                    pending.remove(dag_id)
+            except AirflowError:
+                pass  # 鉴权/网络问题由触发那步的错误体带出，这里只管「在不在」
+        if not pending or time.monotonic() >= deadline:
+            break
         time.sleep(2)
+    return seen
 
 
 def _run_orchestrated(
@@ -203,9 +243,11 @@ def _run_orchestrated(
         if not airflow.sync_runner_endpoint:
             raise MaterializationError(
                 "sync_channel=runner 但未配置 sync-runner 地址"
-                "（设 ONTOMETA_SYNC_RUNNER_ENDPOINT），无法物化"
+                "（设 SYNC_RUNNER_ENDPOINT），无法物化"
             )
-        client = SyncRunnerClient(airflow.sync_runner_endpoint)
+        client = SyncRunnerClient(
+            airflow.sync_runner_endpoint, token=airflow.sync_runner_token
+        )
         try:
             runner_caps = client.capabilities()
         except SyncRunnerError as exc:
@@ -250,29 +292,23 @@ def _run_orchestrated(
     # 按 cron 分组 + 按上限分批：一个 cron 一个 DAG、少数派不再被众数吞掉，超上限再拆（M16）。
     cron_map = _cron_by_entity(db, ontology_id)
     batches = _plan_batches(
-        plan.jobs, cron_map, env_settings.ontometa_max_tasks_per_dag
+        plan.jobs, cron_map, airflow.max_tasks_per_dag
     )
-    # 无可搬作业但有建表：仍产一个 create_tables-only 的 manual DAG（保持既有「只建表」行为）。
-    if not batches and ddl_items:
-        batches = [{"suffix": "manual", "schedule": None, "jobs": ()}]
+    # 建表分配：有作业的表跟着自己那批，无作业的表（ADS/缺 source_ref/不支持的装载方式）
+    # 归入 manual 批。无可搬作业但有建表时，这里会新开一个 create_tables-only 的 manual 批。
+    _assign_ddl(batches, ddl_items)
 
     bundles: list[tuple[dict, Any]] = []
     for batch in batches:
-        targets = {job.target.qualified for job in batch["jobs"]}
-        ddl_subset = (
-            {q: s for q, s in ddl_items if q in targets}
-            if batch["jobs"]
-            else dict(ddl_items)  # 只建表的兜底批：全部 DDL
-        )
         bundle = _dag_builder.build(
             ontology_id=ontology_id,
             plan=JobPlan(jobs=batch["jobs"]),
-            ddl_statements=ddl_subset,
+            ddl_statements=batch["ddl"],
             schedule=batch["schedule"],
             channel=channel,
             runner_endpoint=airflow.sync_runner_endpoint,
             dag_id_suffix=batch["suffix"],
-            max_active_tasks=env_settings.ontometa_max_active_tasks_per_dag,
+            max_active_tasks=airflow.max_active_tasks_per_dag,
             tool=sync_tool,
             engine=engine,
             warehouse_conn_id=_warehouse_conn_id(ds),
@@ -280,6 +316,8 @@ def _run_orchestrated(
             jobs_host_dir=airflow.jobs_dir,
             drivers_host_dir=airflow.drivers_dir,
             image_overrides=airflow.sync_tool_images,
+            # 全量装载走 staging + 原子切换（M15）：搬到一半失败时正式表原封不动。
+            staging=airflow.staging_swap,
             target_urn_builder=_urn_builder,
         )
         bundles.append((batch, bundle))
@@ -302,14 +340,19 @@ def _run_orchestrated(
         api_version=airflow.api_version,
     )
     batch_results: list[dict] = []
-    parse_timeout = env_settings.ontometa_dag_parse_timeout
+    parse_timeout = airflow.dag_parse_timeout
     try:
+        # 一个总超时管整批（见 _wait_for_parse）：它们在同一次写盘里落到同一个目录，
+        # 一次扫描全部认到；逐个各等一遍只会在目录不可见时把等待乘以批数。
+        parsed = _wait_for_parse(
+            client, [bundle.dag_id for _, bundle in bundles], parse_timeout
+        )
         for batch, bundle in bundles:
             # run_id 带批次后缀：每个 DAG 一个确定性 run_id，重复提交在 Airflow 侧幂等。
             run_id = f"ontometa__{artifact_id or 'manual'}__{batch['suffix']}"
             error: str | None = None
             triggered: dict[str, Any] = {}
-            if not _wait_for_parse(client, bundle.dag_id, parse_timeout):
+            if bundle.dag_id not in parsed:
                 # 落盘了但 Airflow 没解析到：多半是 dags 目录两侧不一致（失败模式 #3）。
                 error = (
                     "Airflow 尚未解析到 DAG，请检查 dags 目录是否双向可见"
@@ -330,7 +373,8 @@ def _run_orchestrated(
                     or ("failed" if error else "queued"),
                     "run_url": client.run_url(bundle.dag_id, run_id),
                     "schedule": batch["schedule"],
-                    "tables": sorted({job.target.qualified for job in batch["jobs"]}),
+                    # 该 DAG 实际会建的表（含只建表、无搬运作业的那些），不只是有作业的。
+                    "tables": sorted(batch["ddl"]),
                     "jobs": [job.name for job in batch["jobs"]],
                     "error": error,
                     "artifacts": written_all.get(bundle.dag_id),

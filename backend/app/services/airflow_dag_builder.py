@@ -23,9 +23,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.warehouse.jobs import JobPlan, JobSpec, get_job_adapter, resolve_docker_image
+from app.warehouse.logical_schema import LogicalTable
+from app.warehouse.registry import get_adapter
 from app.connectors.sync_runner import job_spec_to_wire
 
 # 作业配置在搬运容器里的挂载点。默认随工具走（各 Adapter 的 jobs_mount_dir）；
@@ -123,6 +125,58 @@ def _task_group_order(jobs: tuple[JobSpec, ...]) -> list[str]:
     return known + sorted(layers - set(known))
 
 
+@dataclass
+class _Staging:
+    """全量装载的 staging 改写结果（M15 接进运行时）。
+
+    ``exec_jobs`` 是**执行用**的作业（目标已改写成 staging 表）；``plan.jobs`` 里的原作业
+    仍用于展示与血缘——产出的数据集终究是正式表，outlets 不该指向 staging。
+    """
+
+    exec_jobs: dict[str, JobSpec] = field(default_factory=dict)
+    # 建 staging 表的语句。跟在正式表 DDL **之后**执行：CREATE ... LIKE 要求正式表已存在。
+    ddl: list[str] = field(default_factory=list)
+    # 作业名 → 切换语句。空表示该表不走 staging（增量装载 / 开关关闭）。
+    swaps: dict[str, list[str]] = field(default_factory=dict)
+
+    def job(self, job: JobSpec) -> JobSpec:
+        return self.exec_jobs.get(job.name, job)
+
+
+def _plan_staging(
+    plan: JobPlan, *, engine: str, token: str, enabled: bool
+) -> _Staging:
+    """全量装载改走 staging + 原子切换。
+
+    **只作用于 full**：增量是往正式表追加，搬进 staging 再整表切换会把存量数据换没。
+
+    staging 名里的 token 用**批次后缀**而非 run_id：同一个 DAG 的 ``max_active_runs=1``
+    保证两次运行不重叠，而一张表只属于一个批次，故这个名字已经不会撞；用 run_id 反而会
+    让每次失败的运行留下一张不会被回收的 staging 表，且 DAG 产物里要塞 Jinja 表达式。
+    """
+    staging = _Staging()
+    if not enabled:
+        return staging
+    adapter = get_adapter(engine)
+    for job in plan.jobs:
+        if job.mode != "full":
+            continue
+        table = LogicalTable(name=job.target.table, database=job.target.database)
+        staging.ddl.append(
+            _as_single_statement(adapter.render_create_staging(table, token))
+        )
+        staging.swaps[job.name] = [
+            _as_single_statement(s) for s in adapter.render_swap(table, token)
+        ]
+        staging.exec_jobs[job.name] = replace(
+            job,
+            target=replace(
+                job.target, table=adapter.staging_table_name(table, token)
+            ),
+        )
+    return staging
+
+
 class AirflowDagBuilder:
     def build(
         self,
@@ -143,6 +197,7 @@ class AirflowDagBuilder:
         drivers_host_dir: str | None = None,
         docker_network: str = DEFAULT_DOCKER_NETWORK,
         image_overrides: dict[str, str] | None = None,
+        staging: bool = True,
         target_urn_builder=None,
     ) -> DagBundle:
         """产出 DAG 包。
@@ -157,8 +212,15 @@ class AirflowDagBuilder:
         工具（DataX）没配到这里就在**这一步**抛 ``SyncImageUnavailableError``，
         绝不产出一个注定 pull 失败的 DAG。
         ``schedule`` 为契约的 refresh_cron（空 = 只手动触发）；
+        ``staging`` 为全量装载是否走 staging + 原子切换（M15）；
         ``target_urn_builder`` 供 M11 注入目标表 URN 构造（需部署环境的 fabric，M10 不臆造）。
         """
+        stage = _plan_staging(
+            plan,
+            engine=engine,
+            token=dag_id_suffix or "manual",
+            enabled=staging,
+        )
         if channel == "runner":
             return self._build_runner(
                 ontology_id=ontology_id,
@@ -170,6 +232,7 @@ class AirflowDagBuilder:
                 warehouse_conn_id=warehouse_conn_id,
                 dag_id_suffix=dag_id_suffix,
                 max_active_tasks=max_active_tasks,
+                stage=stage,
                 target_urn_builder=target_urn_builder,
             )
         adapter = get_job_adapter(tool)
@@ -181,8 +244,10 @@ class AirflowDagBuilder:
         job_files: dict[str, dict] = {}
         tasks: list[dict] = []
         for job in plan.jobs:
+            # 执行用的作业：全量装载写 staging 表，成功后由 swap 任务切到正式表。
+            exec_job = stage.job(job)
             filename = f"{dag_id}__{job.name}.json"
-            job_files[filename] = adapter.render(job)
+            job_files[filename] = adapter.render(exec_job)
             config_file = f"{jobs_mount}/{filename}"
             tasks.append(
                 {
@@ -193,11 +258,17 @@ class AirflowDagBuilder:
                     # 起 DockerOperator，换工具只改这两个字段，不动骨架——这是
                     # 「工具可插拔」的落地形式。
                     "image": image,
-                    "command": adapter.airflow_command(config_file, adapter.credential_env(job)),
+                    "command": adapter.airflow_command(
+                        config_file, adapter.credential_env(exec_job)
+                    ),
                     # 作业配置里的 ${别名_字段} 占位符靠这张表在运行期补齐。值是
                     # Jinja 表达式（{{ conn.… }}），任务跑起来才渲染——产物里不含凭据。
-                    "env": adapter.credential_env(job),
+                    "env": adapter.credential_env(exec_job),
+                    # 展示用的是**正式表**：staging 只是落地过程，不该出现在回执里。
                     "target": job.target.qualified,
+                    "write_target": exec_job.target.qualified,
+                    # 切换语句（空 = 直接写正式表）。跑在该表的搬运任务之后，失败只红这一张表。
+                    "swap": stage.swaps.get(job.name, []),
                     "mode": job.mode,
                     # 血缘：上游用本体的 source_ref（本就是 DataHub URN）。
                     # 下游 URN 需部署环境的 fabric，M10 不构造，留给 M11 注入。
@@ -230,6 +301,8 @@ class AirflowDagBuilder:
             # 建表语句按目标表名排序，保证幂等
             "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
             "ddl_targets": sorted(ddl_statements),
+            # staging 表的建表语句，**跟在正式表 DDL 之后**执行（CREATE ... LIKE 要求它已存在）。
+            "staging_ddl": stage.ddl,
             "tasks": tasks,
             "layer_order": _task_group_order(plan.jobs),
             "unsupported": plan.unsupported,
@@ -256,6 +329,7 @@ class AirflowDagBuilder:
         warehouse_conn_id: str,
         dag_id_suffix: str | None = None,
         max_active_tasks: int = 16,
+        stage: _Staging,
         target_urn_builder,
     ) -> DagBundle:
         """runner 通道的 DAG 包。
@@ -274,9 +348,12 @@ class AirflowDagBuilder:
                     "task_id": job.name,
                     "layer": job.layer,
                     # 搬运作业声明随请求体传给 runner，凭据不在内（只有 alias）。
-                    "job_spec": job_spec_to_wire(job),
+                    # 全量装载写的是 staging 表，成功后由 swap 任务切到正式表。
+                    "job_spec": job_spec_to_wire(stage.job(job)),
                     "mode": job.mode,
                     "target": job.target.qualified,
+                    "write_target": stage.job(job).target.qualified,
+                    "swap": stage.swaps.get(job.name, []),
                     # 血缘与 docker 通道同口径：上游用本体 source_ref，下游用注入的目标 URN。
                     "inlets": [job.source_urn] if job.source_urn else [],
                     "outlets": [target_urn_builder(job)] if target_urn_builder else [],
@@ -294,6 +371,8 @@ class AirflowDagBuilder:
             "max_active_tasks": max_active_tasks,
             "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
             "ddl_targets": sorted(ddl_statements),
+            # staging 表的建表语句，跟在正式表 DDL 之后执行。
+            "staging_ddl": stage.ddl,
             "tasks": tasks,
             "layer_order": _task_group_order(plan.jobs),
             "unsupported": plan.unsupported,
@@ -367,6 +446,25 @@ class _SyncOperator(DockerOperator):
     template_ext = ()
 
 
+def _with_swap(op, task):
+    """有切换语句就在搬运任务后挂一个 swap 任务，返回该表链条的末端。
+
+    全量装载先搬进 staging 表，成功后再切换到正式表：搬到一半失败时 swap 不会跑，
+    正式表原封不动。切换语法由 Dialect Adapter 按引擎生成（与建表 DDL 同一处），
+    执行侧只管按 conn_id 执行，不需要知道方言。
+    """
+    statements = task.get("swap") or []
+    if not statements:
+        return op
+    swap = SQLExecuteQueryOperator(
+        task_id="swap_" + task["task_id"],
+        conn_id=_SPEC["warehouse_conn_id"],
+        sql=statements,
+    )
+    op >> swap
+    return swap
+
+
 with DAG(
     dag_id="{dag_id}",
     description="ontoMeta 物化：建表 + 按本体映射搬运",
@@ -387,10 +485,14 @@ with DAG(
     create_tables = SQLExecuteQueryOperator(
         task_id="create_tables",
         conn_id=_SPEC["warehouse_conn_id"],
-        sql=_SPEC["ddl"],
+        # staging 表跟在正式表之后建：CREATE ... LIKE 要求正式表已存在。
+        sql=_SPEC["ddl"] + (_SPEC.get("staging_ddl") or []),
     )
 
-    by_layer: dict[str, list] = {{}}
+    # heads 是搬运任务（上游接 create_tables / 上一层），tails 是该表链条的末端
+    # （有 staging 时是 swap 任务）。下一层必须等 swap 完成，等到的才是正式表的数据。
+    heads: dict[str, list] = {{}}
+    tails: dict[str, list] = {{}}
     for task in _SPEC["tasks"]:
         op = _SyncOperator(
             task_id=task["task_id"],
@@ -413,15 +515,20 @@ with DAG(
             inlets=task["inlets"],
             outlets=task["outlets"],
         )
-        by_layer.setdefault(task["layer"], []).append(op)
+        heads.setdefault(task["layer"], []).append(op)
+        tails.setdefault(task["layer"], []).append(_with_swap(op, task))
 
-    previous = create_tables
+    # 层间串联。**逐个上游 >> 整组下游**，不能写成 previous >> group：第二层起
+    # previous 是 list，而 Python 的 list >> list 直接 TypeError（两侧都是内建 list，
+    # Operator 的 __rshift__/__rrshift__ 根本轮不到），整个 DAG 文件在解析期就导入失败。
+    previous = [create_tables]
     for layer in _SPEC["layer_order"]:
-        group = by_layer.get(layer) or []
+        group = heads.get(layer) or []
         if not group:
             continue
-        previous >> group
-        previous = group
+        for upstream in previous:
+            upstream >> group
+        previous = tails[layer]
 '''
 
 
@@ -509,6 +616,25 @@ def _sync(task, **context):
     }
 
 
+def _with_swap(op, task):
+    """有切换语句就在搬运任务后挂一个 swap 任务，返回该表链条的末端。
+
+    全量装载先搬进 staging 表，成功后再切换到正式表：搬到一半失败时 swap 不会跑，
+    正式表原封不动。切换语法由 Dialect Adapter 按引擎生成（与建表 DDL 同一处），
+    runner 不需要知道方言。
+    """
+    statements = task.get("swap") or []
+    if not statements:
+        return op
+    swap = SQLExecuteQueryOperator(
+        task_id="swap_" + task["task_id"],
+        conn_id=_SPEC["warehouse_conn_id"],
+        sql=statements,
+    )
+    op >> swap
+    return swap
+
+
 with DAG(
     dag_id="__DAG_ID__",
     description="ontoMeta 物化（runner 通道）：建表 + 常驻 runner 搬运",
@@ -529,10 +655,14 @@ with DAG(
     create_tables = SQLExecuteQueryOperator(
         task_id="create_tables",
         conn_id=_SPEC["warehouse_conn_id"],
-        sql=_SPEC["ddl"],
+        # staging 表跟在正式表之后建：CREATE ... LIKE 要求正式表已存在。
+        sql=_SPEC["ddl"] + (_SPEC.get("staging_ddl") or []),
     )
 
-    by_layer: dict[str, list] = {}
+    # heads 是搬运任务（上游接 create_tables / 上一层），tails 是该表链条的末端
+    # （有 staging 时是 swap 任务）。下一层必须等 swap 完成，等到的才是正式表的数据。
+    heads: dict[str, list] = {}
+    tails: dict[str, list] = {}
     for task in _SPEC["tasks"]:
         op = PythonOperator(
             task_id=task["task_id"],
@@ -540,18 +670,24 @@ with DAG(
             op_kwargs={"task": task},
             # 血缘：DataHub 的 Airflow 插件基于 OpenLineage，与 Operator 类型无关，
             # inlets/outlets 与 docker 通道同口径（M11 不受通道影响）。
+            # outlets 指的是**正式表**——staging 只是落地过程，不该进血缘图。
             inlets=task["inlets"],
             outlets=task["outlets"],
         )
-        by_layer.setdefault(task["layer"], []).append(op)
+        heads.setdefault(task["layer"], []).append(op)
+        tails.setdefault(task["layer"], []).append(_with_swap(op, task))
 
-    previous = create_tables
+    # 层间串联。**逐个上游 >> 整组下游**，不能写成 previous >> group：第二层起
+    # previous 是 list，而 Python 的 list >> list 直接 TypeError（两侧都是内建 list，
+    # Operator 的 __rshift__/__rrshift__ 根本轮不到），整个 DAG 文件在解析期就导入失败。
+    previous = [create_tables]
     for layer in _SPEC["layer_order"]:
-        group = by_layer.get(layer) or []
+        group = heads.get(layer) or []
         if not group:
             continue
-        previous >> group
-        previous = group
+        for upstream in previous:
+            upstream >> group
+        previous = tails[layer]
 '''
 
 
