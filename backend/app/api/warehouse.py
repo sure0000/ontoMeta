@@ -130,19 +130,37 @@ def update_materialization_contract(
 
 @router.get("/warehouse/sync-tools")
 def list_warehouse_sync_tools():
-    """可选搬运工具及其能力（供物化弹窗选择）。镜像与命令由各工具 Adapter 定。"""
+    """可选搬运工具及其能力（供物化弹窗选择）。镜像与命令由各工具 Adapter 定。
+
+    每项带 ``available``：镜像在本部署里拿不到的工具（如未自建镜像的 DataX）标为
+    不可用并给出 ``reason``，由弹窗禁用。**不从列表里删掉**——「有这个工具但没配」
+    与「没有这个工具」是两回事，后者会让人以为要改代码。
+    """
+    from app.config import settings as env_settings
     from app.warehouse.jobs import get_job_adapter
     from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL, list_sync_tools
 
+    overrides = env_settings.sync_tool_image_map
     tools = []
     for name in list_sync_tools():
         a = get_job_adapter(name)
+        override = overrides.get(a.name)
+        available = bool(a.has_official_image or override)
         tools.append(
             {
                 "name": a.name,
-                "image": a.docker_image,
+                "image": override or a.docker_image,
                 "modes": [m for m in ("full", "incremental", "cdc") if a.supports(m)],
                 "cdc": a.supports("cdc"),
+                "available": available,
+                "reason": (
+                    None
+                    if available
+                    else (
+                        f"{a.docker_image} 无官方发行版，需自建镜像后用环境变量 "
+                        f"ONTOMETA_SYNC_TOOL_IMAGES={a.name}=<你的镜像> 指定"
+                    )
+                ),
             }
         )
     return {"default": DEFAULT_SYNC_TOOL, "tools": tools}

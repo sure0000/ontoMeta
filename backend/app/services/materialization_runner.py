@@ -26,6 +26,11 @@ from app.services.job_planner import JobPlanner
 from app.services.materialization_contract import MaterializationContractService
 from app.services.settings_service import SettingsService
 from app.services.warehouse_generator import WarehouseGenerator
+from app.warehouse.jobs import (
+    SyncImageUnavailableError,
+    get_job_adapter,
+    resolve_docker_image,
+)
 
 _contract_service = MaterializationContractService()
 _generator = WarehouseGenerator()
@@ -132,6 +137,13 @@ def _run_orchestrated(
     artifact_id: str | None,
 ) -> dict[str, Any]:
     """产出 DAG 与搬运作业 → 投递 → 触发一次运行。**不在本进程里落库**。"""
+    # 镜像可用性先于一切：拿不到镜像就没有能跑的作业，此时既不该生成 DAG、
+    # 更不该触发运行——否则失败会推迟到 Airflow 任务日志里，读起来像环境故障。
+    try:
+        resolve_docker_image(get_job_adapter(sync_tool), airflow.sync_tool_images)
+    except SyncImageUnavailableError as exc:
+        raise MaterializationError(str(exc)) from exc
+
     plan = _job_planner.build(
         db,
         ontology_id,
@@ -153,6 +165,11 @@ def _run_orchestrated(
         tool=sync_tool,
         engine=engine,
         warehouse_conn_id=_warehouse_conn_id(ds),
+        docker_network=airflow.docker_network,
+        # 与 bundle.write 的落盘目录同一个：产出在哪，就从哪挂进搬运容器。
+        jobs_host_dir=airflow.jobs_dir,
+        drivers_host_dir=airflow.drivers_dir,
+        image_overrides=airflow.sync_tool_images,
         # M11：DAG 任务的 outlets 注入真实目标表 URN，供 DataHub Airflow 插件自动上报
         # 血缘。与兜底 emitter 走同一个 build_dataset_urn，两条路径产同一份 URN。
         target_urn_builder=lambda job: build_dataset_urn(

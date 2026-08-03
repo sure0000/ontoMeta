@@ -228,7 +228,7 @@ export function MaterializationContractPanel({ ontologyId, targetKind, targetId 
               {contract.partition_key ? (
                 <Tag>{contract.partition_key}</Tag>
               ) : (
-                <span className="muted">无</span>
+                <span className="om-muted">无</span>
               )}
             </Descriptions.Item>
             <Descriptions.Item label={<>历史留存 {pinned("scd_type")}</>}>

@@ -1,5 +1,10 @@
 # 物化执行改造方案：同步工具 + Airflow 编排 + DataHub 血缘自动注册
 
+> **执行通道部分已被修订**：M10 落地后在真实实例上暴露的一类失败（「每表一个一次性
+> DockerOperator 容器」要求九件部署事实同时成立，而提交时只能验证其中一件），
+> 见 [MATERIALIZE_SYNC_STABILITY.md](./MATERIALIZE_SYNC_STABILITY.md)。
+> 本文第 3 节的分工与第 6 节的血缘设计不变，第 7 节里 DockerOperator 那条通道已被取代。
+
 > **本文是提案（proposal），不是 as-built。** 与 `DW_IMPLEMENTATION.md`（已建成执行规格）区分开：
 > 文中「现状」部分对照仓库实际代码核实并给出行号；「目标」部分是尚未实现的设计。
 > 涉及外部系统版本与能力的断言一律标注「⚠ 需实施前验证」，不臆造。

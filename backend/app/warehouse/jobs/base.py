@@ -20,6 +20,43 @@ from dataclasses import dataclass, field
 # 装载方式，取值与 ``MaterializationContract.load_strategy`` 一致。
 LOAD_MODES = ("full", "incremental", "cdc")
 
+# 平台 → JDBC url 的 scheme。只覆盖 JDBC 系；不在表里的（hive 等）不产 URL。
+_JDBC_URL_SCHEMES: dict[str, str] = {
+    "mysql": "mysql",
+    "mariadb": "mariadb",
+    "postgres": "postgresql",
+    "postgresql": "postgresql",
+    "mssql": "sqlserver",
+}
+
+
+def _alias_token(alias: str) -> str:
+    """别名 → 占位符/环境变量里的大写 token。``erp_readonly`` → ``ERP_READONLY``。"""
+    return "".join(c if c.isalnum() else "_" for c in alias).strip("_").upper()
+
+
+def _endpoint_env(endpoint: "JobEndpoint") -> dict[str, str]:
+    """一端的凭据环境变量 → Airflow 运行期 Jinja 表达式。"""
+    token = _alias_token(endpoint.alias)
+    conn = f"conn.{endpoint.alias}"
+    env = {
+        f"{token}_USER": f"{{{{ {conn}.login }}}}",
+        f"{token}_PASSWORD": f"{{{{ {conn}.password }}}}",
+    }
+    scheme = _JDBC_URL_SCHEMES.get((endpoint.platform or "").lower())
+    if scheme:
+        # 库名取 Connection 的 schema，而不是 JobSpec 里的目标库——连的是哪个库属于
+        # 部署事实，由建 Connection 的人说了算。
+        env[f"{token}_URL"] = (
+            f"jdbc:{scheme}://{{{{ {conn}.host }}}}:{{{{ {conn}.port }}}}"
+            f"/{{{{ {conn}.schema }}}}"
+        )
+    if (endpoint.platform or "").lower() == "hive":
+        env[f"{token}_METASTORE_URI"] = (
+            f"{{{{ {conn}.extra_dejson.get('metastore_uri', '') }}}}"
+        )
+    return env
+
 
 @dataclass(frozen=True)
 class JobEndpoint:
@@ -107,6 +144,21 @@ class SyncToolAdapter(ABC):
     name: str
     # 该工具的默认执行镜像（DockerOperator 用）。与 docker/orchestration 的镜像保持一致。
     docker_image: str
+    # 该镜像是否**公开可拉取**。False 表示 ``docker_image`` 只是个占位名字，
+    # registry 上并不存在（DataX 就没有官方镜像），部署方必须自建并用
+    # ``ONTOMETA_SYNC_TOOL_IMAGES`` 指过来。区分这一位是为了**在提交前拦下**：
+    # 否则 DAG 照样生成、照样触发，三分钟后才在 Airflow 里炸一个
+    # ``pull access denied for …, repository does not exist``（真实实例上踩过），
+    # 而那条报错读起来像环境故障，不像「这个工具在本部署里根本没配」。
+    has_official_image: bool = True
+    # 作业配置挂进容器的目录。各工具的约定目录不同，故随工具走——
+    # 把 SeaTunnel 的 /opt/seatunnel/jobs 挂进 DataX 容器不会报错，但产物里
+    # 出现另一个工具的路径，是后来人读 spec 时的纯噪音。
+    jobs_mount_dir: str = ""
+    # 该工具在容器里加载第三方 jar 的目录。JDBC 驱动因授权原因不随镜像分发
+    # （SeaTunnel/Flink 官方镜像都不带），需由部署方提供并挂进这里，否则
+    # ``ClassNotFoundException: …jdbc.Driver``。放适配器是因为各工具目录不同。
+    driver_lib_dir: str = ""
 
     @abstractmethod
     def render(self, job: JobSpec) -> dict:
@@ -121,11 +173,17 @@ class SyncToolAdapter(ABC):
         """该工具是否支持此装载方式。不支持的必须显式返回 False，不静默降级。"""
 
     @abstractmethod
-    def airflow_command(self, config_path: str) -> list[str]:
+    def airflow_command(
+        self, config_path: str, variables: dict[str, str] | None = None
+    ) -> list[str]:
         """DockerOperator 跑该工具的命令。``config_path`` 是容器内的作业配置路径。
 
         水位用 Airflow 模板 ``{{ data_interval_start }}`` 注入（DockerOperator 的
         ``command`` 是模板字段，运行时会被渲染），各工具自定义怎么传。
+
+        ``variables`` 是作业配置里 ``${…}`` 占位符的取值（见 :meth:`credential_env`，
+        值同样是运行期才渲染的 Jinja 表达式）。**怎么把它交给工具是工具自己的事**：
+        有的读环境变量，有的只认命令行参数，故在这里由各适配器决定。
         """
 
     def supports_cdc_from(self, platform: str) -> bool:
@@ -136,7 +194,28 @@ class SyncToolAdapter(ABC):
     def placeholder(self, alias: str, field_name: str) -> str:
         """别名 + 字段 → 执行期占位符，如 ``erp_readonly`` + ``URL`` → ``${ERP_READONLY_URL}``。
 
-        这是「凭据不进产物」的落地形式：产物里只有占位符，实际值由执行侧注入。
+        这是「凭据不进产物」的落地形式：产物里只有占位符，实际值由执行侧注入
+        （注入端见 :meth:`credential_env`）。
         """
-        token = "".join(c if c.isalnum() else "_" for c in alias).strip("_").upper()
+        token = _alias_token(alias)
         return f"${{{token}_{field_name.upper()}}}"
+
+    def credential_env(self, job: JobSpec) -> dict[str, str]:
+        """占位符 → **运行期**取值表达式，交给 Airflow 注入进搬运容器。
+
+        ``alias`` 按约定即 Airflow Connection 的 ``conn_id``（见 :class:`JobEndpoint`
+        「执行侧按别名解析出连接串」）。这里产出的是 Jinja 表达式而非真实值：
+
+        - 表达式在**任务运行时**才渲染，产物（DAG/作业配置/spec）里始终只有
+          ``{{ conn.… }}``，凭据不落盘、不进 DAG 序列化；
+        - 解析期不碰 Connection，避免每次 DAG 解析都打一次元数据库。
+
+        ``METASTORE_URI`` 这类没法从 host/port 可靠推出来的字段，从 Connection 的
+        ``extra`` 里按同名小写键取（如 ``{"metastore_uri": "thrift://host:9083"}``）。
+        """
+        env: dict[str, str] = {}
+        for endpoint in (job.source, job.target):
+            if not endpoint.alias:
+                continue
+            env.update(_endpoint_env(endpoint))
+        return env

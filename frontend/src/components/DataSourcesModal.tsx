@@ -370,7 +370,7 @@ export function DataSourcesPanel() {
         </Form.Item>
       )}
       {profile.fields.length === 0 && !rawMode && (
-        <span className="muted">Mock 数据源使用内置样例，无需填写连接。</span>
+        <span className="om-muted">Mock 数据源使用内置样例，无需填写连接。</span>
       )}
     </Space>
   );
@@ -404,7 +404,7 @@ export function DataSourcesPanel() {
           </Space>
 
           {editingId && (
-            <div className="muted" style={{ marginBottom: 8 }}>
+            <div className="om-muted" style={{ marginBottom: 8 }}>
               连接字段已回显（密码除外）；密码留空＝保持原密码不变，改动其它字段不会清空密码。
             </div>
           )}

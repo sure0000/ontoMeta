@@ -34,6 +34,8 @@ _SINKS: dict[str, str] = {
 class FlinkAdapter(SyncToolAdapter):
     name = "flink"
     docker_image = "apache/flink:1.18"
+    jobs_mount_dir = "/opt/flink/jobs"
+    driver_lib_dir = "/opt/flink/lib"
 
     def supports(self, mode: str) -> bool:
         return mode in {"full", "incremental", "cdc"}
@@ -41,7 +43,9 @@ class FlinkAdapter(SyncToolAdapter):
     def supports_cdc_from(self, platform: str) -> bool:
         return platform.lower() in _CDC_PLATFORMS
 
-    def airflow_command(self, config_path: str) -> list[str]:
+    def airflow_command(
+        self, config_path: str, variables: dict[str, str] | None = None
+    ) -> list[str]:
         # 水位经 -D 传入，供批量 source 的 scan 条件里 ${watermark} 取值。
         return [
             "/opt/flink/bin/flink",

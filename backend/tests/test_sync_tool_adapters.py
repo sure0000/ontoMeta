@@ -14,9 +14,12 @@ from app.warehouse.jobs import (
     ColumnMapping,
     JobEndpoint,
     JobSpec,
+    SyncImageUnavailableError,
     UnknownSyncToolError,
+    available_sync_tools,
     get_job_adapter,
     list_sync_tools,
+    resolve_docker_image,
 )
 
 
@@ -54,8 +57,10 @@ def test_render_has_four_sections_and_column_mapping():
     # 列映射体现为 SELECT 源列 AS 目标列
     assert "`cust_id` AS `customer_id`" in query
     assert "FROM erp_ods.tab_customer" in query
-    assert conf["sink"][0]["database"] == "dim"
-    assert conf["sink"][0]["table"] == "customer"
+    # Hive sink 用单个 table_name（库.表）；拆成 database/table 会被 SeaTunnel
+    # 判为缺少必填项 table_name（2.3.11 实测）。
+    assert conf["sink"][0]["table_name"] == "dim.customer"
+    assert "database" not in conf["sink"][0]
 
 
 def test_no_credentials_in_rendered_config():
@@ -133,9 +138,36 @@ def test_each_adapter_declares_image_and_command():
     for tool in ("seatunnel", "datax", "flink"):
         a = get_job_adapter(tool)
         assert a.docker_image
+        # 作业配置挂到各工具自己的目录，不借用别的工具的路径
+        assert a.jobs_mount_dir.startswith("/opt/") and tool in a.jobs_mount_dir
         cmd = a.airflow_command("/jobs/x.json")
         assert isinstance(cmd, list) and "/jobs/x.json" in cmd
         assert any("data_interval_start" in part for part in cmd)
+
+
+def test_datax_image_is_a_placeholder_not_a_pullable_image():
+    """DataX 无官方镜像：默认名只是占位，未经部署方指定就不算可用。
+
+    线上那次同步失败即源于此——DAG 里写着 ``ontometa/datax:latest``，
+    Airflow 拉它得到 ``pull access denied``。
+    """
+    assert get_job_adapter("datax").has_official_image is False
+    assert get_job_adapter("seatunnel").has_official_image is True
+    assert get_job_adapter("flink").has_official_image is True
+
+    with pytest.raises(SyncImageUnavailableError):
+        resolve_docker_image(get_job_adapter("datax"))
+    # 部署方指过来就能用
+    assert (
+        resolve_docker_image(get_job_adapter("datax"), {"datax": "acme/datax:3.0"})
+        == "acme/datax:3.0"
+    )
+
+
+def test_available_tools_exclude_those_without_an_image():
+    assert "datax" not in available_sync_tools()
+    assert {"seatunnel", "flink"} <= set(available_sync_tools())
+    assert "datax" in available_sync_tools({"datax": "acme/datax:3.0"})
 
 
 def test_datax_renders_reader_writer_and_no_credentials():

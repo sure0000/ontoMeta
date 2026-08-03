@@ -51,7 +51,10 @@ class AirflowClient:
         self.api_version = api_version or DEFAULT_API_VERSION
         self._auth = (username, password) if username and password else None
         self._token = token
-        self._client = client or httpx.Client(timeout=timeout)
+        # trust_env=False：Airflow 是内网服务，绝不该走开发机的 HTTP(S)_PROXY / ALL_PROXY。
+        # 尤其 ALL_PROXY=socks5://… 时 httpx 会直接抛 ImportError（缺 socksio），
+        # 连通性测试因此永远失败。与 cube/datahub 连接器、services.common 同一处置。
+        self._client = client or httpx.Client(trust_env=False, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
@@ -113,6 +116,17 @@ class AirflowClient:
             raise AirflowError(
                 "health", f"响应不是 JSON（可能是登录页/反向代理）：{response.text[:200]}"
             ) from exc
+
+    def ping_api(self) -> dict:
+        """探一次**带版本前缀的 REST API**，确认鉴权真的能用。
+
+        ``/health`` 在 Airflow 2.x 默认匿名可读，只测它会给出「连通正常」的假绿灯：
+        真正下发 DagRun 时才发现 ``/api/v1/*`` 回 401。最常见的原因是部署没开
+        basic_auth 后端（2.x 默认 ``api.auth_backends`` 只有 ``session``，仅供 Web UI 用），
+        此时应在 Airflow 侧加上
+        ``AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session``。
+        """
+        return self._request("GET", "/dags", "ping_api", params={"limit": 1})
 
     def unpause_dag(self, dag_id: str) -> dict:
         """新 DAG 默认可能是暂停态，触发前先取消暂停，否则 run 会一直排队不跑。"""

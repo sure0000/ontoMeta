@@ -137,7 +137,7 @@ export function PrincipalsPanel() {
       dataIndex: "last_used_at",
       key: "last_used_at",
       render: (v: string | null) =>
-        v ? new Date(v).toLocaleString() : <span className="muted">未使用</span>,
+        v ? new Date(v).toLocaleString() : <span className="om-muted">未使用</span>,
     },
     {
       title: "操作",

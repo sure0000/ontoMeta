@@ -36,14 +36,21 @@ _WRITERS: dict[str, str] = {
 
 class DataXAdapter(SyncToolAdapter):
     name = "datax"
-    # DataX 无官方镜像；部署方需自备（见模块 docstring）。
+    # DataX 无官方镜像；部署方需自备（见模块 docstring）。这个名字**在任何 registry
+    # 上都不存在**，故 has_official_image=False：未经 ONTOMETA_SYNC_TOOL_IMAGES 指到
+    # 自建镜像时，提交会被显式拦下，而不是生成一个注定 pull 404 的 DAG。
     docker_image = "ontometa/datax:latest"
+    has_official_image = False
+    jobs_mount_dir = "/opt/datax/jobs"
+    driver_lib_dir = "/opt/datax/plugin/reader/mysqlreader/libs"
 
     def supports(self, mode: str) -> bool:
         # 只做批量：全量 / 按水位增量。CDC 不支持。
         return mode in {"full", "incremental"}
 
-    def airflow_command(self, config_path: str) -> list[str]:
+    def airflow_command(
+        self, config_path: str, variables: dict[str, str] | None = None
+    ) -> list[str]:
         # 水位经 -p 传入 JVM 参数，供 reader 的 where 里 ${watermark} 取值。
         return [
             "python",

@@ -98,8 +98,10 @@ _DRIVER_HINTS: dict[str, str] = {
     "doris": "pymysql",
     "starrocks": "pymysql",
     "postgres": "psycopg[binary]",
-    "hive": '"pyhive[hive]" thrift thrift-sasl',
-    "kyuubi": '"pyhive[hive]" thrift thrift-sasl',
+    # 不用 pyhive[hive] 这个 extra：它带的 sasl 是 C 扩展，Python≥3.12 编译不过
+    # （longintrepr.h 已移除）。pure-sasl 是纯 Python 实现，thrift-sasl 会自动用它。
+    "hive": "pyhive thrift thrift-sasl pure-sasl",
+    "kyuubi": "pyhive thrift thrift-sasl pure-sasl",
     "clickhouse": "clickhouse-sqlalchemy",
     "duckdb": "duckdb-engine",
 }

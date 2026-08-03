@@ -159,3 +159,5 @@ GitHub Actions：`.github/workflows/ci.yml`（backend pytest + frontend lint/bui
 - [IA.md](./IA.md) — 信息架构
 - [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md) — 工程优化方案（可分批执行）
 - [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) — 智能数仓实现执行文档（里程碑与编码规格）
+- [MATERIALIZE_ORCHESTRATION.md](./MATERIALIZE_ORCHESTRATION.md) — 物化执行改造方案（同步工具 + Airflow 编排 + 血缘）
+- [MATERIALIZE_SYNC_STABILITY.md](./MATERIALIZE_SYNC_STABILITY.md) — 同步执行稳定化方案（M13–M16，修订上一篇的执行通道）

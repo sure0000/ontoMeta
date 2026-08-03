@@ -980,6 +980,10 @@ export interface SyncToolInfo {
   image: string;
   modes: MaterializationLoadStrategy[];
   cdc: boolean;
+  /** 该工具的镜像在本部署里拿不拿得到。false 时不可选（否则任务会在 Airflow 侧 pull 失败）。 */
+  available: boolean;
+  /** 不可用的原因与修法；available 时为 null。 */
+  reason: string | null;
 }
 export type MaterializationScdType = "none" | "scd1" | "scd2";
 
@@ -1028,10 +1032,12 @@ export interface MaterializationReceipt {
   ontology_id: string;
   /** 物化总是交 Airflow 编排（已去除直连落库模式）。 */
   execute_mode?: "orchestrated";
-  target_datasource: { id: string; name: string; kind: string };
-  engine: string;
+  /** 前置条件就没过的提交（目标源缺连接串、搬运工具无可用镜像…）只回一个 error，
+   *  下面这些字段都不会有。声明为可选是照实描述，好让 TS 逼出取值处的判空。 */
+  target_datasource?: { id: string; name: string; kind: string };
+  engine?: string;
   database_prefix?: string | null;
-  tables: string[];
+  tables?: string[];
   /** orchestrated 提交回执：建表与搬运由 Airflow 执行，成败看 DagRun。 */
   dag_id?: string;
   dag_run_id?: string;

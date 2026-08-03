@@ -1,9 +1,8 @@
-import { DatabaseOutlined, WarningOutlined } from "@ant-design/icons";
+import { DatabaseOutlined, ExportOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
-  Descriptions,
-  Divider,
+  Collapse,
   Empty,
   Form,
   Input,
@@ -19,7 +18,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { CronPicker } from "./CronPicker";
@@ -71,6 +70,41 @@ const STRATEGY_HINT: Record<string, string> = {
 
 // 定时策略：写回契约 refresh_cron，交由调度作业执行（本次物化仍是立即执行一次）。
 // 编辑与回读见 {@link CronPicker}。
+
+// DagRun / 任务状态 → 中文标签与色。弹窗通篇中文，直接吐 Airflow 的 `upstream_failed`
+// 对使用者没有意义；但**未知状态一律原样显示**，不猜、不归到「其他」——状态是判断
+// 要不要重跑的依据，假装认识比看不懂更糟。
+const RUN_STATE: Record<string, { label: string; color: string }> = {
+  success: { label: "成功", color: "success" },
+  running: { label: "运行中", color: "processing" },
+  queued: { label: "排队中", color: "default" },
+  scheduled: { label: "已调度", color: "default" },
+  up_for_retry: { label: "待重试", color: "warning" },
+  up_for_reschedule: { label: "待重排", color: "warning" },
+  failed: { label: "失败", color: "error" },
+  upstream_failed: { label: "上游失败", color: "error" },
+  skipped: { label: "已跳过", color: "warning" },
+  removed: { label: "已移除", color: "default" },
+};
+// 判定「这次运行是不是砸了」用的状态集合。
+const FAILED_STATES = new Set(["failed", "upstream_failed"]);
+
+function RunStateTag({ state }: { state?: string | null }) {
+  if (!state) return <Tag>未知</Tag>;
+  const hit = RUN_STATE[state];
+  // 未收录的状态原样显示，并把原始值挂在 title 上便于对照 Airflow。
+  return (
+    <Tag color={hit?.color ?? "default"} title={state} style={{ marginInlineEnd: 0 }}>
+      {hit?.label ?? state}
+    </Tag>
+  );
+}
+
+/** 任务在 Airflow UI 里的地址：从 DagRun 的 grid 链接派生，多带一个 task_id。 */
+function taskUrl(runUrl: string | undefined, taskId: string): string | null {
+  if (!runUrl) return null;
+  return `${runUrl}&task_id=${encodeURIComponent(taskId)}`;
+}
 
 interface Props {
   ontologyId: string;
@@ -171,6 +205,16 @@ export function MaterializeModal({
   const isDraft = Boolean(ontologyStatus && ontologyStatus !== "published");
   const dsId = Form.useWatch("target_datasource_id", form);
   const targetDb = Form.useWatch("target_database", form);
+  const syncToolName = Form.useWatch("sync_tool", form);
+  const selectedToolInfo = useMemo(
+    () => syncTools.find((t) => t.name === syncToolName) ?? null,
+    [syncTools, syncToolName],
+  );
+  /** 所选工具支持的装载方式。工具信息还没到时不设限，避免把选项误锁死。 */
+  const supportedModes = useMemo(
+    () => (selectedToolInfo ? new Set(selectedToolInfo.modes) : null),
+    [selectedToolInfo],
+  );
 
   // 目标库里已有的表：推荐表名与「已存在」提示都据此。
   const existingTables = useMemo(
@@ -222,9 +266,15 @@ export function MaterializeModal({
         setDataSources(ds);
         if (toolInfo) {
           setSyncTools(toolInfo.tools);
-          // 搬运工具默认取后端 default（通常 seatunnel），可在弹窗改。
+          // 搬运工具默认取后端 default（通常 seatunnel），可在弹窗改。默认工具在本
+          // 部署里没有可用镜像时退到第一个可用的——默认值本来就该是能跑的那个。
           if (!form.getFieldValue("sync_tool")) {
-            form.setFieldValue("sync_tool", toolInfo.default);
+            const fallback = toolInfo.tools.find((t) => t.available)?.name;
+            const preferred = toolInfo.tools.find((t) => t.name === toolInfo.default);
+            form.setFieldValue(
+              "sync_tool",
+              preferred?.available ? toolInfo.default : (fallback ?? toolInfo.default),
+            );
           }
         }
         setRuns(runList);
@@ -430,6 +480,10 @@ export function MaterializeModal({
     } catch {
       return;
     }
+    if (selectedToolInfo && !selectedToolInfo.available) {
+      message.warning(`「${selectedToolInfo.name}」没有可用的执行镜像，请换一个搬运工具`);
+      return;
+    }
     setStep(1);
   };
 
@@ -462,9 +516,18 @@ export function MaterializeModal({
     <Tooltip title={STRATEGY_HINT[rowStrategy[c.id]]}>
       <Select<MaterializationLoadStrategy>
         size="small"
-        style={{ width: 110 }}
+        style={{ width: 120 }}
         value={rowStrategy[c.id]}
-        options={LOAD_STRATEGY_OPTIONS}
+        // 所选工具不支持的装载方式置灰：选了也只会被 planner 记进「未生成作业」，
+        // 让人以为配好了却没搬（如 DataX 没有 CDC）。
+        options={LOAD_STRATEGY_OPTIONS.map((o) => ({
+          ...o,
+          disabled: Boolean(supportedModes && !supportedModes.has(o.value)),
+          label:
+            supportedModes && !supportedModes.has(o.value)
+              ? `${o.label}（${syncToolName} 不支持）`
+              : o.label,
+        }))}
         onChange={(v) => setRowStrategy((m) => ({ ...m, [c.id]: v }))}
       />
     </Tooltip>
@@ -544,20 +607,31 @@ export function MaterializeModal({
 
   const runTab = (
     <>
-      <div className="muted" style={{ marginBottom: 12, fontSize: 12, lineHeight: 1.6 }}>
-        <WarningOutlined style={{ color: "#faad14", marginRight: 6 }} />
-        破坏性操作：对目标库建表并覆盖写入（INSERT OVERWRITE），会重写整表/分区。
-        {isDraft && (
-          <span style={{ color: "#cf1322", marginLeft: 6 }}>
-            当前本体未发布（{LABELS[ontologyStatus!] ?? ontologyStatus}），将落未发布内容。
-          </span>
-        )}
-      </div>
+      {/* 破坏性操作的告知放 Alert 而不是一行小字：它是这个弹窗里后果最重的一句话，
+          此前排在最不显眼的位置。草稿警示并入同一条，避免两处措辞抢注意力。 */}
+      <Alert
+        type={isDraft ? "warning" : "info"}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="物化会对目标库建表并覆盖写入（INSERT OVERWRITE），重写整表或整分区。"
+        description={
+          isDraft ? (
+            <span>
+              当前本体为
+              <b>{LABELS[ontologyStatus!] ?? ontologyStatus}</b>
+              状态，本次将把<b>未发布内容</b>落到目标库。
+            </span>
+          ) : undefined
+        }
+      />
       <Steps
         size="small"
         current={step}
-        items={[{ title: "连接信息" }, { title: "存储策略" }]}
-        style={{ marginBottom: 16 }}
+        items={[
+          { title: "连接信息", description: "目标存储与搬运工具" },
+          { title: "存储策略", description: "逐实体的表名与同步方式" },
+        ]}
+        style={{ marginBottom: 20 }}
       />
       <Form form={form} layout="vertical">
         {/* 第 1 步字段常驻挂载（display 切换），保证表名预览的 watch 稳定 */}
@@ -594,55 +668,117 @@ export function MaterializeModal({
               }
             />
           </Form.Item>
+          {/* 读不到库列表不该拦住物化：落库由 Airflow 侧执行，后端只是「顺带」
+              列个库供选，故降级为手填。 */}
           <Form.Item
             name="target_database"
             label="目标库"
-            rules={[{ required: true, message: "请选择目标库" }]}
+            normalize={(v) => (typeof v === "string" ? v.trim() : v)}
+            rules={[{ required: true, message: dbError ? "请填写目标库" : "请选择目标库" }]}
             extra={
               dbError
-                ? undefined
+                ? "列不出库，请手动填写；各分层的表都建在这个库里，物化不会自动建库"
                 : "读取自所选数据源；各分层的表都建在这个库里，物化不会自动建库"
             }
           >
-            <Select
-              placeholder={dsId ? "选择目标库" : "请先选择目标数据源"}
-              showSearch
-              disabled={!dsId || Boolean(dbError)}
-              loading={dbLoading}
-              options={databases.map((d) => ({ value: d, label: d }))}
-              notFoundContent={
-                dbLoading ? null : <Empty description="该数据源上没有可用的库" />
-              }
-            />
+            {dbError ? (
+              <Input placeholder="手动填写目标库名，如 dw" allowClear />
+            ) : (
+              <Select
+                placeholder={dsId ? "选择目标库" : "请先选择目标数据源"}
+                showSearch
+                disabled={!dsId}
+                loading={dbLoading}
+                options={databases.map((d) => ({ value: d, label: d }))}
+                notFoundContent={
+                  dbLoading ? null : <Empty description="该数据源上没有可用的库" />
+                }
+              />
+            )}
           </Form.Item>
           {dbError && (
             <Alert
-              type="error"
+              type="warning"
               showIcon
               style={{ marginTop: -12, marginBottom: 16 }}
-              message="无法读取该数据源的库列表"
+              message="无法读取该数据源的库列表，已切为手动填写"
               description={dbError}
             />
           )}
           <Form.Item
             name="sync_tool"
             label="搬运工具"
-            extra="生成对应工具的 Airflow 作业交给调度器执行；CDC 只有支持的工具可选。镜像由工具自身定。"
+            extra={
+              // 收起时只显示工具名（下拉里才展开镜像/能力），但「这次到底会用哪个镜像」
+              // 是排查时第一个要问的，所以在这行常驻。
+              selectedToolInfo ? (
+                <>
+                  执行镜像 <code>{selectedToolInfo.image}</code>；镜像不可用的工具不能选。
+                </>
+              ) : (
+                "生成对应工具的 Airflow 作业交给调度器执行；镜像不可用的工具不能选。"
+              )
+            }
           >
             <Select<SyncTool>
               placeholder="选择搬运工具"
+              optionLabelProp="title"
               options={syncTools.map((t) => ({
                 value: t.name,
+                title: t.name,
+                // 镜像拿不到的工具置灰而非隐藏：「有这个工具但没配」与「没有这个工具」
+                // 是两回事，后者会让人以为得改代码。
+                disabled: !t.available,
                 label: (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    {t.name}
-                    {t.cdc && <Tag color="blue" style={{ marginInlineEnd: 0 }}>CDC</Tag>}
-                    <span className="muted" style={{ fontSize: 12 }}>{t.image}</span>
-                  </span>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      minWidth: 0,
+                    }}
+                  >
+                    <span style={{ fontWeight: 500 }}>{t.name}</span>
+                    {t.cdc && (
+                      <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                        CDC
+                      </Tag>
+                    )}
+                    {!t.available && (
+                      <Tooltip title={t.reason}>
+                        <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                          镜像不可用
+                        </Tag>
+                      </Tooltip>
+                    )}
+                    <code
+                      className="om-muted"
+                      style={{
+                        fontSize: 12,
+                        marginLeft: "auto",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {t.image}
+                    </code>
+                  </div>
                 ),
               }))}
             />
           </Form.Item>
+          {/* 选中的工具没有可用镜像时，后端会在提交前拒绝。与其让人点了「提交」
+              才看到报错，不如在这里就说清怎么修。 */}
+          {selectedToolInfo && !selectedToolInfo.available && (
+            <Alert
+              type="error"
+              showIcon
+              style={{ marginTop: -12, marginBottom: 16 }}
+              message={`「${selectedToolInfo.name}」在本部署里没有可用的执行镜像`}
+              description={selectedToolInfo.reason}
+            />
+          )}
         </div>
 
         {step === 1 &&
@@ -651,7 +787,7 @@ export function MaterializeModal({
               <Alert type="warning" showIcon message={scopeError} />
             ) : allTargets[0] ? (
               <div>
-                <div className="muted" style={{ marginBottom: 10, fontSize: 12 }}>
+                <div className="om-muted" style={{ marginBottom: 10, fontSize: 12 }}>
                   <Tag color="blue">
                     {scopeLabel ?? allTargets[0].contract.target_display_name ?? "—"}
                   </Tag>
@@ -681,7 +817,7 @@ export function MaterializeModal({
             )
           ) : (
             <>
-              <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
+              <div className="om-muted" style={{ marginBottom: 8, fontSize: 12 }}>
                 已选 {targetKeys.length}/{allTargets.length} 个实体，全部落到{" "}
                 <code>{targetDb}</code>。表名给的是推荐值（库里已有同名表时直接推荐那张，
                 物化为覆盖写），可逐行改。
@@ -770,8 +906,61 @@ export function MaterializeModal({
   );
 }
 
+const RUNS_PAGE_SIZE = 8;
+
 /** 历次物化任务列表：时间 / 操作人 / 目标 / 状态 / 分阶段成败，行内展开完整回执。 */
 function MaterializeRunsTable({ runs }: { runs: MaterializationRun[] }) {
+  const [page, setPage] = useState(1);
+  // artifact_id → DagRun 的真实状态。
+  const [runStates, setRunStates] = useState<Record<string, string | null>>({});
+  // 已到终态的不再回读——终态不会变，继续问只是空耗。
+  const settled = useRef<Set<string>>(new Set());
+
+  const visible = useMemo(
+    () => runs.slice((page - 1) * RUNS_PAGE_SIZE, page * RUNS_PAGE_SIZE),
+    [runs, page],
+  );
+
+  // 列表里的「状态」必须是**运行**状态，不能是「提交成功了没有」。制品状态永远是
+  // succeeded（提交成功即落库一条记录），照着渲染的结果是：DagRun 明明 failed，
+  // 列表却整列绿色「已完成」——这次排查同步失败时就是被它误导的。
+  // 权威在 Airflow，故逐行回读；只读当前页，未终结的每 5 秒再读一次。
+  useEffect(() => {
+    const pending = visible.filter(
+      (r) => r.artifact_id && r.receipt?.dag_run_id && !settled.current.has(r.artifact_id),
+    );
+    if (pending.length === 0) return;
+    let stopped = false;
+    const tick = async () => {
+      const results = await Promise.all(
+        pending.map((r) =>
+          api
+            .getMaterializeStatus(r.artifact_id)
+            .then((s) => [r.artifact_id, s] as const)
+            .catch(() => null),
+        ),
+      );
+      if (stopped) return;
+      const next: Record<string, string | null> = {};
+      for (const item of results) {
+        if (!item) continue;
+        const [id, s] = item;
+        next[id] = s.state;
+        if (s.terminal) settled.current.add(id);
+      }
+      if (Object.keys(next).length) setRunStates((m) => ({ ...m, ...next }));
+      // 还有没跑完的才继续轮询
+      if (!stopped && pending.some((r) => !settled.current.has(r.artifact_id))) {
+        timer = window.setTimeout(() => void tick(), 5000);
+      }
+    };
+    let timer = window.setTimeout(() => void tick(), 0);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [visible]);
+
   if (runs.length === 0) {
     return <Empty description="尚无物化执行记录" />;
   }
@@ -795,25 +984,36 @@ function MaterializeRunsTable({ runs }: { runs: MaterializationRun[] }) {
     {
       title: "目标",
       key: "target",
+      // 提交在选目标之前就被拒的（如所选搬运工具没有可用镜像），回执里只有 error，
+      // 没有 target_datasource——这里必须容忍，否则整个弹窗白屏。
       render: (_, r) =>
-        r.receipt
+        r.receipt?.target_datasource
           ? `${r.receipt.target_datasource.name}（${r.receipt.engine}）`
           : "—",
     },
     {
-      title: "状态",
+      title: "运行状态",
       key: "status",
       width: 130,
-      render: (_, r) => (
-        <span>
-          <StatusBadge status={r.status} />
-          {r.receipt && !r.ok && (
-            <Tag color="orange" style={{ marginLeft: 6 }}>
-              有失败项
-            </Tag>
-          )}
-        </span>
-      ),
+      render: (_, r) => {
+        // 触发就没成功的（DAG 落了盘但 Airflow 没收下）没有 DagRun 可读，
+        // 此时制品状态才是唯一事实。
+        if (!r.ok || !r.receipt?.dag_run_id) {
+          return (
+            <span>
+              <StatusBadge status={r.status} />
+              {r.receipt && !r.ok && (
+                <Tag color="orange" style={{ marginLeft: 6 }}>
+                  未触发
+                </Tag>
+              )}
+            </span>
+          );
+        }
+        const live = runStates[r.artifact_id];
+        // 还没读到就先显示提交时的状态，不留白也不假装已知结果。
+        return <RunStateTag state={live ?? r.receipt.state} />;
+      },
     },
     {
       title: "作业 / 调度",
@@ -821,7 +1021,7 @@ function MaterializeRunsTable({ runs }: { runs: MaterializationRun[] }) {
       width: 150,
       render: (_, r) =>
         r.receipt ? (
-          <span className="muted">
+          <span className="om-muted">
             建表 {r.receipt.tables?.length ?? 0} · 搬运 {r.receipt.jobs?.length ?? 0}
             {r.receipt.schedule ? " · 定时" : ""}
           </span>
@@ -836,28 +1036,22 @@ function MaterializeRunsTable({ runs }: { runs: MaterializationRun[] }) {
       rowKey="artifact_id"
       columns={columns}
       dataSource={runs}
-      pagination={runs.length > 8 ? { pageSize: 8 } : false}
+      pagination={
+        runs.length > RUNS_PAGE_SIZE
+          ? {
+              pageSize: RUNS_PAGE_SIZE,
+              current: page,
+              onChange: setPage,
+              showSizeChanger: false,
+            }
+          : false
+      }
       expandable={{
         expandedRowRender: (r) => <MaterializeReceiptView run={r} />,
         rowExpandable: (r) => Boolean(r.receipt),
       }}
     />
   );
-}
-
-// DagRun / 任务状态 → 标签色。未知状态原样显示，不假装成已知态。
-const RUN_STATE_COLOR: Record<string, string> = {
-  success: "success",
-  running: "processing",
-  queued: "default",
-  failed: "error",
-  upstream_failed: "error",
-  skipped: "warning",
-};
-
-function RunStateTag({ state }: { state?: string | null }) {
-  if (!state) return <Tag>未知</Tag>;
-  return <Tag color={RUN_STATE_COLOR[state] ?? "default"}>{state}</Tag>;
 }
 
 /** 编排物化回执：产物在哪、DagRun 到哪一步。状态权威在 Airflow，故轮询而不缓存。 */
@@ -896,6 +1090,61 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
   const state = status?.state ?? r.state;
   const succeeded = state === "success";
 
+  // 各状态的任务计数，供状态行给出「2 成功 / 1 失败」这种一眼可读的分布。
+  const taskCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of status?.tasks ?? []) {
+      const key = t.state ?? "unknown";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()];
+  }, [status]);
+
+  // 回执的头条说的是**这次运行怎么样了**，不是「提交成功了」。
+  // 原先无论 DagRun 是 failed 还是 success，顶上都挂一条绿色的「作业已提交给调度器」，
+  // 于是失败的运行在界面上看着是成功的——排查同步失败时正是被这条挡住的。
+  const headline = useMemo((): {
+    type: "success" | "info" | "warning" | "error";
+    message: string;
+    description: string;
+  } => {
+    if (r.error) {
+      return {
+        type: "warning",
+        message: "作业已生成，但触发失败",
+        description: r.error,
+      };
+    }
+    if (state && FAILED_STATES.has(state)) {
+      return {
+        type: "error",
+        message: "运行失败",
+        description:
+          "建表或搬运有任务未通过。点开失败任务的日志定位原因；改完在 Airflow 侧重跑该任务即可，不必从头再提交一次。",
+      };
+    }
+    if (succeeded) {
+      return {
+        type: "success",
+        message: "运行成功",
+        description: "建表与搬运均已完成，数据已落到目标库。",
+      };
+    }
+    if (state === "running" || state === "queued") {
+      return {
+        type: "info",
+        message: state === "queued" ? "已排队，等待调度" : "正在运行",
+        description: "建表与搬运由 Airflow 执行；本弹窗每 5 秒回读一次状态。",
+      };
+    }
+    return {
+      type: "info",
+      message: "作业已提交给调度器",
+      description:
+        "建表与搬运由 Airflow 执行；本弹窗只回读状态，重试与补数在 Airflow 侧完成。",
+    };
+  }, [r.error, state, succeeded]);
+
   const emitLineage = () => {
     if (!run.artifact_id) return;
     setLineageBusy(true);
@@ -914,105 +1163,182 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
       )
       .finally(() => setLineageBusy(false));
   };
+  const failedTasks = (status?.tasks ?? []).filter((t) =>
+    FAILED_STATES.has(t.state ?? ""),
+  );
   return (
-    <>
-      <Divider style={{ margin: "12px 0" }} />
+    <div className="mtz-receipt">
       <Alert
-        type={r.error ? "warning" : "success"}
+        type={headline.type}
         showIcon
-        style={{ marginBottom: 12 }}
-        message={r.error ? "作业已生成，但触发失败" : "作业已提交给调度器"}
-        description={
-          r.error ??
-          "建表与搬运由 Airflow 执行；本弹窗只回读状态，重试与补数在 Airflow 侧完成。"
+        style={{ marginBottom: 14 }}
+        message={headline.message}
+        description={headline.description}
+        action={
+          r.run_url ? (
+            <a href={r.run_url} target="_blank" rel="noreferrer" className="om-link">
+              Airflow <ExportOutlined style={{ fontSize: 11 }} />
+            </a>
+          ) : undefined
         }
       />
-      <Descriptions column={1} size="small" bordered>
-        <Descriptions.Item label="目标存储">
-          {r.target_datasource.name}（{r.engine}）
-        </Descriptions.Item>
-        <Descriptions.Item label="运行状态">
+
+      {/* 失败任务单独列出来并直达日志：这是运行失败时唯一有用的下一步动作，
+          此前它被埋在一列任务里，得自己认出哪个是红的。 */}
+      {failedTasks.length > 0 && (
+        <div className="mtz-failures">
+          <div className="mtz-failures-title">失败任务（{failedTasks.length}）</div>
+          {failedTasks.map((t) => (
+            <div key={t.task_id} className="mtz-failure-row">
+              <RunStateTag state={t.state} />
+              <code>{t.task_id}</code>
+              {taskUrl(r.run_url, t.task_id) && (
+                <a
+                  href={taskUrl(r.run_url, t.task_id)!}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="om-link"
+                >
+                  查看日志
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <dl className="mtz-facts">
+        <dt>目标存储</dt>
+        <dd>
+          {/* 调用方（MaterializeReceiptView）已挡掉没有 target_datasource 的回执，
+              这里仍按可选取值：判空的责任留在用到它的地方，别指望上游永远记得挡。 */}
+          {r.target_datasource?.name ?? "—"}
+          <span className="om-muted">（{r.engine ?? "—"}）</span>
+        </dd>
+
+        <dt>运行状态</dt>
+        <dd>
           <RunStateTag state={state} />
-          {r.run_url && (
-            <a
-              href={r.run_url}
-              target="_blank"
-              rel="noreferrer"
-              style={{ marginLeft: 8, fontSize: 12 }}
-            >
-              在 Airflow 中查看
-            </a>
+          {taskCounts.length > 0 && (
+            <span className="mtz-task-counts">
+              {taskCounts.map(([s, n]) => (
+                <span key={s}>
+                  {RUN_STATE[s]?.label ?? s} {n}
+                </span>
+              ))}
+            </span>
           )}
-          {statusError && (
-            <div style={{ color: "#d46b08", marginTop: 4, fontSize: 12 }}>{statusError}</div>
+          {statusError && <div className="mtz-warn">{statusError}</div>}
+        </dd>
+
+        <dt>调度</dt>
+        <dd>
+          {r.schedule ? (
+            <code>{r.schedule}</code>
+          ) : (
+            <span className="om-muted">不定时（仅手动触发）</span>
           )}
-        </Descriptions.Item>
-        <Descriptions.Item label="调度">
-          {r.schedule ? <code>{r.schedule}</code> : <span className="muted">不定时（仅手动触发）</span>}
-        </Descriptions.Item>
-        <Descriptions.Item label="作业">
-          <span className="muted">
-            建表 {r.tables?.length ?? 0} 张 · 搬运作业 {r.jobs?.length ?? 0} 个
-          </span>
-        </Descriptions.Item>
-        {status && status.tasks.length > 0 && (
-          <Descriptions.Item label="任务">
-            <div style={{ maxHeight: 160, overflow: "auto" }}>
-              {status.tasks.map((t) => (
-                <div key={t.task_id} style={{ fontSize: 12, marginBottom: 2 }}>
-                  <RunStateTag state={t.state} />
-                  <code style={{ marginLeft: 4 }}>{t.task_id}</code>
+        </dd>
+
+        <dt>作业</dt>
+        <dd className="om-muted">
+          建表 {r.tables?.length ?? 0} 张 · 搬运作业 {r.jobs?.length ?? 0} 个
+        </dd>
+
+        {r.unsupported && r.unsupported.length > 0 && (
+          <>
+            <dt>未生成作业</dt>
+            <dd>
+              {r.unsupported.map((u, i) => (
+                <div key={i} className="om-muted">
+                  <code>{u.target}</code>：{u.reason}
                 </div>
               ))}
-            </div>
-          </Descriptions.Item>
+            </dd>
+          </>
         )}
-        {r.artifacts && (
-          <Descriptions.Item label="产物">
-            {Object.entries(r.artifacts).map(([key, path]) => (
-              <div key={key} className="muted" style={{ fontSize: 11 }}>
-                {key}：<code>{path}</code>
-              </div>
-            ))}
-          </Descriptions.Item>
-        )}
-        {r.unsupported && r.unsupported.length > 0 && (
-          <Descriptions.Item label="未生成作业">
-            {r.unsupported.map((u, i) => (
-              <div key={i} className="muted">
-                {u.target}：{u.reason}
-              </div>
-            ))}
-          </Descriptions.Item>
-        )}
-        <Descriptions.Item label="血缘">
-          <span className="muted" style={{ fontSize: 12 }}>
-            主路径由 Airflow 的 DataHub 插件自动上报；插件缺位时可在此兜底回补（表级，重复幂等）。
-          </span>
-          <div style={{ marginTop: 6 }}>
-            <Button
-              size="small"
-              loading={lineageBusy}
-              disabled={!succeeded}
-              onClick={emitLineage}
-            >
-              兜底回补血缘
-            </Button>
-            {!succeeded && (
-              <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
-                运行成功后可回补
-              </span>
-            )}
+
+        <dt>血缘</dt>
+        <dd>
+          <Button
+            size="small"
+            loading={lineageBusy}
+            disabled={!succeeded}
+            onClick={emitLineage}
+          >
+            兜底回补血缘
+          </Button>
+          <div className="om-muted" style={{ fontSize: 12, marginTop: 6 }}>
+            {succeeded
+              ? "主路径由 Airflow 的 DataHub 插件自动上报；插件缺位时在此兜底回补（表级，重复幂等）。"
+              : "运行成功后可回补。"}
             {lineageResult && (
-              <span style={{ marginLeft: 8, fontSize: 12 }}>
+              <span style={{ marginLeft: 6 }}>
                 已上报 {lineageResult.applied ?? 0} / 共 {lineageResult.applicable} 条
                 {lineageResult.failed ? `，失败 ${lineageResult.failed}` : ""}
               </span>
             )}
           </div>
-        </Descriptions.Item>
-      </Descriptions>
-    </>
+        </dd>
+      </dl>
+
+      {/* 任务明细与产物路径是排查时才看的东西，收进折叠里，不占默认视线。 */}
+      {(status?.tasks.length || r.artifacts) && (
+        <Collapse
+          ghost
+          size="small"
+          className="mtz-detail"
+          items={[
+            ...(status && status.tasks.length > 0
+              ? [
+                  {
+                    key: "tasks",
+                    label: `任务明细（${status.tasks.length}）`,
+                    children: (
+                      <div className="mtz-tasks">
+                        {status.tasks.map((t) => (
+                          <div key={t.task_id} className="mtz-task-row">
+                            <RunStateTag state={t.state} />
+                            <code>{t.task_id}</code>
+                            {taskUrl(r.run_url, t.task_id) && (
+                              <a
+                                href={taskUrl(r.run_url, t.task_id)!}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="om-link"
+                              >
+                                日志
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ),
+                  },
+                ]
+              : []),
+            ...(r.artifacts
+              ? [
+                  {
+                    key: "artifacts",
+                    label: "产物路径",
+                    children: (
+                      <div className="mtz-artifacts">
+                        {Object.entries(r.artifacts).map(([key, path]) => (
+                          <div key={key}>
+                            <span className="om-muted">{key}</span>
+                            <code>{path}</code>
+                          </div>
+                        ))}
+                      </div>
+                    ),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      )}
+    </div>
   );
 }
 

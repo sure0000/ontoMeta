@@ -1,0 +1,149 @@
+/* ============================================================
+ * 物化弹窗（MaterializeModal）
+ * 回执部分刻意不用 AntD 的 bordered Descriptions：那是一张实线网格表，
+ * 一屏里同时出现「表格里的表格」（历史行展开后又是一张网格）视觉很吵。
+ * 这里换成标签/值两列的定义列表，只靠字重与颜色分层。
+ * ============================================================ */
+
+.mtz-receipt {
+  padding: 4px 0 2px;
+}
+
+/* ---------- 事实清单：标签 + 值两列 ---------- */
+.mtz-facts {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+.mtz-facts > dt {
+  color: var(--om-text-tertiary);
+  font-weight: 400;
+  line-height: 22px;
+}
+.mtz-facts > dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--om-text);
+  line-height: 22px;
+}
+.mtz-facts code {
+  font-family: var(--om-font-mono);
+  font-size: 12px;
+  background: var(--om-surface-muted);
+  border: 1px solid var(--om-border);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* 状态行右侧的任务分布：成功 2 · 失败 1 */
+.mtz-task-counts {
+  margin-left: 10px;
+  color: var(--om-text-tertiary);
+  font-size: 12px;
+}
+.mtz-task-counts > span + span::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--om-text-disabled);
+}
+
+.mtz-warn {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--om-warning);
+}
+
+/* ---------- 失败任务：运行失败时唯一有用的下一步动作，给足对比度 ---------- */
+.mtz-failures {
+  border: 1px solid #fecaca;
+  background: #fff5f5;
+  border-radius: var(--om-radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.mtz-failures-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--om-error);
+  margin-bottom: 6px;
+}
+.mtz-failure-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.mtz-failure-row code {
+  font-family: var(--om-font-mono);
+  color: var(--om-text-secondary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 折叠里的明细 ---------- */
+.mtz-detail.ant-collapse {
+  margin-top: 10px;
+  border-top: 1px solid var(--om-border);
+  border-radius: 0;
+}
+.mtz-detail .ant-collapse-header {
+  padding-left: 0 !important;
+  font-size: 12px;
+  color: var(--om-text-tertiary) !important;
+}
+/* 面板内容区的类名在 AntD 各版本间换过（content-box → body），两个都写，
+   否则内容会带一层默认内边距、与上方的事实清单对不齐。 */
+.mtz-detail .ant-collapse-content-box,
+.mtz-detail .ant-collapse-body {
+  padding: 4px 0 8px !important;
+}
+
+.mtz-tasks {
+  max-height: 190px;
+  overflow: auto;
+}
+.mtz-task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--om-border);
+}
+.mtz-task-row:last-child {
+  border-bottom: none;
+}
+.mtz-task-row code {
+  font-family: var(--om-font-mono);
+  color: var(--om-text-secondary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 产物是绝对路径，长且只在排查时看：等宽、可横滚、不换行撑坏布局 */
+.mtz-artifacts > div {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 2px 0;
+}
+.mtz-artifacts > div > span {
+  flex: 0 0 52px;
+}
+.mtz-artifacts code {
+  font-family: var(--om-font-mono);
+  color: var(--om-text-secondary);
+  overflow-x: auto;
+  white-space: nowrap;
+  min-width: 0;
+}

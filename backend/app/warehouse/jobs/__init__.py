@@ -14,9 +14,12 @@ from app.warehouse.jobs.base import (
 )
 from app.warehouse.jobs.registry import (
     DEFAULT_SYNC_TOOL,
+    SyncImageUnavailableError,
     UnknownSyncToolError,
+    available_sync_tools,
     get_job_adapter,
     list_sync_tools,
+    resolve_docker_image,
 )
 
 __all__ = [
@@ -27,7 +30,10 @@ __all__ = [
     "JobSpec",
     "SyncToolAdapter",
     "DEFAULT_SYNC_TOOL",
+    "SyncImageUnavailableError",
     "UnknownSyncToolError",
+    "available_sync_tools",
     "get_job_adapter",
     "list_sync_tools",
+    "resolve_docker_image",
 ]

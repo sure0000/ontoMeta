@@ -44,13 +44,17 @@ class SeaTunnelAdapter(SyncToolAdapter):
     name = "seatunnel"
     # 与 docker/orchestration/.env.example 的 IMG_SEATUNNEL 对齐。
     docker_image = "apache/seatunnel:2.3.11"
+    jobs_mount_dir = "/opt/seatunnel/jobs"
+    driver_lib_dir = "/opt/seatunnel/lib"
 
     def supports(self, mode: str) -> bool:
         return mode in {"full", "incremental", "cdc"}
 
-    def airflow_command(self, config_path: str) -> list[str]:
+    def airflow_command(
+        self, config_path: str, variables: dict[str, str] | None = None
+    ) -> list[str]:
         # 水位由调度器注入 ${watermark}（Airflow 的 data_interval_start），补数自动回区间。
-        return [
+        command = [
             "/opt/seatunnel/bin/seatunnel.sh",
             "--config",
             config_path,
@@ -59,6 +63,12 @@ class SeaTunnelAdapter(SyncToolAdapter):
             "-i",
             "watermark={{ data_interval_start }}",
         ]
+        # SeaTunnel 的 ${…} 只认 -i 传进来的变量，**不读环境变量**（实测：只设 env
+        # 时报 "No suitable driver found for ${ERP_READONLY_URL}"，占位符原样没替换）。
+        # 值仍是 {{ conn.… }} 表达式，运行时才渲染，产物里不含凭据。
+        for key in sorted(variables or {}):
+            command += ["-i", f"{key}={variables[key]}"]
+        return command
 
     def supports_cdc_from(self, platform: str) -> bool:
         return platform.lower() in _CDC_PLUGINS
@@ -125,16 +135,19 @@ class SeaTunnelAdapter(SyncToolAdapter):
             raise ValueError(f"目标引擎 {platform} 无 sink 连接器映射")
         sink: dict = {
             "plugin_name": plugin,
-            "database": job.target.database,
-            "table": job.target.table,
             # 表由 M3 的 DDL 建（本体反补的注释/分区/主键声明只在那条路径上），
             # 绝不让 sink 自动建表把这些绕过去。
             "save_mode_create_template": "NONE",
             "data_save_mode": "APPEND_DATA" if job.mode != "full" else "DROP_DATA",
         }
         if plugin == "Hive":
+            # Hive sink 的表名是**一个** table_name（库.表），没有 database/table 两项——
+            # 拆开写会报 "the options('table_name') are required"（2.3.11 实测）。
+            sink["table_name"] = job.target.qualified
             sink["metastore_uri"] = self.placeholder(job.target.alias, "METASTORE_URI")
         else:
+            sink["database"] = job.target.database
+            sink["table"] = job.target.table
             sink["url"] = self.placeholder(job.target.alias, "URL")
             sink["username"] = self.placeholder(job.target.alias, "USER")
             sink["password"] = self.placeholder(job.target.alias, "PASSWORD")

@@ -13,6 +13,8 @@ pytest>=8.0.0
 # --- 数仓引擎驱动（可选，按需自行安装）---
 # Data App / Chat BI 直连数仓时才需要；方言翻译与 backend 识别不依赖它们。
 # 版本须按目标集群实际版本确认，故不在此固定：
-#   Hive / Kyuubi   pip install "pyhive[hive]" thrift thrift-sasl
+#   Hive / Kyuubi   pip install pyhive thrift thrift-sasl pure-sasl
+#     （别用 pyhive[hive] extra：它带的 sasl 是 C 扩展，Python≥3.12 编译不过；
+#       pure-sasl 是纯 Python 实现，thrift-sasl 会自动改用它）
 #   Doris / StarRocks  走 MySQL 线协议：pip install pymysql
 #   ClickHouse      pip install clickhouse-sqlalchemy

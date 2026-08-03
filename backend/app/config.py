@@ -22,6 +22,32 @@ class Settings(BaseSettings):
     # settings_service 解析为 docker/orchestration 下的本地验证栈目录，可用环境变量覆盖。
     airflow_dags_dir: str = ""
     airflow_jobs_dir: str = ""
+    # 搬运任务容器接哪张 Docker 网络。默认 bridge 保持原行为；真实部署里源库与目标仓
+    # 多以容器名互访（如 hive-metastore / hadoop-namenode），默认 bridge 解析不了，
+    # 需指到与它们同一张网络上。同属部署基础设施，不进设置页。
+    airflow_docker_network: str = "bridge"
+    # JDBC 驱动 jar 目录（宿主机路径）。搬运镜像因授权不带驱动，缺了就是
+    # ClassNotFoundException: …jdbc.Driver。空 = 不挂。
+    airflow_sync_drivers_dir: str = ""
+    # 搬运工具的执行镜像覆盖：``工具名=镜像[,工具名=镜像…]``，如
+    # ``datax=registry.internal/datax:3.0``。适配器只给得出「官方镜像叫什么」，
+    # 而**镜像在这套部署里叫什么、拉不拉得到**是部署事实——DataX 无官方镜像
+    # （见 warehouse/jobs/datax.py），不在这里指一个自建镜像，任务只会在 Airflow
+    # 侧因 pull 404 失败。同属部署基础设施，不进设置页。
+    sync_tool_images: str = ""
+
+    @property
+    def sync_tool_image_map(self) -> dict[str, str]:
+        """``sync_tool_images`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。"""
+        mapping: dict[str, str] = {}
+        for item in (self.sync_tool_images or "").split(","):
+            name, sep, image = item.partition("=")
+            if not sep:
+                continue
+            name, image = name.strip().lower(), image.strip()
+            if name and image:
+                mapping[name] = image
+        return mapping
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"

@@ -99,6 +99,13 @@ class AirflowRuntimeConfig:
     # 投递目录不在设置页配：属部署基础设施，由 config.airflow_dags_dir/jobs_dir 给默认。
     dags_dir: str
     jobs_dir: str
+    # 搬运容器接的 Docker 网络，同属部署基础设施（见 config.airflow_docker_network）。
+    docker_network: str
+    # JDBC 驱动目录（宿主机路径），挂进搬运容器的 lib 目录。
+    drivers_dir: str
+    # 搬运工具的镜像覆盖 ``{工具名: 镜像}``（见 config.sync_tool_images）。
+    # 无官方镜像的工具（DataX）只有在这里配了才可选。
+    sync_tool_images: dict[str, str]
     enabled: bool
 
     @property
@@ -267,6 +274,9 @@ class SettingsService:
             # 投递目录不在 DB：由 config 给默认（部署基础设施，可环境变量覆盖）。
             dags_dir=_default_dags_dir(),
             jobs_dir=_default_jobs_dir(),
+            docker_network=env_settings.airflow_docker_network,
+            drivers_dir=env_settings.airflow_sync_drivers_dir,
+            sync_tool_images=env_settings.sync_tool_image_map,
             enabled=row.enabled,
         )
 

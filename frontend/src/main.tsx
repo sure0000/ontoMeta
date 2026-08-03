@@ -13,6 +13,7 @@ import "./styles/chat-bi.css";
 import "./styles/external-api.css";
 import "./styles/dashboard.css";
 import "./styles/big-screen.css";
+import "./styles/materialize.css";
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 const CODE_FONT_FAMILY =

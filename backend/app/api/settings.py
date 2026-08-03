@@ -166,7 +166,11 @@ def update_airflow_settings(data: AirflowSettingsUpdate, db: Session = Depends(g
 
 @router.post("/settings/airflow/test")
 def test_airflow_connection(db: Session = Depends(get_db)):
-    """连通性测试：打 Airflow 的 /health。与数据源「测试」按钮同一意图。"""
+    """连通性测试：先 ``/health`` 探通，再打一次带版本前缀的 REST API 探鉴权。
+
+    只测 ``/health`` 会给假绿灯——它在 Airflow 2.x 默认匿名可读，而下发 DagRun 走的
+    ``/api/{version}/*`` 可能因为没开 basic_auth 后端而 401。两步都过才算真的能用。
+    """
     from app.connectors.airflow import AirflowClient, AirflowError
 
     cfg = settings_service.get_airflow_runtime(db)
@@ -178,11 +182,25 @@ def test_airflow_connection(db: Session = Depends(get_db)):
         api_version=cfg.api_version,
     )
     try:
-        return {"ok": True, "health": client.health()}
+        health = client.health()
     except AirflowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        client.ping_api()
+    except AirflowError as exc:
+        detail = str(exc)
+        if "401" in detail or "403" in detail:
+            detail += (
+                f"（{cfg.endpoint}/health 可通，说明网络没问题，是 REST API 鉴权不通。"
+                "Airflow 2.x 默认 api.auth_backends 只有 session，仅供 Web UI 用；"
+                "请在 Airflow 侧设 AIRFLOW__API__AUTH_BACKENDS="
+                "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session "
+                "后重启 webserver，或改用 token 鉴权）"
+            )
+        raise HTTPException(status_code=400, detail=detail) from exc
     finally:
         client.close()
+    return {"ok": True, "health": health}
 
 
 def _cube_settings_out(row) -> CubeSettingsOut:

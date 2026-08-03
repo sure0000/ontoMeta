@@ -108,6 +108,45 @@ def test_task_instances_parsed():
     assert [t["task_id"] for t in tasks] == ["create_tables", "sync_dim_customer"]
 
 
+def test_default_client_ignores_proxy_env(monkeypatch):
+    """内网服务不走开发机代理。
+
+    ALL_PROXY=socks5://… 时 httpx 若 trust_env，会直接抛 ImportError（缺 socksio），
+    连通性测试因此永远失败——现实里踩过一次，钉住。
+    """
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:17891")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:17891")
+
+    client = AirflowClient("http://airflow:8080")
+    try:
+        assert client._client.trust_env is False
+    finally:
+        client.close()
+
+
+def test_ping_api_hits_versioned_api():
+    """探鉴权要打带版本前缀的 API —— /health 匿名可读，只测它是假绿灯。"""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"dags": [], "total_entries": 0})
+
+    _client(handler).ping_api()
+    assert "/api/v1/dags" in seen["url"]
+
+
+def test_ping_api_surfaces_401():
+    """没开 basic_auth 后端时 API 回 401，必须报错而不是当成连通。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text='{"title": "Unauthorized"}')
+
+    with pytest.raises(AirflowError) as exc:
+        _client(handler).ping_api()
+    assert "401" in str(exc.value)
+
+
 def test_terminal_states():
     assert is_terminal("success") and is_terminal("failed")
     assert not is_terminal("running")
