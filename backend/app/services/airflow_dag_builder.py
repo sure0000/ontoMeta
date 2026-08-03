@@ -26,6 +26,7 @@ import json
 from dataclasses import dataclass, field
 
 from app.warehouse.jobs import JobPlan, JobSpec, get_job_adapter, resolve_docker_image
+from app.connectors.sync_runner import job_spec_to_wire
 
 # 作业配置在搬运容器里的挂载点。默认随工具走（各 Adapter 的 jobs_mount_dir）；
 # 这个常量只是工具没声明时的兜底，与 docker/orchestration/docker-compose.yml 一致。
@@ -124,6 +125,8 @@ class AirflowDagBuilder:
         plan: JobPlan,
         ddl_statements: dict[str, str],
         schedule: str | None = None,
+        channel: str = "docker",
+        runner_endpoint: str | None = None,
         tool: str | None = None,
         engine: str = "hive",
         warehouse_conn_id: str = DEFAULT_WAREHOUSE_CONN_ID,
@@ -136,6 +139,10 @@ class AirflowDagBuilder:
     ) -> DagBundle:
         """产出 DAG 包。
 
+        ``channel`` 选执行通道（M14）：``runner`` 走常驻 sync-runner（PythonOperator + HTTP，
+        无宿主机路径/驱动挂载/docker.sock）；``docker`` 是旧通道（DockerOperator 起兄弟容器）。
+        两条通道产出的 ``inlets``/``outlets`` 一致，M11 血缘不受通道影响。
+
         ``tool`` 决定搬运工具（seatunnel/datax/flink）——镜像与运行命令都由该工具的
         Adapter 提供，DAG 骨架对工具无感（只读每个任务自带的 ``image``/``command``）。
         ``image_overrides`` 是部署方对镜像的覆盖（``{工具名: 镜像}``）：无官方镜像的
@@ -144,6 +151,17 @@ class AirflowDagBuilder:
         ``schedule`` 为契约的 refresh_cron（空 = 只手动触发）；
         ``target_urn_builder`` 供 M11 注入目标表 URN 构造（需部署环境的 fabric，M10 不臆造）。
         """
+        if channel == "runner":
+            return self._build_runner(
+                ontology_id=ontology_id,
+                plan=plan,
+                ddl_statements=ddl_statements,
+                schedule=schedule,
+                runner_endpoint=runner_endpoint,
+                engine=engine,
+                warehouse_conn_id=warehouse_conn_id,
+                target_urn_builder=target_urn_builder,
+            )
         adapter = get_job_adapter(tool)
         # 先解析镜像：拿不到就在这里失败，落盘与触发都还没发生。
         image = resolve_docker_image(adapter, image_overrides)
@@ -212,6 +230,67 @@ class AirflowDagBuilder:
             spec_filename=f"{dag_id}.json",
             spec=spec,
             job_files=job_files,
+        )
+
+    def _build_runner(
+        self,
+        *,
+        ontology_id: str,
+        plan: JobPlan,
+        ddl_statements: dict[str, str],
+        schedule: str | None,
+        runner_endpoint: str | None,
+        engine: str,
+        warehouse_conn_id: str,
+        target_urn_builder,
+    ) -> DagBundle:
+        """runner 通道的 DAG 包。
+
+        与 docker 通道的差别只在**搬运怎么落到执行侧**：这里每个任务是 PythonOperator，
+        向常驻 sync-runner 发一次 HTTP 再轮询状态；作业声明（JobSpec 的线格式）随请求体走，
+        **不落宿主机目录、不 bind mount、不需要驱动 jar**——spec 里因而没有 ``jobs_host_dir`` /
+        ``driver_jars`` / ``docker_network`` / ``tool_image`` 这些 docker 通道才有的字段。
+        建表仍是 ``create_tables`` 的 SQL 任务（本体 DDL 那条铁律不变）。
+        """
+        dag_id = dag_id_for(ontology_id)
+        tasks: list[dict] = []
+        for job in plan.jobs:
+            tasks.append(
+                {
+                    "task_id": job.name,
+                    "layer": job.layer,
+                    # 搬运作业声明随请求体传给 runner，凭据不在内（只有 alias）。
+                    "job_spec": job_spec_to_wire(job),
+                    "mode": job.mode,
+                    "target": job.target.qualified,
+                    # 血缘与 docker 通道同口径：上游用本体 source_ref，下游用注入的目标 URN。
+                    "inlets": [job.source_urn] if job.source_urn else [],
+                    "outlets": [target_urn_builder(job)] if target_urn_builder else [],
+                }
+            )
+        spec = {
+            "dag_id": dag_id,
+            "ontology_id": ontology_id,
+            "engine": engine,
+            "sync_channel": "runner",
+            # runner 地址进 spec，DAG 运行期据此发 HTTP。凭据不在这里——runner 自解析。
+            "runner_endpoint": (runner_endpoint or "").rstrip("/"),
+            "schedule": schedule or None,
+            "warehouse_conn_id": warehouse_conn_id,
+            "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
+            "ddl_targets": sorted(ddl_statements),
+            "tasks": tasks,
+            "layer_order": _task_group_order(plan.jobs),
+            "unsupported": plan.unsupported,
+            "schema_notes": plan.schema_notes,
+        }
+        return DagBundle(
+            dag_id=dag_id,
+            dag_filename=f"{dag_id}.py",
+            dag_source=_render_runner_dag_source(dag_id, f"{dag_id}.json"),
+            spec_filename=f"{dag_id}.json",
+            spec=spec,
+            job_files={},
         )
 
 
@@ -325,6 +404,130 @@ with DAG(
 
 def _render_dag_source(dag_id: str, spec_filename: str) -> str:
     return _DAG_TEMPLATE.format(dag_id=dag_id, spec_filename=spec_filename)
+
+
+# runner 通道的 DAG 骨架。用 ``__DAG_ID__`` / ``__SPEC_FILENAME__`` 占位符 + str.replace 渲染
+# （不用 .format）：这个模板里有大量 Python 字典/f-string 字面量，逐个转义花括号极易出错。
+# 搬运走 PythonOperator：向常驻 runner 发一次 HTTP 再轮询——只依赖标准库 urllib，不给
+# Airflow 镜像增加任何依赖，也没有 docker.sock / 宿主机路径 / 驱动挂载那一串环境耦合。
+_RUNNER_DAG_TEMPLATE = '''"""ontoMeta 物化 DAG（runner 通道，自动生成，勿手改）。
+
+由 ``app/services/airflow_dag_builder.py`` 生成，同目录的 __SPEC_FILENAME__ 是它的输入。
+重新物化会覆盖这两个文件；手改会在下次提交时丢失。
+
+任务编排：create_tables → 各层搬运任务（层间串行、层内并行）。建表跑 ontoMeta 按本体生成的
+DDL（注释/分区/主键声明由本体反补）。搬运不起兄弟容器：每个任务向常驻 sync-runner 发一次
+HTTP、轮询到终态；凭据不在此——runner 按 alias 自解析。
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import time
+import urllib.request
+
+import pendulum
+from airflow import DAG
+from airflow.exceptions import AirflowException
+from airflow.operators.python import PythonOperator
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+_SPEC = json.loads(
+    (pathlib.Path(__file__).with_name("__SPEC_FILENAME__")).read_text(encoding="utf-8")
+)
+_RUNNER = (_SPEC["runner_endpoint"] or "").rstrip("/")
+# 轮询间隔与总超时。搬运在 runner 侧后台线程跑，任务只是发起+等结果。
+_POLL_SECONDS = 5
+_JOB_TIMEOUT_SECONDS = 6 * 60 * 60
+
+
+def _http(method, path, body=None):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        _RUNNER + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _sync(task, **context):
+    """向 runner 提交一个搬运作业并轮询到终态。失败抛 AirflowException（该任务红，可单独重跑）。"""
+    if not _RUNNER:
+        raise AirflowException("spec.runner_endpoint 为空：runner 通道未配置 sync-runner 地址")
+    run_id = context["run_id"]
+    watermark = context.get("data_interval_start")
+    submit = {
+        "spec": task["job_spec"],
+        # 幂等键 = dag_run_id + task_id：Airflow 重试/重复触发都不会搬第二遍。
+        "idempotency_key": run_id + "__" + task["task_id"],
+        "watermark": watermark.isoformat() if watermark is not None else None,
+    }
+    status = _http("POST", "/jobs", submit)
+    job_id = status["job_id"]
+    deadline = time.monotonic() + _JOB_TIMEOUT_SECONDS
+    while status.get("state") not in ("success", "failed"):
+        if time.monotonic() >= deadline:
+            raise AirflowException("sync-runner 作业超时：job " + str(job_id))
+        time.sleep(_POLL_SECONDS)
+        status = _http("GET", "/jobs/" + job_id)
+    if status.get("state") != "success":
+        raise AirflowException(
+            "sync-runner 作业失败：" + str(status.get("error")) + "（job " + str(job_id) + "）"
+        )
+    # 回执带行数/水位，供「跑成功但没数据」当场可见。
+    return {
+        "job_id": job_id,
+        "rows_written": status.get("rows_written"),
+        "watermark_after": status.get("watermark_after"),
+    }
+
+
+with DAG(
+    dag_id="__DAG_ID__",
+    description="ontoMeta 物化（runner 通道）：建表 + 常驻 runner 搬运",
+    schedule=_SPEC.get("schedule"),
+    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
+    catchup=False,
+    max_active_runs=1,
+    tags=["ontometa", "materialize"],
+) as dag:
+    create_tables = SQLExecuteQueryOperator(
+        task_id="create_tables",
+        conn_id=_SPEC["warehouse_conn_id"],
+        sql=_SPEC["ddl"],
+    )
+
+    by_layer: dict[str, list] = {}
+    for task in _SPEC["tasks"]:
+        op = PythonOperator(
+            task_id=task["task_id"],
+            python_callable=_sync,
+            op_kwargs={"task": task},
+            # 血缘：DataHub 的 Airflow 插件基于 OpenLineage，与 Operator 类型无关，
+            # inlets/outlets 与 docker 通道同口径（M11 不受通道影响）。
+            inlets=task["inlets"],
+            outlets=task["outlets"],
+        )
+        by_layer.setdefault(task["layer"], []).append(op)
+
+    previous = create_tables
+    for layer in _SPEC["layer_order"]:
+        group = by_layer.get(layer) or []
+        if not group:
+            continue
+        previous >> group
+        previous = group
+'''
+
+
+def _render_runner_dag_source(dag_id: str, spec_filename: str) -> str:
+    return _RUNNER_DAG_TEMPLATE.replace("__DAG_ID__", dag_id).replace(
+        "__SPEC_FILENAME__", spec_filename
+    )
 
 
 dag_builder = AirflowDagBuilder()

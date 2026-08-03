@@ -106,6 +106,10 @@ class AirflowRuntimeConfig:
     # 搬运工具的镜像覆盖 ``{工具名: 镜像}``（见 config.sync_tool_images）。
     # 无官方镜像的工具（DataX）只有在这里配了才可选。
     sync_tool_images: dict[str, str]
+    # 搬运执行通道与 runner 地址（M14）。channel=runner 时向常驻 runner 发 HTTP，
+    # docker_network/drivers_dir/sync_tool_images 这三项只服务 docker 旧通道。
+    sync_channel: str
+    sync_runner_endpoint: str
     enabled: bool
 
     @property
@@ -277,6 +281,8 @@ class SettingsService:
             docker_network=env_settings.airflow_docker_network,
             drivers_dir=env_settings.airflow_sync_drivers_dir,
             sync_tool_images=env_settings.sync_tool_image_map,
+            sync_channel=env_settings.sync_channel,
+            sync_runner_endpoint=env_settings.sync_runner_endpoint,
             enabled=row.enabled,
         )
 

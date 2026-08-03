@@ -51,6 +51,26 @@ def _task_name(layer: str, table: str) -> str:
     return "".join(c if c.isalnum() or c in "_-." else "_" for c in raw)
 
 
+def _runner_reject(
+    capabilities: dict, mode: str, source_platform: str, target_engine: str
+) -> str | None:
+    """runner 通道的可搬性门禁：按 runner 如实声明的 capabilities 判，不静默降级。
+
+    返回拒绝原因（进 unsupported）或 None（可搬）。替代 docker 通道那套「工具适配器
+    硬编码平台表」——能不能搬由**执行侧实际装了什么**说了算（§3.1）。
+    """
+    modes = set(capabilities.get("modes") or [])
+    sources = set(capabilities.get("sources") or [])
+    sinks = set(capabilities.get("sinks") or [])
+    if mode not in modes:
+        return f"runner 不支持装载方式 {mode}（支持：{', '.join(sorted(modes)) or '无'}）"
+    if source_platform.lower() not in sources:
+        return f"runner 无 {source_platform} 源连接器（支持：{', '.join(sorted(sources)) or '无'}）"
+    if target_engine.lower() not in sinks:
+        return f"runner 无 {target_engine} 目标连接器（支持：{', '.join(sorted(sinks)) or '无'}）"
+    return None
+
+
 class JobPlanner:
     def build(
         self,
@@ -65,12 +85,15 @@ class JobPlanner:
         database_overrides: dict[str, str] | None = None,
         table_overrides: dict[str, str] | None = None,
         selected_targets: list[str] | None = None,
+        runner_capabilities: dict | None = None,
     ) -> JobPlan:
         """产出搬运作业计划。
 
         ``engine`` 为目标数仓引擎（决定 sink 连接器）；``database_overrides`` /
         ``table_overrides`` 与物化弹窗同义，保证作业写入的库表与 DDL 建的完全一致。
         ``selected_targets`` 按**本体实体名**裁剪（不是物理表名，故改过表名也不会误裁）。
+        ``runner_capabilities`` 给了则走 runner 通道的可搬性门禁（按执行侧实际能力判），
+        为 None 则沿用 docker 通道的工具适配器门禁。
         """
         adapter = get_job_adapter(tool)
         logical = _generator.build_logical_schema(
@@ -113,16 +136,23 @@ class JobPlanner:
                 continue
 
             mode = (table.load_strategy or "full").strip().lower()
-            if not adapter.supports(mode):
-                plan.note(table.qualified_name, f"{adapter.name} 不支持装载方式 {mode}")
-                continue
-            if mode == "cdc" and not adapter.supports_cdc_from(platform):
-                # 不静默退回全量：CDC 退成全量会改变数据语义，必须让人看见。
-                plan.note(
-                    table.qualified_name,
-                    f"契约要求 CDC，但 {adapter.name} 无 {platform} 的 CDC 连接器",
-                )
-                continue
+            # 可搬性门禁：runner 通道按执行侧 capabilities，docker 通道按工具适配器。
+            if runner_capabilities is not None:
+                reason = _runner_reject(runner_capabilities, mode, platform, engine)
+                if reason:
+                    plan.note(table.qualified_name, reason)
+                    continue
+            else:
+                if not adapter.supports(mode):
+                    plan.note(table.qualified_name, f"{adapter.name} 不支持装载方式 {mode}")
+                    continue
+                if mode == "cdc" and not adapter.supports_cdc_from(platform):
+                    # 不静默退回全量：CDC 退成全量会改变数据语义，必须让人看见。
+                    plan.note(
+                        table.qualified_name,
+                        f"契约要求 CDC，但 {adapter.name} 无 {platform} 的 CDC 连接器",
+                    )
+                    continue
             if mode == "incremental" and not table.partition_key:
                 # 与 M3 的 warning 同义：允许生成，但必须显式提示可能重复。
                 plan.note(

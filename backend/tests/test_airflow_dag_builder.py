@@ -295,3 +295,92 @@ def test_write_persists_three_artifacts(tmp_path):
     spec = json.loads((dags_dir / bundle.spec_filename).read_text(encoding="utf-8"))
     assert spec["dag_id"] == bundle.dag_id
     assert bundle.spec_filename in bundle.dag_source
+
+
+# ---------- runner 通道（M14） ----------
+
+
+def _runner_bundle(**kwargs):
+    plan = JobPlan(jobs=(_job("sync_dim_customer"), _job("sync_dwd_order", "dwd", "orders")))
+    return _builder.build(
+        ontology_id="11112222-3333-4444-5555-666677778888",
+        plan=plan,
+        ddl_statements={
+            "dim.customer": "CREATE TABLE `dim`.`customer` (id INT);",
+            "dwd.orders": "CREATE TABLE `dwd`.`orders` (id INT);",
+        },
+        channel="runner",
+        runner_endpoint="http://sync-runner:8088/",
+        engine="hive",
+        **kwargs,
+    )
+
+
+def test_runner_dag_is_valid_python_and_uses_python_operator():
+    bundle = _runner_bundle()
+    ast.parse(bundle.dag_source)  # 语法错误会让 Airflow 整个目录 import error
+    assert "PythonOperator" in bundle.dag_source
+    # runner 通道不该出现 docker 通道的任何痕迹
+    assert "DockerOperator" not in bundle.dag_source
+    assert "docker.sock" not in bundle.dag_source
+    assert "_JOB_MOUNTS" not in bundle.dag_source
+
+
+def test_runner_spec_carries_channel_endpoint_and_wire_jobspec():
+    spec = _runner_bundle().spec
+    assert spec["sync_channel"] == "runner"
+    # 末尾斜杠被规整掉
+    assert spec["runner_endpoint"] == "http://sync-runner:8088"
+    task = spec["tasks"][0]
+    # 每个任务带 JobSpec 的线格式（随请求体发给 runner），凭据不在内
+    assert task["job_spec"]["source"]["alias"] == "erp_readonly"
+    assert task["job_spec"]["target"]["platform"] == "hive"
+    assert task["job_spec"]["columns"] == [
+        {"source": "cust_id", "target": "customer_id"}
+    ]
+
+
+def test_runner_spec_drops_docker_only_fields():
+    spec = _runner_bundle().spec
+    for gone in ("jobs_host_dir", "driver_jars", "docker_network", "tool_image", "jobs_mount"):
+        assert gone not in spec, gone
+    # runner 通道不产作业配置文件（作业声明随请求体走）
+    assert _runner_bundle().job_files == {}
+
+
+def test_runner_dag_has_no_credentials_or_host_paths():
+    bundle = _runner_bundle()
+    blob = bundle.dag_source + json.dumps(bundle.spec, ensure_ascii=False)
+    for leaked in ("password=", "jdbc:", "root@", "/var/run/docker.sock", "/host/"):
+        assert leaked not in blob
+
+
+def test_runner_keeps_create_tables_sql_task():
+    """建表仍是 SQL 任务，本体 DDL 那条铁律不因通道改变。"""
+    bundle = _runner_bundle()
+    assert "SQLExecuteQueryOperator" in bundle.dag_source
+    assert bundle.spec["ddl_targets"] == ["dim.customer", "dwd.orders"]
+
+
+def test_runner_preserves_lineage_inlets_outlets():
+    """M11 血缘与通道无关：inlets/outlets 与 docker 通道同口径。"""
+    from app.connectors.datahub import build_dataset_urn
+
+    bundle = _runner_bundle(
+        target_urn_builder=lambda job: build_dataset_urn(
+            job.target.platform, job.target.qualified, "PROD"
+        )
+    )
+    task = bundle.spec["tasks"][0]
+    assert task["inlets"] == [
+        "urn:li:dataset:(urn:li:dataPlatform:mariadb,erp_ods.tab_customer,PROD)"
+    ]
+    assert task["outlets"] == [
+        "urn:li:dataset:(urn:li:dataPlatform:hive,dim.customer,PROD)"
+    ]
+
+
+def test_runner_build_is_idempotent():
+    a, b = _runner_bundle(), _runner_bundle()
+    assert a.dag_source == b.dag_source
+    assert json.dumps(a.spec, sort_keys=True) == json.dumps(b.spec, sort_keys=True)

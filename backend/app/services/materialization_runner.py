@@ -20,6 +20,11 @@ from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
+from app.connectors.sync_runner import (
+    EXPECTED_CONTRACT_VERSION,
+    SyncRunnerClient,
+    SyncRunnerError,
+)
 from app.models.data_app import DataSource
 from app.services.airflow_dag_builder import AirflowDagBuilder
 from app.services.job_planner import JobPlanner
@@ -137,12 +142,38 @@ def _run_orchestrated(
     artifact_id: str | None,
 ) -> dict[str, Any]:
     """产出 DAG 与搬运作业 → 投递 → 触发一次运行。**不在本进程里落库**。"""
-    # 镜像可用性先于一切：拿不到镜像就没有能跑的作业，此时既不该生成 DAG、
-    # 更不该触发运行——否则失败会推迟到 Airflow 任务日志里，读起来像环境故障。
-    try:
-        resolve_docker_image(get_job_adapter(sync_tool), airflow.sync_tool_images)
-    except SyncImageUnavailableError as exc:
-        raise MaterializationError(str(exc)) from exc
+    # 执行通道（M14）：runner 走常驻服务，docker 走旧的兄弟容器通道。
+    channel = (airflow.sync_channel or "runner").lower()
+    runner_caps: dict | None = None
+    if channel == "runner":
+        # runner 通道的前置条件在提交前问清楚，别产出一个连不上 runner 的 DAG。
+        if not airflow.sync_runner_endpoint:
+            raise MaterializationError(
+                "sync_channel=runner 但未配置 sync-runner 地址"
+                "（设 ONTOMETA_SYNC_RUNNER_ENDPOINT），无法物化"
+            )
+        client = SyncRunnerClient(airflow.sync_runner_endpoint)
+        try:
+            runner_caps = client.capabilities()
+        except SyncRunnerError as exc:
+            raise MaterializationError(
+                f"sync-runner 不可达（{airflow.sync_runner_endpoint}）：{exc}"
+            ) from exc
+        finally:
+            client.close()
+        # 契约版本不匹配即拒绝，而不是发过去再看会不会炸（§3.5）。
+        got = runner_caps.get("contract_version")
+        if got != EXPECTED_CONTRACT_VERSION:
+            raise MaterializationError(
+                f"sync-runner 契约版本不匹配（runner={got}，"
+                f"ontoMeta 认识 {EXPECTED_CONTRACT_VERSION}），请升级对应一侧"
+            )
+    else:
+        # docker 通道：镜像可用性先于一切，拿不到镜像就不生成 DAG、不触发。
+        try:
+            resolve_docker_image(get_job_adapter(sync_tool), airflow.sync_tool_images)
+        except SyncImageUnavailableError as exc:
+            raise MaterializationError(str(exc)) from exc
 
     plan = _job_planner.build(
         db,
@@ -154,6 +185,8 @@ def _run_orchestrated(
         database_overrides=database_overrides,
         table_overrides=table_overrides,
         selected_targets=selected_targets,
+        # runner 通道按执行侧 capabilities 判可搬性，替代硬编码的工具平台表。
+        runner_capabilities=runner_caps,
     )
     # 目标表 URN 的 fabric 取自 DataHub 设置页（默认 PROD），与兜底 emitter 同一来源。
     fabric = _settings.get_datahub_runtime(db).fabric
@@ -162,11 +195,13 @@ def _run_orchestrated(
         plan=plan,
         ddl_statements=dict(ddl_items),
         schedule=_schedule_of(db, ontology_id, set(selected_targets or []) or None),
+        channel=channel,
+        runner_endpoint=airflow.sync_runner_endpoint,
         tool=sync_tool,
         engine=engine,
         warehouse_conn_id=_warehouse_conn_id(ds),
+        # 以下均为 docker 通道字段，runner 通道忽略（build 内部按 channel 分流）。
         docker_network=airflow.docker_network,
-        # 与 bundle.write 的落盘目录同一个：产出在哪，就从哪挂进搬运容器。
         jobs_host_dir=airflow.jobs_dir,
         drivers_host_dir=airflow.drivers_dir,
         image_overrides=airflow.sync_tool_images,
@@ -207,6 +242,7 @@ def _run_orchestrated(
     return {
         "ontology_id": ontology_id,
         "execute_mode": "orchestrated",
+        "sync_channel": channel,
         "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
         "engine": engine,
         "database_prefix": database_prefix,

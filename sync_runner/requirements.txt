@@ -1,0 +1,9 @@
+# ontometa-sync-runner 运行期依赖。
+# 驱动构建期烘进镜像、运行期零挂载（§3.1）——这是消掉失败模式 #5「驱动 jar 缺失」的关键。
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+pydantic>=2.6
+# 数据库驱动：MariaDB/MySQL/Doris/StarRocks 走 MySQL 线协议（PyMySQL），Postgres 走 psycopg2。
+PyMySQL>=1.1
+psycopg2-binary>=2.9

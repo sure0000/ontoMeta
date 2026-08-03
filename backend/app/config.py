@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     # MATERIALIZE_SYNC_STABILITY.md §8.1），故超时不作硬失败、只降级为提醒。
     ontometa_preflight_sentinel_timeout: float = 20.0
 
+    # 搬运执行通道（M14）：
+    # - ``runner``：向常驻 sync-runner 发一次 HTTP，凭据由 runner 自解析，无宿主机路径/
+    #   docker.sock/驱动挂载（消失败模式 #2/#3/#4/#5）。M14 起的默认。
+    # - ``docker``：旧通道，worker 经 docker.sock 起一次性搬运容器。已跑通过的路径保留作
+    #   对照（比照 M9 保留 direct），出问题可一键切回。
+    sync_channel: str = "runner"
+    # runner 通道下 sync-runner 的地址。runner 通道选中但此项为空，物化会在提交前报错
+    # 让人去配（而不是产出一个连不上 runner 的 DAG）。
+    sync_runner_endpoint: str = ""
+
     @property
     def sync_tool_image_map(self) -> dict[str, str]:
         """``sync_tool_images`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。"""

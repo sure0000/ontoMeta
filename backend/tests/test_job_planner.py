@@ -246,6 +246,43 @@ def test_selected_targets_filters_by_entity_name():
     assert {j.target.table for j in plan.jobs} == {"customer"}
 
 
+def test_runner_capabilities_gate_rejects_unsupported_sink():
+    """runner 通道按执行侧 capabilities 判可搬性：目标引擎不在 sinks 里 → 全列 unsupported。"""
+    ontology_id = _seed("capsink")
+    caps = {
+        "modes": ["full", "incremental"],
+        "sources": ["mysql", "mariadb"],
+        "sinks": ["doris"],  # 没有 hive；_build 的 engine=hive
+    }
+    plan = _build(ontology_id, runner_capabilities=caps)
+    assert plan.jobs == ()
+    assert any("hive" in u["reason"] for u in plan.unsupported)
+
+
+def test_runner_capabilities_gate_allows_supported_combo():
+    ontology_id = _seed("capok")
+    caps = {
+        "modes": ["full", "incremental"],
+        "sources": ["mariadb"],  # _seed 默认 URN 平台是 mariadb
+        "sinks": ["hive"],
+    }
+    plan = _build(ontology_id, runner_capabilities=caps)
+    assert {j.target.table for j in plan.jobs} == {"customer", "sales_order"}
+
+
+def test_runner_capabilities_gate_rejects_cdc_mode():
+    """native 不做 CDC：capabilities.modes 无 cdc → CDC 表进 unsupported，不静默降级。"""
+    ontology_id = _seed("capcdc")
+    _set_cdc(ontology_id, "customer")
+    caps = {"modes": ["full", "incremental"], "sources": ["mariadb"], "sinks": ["hive"]}
+    plan = _build(ontology_id, runner_capabilities=caps)
+    assert not any(j.target.table == "customer" for j in plan.jobs)
+    assert any(
+        "customer" in u["target"] and "cdc" in u["reason"].lower()
+        for u in plan.unsupported
+    )
+
+
 def test_plan_is_idempotent():
     """同一本体重复生成，作业与渲染结果逐字节一致。"""
     ontology_id = _seed("idem")

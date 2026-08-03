@@ -197,16 +197,22 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
     assert any("warehouse_prod" in s and "dim_customer" in s for s in spec["ddl"])
 
 
-def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
+def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict, channel: str = "docker", capabilities: dict | None = None):
     """把 Airflow 配成可用，并把 REST 调用换成记录器（不需要真实 Airflow）。
 
     投递目录不再入设置，改由 config 环境变量给默认：直接 monkeypatch 成 tmp 路径。
+    ``channel`` 选执行通道：``docker`` 走旧兄弟容器通道；``runner`` 额外把 SyncRunnerClient
+    换成返回给定 capabilities 的替身（不需要真实 runner）。
     """
     from app.config import settings as env_settings
     from app.services.settings_service import SettingsService
 
     monkeypatch.setattr(env_settings, "airflow_dags_dir", str(tmp_path / "dags"))
     monkeypatch.setattr(env_settings, "airflow_jobs_dir", str(tmp_path / "jobs"))
+    monkeypatch.setattr(env_settings, "sync_channel", channel)
+    monkeypatch.setattr(
+        env_settings, "sync_runner_endpoint", "http://sync-runner:8088"
+    )
     with SessionLocal() as db:
         SettingsService().update_airflow_settings(
             db,
@@ -215,6 +221,27 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
                 "enabled": True,
             },
         )
+
+    if channel == "runner":
+        caps = capabilities or {
+            "contract_version": "1",
+            "backends": ["native"],
+            "sources": ["mysql", "mariadb"],
+            "sinks": ["hive", "doris"],
+            "modes": ["full", "incremental"],
+        }
+
+        class _FakeRunner:
+            def __init__(self, *a, **kw):
+                pass
+
+            def capabilities(self):
+                return caps
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(materialization_runner, "SyncRunnerClient", _FakeRunner)
 
     class _FakeClient:
         def __init__(self, *a, **kw):
@@ -269,6 +296,99 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     jobs = sorted(p.name for p in (tmp_path / "jobs").iterdir())
     assert any(n.endswith(".py") for n in dags) and any(n.endswith(".json") for n in dags)
     assert len(jobs) == len(receipt["jobs"]) >= 1
+
+
+def test_runner_channel_writes_pythonoperator_dag_and_records_channel(tmp_path, monkeypatch):
+    """runner 通道：产出 PythonOperator DAG（无作业配置文件），回执记 sync_channel=runner。"""
+    ids = _seed("runnerok")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    triggered: dict = {}
+    _enable_airflow(tmp_path, monkeypatch, triggered=triggered, channel="runner")
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="artifact-r1",
+        )
+
+    assert receipt["ok"] is True
+    assert receipt["sync_channel"] == "runner"
+    assert receipt["state"] == "queued"
+    # DAG 落盘且是 runner 通道：PythonOperator、无凭据、无作业配置文件
+    dag_py = next(p for p in (tmp_path / "dags").iterdir() if p.name.endswith(".py"))
+    source = dag_py.read_text(encoding="utf-8")
+    assert "PythonOperator" in source and "DockerOperator" not in source
+    assert "password" not in source and "jdbc:" not in source
+    jobs_dir = tmp_path / "jobs"
+    assert not jobs_dir.exists() or list(jobs_dir.iterdir()) == []
+
+
+def test_runner_channel_requires_endpoint(tmp_path, monkeypatch):
+    """runner 通道但没配 runner 地址 → 提交前报错，不产出连不上 runner 的 DAG。"""
+    from app.config import settings as env_settings
+
+    ids = _seed("runnernoep")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={}, channel="runner")
+    monkeypatch.setattr(env_settings, "sync_runner_endpoint", "")
+
+    with SessionLocal() as db:
+        with pytest.raises(materialization_runner.MaterializationError, match="sync-runner"):
+            materialization_runner.run(
+                db, ids["ontology_id"], target_datasource_id=ids["datasource_id"], engine="hive"
+            )
+
+
+def test_runner_channel_unreachable_errors(tmp_path, monkeypatch):
+    """runner 不可达 → 报错（提交前问清，而不是发个 DAG 过去再炸）。"""
+    ids = _seed("runnerdown")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={}, channel="runner")
+
+    class _Dead:
+        def __init__(self, *a, **kw):
+            pass
+
+        def capabilities(self):
+            raise materialization_runner.SyncRunnerError("capabilities", "connection refused")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(materialization_runner, "SyncRunnerClient", _Dead)
+
+    with SessionLocal() as db:
+        with pytest.raises(materialization_runner.MaterializationError, match="不可达"):
+            materialization_runner.run(
+                db, ids["ontology_id"], target_datasource_id=ids["datasource_id"], engine="hive"
+            )
+
+
+def test_runner_channel_contract_mismatch_errors(tmp_path, monkeypatch):
+    """契约版本不匹配即拒绝提交，不发过去再看会不会炸（§3.5）。"""
+    ids = _seed("runnerver")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(
+        tmp_path,
+        monkeypatch,
+        triggered={},
+        channel="runner",
+        capabilities={
+            "contract_version": "999",
+            "modes": ["full"],
+            "sources": ["mysql"],
+            "sinks": ["hive"],
+        },
+    )
+
+    with SessionLocal() as db:
+        with pytest.raises(materialization_runner.MaterializationError, match="契约版本"):
+            materialization_runner.run(
+                db, ids["ontology_id"], target_datasource_id=ids["datasource_id"], engine="hive"
+            )
 
 
 def test_orchestrated_reports_trigger_failure_without_losing_artifacts(tmp_path, monkeypatch):

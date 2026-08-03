@@ -48,6 +48,8 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
 
     monkeypatch.setattr(env_settings, "airflow_dags_dir", str(tmp_path / "dags"))
     monkeypatch.setattr(env_settings, "airflow_jobs_dir", str(tmp_path / "jobs"))
+    # 这条端到端用例走 docker 通道（M14 前的既有行为）；runner 通道另有专测。
+    monkeypatch.setattr(env_settings, "sync_channel", "docker")
 
     class _FakeClient:
         def __init__(self, *a, **kw):
