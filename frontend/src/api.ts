@@ -52,6 +52,7 @@ import type {
   MaterializationRun,
   MaterializeRequestInput,
   MaterializeStatus,
+  MaterializePreflightResult,
   SyncTool,
   SyncToolInfo,
   LineageEmitResult,
@@ -1181,6 +1182,20 @@ export const api = {
   materializeOntology: (ontologyId: string, body: MaterializeRequestInput) =>
     request<MaterializationRun>(
       `/api/ontologies/${ontologyId}/warehouse/materialize`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** M13：物化提交前自检。只读，不落产物、不触发运行，可随便重跑。 */
+  materializePreflight: (
+    ontologyId: string,
+    body: {
+      target_datasource_id: string;
+      engine: string;
+      selected_targets?: string[] | null;
+    },
+  ) =>
+    request<MaterializePreflightResult>(
+      `/api/ontologies/${ontologyId}/warehouse/materialize/preflight`,
       { method: "POST", body: JSON.stringify(body) },
     ),
 

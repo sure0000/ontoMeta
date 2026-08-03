@@ -1088,6 +1088,23 @@ export interface LineageEmitResult {
   errors?: { target: string; source_urn: string; error: string }[];
 }
 
+/** M13：物化提交前自检的单项结果。 */
+export interface PreflightItem {
+  key: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  /** 为真且 fail 时应禁用提交；提醒项（warn / 非阻断 fail）可忽略。 */
+  blocking: boolean;
+  detail: string;
+  next_step?: string | null;
+}
+
+export interface MaterializePreflightResult {
+  /** 无阻断失败即可提交。 */
+  ok: boolean;
+  items: PreflightItem[];
+}
+
 export interface MaterializeRequestInput {
   target_datasource_id: string;
   engine: string;

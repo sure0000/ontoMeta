@@ -100,3 +100,29 @@ class MaterializeResult(BaseModel):
     operator: str | None = None
     created_at: datetime | None = None
 
+
+class MaterializePreflightRequest(BaseModel):
+    """提交前自检请求：只需目标存储与勾选范围，不写回、不触发。"""
+
+    target_datasource_id: str = Field(description="目标存储（DataSource）id")
+    engine: str = Field("hive", description="目标数仓引擎，与物化请求同义")
+    selected_targets: list[str] | None = Field(
+        None, description="勾选要物化的实体名；空/None = 全部可物化实体（用于批次规模预警）"
+    )
+
+
+class PreflightItemOut(BaseModel):
+    """单项自检结果。``next_step`` 是失败时可照做的下一步。"""
+
+    key: str
+    label: str
+    status: str = Field(description="pass / warn / fail")
+    blocking: bool = Field(description="为真且 fail 时应禁用提交")
+    detail: str
+    next_step: str | None = None
+
+
+class MaterializePreflightResult(BaseModel):
+    ok: bool = Field(description="无阻断失败即可提交（提醒项不拦）")
+    items: list[PreflightItemOut] = Field(default_factory=list)
+

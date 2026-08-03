@@ -30,6 +30,7 @@ import type {
   MaterializationLoadStrategy,
   MaterializationRun,
   MaterializeStatus,
+  MaterializePreflightResult,
   LineageEmitResult,
   SyncTool,
   SyncToolInfo,
@@ -88,6 +89,10 @@ const RUN_STATE: Record<string, { label: string; color: string }> = {
 };
 // 判定「这次运行是不是砸了」用的状态集合。
 const FAILED_STATES = new Set(["failed", "upstream_failed"]);
+
+// 提交前自检各项状态 → 标签色与中文。fail=阻断（禁提交），warn=提醒（可忽略）。
+const PF_COLOR: Record<string, string> = { pass: "green", warn: "orange", fail: "red" };
+const PF_LABEL: Record<string, string> = { pass: "通过", warn: "提醒", fail: "阻断" };
 
 function RunStateTag({ state }: { state?: string | null }) {
   if (!state) return <Tag>未知</Tag>;
@@ -200,6 +205,9 @@ export function MaterializeModal({
   const [activeTab, setActiveTab] = useState<"run" | "history">("run");
   // 单实体物化：命中契约不可物化 / 尚未生成时的原因，禁用执行并提示。
   const [scopeError, setScopeError] = useState<string | null>(null);
+  // M13 提交前自检结果。null = 尚未跑；ok=false 时禁用提交（阻断项未解决）。
+  const [preflight, setPreflight] = useState<MaterializePreflightResult | null>(null);
+  const [preflightBusy, setPreflightBusy] = useState(false);
 
   const scoped = Boolean(scopeTargetId);
   const isDraft = Boolean(ontologyStatus && ontologyStatus !== "published");
@@ -249,6 +257,7 @@ export function MaterializeModal({
     setResult(null);
     setActiveTab("run");
     setScopeError(null);
+    setPreflight(null);
     setStep(0);
     setActiveLayer(null);
     setRowTableEdit({});
@@ -375,6 +384,50 @@ export function MaterializeModal({
     // 而占位写入本身会触发本 effect 重跑，守卫反而会把在途请求作废。
   }, [open, dsId, targetDb, tablesByDb]);
 
+  // 本次要物化的实体名参数（与 submit 同口径）：单实体锁定其名；整体全选传 null（不裁剪）。
+  const selectedTargetsArg = useMemo(
+    () =>
+      scoped
+        ? targetKeys
+        : targetKeys.length === allTargets.length
+          ? null
+          : targetKeys,
+    [scoped, targetKeys, allTargets.length],
+  );
+
+  // 改了目标 / 勾选范围，上一次自检结论就不再作数——清掉，强制重跑。绿灯不能授权一个
+  // 已经变过的提交。
+  useEffect(() => {
+    setPreflight(null);
+  }, [dsId, targetDb, selectedTargetsArg]);
+
+  /** 提交前自检：只读，问清 Airflow 那几件提交前能验证的事，不落产物、不触发运行。 */
+  const runPreflight = async () => {
+    const dsIdVal = form.getFieldValue("target_datasource_id");
+    if (!dsIdVal) {
+      message.warning("请先选择目标数据源");
+      return;
+    }
+    const ds = dataSources.find((d) => d.id === dsIdVal);
+    const engine = engineOfKind(ds?.kind) ?? DEFAULT_ENGINE;
+    setPreflightBusy(true);
+    try {
+      const res = await api.materializePreflight(ontologyId, {
+        target_datasource_id: dsIdVal,
+        engine,
+        selected_targets: selectedTargetsArg,
+      });
+      setPreflight(res);
+      if (!res.ok) {
+        message.warning("自检发现阻断项，请按提示处理后再提交");
+      }
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "自检失败");
+    } finally {
+      setPreflightBusy(false);
+    }
+  };
+
   const submit = async () => {
     let values: FormValues;
     try {
@@ -388,6 +441,15 @@ export function MaterializeModal({
     }
     if (targetKeys.length === 0) {
       message.warning(scoped ? "该实体不可物化" : "请至少勾选一个要物化的实体");
+      return;
+    }
+    // 提交前自检必须先跑且无阻断项。提醒项（warn）不拦——ok 即「无阻断失败」。
+    if (!preflight) {
+      message.warning("请先运行提交前自检");
+      return;
+    }
+    if (!preflight.ok) {
+      message.warning("自检存在阻断项，请按提示处理后再提交");
       return;
     }
     // 引擎由所选数据源类型推导；推导不出则回退默认引擎（不拦截物化）。
@@ -550,6 +612,77 @@ export function MaterializeModal({
       value={rowCron[c.id] ?? ""}
       onChange={(v) => setRowCron((m) => ({ ...m, [c.id]: v }))}
     />
+  );
+
+  // 提交前自检面板：一个按钮跑一次，逐项列出 通过/提醒/阻断 + 可照做的下一步。
+  // 未跑或有阻断项时下方「提交并运行」按钮禁用（提醒项可忽略）。
+  const blockingCount =
+    preflight?.items.filter((i) => i.status === "fail" && i.blocking).length ?? 0;
+  const preflightPanel = (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        <Button size="small" onClick={runPreflight} loading={preflightBusy}>
+          {preflight ? "重新自检" : "运行提交前自检"}
+        </Button>
+        <span className="om-muted" style={{ fontSize: 12 }}>
+          提交前查 Airflow 连通 / 鉴权 / 建表连接 / DAG 目录，把「三分钟后才在任务日志里发现」的失败提到点提交之前。
+        </span>
+      </div>
+      {preflight && (
+        <>
+          <Alert
+            type={preflight.ok ? "success" : "error"}
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={
+              preflight.ok
+                ? "自检通过，可提交"
+                : `${blockingCount} 项阻断，需先解决后才能提交`
+            }
+          />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              maxHeight: 220,
+              overflowY: "auto",
+            }}
+          >
+            {preflight.items.map((it) => (
+              <div
+                key={it.key}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "56px 1fr",
+                  gap: 8,
+                  alignItems: "start",
+                  paddingBottom: 4,
+                }}
+              >
+                <Tag
+                  color={PF_COLOR[it.status]}
+                  style={{ marginInlineEnd: 0, justifySelf: "start" }}
+                >
+                  {PF_LABEL[it.status]}
+                </Tag>
+                <div>
+                  <span style={{ fontWeight: 500 }}>{it.label}</span>
+                  <div className="om-muted" style={{ fontSize: 12 }}>
+                    {it.detail}
+                  </div>
+                  {it.next_step && it.status !== "pass" && (
+                    <div style={{ fontSize: 12, marginTop: 2 }}>
+                      下一步：{it.next_step}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
   const entityTable = (rows: Row[]) => (
     <Table
@@ -787,6 +920,7 @@ export function MaterializeModal({
               <Alert type="warning" showIcon message={scopeError} />
             ) : allTargets[0] ? (
               <div>
+                {preflightPanel}
                 <div className="om-muted" style={{ marginBottom: 10, fontSize: 12 }}>
                   <Tag color="blue">
                     {scopeLabel ?? allTargets[0].contract.target_display_name ?? "—"}
@@ -822,6 +956,7 @@ export function MaterializeModal({
                 <code>{targetDb}</code>。表名给的是推荐值（库里已有同名表时直接推荐那张，
                 物化为覆盖写），可逐行改。
               </div>
+              {preflightPanel}
               <Segmented
                 value={curLayer ?? undefined}
                 onChange={(v) => setActiveLayer(v as string)}
@@ -877,7 +1012,11 @@ export function MaterializeModal({
                   type="primary"
                   danger
                   loading={running}
-                  disabled={targetKeys.length === 0 || (scoped && Boolean(scopeError))}
+                  disabled={
+                    targetKeys.length === 0 ||
+                    (scoped && Boolean(scopeError)) ||
+                    !preflight?.ok
+                  }
                   onClick={submit}
                 >
                   {result ? "再次提交" : "提交并运行"}

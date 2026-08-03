@@ -191,8 +191,11 @@ from app.schemas.warehouse import (
     MaterializationContractOut,
     MaterializationContractSyncResult,
     MaterializationContractUpdate,
+    MaterializePreflightRequest,
+    MaterializePreflightResult,
     MaterializeRequest,
     MaterializeResult,
+    PreflightItemOut,
 )
 
 __all__ = [
@@ -355,6 +358,9 @@ __all__ = [
     "MaterializationContractSyncResult",
     "MaterializeRequest",
     "MaterializeResult",
+    "MaterializePreflightRequest",
+    "MaterializePreflightResult",
+    "PreflightItemOut",
     "ChatBiExecuteRequest",
     "ChatBiExecuteResult",
     "PrincipalOut",

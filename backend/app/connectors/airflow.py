@@ -154,6 +154,65 @@ class AirflowClient:
             "GET", f"/dags/{dag_id}/dagRuns/{dag_run_id}", "get_dag_run"
         )
 
+    def dag_exists(self, dag_id: str) -> bool:
+        """DAG 是否已被 Airflow 解析并登记。用于 preflight 的 sentinel 探测。
+
+        ``GET /dags/{id}`` 对未解析的 DAG 返回 404——把它翻成布尔，其余错误（鉴权、
+        网络）照旧抛出，不吞。
+        """
+        try:
+            self._request("GET", f"/dags/{dag_id}", "get_dag")
+            return True
+        except AirflowError as exc:
+            if "404" in str(exc):
+                return False
+            raise
+
+    def get_connection(self, conn_id: str) -> dict:
+        """读一个 Airflow Connection。物化建表任务按此 conn_id 连目标仓。
+
+        只读账号可能对 ``/connections`` 无权（403）——由调用方（preflight）据错误码
+        决定是判失败还是降级为「无法确认」，本方法只如实带出 HTTP 状态。
+        """
+        return self._request("GET", f"/connections/{conn_id}", "get_connection")
+
+    def detect_api_version(self) -> str | None:
+        """自探 Airflow 暴露的 REST 版本（``v1``/``v2``），认不出返回 None。
+
+        不照抄文档：openapi.json 的位置本身随版本变（2.x 常在 ``/api/v1/openapi.json``，
+        根路径 ``/openapi.json`` 可能 404），故逐个候选位置试，命中 JSON 后优先看
+        ``servers[].url``（最权威），再退到候选路径 / paths 前缀。全程不抛，探不到即 None。
+        """
+        import re
+
+        for candidate in ("/openapi.json", "/api/v1/openapi.json", "/api/v2/openapi.json"):
+            try:
+                resp = self._client.get(
+                    f"{self.endpoint}{candidate}",
+                    headers=self._headers(),
+                    auth=self._auth if not self._token else None,
+                )
+            except httpx.HTTPError:
+                continue
+            if resp.status_code >= 400:
+                continue
+            try:
+                doc = resp.json()
+            except ValueError:
+                continue
+            for server in doc.get("servers") or []:
+                match = re.search(r"/api/(v\d+)", server.get("url") or "")
+                if match:
+                    return match.group(1)
+            match = re.search(r"/api/(v\d+)/", candidate)
+            if match:
+                return match.group(1)
+            for path in doc.get("paths") or {}:
+                match = re.search(r"^/api/(v\d+)/", path)
+                if match:
+                    return match.group(1)
+        return None
+
     def list_task_instances(self, dag_id: str, dag_run_id: str) -> list[dict]:
         body = self._request(
             "GET",

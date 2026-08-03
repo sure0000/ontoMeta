@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     # 侧因 pull 404 失败。同属部署基础设施，不进设置页。
     sync_tool_images: str = ""
 
+    # 单个物化 DAG 的任务上限。M16 据此把大本体拆成多个 DAG；M13 只用于 preflight
+    # 预警「本次表数超限、当前仍会塞进一个 DAG」。默认 50。
+    ontometa_max_tasks_per_dag: int = 50
+    # preflight 写 sentinel DAG 后，等 Airflow 解析到它的最长秒数（专治「dags 目录
+    # 两侧不一致」失败模式 #3）。Airflow 的 dag_dir_list_interval 默认 300s（⚠ 见
+    # MATERIALIZE_SYNC_STABILITY.md §8.1），故超时不作硬失败、只降级为提醒。
+    ontometa_preflight_sentinel_timeout: float = 20.0
+
     @property
     def sync_tool_image_map(self) -> dict[str, str]:
         """``sync_tool_images`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。"""

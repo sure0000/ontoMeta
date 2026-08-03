@@ -26,6 +26,8 @@ from app.schemas import (
     MaterializationContractOut,
     MaterializationContractSyncResult,
     MaterializationContractUpdate,
+    MaterializePreflightRequest,
+    MaterializePreflightResult,
     MaterializeRequest,
     MaterializeResult,
 )
@@ -293,6 +295,50 @@ def _materialize_out(artifact) -> MaterializeResult:
         executed_at=artifact.executed_at,
         operator=artifact.confirmed_by,
         created_at=artifact.created_at,
+    )
+
+
+@router.post(
+    "/ontologies/{ontology_id}/warehouse/materialize/preflight",
+    response_model=MaterializePreflightResult,
+)
+def materialize_preflight(
+    ontology_id: str,
+    payload: MaterializePreflightRequest,
+    db: Session = Depends(get_db),
+):
+    """物化提交前自检：把「三分钟后才在任务日志里知道」的一类失败提到点提交之前。
+
+    **只读**：不落产物、不触发运行，可随便重跑。逐项返回 ``status``（pass/warn/fail）与
+    失败时可照做的 ``next_step``；前端据 ``ok``（无阻断失败）决定是否放行「提交」。
+    覆盖 Airflow 可达/鉴权/REST 版本/建表 Connection/DAG 目录双向可见/批次规模——
+    #2 docker.sock、#4 网络名、#5 驱动这类只有真起容器才知道的，M13 不假装能查。
+    """
+    _require_ontology(db, ontology_id)
+    _require_engine(payload.engine)
+
+    from app.services.materialize_preflight import run_preflight
+
+    report = run_preflight(
+        db,
+        ontology_id,
+        target_datasource_id=payload.target_datasource_id,
+        engine=payload.engine,
+        selected_targets=payload.selected_targets,
+    )
+    return MaterializePreflightResult(
+        ok=report.ok,
+        items=[
+            {
+                "key": i.key,
+                "label": i.label,
+                "status": i.status,
+                "blocking": i.blocking,
+                "detail": i.detail,
+                "next_step": i.next_step,
+            }
+            for i in report.items
+        ],
     )
 
 
