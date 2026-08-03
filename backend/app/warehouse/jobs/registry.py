@@ -39,7 +39,7 @@ class SyncImageUnavailableError(RuntimeError):
         alternatives = [t for t in available_sync_tools(image_overrides) if t != tool]
         super().__init__(
             f"搬运工具「{tool}」没有可用的执行镜像：{image} 无官方发行版，"
-            f"需自行构建后用环境变量 ONTOMETA_SYNC_TOOL_IMAGES={tool}=<你的镜像> 指定；"
+            f"需自行构建后用环境变量 SYNC_TOOL_IMAGES={tool}=<你的镜像> 指定；"
             f"或改用有可用镜像的工具（{', '.join(alternatives) or '暂无'}）。"
         )
 

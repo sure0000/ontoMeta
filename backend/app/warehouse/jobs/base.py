@@ -55,6 +55,16 @@ def _endpoint_env(endpoint: "JobEndpoint") -> dict[str, str]:
         env[f"{token}_METASTORE_URI"] = (
             f"{{{{ {conn}.extra_dejson.get('metastore_uri', '') }}}}"
         )
+        # 非 Kerberos 的 HDFS 就按这个环境变量认人。搬运容器里的用户不是建仓目录的
+        # 那个（默认 hadoop:supergroup drwxr-xr-x），不传就是写 staging 目录时
+        # ``AccessControlException: Permission denied: user=…, access=WRITE``
+        # ——报错在 SeaTunnel 的 commit 阶段，读起来像 SeaTunnel 的问题，其实是身份问题。
+        # **变量名必须原样是 HADOOP_USER_NAME**（Hadoop 客户端只认这个），故不加别名前缀；
+        # 一个作业只有一端是 hive，不会互相覆盖。具体用户名属部署事实，从 Connection 的
+        # extra 取（``{"hadoop_user": "hadoop"}``），没配则用 Hadoop 镜像的惯例用户。
+        env["HADOOP_USER_NAME"] = (
+            f"{{{{ {conn}.extra_dejson.get('hadoop_user', 'hadoop') }}}}"
+        )
     return env
 
 
@@ -149,7 +159,7 @@ class SyncToolAdapter(ABC):
     docker_image: str
     # 该镜像是否**公开可拉取**。False 表示 ``docker_image`` 只是个占位名字，
     # registry 上并不存在（DataX 就没有官方镜像），部署方必须自建并用
-    # ``ONTOMETA_SYNC_TOOL_IMAGES`` 指过来。区分这一位是为了**在提交前拦下**：
+    # ``SYNC_TOOL_IMAGES`` 指过来。区分这一位是为了**在提交前拦下**：
     # 否则 DAG 照样生成、照样触发，三分钟后才在 Airflow 里炸一个
     # ``pull access denied for …, repository does not exist``（真实实例上踩过），
     # 而那条报错读起来像环境故障，不像「这个工具在本部署里根本没配」。

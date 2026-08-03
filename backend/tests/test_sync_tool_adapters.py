@@ -225,3 +225,35 @@ def test_all_adapters_render_idempotently():
         x = json.dumps(a.render(spec), sort_keys=True, ensure_ascii=False)
         y = json.dumps(a.render(spec), sort_keys=True, ensure_ascii=False)
         assert x == y
+
+
+def test_hive_target_carries_hadoop_user_name():
+    """Hive 目标必须带 HADOOP_USER_NAME，否则写 HDFS 会被拒。
+
+    非 Kerberos 的 HDFS 按这个环境变量认人。搬运容器里的用户不是建仓目录的那个，
+    不传就是 ``AccessControlException: Permission denied … access=WRITE``（真实实例上踩过），
+    而报错出现在 SeaTunnel 的 commit 阶段，读起来像 SeaTunnel 的问题。
+
+    变量名不能加别名前缀——Hadoop 客户端只认原名。
+    """
+    from app.warehouse.jobs import ColumnMapping, JobEndpoint, JobSpec, get_job_adapter
+
+    job = JobSpec(
+        name="sync_dim_customer",
+        source=JobEndpoint(alias="erp_readonly", platform="mariadb", database="erp", table="c"),
+        target=JobEndpoint(alias="warehouse_default", platform="hive", database="dim", table="customer"),
+        columns=(ColumnMapping(source="a", target="a"),),
+    )
+    env = get_job_adapter("seatunnel").credential_env(job)
+    assert "HADOOP_USER_NAME" in env
+    assert "WAREHOUSE_DEFAULT_HADOOP_USER_NAME" not in env
+    # 运行期才渲染，产物里不含真实值
+    assert env["HADOOP_USER_NAME"].startswith("{{ conn.warehouse_default.extra_dejson")
+    # 非 hive 目标不该带它
+    mysql_job = JobSpec(
+        name="sync_dim_customer",
+        source=job.source,
+        target=JobEndpoint(alias="warehouse_default", platform="doris", database="dim", table="customer"),
+        columns=job.columns,
+    )
+    assert "HADOOP_USER_NAME" not in get_job_adapter("seatunnel").credential_env(mysql_job)

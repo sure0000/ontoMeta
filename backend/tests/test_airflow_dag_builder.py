@@ -1,7 +1,9 @@
 """DAG 生成：结构、幂等、凭据、以及「建表不交给搬运工具」这条铁律。
 
-DAG 源码在这里只做**语法与结构**校验（ast 解析 + 关键调用检查）；用 Airflow 的 DagBag
-真正解析属集成验证，需要装 airflow 包，见 M10 的本地验证步骤。
+DAG 源码在这里只做**语法与结构**校验（ast 解析 + 桩模块建图）：Airflow 2.10 装不进本仓后端
+所用的 Python 版本，同一个 venv 里做不到真解析。**真 Airflow 的 DagBag 解析是 `make dag-parse`**
+（在 Airflow 镜像里跑，见 `scripts/dag_parse_check.py`）——Operator 关键字合不合法、provider
+在不在、连线在真 BaseOperator 上成不成立，只有它说了算，本文件的桩验不了。改 DAG 模板后两边都要跑。
 """
 
 from __future__ import annotations
@@ -268,7 +270,7 @@ def test_tool_without_image_is_rejected_before_any_artifact():
     with pytest.raises(SyncImageUnavailableError) as exc:
         _bundle(tool="datax")
     # 报错要说清怎么修，而不是只说「不可用」
-    assert "ONTOMETA_SYNC_TOOL_IMAGES" in str(exc.value)
+    assert "SYNC_TOOL_IMAGES" in str(exc.value)
 
 
 def test_image_override_is_deployment_fact_not_adapter_default():
@@ -397,3 +399,181 @@ def test_runner_build_is_idempotent():
     a, b = _runner_bundle(), _runner_bundle()
     assert a.dag_source == b.dag_source
     assert json.dumps(a.spec, sort_keys=True) == json.dumps(b.spec, sort_keys=True)
+
+
+# ---------- 图结构：真的执行一遍建图逻辑（M15 staging + 层间串联） ----------
+
+
+class _FakeOp:
+    """桩 Operator：只记 task_id 与上游，支持 ``>>``（右侧可为单个或列表）。
+
+    登记在类级 ``created`` 上，好让 docker 通道那条 ``class _SyncOperator(DockerOperator)``
+    的继承路径也一样能被收集到（它不经工厂函数）。
+    """
+
+    created: list = []
+
+    def __init__(self, **kwargs):
+        self.task_id = kwargs.get("task_id")
+        self.kwargs = kwargs
+        self.upstream: list[str] = []
+        _FakeOp.created.append(self)
+
+    def __rshift__(self, other):
+        for op in other if isinstance(other, list) else [other]:
+            op.upstream.append(self.task_id)
+        return other
+
+
+def _build_graph(bundle, tmp_path):
+    """用桩模块把生成的 DAG 源码**执行**一遍，返回 {task_id: 上游 task_id 列表}。
+
+    ``ast.parse`` 只看语法。层间怎么串、swap 挂在哪，只有真的跑一遍建图逻辑才验得出来
+    ——``previous >> group`` 在第二层起是 ``list >> list``，语法完全合法、执行必 TypeError，
+    整个 DAG 文件在 Airflow 解析期导入失败。这条测试就是为了钉住这类。
+    """
+    import sys
+    import types
+
+    dags_dir = tmp_path / "dags"
+    bundle.write(str(dags_dir), str(tmp_path / "jobs"))
+
+    _FakeOp.created = []
+
+    def _module(name: str, **attrs):
+        mod = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(mod, key, value)
+        return mod
+
+    class _DagCtx:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    stubs = {
+        "pendulum": _module(
+            "pendulum", datetime=lambda *a, **k: None, duration=lambda **k: None
+        ),
+        "airflow": _module("airflow", DAG=_DagCtx),
+        "airflow.exceptions": _module("airflow.exceptions", AirflowException=RuntimeError),
+        "airflow.operators": _module("airflow.operators"),
+        "airflow.operators.python": _module("airflow.operators.python", PythonOperator=_FakeOp),
+        "airflow.providers": _module("airflow.providers"),
+        "airflow.providers.common": _module("airflow.providers.common"),
+        "airflow.providers.common.sql": _module("airflow.providers.common.sql"),
+        "airflow.providers.common.sql.operators": _module("airflow.providers.common.sql.operators"),
+        "airflow.providers.common.sql.operators.sql": _module(
+            "airflow.providers.common.sql.operators.sql", SQLExecuteQueryOperator=_FakeOp
+        ),
+        # docker 通道用：DockerOperator 被 _SyncOperator 继承，故必须是个类。
+        "airflow.providers.docker": _module("airflow.providers.docker"),
+        "airflow.providers.docker.operators": _module("airflow.providers.docker.operators"),
+        "airflow.providers.docker.operators.docker": _module(
+            "airflow.providers.docker.operators.docker", DockerOperator=_FakeOp
+        ),
+        "docker": _module("docker"),
+        "docker.types": _module("docker.types", Mount=lambda **kw: kw),
+    }
+    saved = {k: sys.modules.get(k) for k in stubs}
+    sys.modules.update(stubs)
+    try:
+        exec(
+            compile(bundle.dag_source, str(dags_dir / bundle.dag_filename), "exec"),
+            {"__file__": str(dags_dir / bundle.dag_filename), "__name__": "gen_dag"},
+        )
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = value
+    return {op.task_id: op.upstream for op in _FakeOp.created}, list(_FakeOp.created)
+
+
+def test_runner_dag_graph_chains_layers_without_list_shift(tmp_path):
+    """层间串联必须真的建得起来：第二层起 previous 是 list，写成 previous >> group 会
+    在 Airflow 解析期 TypeError，整个 DAG 目录 import error。"""
+    graph, _ = _build_graph(_runner_bundle(), tmp_path)
+    # dim 层接 create_tables；dwd 层接 dim 层该表链条的末端（有 staging 时是 swap）
+    assert graph["sync_dim_customer"] == ["create_tables"]
+    assert graph["sync_dwd_order"] == ["swap_sync_dim_customer"]
+
+
+def test_full_load_writes_staging_and_swaps(tmp_path):
+    """M15 接进运行时：全量搬进 staging，成功后由 swap 任务切到正式表。"""
+    bundle = _runner_bundle()
+    spec = bundle.spec
+    task = next(t for t in spec["tasks"] if t["task_id"] == "sync_dim_customer")
+    # 搬运写的是 staging 表，展示/血缘用的仍是正式表
+    assert task["job_spec"]["target"]["table"] == "customer__stg_manual"
+    assert task["target"] == "dim.customer"
+    assert task["write_target"] == "dim.customer__stg_manual"
+    # staging 建表跟在正式表 DDL 之后（CREATE ... LIKE 要求正式表已存在）
+    assert any("customer__stg_manual" in s for s in spec["staging_ddl"])
+    assert '_SPEC["ddl"] + (_SPEC.get("staging_ddl") or [])' in bundle.dag_source
+
+    graph, _ = _build_graph(bundle, tmp_path)
+    # swap 只接自己那张表的搬运任务：单表失败不会连累别的表，也不会切一张没搬完的表
+    assert graph["swap_sync_dim_customer"] == ["sync_dim_customer"]
+
+
+def test_staging_name_is_stable_per_batch(tmp_path):
+    """staging 名用批次后缀而非 run_id：每次失败的运行不会各留一张不会回收的临时表。"""
+    a = _runner_bundle(dag_id_suffix="c1a2b3c4_b0")
+    b = _runner_bundle(dag_id_suffix="c1a2b3c4_b0")
+    assert a.spec["staging_ddl"] == b.spec["staging_ddl"]
+    assert any("customer__stg_c1a2b3c4_b0" in s for s in a.spec["staging_ddl"])
+
+
+def test_incremental_load_skips_staging(tmp_path):
+    """增量是往正式表追加，搬进 staging 再整表切换会把存量换没——必须不走 staging。"""
+    from dataclasses import replace as _replace
+
+    job = _replace(_job("sync_dim_customer"), mode="incremental", partition_key="created_at")
+    bundle = _builder.build(
+        ontology_id="1111",
+        plan=JobPlan(jobs=(job,)),
+        ddl_statements={"dim.customer": "CREATE TABLE `dim`.`customer` (id INT);"},
+        channel="runner",
+        runner_endpoint="http://sync-runner:8088",
+        engine="hive",
+    )
+    task = bundle.spec["tasks"][0]
+    assert task["job_spec"]["target"]["table"] == "customer"  # 直接写正式表
+    assert task["swap"] == []
+    assert bundle.spec["staging_ddl"] == []
+    graph, _ = _build_graph(bundle, tmp_path)
+    assert "swap_sync_dim_customer" not in graph
+
+
+def test_staging_can_be_disabled(tmp_path):
+    """⚠ 各引擎切换的原子性需真实实例核实（§8.3），故留一键退回。"""
+    bundle = _runner_bundle(staging=False)
+    task = bundle.spec["tasks"][0]
+    assert task["job_spec"]["target"]["table"] == "customer"
+    assert task["swap"] == []
+    assert bundle.spec["staging_ddl"] == []
+
+
+def test_docker_channel_also_stages_and_swaps(tmp_path):
+    """docker 通道同样走 staging：SeaTunnel 的 DROP_DATA 是先删后写，失败即丢数据。"""
+    bundle = _bundle()
+    task = next(t for t in bundle.spec["tasks"] if t["task_id"] == "sync_dim_customer")
+    assert task["write_target"] == "dim.customer__stg_manual"
+    # 作业配置里的 sink 指向 staging 表，而不是正式表
+    conf = bundle.job_files[f"{bundle.dag_id}__sync_dim_customer.json"]
+    assert conf["sink"][0]["table_name"] == "dim.customer__stg_manual"
+
+
+def test_docker_dag_graph_chains_layers_without_list_shift(tmp_path):
+    """docker 通道的层间串联有同一个 list >> list 问题，同样钉住（它是 runner 的回退路径）。"""
+    graph, _ = _build_graph(_bundle(), tmp_path)
+    assert graph["sync_dim_customer"] == ["create_tables"]
+    assert graph["sync_dwd_order"] == ["swap_sync_dim_customer"]
+    assert graph["swap_sync_dim_customer"] == ["sync_dim_customer"]

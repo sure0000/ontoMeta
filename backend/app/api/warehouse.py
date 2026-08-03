@@ -138,11 +138,11 @@ def list_warehouse_sync_tools():
     不可用并给出 ``reason``，由弹窗禁用。**不从列表里删掉**——「有这个工具但没配」
     与「没有这个工具」是两回事，后者会让人以为要改代码。
     """
-    from app.config import settings as env_settings
     from app.warehouse.jobs import get_job_adapter
     from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL, list_sync_tools
 
-    overrides = env_settings.sync_tool_image_map
+    # 镜像覆盖来自设置页那一行（不再读环境变量），与物化提交时用的是同一个来源。
+    overrides = settings_service.get_airflow_runtime(db).sync_tool_images
     tools = []
     for name in list_sync_tools():
         a = get_job_adapter(name)
@@ -160,7 +160,7 @@ def list_warehouse_sync_tools():
                     if available
                     else (
                         f"{a.docker_image} 无官方发行版，需自建镜像后用环境变量 "
-                        f"ONTOMETA_SYNC_TOOL_IMAGES={a.name}=<你的镜像> 指定"
+                        f"SYNC_TOOL_IMAGES={a.name}=<你的镜像> 指定"
                     )
                 ),
             }
