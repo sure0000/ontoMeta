@@ -176,3 +176,15 @@ class StarRocksAdapter(DialectAdapter):
     def translate_sql(self, sql: str) -> str:
         """StarRocks 兼容 MySQL 日期函数，原样返回。"""
         return sql
+
+    def render_swap(self, table: LogicalTable, run_id: str) -> list[str]:
+        """StarRocks 原子切换：``ALTER TABLE ... SWAP WITH``（原子交换两表名），再删 staging。
+
+        交换后 staging 名下持有的是旧数据，删掉即可。⚠ 原子性/代价需真实实例核实（§8.3）。
+        """
+        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        orig = self._qual(table.database, table.name)
+        return [
+            f"ALTER TABLE {orig} SWAP WITH {stg};",
+            f"DROP TABLE IF EXISTS {stg};",
+        ]

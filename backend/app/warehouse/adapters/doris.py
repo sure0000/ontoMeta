@@ -174,3 +174,13 @@ class DorisAdapter(DialectAdapter):
     def translate_sql(self, sql: str) -> str:
         """Doris 兼容 MySQL 日期函数（CURDATE / DATE_SUB(..., INTERVAL n DAY)），原样返回。"""
         return sql
+
+    def render_swap(self, table: LogicalTable, run_id: str) -> list[str]:
+        """Doris 原子切换：``ALTER TABLE ... REPLACE WITH TABLE``（单语句、原子）。
+
+        ``swap="false"`` 表示替换后**丢弃** staging（否则会把旧数据换到 staging 名下）。
+        docs/3.x：Alter/replace-table。⚠ 原子性与代价需真实实例核实（§8.3）。
+        """
+        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        orig = self._qual(table.database, table.name)
+        return [f'ALTER TABLE {orig} REPLACE WITH TABLE {stg} PROPERTIES("swap" = "false");']

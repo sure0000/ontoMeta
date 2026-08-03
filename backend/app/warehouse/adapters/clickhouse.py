@@ -171,3 +171,21 @@ class ClickHouseAdapter(DialectAdapter):
             flags=re.IGNORECASE,
         )
         return re.sub(r"CURDATE\(\)", "today()", sql, flags=re.IGNORECASE)
+
+    def render_create_staging(self, table: LogicalTable, run_id: str) -> str:
+        """ClickHouse 无 ``CREATE TABLE LIKE``；``CREATE TABLE ... AS <orig>`` 复制结构建空表。"""
+        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        orig = self._qual(table.database, table.name)
+        return f"CREATE TABLE IF NOT EXISTS {stg} AS {orig};"
+
+    def render_swap(self, table: LogicalTable, run_id: str) -> list[str]:
+        """ClickHouse 原子切换：``EXCHANGE TABLES a AND b``（原子交换），再删 staging。
+
+        ⚠ 需 Atomic 数据库引擎（默认）；原子性/代价需真实实例核实（§8.3）。
+        """
+        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        orig = self._qual(table.database, table.name)
+        return [
+            f"EXCHANGE TABLES {orig} AND {stg};",
+            f"DROP TABLE IF EXISTS {stg};",
+        ]

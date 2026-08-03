@@ -184,3 +184,17 @@ class HiveAdapter(DialectAdapter):
             flags=re.IGNORECASE,
         )
         return re.sub(r"CURDATE\(\)", "current_date()", sql, flags=re.IGNORECASE)
+
+    def render_swap(self, table: LogicalTable, run_id: str) -> list[str]:
+        """Hive 无原子 rename-swap；用 ``INSERT OVERWRITE`` 目录级替换全表数据，再删 staging。
+
+        列序与正式表一致（staging 由 ``CREATE TABLE LIKE`` 建），故 ``SELECT *`` 可直接对位。
+        ⚠ 分区表的按分区 OVERWRITE 与原子性需真实实例核实（§8.3）；非分区表 OVERWRITE
+        在 FS 目录级替换，failure 语义与事务库不同。
+        """
+        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        orig = self._qual(table.database, table.name)
+        return [
+            f"INSERT OVERWRITE TABLE {orig} SELECT * FROM {stg};",
+            f"DROP TABLE IF EXISTS {stg};",
+        ]
