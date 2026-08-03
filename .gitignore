@@ -24,6 +24,7 @@ dist/
 *~
 
 # Local / scratch artifacts
+.dagcheck/
 backend/_query_*.json
 backend/_query_*.txt
 backend/_selected_*.json
