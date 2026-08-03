@@ -14,9 +14,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import time
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+from app.config import settings as env_settings
 
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
@@ -32,6 +36,7 @@ from app.services.materialization_contract import MaterializationContractService
 from app.services.settings_service import SettingsService
 from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse.jobs import (
+    JobPlan,
     SyncImageUnavailableError,
     get_job_adapter,
     resolve_docker_image,
@@ -105,25 +110,73 @@ def _selected_names(
     return names
 
 
-def _schedule_of(db: Session, ontology_id: str, selected: set[str] | None) -> str | None:
-    """本次物化的调度表达式：取选中实体契约里出现最多的 refresh_cron。
-
-    契约的定时策略是逐实体的，而一个 DAG 只能有一个 schedule。取众数而非报错——
-    多数场景下同一批表用同一个节奏；真有分歧的，DAG 里各表仍是同一批跑，
-    差异体现在人怎么分批提交，而不是让这里编一个折中值。
-    """
-    from collections import Counter
-
+def _cron_by_entity(db: Session, ontology_id: str) -> dict[str, str | None]:
+    """本体实体名 → 契约的 refresh_cron（空串归一为 None）。M16 按此分组。"""
     contracts = _contract_service.list_contracts(db, ontology_id, materialized_only=True)
-    if selected:
-        names = _contract_service.resolve_target_names(db, contracts)
-        contracts = [
-            c for c in contracts if (names.get(c.target_id) or (None,))[0] in selected
+    names = _contract_service.resolve_target_names(db, contracts)
+    out: dict[str, str | None] = {}
+    for c in contracts:
+        entity = (names.get(c.target_id) or (None,))[0]
+        if entity:
+            out[entity] = (c.refresh_cron or "").strip() or None
+    return out
+
+
+def _cron_suffix(cron: str | None) -> str:
+    """cron → DAG id 后缀。无 cron 归 ``manual``；有 cron 用短哈希（同 cron 稳定同后缀）。"""
+    if not cron:
+        return "manual"
+    return "c" + hashlib.md5(cron.encode("utf-8")).hexdigest()[:8]
+
+
+def _plan_batches(jobs, cron_by_entity: dict[str, str | None], max_tasks: int) -> list[dict]:
+    """按 cron 分组、组内按 max_tasks 分批 → 每个 (后缀, schedule, 作业子集)。
+
+    一个 cron 一个 DAG（少数派 cron 不再被众数吞掉）；单组超 max_tasks 再拆成
+    ``_b0``/``_b1``… 多个 DAG。作业已按 (layer, name) 稳定排序，分批结果因而幂等。
+    """
+    groups: dict[str | None, list] = {}
+    for job in jobs:
+        cron = cron_by_entity.get(job.entity_name)
+        groups.setdefault(cron, []).append(job)
+
+    batches: list[dict] = []
+    # 稳定顺序：cron 字符串升序，无 cron（manual）排最后。
+    for cron in sorted(groups, key=lambda c: (c is None, c or "")):
+        group_jobs = groups[cron]
+        base = _cron_suffix(cron)
+        chunks = [
+            group_jobs[i : i + max_tasks] for i in range(0, len(group_jobs), max_tasks)
         ]
-    crons = [c.refresh_cron for c in contracts if (c.refresh_cron or "").strip()]
-    if not crons:
-        return None
-    return Counter(crons).most_common(1)[0][0]
+        multi = len(chunks) > 1
+        for i, chunk in enumerate(chunks):
+            batches.append(
+                {
+                    "suffix": f"{base}_b{i}" if multi else base,
+                    "schedule": cron,
+                    "jobs": tuple(chunk),
+                }
+            )
+    return batches
+
+
+def _wait_for_parse(client: AirflowClient, dag_id: str, timeout: float) -> bool:
+    """轮询 ``GET /dags/{id}`` 直到 Airflow 解析到该 DAG，或超时。
+
+    替代「落盘后立刻触发、404 被吞成回执 error」：首次提交常见于解析尚未完成，
+    直接触发必 404。⚠ Airflow ``dag_dir_list_interval`` 默认 300s（§8.1），超时值
+    由 ``ONTOMETA_DAG_PARSE_TIMEOUT`` 配；超时不抛，交由调用方记「尚未解析到」。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if client.dag_exists(dag_id):
+                return True
+        except AirflowError:
+            pass  # 鉴权/网络问题由触发那步的错误体带出，这里只管「在不在」
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2)
 
 
 def _run_orchestrated(
@@ -190,34 +243,57 @@ def _run_orchestrated(
     )
     # 目标表 URN 的 fabric 取自 DataHub 设置页（默认 PROD），与兜底 emitter 同一来源。
     fabric = _settings.get_datahub_runtime(db).fabric
-    bundle = _dag_builder.build(
-        ontology_id=ontology_id,
-        plan=plan,
-        ddl_statements=dict(ddl_items),
-        schedule=_schedule_of(db, ontology_id, set(selected_targets or []) or None),
-        channel=channel,
-        runner_endpoint=airflow.sync_runner_endpoint,
-        tool=sync_tool,
-        engine=engine,
-        warehouse_conn_id=_warehouse_conn_id(ds),
-        # 以下均为 docker 通道字段，runner 通道忽略（build 内部按 channel 分流）。
-        docker_network=airflow.docker_network,
-        jobs_host_dir=airflow.jobs_dir,
-        drivers_host_dir=airflow.drivers_dir,
-        image_overrides=airflow.sync_tool_images,
-        # M11：DAG 任务的 outlets 注入真实目标表 URN，供 DataHub Airflow 插件自动上报
-        # 血缘。与兜底 emitter 走同一个 build_dataset_urn，两条路径产同一份 URN。
-        target_urn_builder=lambda job: build_dataset_urn(
-            job.target.platform, job.target.qualified, fabric
-        ),
-    )
-    try:
-        written = bundle.write(airflow.dags_dir, airflow.jobs_dir)
-    except OSError as exc:
-        raise MaterializationError(f"DAG 投递失败（{airflow.dags_dir}）：{exc}") from exc
 
-    # run_id 取制品 id：Airflow 对重复 run_id 返回 409，重复提交因而天然幂等。
-    run_id = f"ontometa__{artifact_id or 'manual'}"
+    def _urn_builder(job):
+        return build_dataset_urn(job.target.platform, job.target.qualified, fabric)
+
+    # 按 cron 分组 + 按上限分批：一个 cron 一个 DAG、少数派不再被众数吞掉，超上限再拆（M16）。
+    cron_map = _cron_by_entity(db, ontology_id)
+    batches = _plan_batches(
+        plan.jobs, cron_map, env_settings.ontometa_max_tasks_per_dag
+    )
+    # 无可搬作业但有建表：仍产一个 create_tables-only 的 manual DAG（保持既有「只建表」行为）。
+    if not batches and ddl_items:
+        batches = [{"suffix": "manual", "schedule": None, "jobs": ()}]
+
+    bundles: list[tuple[dict, Any]] = []
+    for batch in batches:
+        targets = {job.target.qualified for job in batch["jobs"]}
+        ddl_subset = (
+            {q: s for q, s in ddl_items if q in targets}
+            if batch["jobs"]
+            else dict(ddl_items)  # 只建表的兜底批：全部 DDL
+        )
+        bundle = _dag_builder.build(
+            ontology_id=ontology_id,
+            plan=JobPlan(jobs=batch["jobs"]),
+            ddl_statements=ddl_subset,
+            schedule=batch["schedule"],
+            channel=channel,
+            runner_endpoint=airflow.sync_runner_endpoint,
+            dag_id_suffix=batch["suffix"],
+            max_active_tasks=env_settings.ontometa_max_active_tasks_per_dag,
+            tool=sync_tool,
+            engine=engine,
+            warehouse_conn_id=_warehouse_conn_id(ds),
+            docker_network=airflow.docker_network,
+            jobs_host_dir=airflow.jobs_dir,
+            drivers_host_dir=airflow.drivers_dir,
+            image_overrides=airflow.sync_tool_images,
+            target_urn_builder=_urn_builder,
+        )
+        bundles.append((batch, bundle))
+
+    # 先全部落盘：等解析时一次 dag_dir 扫描即可全部认到，避免逐个各等一个解析周期。
+    written_all: dict[str, dict] = {}
+    for _, bundle in bundles:
+        try:
+            written_all[bundle.dag_id] = bundle.write(airflow.dags_dir, airflow.jobs_dir)
+        except OSError as exc:
+            raise MaterializationError(
+                f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
+            ) from exc
+
     client = AirflowClient(
         airflow.endpoint,
         username=airflow.username,
@@ -225,20 +301,47 @@ def _run_orchestrated(
         token=airflow.token,
         api_version=airflow.api_version,
     )
-    triggered: dict[str, Any] = {}
-    error: str | None = None
+    batch_results: list[dict] = []
+    parse_timeout = env_settings.ontometa_dag_parse_timeout
     try:
-        client.unpause_dag(bundle.dag_id)
-        triggered = client.trigger_dag(bundle.dag_id, dag_run_id=run_id)
-    except AirflowError as exc:
-        # 不抛：DAG 与作业配置**已经落盘**，回执要如实反映「产物已出、触发失败」，
-        # 而不是让人以为整件事没发生。DAG 需要 Airflow 解析后才可触发，首次提交
-        # 常见于「解析尚未完成」，重试即可。
-        error = str(exc)
+        for batch, bundle in bundles:
+            # run_id 带批次后缀：每个 DAG 一个确定性 run_id，重复提交在 Airflow 侧幂等。
+            run_id = f"ontometa__{artifact_id or 'manual'}__{batch['suffix']}"
+            error: str | None = None
+            triggered: dict[str, Any] = {}
+            if not _wait_for_parse(client, bundle.dag_id, parse_timeout):
+                # 落盘了但 Airflow 没解析到：多半是 dags 目录两侧不一致（失败模式 #3）。
+                error = (
+                    "Airflow 尚未解析到 DAG，请检查 dags 目录是否双向可见"
+                    "（ontoMeta 写的与 Airflow 读的是否同一路径）"
+                )
+            else:
+                try:
+                    client.unpause_dag(bundle.dag_id)
+                    triggered = client.trigger_dag(bundle.dag_id, dag_run_id=run_id)
+                except AirflowError as exc:
+                    error = str(exc)
+            batch_results.append(
+                {
+                    "suffix": batch["suffix"],
+                    "dag_id": bundle.dag_id,
+                    "dag_run_id": run_id,
+                    "state": triggered.get("state")
+                    or ("failed" if error else "queued"),
+                    "run_url": client.run_url(bundle.dag_id, run_id),
+                    "schedule": batch["schedule"],
+                    "tables": sorted({job.target.qualified for job in batch["jobs"]}),
+                    "jobs": [job.name for job in batch["jobs"]],
+                    "error": error,
+                    "artifacts": written_all.get(bundle.dag_id),
+                }
+            )
     finally:
         client.close()
 
-    state = triggered.get("state") or ("failed" if error else "queued")
+    # 顶层字段向后兼容旧回执/前端：指向首批；权威列表是 ``batches``。
+    first = batch_results[0] if batch_results else {}
+    first_error = next((b["error"] for b in batch_results if b["error"]), None)
     return {
         "ontology_id": ontology_id,
         "execute_mode": "orchestrated",
@@ -248,19 +351,21 @@ def _run_orchestrated(
         "database_prefix": database_prefix,
         "database_overrides": dict(database_overrides or {}),
         "table_overrides": dict(table_overrides or {}),
-        "dag_id": bundle.dag_id,
-        "dag_run_id": run_id,
-        "state": state,
-        "run_url": client.run_url(bundle.dag_id, run_id),
-        "artifacts": written,
-        "schedule": bundle.spec.get("schedule"),
+        "dag_id": first.get("dag_id"),
+        "dag_run_id": first.get("dag_run_id"),
+        "state": first.get("state"),
+        "run_url": first.get("run_url"),
+        "artifacts": first.get("artifacts"),
+        "schedule": first.get("schedule"),
+        # M16：一次物化可产多个 DAG（按 cron 分组 + 分批），逐个的触发结果在此。
+        "batches": batch_results,
         "tables": [q for q, _ in ddl_items],
         "jobs": [job.name for job in plan.jobs],
         "unsupported": plan.unsupported,
         "schema_notes": plan.schema_notes,
-        "error": error,
-        # 提交成功即 ok；真正的成败要看 DagRun 状态，由前端轮询 status 端点。
-        "ok": error is None,
+        "error": first_error,
+        # 提交成功即 ok；真正的成败要看各 DagRun 状态，由前端轮询 status 端点。
+        "ok": first_error is None,
     }
 
 

@@ -19,6 +19,9 @@ from app.models import (
 )
 from app.models.data_app import DataSource
 from app.services import data_app_executor, materialization_runner
+from app.services.materialization_contract import MaterializationContractService
+
+_mc = MaterializationContractService()
 
 _URN = "urn:li:dataset:(urn:li:dataPlatform:mysql,erp_ods.{table},PROD)"
 
@@ -247,6 +250,9 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict, channel: str = "d
         def __init__(self, *a, **kw):
             pass
 
+        def dag_exists(self, dag_id):
+            return True  # 假设已解析（等解析那步立即通过）
+
         def unpause_dag(self, dag_id):
             triggered["unpaused"] = dag_id
 
@@ -286,10 +292,13 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     assert receipt["execute_mode"] == "orchestrated"
     assert receipt["ok"] is True
     assert receipt["state"] == "queued"
-    # run_id 取制品 id → 重复提交在 Airflow 侧因 run_id 冲突而幂等
-    assert receipt["dag_run_id"] == "ontometa__artifact-1"
+    # run_id = 制品 id + 批次后缀（无 cron → manual）：每个 DAG 一个确定性 run_id，重复提交幂等
+    assert receipt["dag_run_id"] == "ontometa__artifact-1__manual"
     assert triggered["run_id"] == receipt["dag_run_id"]
     assert triggered["unpaused"] == receipt["dag_id"]
+    # M16：无 cron 的表进单个 __manual DAG（本例 2 表未超上限，不分批）
+    assert len(receipt["batches"]) == 1
+    assert receipt["batches"][0]["dag_id"].endswith("__manual")
 
     # 产物真的落盘了：DAG + 边车 JSON + 每个作业一个配置
     dags = sorted(p.name for p in (tmp_path / "dags").iterdir())
@@ -416,6 +425,112 @@ def test_orchestrated_reports_trigger_failure_without_losing_artifacts(tmp_path,
     assert "404" in receipt["error"]
     assert receipt["state"] == "failed"
     assert list((tmp_path / "dags").iterdir())  # 产物仍在，可人工排查后重试
+
+
+def _set_cron_m16(ontology_id: str, mapping: dict[str, str]) -> None:
+    """按实体名给契约设 refresh_cron 并钉住（sync 不覆盖），供 M16 分组测试用。"""
+    with SessionLocal() as db:
+        _mc.sync(db, ontology_id)
+        cs = _mc.list_contracts(db, ontology_id)
+        names = _mc.resolve_target_names(db, cs)
+        for c in cs:
+            entity = names.get(c.target_id, (None,))[0]
+            if entity in mapping:
+                _mc.update(db, c.id, {"refresh_cron": mapping[entity]})
+
+
+def test_cron_grouping_one_dag_per_cron(tmp_path, monkeypatch):
+    """M16：一个 cron 一个 DAG，少数派 cron 不再被众数吞掉。"""
+    ids = _seed("crongroup")
+    _set_cron_m16(ids["ontology_id"], {"customer": "0 2 * * *"})  # sales_order 无 cron
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="a-cron",
+        )
+
+    batches = receipt["batches"]
+    assert {b["schedule"] for b in batches} == {"0 2 * * *", None}
+    assert len({b["dag_id"] for b in batches}) == 2  # 两个 cron 组 → 两个 DAG
+    by_sched = {b["schedule"]: b for b in batches}
+    assert any("customer" in j for j in by_sched["0 2 * * *"]["jobs"])
+    assert by_sched[None]["dag_id"].endswith("__manual")
+
+
+def test_batching_splits_group_over_max_tasks(tmp_path, monkeypatch):
+    """M16：单组超上限 → 拆成 _b0/_b1 多个 DAG，每个 ≤ 上限。"""
+    from app.config import settings as env_settings
+
+    ids = _seed("batchsplit")  # customer + sales_order，均无 cron → 同一 manual 组
+    monkeypatch.setattr(env_settings, "ontometa_max_tasks_per_dag", 1)
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="a-split",
+        )
+
+    batches = receipt["batches"]
+    assert len(batches) == 2
+    assert all(len(b["jobs"]) == 1 for b in batches)
+    assert sorted(b["suffix"] for b in batches) == ["manual_b0", "manual_b1"]
+    assert len({b["dag_run_id"] for b in batches}) == 2  # 单批可单独重跑
+
+
+def test_unparsed_dag_recorded_not_triggered(tmp_path, monkeypatch):
+    """落盘后等解析：Airflow 未解析到 → 不触发，回执记「尚未解析到」，产物仍在。"""
+    from app.config import settings as env_settings
+
+    ids = _seed("noparse")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    monkeypatch.setattr(env_settings, "ontometa_dag_parse_timeout", 0.2)
+    monkeypatch.setattr(materialization_runner.time, "sleep", lambda s: None)
+
+    class _NoParse:
+        def __init__(self, *a, **kw):
+            pass
+
+        def dag_exists(self, dag_id):
+            return False  # 永远解析不到
+
+        def unpause_dag(self, dag_id):
+            raise AssertionError("未解析到就不该触发")
+
+        def trigger_dag(self, *a, **kw):
+            raise AssertionError("未解析到就不该触发")
+
+        def run_url(self, dag_id, run_id):
+            return f"url/{dag_id}/{run_id}"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(materialization_runner, "AirflowClient", _NoParse)
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="a-noparse",
+        )
+
+    assert receipt["ok"] is False
+    assert all("尚未解析" in (b["error"] or "") for b in receipt["batches"])
+    assert list((tmp_path / "dags").iterdir())  # 产物已落盘，可排查后重试
 
 
 def test_errors_when_airflow_unavailable(monkeypatch):

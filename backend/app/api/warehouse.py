@@ -406,6 +406,9 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
 
     **只读**：状态的权威在 Airflow，这里不缓存、不改制品——回执记录的是「提交了什么」，
     运行到哪一步随时可能变，缓存一份只会出现两个互相矛盾的事实。
+
+    M16：一次物化可产多个 DAG（按 cron 分组 + 分批）。逐个回读 DagRun 并聚合出整轮状态，
+    同时返回 ``batches`` 明细供弹窗按批展示；旧的单 DAG 回执按单批处理，向后兼容。
     """
     import json
 
@@ -420,8 +423,17 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
     except (TypeError, ValueError):
         receipt = {}
 
-    dag_id, run_id = receipt.get("dag_id"), receipt.get("dag_run_id")
-    if not dag_id or not run_id:
+    # 新回执带 batches；旧回执按单批兜底。
+    batches = receipt.get("batches") or [
+        {
+            "dag_id": receipt.get("dag_id"),
+            "dag_run_id": receipt.get("dag_run_id"),
+            "run_url": receipt.get("run_url"),
+            "state": receipt.get("state"),
+            "error": receipt.get("error"),
+        }
+    ]
+    if not any(b.get("dag_id") and b.get("dag_run_id") for b in batches):
         raise HTTPException(status_code=400, detail="回执里没有 DagRun 信息，可能提交未成功")
 
     airflow = settings_service.get_airflow_runtime(db)
@@ -432,33 +444,104 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
         token=airflow.token,
         api_version=airflow.api_version,
     )
-    try:
-        run = client.get_dag_run(dag_id, run_id)
-        tasks = client.list_task_instances(dag_id, run_id)
-    except AirflowError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    finally:
-        client.close()
 
-    state = run.get("state")
-    return {
-        "artifact_id": artifact_id,
-        "dag_id": dag_id,
-        "dag_run_id": run_id,
-        "state": state,
-        "terminal": is_terminal(state),
-        "start_date": run.get("start_date"),
-        "end_date": run.get("end_date"),
-        "run_url": client.run_url(dag_id, run_id),
-        "tasks": [
+    def _tasks(items):
+        return [
             {
                 "task_id": t.get("task_id"),
                 "state": t.get("state"),
                 "try_number": t.get("try_number"),
             }
-            for t in tasks
-        ],
+            for t in items
+        ]
+
+    batch_out: list[dict] = []
+    all_tasks: list[dict] = []
+    try:
+        for b in batches:
+            bid, brun = b.get("dag_id"), b.get("dag_run_id")
+            # 触发就失败的批（如未解析到 DAG）没有真实 DagRun 可读，用回执里的状态。
+            if b.get("error") or not bid or not brun:
+                st = b.get("state") or "failed"
+                batch_out.append(
+                    {
+                        "suffix": b.get("suffix"),
+                        "dag_id": bid,
+                        "dag_run_id": brun,
+                        "state": st,
+                        "terminal": is_terminal(st),
+                        "run_url": b.get("run_url"),
+                        "error": b.get("error"),
+                        "tasks": [],
+                    }
+                )
+                continue
+            try:
+                run = client.get_dag_run(bid, brun)
+                tasks = _tasks(client.list_task_instances(bid, brun))
+            except AirflowError as exc:
+                # 单批读不到不整体 502：可能刚触发还没落库，标 unknown 让前端继续轮询。
+                batch_out.append(
+                    {
+                        "suffix": b.get("suffix"),
+                        "dag_id": bid,
+                        "dag_run_id": brun,
+                        "state": None,
+                        "terminal": False,
+                        "run_url": client.run_url(bid, brun),
+                        "error": str(exc),
+                        "tasks": [],
+                    }
+                )
+                continue
+            st = run.get("state")
+            batch_out.append(
+                {
+                    "suffix": b.get("suffix"),
+                    "dag_id": bid,
+                    "dag_run_id": brun,
+                    "state": st,
+                    "terminal": is_terminal(st),
+                    "run_url": client.run_url(bid, brun),
+                    "start_date": run.get("start_date"),
+                    "end_date": run.get("end_date"),
+                    "tasks": tasks,
+                }
+            )
+            all_tasks.extend(tasks)
+    finally:
+        client.close()
+
+    states = [b["state"] for b in batch_out]
+    agg = _aggregate_state(states)
+    first = batch_out[0]
+    return {
+        "artifact_id": artifact_id,
+        # 顶层向后兼容单 DAG 前端：指向首批 + 整轮聚合状态。
+        "dag_id": first.get("dag_id"),
+        "dag_run_id": first.get("dag_run_id"),
+        "state": agg,
+        "terminal": all(b["terminal"] for b in batch_out),
+        "run_url": first.get("run_url"),
+        "tasks": all_tasks,
+        "batches": batch_out,
     }
+
+
+def _aggregate_state(states: list) -> str | None:
+    """多批 DagRun 状态 → 整轮状态。任一失败即失败；全成功才成功；否则取「还在跑」。"""
+    present = [s for s in states if s]
+    if not present:
+        return None
+    if any(s in ("failed", "upstream_failed") for s in present):
+        return "failed"
+    if all(s == "success" for s in states):
+        return "success"
+    if any(s == "running" for s in present):
+        return "running"
+    if any(s in ("queued", "scheduled") for s in present):
+        return "queued"
+    return present[0]
 
 
 @router.get(

@@ -186,6 +186,7 @@ class JobPlanner:
                     partition_key=table.partition_key,
                     layer=table.layer,
                     source_urn=urn,
+                    entity_name=entity,
                 )
             )
 

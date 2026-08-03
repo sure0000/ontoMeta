@@ -1384,6 +1384,47 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
           建表 {r.tables?.length ?? 0} 张 · 搬运作业 {r.jobs?.length ?? 0} 个
         </dd>
 
+        {(() => {
+          // M16：一次物化可产多个 DAG（按 cron 分组 + 分批）。>1 时按批展示各自状态与链接；
+          // 优先用轮询到的实时状态，没有则退回提交时回执里的批次。
+          const liveBatches = status?.batches ?? r.batches ?? [];
+          if (liveBatches.length <= 1) return null;
+          return (
+            <>
+              <dt>批次（{liveBatches.length}）</dt>
+              <dd>
+                <div className="mtz-batches">
+                  {liveBatches.map((b) => (
+                    <div key={b.dag_id ?? b.suffix} className="mtz-batch-row">
+                      <RunStateTag state={b.state} />
+                      <code>{b.suffix ?? b.dag_id}</code>
+                      <span className="om-muted" style={{ fontSize: 12 }}>
+                        {b.schedule ? (
+                          <code>{b.schedule}</code>
+                        ) : (
+                          "手动"
+                        )}
+                        {b.jobs ? ` · ${b.jobs.length} 表` : ""}
+                      </span>
+                      {b.error && <span className="mtz-warn">{b.error}</span>}
+                      {b.run_url && (
+                        <a
+                          href={b.run_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="om-link"
+                        >
+                          Airflow
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </dd>
+            </>
+          );
+        })()}
+
         {r.unsupported && r.unsupported.length > 0 && (
           <>
             <dt>未生成作业</dt>

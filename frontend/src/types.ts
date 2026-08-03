@@ -1046,11 +1046,28 @@ export interface MaterializationReceipt {
   schedule?: string | null;
   jobs?: string[];
   artifacts?: Record<string, string>;
+  /** M16：一次物化可产多个 DAG（按 cron 分组 + 分批）。顶层字段指向首批，此处是全量。 */
+  batches?: MaterializeBatch[];
   error?: string | null;
   schema_notes?: { target: string; reason: string }[];
   warnings?: { target: string; feature: string; detail: string }[];
   unsupported?: { target: string; reason: string }[];
   ok: boolean;
+}
+
+/** M16：一次物化里的一个 DAG（一个 cron 分组的一个分批）。 */
+export interface MaterializeBatch {
+  suffix?: string;
+  dag_id: string | null;
+  dag_run_id: string | null;
+  state: string | null;
+  terminal?: boolean;
+  run_url?: string | null;
+  schedule?: string | null;
+  tables?: string[];
+  jobs?: string[];
+  error?: string | null;
+  tasks?: { task_id: string; state: string | null; try_number?: number }[];
 }
 
 /** 编排物化的运行状态（轮询 status 端点获得；权威在 Airflow，前端不缓存）。 */
@@ -1064,6 +1081,8 @@ export interface MaterializeStatus {
   end_date?: string | null;
   run_url: string;
   tasks: { task_id: string; state: string | null; try_number?: number }[];
+  /** M16：各批 DagRun 的明细（顶层 state 是它们的聚合）。 */
+  batches?: MaterializeBatch[];
 }
 
 /** M11：物化血缘上报计划/回执（源表 → 目标表）。 */

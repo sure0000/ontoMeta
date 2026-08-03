@@ -104,6 +104,9 @@ class JobSpec:
     # 数仓分层，仅用于分组与并发闸门，不表达数据依赖（见下方 note）。
     layer: str = "dim"
     source_urn: str | None = None
+    # 承载该表的本体实体技术名（= LogicalTable.source_name）。物理表名可被弹窗改写，
+    # 而按 refresh_cron 分组要回查契约，须用实体名而非物理表名。空 = 与源表名同。
+    entity_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in LOAD_MODES:

@@ -55,6 +55,9 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
         def __init__(self, *a, **kw):
             pass
 
+        def dag_exists(self, dag_id):
+            return True
+
         def unpause_dag(self, dag_id):
             pass
 

@@ -76,10 +76,16 @@ class DagBundle:
         return written
 
 
-def dag_id_for(ontology_id: str) -> str:
-    """稳定的 DAG id：同一本体反复物化更新同一个 DAG，不堆积垃圾 DAG。"""
+def dag_id_for(ontology_id: str, suffix: str | None = None) -> str:
+    """稳定的 DAG id：同一本体反复物化更新同一批 DAG，不堆积垃圾 DAG。
+
+    ``suffix`` 用于 M16 的按 cron 分组 + 分批：一个 cron 一个 DAG
+    （``__c<cron哈希>`` / 无 cron 的 ``__manual``），超上限再分批（``_b0``/``_b1``…）。
+    无 suffix 时退回单 DAG 命名，兼容 M16 前的行为与既有测试。
+    """
     short = (ontology_id or "").replace("-", "")[:12]
-    return f"ontometa_materialize_{short}"
+    base = f"ontometa_materialize_{short}"
+    return f"{base}__{suffix}" if suffix else base
 
 
 def _driver_jars(host_dir: str | None, lib_dir: str) -> list[dict[str, str]]:
@@ -127,6 +133,8 @@ class AirflowDagBuilder:
         schedule: str | None = None,
         channel: str = "docker",
         runner_endpoint: str | None = None,
+        dag_id_suffix: str | None = None,
+        max_active_tasks: int = 16,
         tool: str | None = None,
         engine: str = "hive",
         warehouse_conn_id: str = DEFAULT_WAREHOUSE_CONN_ID,
@@ -160,13 +168,15 @@ class AirflowDagBuilder:
                 runner_endpoint=runner_endpoint,
                 engine=engine,
                 warehouse_conn_id=warehouse_conn_id,
+                dag_id_suffix=dag_id_suffix,
+                max_active_tasks=max_active_tasks,
                 target_urn_builder=target_urn_builder,
             )
         adapter = get_job_adapter(tool)
         # 先解析镜像：拿不到就在这里失败，落盘与触发都还没发生。
         image = resolve_docker_image(adapter, image_overrides)
         jobs_mount = jobs_mount or adapter.jobs_mount_dir or DEFAULT_JOBS_MOUNT
-        dag_id = dag_id_for(ontology_id)
+        dag_id = dag_id_for(ontology_id, dag_id_suffix)
 
         job_files: dict[str, dict] = {}
         tasks: list[dict] = []
@@ -209,6 +219,8 @@ class AirflowDagBuilder:
             "schedule": schedule or None,
             "warehouse_conn_id": warehouse_conn_id,
             "docker_network": docker_network,
+            # 单 DAG 内并发闸门（M16）：层内不再一次性全放开。
+            "max_active_tasks": max_active_tasks,
             # 作业配置要挂进搬运容器。任务容器是 worker 通过宿主机 docker.sock 起的
             # **兄弟容器**，所以 source 必须是宿主机路径（worker 里的挂载点对它无效）。
             "jobs_mount": jobs_mount,
@@ -242,6 +254,8 @@ class AirflowDagBuilder:
         runner_endpoint: str | None,
         engine: str,
         warehouse_conn_id: str,
+        dag_id_suffix: str | None = None,
+        max_active_tasks: int = 16,
         target_urn_builder,
     ) -> DagBundle:
         """runner 通道的 DAG 包。
@@ -252,7 +266,7 @@ class AirflowDagBuilder:
         ``driver_jars`` / ``docker_network`` / ``tool_image`` 这些 docker 通道才有的字段。
         建表仍是 ``create_tables`` 的 SQL 任务（本体 DDL 那条铁律不变）。
         """
-        dag_id = dag_id_for(ontology_id)
+        dag_id = dag_id_for(ontology_id, dag_id_suffix)
         tasks: list[dict] = []
         for job in plan.jobs:
             tasks.append(
@@ -277,6 +291,7 @@ class AirflowDagBuilder:
             "runner_endpoint": (runner_endpoint or "").rstrip("/"),
             "schedule": schedule or None,
             "warehouse_conn_id": warehouse_conn_id,
+            "max_active_tasks": max_active_tasks,
             "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
             "ddl_targets": sorted(ddl_statements),
             "tasks": tasks,
@@ -359,6 +374,14 @@ with DAG(
     start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
+    # 单 DAG 内并发闸门（M16）：层内不再一次性全放开。
+    max_active_tasks=_SPEC.get("max_active_tasks", 16),
+    # 搬运可重跑（幂等/staging 保证），失败自动重试，指数退避。
+    default_args={{
+        "retries": 2,
+        "retry_exponential_backoff": True,
+        "retry_delay": pendulum.duration(seconds=30),
+    }},
     tags=["ontometa", "materialize"],
 ) as dag:
     create_tables = SQLExecuteQueryOperator(
@@ -493,6 +516,14 @@ with DAG(
     start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
+    # 单 DAG 内并发闸门（M16）：层内不再一次性全放开。
+    max_active_tasks=_SPEC.get("max_active_tasks", 16),
+    # 搬运可重跑（幂等键 + staging 保证），失败自动重试，指数退避。
+    default_args={
+        "retries": 2,
+        "retry_exponential_backoff": True,
+        "retry_delay": pendulum.duration(seconds=30),
+    },
     tags=["ontometa", "materialize"],
 ) as dag:
     create_tables = SQLExecuteQueryOperator(

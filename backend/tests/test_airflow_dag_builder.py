@@ -153,6 +153,19 @@ def test_dag_id_is_stable_per_ontology():
     assert _bundle().dag_id.startswith("ontometa_materialize_")
 
 
+def test_dag_id_suffix_and_concurrency_gates():
+    """M16：按 cron 分组/分批的 dag_id 后缀 + 并发闸门 + 重试进入 DAG。"""
+    bundle = _bundle(dag_id_suffix="c1a2b3c4_b0", max_active_tasks=8)
+    assert bundle.dag_id.endswith("__c1a2b3c4_b0")
+    assert bundle.spec["max_active_tasks"] == 8
+    # 并发闸门与重试写进 DAG 骨架
+    assert "max_active_tasks=_SPEC" in bundle.dag_source
+    assert "retries" in bundle.dag_source
+    assert "retry_exponential_backoff" in bundle.dag_source
+    # 无后缀时退回单 DAG 命名（兼容 M16 前）
+    assert not _bundle().dag_id.endswith("__")
+
+
 def test_create_tables_runs_generated_ddl():
     """建表必须跑 M3 的 DDL：本体反补的注释/分区/主键声明只在那条路径上。"""
     bundle = _bundle()

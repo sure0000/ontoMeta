@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # 单个物化 DAG 的任务上限。M16 据此把大本体拆成多个 DAG；M13 只用于 preflight
     # 预警「本次表数超限、当前仍会塞进一个 DAG」。默认 50。
     ontometa_max_tasks_per_dag: int = 50
+    # 单个 DAG 内并发跑的搬运任务上限（Airflow max_active_tasks）。层内不再一次性全放开，
+    # 避免 734 表一次拉起几百个并发。可按 worker/池子容量调。
+    ontometa_max_active_tasks_per_dag: int = 16
+    # 落盘 DAG 后等 Airflow 解析到它再触发的最长秒数（替代「立刻触发、404 被吞」）。
+    # ⚠ Airflow dag_dir_list_interval 默认 300s（§8.1），若解析慢需相应放大。
+    ontometa_dag_parse_timeout: float = 60.0
     # preflight 写 sentinel DAG 后，等 Airflow 解析到它的最长秒数（专治「dags 目录
     # 两侧不一致」失败模式 #3）。Airflow 的 dag_dir_list_interval 默认 300s（⚠ 见
     # MATERIALIZE_SYNC_STABILITY.md §8.1），故超时不作硬失败、只降级为提醒。

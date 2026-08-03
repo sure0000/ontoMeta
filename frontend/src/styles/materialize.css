@@ -76,6 +76,21 @@
   font-size: 12px;
   padding: 2px 0;
 }
+.mtz-batches {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mtz-batch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.mtz-batch-row code {
+  font-family: var(--om-font-mono);
+}
 .mtz-failure-row code {
   font-family: var(--om-font-mono);
   color: var(--om-text-secondary);
