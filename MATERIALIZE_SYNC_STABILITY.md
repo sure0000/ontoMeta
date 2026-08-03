@@ -130,6 +130,33 @@ DAG、spec、作业配置里始终只有 alias。
 runner 的 `GET /capabilities` 如实声明，planner 据此把不支持的表列进 `unsupported`——
 沿用既有的「不静默降级」约定（[job_planner.py:118](backend/app/services/job_planner.py:118)）。
 
+**seatunnel 档（已落地，接口形状为实测非照抄文档）**：native 写不了 Hive（要写 HDFS 上的
+ORC、要过 metastore，逐行 JDBC 不成立），而 Hive 是本仓的 `DEFAULT_ENGINE`。这一档把作业
+提交给**常驻的 Zeta 集群**（REST v2），不起兄弟容器——否则 docker.sock、宿主机路径、网络名、
+驱动挂载会原样搬回来，runner 通道就白做了。
+
+| 用途 | 接口（apache/seatunnel:2.3.11 实测） |
+|---|---|
+| 提交 | `POST /submit-job?jobName=<名>`，body 为作业配置 JSON → `{"jobId": …}` |
+| 回读 | `GET /job-info/{jobId}` → `jobStatus` + `errorMsg` + `metrics`（含 `SourceReceivedCount`/`SinkWriteCount`，行数据此如实上报） |
+| 探活/版本 | `GET /overview` → `projectVersion`；不在支持范围即拒绝提交（§3.5） |
+
+⚠ REST v1（`/hazelcast/rest/maps/*`，5801 端口）在 2.3.11 **默认关闭**，别用。
+
+**能力按「目标 × 装载方式」声明**（`capabilities.sink_modes`，契约 v2）：两个扁平集合分别判
+会放过不存在的组合——seatunnel 档能写 Hive 但只做全量、native 档能做增量但写不了 Hive，
+合起来看「Hive + 增量」会通过门禁、跑到执行侧才失败。**Hive 只声明 full**：增量要回读目标表
+的 `max(分区键)` 才能定水位（§3.3 明确不信调度器给的 data_interval），而 runner 没有查 Hive
+的通路，回读不了——宁可少声明一项，也不拿一个可能漏数/重复的水位去跑。
+
+**Zeta 集群的部署前提**（runner 检查不了，三条都在真实实例上踩过）：
+
+| 前提 | 缺了会怎样 |
+|---|---|
+| 集群进程带 `HADOOP_USER_NAME`（非 Kerberos 的 HDFS 按它认人） | 写 staging 目录时 `AccessControlException: Permission denied … access=WRITE`。这是**集群启动时**的环境变量，REST 提交改不了 |
+| 源库 JDBC 驱动在集群 `lib/` 里（官方镜像自带 mysql，MariaDB 等要自己放） | Zeta 报 `Unable to create a source for identifier 'Jdbc'`——字面像连接器缺失，真实原因在栈最深处的 `loadDriver`。runner 已把这条翻译成可照做的提示 |
+| `metastore_uri` 的主机名不带下划线，也不能因 DNS 搜索域被拼出下划线 | 容器里 `hive-metastore` 会被解析成 `hive-metastore.<网络名>`，网络名带下划线（如 `bigdata_net`）时 Hive 直接 `URISyntaxException: Illegal character in hostname`。用 IP 或不带下划线的名字 |
+
 ### 3.2 提交前自检（Preflight Gate）
 
 新增 `POST /api/warehouse/materialize/preflight`，物化弹窗在「提交」前必须跑一次，
@@ -225,6 +252,21 @@ Hive 分区表走 `INSERT OVERWRITE` 到目标分区，非分区表只能 rename
 
 **M13 没有任何新依赖，且对现在这条通道立刻有效**——先做它，把「三分钟后才知道」这件事
 本身解决掉，后面几阶段就变成可控的迭代，而不是一次次线上试错。
+
+### 落地状态（2026-08-03 复核）
+
+M13–M16 已实现并全部接进运行时。复核时补掉的三处：
+
+| 问题 | 处置 |
+|---|---|
+| 分批后**无搬运作业的表**（ADS 层、缺 `source_ref`、装载方式不被支持）的建表语句不进任何 DAG，却仍出现在回执里 | 建表改由 `_assign_ddl` 分配，孤儿 DDL 归 manual 批；回归用例 `test_tables_without_sync_jobs_still_get_ddl` |
+| preflight 只查 Airflow，不查 runner → 全绿后点提交才报「sync-runner 不可达」 | 补 §3.2 缺的 4 项（runner 可达+契约版本、源库/目标仓 `POST /probe`、sink 支持）；docker 通道如实标注查不了哪几类 |
+| §3.3 的 staging + 原子切换只生成了 SQL，`render_swap` 零调用方 | 接进两条通道的 DAG：全量作业目标改写为 `<表>__stg_<批次>`，`create_tables` 追加 staging 建表，每表一个 `swap_<表>` 任务；增量不走 staging；`ONTOMETA_STAGING_SWAP=false` 可一键退回 |
+
+同时修掉一个自 M10 起就在的解析期缺陷：两个 DAG 模板的层间串联写成 `previous >> group`，
+第二层起 `previous` 是 list，而 Python 的 `list >> list` 直接 TypeError——**任何含两个及以上
+分层的 DAG 都会在 Airflow 解析期整文件 import error**。此前的测试只做 `ast.parse`（语法合法，
+看不出来），现补 `_build_graph`：用桩模块把生成的 DAG 源码真执行一遍，断言任务依赖图。
 
 ---
 

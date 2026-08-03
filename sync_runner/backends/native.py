@@ -8,9 +8,12 @@ incremental。**CDC 不做**——那要 binlog 订阅，路由到 seatunnel 档
 全由方言处理，一套代码同时对 sqlite（测试）/ MariaDB（源）/ Doris（目标，MySQL 线协议）成立，
 不必为每种库手写引用规则。
 
-**full 的落地语义**：先 ``DELETE`` 再插入，**同一事务**——搬到一半失败会回滚，正式表
-不被清空。这已比现状的 SeaTunnel ``DROP_DATA``（先删后写、失败即丢数据，§1.2）安全。
-真正的 staging + 原子切换、各引擎切换语法留给 M15，不在 native 里做。
+**full 的落地语义**：先 ``DELETE`` 再插入，**同一事务**。但别把安全性押在这个事务上——
+Doris/Hive 这类目标没有通用的多语句回滚，DELETE 一旦发出就作数了。真正兜底的是上游：
+DAG 把全量作业的目标改写成 staging 表，搬完再由 Dialect Adapter 的切换语句换到正式表
+（M15，见 ``services/airflow_dag_builder.py::_plan_staging``），所以这里的 DELETE 清的是
+**staging 表**——它可能残留上一次失败运行的数据，必须清。切换语法各引擎不同，落在
+Dialect Adapter（与建表 DDL 同处），不进 runner。
 """
 
 from __future__ import annotations
@@ -93,7 +96,8 @@ def run_native(
         wm_after = watermark_before
         with src_engine.connect() as sconn, tgt_engine.begin() as tconn:
             if spec.mode == "full":
-                # 事务内先清后写：失败整体回滚，正式表不被清空（优于 DROP_DATA）。
+                # 清的是 staging 表（目标已由 DAG 改写），可能残留上次失败运行的数据。
+                # 放在事务里是为了支持事务的目标能整体回滚；不支持的靠上游 staging 兜底。
                 tconn.execute(delete(tgt_tbl))
             result = sconn.execution_options(stream_results=True).execute(stmt)
             while True:

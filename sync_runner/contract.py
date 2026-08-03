@@ -14,7 +14,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 # 线格式版本。任何字段的增删改都要 bump，ontoMeta 侧据此拒绝不认识的 runner。
-CONTRACT_VERSION = "1"
+# 2：Capabilities 增 sink_modes（按「目标 × 装载方式」声明，见该字段说明）。
+CONTRACT_VERSION = "2"
 
 # 作业状态机。queued→running→(success|failed)。
 QUEUED = "queued"
@@ -94,6 +95,11 @@ class Capabilities(BaseModel):
     sinks: list[str] = Field(default_factory=list)
     modes: list[str] = Field(default_factory=list)
     drivers: list[str] = Field(default_factory=list)
+    # 「目标 × 装载方式」的实际组合。``sinks`` 与 ``modes`` 是两个扁平集合，分别判会**放过
+    # 不存在的组合**：seatunnel 档能写 hive 但只做全量、native 档能做增量但写不了 hive，
+    # 两个集合合起来看，「hive + 增量」会通过门禁、跑到执行侧才失败。这张表按组合声明，
+    # planner 有它就按它判（没有则退回扁平集合，兼容旧 runner）。
+    sink_modes: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ProbeRequest(BaseModel):
@@ -106,7 +112,16 @@ class ProbeRequest(BaseModel):
 
 
 class ProbeResult(BaseModel):
+    """``POST /probe`` 的结果。
+
+    ``checkable=False`` 是**第三种结论**，既不是通也不是不通：这个别名不由 runner 直连，
+    因而探不了。典型是 Hive 目标——数据由 Zeta 集群经 metastore/HDFS 写入，runner 手上
+    只有 metastore 地址，没有可连的 JDBC 串。把它当「连不通」会给出一个错误的诊断，
+    让人去修一个根本不存在的连接串。
+    """
+
     alias: str
     reachable: bool
+    checkable: bool = True
     can_read_table: bool | None = None
     detail: str = ""

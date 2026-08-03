@@ -299,3 +299,29 @@ def test_rendered_jobs_carry_no_credentials():
     for leaked in ("password=", "jdbc:mysql://", "root", "secret"):
         assert leaked not in blob
     assert "${ERP_READONLY_URL}" in blob
+
+
+def test_runner_gate_judges_sink_and_mode_as_a_combination():
+    """门禁必须按「目标 × 装载方式」判，不能分别判两个扁平集合。
+
+    runner 可能一个档能写 hive 但只做全量、另一个档能做增量但写不了 hive；分别判会让
+    「hive + 增量」通过门禁、跑到执行侧才失败——正是「不静默降级」要避免的那种。
+    """
+    from app.services.job_planner import _runner_reject
+
+    caps = {
+        "sources": ["mariadb"],
+        "sinks": ["hive", "doris"],
+        "modes": ["full", "incremental"],  # 扁平集合合看是「都支持」
+        "sink_modes": {"hive": ["full"], "doris": ["full", "incremental"]},
+    }
+    assert _runner_reject(caps, "full", "mariadb", "hive") is None
+    assert _runner_reject(caps, "incremental", "mariadb", "doris") is None
+
+    reason = _runner_reject(caps, "incremental", "mariadb", "hive")
+    assert reason and "hive" in reason and "full" in reason
+
+    # 旧 runner（无 sink_modes）只能退回扁平判断，不能因此报错
+    old = {k: v for k, v in caps.items() if k != "sink_modes"}
+    assert _runner_reject(old, "incremental", "mariadb", "hive") is None
+    assert _runner_reject(old, "cdc", "mariadb", "hive") is not None

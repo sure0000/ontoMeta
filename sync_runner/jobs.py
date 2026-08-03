@@ -14,7 +14,7 @@ import threading
 import uuid
 
 from sync_runner import secrets
-from sync_runner.backends import native_supports
+from sync_runner.backends import pick_backend, seatunnel
 from sync_runner.backends.native import run_native
 from sync_runner.contract import FAILED, QUEUED, RUNNING, SUCCESS, JobStatus, JobSubmit
 
@@ -74,33 +74,42 @@ class JobStore:
         self._set(job_id, state=RUNNING)
         self._append(job_id, f"run {spec.name}: {spec.source.qualified} -> {spec.target.qualified} mode={spec.mode}")
         try:
-            if not native_supports(spec):
-                # 不静默降级：native 搬不了就明说，planner 本应已把它列进 unsupported。
+            backend = pick_backend(spec)
+            if backend is None:
+                # 不静默降级：两档都搬不了就明说，planner 本应已按 capabilities 把它
+                # 列进 unsupported，走到这里说明两侧对能力的认知不一致。
                 raise RuntimeError(
-                    f"native 档不支持该组合（源 {spec.source.platform} / 目标 "
-                    f"{spec.target.platform} / 装载 {spec.mode}），或对应驱动未装。"
+                    f"没有能搬这张表的档位（源 {spec.source.platform} / 目标 "
+                    f"{spec.target.platform} / 装载 {spec.mode}）：native 不支持该组合或"
+                    "驱动未装，seatunnel 档不可用或不支持该组合。"
                 )
-            source_url = secrets.resolve(spec.source.alias)
-            target_url = secrets.resolve(spec.target.alias)
-            result = run_native(
-                spec,
-                source_url=source_url,
-                target_url=target_url,
-                watermark=submit.watermark,
-                batch_size=submit.batch_size,
-            )
-            self._set(
-                job_id,
-                rows_read=result.rows_read,
-                rows_written=result.rows_written,
-                watermark_before=result.watermark_before,
-                watermark_after=result.watermark_after,
-                state=SUCCESS,
-            )
+            self._append(job_id, f"backend={backend}")
+
+            if backend == "native":
+                result = run_native(
+                    spec,
+                    source_url=secrets.resolve(spec.source.alias),
+                    target_url=secrets.resolve(spec.target.alias),
+                    watermark=submit.watermark,
+                    batch_size=submit.batch_size,
+                )
+                fields = {
+                    "rows_read": result.rows_read,
+                    "rows_written": result.rows_written,
+                    "watermark_before": result.watermark_before,
+                    "watermark_after": result.watermark_after,
+                }
+            else:
+                st = seatunnel.run(spec, watermark=submit.watermark)
+                # 水位不回报：seatunnel 档目前只做全量（见 SINK_MODES 的说明），
+                # 没有水位可言，填个假的比留空更误导。
+                fields = {"rows_read": st.rows_read, "rows_written": st.rows_written}
+                self._append(job_id, f"zeta job {st.job_id}")
+
+            self._set(job_id, state=SUCCESS, **fields)
             self._append(
                 job_id,
-                f"done read={result.rows_read} written={result.rows_written} "
-                f"watermark={result.watermark_after}",
+                f"done read={fields['rows_read']} written={fields['rows_written']}",
             )
         except Exception as exc:  # noqa: BLE001 — 作业失败要如实进回执，不吞
             self._set(job_id, state=FAILED, error=str(exc))

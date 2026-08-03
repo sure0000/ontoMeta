@@ -62,12 +62,29 @@ def _runner_reject(
     modes = set(capabilities.get("modes") or [])
     sources = set(capabilities.get("sources") or [])
     sinks = set(capabilities.get("sinks") or [])
-    if mode not in modes:
-        return f"runner 不支持装载方式 {mode}（支持：{', '.join(sorted(modes)) or '无'}）"
+    sink_modes = capabilities.get("sink_modes") or {}
+    engine = target_engine.lower()
+
     if source_platform.lower() not in sources:
         return f"runner 无 {source_platform} 源连接器（支持：{', '.join(sorted(sources)) or '无'}）"
-    if target_engine.lower() not in sinks:
+    if engine not in sinks:
         return f"runner 无 {target_engine} 目标连接器（支持：{', '.join(sorted(sinks)) or '无'}）"
+
+    if sink_modes:
+        # 按**组合**判：扁平的 modes/sinks 分别判会放过实际不存在的组合——runner 可能
+        # 一个档能写 hive 但只做全量、另一个档能做增量但写不了 hive，合看「hive + 增量」
+        # 会通过门禁、跑到执行侧才失败（contract v2 起 runner 会声明 sink_modes）。
+        allowed = set(sink_modes.get(engine) or [])
+        if mode not in allowed:
+            return (
+                f"runner 写 {target_engine} 时不支持装载方式 {mode}"
+                f"（该目标支持：{', '.join(sorted(allowed)) or '无'}）"
+            )
+        return None
+
+    # 旧 runner（无 sink_modes）：只能退回扁平判断。
+    if mode not in modes:
+        return f"runner 不支持装载方式 {mode}（支持：{', '.join(sorted(modes)) or '无'}）"
     return None
 
 
