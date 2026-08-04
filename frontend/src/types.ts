@@ -394,6 +394,24 @@ export interface OntologyValidationResult {
   }>;
 }
 
+export interface FormalIssue {
+  code: string;
+  message: string;
+  severity: "error" | "warning";
+  entity_type: string;
+  entity_id?: string | null;
+  entity_name?: string | null;
+}
+
+export interface FormalValidationResult {
+  ontology_id: string;
+  ok: boolean; // 无 error 级不变式违反
+  enforcement: "off" | "warn" | "error";
+  error_count: number;
+  warning_count: number;
+  issues: FormalIssue[];
+}
+
 export interface OntologySummary {
   id: string;
   domain_context_id: string;

@@ -1,5 +1,5 @@
-import { Button, Space, Tag } from "antd";
-import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined } from "@ant-design/icons";
+import { Alert, Button, Space, Tag } from "antd";
+import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type {
@@ -221,6 +221,16 @@ export function ChatBubble({
           <>
             {!isUser && message.payload?.steps && message.payload.steps.length > 0 && (
               <StepTrace steps={message.payload.steps} />
+            )}
+            {!isUser && message.payload?.grounding_refused && (
+              <Alert
+                type="info"
+                showIcon
+                icon={<SafetyOutlined />}
+                style={{ marginBottom: 10, borderRadius: 8 }}
+                message="为避免给出不准确信息，已谨慎拒答"
+                description="回答仅基于已发布本体可证实的对象、字段、关系与口径；下述结论无法由本体证明，故未作答。"
+              />
             )}
             <div className="chatbi-answer-wrap">
               <MarkdownLite content={message.content} />

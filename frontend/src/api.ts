@@ -77,6 +77,7 @@ import type {
   RelationTypeDetail,
   TaskRecord,
   OntologyValidationResult,
+  FormalValidationResult,
   VersionDiff,
   VersionRecord,
   VersionSnapshot,
@@ -443,6 +444,8 @@ export const api = {
     request<OntologyValidationResult>(`/api/ontologies/${ontologyId}/validate`, {
       method: "POST",
     }),
+  formalValidateOntology: (ontologyId: string) =>
+    request<FormalValidationResult>(`/api/ontologies/${ontologyId}/formal-validate`),
   getOntologyGraph: (
     id: string,
     params?: { centerId?: string; depth?: number; full?: boolean; maxNodes?: number },

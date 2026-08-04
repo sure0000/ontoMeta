@@ -355,6 +355,20 @@ export function DomainDetailPage() {
       onOk: async () => {
         try {
           setActionError(null);
+          // 形式化不变式预检（F2）：error 级且 enforcement=error 时阻断（后端也会拦，
+          // 这里提前给出可读提示，避免直接抛 400）。
+          const formal = await api
+            .formalValidateOntology(domain.latest_ontology_id!)
+            .catch(() => null);
+          if (formal && formal.enforcement === "error" && !formal.ok) {
+            const errs = formal.issues.filter((i) => i.severity === "error");
+            const top = errs.slice(0, 3).map((i) => i.message).join("；");
+            const extra = errs.length > 3 ? ` 等 ${errs.length} 项` : "";
+            const msg = `本体未通过形式化校验，无法发布：${top}${extra}`;
+            setActionError(msg);
+            message.error(msg);
+            throw new Error(msg);
+          }
           // 一致性校验改为建议性：不再阻断发布。发布已确认的业务对象与业务关系，
           // 待复核/其它类型对象保持原状，冲突仅作简洁提示。
           const validation = await api
@@ -370,12 +384,22 @@ export function DomainDetailPage() {
           const updated = await api.getDomain(domainId);
           setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
           const issues = validation && !validation.ok ? validation.issues : [];
-          if (issues.length) {
-            const top = issues.slice(0, 2).map((i) => i.message).join("；");
-            const extra = issues.length > 2 ? ` 等 ${issues.length} 项` : "";
-            message.warning(
-              `已发布已确认的业务对象与关系；${issues.length} 处待复核/冲突保持原状：${top}${extra}`,
-            );
+          const formalWarnings =
+            formal && formal.warning_count > 0
+              ? formal.issues.filter((i) => i.severity === "warning")
+              : [];
+          if (issues.length || formalWarnings.length) {
+            const parts: string[] = [];
+            if (issues.length) {
+              const top = issues.slice(0, 2).map((i) => i.message).join("；");
+              parts.push(
+                `${issues.length} 处待复核/冲突保持原状：${top}${issues.length > 2 ? " 等" : ""}`,
+              );
+            }
+            if (formalWarnings.length) {
+              parts.push(`${formalWarnings.length} 项形式化提醒（基数/语义类型可完善）`);
+            }
+            message.warning(`已发布已确认的业务对象与关系；${parts.join("；")}`);
           } else {
             message.success("发布成功");
           }
