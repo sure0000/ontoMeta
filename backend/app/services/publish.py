@@ -389,6 +389,16 @@ class PublishService:
         if not ontology:
             raise ValueError("Ontology not found")
 
+        # 形式化不变式校验（F2）：``formal_enforcement=error`` 时，error 级违反阻断发布。
+        # warn/off 不阻断（迁移期安全）；这与发布后才能供 Data Agent 查询的时序契合——
+        # 不让不可推理的本体进入已发布集。
+        from app.config import settings as _env_settings
+        from app.services.ontology_formal import assert_publishable
+
+        assert_publishable(
+            db, ontology_id, getattr(_env_settings, "formal_enforcement", "warn")
+        )
+
         new_version = ontology.version + 1
         previous_snapshot = load_previous_snapshot(
             db, ontology_id, before_version=new_version

@@ -7,6 +7,8 @@ from app.schemas import (
     ClusterDetail,
     ConflictResolveRequest,
     FieldPinRequest,
+    FormalIssueOut,
+    FormalValidationResult,
     ObjectToRelationConvertIn,
     ObjectToRelationConvertResult,
     ObjectTypeBatchUpdate,
@@ -223,6 +225,35 @@ def validate_ontology(ontology_id: str, db: Session = Depends(get_db)):
         ontology_id=ontology_id,
         ok=len(issues) == 0,
         issues=[ValidationIssueOut(**i.to_dict()) for i in issues],
+    )
+
+
+@router.get(
+    "/ontologies/{ontology_id}/formal-validate",
+    response_model=FormalValidationResult,
+)
+def formal_validate_ontology(ontology_id: str, db: Session = Depends(get_db)):
+    """形式化不变式预检（F2）：派生无环 / 口径可解析 / 聚合语义自洽 / 基数良定义。
+
+    与 ``/validate``（引用完整性）互补。ok=无 error 级违反；warning 不影响 ok
+    但会列出。``enforcement=error`` 时，ok=False 将在发布时被阻断。
+    """
+    from app.config import settings as env_settings
+    from app.services.ontology_formal import check_formal_invariants
+
+    ontology = query.get_ontology(db, ontology_id)
+    if not ontology:
+        raise HTTPException(status_code=404, detail="Ontology not found")
+    issues = check_formal_invariants(db, ontology_id)
+    errors = [i for i in issues if i.severity == "error"]
+    warnings = [i for i in issues if i.severity == "warning"]
+    return FormalValidationResult(
+        ontology_id=ontology_id,
+        ok=len(errors) == 0,
+        enforcement=getattr(env_settings, "formal_enforcement", "warn"),
+        error_count=len(errors),
+        warning_count=len(warnings),
+        issues=[FormalIssueOut(**i.to_dict()) for i in issues],
     )
 
 

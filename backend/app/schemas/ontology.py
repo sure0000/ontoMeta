@@ -375,6 +375,24 @@ class OntologyValidationResult(BaseModel):
     issues: list[ValidationIssueOut] = Field(default_factory=list)
 
 
+class FormalIssueOut(BaseModel):
+    code: str
+    message: str
+    severity: str  # error | warning
+    entity_type: str
+    entity_id: str | None = None
+    entity_name: str | None = None
+
+
+class FormalValidationResult(BaseModel):
+    ontology_id: str
+    ok: bool  # 无 error 级不变式违反（warning 不影响 ok）
+    enforcement: str  # off | warn | error
+    error_count: int = 0
+    warning_count: int = 0
+    issues: list[FormalIssueOut] = Field(default_factory=list)
+
+
 class ReviewUpdate(BaseModel):
     status: str
     operator: str | None = None

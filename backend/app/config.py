@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     #   warn — 只记录「本应拒答」到回执，不真拒（观测泄漏基线/误杀率）
     #   on   — 正式生效：SQL 语义证明不过则不执行、断言不可证则拒答
     agent_soundness: str = "on"
+    # 发布时形式化不变式校验（F2）：
+    #   off  — 不检查
+    #   warn — 检查并返回报告，不阻断发布（默认，迁移期安全）
+    #   error— 存在 error 级不变式违反则阻断发布
+    formal_enforcement: str = "warn"
     # 对象命名(含属性中文名)分块流水线：并发调用 LLM 的子块数上限。
     draft_chunk_max_concurrency: int = 4
     # 分块生成时每批最多打包的表(对象)数：优先按表数切块，字符预算作为兜底细分。
