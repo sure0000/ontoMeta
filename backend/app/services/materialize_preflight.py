@@ -30,13 +30,23 @@ from app.connectors.sync_runner import (
     SyncRunnerError,
 )
 from app.models.data_app import DataSource
-from app.services.job_planner import DEFAULT_SOURCE_ALIAS
+from app.services.job_planner import (
+    DEFAULT_SOURCE_ALIAS,
+    DEFAULT_TARGET_ALIAS,
+    JobPlanner,
+)
 from app.services.materialization_contract import MaterializationContractService
 from app.services.materialization_runner import _warehouse_conn_id
 from app.services.settings_service import SettingsService
+from app.services.sync_tool_resolver import (
+    SyncToolResolutionError,
+    required_modes,
+    resolve_sync_tool,
+)
 
 _settings = SettingsService()
 _contract_service = MaterializationContractService()
+_job_planner = JobPlanner()
 
 # 状态取值。warn 不阻断提交，fail 视 blocking 决定是否阻断。
 PASS = "pass"
@@ -137,7 +147,10 @@ def run_preflight(
     finally:
         client.close()
 
-    _check_execution_channel(report, airflow, ds, engine)
+    _check_sync_tool(report, db, ontology_id, airflow, selected_targets)
+    _check_execution_channel(
+        report, db, ontology_id, airflow, ds, engine, selected_targets
+    )
     _check_batch_size(report, db, ontology_id, selected_targets, airflow.max_tasks_per_dag)
     return report
 
@@ -421,7 +434,80 @@ def _check_dag_dir_visible(
         )
 
 
-def _check_execution_channel(report: PreflightReport, airflow, ds, engine: str) -> None:
+def _check_sync_tool(
+    report: PreflightReport,
+    db: Session,
+    ontology_id: str,
+    airflow,
+    selected_targets: list[str] | None,
+) -> None:
+    """本次会用什么搬。
+
+    工具已改为自动决策（弹窗不再逐次选），所以这一项**不是可有可无的信息**：它是那个
+    决策唯一露出来的地方。自动而不可解释，等于把「为什么没搬这批表」埋进日志。
+    """
+    try:
+        choice = resolve_sync_tool(
+            airflow,
+            modes=required_modes(
+                _contract_service.list_selected(db, ontology_id, selected_targets)
+            ),
+        )
+    except SyncToolResolutionError as exc:
+        report.add(
+            PreflightItem(
+                key="sync_tool",
+                label="搬运方式",
+                status=FAIL,
+                blocking=True,
+                detail=str(exc),
+                next_step=(
+                    "到 系统设置 → Airflow 编排，在「搬运工具镜像」里配一个可用镜像，"
+                    "或把执行通道改回 runner（runner 通道不需要镜像）。"
+                ),
+            )
+        )
+        return
+    if choice.uncovered_modes:
+        report.add(
+            PreflightItem(
+                key="sync_tool",
+                label="搬运方式",
+                status=WARN,
+                blocking=False,
+                detail=choice.detail,
+                next_step=(
+                    f"要求 {', '.join(choice.uncovered_modes)} 的表不会产搬运作业（会列进 "
+                    "unsupported）。改这些实体的同步方式，或配一个支持它的工具镜像。"
+                ),
+            )
+        )
+        return
+    report.add(
+        PreflightItem(
+            key="sync_tool",
+            label="搬运方式",
+            status=PASS,
+            blocking=False,
+            detail=choice.detail,
+            next_step=(
+                None
+                if choice.auto
+                else "如需改回自动，把 系统设置 → Airflow 编排 的「搬运工具」留空。"
+            ),
+        )
+    )
+
+
+def _check_execution_channel(
+    report: PreflightReport,
+    db: Session,
+    ontology_id: str,
+    airflow,
+    ds,
+    engine: str,
+    selected_targets: list[str] | None,
+) -> None:
     """执行通道的前置条件。
 
     runner 通道能在提交前问清楚的，全在这里问掉——runner 的 ``/probe`` 端点本就是为
@@ -513,6 +599,15 @@ def _check_execution_channel(report: PreflightReport, airflow, ds, engine: str) 
         )
 
         _check_runner_sink(report, caps, engine)
+        _check_movability(
+            report,
+            db,
+            ontology_id,
+            engine=engine,
+            selected_targets=selected_targets,
+            caps=caps,
+            target_alias=_warehouse_conn_id(ds) if ds is not None else None,
+        )
         # 源/目标连接：runner 按 alias 自解析，探不通就是搬运任务一定会失败。
         _check_runner_alias(report, client, "sync_runner_source", "源库连接", DEFAULT_SOURCE_ALIAS)
         if ds is not None:
@@ -565,6 +660,88 @@ def _check_runner_sink(report: PreflightReport, caps: dict, engine: str) -> None
             next_step=(
                 f"换一个 runner 支持的目标引擎；或改用 docker 通道"
                 f"（SYNC_CHANNEL=docker）走 SeaTunnel 的 {engine} sink。"
+            ),
+        )
+    )
+
+
+def _check_movability(
+    report: PreflightReport,
+    db: Session,
+    ontology_id: str,
+    *,
+    engine: str,
+    selected_targets: list[str] | None,
+    caps: dict,
+    target_alias: str | None,
+) -> None:
+    """预演一遍搬运计划：本次到底有几张表搬得了、搬不了的各是什么原因。
+
+    这些原因（缺 source_ref、ADS 由指标算出、runner 写不了这个「目标 × 装载方式」组合）
+    此前只出现在**提交后**回执的 ``unsupported`` 里。工具选择被收走之后更该提前：人不再
+    能通过换工具影响结果，那至少得在点提交之前看见「这次只会搬 3/40 张」。
+
+    代价是这里要跑一次完整的逻辑编译（与提交时同一份代码，故结论一致），本体大时耗时
+    可观——preflight 是显式按钮，这个代价换的是不用等 Airflow 跑完才发现。
+    """
+    try:
+        plan = _job_planner.build(
+            db,
+            ontology_id,
+            engine=engine,
+            target_alias=target_alias or DEFAULT_TARGET_ALIAS,
+            selected_targets=selected_targets,
+            runner_capabilities=caps,
+        )
+    except Exception as exc:  # noqa: BLE001 — 预演失败不该拖垮整个自检
+        report.add(
+            PreflightItem(
+                key="movability",
+                label="可搬性",
+                status=WARN,
+                blocking=False,
+                detail=f"预演搬运计划时出错，本项未能检查：{exc}",
+                next_step="不影响提交；若提交后回执里 unsupported 很多，回到这里再看一次。",
+            )
+        )
+        return
+
+    movable = len(plan.jobs)
+    blocked = plan.unsupported
+    total = movable + len(blocked)
+    if not blocked:
+        report.add(
+            PreflightItem(
+                key="movability",
+                label="可搬性",
+                status=PASS,
+                blocking=False,
+                detail=f"本次 {movable} 张表都能搬。",
+            )
+        )
+        return
+
+    # 按原因归并：40 张表各报一行没人看，「缺 source_ref：31 张」才是能照做的信息。
+    by_reason: dict[str, int] = {}
+    for item in blocked:
+        by_reason[item["reason"]] = by_reason.get(item["reason"], 0) + 1
+    top = sorted(by_reason.items(), key=lambda kv: -kv[1])[:3]
+    summary = "；".join(f"{reason}（{n} 张）" for reason, n in top)
+    more = f"，另有 {len(by_reason) - len(top)} 类原因" if len(by_reason) > len(top) else ""
+    report.add(
+        PreflightItem(
+            key="movability",
+            label="可搬性",
+            # 一张都搬不了 = 这次物化只会建空表。不阻断（只建表是合法用法），但必须红着说。
+            status=FAIL if movable == 0 else WARN,
+            blocking=False,
+            detail=(
+                f"本次 {total} 张表里 {movable} 张能搬、{len(blocked)} 张不能：{summary}{more}。"
+                + ("本次将只建表、不搬任何数据。" if movable == 0 else "")
+            ),
+            next_step=(
+                "ADS 表由指标算出、本就不产搬运作业；「无 source_ref」需回到对象上补数据源"
+                "映射；装载方式相关的，改契约的同步方式或换目标引擎。"
             ),
         )
     )
@@ -635,22 +812,6 @@ def _check_runner_alias(
     )
 
 
-def _selected_contracts(
-    db: Session, ontology_id: str, selected_targets: list[str] | None
-):
-    """选中的、已标记物化的契约。selected_targets 为实体名（非物理表名）。"""
-    contracts = _contract_service.list_contracts(
-        db, ontology_id, materialized_only=True
-    )
-    if selected_targets:
-        names = _contract_service.resolve_target_names(db, contracts)
-        wanted = set(selected_targets)
-        contracts = [
-            c for c in contracts if (names.get(c.target_id) or (None,))[0] in wanted
-        ]
-    return contracts
-
-
 def _check_batch_size(
     report: PreflightReport,
     db: Session,
@@ -659,7 +820,7 @@ def _check_batch_size(
     limit_per_dag: int,
 ) -> None:
     """表数 vs 单 DAG 上限。超限会自动按上限拆成多个 DAG（M16），这里只是先说清会拆几个。"""
-    count = len(_selected_contracts(db, ontology_id, selected_targets))
+    count = len(_contract_service.list_selected(db, ontology_id, selected_targets))
     limit = limit_per_dag
     if count > limit:
         report.add(
@@ -712,5 +873,8 @@ def _add_conn_and_batch(
             next_step="先解决 Airflow 连通性。",
         )
     )
-    _check_execution_channel(report, airflow, ds, engine)
+    _check_sync_tool(report, db, ontology_id, airflow, selected_targets)
+    _check_execution_channel(
+        report, db, ontology_id, airflow, ds, engine, selected_targets
+    )
     _check_batch_size(report, db, ontology_id, selected_targets, airflow.max_tasks_per_dag)

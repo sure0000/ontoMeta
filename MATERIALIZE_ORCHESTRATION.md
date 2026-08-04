@@ -115,6 +115,12 @@ DataHub 里看不到「`dim.customer` 由 `erp_ods.tab_customer` 经哪个作业
 这与仓库既有约定同构：`app/warehouse/registry.py::get_adapter(engine)` 之于方言，
 `app/warehouse/jobs/registry.py::get_job_adapter(tool)` 之于搬运工具。生成器主干**不含任何工具特定逻辑**。
 
+**选哪个工具不由使用者逐次决定**（`services/sync_tool_resolver`）：工具是部署事实。
+runner 通道（默认）下 ontoMeta 根本不指定工具——可搬性按 runner 声明的 `capabilities` 判、
+档位由 runner 逐表自选（native 优先，搬不了的交 SeaTunnel）；docker 通道按
+「本次所需装载方式 ∩ 工具能力 ∩ 镜像可用」挑，优先级 seatunnel > flink > datax。
+设置页的 `sync_tool`（空 = 自动）是唯一的人工覆盖入口，决策结果进 preflight 与执行回执。
+
 ---
 
 ## 5. 调度：Airflow

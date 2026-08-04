@@ -53,9 +53,9 @@ import type {
   MaterializationRun,
   MaterializeRequestInput,
   MaterializeStatus,
+  MaterializeTaskResult,
   MaterializePreflightResult,
-  SyncTool,
-  SyncToolInfo,
+  SyncToolPlan,
   LineageEmitResult,
   Principal,
   PrincipalCreated,
@@ -716,6 +716,8 @@ export const api = {
     docker_network?: string;
     drivers_dir?: string;
     sync_tool_images?: string;
+    /** "" = 自动选搬运工具；填了则物化一律用它。 */
+    sync_tool?: string;
     max_tasks_per_dag?: number;
     max_active_tasks_per_dag?: number;
     dag_parse_timeout?: number;
@@ -1187,15 +1189,28 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** 可选搬运工具及其能力（供物化弹窗选择）。 */
-  getSyncTools: () =>
-    request<{ default: SyncTool; tools: SyncToolInfo[] }>(
-      "/api/warehouse/sync-tools",
-    ),
+  /** 本次物化会用什么搬 + 目标引擎实际支持的装载方式（工具已改为自动决策）。 */
+  getSyncTools: (params?: { ontologyId?: string; engine?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.ontologyId) q.set("ontology_id", params.ontologyId);
+    if (params?.engine) q.set("engine", params.engine);
+    const qs = q.toString();
+    return request<SyncToolPlan>(
+      `/api/warehouse/sync-tools${qs ? `?${qs}` : ""}`,
+    );
+  },
   /** 本体一键物化：生成 DDL/ETL 并对目标数据源真正建表落数。需 publisher 角色。 */
   /** 编排物化的运行状态（Airflow DagRun）。仅 orchestrated 回执可查。 */
   getMaterializeStatus: (artifactId: string) =>
     request<MaterializeStatus>(`/api/warehouse/materialize/${artifactId}/status`),
+  /** 一个搬运任务的执行结果：实际用了哪一档、搬了多少行。
+   *
+   * **按需调，别进轮询**：Airflow 没有跨任务批量读 XCom 的端点，一次一请求，
+   * 整轮几百个任务全读一遍会把 Airflow 打垮。 */
+  getMaterializeTaskResult: (artifactId: string, taskId: string) =>
+    request<MaterializeTaskResult>(
+      `/api/warehouse/materialize/${artifactId}/tasks/${encodeURIComponent(taskId)}/result`,
+    ),
   /** M11：本次物化将上报的 源表→目标表 血缘（纯读）。 */
   getMaterializeLineagePlan: (artifactId: string) =>
     request<LineageEmitResult>(

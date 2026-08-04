@@ -32,6 +32,11 @@ from app.services.airflow_dag_builder import AirflowDagBuilder
 from app.services.job_planner import JobPlanner
 from app.services.materialization_contract import MaterializationContractService
 from app.services.settings_service import SettingsService
+from app.services.sync_tool_resolver import (
+    SyncToolResolutionError,
+    required_modes,
+    resolve_sync_tool,
+)
 from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse.jobs import (
     JobPlan,
@@ -236,6 +241,21 @@ def _run_orchestrated(
 ) -> dict[str, Any]:
     """产出 DAG 与搬运作业 → 投递 → 触发一次运行。**不在本进程里落库**。"""
     # 执行通道（M14）：runner 走常驻服务，docker 走旧的兄弟容器通道。
+    # 用什么搬由 resolver 定（弹窗不再逐次选）：runner 通道下不指定工具、由执行侧逐表
+    # 自选；docker 通道按「装载方式 ∩ 镜像可用」挑，选不出来在这里就失败——晚一步就是
+    # 一个注定 pull 失败的 DAG。
+    try:
+        choice = resolve_sync_tool(
+            airflow,
+            modes=required_modes(
+                _contract_service.list_selected(db, ontology_id, selected_targets)
+            ),
+            forced=sync_tool,
+        )
+    except SyncToolResolutionError as exc:
+        raise MaterializationError(str(exc)) from exc
+    sync_tool = choice.tool
+
     channel = (airflow.sync_channel or "runner").lower()
     runner_caps: dict | None = None
     if channel == "runner":
@@ -265,6 +285,7 @@ def _run_orchestrated(
             )
     else:
         # docker 通道：镜像可用性先于一切，拿不到镜像就不生成 DAG、不触发。
+        # resolver 已验过一遍（强制指定的工具也在那里解析镜像），这里是最后一道。
         try:
             resolve_docker_image(get_job_adapter(sync_tool), airflow.sync_tool_images)
         except SyncImageUnavailableError as exc:
@@ -390,6 +411,10 @@ def _run_orchestrated(
         "ontology_id": ontology_id,
         "execute_mode": "orchestrated",
         "sync_channel": channel,
+        # 用什么搬 + 为什么是它。工具已不再由人逐次选，回执必须留下这句可解释的话，
+        # 否则「为什么这批表没搬」在事后无从对账。
+        "sync_tool": choice.label,
+        "sync_tool_detail": choice.detail,
         "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
         "engine": engine,
         "database_prefix": database_prefix,
@@ -436,8 +461,9 @@ def run(
     直连落库（direct）回退：直连的 INSERT…SELECT 要求源表在目标数仓里可见，
     真实拓扑下不成立（见 `MATERIALIZE_ORCHESTRATION.md` §1）。
 
-    搬运工具（``sync_tool``）与同步策略由物化弹窗逐次选；同步策略随 ``overrides``
-    写回契约，``JobPlanner`` 据契约逐表决定装载方式。
+    ``sync_tool`` 通常**不传**：用什么搬由 ``services/sync_tool_resolver`` 决策（设置页
+    可强制指定），传了则盖过它。同步策略仍逐实体来自物化弹窗，随 ``overrides`` 写回契约，
+    ``JobPlanner`` 据契约逐表决定装载方式。
 
     ``overrides``：``{contract_id: {字段: 值}}``，弹窗里人工改的存储策略/层/表名等。
     经 ``MaterializationContractService.update`` 写回并钉住，使生成读到的契约与展示

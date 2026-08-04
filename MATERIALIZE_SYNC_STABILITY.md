@@ -109,7 +109,7 @@ Airflow 侧从此只剩「发一个 HTTP、轮询状态」，没有任何环境�
 | `GET /capabilities` | `contract_version` + 支持的源/目标平台 + 已装驱动清单 + backend 档位 | preflight |
 | `POST /probe` | `{alias}` → 该连接能否连通、能否读到指定表 | preflight |
 | `POST /jobs` | 提交一个 JobSpec，返回 `job_id`（**幂等键 = `dag_run_id + task_id`**，重复提交返回同一个） | Airflow task |
-| `GET /jobs/{id}` | 状态、已搬行数、水位、错误 | Airflow task 轮询 |
+| `GET /jobs/{id}` | 状态、**实际用了哪一档（`backend`）**、已搬行数、水位、错误 | Airflow task 轮询 |
 | `GET /jobs/{id}/log` | 该作业日志 | 回执跳转 |
 
 **为什么是「常驻服务」而不是「Airflow worker 里直接 PythonOperator 搬」**——
@@ -206,6 +206,10 @@ Hive 分区表走 `INSERT OVERWRITE` 到目标分区，非分区表只能 rename
 
 - runner 镜像随 ontoMeta 一起发版，`GET /capabilities` 返回 `contract_version`；
   ontoMeta 只接受自己认识的版本，不匹配即拒绝提交（而不是发过去再看会不会炸）。
+  版本沿革：`2` 增 `capabilities.sink_modes`；`3` 增 `JobStatus.backend`——档位是 runner
+  **逐表自选**的，不回报的话「这张表为什么没有水位/搬得慢」在 ontoMeta 侧无从对账。
+  该值经 Airflow 任务的 XCom 回到物化回执（任务明细里点开才读：Airflow 没有跨任务批量读
+  XCom 的端点，跟着 5 秒一次的状态轮询全读一遍会把它打垮）。
 - seatunnel 档位显式声明支持的版本区间，**未知版本拒绝渲染**——现在的渲染器对真实版本
   一无所知，参数形状全靠实测撞出来（`table_name` 那条就是这么来的）。
 

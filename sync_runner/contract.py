@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field
 
 # 线格式版本。任何字段的增删改都要 bump，ontoMeta 侧据此拒绝不认识的 runner。
 # 2：Capabilities 增 sink_modes（按「目标 × 装载方式」声明，见该字段说明）。
-CONTRACT_VERSION = "2"
+# 3：JobStatus 增 backend（这张表实际由哪一档搬的）。
+CONTRACT_VERSION = "3"
 
 # 作业状态机。queued→running→(success|failed)。
 QUEUED = "queued"
@@ -77,6 +78,10 @@ class JobStatus(BaseModel):
     job_id: str
     idempotency_key: str
     state: str
+    # 这张表实际由哪一档搬的（native / seatunnel）。档位是 runner 逐表自选的
+    # （``backends.pick_backend``），选择结果只进过日志——于是「为什么这张表搬得慢/
+    # 没有水位」在 ontoMeta 侧无从对账。排队中为 None（还没挑）。
+    backend: str | None = None
     target: str = ""
     rows_read: int = 0
     rows_written: int = 0

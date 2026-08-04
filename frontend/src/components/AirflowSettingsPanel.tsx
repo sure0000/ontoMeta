@@ -3,7 +3,8 @@
  * **编排的全部可调项都在这里，不需要改任何配置文件**：怎么连 Airflow、DAG 往哪投、
  * 走哪条执行通道、分批与超时怎么定。环境变量只在首次建配置行时播一次种，此后以本页为准。
  *
- * 仍不在这里的：搬运工具与同步策略由物化弹窗逐次选；源库/目标库的凭据分别归 Airflow
+ * 搬运工具也在这里（默认自动，见 services/sync_tool_resolver）——它是部署事实，不该在
+ * 物化弹窗里逐次选。仍不在这里的：同步策略逐实体存在物化契约上；源库/目标库的凭据分别归 Airflow
  * Connection（docker 通道）与 sync-runner 的 secrets（runner 通道）——凭据只有一个
  * 归属地，ontoMeta 产出的 DAG 里只出现别名。
  */
@@ -18,6 +19,7 @@ import {
   Input,
   InputNumber,
   Radio,
+  Select,
   Space,
   Switch,
   Tag,
@@ -41,6 +43,7 @@ interface FormValues {
   docker_network: string;
   drivers_dir: string;
   sync_tool_images: string;
+  sync_tool: string;
   max_tasks_per_dag: number;
   max_active_tasks_per_dag: number;
   dag_parse_timeout: number;
@@ -73,6 +76,7 @@ export function AirflowSettingsPanel() {
           docker_network: s.docker_network,
           drivers_dir: s.drivers_dir,
           sync_tool_images: s.sync_tool_images,
+          sync_tool: s.sync_tool ?? "",
           max_tasks_per_dag: s.max_tasks_per_dag,
           max_active_tasks_per_dag: s.max_active_tasks_per_dag,
           dag_parse_timeout: s.dag_parse_timeout,
@@ -146,7 +150,7 @@ export function AirflowSettingsPanel() {
         }
         description={
           settings?.available
-            ? "物化将产出建表 DDL + 搬运作业 + DAG 交给 Airflow 执行，血缘由 DataHub 插件自动上报。搬运工具与同步策略在物化弹窗逐次选。"
+            ? "物化将产出建表 DDL + 搬运作业 + DAG 交给 Airflow 执行，血缘由 DataHub 插件自动上报。搬运工具默认自动选（见下方「执行通道」），同步策略逐实体存在物化契约上。"
             : "物化一律交 Airflow 编排执行（已去除直连落库模式）：未启用或未配 endpoint 时，物化将报错无法执行。"
         }
       />
@@ -278,6 +282,23 @@ export function AirflowSettingsPanel() {
                     extra="仅 docker 通道：工具名=镜像，逗号分隔。DataX 无官方镜像，不在这里指到自建镜像就不可选"
                   >
                     <Input placeholder="datax=registry.internal/datax:3.0" />
+                  </Form.Item>
+                  {/* 搬运工具的**唯一**人工入口：物化弹窗已不再逐次选（工具是部署事实，
+                      且 runner 通道下不参与执行）。默认自动，需要钉住时才来这里改。 */}
+                  <Form.Item
+                    label="搬运工具"
+                    name="sync_tool"
+                    extra="留空 = 自动：runner 通道由执行侧逐表自选档位，docker 通道按「装载方式 ∩ 镜像可用」挑。指定后物化一律用它（该工具搬不了的表会列进未生成作业）"
+                  >
+                    <Select
+                      style={{ width: 260 }}
+                      options={[
+                        { value: "", label: "自动（推荐）" },
+                        { value: "seatunnel", label: "seatunnel" },
+                        { value: "datax", label: "datax（需先配镜像）" },
+                        { value: "flink", label: "flink" },
+                      ]}
+                    />
                   </Form.Item>
                 </>
               ),

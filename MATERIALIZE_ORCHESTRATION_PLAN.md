@@ -168,6 +168,10 @@ curl -s localhost:8081/openapi.json | grep -o '/api/v[0-9]*/dags/{dag_id}/dagRun
 >   `docker_image` 与 `airflow_command`，DAG 骨架对工具无感（逐任务读 `image`/`command`）。
 > - **搬运工具与同步策略改由物化弹窗选**：`MaterializeRequest.sync_tool`
 >   → `JobPlanner`/`AirflowDagBuilder` 的 `tool`；`GET /warehouse/sync-tools` 暴露可选项。
+>   ⚠ **已被后续变更取代**：弹窗不再让人选工具——它在默认的 runner 通道下不参与执行
+>   （档位由 runner 逐表自选），却会以「没有可用镜像」的名义拦住提交。改由
+>   `services/sync_tool_resolver` 统一决策，设置页 `sync_tool`（空 = 自动）是唯一人工入口；
+>   `GET /warehouse/sync-tools` 改为**告知结果**（`resolved`/`detail`/`modes`）。
 > - **设置页只留 Airflow 连接信息**（endpoint/鉴权/api_version/enabled）：
 >   `seatunnel_image` 归入工具 Adapter；`warehouse_conn_id` 由目标数据源推导
 >   （`ontometa_ds_<slug>`）；`dags_dir`/`jobs_dir` 归部署基础设施（`config.airflow_dags_dir/jobs_dir`，

@@ -277,6 +277,28 @@ class MaterializationContractService:
             MaterializationContract.target_kind, MaterializationContract.target_id
         ).all()
 
+    def list_selected(
+        self,
+        db: Session,
+        ontology_id: str,
+        selected_targets: list[str] | None = None,
+    ) -> list[MaterializationContract]:
+        """物化弹窗本次勾选的、且标记为物化的契约。
+
+        ``selected_targets`` 是**本体实体名**（不是物理表名），与物化请求同口径——
+        改过表名的实体不会因此被误裁。空/None = 全部可物化实体。
+        """
+        contracts = self.list_contracts(db, ontology_id, materialized_only=True)
+        if not selected_targets:
+            return contracts
+        names = self.resolve_target_names(db, contracts)
+        wanted = set(selected_targets)
+        return [
+            c
+            for c in contracts
+            if (names.get(c.target_id) or (None,))[0] in wanted
+        ]
+
     def get_for_target(
         self, db: Session, ontology_id: str, target_kind: str, target_id: str
     ) -> MaterializationContract | None:
