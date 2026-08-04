@@ -261,7 +261,10 @@ def test_airflow_unavailable_short_circuits(monkeypatch, tmp_path):
 
 
 def test_batch_over_limit_warns(monkeypatch, tmp_path):
-    contracts = [SimpleNamespace(target_id=f"t{i}", target_kind="object_type") for i in range(3)]
+    contracts = [
+        SimpleNamespace(target_id=f"t{i}", target_kind="object_type", load_strategy="full")
+        for i in range(3)
+    ]
     db = _install(
         monkeypatch, tmp_path, _make_handler(), contracts=contracts, max_tasks=2
     )
@@ -273,8 +276,8 @@ def test_batch_over_limit_warns(monkeypatch, tmp_path):
 
 def test_selected_targets_narrow_batch_count(monkeypatch, tmp_path):
     contracts = [
-        SimpleNamespace(target_id="t1", target_kind="object_type"),
-        SimpleNamespace(target_id="t2", target_kind="object_type"),
+        SimpleNamespace(target_id="t1", target_kind="object_type", load_strategy="full"),
+        SimpleNamespace(target_id="t2", target_kind="object_type", load_strategy="full"),
     ]
     names = {"t1": ("alpha", "Alpha"), "t2": ("beta", "Beta")}
     db = _install(
@@ -377,6 +380,82 @@ def test_docker_channel_states_what_cannot_be_checked(monkeypatch, tmp_path):
     assert item.status == pf.WARN and item.blocking is False
     assert "docker.sock" in item.next_step
     assert "sync_runner" not in _by_key(report)  # 不是 runner 通道就不探 runner
+    assert report.ok is True
+
+
+def test_sync_tool_is_reported_even_though_nobody_picks_it(monkeypatch, tmp_path):
+    """搬运工具已改为自动决策，这一项是那个决策唯一露出来的地方——必须在，且可解释。"""
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_tool"]
+    assert item.status == pf.PASS and item.blocking is False
+    assert "逐表自选" in item.detail  # runner 通道：档位由执行侧挑
+
+
+def test_sync_tool_blocks_when_docker_channel_has_no_image(monkeypatch, tmp_path):
+    """docker 通道下选不出工具 = 提交必失败，故这一项阻断，并指向设置页。"""
+    import app.services.sync_tool_resolver as resolver
+
+    monkeypatch.setattr(resolver, "available_sync_tools", lambda overrides=None: [])
+    db = _install(
+        monkeypatch, tmp_path, _make_handler(), runtime_over={"sync_channel": "docker"}
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_tool"]
+    assert item.status == pf.FAIL and item.blocking is True
+    assert "设置" in (item.next_step or "")
+    assert report.ok is False
+
+
+def test_movability_counts_tables_that_cannot_be_moved(monkeypatch, tmp_path):
+    """把「这次只会搬 1/3 张」从事后回执提到提交之前，并按原因归并。"""
+    from app.warehouse.jobs import JobPlan
+
+    plan = JobPlan(
+        jobs=(SimpleNamespace(name="sync_dim_a"),),
+        unsupported=[
+            {"target": "dim.b", "reason": "对象无 source_ref，无法定位源表"},
+            {"target": "dim.c", "reason": "对象无 source_ref，无法定位源表"},
+        ],
+    )
+    monkeypatch.setattr(pf._job_planner, "build", lambda *a, **k: plan)
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
+    item = _by_key(report)["movability"]
+    assert item.status == pf.WARN and item.blocking is False
+    assert "3 张表里 1 张能搬" in item.detail
+    assert "（2 张）" in item.detail  # 同一原因归并计数，不逐表刷屏
+    assert report.ok is True
+
+
+def test_movability_flags_a_run_that_moves_nothing(monkeypatch, tmp_path):
+    """一张都搬不了 = 只建空表。不阻断（只建表是合法用法），但必须红着说清。"""
+    from app.warehouse.jobs import JobPlan
+
+    plan = JobPlan(
+        jobs=(),
+        unsupported=[{"target": "ads.x", "reason": "ADS 指标表由 MetricSpec 生成，不产搬运作业"}],
+    )
+    monkeypatch.setattr(pf._job_planner, "build", lambda *a, **k: plan)
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
+    item = _by_key(report)["movability"]
+    assert item.status == pf.FAIL and item.blocking is False
+    assert "只建表、不搬任何数据" in item.detail
+    assert report.ok is True
+
+
+def test_movability_failure_does_not_sink_the_whole_preflight(monkeypatch, tmp_path):
+    """预演本身出错时降级为提醒——它是附加信息，不该拖垮其余检查。"""
+    def _boom(*a, **k):
+        raise RuntimeError("逻辑编译炸了")
+
+    monkeypatch.setattr(pf._job_planner, "build", _boom)
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
+    item = _by_key(report)["movability"]
+    assert item.status == pf.WARN and item.blocking is False
+    assert "逻辑编译炸了" in item.detail
     assert report.ok is True
 
 

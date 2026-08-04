@@ -32,8 +32,8 @@ import type {
   MaterializeStatus,
   MaterializePreflightResult,
   LineageEmitResult,
-  SyncTool,
-  SyncToolInfo,
+  MaterializeTaskResult,
+  SyncToolPlan,
 } from "../types";
 import { LABELS, StatusBadge } from "./StatusBadge";
 
@@ -126,7 +126,6 @@ interface Props {
 interface FormValues {
   target_datasource_id: string;
   target_database: string;
-  sync_tool: SyncTool;
 }
 
 /** 由数据源类型推导物化引擎（DDL/ETL 方言）。仅仓库类型可作物化目标，否则返回 null。 */
@@ -201,7 +200,9 @@ export function MaterializeModal({
   const [activeLayer, setActiveLayer] = useState<string | null>(null);
   const [result, setResult] = useState<MaterializationRun | null>(null);
   const [runs, setRuns] = useState<MaterializationRun[]>([]);
-  const [syncTools, setSyncTools] = useState<SyncToolInfo[]>([]);
+  // 本次会用什么搬（后端决策的结果，不是选项）+ 目标引擎实际支持的装载方式。
+  const [syncPlan, setSyncPlan] = useState<SyncToolPlan | null>(null);
+  const [syncPlanError, setSyncPlanError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"run" | "history">("run");
   // 单实体物化：命中契约不可物化 / 尚未生成时的原因，禁用执行并提示。
   const [scopeError, setScopeError] = useState<string | null>(null);
@@ -213,15 +214,15 @@ export function MaterializeModal({
   const isDraft = Boolean(ontologyStatus && ontologyStatus !== "published");
   const dsId = Form.useWatch("target_datasource_id", form);
   const targetDb = Form.useWatch("target_database", form);
-  const syncToolName = Form.useWatch("sync_tool", form);
-  const selectedToolInfo = useMemo(
-    () => syncTools.find((t) => t.name === syncToolName) ?? null,
-    [syncTools, syncToolName],
+  // 目标引擎由所选数据源类型推导（与提交时同一口径），决定执行侧支持哪些装载方式。
+  const engine = useMemo(
+    () => engineOfKind(dataSources.find((d) => d.id === dsId)?.kind) ?? DEFAULT_ENGINE,
+    [dataSources, dsId],
   );
-  /** 所选工具支持的装载方式。工具信息还没到时不设限，避免把选项误锁死。 */
+  /** 执行侧真正支持的装载方式。问不到（null）时不设限——凭猜锁死比不锁更糟。 */
   const supportedModes = useMemo(
-    () => (selectedToolInfo ? new Set(selectedToolInfo.modes) : null),
-    [selectedToolInfo],
+    () => (syncPlan?.modes ? new Set(syncPlan.modes) : null),
+    [syncPlan],
   );
 
   // 目标库里已有的表：推荐表名与「已存在」提示都据此。
@@ -267,25 +268,11 @@ export function MaterializeModal({
     setLoading(true);
     void (async () => {
       try {
-        const [ds, runList, toolInfo] = await Promise.all([
+        const [ds, runList] = await Promise.all([
           api.listDataSources(),
           api.listMaterializationRuns(ontologyId),
-          api.getSyncTools().catch(() => null),
         ]);
         setDataSources(ds);
-        if (toolInfo) {
-          setSyncTools(toolInfo.tools);
-          // 搬运工具默认取后端 default（通常 seatunnel），可在弹窗改。默认工具在本
-          // 部署里没有可用镜像时退到第一个可用的——默认值本来就该是能跑的那个。
-          if (!form.getFieldValue("sync_tool")) {
-            const fallback = toolInfo.tools.find((t) => t.available)?.name;
-            const preferred = toolInfo.tools.find((t) => t.name === toolInfo.default);
-            form.setFieldValue(
-              "sync_tool",
-              preferred?.available ? toolInfo.default : (fallback ?? toolInfo.default),
-            );
-          }
-        }
         setRuns(runList);
         if (scopeTargetId) {
           // 单实体：取全部契约按 target_id 命中，校验其是否配置为物化。
@@ -343,6 +330,30 @@ export function MaterializeModal({
       }
     })();
   }, [open, ontologyId, scopeTargetId]);
+
+  // 本次会用什么搬。随目标引擎变（不同引擎在执行侧的能力不同），故选完数据源要重问。
+  // **不静默吞异常**：这个端点曾长期 500，前端一个 catch(() => null) 把它变成「工具列表
+  // 为空」，谁也没发现坏了。
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    setSyncPlanError(null);
+    api
+      .getSyncTools({ ontologyId, engine })
+      .then((plan) => {
+        if (!stale) setSyncPlan(plan);
+      })
+      .catch((err: unknown) => {
+        if (stale) return;
+        setSyncPlan(null);
+        setSyncPlanError(
+          err instanceof Error ? err.message : "无法读取本次的搬运方式",
+        );
+      });
+    return () => {
+      stale = true;
+    };
+  }, [open, ontologyId, engine]);
 
   // 选定数据源 → 读它上面的库列表。目标库只能从中选，故读不到就得显式报错。
   useEffect(() => {
@@ -452,9 +463,6 @@ export function MaterializeModal({
       message.warning("自检存在阻断项，请按提示处理后再提交");
       return;
     }
-    // 引擎由所选数据源类型推导；推导不出则回退默认引擎（不拦截物化）。
-    const ds = dataSources.find((d) => d.id === values.target_datasource_id);
-    const engine = engineOfKind(ds?.kind) ?? DEFAULT_ENGINE;
     // 逐实体的存储策略（分区键 / 同步方式 / 定时策略）按差异写入 overrides，
     // 写回并钉住各自的物化契约；目标库/表名只作用于本次落库，另走 *_overrides。
     const overrides: Record<string, MaterializationContractUpdateInput> = {};
@@ -494,7 +502,7 @@ export function MaterializeModal({
       const run = await api.materializeOntology(ontologyId, {
         target_datasource_id: values.target_datasource_id,
         engine,
-        sync_tool: values.sync_tool,
+        // 搬运工具不传：由后端决策（设置页可强制指定）。前端传了反而会盖过它。
         // 同步方式逐实体来自各自契约（上面已写回），故不传全局覆盖。
         ...(Object.keys(databaseOverrides).length
           ? { database_overrides: databaseOverrides }
@@ -542,10 +550,6 @@ export function MaterializeModal({
     } catch {
       return;
     }
-    if (selectedToolInfo && !selectedToolInfo.available) {
-      message.warning(`「${selectedToolInfo.name}」没有可用的执行镜像，请换一个搬运工具`);
-      return;
-    }
     setStep(1);
   };
 
@@ -580,14 +584,15 @@ export function MaterializeModal({
         size="small"
         style={{ width: 120 }}
         value={rowStrategy[c.id]}
-        // 所选工具不支持的装载方式置灰：选了也只会被 planner 记进「未生成作业」，
-        // 让人以为配好了却没搬（如 DataX 没有 CDC）。
+        // 执行侧搬不了的装载方式置灰：选了也只会被 planner 记进「未生成作业」，
+        // 让人以为配好了却没搬。依据必须是**执行侧对这个目标引擎**声明的能力
+        // （如 SeaTunnel 档写 Hive 只做全量），按工具适配器的 modes 判是错的。
         options={LOAD_STRATEGY_OPTIONS.map((o) => ({
           ...o,
           disabled: Boolean(supportedModes && !supportedModes.has(o.value)),
           label:
             supportedModes && !supportedModes.has(o.value)
-              ? `${o.label}（${syncToolName} 不支持）`
+              ? `${o.label}（${engine} 目标不支持）`
               : o.label,
         }))}
         onChange={(v) => setRowStrategy((m) => ({ ...m, [c.id]: v }))}
@@ -738,6 +743,74 @@ export function MaterializeModal({
     />
   );
 
+  // 搬运方式：**只读**。工具不再由人逐次选——它是部署事实，且在默认的 runner 通道下
+  // 压根不参与执行（档位由执行侧逐表自选）。这里只说清「这次会怎么搬」，改它去设置页。
+  const syncMethod = (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ marginBottom: 4 }}>搬运方式</div>
+      {syncPlanError ? (
+        // 读不到就明说。此前这里是 catch(() => null)，端点 500 被吞成「工具列表为空」。
+        <Alert
+          type="warning"
+          showIcon
+          message="无法读取本次的搬运方式"
+          description={
+            <>
+              {syncPlanError}
+              <div style={{ marginTop: 4 }}>
+                不拦截物化：搬运方式由后端决定，提交前自检会再查一次。
+              </div>
+            </>
+          }
+        />
+      ) : syncPlan?.error ? (
+        <Alert
+          type="error"
+          showIcon
+          message="选不出可用的搬运工具"
+          description={
+            <>
+              {syncPlan.error}
+              <div style={{ marginTop: 4 }}>
+                到 <Link to="/settings">系统设置 → Airflow 编排</Link> 配置后重试。
+              </div>
+            </>
+          }
+        />
+      ) : (
+        <div className="om-muted" style={{ fontSize: 12 }}>
+          <Tag color={syncPlan?.auto === false ? "orange" : "blue"}>
+            {syncPlan
+              ? syncPlan.resolved === "auto"
+                ? "自动"
+                : (syncPlan.resolved ?? "—")
+              : "读取中…"}
+          </Tag>
+          {syncPlan?.auto === false && (
+            <Tag style={{ marginInlineEnd: 6 }}>设置页已指定</Tag>
+          )}
+          {syncPlan?.detail}
+          {syncPlan && (
+            <div style={{ marginTop: 4 }}>
+              {syncPlan.modes_detail}
+              {syncPlan.modes && syncPlan.modes.length > 0 && (
+                <>
+                  {" "}
+                  可用装载方式：
+                  {syncPlan.modes
+                    .map((m) => LOAD_STRATEGY_OPTIONS.find((o) => o.value === m)?.label ?? m)
+                    .join(" / ")}
+                  。
+                </>
+              )}{" "}
+              需要指定工具请到 <Link to="/settings">系统设置 → Airflow 编排</Link>。
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   const runTab = (
     <>
       {/* 破坏性操作的告知放 Alert 而不是一行小字：它是这个弹窗里后果最重的一句话，
@@ -761,7 +834,7 @@ export function MaterializeModal({
         size="small"
         current={step}
         items={[
-          { title: "连接信息", description: "目标存储与搬运工具" },
+          { title: "连接信息", description: "目标存储与目标库" },
           { title: "存储策略", description: "逐实体的表名与同步方式" },
         ]}
         style={{ marginBottom: 20 }}
@@ -838,80 +911,7 @@ export function MaterializeModal({
               description={dbError}
             />
           )}
-          <Form.Item
-            name="sync_tool"
-            label="搬运工具"
-            extra={
-              // 收起时只显示工具名（下拉里才展开镜像/能力），但「这次到底会用哪个镜像」
-              // 是排查时第一个要问的，所以在这行常驻。
-              selectedToolInfo ? (
-                <>
-                  执行镜像 <code>{selectedToolInfo.image}</code>；镜像不可用的工具不能选。
-                </>
-              ) : (
-                "生成对应工具的 Airflow 作业交给调度器执行；镜像不可用的工具不能选。"
-              )
-            }
-          >
-            <Select<SyncTool>
-              placeholder="选择搬运工具"
-              optionLabelProp="title"
-              options={syncTools.map((t) => ({
-                value: t.name,
-                title: t.name,
-                // 镜像拿不到的工具置灰而非隐藏：「有这个工具但没配」与「没有这个工具」
-                // 是两回事，后者会让人以为得改代码。
-                disabled: !t.available,
-                label: (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      minWidth: 0,
-                    }}
-                  >
-                    <span style={{ fontWeight: 500 }}>{t.name}</span>
-                    {t.cdc && (
-                      <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-                        CDC
-                      </Tag>
-                    )}
-                    {!t.available && (
-                      <Tooltip title={t.reason}>
-                        <Tag color="default" style={{ marginInlineEnd: 0 }}>
-                          镜像不可用
-                        </Tag>
-                      </Tooltip>
-                    )}
-                    <code
-                      className="om-muted"
-                      style={{
-                        fontSize: 12,
-                        marginLeft: "auto",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {t.image}
-                    </code>
-                  </div>
-                ),
-              }))}
-            />
-          </Form.Item>
-          {/* 选中的工具没有可用镜像时，后端会在提交前拒绝。与其让人点了「提交」
-              才看到报错，不如在这里就说清怎么修。 */}
-          {selectedToolInfo && !selectedToolInfo.available && (
-            <Alert
-              type="error"
-              showIcon
-              style={{ marginTop: -12, marginBottom: 16 }}
-              message={`「${selectedToolInfo.name}」在本部署里没有可用的执行镜像`}
-              description={selectedToolInfo.reason}
-            />
-          )}
+          {syncMethod}
         </div>
 
         {step === 1 &&
@@ -1370,6 +1370,17 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
           {statusError && <div className="mtz-warn">{statusError}</div>}
         </dd>
 
+        <dt>搬运方式</dt>
+        <dd>
+          {/* 工具已不由人选，回执里这句话就是事后对账「为什么这批表没搬」的起点。 */}
+          {r.sync_tool ?? "—"}
+          {r.sync_tool_detail && (
+            <div className="om-muted" style={{ fontSize: 12 }}>
+              {r.sync_tool_detail}
+            </div>
+          )}
+        </dd>
+
         <dt>调度</dt>
         <dd>
           {r.schedule ? (
@@ -1490,6 +1501,11 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
                                 日志
                               </a>
                             )}
+                            <TaskResult
+                              artifactId={run.artifact_id}
+                              taskId={t.task_id}
+                              state={t.state}
+                            />
                           </div>
                         ))}
                       </div>
@@ -1519,6 +1535,62 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
         />
       )}
     </div>
+  );
+}
+
+/** 一个搬运任务的执行结果：实际用了哪一档、搬了多少行。**点开才读**。
+ *
+ * 不跟着状态轮询一起拉：Airflow 没有跨任务批量读 XCom 的端点，一次一请求，整轮几百个
+ * 任务每 5 秒全读一遍会把 Airflow 打垮。这是排查时才看的信息，按需付费即可。
+ */
+function TaskResult({
+  artifactId,
+  taskId,
+  state,
+}: {
+  artifactId: string;
+  taskId: string;
+  state?: string | null;
+}) {
+  const [data, setData] = useState<MaterializeTaskResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 没跑到终态的任务还没有 XCom，读了也是空——不给按钮，免得点出一片「暂无」。
+  if (!state || !["success", "failed"].includes(state)) return null;
+
+  if (data) {
+    const parts = [
+      data.backend ? `档位 ${data.backend}` : null,
+      data.rows_written != null ? `写入 ${data.rows_written} 行` : null,
+      data.watermark_after ? `水位 ${data.watermark_after}` : null,
+    ].filter(Boolean);
+    return (
+      <span className="om-muted" style={{ fontSize: 12 }}>
+        {parts.length ? parts.join(" · ") : "该任务没有搬运回执（建表/切换任务不产）"}
+      </span>
+    );
+  }
+  return (
+    <Button
+      size="small"
+      type="link"
+      style={{ padding: 0, height: "auto", fontSize: 12 }}
+      loading={busy}
+      onClick={() => {
+        setBusy(true);
+        setError(null);
+        api
+          .getMaterializeTaskResult(artifactId, taskId)
+          .then(setData)
+          .catch((err: unknown) =>
+            setError(err instanceof Error ? err.message : "读取失败"),
+          )
+          .finally(() => setBusy(false));
+      }}
+    >
+      {error ?? "搬运结果"}
+    </Button>
   );
 }
 

@@ -98,6 +98,9 @@ class AirflowSetting(Base):
     # ontoMeta 调 runner 的 Bearer token。runner 侧设了 SYNC_RUNNER_TOKEN 才需要；
     # **写连接配置必须有它**（runner 没配 token 时写接口直接 403，不敞着）。
     sync_runner_token: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 强制指定搬运工具。空 = 自动（见 services/sync_tool_resolver）：物化弹窗不再让人
+    # 逐次选工具——工具是部署事实，且 runner 通道下它压根不参与执行。
+    sync_tool: Mapped[str] = mapped_column(String(32), default="")
     # 下面三项只服务 docker 通道，runner 通道下不生效。
     docker_network: Mapped[str] = mapped_column(String(128), default="bridge")
     drivers_dir: Mapped[str] = mapped_column(String(512), default="")

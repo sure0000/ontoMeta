@@ -221,6 +221,42 @@ class AirflowClient:
         )
         return list(body.get("task_instances") or [])
 
+    def get_xcom(
+        self, dag_id: str, dag_run_id: str, task_id: str, key: str = "return_value"
+    ) -> Any:
+        """读一个任务的 XCom 值。任务没跑完/没留值时返回 None（404 不算错）。
+
+        **逐个任务一次请求**，Airflow 没有跨任务批量读 XCom 的端点。故调用方必须按需读
+        （单个任务展开时），不能在状态轮询里对整轮几百个任务全读一遍。
+
+        Airflow 的 ``value`` 是**序列化后的字符串**（2.x 默认 JSON，也可能是 repr 过的
+        Python 字面量）。这里尽力解析，解析不出就原样带出——回执宁可显示一段原文，
+        也不该因为格式不认识而假装没有值。
+        """
+        import ast
+        import json
+
+        try:
+            body = self._request(
+                "GET",
+                f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}"
+                f"/xcomEntries/{key}",
+                "get_xcom",
+            )
+        except AirflowError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+        value = body.get("value")
+        if not isinstance(value, str):
+            return value
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                return parse(value)
+            except (ValueError, SyntaxError):
+                continue
+        return value
+
     # ---------- 展示 ----------
 
     def run_url(self, dag_id: str, dag_run_id: str) -> str:

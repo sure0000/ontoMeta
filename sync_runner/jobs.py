@@ -83,6 +83,9 @@ class JobStore:
                     f"{spec.target.platform} / 装载 {spec.mode}）：native 不支持该组合或"
                     "驱动未装，seatunnel 档不可用或不支持该组合。"
                 )
+            # 进 JobStatus 而不只是日志：Airflow 任务会把它带回 XCom，ontoMeta 的回执
+            # 据此说清「这张表实际用了哪一档」。
+            self._set(job_id, backend=backend)
             self._append(job_id, f"backend={backend}")
 
             if backend == "native":

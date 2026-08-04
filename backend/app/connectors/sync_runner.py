@@ -20,7 +20,8 @@ from app.warehouse.jobs import JobSpec
 
 # ontoMeta 认识的 runner 契约版本。runner 的 GET /capabilities.contract_version 与此比对。
 # 2：capabilities 增 sink_modes（按「目标 × 装载方式」声明，见 job_planner._runner_reject）。
-EXPECTED_CONTRACT_VERSION = "2"
+# 3：JobStatus 增 backend（这张表实际由哪一档搬的），经 XCom 回到物化回执。
+EXPECTED_CONTRACT_VERSION = "3"
 
 
 class SyncRunnerError(RuntimeError):

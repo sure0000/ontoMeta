@@ -592,6 +592,8 @@ export interface AirflowSettings {
   docker_network: string;
   drivers_dir: string;
   sync_tool_images: string;
+  /** 强制指定搬运工具；"" = 自动（物化弹窗不再逐次选）。 */
+  sync_tool: string;
   max_tasks_per_dag: number;
   max_active_tasks_per_dag: number;
   dag_parse_timeout: number;
@@ -999,7 +1001,7 @@ export type MaterializationLayer = "dim" | "dwd" | "dws" | "ads";
 export type MaterializationLoadStrategy = "full" | "incremental" | "cdc";
 export type SyncTool = "seatunnel" | "datax" | "flink";
 
-/** 可选搬运工具及其能力（GET /warehouse/sync-tools）。 */
+/** 一个搬运工具及其能力。诊断与设置页的强制指定用；物化弹窗不再据此让人选。 */
 export interface SyncToolInfo {
   name: SyncTool;
   image: string;
@@ -1009,6 +1011,34 @@ export interface SyncToolInfo {
   available: boolean;
   /** 不可用的原因与修法；available 时为 null。 */
   reason: string | null;
+}
+
+/** 本次物化**会用什么搬**（GET /warehouse/sync-tools）。
+ *
+ * 工具已改为自动决策：runner 通道由执行侧逐表自选档位，docker 通道按「装载方式 ∩ 镜像
+ * 可用」挑。故这里是「告知结果」，不是「给你挑」。
+ */
+export interface SyncToolPlan {
+  channel: "runner" | "docker";
+  /** 本次会用的工具；"auto" = 不由 ontoMeta 指定（runner 自选）。选不出来时为 null。 */
+  resolved: string | null;
+  /** 是否为自动决策。false = 设置页强制指定了工具。 */
+  auto: boolean;
+  /** 一句可解释的理由，直接展示。 */
+  detail: string;
+  /** 选中的工具覆盖不了的装载方式（这些表不会产搬运作业）。 */
+  uncovered_modes: MaterializationLoadStrategy[];
+  /** 选不出工具时的原因；正常为 null。 */
+  error: string | null;
+  /**
+   * 目标引擎在**执行侧**真正支持的装载方式。null = 问不到（runner 不可达/未配），
+   * 此时不置灰任何选项——凭猜锁死比不锁更糟。
+   */
+  modes: MaterializationLoadStrategy[] | null;
+  /** modes 的来源或问不到的原因。 */
+  modes_detail: string;
+  default: SyncTool;
+  tools: SyncToolInfo[];
 }
 export type MaterializationScdType = "none" | "scd1" | "scd2";
 
@@ -1061,6 +1091,9 @@ export interface MaterializationReceipt {
    *  下面这些字段都不会有。声明为可选是照实描述，好让 TS 逼出取值处的判空。 */
   target_datasource?: { id: string; name: string; kind: string };
   engine?: string;
+  /** 这次实际用什么搬（"auto" = runner 逐表自选档位）+ 为什么是它。 */
+  sync_tool?: string | null;
+  sync_tool_detail?: string | null;
   database_prefix?: string | null;
   tables?: string[];
   /** orchestrated 提交回执：建表与搬运由 Airflow 执行，成败看 DagRun。 */
@@ -1108,6 +1141,23 @@ export interface MaterializeStatus {
   tasks: { task_id: string; state: string | null; try_number?: number }[];
   /** M16：各批 DagRun 的明细（顶层 state 是它们的聚合）。 */
   batches?: MaterializeBatch[];
+}
+
+/** 一个搬运任务的执行结果（来自该任务的 XCom）。
+ *
+ * runner 逐表自选档位，``backend`` 就是这张表实际用的那一档（native / seatunnel）。
+ * 任务还没跑完、或它是建表/切换任务（不产 XCom）时全为 null——这不是错误。
+ */
+export interface MaterializeTaskResult {
+  task_id: string;
+  dag_id: string | null;
+  backend?: string | null;
+  job_id?: string | null;
+  rows_read?: number | null;
+  rows_written?: number | null;
+  watermark_after?: string | null;
+  /** 形状不合预期时原样带出的 XCom 值。 */
+  raw?: unknown;
 }
 
 /** M11：物化血缘上报计划/回执（源表 → 目标表）。 */
@@ -1158,7 +1208,10 @@ export interface MaterializeRequestInput {
   /** 契约 id → 物理表名；缺省用实体技术名。 */
   table_overrides?: Record<string, string>;
   load_strategy?: MaterializationLoadStrategy | null;
-  /** 搬运工具：seatunnel/datax/flink；空 = 后端默认 seatunnel。 */
+  /**
+   * 搬运工具。**前端不再传**：由后端 sync_tool_resolver 决策（设置页可强制指定）。
+   * 保留字段仅为兼容既有调用方，传了会盖过自动决策。
+   */
   sync_tool?: SyncTool | null;
   selected_targets?: string[] | null;
   overrides?: Record<string, MaterializationContractUpdateInput>;

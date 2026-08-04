@@ -608,9 +608,12 @@ def _sync(task, **context):
         raise AirflowException(
             "sync-runner 作业失败：" + str(status.get("error")) + "（job " + str(job_id) + "）"
         )
-    # 回执带行数/水位，供「跑成功但没数据」当场可见。
+    # 返回值即 XCom（key=return_value），ontoMeta 的回执按需回读它。带行数/水位，供
+    # 「跑成功但没数据」当场可见；带 backend，说清这张表实际由哪一档搬的（runner 逐表自选）。
     return {
         "job_id": job_id,
+        "backend": status.get("backend"),
+        "rows_read": status.get("rows_read"),
         "rows_written": status.get("rows_written"),
         "watermark_after": status.get("watermark_after"),
     }

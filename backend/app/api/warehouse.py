@@ -18,6 +18,7 @@ from app.api.deps import (
     settings_service,
     warehouse_generator,
 )
+from app.connectors.sync_runner import SyncRunnerClient, SyncRunnerError
 from app.database import get_db
 from app.models import MaterializationContract, Ontology
 from app.models.agent import ArtifactStatus
@@ -131,18 +132,40 @@ def update_materialization_contract(
 
 
 @router.get("/warehouse/sync-tools")
-def list_warehouse_sync_tools():
-    """可选搬运工具及其能力（供物化弹窗选择）。镜像与命令由各工具 Adapter 定。
+def list_warehouse_sync_tools(
+    ontology_id: str | None = Query(
+        None, description="本次要物化的本体；给了才能按其装载方式算出会选哪个工具"
+    ),
+    engine: str = Query(DEFAULT_ENGINE, description="目标数仓引擎，决定可用的装载方式"),
+    db: Session = Depends(get_db),
+):
+    """本次物化**会用什么搬**，以及目标引擎实际支持哪些装载方式。
 
-    每项带 ``available``：镜像在本部署里拿不到的工具（如未自建镜像的 DataX）标为
-    不可用并给出 ``reason``，由弹窗禁用。**不从列表里删掉**——「有这个工具但没配」
-    与「没有这个工具」是两回事，后者会让人以为要改代码。
+    这个端点原来是「给弹窗列出可选工具」。工具已改为自动决策
+    （见 ``services/sync_tool_resolver``：runner 通道由执行侧逐表自选，docker 通道按
+    「装载方式 ∩ 镜像可用」挑），故这里改为**告知结果**：``resolved`` 是这次会用的工具，
+    ``detail`` 是那句可解释的理由。
+
+    ``modes`` 是目标引擎在**执行侧**真正支持的装载方式，供弹窗置灰「同步方式」。
+    runner 通道下取自 runner 的 ``sink_modes``——这才是真约束：seatunnel 档写 Hive 只做
+    全量、native 档能做增量却写不了 Hive，按工具适配器的 modes 置灰是错的。
+    问不到（runner 不可达/未配）时返回 null，此时**不置灰**，别凭猜锁死选项。
+
+    ``tools`` 保留作诊断与设置页的强制指定用：镜像拿不到的工具标 ``available=false``
+    并给出 ``reason``，**不从列表里删掉**——「有这个工具但没配」与「没有这个工具」是
+    两回事，后者会让人以为要改代码。
     """
+    from app.services.sync_tool_resolver import (
+        SyncToolResolutionError,
+        required_modes,
+        resolve_sync_tool,
+    )
     from app.warehouse.jobs import get_job_adapter
     from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL, list_sync_tools
 
+    airflow = settings_service.get_airflow_runtime(db)
     # 镜像覆盖来自设置页那一行（不再读环境变量），与物化提交时用的是同一个来源。
-    overrides = settings_service.get_airflow_runtime(db).sync_tool_images
+    overrides = airflow.sync_tool_images
     tools = []
     for name in list_sync_tools():
         a = get_job_adapter(name)
@@ -159,13 +182,88 @@ def list_warehouse_sync_tools():
                     None
                     if available
                     else (
-                        f"{a.docker_image} 无官方发行版，需自建镜像后用环境变量 "
-                        f"SYNC_TOOL_IMAGES={a.name}=<你的镜像> 指定"
+                        f"{a.docker_image} 无官方发行版，需自建镜像后在设置页的"
+                        f"「搬运工具镜像」里填 {a.name}=<你的镜像>"
                     )
                 ),
             }
         )
-    return {"default": DEFAULT_SYNC_TOOL, "tools": tools}
+
+    # 与提交时同一个决策函数、同一批装载方式：这里显示什么，那边就会用什么。
+    modes_wanted = (
+        required_modes(materialization_contract_service.list_selected(db, ontology_id))
+        if ontology_id
+        else ()
+    )
+    try:
+        choice = resolve_sync_tool(airflow, modes=modes_wanted)
+        resolved = {
+            "resolved": choice.label,
+            "auto": choice.auto,
+            "detail": choice.detail,
+            "uncovered_modes": list(choice.uncovered_modes),
+            "error": None,
+        }
+    except SyncToolResolutionError as exc:
+        # 选不出来不是 500：它是一个要在弹窗里说清、并由 preflight 阻断的部署问题。
+        resolved = {
+            "resolved": None,
+            "auto": True,
+            "detail": str(exc),
+            "uncovered_modes": [],
+            "error": str(exc),
+        }
+
+    supported, modes_detail = _engine_modes(airflow, engine, choice_tool=resolved["resolved"])
+    return {
+        "channel": (airflow.sync_channel or "runner").lower(),
+        "default": DEFAULT_SYNC_TOOL,
+        "modes": supported,
+        "modes_detail": modes_detail,
+        "tools": tools,
+        **resolved,
+    }
+
+
+def _engine_modes(
+    airflow, engine: str, *, choice_tool: str | None
+) -> tuple[list[str] | None, str]:
+    """目标引擎在执行侧真正支持的装载方式。问不到返回 ``(None, 原因)``。
+
+    **宁可返回 None 也不猜**：这个值直接用于置灰「同步方式」，猜错的代价是让人选不了
+    一个其实能跑的方式，或选了一个其实跑不了的。
+    """
+    channel = (airflow.sync_channel or "runner").lower()
+    key = (engine or "").lower()
+    if channel != "runner":
+        if not choice_tool or choice_tool == "auto":
+            return None, "docker 通道且未定下工具，无法确定可用的装载方式。"
+        from app.warehouse.jobs import get_job_adapter
+
+        adapter = get_job_adapter(choice_tool)
+        return (
+            [m for m in ("full", "incremental", "cdc") if adapter.supports(m)],
+            f"取自 {adapter.name} 适配器声明的能力。",
+        )
+    if not airflow.sync_runner_endpoint:
+        return None, "未配置 sync-runner 地址，问不到执行侧能力。"
+    client = SyncRunnerClient(
+        airflow.sync_runner_endpoint,
+        token=airflow.sync_runner_token,
+        # 弹窗打开时同步调一次，超时要短：问不到只是不置灰，不该让弹窗卡住。
+        timeout=5.0,
+    )
+    try:
+        caps = client.capabilities()
+    except SyncRunnerError as exc:
+        return None, f"sync-runner 不可达，问不到执行侧能力（{exc}）。"
+    finally:
+        client.close()
+    modes = (caps.get("sink_modes") or {}).get(key)
+    if modes is None:
+        sinks = ", ".join(caps.get("sinks") or []) or "无"
+        return [], f"runner 不支持写入 {engine}（它声明的目标：{sinks}）。"
+    return list(modes), f"取自 sync-runner 声明的 {engine} 能力。"
 
 
 @router.get("/warehouse/engines")
@@ -400,19 +498,10 @@ def materialize_ontology(
     return _materialize_out(artifact)
 
 
-@router.get("/warehouse/materialize/{artifact_id}/status")
-def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
-    """回读一次编排物化的运行状态（供弹窗轮询）。
-
-    **只读**：状态的权威在 Airflow，这里不缓存、不改制品——回执记录的是「提交了什么」，
-    运行到哪一步随时可能变，缓存一份只会出现两个互相矛盾的事实。
-
-    M16：一次物化可产多个 DAG（按 cron 分组 + 分批）。逐个回读 DagRun 并聚合出整轮状态，
-    同时返回 ``batches`` 明细供弹窗按批展示；旧的单 DAG 回执按单批处理，向后兼容。
-    """
+def _receipt_batches(db: Session, artifact_id: str) -> list[dict]:
+    """制品回执里的批次列表（新回执带 batches；旧的单 DAG 回执按单批兜底）。"""
     import json
 
-    from app.connectors.airflow import AirflowClient, AirflowError, is_terminal
     from app.models.agent import GovernanceArtifact
 
     artifact = db.get(GovernanceArtifact, artifact_id)
@@ -422,8 +511,6 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
         receipt = json.loads(artifact.execution_receipt_json or "{}")
     except (TypeError, ValueError):
         receipt = {}
-
-    # 新回执带 batches；旧回执按单批兜底。
     batches = receipt.get("batches") or [
         {
             "dag_id": receipt.get("dag_id"),
@@ -435,7 +522,76 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
     ]
     if not any(b.get("dag_id") and b.get("dag_run_id") for b in batches):
         raise HTTPException(status_code=400, detail="回执里没有 DagRun 信息，可能提交未成功")
+    return batches
 
+
+@router.get("/warehouse/materialize/{artifact_id}/tasks/{task_id}/result")
+def get_materialize_task_result(
+    artifact_id: str, task_id: str, db: Session = Depends(get_db)
+):
+    """一个搬运任务的执行结果：**实际用了哪一档**、搬了多少行、水位到哪。
+
+    值来自该任务的 XCom（runner 通道的搬运任务把 runner 回执作为返回值）。runner 逐表
+    自选档位（native 优先，搬不了的交 seatunnel），这个选择此前只进过 runner 的日志——
+    「为什么这张表没有水位/搬得慢」在 ontoMeta 侧无从对账，这个端点补上那一环。
+
+    **按需读，不进轮询**：Airflow 没有跨任务批量读 XCom 的端点，一次一请求；整轮几百个
+    任务在 5 秒一次的状态轮询里全读一遍会把 Airflow 打垮。故由前端在展开单个任务时调。
+    """
+    from app.connectors.airflow import AirflowClient, AirflowError
+
+    batches = _receipt_batches(db, artifact_id)
+    airflow = settings_service.get_airflow_runtime(db)
+    client = AirflowClient(
+        airflow.endpoint,
+        username=airflow.username,
+        password=airflow.password,
+        token=airflow.token,
+        api_version=airflow.api_version,
+    )
+    # 任务落在哪一批不由前端记：逐批试，命中即返回。批数是个位到十位数，代价可接受。
+    try:
+        for b in batches:
+            bid, brun = b.get("dag_id"), b.get("dag_run_id")
+            if not bid or not brun:
+                continue
+            try:
+                value = client.get_xcom(bid, brun, task_id)
+            except AirflowError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            if value is None:
+                continue
+            if not isinstance(value, dict):
+                # 非预期形状原样带出，不硬套字段——回执宁可显示原文也别假装读懂了。
+                return {"task_id": task_id, "dag_id": bid, "raw": value}
+            return {
+                "task_id": task_id,
+                "dag_id": bid,
+                "backend": value.get("backend"),
+                "job_id": value.get("job_id"),
+                "rows_read": value.get("rows_read"),
+                "rows_written": value.get("rows_written"),
+                "watermark_after": value.get("watermark_after"),
+            }
+    finally:
+        client.close()
+    # 没有值 ≠ 出错：任务还没跑完、或它是建表/切换任务（不产 XCom）。
+    return {"task_id": task_id, "dag_id": None, "backend": None}
+
+
+@router.get("/warehouse/materialize/{artifact_id}/status")
+def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
+    """回读一次编排物化的运行状态（供弹窗轮询）。
+
+    **只读**：状态的权威在 Airflow，这里不缓存、不改制品——回执记录的是「提交了什么」，
+    运行到哪一步随时可能变，缓存一份只会出现两个互相矛盾的事实。
+
+    M16：一次物化可产多个 DAG（按 cron 分组 + 分批）。逐个回读 DagRun 并聚合出整轮状态，
+    同时返回 ``batches`` 明细供弹窗按批展示；旧的单 DAG 回执按单批处理，向后兼容。
+    """
+    from app.connectors.airflow import AirflowClient, AirflowError, is_terminal
+
+    batches = _receipt_batches(db, artifact_id)
     airflow = settings_service.get_airflow_runtime(db)
     client = AirflowClient(
         airflow.endpoint,

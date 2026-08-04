@@ -5,15 +5,15 @@
 # GET /capabilities 如实声明装到了哪些。
 #
 # 构建（仓库根目录）：
-#   docker build -f docker/sync-runner/Dockerfile -t ontometa/sync-runner:1 .
+#   docker build -f docker/sync-runner/Dockerfile -t ontometa/sync-runner:3 .
 # 直连 Docker Hub 慢/不通时走镜像源（与 docker/orchestration/.env.example 的 IMG_* 同一套路）：
 #   docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
-#     -f docker/sync-runner/Dockerfile -t ontometa/sync-runner:1 .
+#     -f docker/sync-runner/Dockerfile -t ontometa/sync-runner:3 .
 # 运行（凭据按 alias 从环境变量注入，请求体里只有 alias）：
 #   docker run -p 8098:8098 \
 #     -e SYNC_CONN_ERP_READONLY_URL='mysql+pymysql://ro:pw@erp-db:3306/erp' \
 #     -e SYNC_CONN_WAREHOUSE_DEFAULT_URL='mysql+pymysql://root:pw@doris-fe:9030/dw' \
-#     ontometa/sync-runner:1
+#     ontometa/sync-runner:3
 # 写 Hive 时还要指到 Zeta 集群（见 sync_runner/backends/seatunnel.py 的部署前提）：
 #   -e SEATUNNEL_REST_ENDPOINT=http://<zeta>:8080
 #   -e SYNC_CONN_<目标别名>_METASTORE_URI=thrift://<不带下划线的主机>:9083

@@ -86,6 +86,9 @@ def test_submit_runs_and_reports_rows(tmp_path, monkeypatch):
     assert st["state"] == "success"
     assert st["rows_read"] == 2 and st["rows_written"] == 2
     assert st["target"] == "dim_cust"
+    # 档位是 runner 逐表自选的，必须如实回报（契约 v3）：不然「这张表用了哪一档」
+    # 只存在于 runner 的日志里，ontoMeta 侧无从对账。
+    assert st["backend"] == "native"
 
 
 def test_idempotent_key_returns_same_job(tmp_path, monkeypatch):

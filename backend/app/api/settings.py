@@ -158,6 +158,7 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         docker_network=row.docker_network,
         drivers_dir=row.drivers_dir,
         sync_tool_images=row.sync_tool_images,
+        sync_tool=row.sync_tool or "",
         max_tasks_per_dag=row.max_tasks_per_dag,
         max_active_tasks_per_dag=row.max_active_tasks_per_dag,
         dag_parse_timeout=row.dag_parse_timeout,

@@ -147,6 +147,48 @@ def test_ping_api_surfaces_401():
     assert "401" in str(exc.value)
 
 
+def test_xcom_parses_json_value():
+    """Airflow 的 XCom value 是序列化后的字符串，要解回结构才能取 backend/行数。"""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200, json={"key": "return_value", "value": '{"backend": "native", "rows_written": 7}'}
+        )
+
+    out = _client(handler).get_xcom("dag1", "r1", "sync_dim_a")
+    assert "/dags/dag1/dagRuns/r1/taskInstances/sync_dim_a/xcomEntries/return_value" in seen["url"]
+    assert out == {"backend": "native", "rows_written": 7}
+
+
+def test_xcom_parses_python_repr_value():
+    """2.x 有的版本存的是 repr 过的 Python 字面量（单引号），JSON 解不动，要退到字面量解析。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": "{'backend': 'seatunnel'}"})
+
+    assert _client(handler).get_xcom("dag1", "r1", "t") == {"backend": "seatunnel"}
+
+
+def test_xcom_unparseable_value_is_returned_raw():
+    """认不出的格式原样带出——回执宁可显示一段原文，也别因为格式不认识就丢掉。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": "not-json-at-all"})
+
+    assert _client(handler).get_xcom("dag1", "r1", "t") == "not-json-at-all"
+
+
+def test_xcom_missing_is_none_not_error():
+    """任务没跑完/不产 XCom 时 404。这不是错误，别把它变成一个红色的回执。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text='{"title": "XCom entry not found"}')
+
+    assert _client(handler).get_xcom("dag1", "r1", "create_tables") is None
+
+
 def test_terminal_states():
     assert is_terminal("success") and is_terminal("failed")
     assert not is_terminal("running")
