@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.services.common import log_change
+from app.ontology_types import is_valid_cardinality, is_valid_semantic_type
 from app.schemas import (
     BusinessLogicDetail,
     BusinessLogicObjectBindingOut,
@@ -34,6 +35,31 @@ _PROPERTY_BINDING_ROLES = {"input", "output", "filter", "group"}
 _ALLOWED_TABLE_ROLES = {"business_object", "data_table", "bridge", "technical"}
 # 待复核软标记：写入 role_reason 前缀，全库以此为复核状态的唯一真源。
 _REVIEW_MARK = "[待复核]"
+
+
+def _formal_enforced() -> bool:
+    """当前是否强制形式化枚举校验（formal_enforcement=error）。warn/off 不阻断编辑。"""
+    from app.config import settings
+
+    return (getattr(settings, "formal_enforcement", "warn") or "warn").lower() == "error"
+
+
+def _validate_cardinality_or_raise(value: str | None) -> None:
+    if value is None or not _formal_enforced():
+        return
+    if not is_valid_cardinality(value):
+        raise ValueError(
+            f"非法基数「{value}」：须为 one_to_one/one_to_many/many_to_one/many_to_many 之一"
+        )
+
+
+def _validate_semantic_type_or_raise(value: str | None) -> None:
+    if value is None or not _formal_enforced():
+        return
+    if not is_valid_semantic_type(value):
+        raise ValueError(
+            f"非法语义类型「{value}」：须为 identifier/measure/temporal/categorical/textual/technical 之一"
+        )
 
 
 def _set_review_mark(obj: ObjectType, needs_review: bool) -> None:
@@ -310,6 +336,7 @@ class EditService:
             prop.data_type = data_type
             changed.append("data_type")
         if semantic_type is not None:
+            _validate_semantic_type_or_raise(semantic_type)
             prop.semantic_type = semantic_type
             changed.append("semantic_type")
         if changed:
@@ -376,6 +403,7 @@ class EditService:
                 raise ValueError("Mapping object cannot be the same as source or target")
 
         rel_name = name or compacted
+        _validate_cardinality_or_raise(cardinality)
         rel = RelationType(
             ontology_id=ontology_id,
             name=rel_name,
@@ -549,6 +577,7 @@ class EditService:
             rel.description = description
             _mark_overridden(rel, ["description"])
         if cardinality is not None:
+            _validate_cardinality_or_raise(cardinality)
             rel.cardinality = cardinality
             _mark_overridden(rel, ["cardinality"])
         if structure_type is not None:

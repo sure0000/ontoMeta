@@ -70,7 +70,15 @@ def normalize_semantic_type(v: str | None) -> SemanticType: ...   # 认不出返
 
 ### 1.2 DB 约束与列变更（alembic）
 
-新增迁移 `xxxx_formalize_ontology_schema.py`：
+> 【实现决定】2025 落地时**暂不加硬唯一约束**（object_types/relation_types 的
+> `(ontology_id, name)`）。原因：生成流水线 ``ontology_merge.merge_objects`` 在 dedup
+> sweep **之前**会逐个 ``db.flush()`` 对象，此时同名对象的 DB 唯一约束会在 flush
+> 时立即报错，与「先落库再消歧」的现有流程冲突；而该不变式已由
+> ``validate_ontology``（发布前一致性）+ dedup sweep 在应用层保证。若未来把生成
+> 改成「先消歧再 flush」，再补硬约束。**属性名** `(object_type_id, name)` 的唯一性
+> 风险较小，可在后续单独评估。
+
+若后续确需加约束，新增迁移 `xxxx_formalize_ontology_schema.py`：
 
 ```python
 def upgrade():
