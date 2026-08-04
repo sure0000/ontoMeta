@@ -122,6 +122,11 @@ class FactLedger:
         rf = RelationFact(id=rid, name=rel.get("name") or "", display_name=rel.get("display_name") or "")
         self.relations[rid] = rf
         self._index_names(rf.name, rf.display_name)
+        # 关系两端对象名也属已检索到的可信具名实体（search_relations 已返回），
+        # 答案描述“某关系连接 A 和 B”时不应把 A/B 判为幻觉。
+        self._index_names(
+            rel.get("source_object_name") or "", rel.get("target_object_name") or ""
+        )
 
     def add_metric_summary(self, logic: dict) -> None:
         lid = logic.get("id")
@@ -147,6 +152,14 @@ class FactLedger:
             key = _norm(n)
             if key and len(key) >= 2:  # 单字符名不进索引，避免噪声误命中
                 self._name_index.add(key)
+
+    def add_context_name(self, *names: str) -> None:
+        """登记本轮上下文可信具名实体（如当前数据域/本体名）。
+
+        这些名称是问答发生的确定上下文（非 LLM 自编），允许答案引用
+        当前数据域名而不被 answer_verifier 误判为幻觉实体。
+        """
+        self._index_names(*names)
 
     # ------------------------------------------------------------------ 判定
 

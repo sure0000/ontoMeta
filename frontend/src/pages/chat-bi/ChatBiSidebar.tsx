@@ -329,9 +329,9 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
         )}
       </div>
 
-      <div className="chatbi-sidebar-footer">
-        <div style={{ flex: 1 }} />
-        {totalArchived > 0 && !showArchived && (
+      {totalArchived > 0 && !showArchived && (
+        <div className="chatbi-sidebar-footer">
+          <div style={{ flex: 1 }} />
           <Tooltip title={`归档 (${totalArchived})`}>
             <Badge count={totalArchived} size="small" offset={[-2, 2]}>
               <Button
@@ -343,8 +343,8 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
               />
             </Badge>
           </Tooltip>
-        )}
-      </div>
+        </div>
+      )}
     </aside>
   );
 });

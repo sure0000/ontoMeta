@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.services.agent_grounding import FactLedger
 from app.services.answer_verifier import verify_answer
+from app.services.chat_bi import _AGENT_TOOL_SCHEMAS
 
 
 def _ledger_with_order() -> FactLedger:
@@ -78,3 +79,53 @@ def test_ledger_numeric_normalization():
 
 def test_empty_answer_ok():
     assert verify_answer("", _ledger_with_order()).ok
+
+
+def test_relation_from_overview_passes():
+    """get_domain_overview 现在登记已发布关系：概览/列举类问题引用关系名不再被拒答。"""
+    led = _ledger_with_order()
+    led.add_relation({"id": "r1", "name": "order_customer", "display_name": "下单客户"})
+    v = verify_answer("当前数据域存在关系「下单客户」。", led, strict_numbers=False)
+    assert v.ok, v.unverified
+
+
+def test_context_domain_name_not_flagged():
+    """植入的当前数据域名是可信上下文，答案引用时不得被判为幻觉实体。"""
+    led = _ledger_with_order()
+    led.add_context_name("销售域")
+    v = verify_answer("数据域「销售域」已发布的关系涉及「订单」对象。", led, strict_numbers=False)
+    assert v.ok, v.unverified
+
+
+def test_tool_names_not_flagged():
+    """复现拒答场景：模型在正文提到工具名（get_domain_overview/search_relations）时不应被拒答。"""
+    led = _ledger_with_order()
+    led.add_context_name(*[t["function"]["name"] for t in _AGENT_TOOL_SCHEMAS])
+    v = verify_answer(
+        "我通过「get_domain_overview」与「search_relations」检索到当前数据域的已发布关系。",
+        led,
+        strict_numbers=False,
+    )
+    assert v.ok, v.unverified
+
+
+def test_enumeration_answer_end_to_end_not_refused():
+    """端到端复现『有哪些已发布的本体有关系？』：账本按真实流程植入
+    （数据域名 + 工具名 + 概览关系），答案列举关系显示名 + 顺带提到工具名，不应拒答。"""
+    led = _ledger_with_order()
+    led.add_context_name("数据域-ERP-全量")
+    led.add_context_name(*[t["function"]["name"] for t in _AGENT_TOOL_SCHEMAS])
+    # get_domain_overview 现在会登记关系
+    for r in [
+        {"id": "r1", "name": "order_customer", "display_name": "下单客户",
+         "source_object_name": "订单", "target_object_name": "客户"},
+        {"id": "r2", "name": "order_item", "display_name": "订单明细",
+         "source_object_name": "订单", "target_object_name": "商品"},
+    ]:
+        led.add_relation(r)
+    answer = (
+        "数据域「数据域-ERP-全量」已发布若干关系，例如「下单客户」（连接「订单」与「客户」）"
+        "和「订单明细」。以上通过「get_domain_overview」检索得到。"
+    )
+    v = verify_answer(answer, led, strict_numbers=False)
+    assert v.ok, v.unverified

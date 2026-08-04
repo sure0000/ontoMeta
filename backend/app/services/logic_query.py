@@ -6,6 +6,7 @@ from app.models import (
     BusinessLogicCategory,
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
+    EntityStatus,
     ObjectType,
     Property,
     RelationType,
@@ -337,7 +338,9 @@ class OntologyQueryService(_OntologyQueryBase):
             for b, prop, obj in rows
         ]
 
-    def get_object_type(self, db: Session, object_type_id: str) -> ObjectTypeDetail | None:
+    def get_object_type(
+        self, db: Session, object_type_id: str, *, published_only: bool = False
+    ) -> ObjectTypeDetail | None:
         obj = (
             db.query(ObjectType)
             .options(joinedload(ObjectType.properties))
@@ -346,39 +349,32 @@ class OntologyQueryService(_OntologyQueryBase):
         )
         if not obj:
             return None
+        # 已发布浏览：对象本身未发布则视为不存在，且其关系/邻居仅取已发布，
+        # 与 Data Agent 的接地集（只认 published 实体）保持一致，避免
+        # 「浏览可见但 Data Agent 拒答」的口径分裂。
+        if published_only and obj.status != EntityStatus.PUBLISHED.value:
+            return None
+        _pub = EntityStatus.PUBLISHED.value
 
-        outgoing = (
-            db.query(RelationType)
-            .options(
-                joinedload(RelationType.source_object_type),
-                joinedload(RelationType.target_object_type),
-                joinedload(RelationType.mapping_object_type),
+        def _rel_query(filter_expr):
+            q = (
+                db.query(RelationType)
+                .options(
+                    joinedload(RelationType.source_object_type),
+                    joinedload(RelationType.target_object_type),
+                    joinedload(RelationType.mapping_object_type),
+                )
+                .filter(filter_expr)
             )
-            .filter(RelationType.source_object_type_id == object_type_id)
-            .all()
-        )
-        incoming = (
-            db.query(RelationType)
-            .options(
-                joinedload(RelationType.source_object_type),
-                joinedload(RelationType.target_object_type),
-                joinedload(RelationType.mapping_object_type),
-            )
-            .filter(RelationType.target_object_type_id == object_type_id)
-            .all()
-        )
+            if published_only:
+                q = q.filter(RelationType.status == _pub)
+            return q.all()
+
+        outgoing = _rel_query(RelationType.source_object_type_id == object_type_id)
+        incoming = _rel_query(RelationType.target_object_type_id == object_type_id)
         # 本对象作为关系表(bridge)实现(mapping)的业务关系：它本身不是关系端点，
         # 故不在 outgoing/incoming 里；供桥表详情图谱显示它所连接的两个业务对象。
-        implemented = (
-            db.query(RelationType)
-            .options(
-                joinedload(RelationType.source_object_type),
-                joinedload(RelationType.target_object_type),
-                joinedload(RelationType.mapping_object_type),
-            )
-            .filter(RelationType.mapping_object_type_id == object_type_id)
-            .all()
-        )
+        implemented = _rel_query(RelationType.mapping_object_type_id == object_type_id)
         related_logics = self._related_logics_for_object(db, obj)
         logic_bindings = self._logic_bindings_for_object(db, obj)
 

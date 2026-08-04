@@ -1,4 +1,4 @@
-import { Breadcrumb, Spin } from "antd";
+import { Breadcrumb } from "antd";
 import type { ItemType } from "antd/es/breadcrumb/Breadcrumb";
 import { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
@@ -203,16 +203,17 @@ export function AppBreadcrumb() {
   }, [location.pathname, location.search, params.domainId, params.objectId, params.logicId, params.relationId]);
 
   if (loading && items.length === 0) {
-    return (
-      <div className="app-breadcrumb">
-        <Spin size="small" />
-      </div>
-    );
+    return null;
+  }
+
+  // 单级页面（如列表页）无需面包屑导航
+  if (items.length <= 1) {
+    return null;
   }
 
   return (
-    <div className="app-breadcrumb">
+    <nav className="page-breadcrumb">
       <Breadcrumb items={items} />
-    </div>
+    </nav>
   );
 }

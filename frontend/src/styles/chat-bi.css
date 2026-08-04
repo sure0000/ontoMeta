@@ -10,11 +10,9 @@
   gap: 0;
   flex: 1;
   min-height: 0;
-  border-radius: 12px;
+  min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--om-border);
   background: var(--om-surface);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 /* ---------- Sidebar ---------- */
@@ -22,8 +20,8 @@
 .chatbi-sidebar {
   width: 300px;
   flex-shrink: 0;
-  border-right: 1px solid var(--om-border);
-  background: #f8f9fb;
+  border-right: 1px solid var(--om-border-strong);
+  background: #ffffff;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -34,18 +32,18 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 14px 10px;
+  padding: 10px 12px 6px;
 }
 
 .chatbi-sidebar-brand-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  font-size: 18px;
+  font-size: 16px;
   background: linear-gradient(135deg, var(--om-primary, #2563eb), #4f46e5);
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28);
 }
@@ -65,16 +63,16 @@
 }
 
 .chatbi-sidebar-header {
-  padding: 4px 12px 12px;
-  border-bottom: 1px solid var(--om-border);
-  background: #f8f9fb;
+  padding: 2px 10px 10px;
+  border-bottom: 1px solid var(--om-border-strong);
+  background: #ffffff;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .chatbi-sidebar-header .chatbi-new-chat-btn {
-  height: 38px;
+  height: 34px;
   border-radius: 8px;
   font-weight: 500;
   font-size: 13px;
@@ -94,7 +92,7 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 8px 8px 4px;
+  padding: 6px 6px 4px;
   scroll-behavior: smooth;
 }
 
@@ -117,8 +115,8 @@
 
 .chatbi-sidebar-footer {
   padding: 8px 12px;
-  border-top: 1px solid var(--om-border);
-  background: #f8f9fb;
+  border-top: 1px solid var(--om-border-strong);
+  background: #ffffff;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -127,7 +125,7 @@
 /* ---- Category folder ---- */
 
 .chatbi-category-folder {
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .chatbi-category-folder-header {
@@ -135,7 +133,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 6px 10px;
   cursor: pointer;
   user-select: none;
   border: none;
@@ -250,7 +248,7 @@
 }
 
 .chatbi-time-group-label {
-  padding: 8px 12px 6px;
+  padding: 8px 10px 3px;
   font-size: 11px;
   font-weight: 700;
   color: var(--om-text-tertiary);
@@ -264,8 +262,8 @@
 .chatbi-conv-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
+  gap: 9px;
+  padding: 6px 10px;
   cursor: pointer;
   transition: background 0.12s ease;
   position: relative;
@@ -283,6 +281,17 @@
 
 .chatbi-conv-item--active:hover {
   background: var(--om-primary-soft) !important;
+}
+
+.chatbi-conv-item--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--om-primary);
 }
 
 .chatbi-conv-item:focus-visible {
@@ -335,7 +344,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .chatbi-conv-preview {
@@ -581,6 +590,8 @@
 .chatbi-bubble--user {
   align-self: flex-end;
   flex-direction: row-reverse;
+  width: auto;
+  max-width: 78%;
 }
 
 .chatbi-bubble--assistant {
@@ -622,6 +633,9 @@
 }
 
 .chatbi-bubble--user .chatbi-bubble-body {
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: 100%;
   background: #eff6ff;
   border-color: #bfdbfe;
 }
@@ -751,6 +765,49 @@
   gap: 6px;
   color: var(--om-text-secondary);
   font-size: 12px;
+}
+
+/* 紧凑的警告 / 提醒提示条 —— 黄色警告、红色错误 */
+.chatbi-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.chatbi-notice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.chatbi-notice-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  font-size: 13px;
+}
+.chatbi-notice-title {
+  font-weight: 600;
+}
+.chatbi-notice-desc {
+  opacity: 0.82;
+}
+.chatbi-notice--warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+.chatbi-notice--warning .chatbi-notice-icon {
+  color: #d97706;
+}
+.chatbi-notice--error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
 }
 
 /* ---------- Composer ---------- */

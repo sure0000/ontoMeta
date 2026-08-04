@@ -149,6 +149,31 @@ def test_published_browse_shows_business_objects_only(client, admin_headers):
     assert logics.json()["total"] == 0
 
 
+def test_published_object_detail_excludes_unpublished_relations(client, admin_headers):
+    """已发布浏览态的对象详情（published_only）不得泄露未发布的关系与邻居，
+    与 Data Agent 只认已发布实体的接地集保持一致（避免“浏览可见但拒答”）。"""
+    _, ontology_id, ids = _seed("scope-detail")
+    _publish(client, admin_headers, ontology_id)
+
+    # 默认（工作区/草稿态）：仍可看到未发布关系
+    draft = client.get(f"/api/object-types/{ids['biz']}", headers=admin_headers)
+    assert draft.status_code == 200
+    assert len(draft.json()["outgoing_relations"]) == 1
+
+    # 已发布浏览态：未发布关系被滤掉
+    pub = client.get(
+        f"/api/object-types/{ids['biz']}?published_only=true", headers=admin_headers
+    )
+    assert pub.status_code == 200
+    assert pub.json()["outgoing_relations"] == []
+
+    # 未发布的非业务对象在已发布浏览态下视为不存在
+    missing = client.get(
+        f"/api/object-types/{ids['tech']}?published_only=true", headers=admin_headers
+    )
+    assert missing.status_code == 404
+
+
 def test_published_object_count_excludes_non_business(client, admin_headers):
     domain_id, ontology_id, _ = _seed("scope-count")
     _publish(client, admin_headers, ontology_id)

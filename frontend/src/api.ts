@@ -424,7 +424,10 @@ export const api = {
       })}`,
     ),
 
-  getRelationType: (id: string) => request<RelationTypeDetail>(`/api/relation-types/${id}`),
+  getRelationType: (id: string, publishedOnly?: boolean) =>
+    request<RelationTypeDetail>(
+      `/api/relation-types/${id}${buildQuery({ published_only: publishedOnly })}`,
+    ),
 
   listOntologies: (params?: { domainId?: string; publishedOnly?: boolean }) =>
     request<OntologySummary[]>(
@@ -448,7 +451,7 @@ export const api = {
     request<FormalValidationResult>(`/api/ontologies/${ontologyId}/formal-validate`),
   getOntologyGraph: (
     id: string,
-    params?: { centerId?: string; depth?: number; full?: boolean; maxNodes?: number },
+    params?: { centerId?: string; depth?: number; full?: boolean; maxNodes?: number; publishedOnly?: boolean },
   ) =>
     request<OntologyGraph>(
       `/api/ontologies/${id}/graph${buildQuery({
@@ -456,6 +459,7 @@ export const api = {
         depth: params?.depth,
         full: params?.full,
         max_nodes: params?.maxNodes,
+        published_only: params?.publishedOnly,
       })}`,
     ),
   getOntologyGroupedGraph: (id: string) =>
@@ -485,7 +489,10 @@ export const api = {
         offset: params?.offset,
       })}`,
     ),
-  getObjectType: (id: string) => request<ObjectTypeDetail>(`/api/object-types/${id}`),
+  getObjectType: (id: string, publishedOnly?: boolean) =>
+    request<ObjectTypeDetail>(
+      `/api/object-types/${id}${buildQuery({ published_only: publishedOnly })}`,
+    ),
 
   listBusinessLogics: (params?: {
     ontologyId?: string;

@@ -9,7 +9,7 @@ import {
   RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
-import { Avatar, Layout, Menu, Tooltip } from "antd";
+import { Layout, Menu, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -18,7 +18,7 @@ import { api } from "../api";
 import { useApi } from "../hooks/useApi";
 import type { DomainContext } from "../types";
 
-const { Sider, Content, Header } = Layout;
+const { Sider, Content } = Layout;
 
 function ontologyChildKey(domainId: string) {
   return `/ontology?domain=${domainId}`;
@@ -85,6 +85,9 @@ export function AppLayout() {
     () => getOpenKeys(location.pathname),
     [],
   );
+
+  // Data Agent 等全高度三栏应用：内容区满幅铺满，去掉内边距
+  const isFlushPage = location.pathname.startsWith("/chat-bi");
 
   const menuItems = useMemo<MenuProps["items"]>(() => {
     const domainList = domains ?? [];
@@ -159,14 +162,26 @@ export function AppLayout() {
         trigger={null}
         className="app-sider"
       >
-        <div className="app-logo">
-          <span className="app-logo-mark">◈</span>
+        <div className={`app-logo${collapsed ? " app-logo--collapsed" : ""}`}>
+          {!collapsed && <span className="app-logo-mark">◈</span>}
           {!collapsed && (
             <div className="app-logo-text">
               <span className="app-logo-title">ontoMeta</span>
               <span className="app-logo-subtitle">企业本体建模系统</span>
             </div>
           )}
+          <Tooltip
+            title={collapsed ? "展开侧栏" : "收起侧栏"}
+            placement="right"
+          >
+            <button
+              className="app-sider-toggle"
+              onClick={() => setCollapsed((c) => !c)}
+              aria-label="toggle sider"
+            >
+              {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+            </button>
+          </Tooltip>
         </div>
         <Menu
           className="app-sider-menu"
@@ -189,45 +204,8 @@ export function AppLayout() {
       </Sider>
 
       <Layout>
-        <Header className="app-header">
-          <div className="app-header-left">
-            <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"} placement="bottom">
-              <button
-                className="om-icon-btn"
-                onClick={() => setCollapsed((c) => !c)}
-                aria-label="toggle sider"
-                style={{
-                  border: "1px solid var(--om-border)",
-                  background: "var(--om-surface)",
-                  borderRadius: 8,
-                  width: 32,
-                  height: 32,
-                  display: "grid",
-                  placeItems: "center",
-                  cursor: "pointer",
-                  color: "var(--om-text-secondary)",
-                }}
-              >
-                {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-              </button>
-            </Tooltip>
-            <AppBreadcrumb />
-          </div>
-          <div className="app-header-right">
-            <span className="app-env-badge">
-              <span className="app-env-dot" />
-              内部环境
-            </span>
-            <div className="app-user">
-              <Avatar size={26} style={{ background: "#2563eb", fontSize: 12 }}>
-                OM
-              </Avatar>
-              <span className="app-user-name">本体管理员</span>
-            </div>
-          </div>
-        </Header>
-
-        <Content className="app-content">
+        <Content className={`app-content${isFlushPage ? " app-content--flush" : ""}`}>
+          <AppBreadcrumb />
           <Outlet />
         </Content>
       </Layout>

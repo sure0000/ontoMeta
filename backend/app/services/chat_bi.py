@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+import types
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,16 +73,23 @@ _AGENT_SYSTEM_PROMPT = (
     "1. 先用 search_objects / search_logics / search_relations 找到相关实体，"
     "再用 get_object / get_logic 拿字段与口径细节；不要臆造对象名或字段名。"
     "检索关键词优先用**中文**（本体以中文命名，英文词多半命不中）。\n"
-    "1b. 概览/列举类问题（如“有哪些对象/本体”）**先调用 get_domain_overview**，"
-    "严格基于它返回的已发布对象总数与清单作答，不要逐个猜关键词穷举、更不要编造数量或对象名。\n"
+    "1b. 概览/列举类问题（如“有哪些对象/本体/关系”、“哪些本体有关系”）**必须先调用 get_domain_overview**，"
+    "严格基于它返回的已发布对象/关系清单与总数作答；若需更多关系细节再调 search_relations。"
+    "**绝不允许凭常识/行业经验（如 ERP/ERPNext 的 tabXxx 表名）猜测或穷举对象/关系/数量名称**，"
+    "答案里出现的每一个对象名/关系名/字段名都必须是工具本次**实际返回**过的名称；宁可少答不可编造。\n"
     "2. 若问题需要具体数值/明细，用 get_object 拿到真实字段后写 SQL；"
     "**只要你写了查询 SQL，就必须通过 run_sql 提交**（哪怕只为取数/校验），"
     "不要仅在正文里贴 SQL 而不调用 run_sql。表名/字段名必须来自本体。\n"
     "3. run_sql 只读：只能 SELECT。若返回“无可执行数据源”，就把该查询作为建议 SQL 给出，"
     "并说明未实际执行。\n"
     "4. 用中文、Markdown 作答：先给口径解读，再给结论/建议；有数据时用表格或要点呈现。\n"
+    "4b. 【作答粒度】列举/概览类只用工具返回的**对象显示名**或**关系显示名(display_name)**作答，"
+    "不要擅自展开到字段名、列名或底层表名（如 to_currency、campaign_name、tabXxx）——除非你确实通过 get_object 取到了该字段；"
+    "也不要用「」或反引号包裹任何非工具返回的英文标识符。宁可只给已检索到的名称清单，也不要补充未接地的细节。\n"
     "5. 若本体中确实找不到相关对象/逻辑，如实说明无法基于当前本体回答，不要编造。\n"
     "6. 不要在正文里堆砌调试信息；工具调用过程会单独展示给用户。"
+    "**绝不要在回答正文里提及工具名（如 get_domain_overview、search_relations）或用「」/反引号包裹它们**，"
+    "直接用自然语言陈述结果即可。"
 )
 
 # OpenAI 原生 function-calling 工具（自建 GLM 实测支持）。
@@ -317,18 +325,10 @@ class ChatBiService:
                 )
             except Exception as exc:
                 logger.exception("ChatBI agent loop failed: %s", exc)
-                payload = self._mock_answer(
-                    question=question,
-                    snapshots=snapshots,
-                    relations=relations,
-                    logics=logics,
-                    matched_objects=grounded_objects,
-                    matched_logics=grounded_logics,
-                )
-                payload.setdefault("steps", [])
-                payload["answer"] = (
-                    f"> {self._friendly_llm_error(exc)}\n\n{payload['answer']}"
-                )
+                # 不做 mock 降级：LLM 调用失败直接报错，避免用规则答案冒充真实回答。
+                raise ValueError(
+                    f"LLM 调用失败：{self._friendly_llm_error(exc)}"
+                ) from exc
             payload = resolver.resolve_payload(payload)
             # Agent 接地判定：只要 Agent 真正命中过本体数据（检索有结果 / 读到对象逻辑 /
             # 概览 / 跑出数据）就视为接地，即便未产出具体引用（如“有哪些对象”这类概览问题）。
@@ -453,20 +453,21 @@ class ChatBiService:
                     yield ev  # step_start / step_done / token 透传
         except Exception as exc:  # noqa: BLE001
             logger.exception("ChatBI agent stream failed: %s", exc)
+            # 不做 mock 降级：LLM 调用失败时只推送明确错误并结束，不用规则答案冒充。
             yield {"type": "error", "message": self._friendly_llm_error(exc)}
-            payload = self._mock_answer(
-                question=question, snapshots=snapshots, relations=relations, logics=logics,
-                matched_objects=grounded_objects, matched_logics=grounded_logics)
-            payload.setdefault("steps", [])
-            payload["answer"] = f"> {self._friendly_llm_error(exc)}\n\n{payload['answer']}"
+            return
 
         payload = payload or {"answer": "（模型未返回回答）", "steps": []}
         payload = resolver.resolve_payload(payload)
         unverified = payload.get("_unverified") or []
+        # 拒答时仍保留 agent 已产生的工具步骤轨迹，供用户查看「做了什么才拒答」，
+        # 避免拒答 payload 覆盖前端已流式出来的 steps。
+        _prev_steps = payload.get("steps") or []
         if unverified:
             payload = self._ungrounded_refusal(
                 domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id,
                 question=question, reasons=unverified)
+            payload["steps"] = _prev_steps
         else:
             grounded = bool(
                 payload.pop("_grounded", False)
@@ -477,10 +478,16 @@ class ChatBiService:
             if not grounded:
                 payload = self._ungrounded_refusal(
                     domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)
+                payload["steps"] = _prev_steps
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
         payload.update({"domain_id": domain_id, "domain_name": domain.name,
                         "ontology_id": ontology.id, "used_mock": use_mock})
+        # 关键：只有在接地校验通过、确定不拒答后，才逐字流式吐出答案，
+        # 避免"先流式给出内容、后又被拒答撤回"的观感。
+        if not payload.get("grounding_refused"):
+            async for ev in self._emit_answer_tokens(payload.get("answer") or ""):
+                yield ev
         yield {"type": "done", "payload": payload}
 
     def suggest_questions(self, db: Session, domain_id: str) -> list[str]:
@@ -799,7 +806,7 @@ class ChatBiService:
 
     @staticmethod
     def _friendly_llm_error(exc: Exception) -> str:
-        """把常见 LLM 失败(尤其是上下文/请求体过大)翻译成可读提示，替代笼统报错。"""
+        """把常见 LLM 失败翻译成可读提示（不降级，直接报错）。"""
         text = str(exc).lower()
         status = getattr(exc, "status_code", None)
         size_signals = (
@@ -814,10 +821,22 @@ class ChatBiService:
         )
         if status in (413, 422) or any(sig in text for sig in size_signals):
             return (
-                "LLM 上下文过大：本体知识超出模型/网关的请求上限，已降级为规则匹配示例。"
+                "LLM 上下文过大：本体知识超出模型/网关的请求上限。"
                 "请缩小提问范围，或联系管理员放宽端点的 body/上下文限制。"
             )
-        return "LLM 调用失败，已降级为规则匹配示例。"
+        # 模型/通道不可用（如网关报 model_not_found / no available channel）
+        if (
+            status in (401, 403, 404)
+            or "model_not_found" in text
+            or "no available channel" in text
+            or "invalid token" in text
+            or "unauthorized" in text
+        ):
+            return (
+                "LLM 服务不可用：当前模型或密钥/通道无效（网关返回不可用）。"
+                "请到「设置 → 模型服务」检查并启用一个可用的 LLM 配置后重试。"
+            )
+        return f"LLM 调用失败：{str(exc)[:200]}"
 
     # -------------------------------------------------------------- agent loop
 
@@ -1035,6 +1054,9 @@ class ChatBiService:
                 for o in result.get("objects") or []:
                     if isinstance(o, dict):
                         ledger.add_object_summary(o)
+                for r in result.get("relations") or []:
+                    if isinstance(r, dict):
+                        ledger.add_relation(r)
             elif tool_name == "run_sql" and isinstance(result, dict) and result.get("executed"):
                 ledger.add_cells(result.get("columns") or [], result.get("rows") or [])
         except Exception as exc:  # noqa: BLE001 — 登记失败不得拖垮问答
@@ -1110,7 +1132,7 @@ class ChatBiService:
                     db, ontology_id=ontology_id, published_only=True, limit=100
                 )
                 rel_page = qs.list_relation_types(
-                    db, ontology_id=ontology_id, published_only=True, limit=1
+                    db, ontology_id=ontology_id, published_only=True, limit=100
                 )
                 overview = {
                     "published_object_count": obj_page.total,
@@ -1119,6 +1141,9 @@ class ChatBiService:
                         {"display_name": o.display_name, "name": o.name, "table_role": o.table_role}
                         for o in obj_page.items
                     ],
+                    # 列出已发布关系（名称+两端），供概览/列举类问题接地：
+                    # 否则答案一提关系就因账本无凭证而被判不可证→误拒答。
+                    "relations": [self._compact_relation(r) for r in rel_page.items],
                     "note": "仅统计并列举【已发布(published)】的业务对象与关系；未发布的建模草稿不计入。",
                 }
                 return overview, f"{obj_page.total} 个已发布对象 / {rel_page.total} 个已发布关系", False
@@ -1128,6 +1153,58 @@ class ChatBiService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent tool %s failed: %s", name, exc)
             return {"error": str(exc)[:300]}, f"工具异常：{type(exc).__name__}", True
+
+    # 有些模型不走 OpenAI 原生 function-calling，而把工具调用以 DSML/XML 文本写进正文：
+    #   <｜｜DSML｜｜invoke name="search_relations">
+    #     <｜｜DSML｜｜parameter name="keyword" string="true">分组</｜｜DSML｜｜parameter>
+    #   </｜｜DSML｜｜invoke>
+    # 仅锚定 invoke/parameter 关键字，兼容全角竖线等任意前缀。
+    _TEXT_INVOKE_RE = re.compile(
+        r'invoke\s+name="([^"]+)"(.*?)</[^<>]*?invoke[^<>]*?>', re.S | re.I
+    )
+    _TEXT_PARAM_RE = re.compile(
+        r'parameter\s+name="([^"]+)"[^<>]*?>(.*?)</[^<>]*?parameter[^<>]*?>', re.S | re.I
+    )
+
+    @classmethod
+    def _extract_text_tool_calls(cls, content: str | None) -> list:
+        """从正文解析非原生（DSML/XML 文本）的工具调用，返回与原生 tool_call 同形的对象。
+
+        兼容部分模型（如部署不完善的 GLM/DeepSeek 网关）把工具调用写到 content 而非
+        tool_calls 字段的情形，避免把一堆标记当答案输出。
+        """
+        if not content or "invoke" not in content.lower():
+            return []
+        calls: list = []
+        for i, m in enumerate(cls._TEXT_INVOKE_RE.finditer(content)):
+            name = (m.group(1) or "").strip()
+            if not name:
+                continue
+            args: dict = {}
+            for pm in cls._TEXT_PARAM_RE.finditer(m.group(2) or ""):
+                args[(pm.group(1) or "").strip()] = (pm.group(2) or "").strip()
+            calls.append(
+                types.SimpleNamespace(
+                    id=f"txt_{i}",
+                    type="function",
+                    function=types.SimpleNamespace(
+                        name=name, arguments=json.dumps(args, ensure_ascii=False)
+                    ),
+                )
+            )
+        return calls
+
+    @staticmethod
+    def _strip_tool_markup(text: str | None) -> str:
+        """去除正文里泄漏的工具调用标记（DSML/tool_calls/invoke/parameter），避免当答案展示。"""
+        if not text:
+            return text or ""
+        t = re.sub(r"<[^<>]*?tool_calls[^<>]*?>.*?</[^<>]*?tool_calls[^<>]*?>", "", text, flags=re.S | re.I)
+        t = re.sub(r"<[^<>]*?invoke\b.*?</[^<>]*?invoke[^<>]*?>", "", t, flags=re.S | re.I)
+        # 未闭合/残留：从孤立的 DSML/tool 起始标签到结尾全部舍弃
+        t = re.sub(r"<[^<>]*?(?:DSML|tool_calls|invoke|parameter)\b.*$", "", t, flags=re.S | re.I)
+        t = re.sub(r"</?[^<>]*?DSML[^<>]*?>", "", t, flags=re.I)
+        return t.strip()
 
     @staticmethod
     def _extract_sql_from_text(text: str | None) -> str | None:
@@ -1193,6 +1270,21 @@ class ChatBiService:
             if delta:
                 yield delta
 
+    @staticmethod
+    async def _emit_answer_tokens(text: str) -> AsyncIterator[dict]:
+        """将已生成并通过接地校验的答案按小片逐字流式产出。
+
+        只有确定不会被拒答后才调用，从而避免“先给内容再撤回”的观感；
+        因答案已在服务端生成完毕，此处仅模拟打字机节奏。
+        """
+        if not text:
+            return
+        # 依长度自适应步长，长答案加大步长以控制总时长
+        step = 1 if len(text) <= 200 else (2 if len(text) <= 600 else 4)
+        for i in range(0, len(text), step):
+            yield {"type": "token", "delta": text[i : i + step]}
+            await asyncio.sleep(0.012)
+
     async def _stream_agent_events(
         self,
         db: Session,
@@ -1256,6 +1348,13 @@ class ChatBiService:
         grounded_hit = False
         answer = ""
         ledger = FactLedger()  # F4：断言级凭证账本（只登记工具真实返回的事实）
+        # 植入当前数据域名作为可信上下文，允许答案引用「数据域/本体名」而不被误判为幻觉
+        ledger.add_context_name(domain.name)
+        # 工具名是内部机制、非业务实体：若模型在正文提到工具名（如 get_domain_overview），
+        # 不得被 answer_verifier 当成本体幻觉实体而拒答。
+        ledger.add_context_name(
+            *[t["function"]["name"] for t in _AGENT_TOOL_SCHEMAS]
+        )
 
         for _ in range(_AGENT_MAX_STEPS):
             resp = await client.chat.completions.create(
@@ -1267,17 +1366,24 @@ class ChatBiService:
             msg = resp.choices[0].message
             tool_calls = msg.tool_calls or []
             if not tool_calls:
-                # 收敛：最终作答轮改流式逐字产出
+                # 部分模型不走原生 function-calling，而把工具调用以 DSML/XML 文本写进正文：
+                # 解析并当作工具调用执行，避免把一堆标记当答案输出。
+                tool_calls = self._extract_text_tool_calls(msg.content or "")
+            if not tool_calls:
+                # 先缓冲完整答案，待 ask_stream 接地校验通过后再逐字流式吐出，
+                # 避免"先给内容、校验不过再撤回"的观感。
                 async for tok in self._stream_final_answer(client, runtime.model, messages):
                     answer += tok
-                    yield {"type": "token", "delta": tok}
-                answer = answer.strip()
+                # 兑底：若最终轮仍泄漏了工具调用标记，剔除后再作为答案。
+                answer = self._strip_tool_markup(answer)
                 break
 
+            # 存入历史的 content 去掉工具标记，避免污染上下文并被当作 thought 展示。
+            clean_content = self._strip_tool_markup(msg.content or "")
             messages.append(
                 {
                     "role": "assistant",
-                    "content": msg.content or "",
+                    "content": clean_content,
                     "tool_calls": [
                         {
                             "id": t.id,
@@ -1290,7 +1396,7 @@ class ChatBiService:
             )
             # 工具间的模型自述：作为 thought 伪步穿插进轨迹（贴近 Claude Code 的"先说再做"），
             # 既实时流给前端、也落进 steps 持久化；_steps_to_caliber 因 tool 不匹配自动忽略它。
-            thought = (msg.content or "").strip()
+            thought = clean_content.strip()
             if thought:
                 t_idx = len(steps)
                 steps.append({"index": t_idx, "kind": "thought", "tool": "", "text": thought})
@@ -1358,7 +1464,7 @@ class ChatBiService:
                     result_text = result_text[:_TOOL_RESULT_MAX_CHARS] + "…(结果过长已截断)"
                 messages.append({"role": "tool", "tool_call_id": t.id, "content": result_text})
         else:
-            # 步数耗尽仍未收敛：强制不带工具、流式收尾
+            # 步数耗尽仍未收敛：强制不带工具收尾（同样仅缓冲，稍后校验通过再流式）
             async for tok in self._stream_final_answer(
                 client,
                 runtime.model,
@@ -1366,8 +1472,7 @@ class ChatBiService:
                 nudge="请基于以上工具结果直接给出最终回答，不要再调用工具。",
             ):
                 answer += tok
-                yield {"type": "token", "delta": tok}
-            answer = answer.strip()
+            answer = self._strip_tool_markup(answer)
 
         # 兜底：模型若把 SQL 写进正文却没走 run_sql，从围栏块抽出，避免前端丢弃 SQL
         if not last_sql:

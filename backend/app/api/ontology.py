@@ -145,6 +145,7 @@ def get_ontology_graph(
     depth: int = Query(1, ge=0, le=5),
     full: bool = Query(False, description="为 true 时返回全量图（大域慎用）"),
     max_nodes: int = Query(80, ge=10, le=500),
+    published_only: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     return query.get_ontology_graph(
@@ -154,6 +155,7 @@ def get_ontology_graph(
         depth=depth,
         full=full,
         max_nodes=max_nodes,
+        published_only=published_only,
     )
 
 
@@ -308,8 +310,12 @@ def batch_update_object_types(
 
 
 @router.get("/object-types/{object_type_id}", response_model=ObjectTypeDetail)
-def get_object_type(object_type_id: str, db: Session = Depends(get_db)):
-    obj = query.get_object_type(db, object_type_id)
+def get_object_type(
+    object_type_id: str,
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    obj = query.get_object_type(db, object_type_id, published_only=published_only)
     if not obj:
         raise HTTPException(status_code=404, detail="Object type not found")
     return obj
@@ -474,8 +480,12 @@ def list_relation_groups(
 
 
 @router.get("/relation-types/{relation_type_id}", response_model=RelationTypeDetail)
-def get_relation_type(relation_type_id: str, db: Session = Depends(get_db)):
-    rel = query.get_relation_type(db, relation_type_id)
+def get_relation_type(
+    relation_type_id: str,
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    rel = query.get_relation_type(db, relation_type_id, published_only=published_only)
     if not rel:
         raise HTTPException(status_code=404, detail="Relation type not found")
     return rel

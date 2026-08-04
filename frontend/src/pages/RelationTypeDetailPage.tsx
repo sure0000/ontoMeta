@@ -213,7 +213,8 @@ export function RelationTypeDetailPage() {
 
   const loadRelation = async () => {
     if (!relationId) return;
-    const detail = await api.getRelationType(relationId);
+    // 非工作区（本体浏览）只取已发布关系，与 Data Agent 接地集一致。
+    const detail = await api.getRelationType(relationId, !inWorkspace);
     setRel(detail);
     form.setFieldsValue({
       display_name: detail.display_name,

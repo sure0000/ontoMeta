@@ -1,4 +1,4 @@
-import { Alert, Button, Space, Tag } from "antd";
+import { Button, Space, Tag } from "antd";
 import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -223,14 +223,13 @@ export function ChatBubble({
               <StepTrace steps={message.payload.steps} />
             )}
             {!isUser && message.payload?.grounding_refused && (
-              <Alert
-                type="info"
-                showIcon
-                icon={<SafetyOutlined />}
-                style={{ marginBottom: 10, borderRadius: 8 }}
-                message="为避免给出不准确信息，已谨慎拒答"
-                description="回答仅基于已发布本体可证实的对象、字段、关系与口径；下述结论无法由本体证明，故未作答。"
-              />
+              <div className="chatbi-notice chatbi-notice--warning">
+                <SafetyOutlined className="chatbi-notice-icon" />
+                <div className="chatbi-notice-body">
+                  <span className="chatbi-notice-title">为避免不准确信息，已谨慎拒答</span>
+                  <span className="chatbi-notice-desc">回答仅基于已发布本体可证实的内容；无法由本体证明的结论未作答。</span>
+                </div>
+              </div>
             )}
             <div className="chatbi-answer-wrap">
               <MarkdownLite content={message.content} />
@@ -273,8 +272,8 @@ export function ChatBubble({
               </div>
             )}
             {message.error && (
-              <div className="chatbi-mock-hint" style={{ color: "var(--om-error)" }}>
-                回答出错，请重试。
+              <div className="chatbi-notice chatbi-notice--error">
+                <span>回答出错，请重试。</span>
               </div>
             )}
             {canGenerate && (

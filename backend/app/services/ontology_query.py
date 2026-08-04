@@ -580,9 +580,14 @@ class OntologyQueryService:
         return result
 
 
-    def get_relation_type(self, db: Session, relation_type_id: str) -> RelationTypeDetail | None:
+    def get_relation_type(
+        self, db: Session, relation_type_id: str, *, published_only: bool = False
+    ) -> RelationTypeDetail | None:
         rel = db.get(RelationType, relation_type_id)
         if not rel:
+            return None
+        # 已发布浏览：未发布的关系视为不存在，与 Data Agent 接地集一致。
+        if published_only and rel.status != EntityStatus.PUBLISHED.value:
             return None
 
         source = db.get(ObjectType, rel.source_object_type_id)
@@ -640,9 +645,17 @@ class OntologyQueryService:
         depth: int = 1,
         full: bool = False,
         max_nodes: int = _DEFAULT_GRAPH_MAX_NODES,
+        published_only: bool = False,
     ) -> OntologyGraph:
-        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
-        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
+        obj_q = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+        rel_q = db.query(RelationType).filter(RelationType.ontology_id == ontology_id)
+        if published_only:
+            # 与已发布列表/详情/Data Agent 一致：图谱只展现已发布实体。
+            _pub = EntityStatus.PUBLISHED.value
+            obj_q = obj_q.filter(ObjectType.status == _pub)
+            rel_q = rel_q.filter(RelationType.status == _pub)
+        objects = obj_q.all()
+        relations = rel_q.all()
         total_object_count = len(objects)
         total_relation_count = len(relations)
         obj_by_id = {obj.id: obj for obj in objects}

@@ -265,7 +265,9 @@ export function ObjectTypeDetailPage() {
 
   const loadObject = async () => {
     if (!objectId) return;
-    const detail = await api.getObjectType(objectId);
+    // 非工作区（即本体浏览）只取已发布实体，与 Data Agent 接地集一致，
+    // 避免详情图谱/关系表泄露未发布的“建议”状态对象与关系。
+    const detail = await api.getObjectType(objectId, !inWorkspace);
     setObj(detail);
     setProperties(detail.properties.map((p) => ({ ...p })));
     form.setFieldsValue({
