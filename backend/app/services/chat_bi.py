@@ -32,6 +32,7 @@ from app.models import (
     ChatBiConversation,
     ChatBiMessage,
     DomainContext,
+    EntityStatus,
     ObjectType,
     Ontology,
     OntologyStatus,
@@ -61,6 +62,8 @@ _RUN_SQL_LIMIT = 100           # run_sql 默认返回行上限
 _TOOL_RESULT_MAX_CHARS = 8000  # 单个工具结果回灌前的截断阈值
 _SQL_TIMEOUT_SECONDS = 15      # run_sql 语句超时（execute_sql 既有能力）
 _SEARCH_LIMIT = 8              # 检索类工具默认返回条数
+_OVERVIEW_LIST_LIMIT = 100     # 概览里 objects/relations 样本清单各自的条数上限
+_OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 
 _AGENT_SYSTEM_PROMPT = (
     "你是企业数据问答助手（Data Agent），基于**已发布本体**回答业务问题。\n"
@@ -75,8 +78,17 @@ _AGENT_SYSTEM_PROMPT = (
     "检索关键词优先用**中文**（本体以中文命名，英文词多半命不中）。\n"
     "1b. 概览/列举类问题（如“有哪些对象/本体/关系”、“哪些本体有关系”）**必须先调用 get_domain_overview**，"
     "严格基于它返回的已发布对象/关系清单与总数作答；若需更多关系细节再调 search_relations。"
+    "问“哪些/多少对象有关系”时，直接引用 objects_with_relations、objects_without_relations、"
+    "most_connected_objects 三个字段作答，**不要**用抽样到的几条关系去反推全局。\n"
     "**绝不允许凭常识/行业经验（如 ERP/ERPNext 的 tabXxx 表名）猜测或穷举对象/关系/数量名称**，"
     "答案里出现的每一个对象名/关系名/字段名都必须是工具本次**实际返回**过的名称；宁可少答不可编造。\n"
+    "1c. 【铁律·不得把样本当全集】工具结果里的清单都可能被截断："
+    "get_domain_overview 的 objects/relations 看 objects_truncated / relations_truncated，"
+    "search_* 看 truncated 与 total_matched（total_matched 才是真实命中总数，items 只是前几条）。"
+    "truncated=true 时**必须**在答案里写明这是“N 条中的示例”并给出真实总数，"
+    "严禁用“全部/所有/共有以下”等措辞把样本说成完整清单；"
+    "更不得由样本去推断全集的性质或覆盖范围（例如由几条关系断言“这些关系覆盖了全部 N 个对象”）。"
+    "需要完整清单时如实说明清单过长、只能给示例，并建议用户到本体页面查看。\n"
     "2. 若问题需要具体数值/明细，用 get_object 拿到真实字段后写 SQL；"
     "**只要你写了查询 SQL，就必须通过 run_sql 提交**（哪怕只为取数/校验），"
     "不要仅在正文里贴 SQL 而不调用 run_sql。表名/字段名必须来自本体。\n"
@@ -99,7 +111,11 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_objects",
-            "description": "按关键词检索当前数据域的已发布业务对象，返回候选列表（含 id/名称/字段数）。",
+            "description": (
+                "按关键词检索当前数据域的已发布业务对象。返回 "
+                "{total_matched, returned, truncated, items}："
+                "total_matched 是真实命中总数，items 只是前几条；truncated=true 表示还有更多未返回。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -127,7 +143,12 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_relations",
-            "description": "按关键词检索业务关系（两个对象之间的关联），返回关系列表。",
+            "description": (
+                "按关键词检索业务关系（两个对象之间的关联）。返回 "
+                "{total_matched, returned, truncated, items}："
+                "total_matched 是真实命中总数，items 只是前几条；truncated=true 表示还有更多未返回，"
+                "此时不得把 items 当作全部关系。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -141,7 +162,11 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_logics",
-            "description": "按关键词检索业务逻辑/指标口径（如 GMV、活跃客户），返回口径列表。",
+            "description": (
+                "按关键词检索业务逻辑/指标口径（如 GMV、活跃客户）。返回 "
+                "{total_matched, returned, truncated, items}："
+                "total_matched 是真实命中总数，items 只是前几条。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -170,8 +195,12 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "get_domain_overview",
             "description": (
-                "获取当前数据域【已发布本体】的概览：已发布业务对象与关系的总数，并列举已发布对象名。"
-                "回答“有哪些对象/本体”这类概览问题时首选此工具。**仅含已发布内容，不含未发布草稿**。"
+                "获取当前数据域【已发布本体】的概览：对象/关系总数、"
+                "有关系与无关系的对象数（objects_with_relations / objects_without_relations）、"
+                "关系最多的对象（most_connected_objects），以及**可能被截断的**对象与关系样本清单"
+                "（objects_truncated / relations_truncated 标示是否截断）。"
+                "回答“有哪些对象/本体”“哪些对象有关系”这类概览问题时首选此工具。"
+                "**仅含已发布内容，不含未发布草稿**。"
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -195,6 +224,15 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+def _search_items(result: Any) -> list[dict]:
+    """取检索类工具结果里的条目列表。兼容新信封 {items:[...]} 与历史的裸列表。"""
+    if isinstance(result, dict):
+        result = result.get("items")
+    if not isinstance(result, list):
+        return []
+    return [x for x in result if isinstance(x, dict)]
 
 
 def _format_sql(sql: str | None) -> str | None:
@@ -1034,26 +1072,24 @@ class ChatBiService:
         if is_error:
             return
         try:
-            if tool_name == "search_objects" and isinstance(result, list):
-                for o in result:
-                    if isinstance(o, dict):
-                        ledger.add_object_summary(o)
+            if tool_name == "search_objects":
+                for o in _search_items(result):
+                    ledger.add_object_summary(o)
             elif tool_name == "get_object" and isinstance(result, dict):
                 ledger.add_object_detail(result)
-            elif tool_name == "search_relations" and isinstance(result, list):
-                for r in result:
-                    if isinstance(r, dict):
-                        ledger.add_relation(r)
-            elif tool_name == "search_logics" and isinstance(result, list):
-                for l in result:
-                    if isinstance(l, dict):
-                        ledger.add_metric_summary(l)
+            elif tool_name == "search_relations":
+                for r in _search_items(result):
+                    ledger.add_relation(r)
+            elif tool_name == "search_logics":
+                for l in _search_items(result):
+                    ledger.add_metric_summary(l)
             elif tool_name == "get_logic" and isinstance(result, dict):
                 ledger.add_metric_summary(result)
             elif tool_name == "get_domain_overview" and isinstance(result, dict):
-                for o in result.get("objects") or []:
-                    if isinstance(o, dict):
-                        ledger.add_object_summary(o)
+                for key in ("objects", "most_connected_objects"):
+                    for o in result.get(key) or []:
+                        if isinstance(o, dict):
+                            ledger.add_object_summary(o)
                 for r in result.get("relations") or []:
                     if isinstance(r, dict):
                         ledger.add_relation(r)
@@ -1089,6 +1125,129 @@ class ChatBiService:
             return True, []  # warn 不拦
         return False, verdict.unverified
 
+    @staticmethod
+    def _search_envelope(items: list[dict], total: int, noun: str) -> tuple[Any, str, bool]:
+        """检索类工具的统一返回：**必须**带上真实命中总数与截断标记。
+
+        只回裸列表会让模型把「前 8 条」当成「全部命中」——问 “有哪些关系” 时，
+        140 条里挑出的 8 条会被当作完整清单写进答案。总数与 truncated 一起给出，
+        模型才能如实说明「这是 N 条里的示例」。
+        """
+        truncated = total > len(items)
+        return (
+            {
+                "total_matched": total,
+                "returned": len(items),
+                "truncated": truncated,
+                "items": items,
+            },
+            f"命中 {total} 个{noun}，返回前 {len(items)} 个" if truncated else f"命中 {total} 个{noun}",
+            False,
+        )
+
+    def _dispatch_domain_overview(self, db: Session, *, ontology_id: str) -> tuple[Any, str, bool]:
+        """已发布本体概览：总数 + 连通性统计 + **明确标注截断**的样本清单。
+
+        只统计/列举【已发布】对象与关系；grouped_graph 混入未发布草稿，不能用于概览。
+        连通性统计（有/无关系的对象数、关系最多的对象）是 “哪些本体/对象有关系”
+        这类问题的**直接答案**，避免模型靠几条抽样去反推而说出
+        “4113 条关系覆盖了 734 个对象” 这种错话。
+        """
+        qs = self.query_service
+        obj_page = qs.list_object_types(
+            db, ontology_id=ontology_id, published_only=True, limit=_OVERVIEW_LIST_LIMIT
+        )
+        rel_page = qs.list_relation_types(
+            db, ontology_id=ontology_id, published_only=True, limit=_OVERVIEW_LIST_LIMIT
+        )
+        conn = self._relation_connectivity(db, ontology_id=ontology_id)
+        # 必须带 id：FactLedger.add_object_summary 无 id 即丢弃，
+        # 否则概览列出的对象名进不了账本，答案一引用就被判幻觉→误拒答。
+        objects = [
+            {"id": o.id, "display_name": o.display_name, "name": o.name, "table_role": o.table_role}
+            for o in obj_page.items
+        ]
+        # 列出已发布关系（名称+两端），供概览/列举类问题接地：
+        # 否则答案一提关系就因账本无凭证而被判不可证→误拒答。
+        relations = [self._compact_relation(r) for r in rel_page.items]
+        overview = {
+            "published_object_count": obj_page.total,
+            "published_relation_count": rel_page.total,
+            "objects_with_relations": conn["with_relations"],
+            "objects_without_relations": conn["without_relations"],
+            "most_connected_objects": conn["top"],
+            "objects_listed": len(objects),
+            "objects_truncated": obj_page.total > len(objects),
+            "objects": objects,
+            "relations_listed": len(relations),
+            "relations_truncated": rel_page.total > len(relations),
+            "relations": relations,
+            "note": (
+                "仅统计并列举【已发布(published)】的业务对象与关系；未发布的建模草稿不计入。"
+                f"objects/relations 两个清单最多各返回 {_OVERVIEW_LIST_LIMIT} 条：truncated=true 时"
+                "它们只是样本，**不是全集**，作答时必须说明是示例并以 count 字段为准的总数为准，"
+                "不得把样本当作完整清单，也不得由样本推断全集的性质。"
+                "“哪些对象有关系/多少对象有关系”请直接用 objects_with_relations / "
+                "objects_without_relations / most_connected_objects，不要自行推算。"
+                "列举 most_connected_objects 时请用 display_label 作为对象名"
+                "（重名对象已在其中带标识符消歧），不要改写它。"
+            ),
+        }
+        summary = (
+            f"{obj_page.total} 个已发布对象 / {rel_page.total} 个已发布关系"
+            f"（{conn['with_relations']} 个对象有关系、{conn['without_relations']} 个无关系）"
+        )
+        return overview, summary, False
+
+    @staticmethod
+    def _relation_connectivity(db: Session, *, ontology_id: str) -> dict:
+        """已发布关系的连通性：有/无关系的对象数，以及关系数最多的对象 Top N。
+
+        度数按「作为源端或目标端出现的关系条数」计（同一关系对两端各计一次）。
+        """
+        obj_q = db.query(ObjectType.id, ObjectType.name, ObjectType.display_name).filter(
+            ObjectType.ontology_id == ontology_id,
+            ObjectType.status == EntityStatus.PUBLISHED.value,
+        )
+        objects = {oid: (nm, dn) for oid, nm, dn in obj_q.all()}
+
+        rel_q = db.query(
+            RelationType.source_object_type_id, RelationType.target_object_type_id
+        ).filter(
+            RelationType.ontology_id == ontology_id,
+            RelationType.status == EntityStatus.PUBLISHED.value,
+        )
+        degree: dict[str, int] = {}
+        for src, tgt in rel_q.all():
+            for oid in (src, tgt):
+                if oid in objects:
+                    degree[oid] = degree.get(oid, 0) + 1
+
+        top = [
+            {
+                "id": oid,
+                "display_name": objects[oid][1],
+                "name": objects[oid][0],
+                "relation_count": cnt,
+            }
+            for oid, cnt in sorted(degree.items(), key=lambda kv: -kv[1])[:_OVERVIEW_TOP_CONNECTED]
+        ]
+        # 同一榜单里重名的对象（如 item 与 project 都叫「项目」）若只给显示名，
+        # 读起来像同一个对象被列了两次；重名时补上标识符消歧。
+        dup = {
+            d for d in (t["display_name"] for t in top)
+            if sum(1 for t in top if t["display_name"] == d) > 1
+        }
+        for t in top:
+            t["display_label"] = (
+                f"{t['display_name']}（{t['name']}）" if t["display_name"] in dup else t["display_name"]
+            )
+        return {
+            "with_relations": len(degree),
+            "without_relations": len(objects) - len(degree),
+            "top": top,
+        }
+
     def _dispatch_agent_tool(
         self, db: Session, *, domain_id: str, ontology_id: str, name: str, args: dict
     ) -> tuple[Any, str, bool]:
@@ -1101,7 +1260,7 @@ class ChatBiService:
                     db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
                 )
                 items = [self._compact_object_summary(o) for o in page.items]
-                return items, f"命中 {len(items)} 个对象", False
+                return self._search_envelope(items, page.total, "对象")
             if name == "get_object":
                 detail = qs.get_object_type(db, str(args.get("object_id") or ""))
                 if not detail or detail.status != "published":
@@ -1113,40 +1272,21 @@ class ChatBiService:
                     db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
                 )
                 items = [self._compact_relation(r) for r in page.items]
-                return items, f"命中 {len(items)} 个关系", False
+                return self._search_envelope(items, page.total, "关系")
             if name == "search_logics":
                 kw = str(args.get("keyword") or "").strip() or None
                 page = qs.list_business_logics(
                     db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
                 )
                 items = [self._compact_logic_summary(l) for l in page.items]
-                return items, f"命中 {len(items)} 个口径", False
+                return self._search_envelope(items, page.total, "口径")
             if name == "get_logic":
                 detail = qs.get_business_logic(db, str(args.get("logic_id") or ""))
                 if not detail or detail.status != "published":
                     return {"error": "业务逻辑不存在或未发布"}, "口径未命中", True
                 return self._compact_logic_detail(detail), f"口径「{detail.display_name}」", False
             if name == "get_domain_overview":
-                # 只统计/列举【已发布】对象与关系；grouped_graph 混入未发布草稿，不能用于概览
-                obj_page = qs.list_object_types(
-                    db, ontology_id=ontology_id, published_only=True, limit=100
-                )
-                rel_page = qs.list_relation_types(
-                    db, ontology_id=ontology_id, published_only=True, limit=100
-                )
-                overview = {
-                    "published_object_count": obj_page.total,
-                    "published_relation_count": rel_page.total,
-                    "objects": [
-                        {"display_name": o.display_name, "name": o.name, "table_role": o.table_role}
-                        for o in obj_page.items
-                    ],
-                    # 列出已发布关系（名称+两端），供概览/列举类问题接地：
-                    # 否则答案一提关系就因账本无凭证而被判不可证→误拒答。
-                    "relations": [self._compact_relation(r) for r in rel_page.items],
-                    "note": "仅统计并列举【已发布(published)】的业务对象与关系；未发布的建模草稿不计入。",
-                }
-                return overview, f"{obj_page.total} 个已发布对象 / {rel_page.total} 个已发布关系", False
+                return self._dispatch_domain_overview(db, ontology_id=ontology_id)
             if name == "run_sql":
                 return self._dispatch_run_sql(db, args=args, ontology_id=ontology_id)
             return {"error": f"未知工具：{name}"}, "未知工具", True
@@ -1424,7 +1564,7 @@ class ChatBiService:
 
                 # 从工具轨迹收割结构化产物
                 if not is_error and (
-                    (tool_name.startswith("search_") and isinstance(result, list) and result)
+                    (tool_name.startswith("search_") and _search_items(result))
                     or (tool_name in ("get_object", "get_logic", "get_domain_overview"))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
                 ):
