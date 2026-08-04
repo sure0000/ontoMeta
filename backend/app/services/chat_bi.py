@@ -40,6 +40,10 @@ from app.models import (
 from app.services.common import log_change, make_async_http_client
 from app.services.query import OntologyQueryService
 from app.services.settings_service import SettingsService
+from app.services.ontology_projection import build_projection
+from app.services.sql_soundness import SqlRejection, prove_sql_sound
+from app.services.agent_grounding import FactLedger
+from app.services.answer_verifier import verify_answer
 
 logger = logging.getLogger("ontometa.chat_bi")
 
@@ -328,6 +332,16 @@ class ChatBiService:
             payload = resolver.resolve_payload(payload)
             # Agent 接地判定：只要 Agent 真正命中过本体数据（检索有结果 / 读到对象逻辑 /
             # 概览 / 跑出数据）就视为接地，即便未产出具体引用（如“有哪些对象”这类概览问题）。
+            # F4：校验失败（_unverified 非空）优先拒答，不被 referenced_* 兜底覆盖。
+            unverified = payload.get("_unverified") or []
+            if unverified:
+                return self._ungrounded_refusal(
+                    domain_id=domain_id,
+                    domain_name=domain.name,
+                    ontology_id=ontology.id,
+                    question=question,
+                    reasons=unverified,
+                )
             grounded = bool(
                 payload.pop("_grounded", False)
                 or payload.get("referenced_objects")
@@ -448,15 +462,21 @@ class ChatBiService:
 
         payload = payload or {"answer": "（模型未返回回答）", "steps": []}
         payload = resolver.resolve_payload(payload)
-        grounded = bool(
-            payload.pop("_grounded", False)
-            or payload.get("referenced_objects")
-            or payload.get("referenced_logics")
-            or payload.get("data_result")
-        )
-        if not grounded:
+        unverified = payload.get("_unverified") or []
+        if unverified:
             payload = self._ungrounded_refusal(
-                domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)
+                domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id,
+                question=question, reasons=unverified)
+        else:
+            grounded = bool(
+                payload.pop("_grounded", False)
+                or payload.get("referenced_objects")
+                or payload.get("referenced_logics")
+                or payload.get("data_result")
+            )
+            if not grounded:
+                payload = self._ungrounded_refusal(
+                    domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
         payload.update({"domain_id": domain_id, "domain_name": domain.name,
@@ -891,7 +911,9 @@ class ChatBiService:
         ]
         return base
 
-    def _dispatch_run_sql(self, db: Session, *, args: dict) -> tuple[Any, str, bool]:
+    def _dispatch_run_sql(
+        self, db: Session, *, args: dict, ontology_id: str | None = None
+    ) -> tuple[Any, str, bool]:
         from app.services import data_app_executor
 
         sql = str(args.get("sql") or "").strip()
@@ -908,13 +930,20 @@ class ChatBiService:
             return {"executed": False, "error": f"仅允许只读 SELECT：{reason}", "sql": sql}, "被只读校验拒绝", True
 
         source = self._resolve_domain_data_source(db)
+        mapping = _loads_payload(source.mapping_json) if source is not None else None
+
+        # ★ SQL 语义证明（F3）：执行/建议前静态证明语义合法，不过则不放行。
+        #   即便无可执行数据源（仅建议 SQL），也要证明——臆造字段/JOIN 与是否落库无关。
+        rejection = self._prove_sql_or_reject(db, sql, ontology_id, source, mapping)
+        if rejection is not None:
+            return rejection
+
         if source is None:
             return (
                 {"executed": False, "reason": "当前数据域未绑定可执行数据源，仅能给出建议 SQL", "sql": sql},
                 "无可执行数据源",
                 False,
             )
-        mapping = _loads_payload(source.mapping_json)
         try:
             columns, rows = data_app_executor.execute_sql(
                 dsn=source.dsn_secret_ref,
@@ -937,6 +966,106 @@ class ChatBiService:
             f"返回 {len(rows)} 行",
             False,
         )
+
+    def _prove_sql_or_reject(
+        self, db: Session, sql: str, ontology_id: str | None, source, mapping
+    ) -> tuple[Any, str, bool] | None:
+        """SQL 语义证明门（F3）。返回拒绝三元组（阻断）或 None（放行）。
+
+        受 ``settings.agent_soundness`` 开关：off=跳过；warn=只记日志不拦；on=拒绝执行。
+        证明本身出错（解析器异常等）绝不误伤正常查询——降级为放行并记日志。
+        """
+        from app.config import settings as env_settings
+        from app.services import data_app_executor
+
+        mode = (getattr(env_settings, "agent_soundness", "on") or "on").lower()
+        if mode == "off" or not ontology_id:
+            return None
+        try:
+            proj = build_projection(db, ontology_id, mapping)
+            dialect = (
+                data_app_executor.backend_of(source.dsn_secret_ref)
+                if source is not None
+                else None
+            )
+            verdict = prove_sql_sound(sql, proj, dialect=dialect)
+        except Exception as exc:  # noqa: BLE001 — 证明器故障不得拖垮问答
+            logger.warning("sql soundness prover error, allowing SQL: %s", exc)
+            return None
+        if not isinstance(verdict, SqlRejection):
+            return None
+        if mode == "warn":
+            logger.info("[soundness=warn] 本应拒答 SQL：%s | %s", verdict.code, verdict.message)
+            return None
+        # mode == "on"：拒绝执行。is_error=True → 不计入接地，避免用拒绝当命中。
+        return (
+            {"executed": False, "rejected": True, "sql": sql,
+             "reason": verdict.message, "code": verdict.code},
+            f"SQL 语义证明未通过：{verdict.code}",
+            True,
+        )
+
+    # -------------------------------------------------------------- F4 断言级可靠性
+
+    @staticmethod
+    def _ledger_register(
+        ledger: FactLedger, tool_name: str, result: Any, is_error: bool
+    ) -> None:
+        """把一次工具调用的**真实返回**登记进事实账本。失败/错误返回不入账。"""
+        if is_error:
+            return
+        try:
+            if tool_name == "search_objects" and isinstance(result, list):
+                for o in result:
+                    if isinstance(o, dict):
+                        ledger.add_object_summary(o)
+            elif tool_name == "get_object" and isinstance(result, dict):
+                ledger.add_object_detail(result)
+            elif tool_name == "search_relations" and isinstance(result, list):
+                for r in result:
+                    if isinstance(r, dict):
+                        ledger.add_relation(r)
+            elif tool_name == "search_logics" and isinstance(result, list):
+                for l in result:
+                    if isinstance(l, dict):
+                        ledger.add_metric_summary(l)
+            elif tool_name == "get_logic" and isinstance(result, dict):
+                ledger.add_metric_summary(result)
+            elif tool_name == "get_domain_overview" and isinstance(result, dict):
+                for o in result.get("objects") or []:
+                    if isinstance(o, dict):
+                        ledger.add_object_summary(o)
+            elif tool_name == "run_sql" and isinstance(result, dict) and result.get("executed"):
+                ledger.add_cells(result.get("columns") or [], result.get("rows") or [])
+        except Exception as exc:  # noqa: BLE001 — 登记失败不得拖垮问答
+            logger.warning("fact ledger register failed for %s: %s", tool_name, exc)
+
+    @staticmethod
+    def _asks_number(question: str) -> bool:
+        """问题是否在问具体数值/计量（决定数值断言是否要求 run_sql 凭证）。"""
+        return any(k in (question or "") for k in _AGG_KEYWORDS)
+
+    def _verify_answer(
+        self, answer: str, ledger: FactLedger, question: str
+    ) -> tuple[bool, list[str]]:
+        """F4 校验入口。受 settings.agent_soundness 开关；off/warn 不拦，on 生效。
+
+        返回 (ok, unverified)：ok=False 且 on 模式时，上层将拒答并展示 unverified。
+        """
+        from app.config import settings as env_settings
+
+        mode = (getattr(env_settings, "agent_soundness", "on") or "on").lower()
+        if mode == "off":
+            return True, []
+        # 数值严格模式：只要本轮真跑过数（有 cells）或问题在问量，就要求数值有凭证。
+        strict = bool(ledger.cells) or self._asks_number(question)
+        verdict = verify_answer(answer, ledger, strict_numbers=strict)
+        if verdict.ok:
+            return True, []
+        if mode == "warn":
+            logger.info("[soundness=warn] 答案含不可证断言：%s", "; ".join(verdict.unverified))
+            return True, []  # warn 不拦
+        return False, verdict.unverified
 
     def _dispatch_agent_tool(
         self, db: Session, *, domain_id: str, ontology_id: str, name: str, args: dict
@@ -994,7 +1123,7 @@ class ChatBiService:
                 }
                 return overview, f"{obj_page.total} 个已发布对象 / {rel_page.total} 个已发布关系", False
             if name == "run_sql":
-                return self._dispatch_run_sql(db, args=args)
+                return self._dispatch_run_sql(db, args=args, ontology_id=ontology_id)
             return {"error": f"未知工具：{name}"}, "未知工具", True
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent tool %s failed: %s", name, exc)
@@ -1126,6 +1255,7 @@ class ChatBiService:
         last_sql: str | None = None
         grounded_hit = False
         answer = ""
+        ledger = FactLedger()  # F4：断言级凭证账本（只登记工具真实返回的事实）
 
         for _ in range(_AGENT_MAX_STEPS):
             resp = await client.chat.completions.create(
@@ -1214,6 +1344,9 @@ class ChatBiService:
                                 "truncated": bool(result.get("truncated")),
                             }
 
+                # F4：把工具真实返回的结构化事实登记进账本（LLM 说的不入账）
+                self._ledger_register(ledger, tool_name, result, is_error)
+
                 step_status = "failed" if is_error else "succeeded"
                 steps.append(
                     {"index": idx, "tool": tool_name, "arguments": call_args, "status": step_status, "summary": summary}
@@ -1240,6 +1373,11 @@ class ChatBiService:
         if not last_sql:
             last_sql = self._extract_sql_from_text(answer)
 
+        # F4：断言级可靠性校验。答案里出现账本外的具名实体/未证实数值 → 判不可靠。
+        # 受 settings.agent_soundness 开关：off 跳过；warn 仅记录不拦；on 生效。
+        verify_ok, unverified = self._verify_answer(answer, ledger, question)
+        grounded = grounded_hit and verify_ok
+
         yield {
             "type": "done",
             "payload": {
@@ -1250,7 +1388,8 @@ class ChatBiService:
                 "referenced_logics": referenced_logics,
                 "steps": steps,
                 "data_result": data_result,
-                "_grounded": grounded_hit,
+                "_grounded": grounded,
+                "_unverified": unverified,
             },
         }
 
@@ -1462,19 +1601,32 @@ class ChatBiService:
         domain_name: str,
         ontology_id: str,
         question: str,
+        reasons: list[str] | None = None,
     ) -> dict:
         q = (question or "").strip()
         preview = q if len(q) <= 80 else q[:80] + "…"
-        return {
-            "domain_id": domain_id,
-            "domain_name": domain_name,
-            "ontology_id": ontology_id,
-            "answer": (
+        if reasons:
+            # F4：校验不通——拒答并逐条说明「哪句不可证」，而非笼统「无法回答」。
+            bullet = "\n".join(f"  · {r}" for r in reasons)
+            answer = (
+                f"为避免给出不准确信息，未能基于「{domain_name}」已发布本体可靠回答该问题"
+                + (f"（{preview}）" if preview else "")
+                + "：以下结论无法由本体证实：\n"
+                + bullet
+                + "\n请换用本体中已有实体提问，或先补充/发布相关建模。"
+            )
+        else:
+            answer = (
                 f"无法基于「{domain_name}」已发布本体回答该问题"
                 + (f"（{preview}）" if preview else "")
                 + "：未检索到匹配的对象类型或业务逻辑。"
                 "请换用本体中已有实体的名称提问，或先补充/发布相关建模。"
-            ),
+            )
+        return {
+            "domain_id": domain_id,
+            "domain_name": domain_name,
+            "ontology_id": ontology_id,
+            "answer": answer,
             "suggested_sql": None,
             "caliber_decomposition": [],
             "referenced_objects": [],

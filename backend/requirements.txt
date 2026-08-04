@@ -8,6 +8,7 @@ httpx>=0.28.0
 python-dotenv>=1.0.1
 openai>=1.57.0
 sqlparse>=0.5.0
+sqlglot>=25.0.0
 pytest>=8.0.0
 
 # --- 数仓引擎驱动（可选，按需自行安装）---

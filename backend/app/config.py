@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # DeepSeek 64K token 上下文，此处默认 ~48000 字符（约 16-20K token），
     # 为 system prompt 与输出预留充足余量。
     llm_context_budget_chars: int = 48000
+    # Data Agent 形式化可靠性闸门（FORMAL_VALIDATION_IMPL.md）：
+    #   off  — 完全关闭，回到现状（零风险回滚）
+    #   warn — 只记录「本应拒答」到回执，不真拒（观测泄漏基线/误杀率）
+    #   on   — 正式生效：SQL 语义证明不过则不执行、断言不可证则拒答
+    agent_soundness: str = "on"
     # 对象命名(含属性中文名)分块流水线：并发调用 LLM 的子块数上限。
     draft_chunk_max_concurrency: int = 4
     # 分块生成时每批最多打包的表(对象)数：优先按表数切块，字符预算作为兜底细分。
