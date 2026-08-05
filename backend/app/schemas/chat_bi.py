@@ -134,6 +134,60 @@ class ChatBiConversationUpdate(BaseModel):
     is_archived: bool | None = None
 
 
+class ChatBiTaskLinkRequest(BaseModel):
+    """P1：把「本会话催生的数据任务（治理制品）」关联到会话。
+
+    用户对 Data Agent 的任务提案点「去校验并执行」建出制品后，前端调用记录此关联，
+    使该会话后续能用 get_task_status 免 id 追踪。
+    """
+
+    artifact_id: str
+    kind: str | None = None
+    intent: str | None = None
+
+
+class ChatBiExternalToolCreate(BaseModel):
+    """P4：注册一个配置驱动的外部工具（HTTP）。"""
+
+    name: str  # 小写 snake_case，全局唯一，不得与原生工具同名
+    description: str
+    url: str
+    parameters: dict[str, Any] | None = None  # OpenAI function 的 JSON-Schema 入参
+    method: str = "POST"
+    auth_header: str | None = None  # 机密：整串作请求头值（如 "Bearer xxx"），不回显
+    domain_id: str | None = None  # 空=全局
+    display_name: str | None = None
+    result_max_chars: int = 4000
+
+
+class ChatBiExternalToolUpdate(BaseModel):
+    enabled: bool
+
+
+class ChatBiPreferenceRequest(BaseModel):
+    """P3.1：把用户确认的约定落库为本域记忆。"""
+
+    domain_id: str
+    text: str
+
+
+class ChatBiExternalToolOut(BaseModel):
+    id: str
+    name: str
+    display_name: str | None = None
+    description: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    method: str
+    url: str
+    has_auth: bool = False  # 机密不回显，仅标识是否配置了鉴权头
+    enabled: bool
+    domain_id: str | None = None
+    result_max_chars: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ChatBiMessageOut(BaseModel):
     id: str
     conversation_id: str

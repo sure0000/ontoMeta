@@ -329,7 +329,7 @@ function IssueList({ issues }: { issues: AgentValidationIssue[] }) {
   );
 }
 
-function ArtifactDetail({
+export function ArtifactDetail({
   artifact,
   busy,
   onClose,

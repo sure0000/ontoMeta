@@ -54,11 +54,14 @@ SKILLS: dict[str, Skill] = {
             "【取数分析技能】用户要具体数据/趋势/对比。流程：定位实体 → 有现成口径就 "
             "compile_metric、跨对象先 find_join_path、写死值前先 profile_values → 用 run_sql "
             "提交只读 SQL 取数。\n"
-            "拿到结果后，若适合可视化就调 **render_chart** 出图：时间/日期维度用 line 或 area，"
+            "若是开放式/多步分析（如「探索销售数据有没有异常」），**先用 update_plan 列 2-5 步计划**"
+            "让用户看到你的拆解思路，再逐步执行；单值或单步取数不必规划。\n"
+            "拿到结果后：找异常/看分布/离群用 **analyze_result** 对结果做统计画像（均值/分位/IQR 离群），"
+            "别口头臆测；若适合可视化就调 **render_chart** 出图：时间/日期维度用 line 或 area，"
             "类别对比用 bar；x/y 必须照抄结果表里的真实列名。单值或纯明细不必作图。"
         ),
-        extra_tool_names=("render_chart",),
-        block_types=("markdown", "sql", "table", "chart", "mapping"),
+        extra_tool_names=("update_plan", "analyze_result", "render_chart"),
+        block_types=("markdown", "plan", "sql", "table", "insight", "chart", "mapping"),
     ),
     "lineage": Skill(
         name="lineage",
@@ -89,6 +92,24 @@ SKILLS: dict[str, Skill] = {
         ),
         extra_tool_names=("propose_draft", "lint_against_standard"),
         block_types=("markdown", "draft_proposal"),
+        attach_governance=True,
+    ),
+    "task": Skill(
+        name="task",
+        display="建/管数据任务",
+        when_to_use="用户要把本体/数据物化落库、建数据同步/加工任务，或问某个数据任务跑到哪了、成没成功",
+        prompt_overlay=(
+            "【建/管数据任务技能】用户想建数据任务（物化 materialize / 同步 sync / 加工 transform）"
+            "或查任务进度。\n"
+            "建任务：先把「对哪张/哪些表做什么」说清楚，再用 **propose_action(kind, intent, context)** "
+            "产出一份**提案**（**不执行、不写库**）；真正的创建/校验/dry-run/确认/执行由用户在前端点击后走"
+            "既有治理流程，你不直接建表或跑作业。若提案涉及具体物理表名，先用 **lint_against_standard** "
+            "自检命名是否合规约、按返回的 fix 修正后再提。\n"
+            "查进度：用 **get_task_status(artifact_id 或 kind)** 回读任务状态与执行回执，据实回答"
+            "「跑完没/成没成功」；不要臆造状态。"
+        ),
+        extra_tool_names=("propose_action", "get_task_status", "lint_against_standard"),
+        block_types=("markdown", "action_proposal", "task_status"),
         attach_governance=True,
     ),
 }

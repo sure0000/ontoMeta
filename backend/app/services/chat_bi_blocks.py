@@ -67,6 +67,11 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if payload.get("steps"):
         _add({"type": "steps", "steps": payload["steps"]})
 
+    # P2：多步分析计划（update_plan 产出）。紧随执行轨迹——路线图 + 实时轨迹互补。
+    plan = payload.get("plan")
+    if plan and plan.get("steps"):
+        _add({"type": "plan", "steps": plan["steps"], "note": plan.get("note") or ""})
+
     if payload.get("grounding_refused"):
         _add({"type": "notice", "level": "warning", "variant": "refused"})
 
@@ -103,6 +108,11 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
+    # P5：结果分析块（analyze_result 产出）。统计画像 + 离群，紧跟结果表、在图表之前。
+    for analysis in payload.get("analyses") or []:
+        if analysis.get("columns"):
+            _add({"type": "insight", "analysis": analysis})
+
     # V3 S1：图表块（render_chart 产出）。自带数据行以便前端自足渲染，紧随结果表。
     for spec in payload.get("charts") or []:
         _add(
@@ -130,6 +140,18 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     # V3 S3：建数提案块（propose_draft 产出）。纯提案 + 「去确认」创建载荷；不写库。
     for proposal in payload.get("draft_proposals") or []:
         _add({"type": "draft_proposal", "proposal": proposal})
+
+    # P0：数据任务提案块（propose_action 产出）。纯提案 + 「去校验并执行」的 draft 载荷；不写库、不执行。
+    for proposal in payload.get("action_proposals") or []:
+        _add({"type": "action_proposal", "proposal": proposal})
+
+    # P3.1：记忆提案块（propose_preference 产出）。纯提案 + 「记住」写入本域约定；不写库。
+    for proposal in payload.get("preference_proposals") or []:
+        _add({"type": "preference_proposal", "proposal": proposal})
+
+    # P0：任务状态块（get_task_status 产出）。回读的任务态与回执摘要，供前端列表展示。
+    for status in payload.get("task_statuses") or []:
+        _add({"type": "task_status", "status": status})
 
     if payload.get("used_mock"):
         _add({"type": "notice", "level": "info", "variant": "mock"})

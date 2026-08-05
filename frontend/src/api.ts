@@ -63,6 +63,7 @@ import type {
   RolePolicy,
   AgentKinds,
   GovernanceArtifact,
+  ChatBiExternalTool,
   LlmConnectionTestResult,
   ObjectTypeDetail,
   ObjectTypeSummary,
@@ -868,6 +869,23 @@ export const api = {
   getChatBiMessages: (id: string) =>
     request<ChatBiMessageItem[]>(`/api/chat-bi/conversations/${id}/messages`),
 
+  /** P1：记录「本会话催生了某数据任务（治理制品）」，使会话可免 id 追踪任务。 */
+  linkChatBiTask: (
+    conversationId: string,
+    body: { artifact_id: string; kind?: string; intent?: string },
+  ) =>
+    request<{ id: string; artifact_id: string; linked: boolean }>(
+      `/api/chat-bi/conversations/${conversationId}/tasks`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** P3.1：把用户确认的约定落库为本域记忆（点「记住」后调用）。 */
+  rememberPreference: (domainId: string, text: string) =>
+    request<{ id: string; text: string; remembered: boolean }>(
+      "/api/chat-bi/domain-memory/preferences",
+      { method: "POST", body: JSON.stringify({ domain_id: domainId, text }) },
+    ),
+
   listChatBiCategories: (domainId: string) =>
     request<ChatBiCategoryList>(
       `/api/chat-bi/categories${buildQuery({ domain_id: domainId })}`,
@@ -1285,6 +1303,36 @@ export const api = {
     request<GovernanceArtifact[]>(`/api/agents/artifacts${buildQuery(params ?? {})}`),
   getArtifact: (id: string) =>
     request<GovernanceArtifact>(`/api/agents/artifacts/${id}`),
+
+  // P4：配置驱动的外部工具（Data Agent 免改代码扩能力）
+  listExternalTools: (domainId?: string) =>
+    request<ChatBiExternalTool[]>(
+      `/api/chat-bi/external-tools${buildQuery({ domain_id: domainId })}`,
+    ),
+  registerExternalTool: (body: {
+    name: string;
+    description: string;
+    url: string;
+    parameters?: Record<string, unknown>;
+    method?: string;
+    auth_header?: string;
+    domain_id?: string | null;
+    display_name?: string;
+    result_max_chars?: number;
+  }) =>
+    request<ChatBiExternalTool>("/api/chat-bi/external-tools", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  toggleExternalTool: (id: string, enabled: boolean) =>
+    request<ChatBiExternalTool>(`/api/chat-bi/external-tools/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  deleteExternalTool: (id: string) =>
+    request<{ id: string; deleted: boolean }>(`/api/chat-bi/external-tools/${id}`, {
+      method: "DELETE",
+    }),
   draftArtifact: (body: {
     kind: string;
     intent: string;

@@ -742,7 +742,48 @@ export type ChatBiBlock =
       columns: ChatBiDataResult["columns"];
       rows: ChatBiDataResult["rows"];
     }
+  | {
+      id: string;
+      /** P5：结果统计画像 + 离群检测（analyze_result 产出）。 */
+      type: "insight";
+      analysis: {
+        row_count: number;
+        total_outliers: number;
+        total_jumps?: number;
+        ordered_by?: string;
+        columns: Array<{
+          column: string;
+          count: number;
+          nulls: number;
+          min: number;
+          max: number;
+          mean: number;
+          p25?: number;
+          median?: number;
+          p75?: number;
+          std?: number;
+          outlier_count?: number;
+          outliers?: number[];
+          trend?: {
+            direction: "up" | "down" | "flat";
+            slope: number;
+            first: number;
+            last: number;
+            change: number;
+            change_pct?: number | null;
+          };
+          jumps?: Array<{ at: unknown; from: number; to: number; delta: number }>;
+        }>;
+      };
+    }
   | { id: string; type: "refs"; objects: ChatBiReference[]; logics: ChatBiReference[] }
+  | {
+      id: string;
+      /** P2：多步分析计划（update_plan 产出）。声明式路线图，与实时 steps 轨迹互补。 */
+      type: "plan";
+      steps: Array<{ title: string; status: "pending" | "active" | "done" }>;
+      note?: string;
+    }
   | {
       id: string;
       type: "lineage";
@@ -763,6 +804,47 @@ export type ChatBiBlock =
         description?: string;
         create_payload: BusinessLogicCreateInput;
       };
+    }
+  | {
+      id: string;
+      /** P0：数据任务提案（物化/同步/加工）。agent 只出提案，点按钮才走既有 draft→…→execute。 */
+      type: "action_proposal";
+      proposal: {
+        kind: string;
+        intent: string;
+        context?: Record<string, unknown>;
+        ontology_id?: string | null;
+        /** 「去校验并执行」按钮原样传给 api.draftArtifact 的载荷。 */
+        draft_payload: {
+          kind: string;
+          intent: string;
+          context?: Record<string, unknown>;
+          ontology_id?: string | null;
+        };
+      };
+    }
+  | {
+      id: string;
+      /** P0：任务状态回读（get_task_status 产出）。 */
+      type: "task_status";
+      status: {
+        tasks: Array<{
+          id: string;
+          kind: string;
+          name: string;
+          status: string;
+          is_high_risk?: boolean;
+          executed_at?: string | null;
+          receipt_summary?: string | null;
+        }>;
+        total?: number;
+      };
+    }
+  | {
+      id: string;
+      /** P3.1：记忆提案（跨会话约定）。agent 只提案，点「记住」才写入本域约定。 */
+      type: "preference_proposal";
+      proposal: { kind: string; text: string; domain_id?: string | null };
     }
   | { id: string; type: "clarify"; clarification: ChatBiClarification };
 
@@ -790,9 +872,24 @@ export interface ChatBiAnswer {
   conversation_title?: string | null;
 }
 
+/** P4：配置驱动的外部工具（Data Agent 免改代码扩能力）。auth_header 机密不回显。 */
+export interface ChatBiExternalTool {
+  id: string;
+  name: string;
+  display_name?: string | null;
+  description: string;
+  parameters: Record<string, unknown>;
+  method: string;
+  url: string;
+  has_auth: boolean;
+  enabled: boolean;
+  domain_id?: string | null;
+  result_max_chars: number;
+  created_at: string;
+}
+
 export type ChatBiStreamEvent =
-  | { type: "meta"; conversation_id: string; conversation_title?: string | null }
-  | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
+  | { type: "meta"; conversation_id: string; conversation_title?: string | null }  | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
   | { type: "step_done"; index: number; status: "succeeded" | "failed"; summary?: string | null }
   | { type: "thought"; index: number; text: string }
   /** 答案未过可靠性校验，正在让模型重写一次（P4.3 自愈回环）。 */

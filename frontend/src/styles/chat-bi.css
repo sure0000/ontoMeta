@@ -1004,6 +1004,188 @@
   color: var(--om-error, #d4380d);
 }
 
+/* P5：结果分析块 */
+.chatbi-insight {
+  margin: 12px 0 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: #fff7f5;
+}
+
+.chatbi-insight-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-insight-meta {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-insight-col {
+  margin-top: 8px;
+}
+
+.chatbi-insight-colname {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text-primary);
+}
+
+.chatbi-insight-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: var(--om-text-secondary);
+  margin-top: 2px;
+}
+
+.chatbi-insight-null {
+  color: var(--om-warning, #d46b08);
+}
+
+.chatbi-insight-outliers {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--om-error, #d4380d);
+}
+
+.chatbi-insight-outvals {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-insight-trend {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chatbi-insight-trend--up {
+  color: var(--om-success, #389e0d);
+}
+
+.chatbi-insight-trend--down {
+  color: var(--om-error, #d4380d);
+}
+
+.chatbi-insight-trend--flat {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-insight-jumps {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--om-warning, #d46b08);
+}
+
+/* P2：分析计划块 */
+.chatbi-plan {
+  margin: 12px 0 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: #faf7ff;
+}
+
+.chatbi-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-plan-progress {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-plan-steps {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chatbi-plan-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--om-text-primary);
+}
+
+.chatbi-plan-mark {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-plan-step--active {
+  font-weight: 600;
+}
+
+.chatbi-plan-step--active .chatbi-plan-mark {
+  color: var(--om-primary, #722ed1);
+}
+
+.chatbi-plan-step--done .chatbi-plan-mark {
+  color: var(--om-success, #389e0d);
+}
+
+.chatbi-plan-step--done .chatbi-plan-title {
+  color: var(--om-text-tertiary);
+  text-decoration: line-through;
+}
+
+.chatbi-plan-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+}
+
+/* P0：任务状态块 */
+.chatbi-tasks {
+  margin: 12px 0 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chatbi-task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface, #fff);
+  font-size: 13px;
+}
+
+.chatbi-task-name {
+  font-weight: 600;
+  color: var(--om-text-primary);
+}
+
+.chatbi-task-receipt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+}
+
 .chatbi-caliber-title {
   font-size: 12px;
   font-weight: 650;

@@ -98,6 +98,7 @@ export function ChatBiMessages({
               key={idx}
               message={msg}
               question={precedingQuestion}
+              conversationId={activeConversationId ?? undefined}
               onGenerateApp={onGenerateApp}
               onAddToDashboard={onAddToDashboard}
               onClarify={onSuggestionClick}

@@ -8,6 +8,7 @@ import {
   KeyOutlined,
   PlusOutlined,
   RobotOutlined,
+  ToolOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
   ThunderboltOutlined,
@@ -40,6 +41,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PrincipalsPanel } from "../components/PrincipalsPanel";
 import { AgentsPanel } from "../components/AgentsPanel";
+import { ExternalToolsPanel } from "../components/ExternalToolsPanel";
 import { AirflowSettingsPanel } from "../components/AirflowSettingsPanel";
 import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
@@ -708,6 +710,16 @@ export function SettingsPage() {
               </span>
             ),
             children: <AgentsPanel />,
+          },
+          {
+            key: "external-tools",
+            label: (
+              <span>
+                <ToolOutlined style={{ marginRight: 6 }} />
+                外部工具
+              </span>
+            ),
+            children: <ExternalToolsPanel />,
           },
           {
             key: "airflow",

@@ -1,8 +1,9 @@
-import { Button, Space, Tag } from "antd";
+import { Button, Space, Tag, message } from "antd";
 import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../../api";
+import { ApiError, api } from "../../api";
+import { ArtifactDetail } from "../../components/AgentsPanel";
 import type {
   ChatBiAgentStep,
   ChatBiBlock,
@@ -12,6 +13,7 @@ import type {
   ChatBiClarification,
   ChatBiDataResult,
   ChatBiReference,
+  GovernanceArtifact,
   GraphEdge,
   GraphNode,
 } from "../../types";
@@ -187,12 +189,14 @@ const CALIBER_KIND_COLOR: Record<ChatBiCaliberKind, string> = {
 export function ChatBubble({
   message,
   question,
+  conversationId,
   onGenerateApp,
   onAddToDashboard,
   onClarify,
 }: {
   message: ChatMessage;
   question?: string;
+  conversationId?: string;
   onGenerateApp?: (
     question: string,
     appType: "data_table" | "screen" | "dashboard",
@@ -246,6 +250,7 @@ export function ChatBubble({
                 block={block}
                 streaming={message.streaming}
                 question={question}
+                conversationId={conversationId}
                 onClarify={onClarify}
               />
             ))}
@@ -295,11 +300,13 @@ function BlockRenderer({
   block,
   streaming,
   question,
+  conversationId,
   onClarify,
 }: {
   block: ChatBiBlock;
   streaming?: boolean;
   question?: string;
+  conversationId?: string;
   onClarify?: (text: string) => void;
 }) {
   switch (block.type) {
@@ -323,6 +330,8 @@ function BlockRenderer({
       );
     case "chart":
       return <ChatBiChart spec={block.spec} columns={block.columns} rows={block.rows} />;
+    case "insight":
+      return <InsightBlock analysis={block.analysis} />;
     case "lineage":
       return (
         <ChatBiLineage
@@ -334,8 +343,16 @@ function BlockRenderer({
       );
     case "refs":
       return <RefsRow objects={block.objects} logics={block.logics} />;
+    case "plan":
+      return <PlanBlock steps={block.steps} note={block.note} />;
     case "draft_proposal":
       return <DraftProposalBlock proposal={block.proposal} />;
+    case "action_proposal":
+      return <ActionProposalBlock proposal={block.proposal} conversationId={conversationId} />;
+    case "preference_proposal":
+      return <PreferenceProposalBlock proposal={block.proposal} />;
+    case "task_status":
+      return <TaskStatusBlock status={block.status} />;
     case "notice":
       return block.variant === "refused" ? <RefusedNotice /> : <MockNotice />;
     case "clarify":
@@ -488,6 +505,339 @@ function DraftProposalBlock({
           <span className="chatbi-draft-error">创建失败，请重试或到口径页手动创建。</span>
         )}
       </Space>
+    </div>
+  );
+}
+
+const PLAN_STATUS_ICON: Record<string, string> = {
+  pending: "○",
+  active: "◔",
+  done: "✓",
+};
+
+/** 紧凑格式化数值：整数直出，小数保留 2 位。 */
+function fmtNum(v: number): string {
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
+const TREND_ICON: Record<string, string> = { up: "↑", down: "↓", flat: "→" };
+
+/**
+ * 记忆提案块（P3.1）：Data Agent 只出提案（不写库）；点「记住」才 POST 落库为本域约定，
+ * 后续作为软提示注入。守住「agent 只提案、写在人点击」不变量。
+ */
+function PreferenceProposalBlock({
+  proposal,
+}: {
+  proposal: Extract<ChatBiBlock, { type: "preference_proposal" }>["proposal"];
+}) {
+  const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const onRemember = async () => {
+    if (!proposal.domain_id) {
+      setState("error");
+      return;
+    }
+    setState("saving");
+    try {
+      await api.rememberPreference(proposal.domain_id, proposal.text);
+      setState("done");
+    } catch {
+      setState("error");
+    }
+  };
+  return (
+    <div className="chatbi-draft">
+      <div className="chatbi-draft-head">
+        <Tag color="cyan" bordered={false}>记忆提案</Tag>
+        <span>记住本域约定</span>
+      </div>
+      <div className="chatbi-draft-name">{proposal.text}</div>
+      <div className="chatbi-draft-note">
+        点「记住」后作为本域约定长期生效（后续问答默认遵循此口径/范围），不改动本体或数据。
+      </div>
+      <Space>
+        <Button
+          type="primary"
+          size="small"
+          loading={state === "saving"}
+          disabled={state === "done"}
+          onClick={() => void onRemember()}
+        >
+          {state === "done" ? "已记住" : "记住"}
+        </Button>
+        {state === "error" && <span className="chatbi-draft-error">保存失败，请重试。</span>}
+      </Space>
+    </div>
+  );
+}
+
+/**
+ * 结果分析块（P5）：analyze_result 产出的统计画像 + IQR 离群检测（+ 可选趋势/突变）。让「有没有
+ * 异常/趋势如何」这类判断有真实计算支撑，逐数值列展示统计量、离群、趋势方向与突变点。
+ */
+function InsightBlock({
+  analysis,
+}: {
+  analysis: Extract<ChatBiBlock, { type: "insight" }>["analysis"];
+}) {
+  const metaBits = [`${analysis.row_count} 行`, `${analysis.total_outliers} 个离群`];
+  if (analysis.ordered_by) metaBits.push(`${analysis.total_jumps ?? 0} 处突变`);
+  return (
+    <div className="chatbi-insight">
+      <div className="chatbi-insight-head">
+        <Tag color="volcano" bordered={false}>结果分析</Tag>
+        <span className="chatbi-insight-meta">
+          {metaBits.join(" · ")}
+          {analysis.ordered_by && ` · 按 ${analysis.ordered_by} 排序`}
+        </span>
+      </div>
+      {analysis.columns.map((c) => (
+        <div key={c.column} className="chatbi-insight-col">
+          <div className="chatbi-insight-colname">
+            {c.column}
+            {c.trend && (
+              <span className={`chatbi-insight-trend chatbi-insight-trend--${c.trend.direction}`}>
+                {TREND_ICON[c.trend.direction] ?? ""}
+                {c.trend.change_pct != null && ` ${c.trend.change_pct > 0 ? "+" : ""}${c.trend.change_pct}%`}
+              </span>
+            )}
+          </div>
+          <div className="chatbi-insight-stats">
+            <span>min {fmtNum(c.min)}</span>
+            {c.p25 != null && <span>p25 {fmtNum(c.p25)}</span>}
+            <span>均值 {fmtNum(c.mean)}</span>
+            {c.median != null && <span>中位 {fmtNum(c.median)}</span>}
+            {c.p75 != null && <span>p75 {fmtNum(c.p75)}</span>}
+            <span>max {fmtNum(c.max)}</span>
+            {c.std != null && <span>σ {fmtNum(c.std)}</span>}
+            {c.nulls > 0 && <span className="chatbi-insight-null">空 {c.nulls}</span>}
+          </div>
+          {!!c.outlier_count && (
+            <div className="chatbi-insight-outliers">
+              离群 {c.outlier_count} 个
+              {c.outliers && c.outliers.length > 0 && (
+                <span className="chatbi-insight-outvals">
+                  ：{c.outliers.map(fmtNum).join("、")}
+                </span>
+              )}
+            </div>
+          )}
+          {c.jumps && c.jumps.length > 0 && (
+            <div className="chatbi-insight-jumps">
+              突变 {c.jumps.length} 处：
+              {c.jumps
+                .map((j) => `${String(j.at)}（${fmtNum(j.from)}→${fmtNum(j.to)}）`)
+                .join("、")}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 分析计划块（P2）：update_plan 产出的声明式多步路线图，让开放式分析可见、有主线。
+ * 与实时执行轨迹（StepTrace）互补——这里是「打算怎么拆」，那里是「实际做了什么」。
+ */
+function PlanBlock({
+  steps,
+  note,
+}: {
+  steps: Extract<ChatBiBlock, { type: "plan" }>["steps"];
+  note?: string;
+}) {
+  const done = steps.filter((s) => s.status === "done").length;
+  return (
+    <div className="chatbi-plan">
+      <div className="chatbi-plan-head">
+        <Tag color="purple" bordered={false}>分析计划</Tag>
+        <span className="chatbi-plan-progress">
+          {done}/{steps.length}
+        </span>
+      </div>
+      <ol className="chatbi-plan-steps">
+        {steps.map((s, i) => (
+          <li key={i} className={`chatbi-plan-step chatbi-plan-step--${s.status}`}>
+            <span className="chatbi-plan-mark">{PLAN_STATUS_ICON[s.status] ?? "○"}</span>
+            <span className="chatbi-plan-title">{s.title}</span>
+          </li>
+        ))}
+      </ol>
+      {note && <div className="chatbi-plan-note">{note}</div>}
+    </div>
+  );
+}
+
+/**
+ * 任务制品抽屉（P0）：复用治理面板的 ArtifactDetail（已含 dry-run 差异 + 校验/确认/执行 + 回执）。
+ * agent 只出提案，人在此抽屉里过既有人审门；写全部落在 publisher 门控之后。
+ */
+function useArtifactDrawer() {
+  const [detail, setDetail] = useState<GovernanceArtifact | null>(null);
+  const [busy, setBusy] = useState(false);
+  const STEP_LABEL: Record<string, string> = { validate: "校验", confirm: "确认", execute: "执行" };
+  const onStep = async (
+    step: "validate" | "confirm" | "execute",
+    artifact: GovernanceArtifact,
+  ) => {
+    setBusy(true);
+    try {
+      const next =
+        step === "validate"
+          ? await api.validateArtifact(artifact.id)
+          : step === "confirm"
+            ? await api.confirmArtifact(artifact.id)
+            : await api.executeArtifact(artifact.id);
+      setDetail(next);
+      message.success(`${STEP_LABEL[step]}完成：${next.status}`);
+    } catch (err) {
+      message.error(
+        err instanceof ApiError && err.status === 403
+          ? "需要 publisher 角色：写侧任务仅 publisher 可校验/确认/执行"
+          : err instanceof Error
+            ? err.message
+            : "操作失败",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const node = (
+    <ArtifactDetail artifact={detail} busy={busy} onClose={() => setDetail(null)} onStep={onStep} />
+  );
+  return { open: setDetail, node };
+}
+
+const ACTION_KIND_LABEL: Record<string, string> = {
+  materialize: "物化",
+  sync: "同步",
+  transform: "加工",
+};
+
+const TASK_STATUS_COLOR: Record<string, string> = {
+  drafted: "default",
+  validated: "blue",
+  confirmed: "gold",
+  executing: "processing",
+  succeeded: "green",
+  failed: "red",
+};
+
+/**
+ * 数据任务提案块（P0）：Data Agent 只出提案（不执行、不写库）；点「去校验并执行」才由用户动作
+ * POST /api/agents/draft 建一条治理制品，随后在复用的 ArtifactDetail 抽屉里走
+ * 校验→看 dry-run 差异→确认→执行。写侧全程 publisher 门控 + 人工确认，agent 不碰。
+ */
+function ActionProposalBlock({
+  proposal,
+  conversationId,
+}: {
+  proposal: Extract<ChatBiBlock, { type: "action_proposal" }>["proposal"];
+  conversationId?: string;
+}) {
+  const [drafting, setDrafting] = useState(false);
+  const { open, node } = useArtifactDrawer();
+  const kindLabel = ACTION_KIND_LABEL[proposal.kind] ?? proposal.kind;
+  const onConfirm = async () => {
+    setDrafting(true);
+    try {
+      const artifact = await api.draftArtifact(proposal.draft_payload);
+      // P1：把本会话与该任务关联，后续可免 id 追踪。best-effort，失败不阻断主流程。
+      if (conversationId) {
+        void api
+          .linkChatBiTask(conversationId, {
+            artifact_id: artifact.id,
+            kind: proposal.kind,
+            intent: proposal.intent,
+          })
+          .catch(() => {});
+      }
+      open(artifact);
+    } catch (err) {
+      message.error(
+        err instanceof ApiError && err.status === 403
+          ? "需要 publisher 角色：写侧任务仅 publisher 可创建"
+          : err instanceof Error
+            ? err.message
+            : "起草失败，请重试",
+      );
+    } finally {
+      setDrafting(false);
+    }
+  };
+  return (
+    <div className="chatbi-draft">
+      <div className="chatbi-draft-head">
+        <Tag color="geekblue" bordered={false}>数据任务提案</Tag>
+        <span>新建{kindLabel}任务</span>
+      </div>
+      <div className="chatbi-draft-name">{proposal.intent}</div>
+      {proposal.context && Object.keys(proposal.context).length > 0 && (
+        <div className="chatbi-draft-desc">
+          <code>{JSON.stringify(proposal.context)}</code>
+        </div>
+      )}
+      <div className="chatbi-draft-note">
+        点击后创建治理制品，并在弹窗里过「校验 → dry-run 差异 → 人工确认 → 执行」；不会自动执行，也不直接改动数据。
+      </div>
+      <Space>
+        <Button type="primary" size="small" loading={drafting} onClick={() => void onConfirm()}>
+          去校验并执行
+        </Button>
+      </Space>
+      {node}
+    </div>
+  );
+}
+
+/**
+ * 任务状态块（P0）：get_task_status 回读的数据任务态与回执摘要，列表展示；
+ * 「查看」拉取完整制品并在复用抽屉里看 dry-run/回执（只读或续走人审门）。
+ */
+function TaskStatusBlock({
+  status,
+}: {
+  status: Extract<ChatBiBlock, { type: "task_status" }>["status"];
+}) {
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const { open, node } = useArtifactDrawer();
+  const tasks = status.tasks ?? [];
+  const onView = async (id: string) => {
+    setLoadingId(id);
+    try {
+      open(await api.getArtifact(id));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载失败");
+    } finally {
+      setLoadingId(null);
+    }
+  };
+  if (!tasks.length) {
+    return <div className="chatbi-draft-note">当前数据域暂无数据任务。</div>;
+  }
+  return (
+    <div className="chatbi-tasks">
+      {tasks.map((t) => (
+        <div key={t.id} className="chatbi-task-row">
+          <Tag color={TASK_STATUS_COLOR[t.status] ?? "default"}>{t.status}</Tag>
+          <span className="chatbi-task-name">
+            {ACTION_KIND_LABEL[t.kind] ?? t.kind} · {t.name}
+          </span>
+          {t.receipt_summary && (
+            <span className="chatbi-task-receipt">{t.receipt_summary}</span>
+          )}
+          <Button
+            type="link"
+            size="small"
+            loading={loadingId === t.id}
+            onClick={() => void onView(t.id)}
+          >
+            查看
+          </Button>
+        </div>
+      ))}
+      {node}
     </div>
   );
 }
@@ -749,9 +1099,14 @@ const STEP_TOOL_META: Record<string, { icon: string; verb: string }> = {
   get_domain_overview: { icon: "🗺️", verb: "获取数据域概览" },
   run_sql: { icon: "⚡", verb: "执行 SQL 查询" },
   select_skill: { icon: "🎯", verb: "选择技能" },
+  update_plan: { icon: "📋", verb: "制定计划" },
   render_chart: { icon: "📊", verb: "生成图表" },
+  analyze_result: { icon: "🔬", verb: "分析结果" },
   get_lineage: { icon: "🌊", verb: "查看血缘" },
   propose_draft: { icon: "🧩", verb: "拟建数提案" },
+  propose_preference: { icon: "📌", verb: "拟记忆约定" },
+  propose_action: { icon: "🛠️", verb: "拟数据任务提案" },
+  get_task_status: { icon: "📶", verb: "查任务状态" },
 };
 
 /** 把 (工具 + 入参) 翻译成一句人话动作 + 图标。 */

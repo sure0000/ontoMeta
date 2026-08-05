@@ -13,7 +13,9 @@ import asyncio
 import json
 import logging
 import re
+import statistics
 import types
+import uuid
 from collections import Counter
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -32,6 +34,8 @@ from app.governance import active_standard, lint_against_standard
 from app.models import (
     BusinessLogic,
     ChatBiConversation,
+    ChatBiConversationTask,
+    ChatBiDomainMemory,
     ChatBiMessage,
     DomainContext,
     EntityStatus,
@@ -51,6 +55,7 @@ from app.services.agent_grounding import FactLedger
 from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
 from app.services.domain_semantic_card import build_card
+from app.services import chat_bi_external_tools as external_tools
 from app.services.chat_bi_skills import SKILLS, Skill, skill_choices_text
 from app.services.tool_result_compaction import compact_tool_result
 
@@ -424,6 +429,29 @@ _RENDER_CHART_TOOL: dict[str, Any] = {
     },
 }
 
+_ANALYZE_RESULT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "analyze_result",
+        "description": (
+            "对最近一次 run_sql 的结果做统计画像 + 离群检测（均值/分位/标准差 + IQR 异常值）。"
+            "回答「有没有异常/分布怎样/哪些离群」时用它拿到**真实计算**，别口头臆测。仅分析数值列。"
+            "给 order_by（如时间/月份列）还会算**趋势方向 + 突变点**（回答「趋势如何/哪里突变」）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "columns": {"type": "array", "items": {"type": "string"},
+                             "description": "可选：只分析这些结果列（缺省=全部数值列）"},
+                "order_by": {"type": "string",
+                              "description": "可选：按此列（时间/序号）排序后算趋势与突变；须为结果列"},
+                "max_outliers": {"type": "integer", "description": "每列最多返回的离群/突变样例数，默认 5"},
+            },
+            "required": [],
+        },
+    },
+}
+
 _GET_LINEAGE_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -494,16 +522,127 @@ _LINT_TOOL: dict[str, Any] = {
     },
 }
 
+# 数据任务类型白名单——agent 只在「物化/同步/加工」车道出提案；metric 归 propose_draft、
+# cluster（基建）不开，避免与口径提案重叠混淆。
+_ACTION_KINDS: tuple[str, ...] = ("materialize", "sync", "transform")
+_ACTION_KIND_LABEL: dict[str, str] = {
+    "materialize": "物化", "sync": "同步", "transform": "加工",
+}
+
+_PROPOSE_ACTION_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_action",
+        "description": (
+            "为新建一个数据任务（物化 materialize / 同步 sync / 加工 transform）产出**提案**"
+            "（不执行、不写库）。提案由用户在前端点击后走「校验→看 dry-run 差异→人工确认→执行」"
+            "的既有治理流程创建并运行。提案前先把「要对哪张/哪些表做什么」说清楚。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": list(_ACTION_KINDS),
+                          "description": "物化 materialize / 同步 sync / 加工 transform"},
+                "intent": {"type": "string",
+                            "description": "自然语言任务意图，如「把客户主数据物化到数仓 dim_customer」"},
+                "context": {"type": "object",
+                             "description": '可选结构化上下文，如 {"target_table":"dim_customer"}；凭据只能传 *_ref/*_alias，勿传明文'},
+            },
+            "required": ["kind", "intent"],
+        },
+    },
+}
+
+_GET_TASK_STATUS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_task_status",
+        "description": (
+            "回读数据任务（治理制品）的执行状态与回执摘要——回答「某任务跑到哪了/成没成功」。"
+            "给 artifact_id 查单个；否则按 kind/limit 列最近若干。只读，不触发执行。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string", "description": "指定任务（制品）id；缺省则列最近的"},
+                "kind": {"type": "string", "enum": list(_ACTION_KINDS),
+                          "description": "按类型过滤（可空）"},
+                "limit": {"type": "integer", "description": "列表条数上限，默认 5"},
+            },
+            "required": [],
+        },
+    },
+}
+
+# 计划步骤状态（P2 显式规划）
+_PLAN_STATUSES: frozenset[str] = frozenset({"pending", "active", "done"})
+_PLAN_MAX_STEPS: int = 12
+
+_UPDATE_PLAN_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "update_plan",
+        "description": (
+            "为开放式/多步分析列一份**计划**（2-5 步为宜），让用户看到你打算怎么拆解这个问题。"
+            "整份计划**每次调用整体覆盖**（同 TodoWrite）；进展时可再调一次把某步 status 改为 "
+            "active/done，但不必每步都回来更新（执行轨迹已实时展示进度）。单值/单步问题不必规划。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "description": "计划步骤（有序）；每步一句话标题",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "该步要做什么，一句话"},
+                            "status": {"type": "string", "enum": list(_PLAN_STATUSES),
+                                        "description": "pending/active/done，缺省 pending"},
+                        },
+                        "required": ["title"],
+                    },
+                },
+                "note": {"type": "string", "description": "对整体思路的一句可选说明"},
+            },
+            "required": ["steps"],
+        },
+    },
+}
+
+_PROPOSE_PREFERENCE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_preference",
+        "description": (
+            "当用户明确表达一个**应跨会话记住的口径/范围约定**（如「以后成交额都按含税口径」"
+            "「华东含上海」）时，产出一份**记忆提案**（不写库）。由用户在前端点「记住」后才落库为"
+            "本域约定，后续作为软提示注入。仅在用户确实在立约定时用，普通提问别调。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要记住的约定，一句话（如「成交额默认含税口径」）"},
+            },
+            "required": ["text"],
+        },
+    },
+}
+
 # 基础工具集 = 12 检索/执行工具 + select_skill；技能激活后再并上其 extra 工具。
-_BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [*_AGENT_TOOL_SCHEMAS, _SELECT_SKILL_TOOL]
+_BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [*_AGENT_TOOL_SCHEMAS, _SELECT_SKILL_TOOL, _PROPOSE_PREFERENCE_TOOL]
 _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
     t["function"]["name"]: t
     for t in [
         *_BASE_TOOL_SCHEMAS,
         _RENDER_CHART_TOOL,
+        _ANALYZE_RESULT_TOOL,
         _GET_LINEAGE_TOOL,
         _PROPOSE_DRAFT_TOOL,
         _LINT_TOOL,
+        _PROPOSE_ACTION_TOOL,
+        _GET_TASK_STATUS_TOOL,
+        _UPDATE_PLAN_TOOL,
     ]
 }
 # 所有可能出现的工具名——供 FactLedger 登记为可信上下文（工具名非业务实体）。
@@ -603,6 +742,7 @@ class ChatBiService:
         question: str,
         history: list[dict] | None = None,
         principal_role: str | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         domain = db.get(DomainContext, domain_id)
         if not domain:
@@ -689,6 +829,7 @@ class ChatBiService:
                     seed_logics=grounded_logics,
                     principal_role=principal_role,
                     telemetry=tel,
+                    conversation_id=conversation_id,
                 )
             except Exception as exc:
                 logger.exception("ChatBI agent loop failed: %s", exc)
@@ -757,6 +898,7 @@ class ChatBiService:
         question: str,
         history: list[dict] | None = None,
         principal_role: str | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """ask() 的流式版：yield step_start / step_done / token / done。
 
@@ -829,6 +971,7 @@ class ChatBiService:
                 question=question, history=history or [],
                 seed_objects=grounded_objects, seed_logics=grounded_logics,
                 principal_role=principal_role, telemetry=tel,
+                conversation_id=conversation_id,
             ):
                 if ev["type"] == "done":
                     payload = ev["payload"]
@@ -1152,6 +1295,163 @@ class ChatBiService:
         ]
 
     # ------------------------------------------------------------------ data
+
+    def link_conversation_task(
+        self,
+        db: Session,
+        conversation_id: str,
+        artifact_id: str,
+        *,
+        kind: str | None = None,
+        intent: str | None = None,
+    ) -> dict:
+        """P1：记录「本会话催生了某数据任务（治理制品）」。幂等：同一 (会话,制品) 不重复。
+
+        由前端在用户对任务提案点「去校验并执行」建出制品后调用。落这条关联后，该会话再问
+        「那个任务好了吗」，get_task_status 无需用户重报 id 即可解析。
+        """
+        conv = db.get(ChatBiConversation, conversation_id)
+        if not conv:
+            raise ValueError("对话不存在")
+        existing = (
+            db.query(ChatBiConversationTask)
+            .filter(
+                ChatBiConversationTask.conversation_id == conversation_id,
+                ChatBiConversationTask.artifact_id == artifact_id,
+            )
+            .first()
+        )
+        if existing:
+            return {"id": existing.id, "artifact_id": artifact_id, "linked": True}
+        row = ChatBiConversationTask(
+            conversation_id=conversation_id,
+            artifact_id=artifact_id,
+            kind=kind,
+            intent=intent,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {"id": row.id, "artifact_id": artifact_id, "linked": True}
+
+    def list_conversation_task_ids(self, db: Session, conversation_id: str) -> list[str]:
+        """本会话催生的数据任务 artifact_id 列表（最近在前）。"""
+        rows = (
+            db.query(ChatBiConversationTask.artifact_id)
+            .filter(ChatBiConversationTask.conversation_id == conversation_id)
+            .order_by(desc(ChatBiConversationTask.created_at))
+            .all()
+        )
+        return [r[0] for r in rows]
+
+    # ---- P3：跨会话记忆（按域沉淀高频使用，注入系统提示做软召回） ----
+
+    def record_domain_memory(self, db: Session, domain_id: str, payload: dict) -> None:
+        """把本次**已接地**回答命中的对象/口径按 (域, 实体) 累加使用度。
+
+        best-effort：拒答/mock 不记；记忆失败绝不影响回答（吞异常并 rollback）。由 API 层在
+        存完消息后调用（与 save_message 同类的会话侧持久化，ask() 本身保持只读）。
+        """
+        if payload.get("grounding_refused") or payload.get("used_mock"):
+            return
+        refs: list[tuple[str, str, str | None]] = []
+        for o in payload.get("referenced_objects") or []:
+            rid = o.get("id")
+            if rid:
+                refs.append(("object_type", rid, o.get("display_name") or o.get("name")))
+        for lg in payload.get("referenced_logics") or []:
+            rid = lg.get("id")
+            if rid:
+                refs.append(("business_logic", rid, lg.get("display_name") or lg.get("name")))
+        if not refs:
+            return
+        try:
+            now = datetime.now(timezone.utc)
+            for ref_kind, ref_id, label in refs:
+                row = (
+                    db.query(ChatBiDomainMemory)
+                    .filter_by(domain_id=domain_id, ref_kind=ref_kind, ref_id=ref_id)
+                    .first()
+                )
+                if row:
+                    row.hit_count += 1
+                    row.last_used_at = now
+                    if label:
+                        row.label = label
+                else:
+                    db.add(ChatBiDomainMemory(
+                        domain_id=domain_id, ref_kind=ref_kind, ref_id=ref_id,
+                        label=label, hit_count=1, last_used_at=now,
+                    ))
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 — 记忆是增强，失败不该影响主流程
+            db.rollback()
+            logger.info("record_domain_memory failed: %s", exc)
+
+    def build_domain_memory_card(self, db: Session, domain_id: str, *, limit: int = 8) -> str:
+        """本域高频对象/口径 + 显式约定的**软提示**文本。空则返回空串。
+
+        与静态语义卡互补：语义卡按结构重要性，本卡按真实使用度 + 用户立的约定（P3.1）。
+        仅作提示、以检索为准——故标注「历史使用」，不作为权威。
+        """
+        try:
+            rows = (
+                db.query(ChatBiDomainMemory)
+                .filter(ChatBiDomainMemory.domain_id == domain_id)
+                .order_by(desc(ChatBiDomainMemory.hit_count), desc(ChatBiDomainMemory.last_used_at))
+                .limit(60)
+                .all()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("build_domain_memory_card failed: %s", exc)
+            return ""
+        objs = [r.label for r in rows if r.ref_kind == "object_type" and r.label][:limit]
+        logs = [r.label for r in rows if r.ref_kind == "business_logic" and r.label][:limit]
+        prefs = [r.label for r in rows if r.ref_kind == "preference" and r.label][:limit]
+        if not objs and not logs and not prefs:
+            return ""
+        out = ""
+        parts: list[str] = []
+        if objs:
+            parts.append("常用对象：" + "、".join(objs))
+        if logs:
+            parts.append("常用口径：" + "、".join(logs))
+        if parts:
+            out += "\n\n【本域高频（历史使用，以检索为准）】" + "；".join(parts) + "。"
+        if prefs:
+            # 用户立的约定优先级更高：单独一段，作为回答口径/范围时的默认取向。
+            out += "\n\n【本域约定（用户已确认，遵循）】" + "；".join(prefs) + "。"
+        return out
+
+    def record_domain_preference(self, db: Session, domain_id: str, text: str) -> dict:
+        """P3.1：把用户确认的约定落库为本域记忆（ref_kind=preference）。幂等：同域同文不重复。
+
+        由前端在用户对记忆提案点「记住」后调用。写入后经 build_domain_memory_card 注入系统提示。
+        """
+        text = (text or "").strip()[:255]
+        if not text:
+            raise ValueError("约定文本为空")
+        if not db.get(DomainContext, domain_id):
+            raise ValueError("数据域不存在")
+        existing = (
+            db.query(ChatBiDomainMemory)
+            .filter(
+                ChatBiDomainMemory.domain_id == domain_id,
+                ChatBiDomainMemory.ref_kind == "preference",
+                ChatBiDomainMemory.label == text,
+            )
+            .first()
+        )
+        if existing:
+            return {"id": existing.id, "text": text, "remembered": True}
+        row = ChatBiDomainMemory(
+            domain_id=domain_id, ref_kind="preference",
+            ref_id=str(uuid.uuid4()), label=text, hit_count=1,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {"id": row.id, "text": text, "remembered": True}
 
     def _load_ontology_snapshot(
         self, db: Session, ontology_id: str
@@ -1559,6 +1859,59 @@ class ChatBiService:
                 ledger.add_context_name(
                     *[str(v) for v in (result.get("display_name"), result.get("name")) if v]
                 )
+            elif tool_name == "propose_preference" and isinstance(result, dict):
+                # 记忆提案的约定文本是本轮工具产出——答案复述该约定时不被 F4 判成幻觉。
+                if result.get("text"):
+                    ledger.add_context_name(str(result["text"]))
+            elif tool_name == "analyze_result" and isinstance(result, dict):
+                # P5：把统计画像的真实计算值（均值/分位/离群…）登记为可信事实，
+                # 让答案复述「均值 X、离群 Y 个」时不被 F4 判成幻觉。
+                a = result.get("analysis") or {}
+                cells: list[dict] = []
+                for rep in a.get("columns") or []:
+                    if isinstance(rep, dict):
+                        if rep.get("column"):
+                            ledger.add_context_name(str(rep["column"]))
+                        for k in ("count", "nulls", "min", "max", "mean", "p25",
+                                  "median", "p75", "std", "outlier_count"):
+                            if isinstance(rep.get(k), (int, float)) and not isinstance(rep.get(k), bool):
+                                cells.append({"v": rep[k]})
+                        for ov in rep.get("outliers") or []:
+                            if isinstance(ov, (int, float)) and not isinstance(ov, bool):
+                                cells.append({"v": ov})
+                        tr = rep.get("trend") or {}
+                        for k in ("first", "last", "change", "change_pct", "slope"):
+                            if isinstance(tr.get(k), (int, float)) and not isinstance(tr.get(k), bool):
+                                cells.append({"v": tr[k]})
+                        for jp in rep.get("jumps") or []:
+                            for k in ("from", "to", "delta"):
+                                if isinstance(jp.get(k), (int, float)) and not isinstance(jp.get(k), bool):
+                                    cells.append({"v": jp[k]})
+                            if jp.get("at") is not None:
+                                ledger.add_context_name(str(jp["at"]))
+                if isinstance(a.get("total_outliers"), int):
+                    cells.append({"v": a["total_outliers"]})
+                if isinstance(a.get("total_jumps"), int):
+                    cells.append({"v": a["total_jumps"]})
+                if cells:
+                    ledger.add_cells([], cells)
+            elif isinstance(result, dict) and "data" in result:
+                # P4：外部工具返回（{"data": ...}）是本轮工具的真实产出——把其中的字符串/数值
+                # 登记为可信事实，让答案复述外部结果时不被 F4 判成幻觉。
+                def _reg(v: Any, depth: int = 0) -> None:
+                    if depth > 3:
+                        return
+                    if isinstance(v, dict):
+                        for x in v.values():
+                            _reg(x, depth + 1)
+                    elif isinstance(v, list):
+                        for x in v[:50]:
+                            _reg(x, depth + 1)
+                    elif isinstance(v, str) and v.strip():
+                        ledger.add_context_name(v[:120])
+                    elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                        ledger.add_cells([], [{"v": v}])
+                _reg(result.get("data"))
         except Exception as exc:  # noqa: BLE001 — 登记失败不得拖垮问答
             logger.warning("fact ledger register failed for %s: %s", tool_name, exc)
 
@@ -2102,6 +2455,156 @@ class ChatBiService:
         charts.append(spec)
         return {"ok": True, "chart": spec}, f"已生成{kind}图（x={x}, y={y}）", False
 
+    @staticmethod
+    def _dispatch_analyze_result(
+        args: dict, data_result: dict | None, analyses: list[dict]
+    ) -> tuple[dict, str, bool]:
+        """P5：对最近一次 run_sql 结果做统计画像 + IQR 离群检测（纯 stdlib，不外呼）。
+
+        让「有没有异常/分布如何」这类分析有**真实计算**支撑，而非模型对结果的口头臆测。
+        接地约束：必须已有执行结果；只分析数值列。结果随后投影成 insight 块，且其统计数值
+        登记进事实账本（见 _ledger_register），答案复述均值/离群时不被 F4 判成幻觉。
+        """
+        rows = (data_result or {}).get("rows") or []
+        if not rows:
+            return (
+                {"error": "尚无查询结果，请先用 run_sql 取到数据再分析。"},
+                "分析失败：无数据",
+                True,
+            )
+        columns = [str(c.get("key") or c.get("title") or "") for c in (data_result.get("columns") or [])]
+        if not columns:
+            columns = list({k for r in rows if isinstance(r, dict) for k in r})
+        want = [str(c).strip() for c in (args.get("columns") or []) if str(c).strip()]
+        order_by = str(args.get("order_by") or "").strip()
+        if order_by and order_by not in columns:
+            order_by = ""  # 不在结果里就忽略（仍出统计，只是不算趋势）
+        try:
+            max_out = int(args.get("max_outliers") or 5)
+        except (TypeError, ValueError):
+            max_out = 5
+        max_out = max(1, min(max_out, 20))
+
+        def _num(v: Any) -> float | None:
+            if isinstance(v, bool) or v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v.replace(",", "").strip())
+                except ValueError:
+                    return None
+            return None
+
+        dict_rows = [r for r in rows if isinstance(r, dict)]
+        # 趋势/突变需要**有序序列**：仅当给了 order_by 才排序并计算，避免对无序数据误判趋势。
+        ordered_rows = dict_rows
+        if order_by:
+            def _okey(r: dict) -> tuple:
+                v = r.get(order_by)
+                nv = _num(v)
+                return (0, nv) if nv is not None else (1, str(v))
+            ordered_rows = sorted(dict_rows, key=_okey)
+
+        def _trend_and_jumps(pairs: list[tuple[Any, float]]) -> tuple[dict | None, list[dict]]:
+            ys = [v for _, v in pairs]
+            n = len(ys)
+            if n < 4:
+                return None, []
+            xs = list(range(n))
+            mx = statistics.fmean(xs)
+            my = statistics.fmean(ys)
+            denom = sum((x - mx) ** 2 for x in xs)
+            slope = (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom) if denom else 0.0
+            first, last = ys[0], ys[-1]
+            change = last - first
+            span = max(ys) - min(ys)
+            eps = (span or abs(my) or 1.0) * 0.01
+            direction = "up" if slope > eps else ("down" if slope < -eps else "flat")
+            trend = {
+                "direction": direction, "slope": round(slope, 4),
+                "first": first, "last": last, "change": round(change, 4),
+                "change_pct": round(change / abs(first) * 100, 2) if first else None,
+            }
+            deltas = [ys[i] - ys[i - 1] for i in range(1, n)]
+            ad = [abs(d) for d in deltas]
+            jumps: list[dict] = []
+            if len(ad) >= 3:
+                # 突变阈值用「3×典型步长（中位）」——中位对单个大突变稳健，不像 mean+kσ 会被
+                # 突变自身抬高阈值而漏检（masking）。
+                thr = max(eps, 3 * statistics.median(ad))
+                for i, d in enumerate(deltas, start=1):
+                    if abs(d) > thr:
+                        jumps.append({"at": pairs[i][0], "from": pairs[i - 1][1],
+                                      "to": pairs[i][1], "delta": round(d, 4)})
+            jumps.sort(key=lambda j: -abs(j["delta"]))
+            return trend, jumps[:max_out]
+
+        col_reports: list[dict] = []
+        total_outliers = 0
+        total_jumps = 0
+        for col in columns:
+            if want and col not in want:
+                continue
+            if order_by and col == order_by:
+                continue  # 排序维度本身不作为度量分析
+            raw = [r.get(col) for r in dict_rows]
+            vals = [x for x in (_num(v) for v in raw) if x is not None]
+            nulls = len(raw) - len(vals)
+            # 数值列判定：至少一半非空值可解析为数
+            if not vals or len(vals) < max(1, len([v for v in raw if v is not None]) / 2):
+                continue
+            n = len(vals)
+            rep: dict[str, Any] = {
+                "column": col, "count": n, "nulls": nulls,
+                "min": min(vals), "max": max(vals),
+                "mean": round(statistics.fmean(vals), 4),
+            }
+            if n >= 2:
+                q = statistics.quantiles(vals, n=4)  # [p25, p50, p75]
+                p25, p50, p75 = q[0], q[1], q[2]
+                iqr = p75 - p25
+                rep.update({
+                    "p25": round(p25, 4), "median": round(p50, 4), "p75": round(p75, 4),
+                    "std": round(statistics.stdev(vals), 4),
+                })
+                lo, hi = p25 - 1.5 * iqr, p75 + 1.5 * iqr
+                outliers = [v for v in vals if v < lo or v > hi]
+                rep["outlier_count"] = len(outliers)
+                rep["outliers"] = sorted(outliers, key=lambda v: -abs(v - rep["mean"]))[:max_out]
+                total_outliers += len(outliers)
+            if order_by:
+                pairs = [(r.get(order_by), _num(r.get(col))) for r in ordered_rows]
+                pairs = [(lbl, v) for lbl, v in pairs if v is not None]
+                trend, jumps = _trend_and_jumps(pairs)
+                if trend:
+                    rep["trend"] = trend
+                if jumps:
+                    rep["jumps"] = jumps
+                    total_jumps += len(jumps)
+            col_reports.append(rep)
+
+        if not col_reports:
+            return (
+                {"error": "结果里没有可分析的数值列。", "columns": columns},
+                "分析失败：无数值列",
+                True,
+            )
+        analysis = {
+            "row_count": len(rows), "columns": col_reports,
+            "total_outliers": total_outliers, "total_jumps": total_jumps,
+        }
+        if order_by:
+            analysis["ordered_by"] = order_by
+        _extra = f"、{total_jumps} 处突变" if order_by else ""
+        analyses.append(analysis)
+        return (
+            {"analysis": analysis},
+            f"已分析 {len(col_reports)} 个数值列，发现 {total_outliers} 个离群值{_extra}",
+            False,
+        )
+
     def _dispatch_get_lineage(
         self, db: Session, *, ontology_id: str, args: dict
     ) -> tuple[dict, str, bool]:
@@ -2209,6 +2712,213 @@ class ChatBiService:
             False,
         )
 
+    @staticmethod
+    def _dispatch_propose_preference(*, domain_id: str, args: dict) -> tuple[dict, str, bool]:
+        """P3.1：为「跨会话应记住的约定」产出提案（纯 spec，不写库）。
+
+        与 propose_draft/propose_action 同构——ask() 保持只读：真正落库由用户在前端点「记住」
+        触发 POST /chat-bi/domain-memory/preferences。守住「agent 只提案、写在人点击」不变量。
+        """
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return {"error": "需要 text（要记住的约定）"}, "记忆提案为空", True
+        proposal = {"kind": "preference", "text": text[:255], "domain_id": domain_id}
+        return proposal, f"提案：记住约定「{text[:24]}」", False
+
+    def _dispatch_propose_action(
+        self, *, ontology_id: str, domain_id: str, args: dict
+    ) -> tuple[dict, str, bool]:
+        """P0：为新建数据任务（物化/同步/加工）产出**提案**（纯 spec，不写库、不执行）。
+
+        与 propose_draft 同构：ask() 保持只读——真正的 draft（写一条 GovernanceArtifact）
+        由用户在前端点「去校验并执行」后触发，落在 publisher 门控 + 人工确认（含 dry-run 差异）
+        之后。本方法只组装前端按钮原样回传给 POST /api/agents/draft 的载荷。
+        """
+        kind = str(args.get("kind") or "").strip()
+        if kind not in _ACTION_KINDS:
+            return (
+                {"error": f"kind 须为 {'/'.join(_ACTION_KINDS)}，收到「{kind}」",
+                 "available": list(_ACTION_KINDS)},
+                "提案类型非法",
+                True,
+            )
+        intent = str(args.get("intent") or "").strip()
+        if not intent:
+            return {"error": "需要 intent（任务意图）"}, "提案缺意图", True
+        context = args.get("context")
+        if not isinstance(context, dict):
+            context = {}
+        proposal = {
+            "kind": kind,
+            "intent": intent,
+            "context": context,
+            "ontology_id": ontology_id,
+            # 前端「去校验并执行」按钮原样 POST /api/agents/draft 的载荷（ArtifactDraftRequest）。
+            "draft_payload": {
+                "kind": kind,
+                "intent": intent,
+                "context": context,
+                "ontology_id": ontology_id,
+            },
+        }
+        label = _ACTION_KIND_LABEL[kind]
+        return proposal, f"提案：新建{label}任务「{intent[:24]}」", False
+
+    @staticmethod
+    def _dispatch_update_plan(args: dict) -> tuple[dict, str, bool]:
+        """P2：产出/更新一份多步分析计划（纯 echo，不写库、不接地）。
+
+        计划是「打算怎么拆解」的可见路线图，与实时执行轨迹（steps）互补。整份计划每次整体
+        覆盖（同 TodoWrite）。计划文本不进 answer，不参与接地校验，故不会因步骤标题触发拒答。
+        """
+        raw_steps = args.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return {"error": "需要 steps（非空步骤数组）"}, "计划为空", True
+        steps: list[dict] = []
+        for item in raw_steps[:_PLAN_MAX_STEPS]:
+            if isinstance(item, str):
+                title, status = item.strip(), "pending"
+            elif isinstance(item, dict):
+                title = str(item.get("title") or "").strip()
+                status = str(item.get("status") or "pending").strip()
+            else:
+                continue
+            if not title:
+                continue
+            if status not in _PLAN_STATUSES:
+                status = "pending"
+            steps.append({"title": title[:120], "status": status})
+        if not steps:
+            return {"error": "steps 里没有有效步骤（需 title）"}, "计划无有效步骤", True
+        note = str(args.get("note") or "").strip()[:200]
+        plan = {"steps": steps, "note": note}
+        done = sum(1 for s in steps if s["status"] == "done")
+        return {"plan": plan}, f"计划 {len(steps)} 步（完成 {done}）", False
+
+    def _live_task_state(self, db: Session, artifact: Any) -> dict | None:
+        """尽力回读一个物化任务的 Airflow 实时态（多批 DagRun 聚合）。**从不抛异常**。
+
+        制品状态在 execute() 提交 DAG 后即置 succeeded，但 DAG 在 Airflow 里可能还在跑——
+        故实时权威是 Airflow。复用 warehouse 的批次解析 + 状态聚合，读不到就返回 None（退制品态）。
+        """
+        try:
+            from app.api.warehouse import _aggregate_state, _receipt_batches  # noqa: PLC0415
+            from app.connectors.airflow import AirflowClient, AirflowError, is_terminal  # noqa: PLC0415
+
+            batches = _receipt_batches(db, artifact.id)
+            if not batches:
+                return None
+            rt = self.settings_service.get_airflow_runtime(db)
+            client = AirflowClient(
+                rt.endpoint, username=rt.username, password=rt.password,
+                token=rt.token, api_version=rt.api_version,
+            )
+            try:
+                states: list = []
+                run_url = None
+                for b in batches:
+                    bid, brun = b.get("dag_id"), b.get("dag_run_id")
+                    if not bid or not brun:
+                        states.append(b.get("state") or "failed")
+                        continue
+                    try:
+                        run = client.get_dag_run(bid, brun)
+                        states.append(run.get("state"))
+                        run_url = run_url or client.run_url(bid, brun)
+                    except AirflowError:
+                        states.append(None)
+            finally:
+                client.close()
+            agg = _aggregate_state(states)
+            if not agg:
+                return None
+            return {"live_state": agg, "terminal": is_terminal(agg), "run_url": run_url}
+        except Exception as exc:  # noqa: BLE001 — 实时态是增强，读不到退回制品态，绝不炸问答
+            logger.info("live task state unavailable for %s: %s", getattr(artifact, "id", "?"), exc)
+            return None
+
+    def _dispatch_get_task_status(
+        self, db: Session, *, ontology_id: str, args: dict, conversation_id: str | None = None
+    ) -> tuple[dict, str, bool]:
+        """回读数据任务（治理制品）状态与回执摘要。纯 DB 读。
+
+        不引入 Airflow 实时轮询（那条留给现有 UI 状态端点）：读 GovernanceArtifact.status
+        与 execution_receipt_json 已能回答「跑完没/成没成功」。
+
+        P1 跨轮任务记忆：未指定 artifact_id 时，**优先**返回本会话催生的任务
+        （conversation_id ↔ artifact 关联），用户不必重报 id 即可问「那个任务好了吗」；
+        本会话无关联任务时回落到「本体最近任务」（P0 行为）。
+        """
+        from app.api.deps import agent_pipeline  # 延迟导入避免与 deps 循环
+
+        def _summarize_receipt(raw: str | None) -> str | None:
+            if not raw:
+                return None
+            try:
+                data = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                return None
+            if not isinstance(data, dict):
+                return None
+            if data.get("error"):
+                return f"错误：{str(data['error'])[:80]}"
+            keys = ("rows", "row_count", "dag_run_id", "dag_id", "table", "target_table", "message")
+            picked = {k: data[k] for k in keys if k in data}
+            return json.dumps(picked, ensure_ascii=False)[:160] if picked else None
+
+        def _project(a) -> dict:
+            return {
+                "id": a.id,
+                "kind": a.kind,
+                "name": a.name,
+                "status": a.status,
+                "is_high_risk": a.is_high_risk,
+                "executed_at": a.executed_at.isoformat() if a.executed_at else None,
+                "receipt_summary": _summarize_receipt(a.execution_receipt_json),
+            }
+
+        artifact_id = str(args.get("artifact_id") or "").strip()
+        if artifact_id:
+            a = agent_pipeline.get(db, artifact_id)
+            if a is None or (a.ontology_id and a.ontology_id != ontology_id):
+                return {"error": "任务不存在或不属于当前数据域"}, "任务未命中", True
+            task = _project(a)
+            # 实时权威在 Airflow：单任务查询时尽力回读一次 DagRun 实时态（best-effort，失败退制品态）。
+            live = self._live_task_state(db, a)
+            if live:
+                task.update(live)
+            state_label = (live or {}).get("live_state") or a.status
+            return {"tasks": [task]}, f"任务「{a.name}」：{state_label}", False
+
+        try:
+            limit = int(args.get("limit") or 5)
+        except (TypeError, ValueError):
+            limit = 5
+        limit = max(1, min(limit, 20))
+
+        # P1：优先本会话催生的任务（跨轮记忆）
+        if conversation_id:
+            linked_ids = self.list_conversation_task_ids(db, conversation_id)
+            linked = [a for aid in linked_ids if (a := agent_pipeline.get(db, aid)) is not None]
+            if linked:
+                tasks = [_project(a) for a in linked[:limit]]
+                return (
+                    {"tasks": tasks, "total": len(linked), "scope": "conversation"},
+                    f"本会话的 {len(tasks)} 个数据任务",
+                    False,
+                )
+
+        kind = str(args.get("kind") or "").strip() or None
+        if kind and kind not in _ACTION_KINDS:
+            kind = None
+        rows = agent_pipeline.list_artifacts(db, ontology_id=ontology_id, kind=kind)
+        tasks = [_project(a) for a in rows[:limit]]
+        return (
+            {"tasks": tasks, "total": len(rows), "scope": "ontology"},
+            f"最近 {len(tasks)} 个数据任务" if tasks else "暂无数据任务",
+            False,
+        )
+
     def _dispatch_agent_tool(
         self,
         db: Session,
@@ -2281,6 +2991,15 @@ class ChatBiService:
                 return self._dispatch_propose_draft(domain_id=domain_id, args=args)
             if name == "lint_against_standard":
                 return self._dispatch_lint(db, args=args)
+            if name == "propose_action":
+                return self._dispatch_propose_action(
+                    ontology_id=ontology_id, domain_id=domain_id, args=args
+                )
+            if name == "propose_preference":
+                return self._dispatch_propose_preference(domain_id=domain_id, args=args)
+            if name == "update_plan":
+                return self._dispatch_update_plan(args)
+            # get_task_status 在 agent 循环里特判（需注入 conversation_id 做跨轮解析），不走此处。
             if name == "ask_clarification":
                 q = str(args.get("question") or "").strip()
                 if not q:
@@ -2448,6 +3167,7 @@ class ChatBiService:
         seed_logics: list[BusinessLogic],
         principal_role: str | None = None,
         telemetry: RunTelemetry | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """多步工具编排的事件流：yield step_start / step_done / token / done。
 
@@ -2490,8 +3210,15 @@ class ChatBiService:
             logger.info("domain semantic card unavailable: %s", exc)
             card_text = f"\n\n当前数据域：{domain.name}"
 
+        # P3：跨会话记忆软提示——本域历史高频对象/口径，帮复现问题少绕检索、少重复澄清。
+        try:
+            memory_text = self.build_domain_memory_card(db, domain.id)
+        except Exception as exc:  # noqa: BLE001 — 记忆是增强，算不出退空
+            logger.info("domain memory card unavailable: %s", exc)
+            memory_text = ""
+
         messages: list[dict] = [
-            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{seed_note}"}
+            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{memory_text}{seed_note}"}
         ]
         for item in history[-6:]:
             role = item.get("role")
@@ -2542,7 +3269,18 @@ class ChatBiService:
         # 选中技能后就地重建 messages[0] = base_system + overlay（重复选取以最后一次为准）。
         base_system = messages[0]["content"]
         active_skill: Skill | None = None
-        active_tools = _tools_for_skill(active_skill, sql_allowed=sql_allowed)
+        # P4：本域启用的外部工具（配置驱动，curated + 数量封顶）——注入工具集、按名分发。
+        try:
+            external_schemas = external_tools.tool_schemas_for_domain(db, domain.id)
+            external_names = {s["function"]["name"] for s in external_schemas}
+        except Exception as exc:  # noqa: BLE001 — 外部工具是增强，取不到就当没有
+            logger.info("external tools unavailable: %s", exc)
+            external_schemas, external_names = [], set()
+
+        def _compose_tools(skill: "Skill | None") -> list[dict]:
+            return [*_tools_for_skill(skill, sql_allowed=sql_allowed), *external_schemas]
+
+        active_tools = _compose_tools(active_skill)
         # 规约意识：备好当前生效规约的约束卡；选中带 attach_governance 的技能（建数）时并入 overlay。
         try:
             governance_card = active_standard(db).compile_prompt_card()
@@ -2550,8 +3288,13 @@ class ChatBiService:
             logger.info("governance card unavailable: %s", exc)
             governance_card = ""
         charts: list[dict] = []  # render_chart 产出的图表规格（挂到 data_result 上渲染）
+        analyses: list[dict] = []  # analyze_result 产出的统计画像/离群（供 insight 块）
         lineage: dict | None = None  # get_lineage 产出的血缘邻域子图（供 lineage 块渲染）
         draft_proposals: list[dict] = []  # propose_draft 产出的建数提案（供 draft_proposal 块）
+        preference_proposals: list[dict] = []  # propose_preference 产出的记忆提案（供 preference_proposal 块）
+        action_proposals: list[dict] = []  # propose_action 产出的数据任务提案（供 action_proposal 块）
+        task_statuses: list[dict] = []  # get_task_status 产出的任务状态（供 task_status 块）
+        plan: dict | None = None  # update_plan 产出的多步分析计划（供 plan 块；整体覆盖）
 
         for _ in range(_AGENT_MAX_STEPS):
             tel.llm_call()
@@ -2631,11 +3374,16 @@ class ChatBiService:
                     # 只挡「无意识漂移」，给规则误判留一条可恢复路径。
                     if active_skill is not None and active_skill.name == "query":
                         sql_allowed = True
-                    active_tools = _tools_for_skill(active_skill, sql_allowed=sql_allowed)
+                    active_tools = _compose_tools(active_skill)
                 elif tool_name == "render_chart":
                     # V3 S1：把最近的 run_sql 结果渲染成图表；x/y 须为真实结果列（接地）。
                     result, summary, is_error = self._dispatch_render_chart(
                         call_args, data_result, charts
+                    )
+                elif tool_name == "analyze_result":
+                    # P5：对最近的 run_sql 结果做统计画像+离群检测（真实计算，接地）。
+                    result, summary, is_error = self._dispatch_analyze_result(
+                        call_args, data_result, analyses
                     )
                 elif tool_name == "locate_entities":
                     # P4.2：子 agent 在**隔离上下文**里跑检索循环，
@@ -2644,6 +3392,24 @@ class ChatBiService:
                         db, client=client, model=runtime.model,
                         domain_id=domain.id, ontology_id=ontology.id,
                         args=call_args, telemetry=tel,
+                    )
+                elif tool_name == "get_task_status":
+                    # P1：跨轮任务记忆——注入本会话 id，未指定 artifact_id 时优先解析本会话催生的任务。
+                    result, summary, is_error = await asyncio.to_thread(
+                        self._dispatch_get_task_status,
+                        db,
+                        ontology_id=ontology.id,
+                        args=call_args,
+                        conversation_id=conversation_id,
+                    )
+                elif tool_name in external_names:
+                    # P4：配置驱动的外部工具——通用 HTTP executor 取回，结果封顶；从不抛异常进循环。
+                    result, summary, is_error = await asyncio.to_thread(
+                        external_tools.call_external_tool,
+                        db,
+                        tool_name=tool_name,
+                        domain_id=domain.id,
+                        args=call_args,
                     )
                 else:
                     result, summary, is_error = await asyncio.to_thread(
@@ -2688,9 +3454,14 @@ class ChatBiService:
                     or (tool_name in (
                         "get_object", "get_logic", "get_domain_overview",
                         "find_join_path", "profile_values", "compile_metric", "get_lineage",
-                        "propose_draft",
+                        "propose_draft", "propose_action", "get_task_status",
+                        "propose_preference",
                     ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
+                    # P5：结果分析成功=基于真实数据的统计，算接地。
+                    or (tool_name == "analyze_result" and isinstance(result, dict) and result.get("analysis"))
+                    # P4：外部工具成功=拿到真实数据，算接地（否则纯外部工具答案会被误判未接地拒答）。
+                    or (tool_name in external_names)
                 ):
                     grounded_hit = True
                 if isinstance(result, dict):
@@ -2725,6 +3496,14 @@ class ChatBiService:
                         lineage = result
                     elif tool_name == "propose_draft" and result.get("create_payload"):
                         draft_proposals.append(result)
+                    elif tool_name == "propose_preference" and result.get("text"):
+                        preference_proposals.append(result)
+                    elif tool_name == "propose_action" and result.get("draft_payload"):
+                        action_proposals.append(result)
+                    elif tool_name == "get_task_status" and "tasks" in result:
+                        task_statuses.append(result)
+                    elif tool_name == "update_plan" and result.get("plan"):
+                        plan = result["plan"]  # 整体覆盖，末次为准
 
                 # F4：把工具真实返回的结构化事实登记进账本（LLM 说的不入账）
                 self._ledger_register(ledger, tool_name, result, is_error)
@@ -2823,8 +3602,13 @@ class ChatBiService:
                 "steps": steps,
                 "data_result": data_result,
                 "charts": charts,
+                "analyses": analyses,
                 "lineage": lineage,
                 "draft_proposals": draft_proposals,
+                "preference_proposals": preference_proposals,
+                "action_proposals": action_proposals,
+                "task_statuses": task_statuses,
+                "plan": plan,
                 "skill": active_skill.name if active_skill else None,
                 "_grounded": grounded,
                 "_unverified": unverified,
@@ -2845,6 +3629,7 @@ class ChatBiService:
         seed_logics: list[BusinessLogic],
         principal_role: str | None = None,
         telemetry: RunTelemetry | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         """非流式包装：消费事件流、聚合 done.payload 返回（供 ask() agent 路径复用）。"""
         payload: dict | None = None
@@ -2859,6 +3644,7 @@ class ChatBiService:
             seed_logics=seed_logics,
             principal_role=principal_role,
             telemetry=telemetry,
+            conversation_id=conversation_id,
         ):
             if ev["type"] == "done":
                 payload = ev["payload"]
