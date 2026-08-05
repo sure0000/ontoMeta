@@ -898,6 +898,112 @@
   overflow: hidden;
 }
 
+/* V3 S0：本体映射的内联形态——平凡单步映射用一行 chip，不套整张口径卡。 */
+.chatbi-mapping-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 4px;
+}
+
+.chatbi-mapping-inline-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--om-text-tertiary);
+  margin-right: 2px;
+}
+
+/* V3 S1：图表块（轻量 SVG，沿用 DataAppRenderer 手绘风格）。 */
+.chatbi-chart {
+  margin: 12px 0 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: #fafbfc;
+}
+
+.chatbi-chart-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--om-text-secondary);
+  margin-bottom: 8px;
+}
+
+.chatbi-chart-axis {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-chart--empty {
+  color: var(--om-text-tertiary);
+  font-size: 13px;
+}
+
+/* V3 S2：血缘块（轻量 SVG，无 g6 依赖，三列上下游布局）。 */
+.chatbi-lineage {
+  margin: 12px 0 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: #fafbfc;
+}
+
+.chatbi-lineage-head {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--om-text-secondary);
+  margin-bottom: 8px;
+}
+
+.chatbi-lineage--empty {
+  color: var(--om-text-tertiary);
+  font-size: 13px;
+}
+
+/* V3 S3：建数提案块（agent 只出提案，确认后才由用户动作建草稿口径）。 */
+.chatbi-draft {
+  margin: 12px 0 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: #fffdf5;
+}
+
+.chatbi-draft-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-draft-name {
+  margin: 6px 0 2px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--om-text-primary);
+}
+
+.chatbi-draft-desc {
+  font-size: 13px;
+  color: var(--om-text-secondary);
+  margin-bottom: 4px;
+}
+
+.chatbi-draft-note {
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+  margin: 4px 0 10px;
+}
+
+.chatbi-draft-error {
+  font-size: 12px;
+  color: var(--om-error, #d4380d);
+}
+
 .chatbi-caliber-title {
   font-size: 12px;
   font-weight: 650;
@@ -966,6 +1072,31 @@
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 4px;
+}
+
+/* 「命中本体」：口径卡底部一行去重的可跳转引用（口径/对象）。 */
+.chatbi-caliber-hits {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--om-border);
+  background: #ffffff;
+}
+
+.chatbi-caliber-hits-label {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  color: var(--om-text-secondary);
+  flex-shrink: 0;
+}
+
+.chatbi-caliber-hits-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .chatbi-caliber-chip {

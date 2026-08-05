@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import chat_bi_service
 from app.database import get_db
 from app.services import agent_telemetry
+from app.services.chat_bi_blocks import answer_to_blocks
 from app.services.data_app_executor import ExecutionError
 from app.schemas import (
     ChatBiAnswer,
@@ -186,6 +187,9 @@ async def chat_bi_ask(
             principal_role=_principal_role(request),
         )
 
+        # V3 S0：终态 payload 投影成渲染块（双写，旧字段保留）。落库与返回都含 blocks。
+        payload["blocks"] = answer_to_blocks(payload)
+
         chat_bi_service.save_message(
             db,
             conversation_id,
@@ -255,6 +259,8 @@ async def chat_bi_ask_stream(
             ):
                 if ev.get("type") == "done":
                     payload = ev["payload"]
+                    # V3 S0：终态 payload 投影成渲染块（双写）。SSE 下发与落库都含 blocks。
+                    payload["blocks"] = answer_to_blocks(payload)
                     payload["conversation_id"] = conversation_id
                     payload["conversation_title"] = conversation_title
                     yield sse(ev)

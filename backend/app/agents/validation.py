@@ -3,6 +3,11 @@
 标准不是一份文档，而是**代码里的闸门**——每个制品在人工确认**之前**必须过这里，
 不过闸门就不能确认、更不能执行。
 
+**判据来源（G1）**：闸门不再自持判据字面值，而是读 ``app.governance.active_standard(db)``
+——必填字段、凭据词元、命名约定都由那份**声明式规约**给出。本文件只负责「怎么查」，
+「查什么」归规约。这样 agent 提议（读规约当约束）与执行闸门（按规约拦截）咬同一份标准。
+enforced 规则（missing_required_field / credential_in_spec）沿用原 code，行为逐字节不变。
+
 复用而非另写：``ValidationIssue`` / ``DraftConsistencyError`` 直接取自
 ``services/draft_consistency.py``，本体范围的校验直接调用其 ``validate_ontology``。
 若在此另立一套 issue 类型，两份校验语义迟早分叉。
@@ -14,12 +19,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.governance import GovernanceStandard, active_standard
+from app.governance.lint import lint_spec
 from app.models import ObjectType, Ontology, Property
-from app.models.agent import ArtifactKind
 from app.services.draft_consistency import ValidationIssue, validate_ontology
 from app.warehouse import UnknownEngineError, get_adapter
 
-# error 级阻断确认；warning 级必须呈现但不阻断。
+# 与规约无关的结构性 warning（引擎未核实、本体一致性）。规约条款的 error/warning
+# 由其自身 severity 决定，不在这里维护——见 is_blocking。
 _WARNING_CODES = frozenset(
     {
         "engine_unverified",
@@ -28,8 +35,16 @@ _WARNING_CODES = frozenset(
 )
 
 
+def _standard_warning_codes() -> frozenset[str]:
+    """规约里 severity=warning 的条款码——这些进闸门也不阻断确认。"""
+    return frozenset(
+        r.code for r in active_standard().all_rules() if r.severity == "warning"
+    )
+
+
 def is_blocking(issue: ValidationIssue) -> bool:
-    return issue.code not in _WARNING_CODES
+    """error 级阻断确认；warning 级（结构性 + 规约声明的 warning 条款）呈现但不阻断。"""
+    return issue.code not in _WARNING_CODES and issue.code not in _standard_warning_codes()
 
 
 def validate_spec(
@@ -48,9 +63,11 @@ def validate_spec(
         )
         return issues
 
+    standard = active_standard(db)
     issues.extend(_check_engines(spec))
     issues.extend(_check_ontology_refs(db, spec, ontology_id))
-    issues.extend(_check_required_metadata(kind, spec))
+    issues.extend(_check_required_metadata(kind, spec, standard))
+    issues.extend(_check_standard(kind, spec, standard))
 
     # 本体范围的制品：连带跑既有的发布前一致性校验（warning 级，不阻断制品本身）。
     if ontology_id and db.query(Ontology).filter(Ontology.id == ontology_id).first():
@@ -157,19 +174,16 @@ def _check_ontology_refs(
     return issues
 
 
-# 各制品类型的必填字段。缺失即阻断——宁可退回重拟，不可带着窟窿执行。
-_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
-    ArtifactKind.CLUSTER.value: ("hosts", "services"),
-    ArtifactKind.SYNC.value: ("source", "target"),
-    ArtifactKind.TRANSFORM.value: ("target_table", "ontology_id"),
-    ArtifactKind.METRIC.value: ("metric_name",),
-    ArtifactKind.MATERIALIZE.value: ("ontology_id", "target_datasource_id"),
-}
+# 各制品类型的必填字段与凭据规则，判据来自规约（app.governance）——此处不再自持字面值。
+# enforced 规则沿用既有 code（missing_required_field / credential_in_spec），确保接线后
+# 拒绝码分布与遥测不变。
 
 
-def _check_required_metadata(kind: str, spec: dict[str, Any]) -> list[ValidationIssue]:
+def _check_required_metadata(
+    kind: str, spec: dict[str, Any], standard: GovernanceStandard
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    for field in _REQUIRED_FIELDS.get(kind, ()):
+    for field in standard.required_metadata.per_artifact.get(kind, ()):
         if not spec.get(field):
             issues.append(
                 ValidationIssue(
@@ -181,7 +195,7 @@ def _check_required_metadata(kind: str, spec: dict[str, Any]) -> list[Validation
             )
     # 指标必须绑定主对象：聚合 SQL 的 FROM 需要一张源表，缺失时以往会生成看似合法、
     # 实则无法执行的 `FROM <主对象未绑定>`（遗留1）。在起草期就阻断，不带窟窿执行。
-    if kind == ArtifactKind.METRIC.value and not (
+    if kind == "metric" and not (
         spec.get("subject_objects") or spec.get("object_types")
     ):
         issues.append(
@@ -195,14 +209,12 @@ def _check_required_metadata(kind: str, spec: dict[str, Any]) -> list[Validation
         )
     # 凭据绝不应出现在 Spec 里——LLM 上下文与制品存储都不得承载密钥。
     # 但 ``*_ref`` / ``*_alias`` 是**指向**密钥存储的引用，正是要鼓励的写法，须放行。
+    sec = standard.security
     for key in spec:
         lowered = str(key).lower()
-        if lowered.endswith(("_ref", "_alias")):
+        if lowered.endswith(sec.allowed_ref_suffixes):
             continue
-        if any(
-            token in lowered
-            for token in ("password", "secret", "token", "private_key", "credential")
-        ):
+        if any(token in lowered for token in sec.forbidden_tokens):
             issues.append(
                 ValidationIssue(
                     code="credential_in_spec",
@@ -213,3 +225,23 @@ def _check_required_metadata(kind: str, spec: dict[str, Any]) -> list[Validation
                 )
             )
     return issues
+
+
+def _check_standard(
+    kind: str, spec: dict[str, Any], standard: GovernanceStandard
+) -> list[ValidationIssue]:
+    """规约里可在 Spec 层校验的条款（命名 advisory）。
+
+    判据委托 ``governance.lint.lint_spec``——命名规则只有那一处定义（agent 自检与本闸门
+    共用同一份），此处只把 ``Violation`` 投影成 ``ValidationIssue``。这些条款 severity=warning，
+    经 ``is_blocking`` 判为不阻断——**呈现而非拦截**，避免误伤存量、引入回归。
+    """
+    return [
+        ValidationIssue(
+            code=v.code,
+            message=v.message,
+            entity_type=v.entity_type,
+            entity_name=v.entity_name,
+        )
+        for v in lint_spec(kind, spec, standard)
+    ]

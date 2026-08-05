@@ -233,6 +233,13 @@ def test_chat_bi_no_hit_refuses_fiction(client, admin_headers):
     # 不应把本体对象名当作已匹配主对象来编造口径
     assert "基于「订单」本体解读" not in answer
     assert "基于「客户」本体解读" not in answer
+    # V3 S0：终态 payload 经 API funnel 投影出渲染块（双写）。
+    # 本测试无 LLM → mock 模式拒答：拒答提示块 + 正文块 + mock 提示块。
+    blocks = payload["blocks"]
+    assert [b["type"] for b in blocks] == ["notice", "markdown", "notice"]
+    assert blocks[0]["variant"] == "refused"
+    assert blocks[-1]["variant"] == "mock"
+    assert all(b.get("id") for b in blocks)
 
 
 def test_chat_bi_session_domain_binding(client, admin_headers):

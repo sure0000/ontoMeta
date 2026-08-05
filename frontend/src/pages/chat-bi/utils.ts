@@ -1,4 +1,11 @@
-import type { ChatBiAnswer, ChatBiConversation } from "../../types";
+import type {
+  ChatBiAnswer,
+  ChatBiBlock,
+  ChatBiCaliberItem,
+  ChatBiCaliberReference,
+  ChatBiConversation,
+  ChatBiReference,
+} from "../../types";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -8,6 +15,107 @@ export interface ChatMessage {
   /** 正在逐字流式产出最终答案（用于末尾闪烁光标）。 */
   streaming?: boolean;
   error?: boolean;
+}
+
+/**
+ * 口径卡形态（须与后端 chat_bi_blocks._mapping_variant 一致）：
+ * 有口径展开轨迹 → 完整口径卡；只有「命中本体」→ 内联 chip。
+ */
+function mappingVariant(items: ChatBiCaliberItem[]): "inline" | "caliber" {
+  return items.length ? "caliber" : "inline";
+}
+
+/**
+ * 「命中本体」——去重的可跳转引用（须与后端 chat_bi_blocks._caliber_hits 一致）。
+ * 顺序=口径展开引用的口径 → 命中对象 → 命中逻辑；按 (kind, id|name) 去重。
+ */
+function caliberHits(
+  caliber: ChatBiCaliberItem[],
+  objects: ChatBiReference[],
+  logics: ChatBiReference[],
+): ChatBiCaliberReference[] {
+  const hits: ChatBiCaliberReference[] = [];
+  const seen = new Set<string>();
+  const add = (kind: ChatBiCaliberReference["kind"], ref: Partial<ChatBiCaliberReference>) => {
+    const key = `${kind}:${ref.id ?? ref.name ?? ""}`;
+    if (key === `${kind}:` || seen.has(key)) return;
+    seen.add(key);
+    hits.push({ ...ref, kind });
+  };
+  for (const item of caliber) {
+    for (const ref of item.references ?? []) add(ref.kind ?? "business_logic", ref);
+  }
+  for (const obj of objects) add("object_type", obj);
+  for (const logic of logics) add("business_logic", logic);
+  return hits;
+}
+
+/**
+ * 把（可能是旧的、无 blocks 的）终态 payload 投影成渲染块序列，供块渲染器兜底。
+ * 与后端 `answer_to_blocks` 规则一致——改一处记得同步另一处。
+ * `content` 用于流式：此时 payload.answer 仍为空，正文取实时流式的 content。
+ */
+export function answerToBlocks(
+  payload: ChatBiAnswer | undefined,
+  content?: string,
+): ChatBiBlock[] {
+  const blocks: ChatBiBlock[] = [];
+  let n = 0;
+  const id = () => `b${n++}`;
+
+  if (!payload) {
+    if (content) blocks.push({ id: id(), type: "markdown", content });
+    return blocks;
+  }
+
+  const steps = payload.steps ?? [];
+  if (steps.length) blocks.push({ id: id(), type: "steps", steps });
+
+  if (payload.grounding_refused) {
+    blocks.push({ id: id(), type: "notice", level: "warning", variant: "refused" });
+  }
+
+  if (payload.clarification) {
+    blocks.push({ id: id(), type: "clarify", clarification: payload.clarification });
+  } else {
+    const md = content ?? payload.answer ?? "";
+    if (md) blocks.push({ id: id(), type: "markdown", content: md });
+  }
+
+  const caliber = payload.caliber_decomposition ?? [];
+  const objects = payload.referenced_objects ?? [];
+  const logics = payload.referenced_logics ?? [];
+  // 口径映射块：口径展开轨迹（items）+ 一行去重的「命中本体」（references）。
+  // 「命中本体」已并入本块，不再另发底部 refs 块——消除对象列举的重复。
+  const hits = caliberHits(caliber, objects, logics);
+  if (caliber.length || hits.length) {
+    blocks.push({
+      id: id(),
+      type: "mapping",
+      variant: mappingVariant(caliber),
+      items: caliber,
+      references: hits,
+    });
+  }
+
+  if (payload.suggested_sql) blocks.push({ id: id(), type: "sql", sql: payload.suggested_sql });
+
+  const dr = payload.data_result;
+  if (dr && (dr.rows?.length ?? 0) > 0) {
+    blocks.push({
+      id: id(),
+      type: "table",
+      columns: dr.columns ?? [],
+      rows: dr.rows ?? [],
+      truncated: dr.truncated,
+    });
+  }
+
+  if (payload.used_mock) {
+    blocks.push({ id: id(), type: "notice", level: "info", variant: "mock" });
+  }
+
+  return blocks;
 }
 
 export type TimeGroup =

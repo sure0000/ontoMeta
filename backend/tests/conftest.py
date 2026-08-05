@@ -21,6 +21,12 @@ os.environ.pop("OPENAI_API_KEY", None)
 import pytest
 from fastapi.testclient import TestClient
 
+# 与 app 启动一致地建表：确保**不经 app 启动、直连 SessionLocal** 的用例也有全部表
+# （env 已在上方固定，此处 import app.* 安全）。app 启动的 init_db 里 create_all 幂等，无冲突。
+from app.database import Base, engine
+import app.models  # noqa: F401 —— 注册所有模型到 Base.metadata
+Base.metadata.create_all(bind=engine)
+
 ADMIN_TOKEN = "test-admin-token"
 ADMIN_HEADERS = {"X-Admin-Token": ADMIN_TOKEN}
 

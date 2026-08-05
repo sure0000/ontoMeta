@@ -17,6 +17,7 @@ from app.agents import registry
 from app.agents.drafters.base import Drafter
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
+from app.governance.standard import DEFAULT_STANDARD
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
 
 
@@ -163,6 +164,8 @@ def test_happy_path_state_machine(client, admin_headers, metric_agent):
     assert a["status"] == "validated"
     assert a["validation_report"]["blocking_count"] == 0
     assert a["validation_report"]["dry_run"]["will_create"] == "gmv"
+    # G3 版本戳：校验报告记下过闸时的规约版本（审计 / 规约升级后判是否需 re-lint）。
+    assert a["validation_report"]["standard_version"] == DEFAULT_STANDARD.version
     assert executor.dry_runs == 1
 
     a = client.post(

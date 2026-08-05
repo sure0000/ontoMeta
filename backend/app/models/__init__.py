@@ -40,6 +40,7 @@ from app.models.agent import (
     HIGH_RISK_KINDS,
 )
 from app.models.principal import Principal, Role, role_rank, role_satisfies
+from app.models.governance import GovernanceStandardRecord
 from app.models.semantic_index import SemanticIndexEntry
 from app.models.settings import (
     AirflowSetting,
@@ -100,6 +101,7 @@ __all__ = [
     "role_rank",
     "role_satisfies",
     "GovernanceArtifact",
+    "GovernanceStandardRecord",
     "ArtifactKind",
     "ArtifactStatus",
     "HIGH_RISK_KINDS",

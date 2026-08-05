@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session, joinedload
 
 from app.connectors.datahub import _extract_dataset_name, _field_path
+from app.governance import active_standard
+from app.governance.lint import lint_logical_table
 from app.models import (
     BusinessLogic,
     MaterializationContract,
@@ -38,6 +40,9 @@ from app.warehouse import (
     LogicalTable,
     get_adapter,
 )
+
+# 生成期只 surface 的规约码：命名类（违规罕见、信号高）。comment/pk 等 advisory 不逐表刷。
+_GENERATOR_SURFACED_CODES = frozenset({"naming_snake_case", "naming_reserved_word"})
 
 # 缺乏证据时的外键回退约定，与 connectors/cube.py 保持一致。
 _DEFAULT_REF_COLUMN = "id"
@@ -250,6 +255,14 @@ class WarehouseGenerator:
             ontology_id=ontology_id,
             tables=tuple(sorted(tables, key=lambda t: (t.layer, t.name))),
         )
+        # 生成期治理体检：在**真实物理名**上查命名规约，违规记进 plan.note（advisory，
+        # 不阻断生成——延续 G1「呈现而非拦截」的姿态）。只 surface 命名类；comment/pk advisory
+        # 在零注释源（见真实 DataHub）上会刷屏，留给 G3 存量 re-lint 聚合呈现，不在此逐表刷。
+        standard = active_standard(db)
+        for table in plan.schema.tables:
+            for v in lint_logical_table(table, standard):
+                if v.code in _GENERATOR_SURFACED_CODES:
+                    plan.note(table.qualified_name, f"治理·{v.code}：{v.fix}")
         return plan
 
     def _object_to_table(

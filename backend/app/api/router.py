@@ -8,6 +8,7 @@ from app.api import (
     chat_bi,
     confirmations,
     data_app,
+    governance,
     ontology,
     principals,
     public_routes,
@@ -27,4 +28,5 @@ router.include_router(data_app.router)
 router.include_router(warehouse.router)
 router.include_router(principals.router)
 router.include_router(agents.router)
+router.include_router(governance.router)
 router.include_router(public_routes.router)

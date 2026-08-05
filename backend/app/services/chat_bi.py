@@ -28,6 +28,7 @@ import sqlparse
 
 from app.config import settings as env_settings
 
+from app.governance import active_standard, lint_against_standard
 from app.models import (
     BusinessLogic,
     ChatBiConversation,
@@ -50,6 +51,7 @@ from app.services.agent_grounding import FactLedger
 from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
 from app.services.domain_semantic_card import build_card
+from app.services.chat_bi_skills import SKILLS, Skill, skill_choices_text
 from app.services.tool_result_compaction import compact_tool_result
 
 logger = logging.getLogger("ontometa.chat_bi")
@@ -88,6 +90,8 @@ _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 _AGENT_SYSTEM_PROMPT = (
     "你是企业数据问答助手（Data Agent），基于**已发布本体**回答业务问题。\n"
     "可多步调用工具检索本体并执行只读 SQL，像分析师一样先查清口径再作答。\n\n"
+    "若问题明确属于某类任务（了解域结构 / 取数分析），可先调 select_skill 选对应技能，"
+    "它会给出该类任务的专门策略与能力；不确定则直接按下面的通用策略作答。\n\n"
     "工具选择：\n"
     "1. 先 search_* 定位实体，再 get_object / get_logic 取细节。"
     "**若关键词要来回试几次**（域大、说法不确定），改用 locate_entities 整体外包，"
@@ -103,7 +107,10 @@ _AGENT_SYSTEM_PROMPT = (
     "返回「无可执行数据源」时作为建议 SQL 给出并说明未实际执行。\n"
     "6. 【缺口反问】只有用户能补齐的歧义（多个候选指标/时间字段、口径值不明确），"
     "调 **ask_clarification** 反问，不要挑一个可能错的解释硬答；"
-    "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n\n"
+    "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n"
+    "7. 【结构性问题】问对象有哪些属性/字段/关系、口径定义这类元数据问题，"
+    "直接用 get_object/get_logic 的本体元数据作答，**不要取数、不要在正文写取数 SQL**；"
+    "此时取数工具可能不可用。用户确实要据此查数时，再 select_skill('query') 切到取数。\n\n"
     "作答：中文 Markdown，先口径解读再结论；有数据用表格。"
     "用对象/关系的**显示名**称呼它们，不要在正文提及工具名。"
     "本体中确实没有的，如实说明无法回答。"
@@ -373,6 +380,171 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+# --- V3 S1：技能层工具 ---------------------------------------------------------
+# select_skill 是基础工具（永远可用）；render_chart 由 query 技能解锁（只解锁不收窄）。
+_SELECT_SKILL_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "select_skill",
+        "description": (
+            "当问题明确属于某类数据任务时，先选对应技能，获得该任务类型的专门策略与能力。"
+            "可选技能：" + skill_choices_text() + "。不确定就不必选，按通用方式作答即可。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill": {"type": "string", "enum": list(SKILLS.keys()), "description": "要切换到的技能名"},
+            },
+            "required": ["skill"],
+        },
+    },
+}
+
+_RENDER_CHART_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "render_chart",
+        "description": (
+            "把最近一次 run_sql 的结果渲染成图表（供前端展示）。仅在已取到数据且适合可视化时用；"
+            "x/y 必须照抄结果表里的真实列名，否则会被拒绝。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["bar", "line", "area"],
+                         "description": "图型：类别对比用 bar；时间序列用 line 或 area"},
+                "x": {"type": "string", "description": "X 轴列名（维度/时间），须为结果表列"},
+                "y": {"type": "string", "description": "Y 轴列名（度量），须为结果表列"},
+                "title": {"type": "string", "description": "可选：图表标题"},
+            },
+            "required": ["kind", "x", "y"],
+        },
+    },
+}
+
+_GET_LINEAGE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_lineage",
+        "description": (
+            "查看某业务对象的血缘/上下游邻域子图（中心对象 + depth 跳关系）。"
+            "center_id 用 search_objects/get_object 拿到的对象 id。"
+            "structure_type=derivation 的边是数据加工血缘，其它是业务关系（外键/引用等）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "center_id": {"type": "string",
+                              "description": "中心业务对象的 id（来自 search_objects/get_object）"},
+                "depth": {"type": "integer", "description": "邻域跳数，默认 1，最多 3"},
+            },
+            "required": ["center_id"],
+        },
+    },
+}
+
+_PROPOSE_DRAFT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_draft",
+        "description": (
+            "为新建一个口径定义（指标 metric / 标签 tag / 规则 rule）产出**提案**（不写库）。"
+            "只给中文名、类型与口径自然语言说明；**不要编具体表达式**——口径由人在确认后补全。"
+            "提案由用户在前端点击确认后才创建为草稿口径。建前应先 search_logics 查重。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "display_name": {"type": "string", "description": "口径中文名，如「复购率」"},
+                "logic_type": {"type": "string", "enum": ["metric", "tag", "rule"],
+                               "description": "指标 metric / 标签 tag / 规则 rule"},
+                "name": {"type": "string",
+                         "description": "英文标识符（snake_case，如 repurchase_rate）；缺省则由中文名派生"},
+                "description": {"type": "string", "description": "口径的自然语言说明/意图"},
+            },
+            "required": ["display_name", "logic_type"],
+        },
+    },
+}
+
+_LINT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "lint_against_standard",
+        "description": (
+            "用当前数据治理规约自检一份建数/建表规格（提案前调、据返回的 fix 自行修正）。"
+            "主要查物理表名等命名规约；返回违规项列表，空列表=合规。口径提案无物理表名时返回空。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "制品类型，如 transform / materialize / metric（可空）",
+                },
+                "spec": {
+                    "type": "object",
+                    "description": '待自检的规格，如 {"target_table": "dim_customer"}',
+                },
+            },
+            "required": ["spec"],
+        },
+    },
+}
+
+# 基础工具集 = 12 检索/执行工具 + select_skill；技能激活后再并上其 extra 工具。
+_BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [*_AGENT_TOOL_SCHEMAS, _SELECT_SKILL_TOOL]
+_TOOL_BY_NAME: dict[str, dict[str, Any]] = {
+    t["function"]["name"]: t
+    for t in [
+        *_BASE_TOOL_SCHEMAS,
+        _RENDER_CHART_TOOL,
+        _GET_LINEAGE_TOOL,
+        _PROPOSE_DRAFT_TOOL,
+        _LINT_TOOL,
+    ]
+}
+# 所有可能出现的工具名——供 FactLedger 登记为可信上下文（工具名非业务实体）。
+_ALL_AGENT_TOOL_NAMES: list[str] = list(_TOOL_BY_NAME.keys())
+
+# 取数（写 SQL / 产出可执行 SQL）工具——结构性问题下按意图门控从工具集移除并在 dispatch 硬拒。
+_SQL_TOOL_NAMES: frozenset[str] = frozenset({"run_sql", "compile_metric"})
+
+# 意图分类关键词（规则优先、确定性；无额外 LLM 调用）。
+# 结构性=纯元数据/结构问题（对象有哪些属性/字段/关系、口径定义），应基于本体元数据直接作答；
+# 取数=需要实际查库出数。**analytical 赢平局**（fail-open）：宁可多给取数能力，绝不误伤真实取数。
+# 注意：取数标记只收「聚合动词/量词」（多少/统计/求和…），**不收营收名词**（金额/总额/总数）——
+# 后者是指标名/字段名的组成部分（如指标「订单总额」），会把「…的定义」这类结构问题误判成取数。
+_ANALYTICAL_MARKERS: tuple[str, ...] = (
+    "多少", "数量", "几个", "趋势", "环比", "同比", "对比", "占比",
+    "比例", "排名", "排行", "top", "明细", "统计", "近", "分布", "增长",
+    "均值", "平均", "合计", "汇总", "求和", "计数",
+)
+_STRUCTURAL_MARKERS: tuple[str, ...] = (
+    "有哪些", "哪些属性", "哪些字段", "包含哪些", "由哪些", "组成", "构成",
+    "属性", "字段", "结构", "定义", "关系", "关联", "主键", "外键",
+    "数据类型", "schema", "元数据", "是什么意思", "怎么理解",
+)
+
+
+def _tools_for_skill(
+    skill: "Skill | None", *, sql_allowed: bool = True
+) -> list[dict[str, Any]]:
+    """当前可用工具集：基础工具 + 激活技能解锁的额外工具（只增不减）。
+
+    ``sql_allowed=False``（结构性问题）时**收窄**——从工具集移除取数工具
+    （run_sql / compile_metric），让模型在 API 层就无法调用它们。这是「只解锁不收窄」
+    的意图门控例外：默认 True 保持旧行为，仅结构性 turn 显式收窄。
+    """
+    base = _BASE_TOOL_SCHEMAS if skill is None else [
+        *_BASE_TOOL_SCHEMAS,
+        *[_TOOL_BY_NAME[n] for n in skill.extra_tool_names if n in _TOOL_BY_NAME],
+    ]
+    if sql_allowed:
+        return base
+    return [t for t in base if t["function"]["name"] not in _SQL_TOOL_NAMES]
 
 
 def _search_items(result: Any) -> list[dict]:
@@ -1370,6 +1542,23 @@ class ChatBiService:
                     ledger.add_context_name(*names)
                 if result.get("executed"):
                     ledger.add_cells(result.get("columns") or [], result.get("rows") or [])
+            elif tool_name == "get_lineage" and isinstance(result, dict):
+                # 血缘邻域里的对象名与关系名都是本体真实成员——答案解读「上游是客户、
+                # 下游影响订单」时引用这些名字不得被 F4 判成幻觉。
+                for n in result.get("nodes") or []:
+                    if isinstance(n, dict):
+                        ledger.add_context_name(
+                            *[str(v) for v in (n.get("display_name"), n.get("label")) if v]
+                        )
+                for e in result.get("edges") or []:
+                    if isinstance(e, dict) and e.get("label"):
+                        ledger.add_context_name(str(e["label"]))
+            elif tool_name == "propose_draft" and isinstance(result, dict):
+                # 提案里的口径名是本轮工具产出的事实——答案复述「建议新建指标X」时
+                # 引用 X 不得被 F4 判成幻觉（它是提案而非对已有实体的断言）。
+                ledger.add_context_name(
+                    *[str(v) for v in (result.get("display_name"), result.get("name")) if v]
+                )
         except Exception as exc:  # noqa: BLE001 — 登记失败不得拖垮问答
             logger.warning("fact ledger register failed for %s: %s", tool_name, exc)
 
@@ -1841,6 +2030,185 @@ class ChatBiService:
             logger.info("semantic augmentation skipped: %s", exc)
             return items, 0
 
+    def _apply_select_skill(
+        self, args: dict, messages: list[dict], base_system: str, governance_card: str = ""
+    ) -> tuple["Skill | None", dict, str, bool]:
+        """V3 S1：切换技能。就地把 messages[0] 重建为 base_system + 技能 overlay。
+
+        返回 (激活的技能, 工具结果, 摘要, 是否错误)。未知技能名→不切换、回错误提示。
+        重复选取以最后一次为准（overlay 不叠加，避免多次切换污染 system）。
+        技能标了 attach_governance 时，把当前生效规约的约束卡并入 overlay（事前遵循）。
+        """
+        name = str(args.get("skill") or "").strip()
+        skill = SKILLS.get(name)
+        if skill is None:
+            return (
+                None,
+                {"error": f"未知技能「{name}」", "available": list(SKILLS.keys())},
+                f"未知技能「{name}」",
+                True,
+            )
+        overlay = skill.prompt_overlay
+        if skill.attach_governance and governance_card:
+            overlay = f"{overlay}\n\n{governance_card}"
+        messages[0]["content"] = f"{base_system}\n\n{overlay}"
+        result = {
+            "ok": True,
+            "skill": skill.name,
+            "display": skill.display,
+            "tools_unlocked": list(skill.extra_tool_names),
+        }
+        return skill, result, f"已切换到「{skill.display}」技能", False
+
+    def _dispatch_render_chart(
+        self, args: dict, data_result: dict | None, charts: list[dict]
+    ) -> tuple[dict, str, bool]:
+        """V3 S1：把最近一次 run_sql 结果渲染成图表规格，追加到 charts。
+
+        接地约束：必须已有执行结果，且 x/y 是结果表里的真实列名——不许对臆造列作图。
+        规格随后由 answer_to_blocks 连同数据行投影成 chart 块。
+        """
+        if not data_result or not (data_result.get("rows") or []):
+            return (
+                {"error": "尚无查询结果，请先用 run_sql 取到数据再作图。"},
+                "作图失败：无数据",
+                True,
+            )
+        kind = str(args.get("kind") or "").strip()
+        if kind not in ("bar", "line", "area"):
+            return (
+                {"error": f"不支持的图型「{kind}」", "available": ["bar", "line", "area"]},
+                f"作图失败：图型「{kind}」不支持",
+                True,
+            )
+        columns = data_result.get("columns") or []
+        col_keys = {str(c.get("key") or c.get("title") or "") for c in columns}
+        x = str(args.get("x") or "").strip()
+        y = str(args.get("y") or "").strip()
+        missing = [c for c in (x, y) if c not in col_keys]
+        if missing:
+            return (
+                {
+                    "error": f"列 {missing} 不在结果表里，x/y 必须照抄结果列名。",
+                    "available_columns": sorted(col_keys),
+                },
+                "作图失败：列名不在结果中",
+                True,
+            )
+        spec = {"kind": kind, "x": x, "y": y}
+        title = str(args.get("title") or "").strip()
+        if title:
+            spec["title"] = title
+        charts.append(spec)
+        return {"ok": True, "chart": spec}, f"已生成{kind}图（x={x}, y={y}）", False
+
+    def _dispatch_get_lineage(
+        self, db: Session, *, ontology_id: str, args: dict
+    ) -> tuple[dict, str, bool]:
+        """V3 S2：某对象的血缘/上下游邻域子图，包 `get_ontology_graph`（中心+depth BFS）。
+
+        DataHub 表级血缘在 ingest 时已落成 `structure_type=derivation` 的关系边，故直接查
+        已发布关系图即可，天然按域/发布范围收敛。center_id 须是已发布对象 id。
+        """
+        center_id = str(args.get("center_id") or "").strip()
+        if not center_id:
+            return (
+                {"error": "需要 center_id（对象 id）", "hint": "先用 search_objects 定位对象拿到 id"},
+                "血缘缺中心对象",
+                True,
+            )
+        center = self.query_service.get_object_type(db, center_id)
+        if not center or center.status != "published":
+            return (
+                {"error": "中心对象不存在或未发布", "hint": "先用 search_objects 定位已发布对象的 id"},
+                "中心对象未命中",
+                True,
+            )
+        try:
+            depth = int(args.get("depth") or 1)
+        except (TypeError, ValueError):
+            depth = 1
+        depth = max(1, min(depth, 3))
+        graph = self.query_service.get_ontology_graph(
+            db, ontology_id, center_id=center_id, depth=depth, published_only=True
+        )
+        payload = graph.model_dump() if hasattr(graph, "model_dump") else dict(graph)
+        nodes = payload.get("nodes") or []
+        edges = payload.get("edges") or []
+        result = {
+            "center_id": center_id,
+            "center_name": center.display_name,
+            "depth": depth,
+            "truncated": bool(payload.get("truncated")),
+            "nodes": nodes,
+            "edges": edges,
+        }
+        summary = f"「{center.display_name}」邻域：{len(nodes)} 对象 / {len(edges)} 关系"
+        return result, summary, False
+
+    _PROPOSE_LOGIC_TYPES = ("metric", "tag", "rule")
+    _PROPOSE_TYPE_LABEL = {"metric": "指标", "tag": "标签", "rule": "规则"}
+
+    def _dispatch_propose_draft(self, *, domain_id: str, args: dict) -> tuple[dict, str, bool]:
+        """V3 S3：为新建口径定义产出**提案**（纯 spec，不写库）。
+
+        Data Agent 只出提案；真正建库草稿由用户在前端点「去确认」后走 POST /api/business-logics。
+        故本方法无任何 DB 写——ask() 保持只读（写侧仍走既有 draft→confirm→execute 治理骨架）。
+        不替用户编表达式（口径是人定的）：提案只含名字、类型、自然语言说明。
+        """
+        display_name = str(args.get("display_name") or "").strip()
+        if not display_name:
+            return {"error": "需要 display_name（口径中文名）"}, "提案缺名称", True
+        logic_type = str(args.get("logic_type") or "").strip()
+        if logic_type not in self._PROPOSE_LOGIC_TYPES:
+            return (
+                {"error": f"logic_type 须为 metric/tag/rule，收到「{logic_type}」",
+                 "available": list(self._PROPOSE_LOGIC_TYPES)},
+                "提案类型非法",
+                True,
+            )
+        name = str(args.get("name") or "").strip()
+        if not name:
+            # 无英文标识符则由中文名派生一个安全 slug（非 ascii 落空时给占位名，用户可在表单改）
+            slug = re.sub(r"[^a-zA-Z0-9_]+", "_", display_name).strip("_").lower()
+            name = slug or "new_logic"
+        description = str(args.get("description") or "").strip()
+        proposal = {
+            "kind": "business_logic",
+            "logic_type": logic_type,
+            "display_name": display_name,
+            "name": name,
+            "description": description,
+            # 前端「去确认」按钮原样 POST /api/business-logics 的载荷（BusinessLogicCreate）。
+            "create_payload": {
+                "domain_id": domain_id,
+                "name": name,
+                "display_name": display_name,
+                "logic_type": logic_type,
+                "description": description or None,
+                "expression_summary": description or None,
+            },
+        }
+        label = self._PROPOSE_TYPE_LABEL[logic_type]
+        return proposal, f"提案：新建{label}「{display_name}」", False
+
+    def _dispatch_lint(self, db: Session, *, args: dict) -> tuple[dict, str, bool]:
+        """规约自检：用当前生效规约 lint 一份规格，返回违规项+可照做的 fix（只读，不写库）。
+
+        「事前遵循」的自检工具——agent 提含物理表名的规格前调，据 fix 自改而非等治理闸门打回。
+        口径提案无物理表名时返回空（合规）。
+        """
+        spec = args.get("spec")
+        if not isinstance(spec, dict):
+            return {"error": "需要 spec 对象"}, "规约自检失败：无 spec", True
+        kind = str(args.get("kind") or "").strip()
+        violations = lint_against_standard(kind, spec, db)
+        return (
+            {"violations": violations, "compliant": not violations},
+            f"规约自检：{len(violations)} 项待修" if violations else "规约自检：合规",
+            False,
+        )
+
     def _dispatch_agent_tool(
         self,
         db: Session,
@@ -1907,6 +2275,12 @@ class ChatBiService:
                 )
             if name == "compile_metric":
                 return self._dispatch_compile_metric(db, args=args)
+            if name == "get_lineage":
+                return self._dispatch_get_lineage(db, ontology_id=ontology_id, args=args)
+            if name == "propose_draft":
+                return self._dispatch_propose_draft(domain_id=domain_id, args=args)
+            if name == "lint_against_standard":
+                return self._dispatch_lint(db, args=args)
             if name == "ask_clarification":
                 q = str(args.get("question") or "").strip()
                 if not q:
@@ -1980,6 +2354,20 @@ class ChatBiService:
         return t.strip()
 
     @staticmethod
+    def _classify_intent(question: str) -> str:
+        """意图分类：``"structural"``（纯元数据/结构问题）或 ``"analytical"``（取数）。
+
+        规则优先、确定性、零额外 LLM 调用。**analytical 赢平局**：命中任一取数标记即取数；
+        否则命中结构标记且无取数标记才判结构；都不命中 → 取数（fail-open，绝不误伤真实取数）。
+        """
+        q = (question or "").lower()
+        if any(m in q for m in _ANALYTICAL_MARKERS):
+            return "analytical"
+        if any(m in q for m in _STRUCTURAL_MARKERS):
+            return "structural"
+        return "analytical"
+
+    @staticmethod
     def _extract_sql_from_text(text: str | None) -> str | None:
         """从答案正文里抽取 ```sql 围栏块（兜底：模型未走 run_sql 时不丢 SQL）。"""
         if not text:
@@ -1996,14 +2384,16 @@ class ChatBiService:
         referenced_logics: list[dict],
         compiled: list[dict] | None = None,
     ) -> list[dict]:
-        """口径拆解卡。
+        """口径拆解卡——**只保留编译器的口径展开契约**。
 
-        ``compiled``（P3 口径编译器的 ``caliber_trace``）**排在最前且优先**：它是
-        「口径如何展开成这条查询」的**契约**——由本体确定性生成；而下面按 steps 反推的
-        卡片只是事后猜测（「调了 get_object，那大概是个对象口径」）。有契约就别用猜测。
+        每项来自 P3 口径编译器的 ``caliber_trace``：由本体确定性生成、已自证的
+        「口径如何展开成这条查询」。此前还按 steps 反推「对象口径 / 逻辑口径 / 数据查询」
+        三类卡——那是事后猜测（「调了 get_object，那大概是个对象口径」），且「N 字段」是
+        无效计数、对象 chip 又与展开轨迹里的「关联」及底部引用重复。已移除；命中的对象/口径
+        改为在块投影层（``chat_bi_blocks._caliber_hits``）汇成一行去重的「命中本体」。
+
+        ``steps`` / ``referenced_*`` 形参保留（调用点不变），但不再参与卡片构建。
         """
-        obj_by_id = {o["id"]: o for o in referenced_objects if o.get("id")}
-        logic_by_id = {l["id"]: l for l in referenced_logics if l.get("id")}
         items: list[dict] = []
         for c in compiled or []:
             items.append({
@@ -2015,37 +2405,6 @@ class ChatBiService:
                     if c.get("logic_id") else []
                 ),
             })
-        seen_obj: set[str] = set()
-        seen_logic: set[str] = set()
-        for s in steps:
-            # 只保留成功步：失败的检索（如模型把英文名当 object_id 猜错）不应铸成口径卡
-            if s.get("status") != "succeeded":
-                continue
-            tool = s.get("tool")
-            a = s.get("arguments") or {}
-            if tool == "get_object":
-                ref = obj_by_id.get(a.get("object_id"))
-                # 未解析到引用的对象卡是噪声；同一对象（失败后重试命中）只留一张
-                if not ref or ref["id"] in seen_obj:
-                    continue
-                seen_obj.add(ref["id"])
-                items.append({
-                    "label": "对象口径",
-                    "description": s.get("summary") or "",
-                    "references": [{"kind": "object_type", **ref}],
-                })
-            elif tool == "get_logic":
-                ref = logic_by_id.get(a.get("logic_id"))
-                if not ref or ref["id"] in seen_logic:
-                    continue
-                seen_logic.add(ref["id"])
-                items.append({
-                    "label": "逻辑口径",
-                    "description": s.get("summary") or "",
-                    "references": [{"kind": "business_logic", **ref}],
-                })
-            elif tool == "run_sql":
-                items.append({"label": "数据查询", "description": s.get("summary") or "", "references": []})
         return items
 
     async def _stream_final_answer(
@@ -2159,7 +2518,8 @@ class ChatBiService:
         # 工具名是内部机制、非业务实体：若模型在正文提到工具名（如 get_domain_overview），
         # 不得被 answer_verifier 当成本体幻觉实体而拒答。
         ledger.add_context_name(
-            *[t["function"]["name"] for t in _AGENT_TOOL_SCHEMAS]
+            *[t["function"]["name"] for t in _AGENT_TOOL_SCHEMAS],
+            *_ALL_AGENT_TOOL_NAMES,
         )
         # 语义卡上的名字是**服务端从已发布本体算出来的**，与 get_domain_overview 同源同可信。
         # 不入账的话，模型引用卡上看到的核心对象/指标名会被 F4 当成幻觉——
@@ -2173,12 +2533,32 @@ class ChatBiService:
 
         tel = telemetry if telemetry is not None else RunTelemetry()
 
+        # 意图门控（架构强制，非提示词）：结构性问题（问对象有哪些属性/字段/关系等）
+        # 不提供取数工具，避免答非所问地追加取数 SQL。规则确定性分类，analytical fail-open。
+        intent = self._classify_intent(question)
+        sql_allowed = intent == "analytical"
+
+        # V3 S1：技能层运行态。base_system 是不含技能 overlay 的系统提示基线，
+        # 选中技能后就地重建 messages[0] = base_system + overlay（重复选取以最后一次为准）。
+        base_system = messages[0]["content"]
+        active_skill: Skill | None = None
+        active_tools = _tools_for_skill(active_skill, sql_allowed=sql_allowed)
+        # 规约意识：备好当前生效规约的约束卡；选中带 attach_governance 的技能（建数）时并入 overlay。
+        try:
+            governance_card = active_standard(db).compile_prompt_card()
+        except Exception as exc:  # noqa: BLE001 — 规约取不到只是少一段增强，不该炸循环
+            logger.info("governance card unavailable: %s", exc)
+            governance_card = ""
+        charts: list[dict] = []  # render_chart 产出的图表规格（挂到 data_result 上渲染）
+        lineage: dict | None = None  # get_lineage 产出的血缘邻域子图（供 lineage 块渲染）
+        draft_proposals: list[dict] = []  # propose_draft 产出的建数提案（供 draft_proposal 块）
+
         for _ in range(_AGENT_MAX_STEPS):
             tel.llm_call()
             resp = await client.chat.completions.create(
                 model=runtime.model,
                 messages=messages,
-                tools=_AGENT_TOOL_SCHEMAS,
+                tools=active_tools,
                 tool_choice="auto",
             )
             msg = resp.choices[0].message
@@ -2237,7 +2617,27 @@ class ChatBiService:
                 idx = len(steps)
                 yield {"type": "step_start", "index": idx, "tool": tool_name, "arguments": call_args}
 
-                if tool_name == "locate_entities":
+                if (not sql_allowed) and tool_name in _SQL_TOOL_NAMES:
+                    # 意图门控硬拒：结构性 turn 里，就算模型（或正文 tool-call 绕过）发出取数
+                    # 工具，也在执行层拦下——这是真正的强制，覆盖非原生模型的正文工具调用路径。
+                    result = {"error": "结构性问题无需取数，已跳过取数工具", "code": "sql_not_allowed"}
+                    summary, is_error = "结构性问题：已跳过取数工具", True
+                elif tool_name == "select_skill":
+                    # V3 S1：切换技能——叠 prompt overlay + 解锁额外工具。只解锁不收窄。
+                    active_skill, result, summary, is_error = self._apply_select_skill(
+                        call_args, messages, base_system, governance_card
+                    )
+                    # 升级阀：模型显式选 query（取数）技能=有意识的取数请求 → 放开取数能力。
+                    # 只挡「无意识漂移」，给规则误判留一条可恢复路径。
+                    if active_skill is not None and active_skill.name == "query":
+                        sql_allowed = True
+                    active_tools = _tools_for_skill(active_skill, sql_allowed=sql_allowed)
+                elif tool_name == "render_chart":
+                    # V3 S1：把最近的 run_sql 结果渲染成图表；x/y 须为真实结果列（接地）。
+                    result, summary, is_error = self._dispatch_render_chart(
+                        call_args, data_result, charts
+                    )
+                elif tool_name == "locate_entities":
                     # P4.2：子 agent 在**隔离上下文**里跑检索循环，
                     # 只有结论回到主上下文；试错过程一个字符都不进来。
                     result, summary, is_error = await self._dispatch_locate_entities(
@@ -2287,7 +2687,8 @@ class ChatBiService:
                     (tool_name.startswith("search_") and _search_items(result))
                     or (tool_name in (
                         "get_object", "get_logic", "get_domain_overview",
-                        "find_join_path", "profile_values", "compile_metric",
+                        "find_join_path", "profile_values", "compile_metric", "get_lineage",
+                        "propose_draft",
                     ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
                 ):
@@ -2320,6 +2721,10 @@ class ChatBiService:
                                 "rows": result.get("rows") or [],
                                 "truncated": bool(result.get("truncated")),
                             }
+                    elif tool_name == "get_lineage" and result.get("nodes"):
+                        lineage = result
+                    elif tool_name == "propose_draft" and result.get("create_payload"):
+                        draft_proposals.append(result)
 
                 # F4：把工具真实返回的结构化事实登记进账本（LLM 说的不入账）
                 self._ledger_register(ledger, tool_name, result, is_error)
@@ -2373,7 +2778,9 @@ class ChatBiService:
 
         # SQL 收割优先级：run_sql 实际提交的 > 口径编译产物 > 正文围栏块兜底。
         # 编译产物排在正文之前——它是本体确定性生成且已自证的，比模型正文里写的可信。
-        if not last_sql:
+        # 结构性 turn（sql_allowed=False）不收割：正文里的示例 SQL 不得被提升成取数块，
+        # 否则又是「答非所问地追加取数」。取数工具本已被门控拦下，这里是最后一道闸。
+        if sql_allowed and not last_sql:
             last_sql = compiled_sql or self._extract_sql_from_text(answer)
 
         # F4：断言级可靠性校验。答案里出现账本外的具名实体/未证实数值 → 判不可靠。
@@ -2415,6 +2822,10 @@ class ChatBiService:
                 "referenced_logics": referenced_logics,
                 "steps": steps,
                 "data_result": data_result,
+                "charts": charts,
+                "lineage": lineage,
+                "draft_proposals": draft_proposals,
+                "skill": active_skill.name if active_skill else None,
                 "_grounded": grounded,
                 "_unverified": unverified,
             },

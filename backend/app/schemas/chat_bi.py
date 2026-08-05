@@ -59,6 +59,21 @@ class ChatBiClarification(BaseModel):
     reason: str = ""
 
 
+class ChatBiBlock(BaseModel):
+    """渲染块（V3 S0）：Data Agent 回答由一串有类型的块组成，前端按 ``type`` 查注册表渲染。
+
+    块携带的字段随 ``type`` 变化——markdown.content / sql.sql /
+    table.columns+rows / mapping.variant+items / steps.steps /
+    notice.level+variant / clarify.clarification / refs.objects+logics——
+    故允许额外字段：S1 的 chart / lineage / draft_proposal 块新增字段无需改本模型。
+    """
+
+    model_config = {"extra": "allow"}
+
+    id: str
+    type: str  # markdown|sql|table|mapping|steps|notice|clarify|refs
+
+
 class ChatBiAnswer(BaseModel):
     domain_id: str
     domain_name: str
@@ -76,6 +91,9 @@ class ChatBiAnswer(BaseModel):
     # P4.1 澄清反问：模型判定缺口只能由用户补齐时，本轮不作答而是回问。
     # 与 grounding_refused 是**两种不同结局**——拒答是「答不了」，澄清是「先确认再答」。
     clarification: ChatBiClarification | None = None
+    # V3 S0 渲染块协议：由 chat_bi_blocks.answer_to_blocks 从上述扁平字段投影而来。
+    # 双写——旧字段全部保留，前端优先用 blocks、缺失时本地 answerToBlocks 兜底旧消息。
+    blocks: list[ChatBiBlock] = Field(default_factory=list)
     conversation_id: str | None = None
     conversation_title: str | None = None
 

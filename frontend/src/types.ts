@@ -711,6 +711,61 @@ export interface ChatBiDataResult {
   truncated?: boolean;
 }
 
+/**
+ * 渲染块（V3 S0）：Data Agent 回答由一串有类型的块组成，前端按 `type` 查注册表渲染，
+ * 替代改造前写死的 JSX 阶梯。后端 `answer_to_blocks` 双写，缺失时 `answerToBlocks` 兜底。
+ * 未来 S1 的 chart / lineage / draft_proposal 是新增的块类型，运行时由渲染器 default 跳过。
+ */
+export type ChatBiBlock =
+  | { id: string; type: "steps"; steps: ChatBiAgentStep[] }
+  | { id: string; type: "markdown"; content: string }
+  | {
+      id: string;
+      type: "mapping";
+      variant: "inline" | "caliber";
+      items: ChatBiCaliberItem[];
+      /** 「命中本体」：去重的可跳转口径/对象引用，随口径卡一行展示。 */
+      references: ChatBiCaliberReference[];
+    }
+  | { id: string; type: "sql"; sql: string; compiled_from?: string }
+  | {
+      id: string;
+      type: "table";
+      columns: ChatBiDataResult["columns"];
+      rows: ChatBiDataResult["rows"];
+      truncated?: boolean;
+    }
+  | {
+      id: string;
+      type: "chart";
+      spec: { kind: "bar" | "line" | "area"; x: string; y: string; title?: string };
+      columns: ChatBiDataResult["columns"];
+      rows: ChatBiDataResult["rows"];
+    }
+  | { id: string; type: "refs"; objects: ChatBiReference[]; logics: ChatBiReference[] }
+  | {
+      id: string;
+      type: "lineage";
+      center_id?: string | null;
+      nodes: GraphNode[];
+      edges: GraphEdge[];
+      truncated?: boolean;
+    }
+  | { id: string; type: "notice"; level: "info" | "warning"; variant: "refused" | "mock" }
+  | {
+      id: string;
+      type: "draft_proposal";
+      proposal: {
+        kind: string;
+        logic_type: string;
+        display_name: string;
+        name: string;
+        description?: string;
+        create_payload: BusinessLogicCreateInput;
+      };
+    }
+  | { id: string; type: "clarify"; clarification: ChatBiClarification };
+
 export interface ChatBiAnswer {
   domain_id: string;
   domain_name: string;
@@ -729,6 +784,8 @@ export interface ChatBiAnswer {
   clarification?: ChatBiClarification | null;
   steps?: ChatBiAgentStep[];
   data_result?: ChatBiDataResult | null;
+  /** V3 S0 渲染块（后端双写）；缺失时前端 answerToBlocks 由旧字段兜底。 */
+  blocks?: ChatBiBlock[];
   conversation_id?: string | null;
   conversation_title?: string | null;
 }

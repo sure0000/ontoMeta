@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.agents import registry
 from app.agents.validation import is_blocking, validate_spec
+from app.governance import active_standard
 from app.models.agent import ArtifactKind, ArtifactStatus, GovernanceArtifact
 
 
@@ -112,6 +113,8 @@ class AgentPipelineService:
                 "blocking_count": len(blocking),
                 "dry_run": dry_run,
                 "dry_run_error": dry_run_error,
+                # 版本戳：审计「本制品在哪版规约下过闸」，规约升级后可据此判是否需 re-lint。
+                "standard_version": active_standard(db).version,
                 "validated_at": datetime.now(timezone.utc).isoformat(),
             }
         )

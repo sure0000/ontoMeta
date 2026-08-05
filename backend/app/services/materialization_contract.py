@@ -12,6 +12,7 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app.governance import active_standard
 from app.models import (
     BusinessLogic,
     MaterializationContract,
@@ -21,7 +22,6 @@ from app.models import (
 )
 from app.models.warehouse import (
     LoadStrategy,
-    MaterializationLayer,
     ScdType,
     TargetKind,
 )
@@ -73,6 +73,9 @@ class MaterializationContractService:
         | BusinessLogic | — | ads | 是 |
         """
         out: list[dict] = []
+        # 落层判据来自治理规约（app.governance），此处不再自持层字面值——层的定义归规约，
+        # 「是否物化 / derivation_reason」是本服务的派生语义，仍在此决定。
+        layering = active_standard(db).layering
 
         for obj in (
             db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
@@ -80,19 +83,19 @@ class MaterializationContractService:
             role = obj.table_role or "business_object"
             if role == "business_object":
                 layer, materialized, reason = (
-                    MaterializationLayer.DIM.value,
+                    layering.role_to_layer.get("business_object", "dim"),
                     True,
                     "table_role=business_object → 维度表",
                 )
             elif role == "bridge":
                 layer, materialized, reason = (
-                    MaterializationLayer.DWD.value,
+                    layering.role_to_layer.get("bridge", "dwd"),
                     True,
                     "table_role=bridge → 关系实现表，落 DWD",
                 )
             else:
                 layer, materialized, reason = (
-                    MaterializationLayer.DIM.value,
+                    layering.role_to_layer.get(role, "dim"),
                     False,
                     f"table_role={role} → 非业务对象，不落物理表",
                 )
@@ -117,19 +120,19 @@ class MaterializationContractService:
             structure = rel.structure_type or "other"
             if structure in ("fact_table", "bridge_table"):
                 layer, materialized, reason = (
-                    MaterializationLayer.DWD.value,
+                    layering.structure_to_layer.get(structure, "dwd"),
                     True,
                     f"structure_type={structure} → 明细事实表",
                 )
             elif structure == "foreign_key":
                 layer, materialized, reason = (
-                    MaterializationLayer.DWD.value,
+                    layering.structure_to_layer.get("foreign_key", "dwd"),
                     False,
                     "structure_type=foreign_key → 外键是列上的声明，不是独立表",
                 )
             else:
                 layer, materialized, reason = (
-                    MaterializationLayer.DWD.value,
+                    layering.structure_to_layer.get(structure, "dwd"),
                     False,
                     f"structure_type={structure} → 非实体化关系，不落物理表",
                 )
@@ -161,7 +164,7 @@ class MaterializationContractService:
                 {
                     "target_kind": TargetKind.BUSINESS_LOGIC.value,
                     "target_id": logic.id,
-                    "target_layer": MaterializationLayer.ADS.value,
+                    "target_layer": layering.business_logic_layer,
                     "target_engines": json.dumps(DEFAULT_ENGINES, ensure_ascii=False),
                     "load_strategy": LoadStrategy.FULL.value,
                     "partition_key": None,
