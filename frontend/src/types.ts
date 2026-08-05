@@ -705,6 +705,38 @@ export interface ChatBiClarification {
   reason?: string;
 }
 
+/** 交互表单字段（P6）：`type` 决定前端用哪种控件渲染。 */
+export interface ChatBiFormField {
+  name: string;
+  label: string;
+  type:
+    | "text"
+    | "textarea"
+    | "number"
+    | "select"
+    | "multiselect"
+    | "radio"
+    | "boolean"
+    | "date";
+  /** select/multiselect/radio 的候选项（须来自真实实体）。 */
+  options?: string[];
+  required?: boolean;
+  placeholder?: string;
+  help?: string;
+  default?: string | number | boolean | string[] | null;
+}
+
+/**
+ * Agent 动态生成的可填写表单（P6）：一次向用户收集多个结构化参数。
+ * 与 clarification 同为终态出口——本轮结束、等用户填完提交带回（结构化回填文本进 history）。
+ */
+export interface ChatBiFormRequest {
+  title: string;
+  intent?: string;
+  submit_label?: string;
+  fields: ChatBiFormField[];
+}
+
 export interface ChatBiDataResult {
   columns: { key?: string; title?: string; [k: string]: unknown }[];
   rows: Record<string, unknown>[];
@@ -846,7 +878,8 @@ export type ChatBiBlock =
       type: "preference_proposal";
       proposal: { kind: string; text: string; domain_id?: string | null };
     }
-  | { id: string; type: "clarify"; clarification: ChatBiClarification };
+  | { id: string; type: "clarify"; clarification: ChatBiClarification }
+  | { id: string; type: "form"; form: ChatBiFormRequest };
 
 export interface ChatBiAnswer {
   domain_id: string;
@@ -864,6 +897,8 @@ export interface ChatBiAnswer {
    * 拒答是「答不了」，澄清是「先确认再答」。
    */
   clarification?: ChatBiClarification | null;
+  /** P6：需一次补齐多个结构化参数时，Agent 生成的可填写表单（终态出口）。 */
+  form_request?: ChatBiFormRequest | null;
   steps?: ChatBiAgentStep[];
   data_result?: ChatBiDataResult | null;
   /** V3 S0 渲染块（后端双写）；缺失时前端 answerToBlocks 由旧字段兜底。 */

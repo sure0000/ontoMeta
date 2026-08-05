@@ -113,6 +113,9 @@ _AGENT_SYSTEM_PROMPT = (
     "6. 【缺口反问】只有用户能补齐的歧义（多个候选指标/时间字段、口径值不明确），"
     "调 **ask_clarification** 反问，不要挑一个可能错的解释硬答；"
     "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n"
+    "6b.【多参数收集】若需用户**一次补齐多个**结构化参数（取数的指标+时间范围+分组维度、"
+    "建数任务的目标表+更新策略+调度）才能继续，调 **request_form** 生成可填写表单一并收集，"
+    "比逐条追问高效；候选项须来自真实实体。仅单个歧义仍用 ask_clarification。\n"
     "7. 【结构性问题】问对象有哪些属性/字段/关系、口径定义这类元数据问题，"
     "直接用 get_object/get_logic 的本体元数据作答，**不要取数、不要在正文写取数 SQL**；"
     "此时取数工具可能不可用。用户确实要据此查数时，再 select_skill('query') 切到取数。\n\n"
@@ -631,8 +634,64 @@ _PROPOSE_PREFERENCE_TOOL: dict[str, Any] = {
     },
 }
 
-# 基础工具集 = 12 检索/执行工具 + select_skill；技能激活后再并上其 extra 工具。
-_BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [*_AGENT_TOOL_SCHEMAS, _SELECT_SKILL_TOOL, _PROPOSE_PREFERENCE_TOOL]
+# P6 交互表单：需一次补齐多个结构化参数才能继续时，Agent 生成一张可填写表单收集上下文，
+# 比逐条 ask_clarification 追问高效。与 clarification 同为终态出口（本轮结束等用户回填）。
+_FORM_FIELD_TYPES: tuple[str, ...] = (
+    "text", "textarea", "number", "select", "multiselect", "radio", "boolean", "date",
+)
+_FORM_MAX_FIELDS: int = 10
+
+_REQUEST_FORM_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "request_form",
+        "description": (
+            "当需要用户**一次补齐多个结构化参数**才能继续时，生成一张**可填写表单**收集上下文，"
+            "而不是来回追问多轮。适用：取数需明确「指标+时间范围+分组维度」、"
+            "建数任务需明确「目标表+更新策略+调度」等。"
+            "select/radio/multiselect 的 options **必须来自工具返回的真实实体**；"
+            "无从预置就用 text/number 让用户自填。调用后本轮结束、等用户填完提交再继续。"
+            "只需单个澄清用 ask_clarification；无需用户补参数别乱发表单。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "表单标题：这一步在收集什么（一句话）"},
+                "intent": {"type": "string", "description": "可选：为什么需要这些信息（一句话辅助说明）"},
+                "submit_label": {"type": "string", "description": "可选：提交按钮文案，缺省「提交」"},
+                "fields": {
+                    "type": "array",
+                    "description": f"表单字段（1-{_FORM_MAX_FIELDS} 个）",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string",
+                                      "description": "字段标识（英文 snake_case，回填时作键）"},
+                            "label": {"type": "string", "description": "字段中文标签"},
+                            "type": {"type": "string", "enum": list(_FORM_FIELD_TYPES),
+                                      "description": ("控件类型：text 单行/textarea 多行/number 数字/"
+                                                      "select 单选下拉/multiselect 多选/radio 单选按钮/"
+                                                      "boolean 开关/date 日期")},
+                            "options": {"type": "array", "items": {"type": "string"},
+                                         "description": "select/radio/multiselect 的候选项（须来自真实实体）"},
+                            "required": {"type": "boolean", "description": "是否必填，缺省 false"},
+                            "placeholder": {"type": "string", "description": "可选：占位提示"},
+                            "help": {"type": "string", "description": "可选：字段说明"},
+                            "default": {"description": "可选：默认值（字符串/数字/布尔/数组）"},
+                        },
+                        "required": ["name", "label", "type"],
+                    },
+                },
+            },
+            "required": ["title", "fields"],
+        },
+    },
+}
+
+# 基础工具集 = 12 检索/执行工具 + select_skill + 记忆提案 + 交互表单；技能激活后再并上其 extra 工具。
+_BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    *_AGENT_TOOL_SCHEMAS, _SELECT_SKILL_TOOL, _PROPOSE_PREFERENCE_TOOL, _REQUEST_FORM_TOOL,
+]
 _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
     t["function"]["name"]: t
     for t in [
@@ -2806,6 +2865,65 @@ class ChatBiService:
         done = sum(1 for s in steps if s["status"] == "done")
         return {"plan": plan}, f"计划 {len(steps)} 步（完成 {done}）", False
 
+    @staticmethod
+    def _dispatch_request_form(args: dict) -> tuple[dict, str, bool]:
+        """P6：生成一张可填写表单收集结构化上下文（纯 spec，不写库、不接地）。
+
+        与 ask_clarification 同为**终态出口**：本轮到此为止，等用户在前端填完提交后作为新一
+        轮问题（结构化回填文本）带回。表单只描述「要收集什么」（字段 + 候选项），不携带任何
+        业务结论，故不入接地账本、不参与拒答判定。候选项须来自真实工具结果由提示词约束，此处
+        只做结构校验与归一：非法/空字段丢弃，选项类字段无候选项时退化为文本输入（避免空下拉）。
+        """
+        title = str(args.get("title") or "").strip()
+        raw_fields = args.get("fields")
+        if not title:
+            return {"error": "需要 title（表单标题）"}, "表单缺标题", True
+        if not isinstance(raw_fields, list) or not raw_fields:
+            return {"error": "需要 fields（非空字段数组）"}, "表单无字段", True
+
+        fields: list[dict] = []
+        seen: set[str] = set()
+        for item in raw_fields[:_FORM_MAX_FIELDS]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            label = str(item.get("label") or "").strip()
+            ftype = str(item.get("type") or "").strip()
+            if not name or not label or ftype not in _FORM_FIELD_TYPES or name in seen:
+                continue
+            seen.add(name)
+            field: dict[str, Any] = {"name": name[:64], "label": label[:80], "type": ftype}
+            if item.get("required"):
+                field["required"] = True
+            placeholder = str(item.get("placeholder") or "").strip()
+            if placeholder:
+                field["placeholder"] = placeholder[:120]
+            help_text = str(item.get("help") or "").strip()
+            if help_text:
+                field["help"] = help_text[:200]
+            if ftype in ("select", "multiselect", "radio"):
+                options = [str(o).strip() for o in (item.get("options") or []) if str(o).strip()]
+                if not options:
+                    # 选项类字段没有候选项就退化成文本输入，避免出一个点不动的空下拉。
+                    field["type"] = "textarea" if ftype == "multiselect" else "text"
+                else:
+                    field["options"] = options[:50]
+            if item.get("default") is not None:
+                field["default"] = item["default"]
+            fields.append(field)
+
+        if not fields:
+            return {"error": "fields 里没有有效字段（需 name/label/合法 type）"}, "表单无有效字段", True
+
+        form: dict[str, Any] = {"title": title[:120], "fields": fields}
+        intent = str(args.get("intent") or "").strip()
+        if intent:
+            form["intent"] = intent[:200]
+        submit_label = str(args.get("submit_label") or "").strip()
+        if submit_label:
+            form["submit_label"] = submit_label[:24]
+        return {"form": form}, f"表单：{title[:24]}（{len(fields)} 项）", False
+
     def _live_task_state(self, db: Session, artifact: Any) -> dict | None:
         """尽力回读一个物化任务的 Airflow 实时态（多批 DagRun 聚合）。**从不抛异常**。
 
@@ -3010,6 +3128,8 @@ class ChatBiService:
                 return self._dispatch_propose_preference(domain_id=domain_id, args=args)
             if name == "update_plan":
                 return self._dispatch_update_plan(args)
+            if name == "request_form":
+                return self._dispatch_request_form(args)
             # get_task_status 在 agent 循环里特判（需注入 conversation_id 做跨轮解析），不走此处。
             if name == "ask_clarification":
                 q = str(args.get("question") or "").strip()
@@ -3253,6 +3373,7 @@ class ChatBiService:
         compiled_metrics: list[dict] = []  # P3：口径编译轨迹（权威口径卡的来源）
         compiled_sql: str | None = None
         clarification: dict | None = None  # P4.1：待用户澄清的缺口
+        form_request: dict | None = None  # P6：待用户填写的交互表单（终态出口）
         grounded_hit = False
         answer = ""
         ledger = FactLedger()  # F4：断言级凭证账本（只登记工具真实返回的事实）
@@ -3457,6 +3578,18 @@ class ChatBiService:
                                "status": "succeeded", "summary": summary}
                         tel.clarification()
                         break
+                    if result.get("form") and tool_name == "request_form" and not is_error:
+                        # P6：模型要用户一次补齐多个结构化参数 → 生成表单、本轮到此为止。
+                        # 与澄清同为「先确认再答」出口（非拒答），复用澄清计数（都是等用户回填）。
+                        form_request = result["form"]
+                        steps.append({
+                            "index": idx, "tool": tool_name, "arguments": call_args,
+                            "status": "succeeded", "summary": summary,
+                        })
+                        yield {"type": "step_done", "index": idx,
+                               "status": "succeeded", "summary": summary}
+                        tel.clarification()
+                        break
                     if result.get("code"):
                         tel.rejection(str(result["code"]))
                     if tool_name == "run_sql":
@@ -3535,8 +3668,8 @@ class ChatBiService:
                 result_text, _compacted = compact_tool_result(result, _TOOL_RESULT_MAX_CHARS)
                 messages.append({"role": "tool", "tool_call_id": t.id, "content": result_text})
 
-            if clarification is not None:
-                break  # 澄清请求：跳出整个 agent 循环，不再作答
+            if clarification is not None or form_request is not None:
+                break  # 澄清/表单请求：跳出整个 agent 循环，不再作答
         else:
             # 步数耗尽仍未收敛：强制不带工具收尾（同样仅缓冲，稍后校验通过再流式）
             tel.llm_call()
@@ -3548,6 +3681,29 @@ class ChatBiService:
             ):
                 answer += tok
             answer = self._strip_tool_markup(answer)
+
+        if form_request is not None:
+            # P6 表单出口：与澄清同构——不生成答案、不跑接地校验，直接把表单抛给用户填。
+            # 正文用表单标题（+意图）兜底旧前端；结构化 form_request 供块渲染器出可填写表单。
+            body = form_request["title"]
+            if form_request.get("intent"):
+                body += "\n\n" + form_request["intent"]
+            yield {
+                "type": "done",
+                "payload": {
+                    "answer": body,
+                    "form_request": form_request,
+                    "suggested_sql": None,
+                    "caliber_decomposition": [],
+                    "referenced_objects": referenced_objects,
+                    "referenced_logics": referenced_logics,
+                    "steps": steps,
+                    "data_result": None,
+                    "_grounded": True,   # 表单不是拒答，不该被接地判定拦下
+                    "_unverified": [],
+                },
+            }
+            return
 
         if clarification is not None:
             # 澄清出口：不生成答案、不跑接地校验（没有断言可校验），直接把问题抛给用户。

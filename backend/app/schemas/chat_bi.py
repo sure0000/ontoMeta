@@ -59,6 +59,38 @@ class ChatBiClarification(BaseModel):
     reason: str = ""
 
 
+class ChatBiFormField(BaseModel):
+    """交互表单的单个字段（P6）。``type`` 决定前端用哪种控件渲染。
+
+    ``options`` 仅对 select/multiselect/radio 有意义，且**必须来自工具返回的真实实体**
+    （与 clarification.options 同一约束）；没有候选项时应退化为 text/number 让用户自填。
+    """
+
+    name: str  # 字段标识（回填时作键）
+    label: str  # 中文标签
+    type: str  # text/textarea/number/select/multiselect/radio/boolean/date
+    options: list[str] = Field(default_factory=list)
+    required: bool = False
+    placeholder: str | None = None
+    help: str | None = None
+    default: Any | None = None
+
+
+class ChatBiFormRequest(BaseModel):
+    """Agent 动态生成的**可填写表单**（P6）：一次向用户收集多个结构化参数。
+
+    与 clarification 一样是**终态出口**——本轮到此为止，等用户在前端填完提交后作为
+    新一轮问题带回（结构化回填文本进 history，Agent 据此继续）。表单只描述「要收集什么」，
+    不携带业务结论，故不入接地账本、不参与拒答判定。适用于取数（指标+时间+维度）、
+    建数任务（目标表+更新策略+调度）等需一次补齐多参数的场景。
+    """
+
+    title: str
+    intent: str = ""
+    submit_label: str = "提交"
+    fields: list[ChatBiFormField] = Field(default_factory=list)
+
+
 class ChatBiBlock(BaseModel):
     """渲染块（V3 S0）：Data Agent 回答由一串有类型的块组成，前端按 ``type`` 查注册表渲染。
 
@@ -91,6 +123,9 @@ class ChatBiAnswer(BaseModel):
     # P4.1 澄清反问：模型判定缺口只能由用户补齐时，本轮不作答而是回问。
     # 与 grounding_refused 是**两种不同结局**——拒答是「答不了」，澄清是「先确认再答」。
     clarification: ChatBiClarification | None = None
+    # P6 交互表单：需一次补齐多个结构化参数时，Agent 生成可填写表单收集上下文。
+    # 与 clarification 同为终态出口——本轮结束、等用户填完提交带回；不入接地判定。
+    form_request: ChatBiFormRequest | None = None
     # V3 S0 渲染块协议：由 chat_bi_blocks.answer_to_blocks 从上述扁平字段投影而来。
     # 双写——旧字段全部保留，前端优先用 blocks、缺失时本地 answerToBlocks 兜底旧消息。
     blocks: list[ChatBiBlock] = Field(default_factory=list)

@@ -1721,3 +1721,33 @@
   cursor: default;
   opacity: 0.6;
 }
+
+/* P6 交互表单块：Agent 动态生成的可填写表单，一次收集多个结构化参数。 */
+.chatbi-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-left: 3px solid var(--om-primary, #2563eb);
+  border-radius: 8px;
+  background: var(--om-neutral-subtle, #f8fafc);
+}
+.chatbi-form-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--om-text-primary, #0f172a);
+}
+.chatbi-form-intent {
+  font-size: 12px;
+  color: var(--om-text-tertiary, #64748b);
+}
+.chatbi-form-body {
+  margin-top: 4px;
+}
+.chatbi-form-body .ant-form-item {
+  margin-bottom: 12px;
+}
+.chatbi-form-actions {
+  margin-top: 2px;
+}

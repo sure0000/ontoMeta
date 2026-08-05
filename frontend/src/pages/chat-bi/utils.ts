@@ -77,6 +77,9 @@ export function answerToBlocks(
 
   if (payload.clarification) {
     blocks.push({ id: id(), type: "clarify", clarification: payload.clarification });
+  } else if (payload.form_request) {
+    // P6：交互表单出口——出可填写表单块，替代正文（与后端 answer_to_blocks 一致）。
+    blocks.push({ id: id(), type: "form", form: payload.form_request });
   } else {
     const md = content ?? payload.answer ?? "";
     if (md) blocks.push({ id: id(), type: "markdown", content: md });

@@ -78,6 +78,9 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     clarification = payload.get("clarification")
     if clarification:
         _add({"type": "clarify", "clarification": clarification})
+    elif payload.get("form_request"):
+        # P6：交互表单出口——出可填写表单块，替代正文（表单块自带标题/意图）。
+        _add({"type": "form", "form": payload["form_request"]})
     else:
         # 拒答/概览等正文可能为空——answer 为空则不发 markdown 块。
         answer = payload.get("answer")

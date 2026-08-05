@@ -1,6 +1,18 @@
-import { Button, Space, Tag, message } from "antd";
+import {
+  Button,
+  DatePicker,
+  Form,
+  Input,
+  InputNumber,
+  Radio,
+  Select,
+  Space,
+  Switch,
+  Tag,
+  message,
+} from "antd";
 import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api";
 import { ArtifactDetail } from "../../components/AgentsPanel";
@@ -12,6 +24,8 @@ import type {
   ChatBiCaliberReference,
   ChatBiClarification,
   ChatBiDataResult,
+  ChatBiFormField,
+  ChatBiFormRequest,
   ChatBiReference,
   GovernanceArtifact,
   GraphEdge,
@@ -363,6 +377,9 @@ function BlockRenderer({
           onClarify={onClarify}
         />
       );
+    case "form":
+      // P6：Agent 动态生成的可填写表单。提交后把结构化回填文本经澄清通道作为新一轮问题带回。
+      return <FormBlock form={block.form} onSubmit={onClarify} />;
     default:
       return null;
   }
@@ -428,6 +445,107 @@ function ClarifyBlock({
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** 把 date 控件的 dayjs 值格式化，其余原样返回（避免为一个 format 引入 dayjs 依赖）。 */
+function formatFormValue(v: unknown): string {
+  if (v === undefined || v === null || v === "") return "（未填写）";
+  if (Array.isArray(v)) return v.length ? v.join("、") : "（未填写）";
+  if (typeof v === "boolean") return v ? "是" : "否";
+  if (typeof v === "object" && typeof (v as { format?: unknown }).format === "function") {
+    return (v as { format: (f: string) => string }).format("YYYY-MM-DD");
+  }
+  return String(v);
+}
+
+/** 把填好的表单值拼成既可读、又便于 LLM 解析的结构化回填文本。 */
+function composeFormReply(form: ChatBiFormRequest, values: Record<string, unknown>): string {
+  const lines = form.fields.map((f) => `- ${f.label}：${formatFormValue(values[f.name])}`);
+  return `【已填写：${form.title}】\n${lines.join("\n")}`;
+}
+
+function FormControl({ field }: { field: ChatBiFormField }) {
+  const options = (field.options ?? []).map((o) => ({ label: o, value: o }));
+  switch (field.type) {
+    case "textarea":
+      return <Input.TextArea placeholder={field.placeholder} autoSize={{ minRows: 2, maxRows: 6 }} />;
+    case "number":
+      return <InputNumber placeholder={field.placeholder} style={{ width: "100%" }} />;
+    case "select":
+      return <Select placeholder={field.placeholder} options={options} allowClear />;
+    case "multiselect":
+      return <Select mode="multiple" placeholder={field.placeholder} options={options} allowClear />;
+    case "radio":
+      return <Radio.Group options={options} />;
+    case "boolean":
+      return <Switch />;
+    case "date":
+      return <DatePicker style={{ width: "100%" }} placeholder={field.placeholder} />;
+    default:
+      return <Input placeholder={field.placeholder} />;
+  }
+}
+
+/**
+ * 交互表单块（P6）：Agent 用 request_form 动态生成的可填写表单，一次收集多个结构化参数。
+ * 提交后把「字段=值」拼成结构化回填文本，经澄清通道（onSubmit=submit）作为新一轮问题带回，
+ * Agent 从 history 读到后继续——无需后端会话态，与既有单发澄清同构，天然支持多轮需求探索。
+ */
+function FormBlock({
+  form,
+  onSubmit,
+}: {
+  form: ChatBiFormRequest;
+  onSubmit?: (text: string) => void;
+}) {
+  const [antForm] = Form.useForm();
+  const [submitted, setSubmitted] = useState(false);
+  const disabled = !onSubmit || submitted;
+  const initialValues = useMemo(() => {
+    const iv: Record<string, unknown> = {};
+    for (const f of form.fields) {
+      if (f.default !== undefined && f.default !== null) iv[f.name] = f.default;
+    }
+    return iv;
+  }, [form]);
+  const handleFinish = (values: Record<string, unknown>) => {
+    setSubmitted(true);
+    onSubmit?.(composeFormReply(form, values));
+  };
+  return (
+    <div className="chatbi-form">
+      <div className="chatbi-form-title">{form.title}</div>
+      {form.intent && <div className="chatbi-form-intent">{form.intent}</div>}
+      <Form
+        form={antForm}
+        layout="vertical"
+        size="small"
+        disabled={disabled}
+        initialValues={initialValues}
+        onFinish={handleFinish}
+        className="chatbi-form-body"
+        requiredMark="optional"
+      >
+        {form.fields.map((f) => (
+          <Form.Item
+            key={f.name}
+            name={f.name}
+            label={f.label}
+            extra={f.help}
+            valuePropName={f.type === "boolean" ? "checked" : undefined}
+            rules={f.required ? [{ required: true, message: `请填写${f.label}` }] : undefined}
+          >
+            <FormControl field={f} />
+          </Form.Item>
+        ))}
+        <div className="chatbi-form-actions">
+          <Button type="primary" size="small" htmlType="submit" disabled={disabled}>
+            {submitted ? "已提交" : form.submit_label || "提交"}
+          </Button>
+        </div>
+      </Form>
     </div>
   );
 }

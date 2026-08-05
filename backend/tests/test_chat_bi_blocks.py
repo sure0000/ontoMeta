@@ -215,3 +215,40 @@ def test_draft_proposal_block_from_payload():
 def test_no_draft_proposal_block_without_proposals():
     assert "draft_proposal" not in _types({"answer": "x", "draft_proposals": []})
 
+
+def test_form_request_replaces_markdown():
+    """P6：交互表单出口——出 form 块，不再出 markdown 正文块（与澄清同构）。"""
+    payload = {
+        "answer": "确认取数需求",
+        "form_request": {
+            "title": "确认取数需求",
+            "fields": [
+                {"name": "metric", "label": "指标", "type": "select", "options": ["GMV", "客单价"]},
+                {"name": "range", "label": "时间范围", "type": "text"},
+            ],
+        },
+    }
+    types = _types(payload)
+    assert "form" in types
+    assert "markdown" not in types
+    form = next(b for b in answer_to_blocks(payload) if b["type"] == "form")
+    assert form["form"]["title"] == "确认取数需求"
+    assert len(form["form"]["fields"]) == 2
+
+
+def test_clarification_takes_precedence_over_form():
+    """澄清与表单同时在场时，澄清优先（都在场是异常，取其一即可，不出重复正文）。"""
+    payload = {
+        "answer": "x",
+        "clarification": {"question": "指哪个口径？", "options": ["含税"]},
+        "form_request": {"title": "t", "fields": [{"name": "a", "label": "A", "type": "text"}]},
+    }
+    types = _types(payload)
+    assert "clarify" in types
+    assert "form" not in types
+    assert "markdown" not in types
+
+
+def test_no_form_block_without_form_request():
+    assert "form" not in _types({"answer": "客户表当前有 1200 行。"})
+
