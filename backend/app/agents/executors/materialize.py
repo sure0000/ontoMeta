@@ -81,6 +81,8 @@ class MaterializeExecutor(Executor):
                 load_strategy=spec.get("load_strategy"),
                 selected_targets=spec.get("selected_targets"),
                 overrides=spec.get("overrides"),
+                # 整批调度：runner 在对齐契约之后展开到各选中契约（见其 refresh_cron 形参）。
+                refresh_cron=spec.get("refresh_cron"),
                 # run_id 取制品 id：重复提交在 Airflow 侧因 run_id 冲突而幂等
                 artifact_id=context.get("artifact_id"),
             )

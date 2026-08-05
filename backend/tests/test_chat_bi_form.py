@@ -15,7 +15,12 @@ from tests.fixtures.golden_questions import ToolTurn
 from tests.test_chat_bi_golden import _StubCompletions, _seed_golden_domain
 from tests.test_chat_bi_intent_gate import _ask, _make_service
 
-_dispatch = ChatBiService._dispatch_request_form
+def _dispatch(args: dict):
+    """无 task_kind 的通用表单不碰库，给个占位 session 即可（模板分支不会走到）。"""
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        return ChatBiService()._dispatch_request_form(db, ontology_id="onto-x", args=args)
 
 
 def test_missing_title_is_error():
@@ -125,3 +130,84 @@ def test_request_form_ends_turn_and_projects_form_block():
     assert "form" in types
     assert "markdown" not in types
 
+
+
+# ---------------- P2：建数任务表单走服务端模板 ----------------
+
+
+def _materialize_form(datasource_id: str = "", extra: list | None = None):
+    """建一个可写数据源 + 对齐契约，产出物化表单模板。返回 (form, cleanup 已完成)。"""
+    from app.database import SessionLocal
+    from app.models import DataSource
+    from app.services.materialization_contract import MaterializationContractService
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        db.add(DataSource(id="ds-tpl", name="仓库", kind="hive", status="ok",
+                          dsn_secret_ref="ref://tpl"))
+        db.commit()
+        try:
+            MaterializationContractService().sync(db, onto_id)
+            result, _summary, is_error = ChatBiService()._dispatch_request_form(
+                db, ontology_id=onto_id,
+                args={"title": "物化参数", "task_kind": "materialize",
+                      "target_datasource_id": datasource_id,
+                      **({"fields": extra} if extra else {})},
+            )
+        finally:
+            # 带 dsn 的源会被 run_sql 的数据源解析选走，串到别的用例
+            db.query(DataSource).filter(DataSource.id == "ds-tpl").delete()
+            db.commit()
+    assert is_error is False, result
+    return result["form"]
+
+
+def test_materialize_template_asks_every_required_param():
+    """物化表单的必问字段由服务端出——模型漏问装载方式/分区键这件事不该再可能发生。"""
+    form = _materialize_form()
+    names = [f["name"] for f in form["fields"]]
+    assert names == [
+        "target_datasource_id", "target_database", "target_table",
+        "load_strategy", "partition_key", "refresh_cron",
+    ]
+    by_name = {f["name"]: f for f in form["fields"]}
+    # 数据源选项带 id：表单回填是纯文本、无后端会话态，只回名字下一轮还得再猜是哪条
+    assert by_name["target_datasource_id"]["options"] == ["仓库｜ds-tpl"]
+    # 唯一可写数据源直接定为默认值，省一次追问
+    assert by_name["target_datasource_id"]["default"] == "仓库｜ds-tpl"
+    assert by_name["load_strategy"]["options"]  # 装载方式恒有候选
+    assert any("每天 02:00" in o for o in by_name["refresh_cron"]["options"])
+
+
+def test_task_template_appends_model_fields_without_overriding():
+    """模型另给的字段追加在骨架之后；与骨架同名的被丢掉（骨架不被覆盖）。"""
+    form = _materialize_form(extra=[
+        {"name": "target_table", "label": "模型想改的表名", "type": "text"},
+        {"name": "comment", "label": "备注", "type": "textarea"},
+    ])
+    by_name = {f["name"]: f for f in form["fields"]}
+    assert by_name["target_table"]["label"] == "目标表名"  # 骨架为准
+    assert form["fields"][-1]["name"] == "comment"
+
+
+def test_transform_template_offers_cleansing_vocabulary():
+    """加工表单把清洗规则做成多选——规则是闭集，让用户在词表里选而不是自由描述。"""
+    from app.database import SessionLocal
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db, ontology_id=onto_id,
+            args={"title": "加工参数", "task_kind": "transform"},
+        )
+    assert is_error is False
+    by_name = {f["name"]: f for f in result["form"]["fields"]}
+    assert by_name["target_table"]["type"] == "select"  # 不再靠 select_by_intent 猜
+    assert by_name["cleansing_rules"]["type"] == "multiselect"
+    assert any("去重" in o for o in by_name["cleansing_rules"]["options"])
+
+
+def test_task_kind_form_needs_no_model_fields():
+    """带 task_kind 时 fields 可以完全不给——骨架本身就够了，不该再报「表单无字段」。"""
+    form = _materialize_form()
+    assert len(form["fields"]) == 6

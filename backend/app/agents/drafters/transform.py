@@ -25,12 +25,20 @@ _RULE_PATTERNS: tuple[tuple[str, str, str], ...] = (
     (r"标准化|统一编码|归一", "normalize_code", "编码标准化"),
 )
 
+# 可产出的清洗规则词表（闭集）。**对外公开**是因为这是一份能力边界：说不出的清洗需求
+# 会被静默丢掉（只留在 notes 里），故 Data Agent 要在提需求时就把这份词表摆给用户，
+# 而不是产出一个什么都不做的 ETL 任务。见 chat_bi._entity_task_options。
+SUPPORTED_CLEANSING_RULES: tuple[tuple[str, str], ...] = tuple(
+    (code, desc) for _pattern, code, desc in _RULE_PATTERNS
+)
+
 
 class TransformDrafter(Drafter):
     kind = "transform"
+    required_context = ("ontology_id",)
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
-        require_context(context, "ontology_id")
+        require_context(context, *self.required_context)
         ontology_id = context["ontology_id"]
         with SessionLocal() as db:
             objects = (

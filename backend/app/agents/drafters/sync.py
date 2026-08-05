@@ -18,6 +18,7 @@ from app.connectors.datahub import _extract_dataset_name
 from app.database import SessionLocal
 from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
+from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 
 # 关键源保全判定规则。命中任一 → 需在 STG 留原始副本。
 _PRESERVE_RULES: tuple[tuple[str, str], ...] = (
@@ -42,9 +43,10 @@ def decide_preservation(intent: str, table_name: str) -> dict[str, Any]:
 
 class SyncDrafter(Drafter):
     kind = "sync"
+    required_context = ("ontology_id",)
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
-        require_context(context, "ontology_id")
+        require_context(context, *self.required_context)
         ontology_id = context["ontology_id"]
         with SessionLocal() as db:
             objects = (
@@ -89,8 +91,10 @@ class SyncDrafter(Drafter):
                 "engine": context.get("engine")
                 or (contract.engines[0] if contract and contract.engines else "hive"),
                 "preservation": decide_preservation(intent, source_table),
-                # 凭据不入 Spec：只放数据源别名，执行器按别名取连接串。
-                "source_ref_alias": context.get("source_ref_alias") or "erp_readonly",
+                # 凭据不入 Spec：只放连接别名（= Airflow conn_id），执行侧按别名取连接串。
+                # 默认值取 job_planner 的同一常量——三处各写各的 "erp_readonly" /
+                # "default" 会让「改默认连接」这件事漏掉其中一处。
+                "source_ref_alias": context.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS,
             }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

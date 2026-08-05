@@ -114,8 +114,10 @@ _AGENT_SYSTEM_PROMPT = (
     "调 **ask_clarification** 反问，不要挑一个可能错的解释硬答；"
     "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n"
     "6b.【多参数收集】若需用户**一次补齐多个**结构化参数（取数的指标+时间范围+分组维度、"
-    "建数任务的目标表+更新策略+调度）才能继续，调 **request_form** 生成可填写表单一并收集，"
-    "比逐条追问高效；候选项须来自真实实体。仅单个歧义仍用 ask_clarification。\n"
+    "建数任务的目标数据源+目标库+更新策略+调度）才能继续，调 **request_form** 生成可填写表单"
+    "一并收集，比逐条追问高效；候选项须来自真实实体——**先用工具把候选查出来再发表单**"
+    "（建数任务用 get_task_options），别因为没查就把本该是下拉的字段退化成文本框。"
+    "仅单个歧义仍用 ask_clarification。\n"
     "7. 【结构性问题】问对象有哪些属性/字段/关系、口径定义这类元数据问题，"
     "直接用 get_object/get_logic 的本体元数据作答，**不要取数、不要在正文写取数 SQL**；"
     "此时取数工具可能不可用。用户确实要据此查数时，再 select_skill('query') 切到取数。\n\n"
@@ -541,7 +543,9 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
         "description": (
             "为新建一个数据任务（物化 materialize / 同步 sync / 加工 transform）产出**提案**"
             "（不执行、不写库）。提案由用户在前端点击后走「校验→看 dry-run 差异→人工确认→执行」"
-            "的既有治理流程创建并运行。提案前先把「要对哪张/哪些表做什么」说清楚。"
+            "的既有治理流程创建并运行。提案前先把「要对哪张/哪些表做什么」说清楚。\n"
+            "**物化必须在 context 里给 target_datasource_id**（落到哪个数据源，本体推导不出来）。"
+            "不知道选哪个就先调 request_form 让用户选，别自己编 id；缺了会被当场判错并给出真实候选。"
         ),
         "parameters": {
             "type": "object",
@@ -551,12 +555,129 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
                 "intent": {"type": "string",
                             "description": "自然语言任务意图，如「把客户主数据物化到数仓 dim_customer」"},
                 "context": {"type": "object",
-                             "description": '可选结构化上下文，如 {"target_table":"dim_customer"}；凭据只能传 *_ref/*_alias，勿传明文'},
+                             "description": (
+                                 "结构化上下文，取值一律来自 get_task_options 的真实候选。物化常用："
+                                 'target_datasource_id（必填）、database_overrides={"层":"库名"}（目标库）、'
+                                 'table_overrides={"契约id":"表名"}、refresh_cron（整批调度）、'
+                                 'selected_targets=["实体名"]（只物化其中几个）、'
+                                 'overrides={"契约id":{"partition_key":"dt","load_strategy":"incremental"}}'
+                                 "（逐实体的分区键/装载方式/调度）。凭据只能传 *_ref/*_alias，勿传明文"
+                             )},
             },
             "required": ["kind", "intent"],
         },
     },
 }
+
+# ---- P1：建数任务的可选项目录 ----
+# 建数表单此前长不出下拉框，根因是模型没有任何工具能读到物理侧的候选（数据源/库/契约/
+# 装载方式/调度）——request_form 的「options 必须来自真实实体」于是永远无法满足，只能退化
+# 成文本输入。本工具就是那份缺失的目录：与物化弹窗（MaterializeModal）读同一批服务，
+# 保证「对话里选到的」和「弹窗里选到的」是同一套事实。
+
+# 调度频率预置项。与前端 CronPicker 同域：那里是任意 cron 的下拉编辑器，这里给几个常用
+# 值让模型直接摆进表单；用户要别的频率仍可自填合法 cron 表达式。
+_CRON_PRESETS: tuple[dict[str, str], ...] = (
+    {"expr": "0 2 * * *", "label": "每天 02:00"},
+    {"expr": "0 */6 * * *", "label": "每 6 小时"},
+    {"expr": "0 * * * *", "label": "每小时"},
+    {"expr": "0 3 * * 1", "label": "每周一 03:00"},
+    {"expr": "0 4 1 * *", "label": "每月 1 日 04:00"},
+    {"expr": "", "label": "不定时（仅手动触发）"},
+)
+
+# 装载方式的中文标签与**实际语义**。语义不能省：CDC 在物化里其实按全量跑，模型若照字面
+# 理解会给用户一个错误的承诺（与 MaterializeModal 的 STRATEGY_HINT 是同一句话）。
+_LOAD_STRATEGIES: tuple[dict[str, str], ...] = (
+    {"value": "full", "label": "全量覆盖",
+     "hint": "INSERT OVERWRITE：重写整表/分区"},
+    {"value": "incremental", "label": "增量追加",
+     "hint": "INSERT INTO：按分区键追加，水位由调度器注入；未配分区键会退化为无谓词追加"},
+    {"value": "cdc", "label": "CDC 变更捕获",
+     "hint": "物化内不承载变更捕获，本次按全量覆盖执行；要 CDC 请改用同步作业"},
+)
+
+# 候选清单的回灌上限。物化契约会有几百条（一个 734 对象的域即如此），整份倒进上下文
+# 既挤爆预算也没人读——按 search_* 的既有约定给 {total, returned, truncated, items}。
+_TASK_OPTIONS_LIMIT: int = 30
+
+_GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_task_options",
+        "description": (
+            "读取新建数据任务时**可选什么**：物化的目标数据源/目标库/待物化实体（含各自的"
+            "契约 id、分层、分区键、装载方式、现有调度）/装载方式/调度频率预置；同步与加工的"
+            "候选对象。\n"
+            "**建数任务开工第一步就调它**：propose_action 的 context 与 request_form 的 "
+            "options 都必须用这里返回的真实值，不得自己编数据源 id、库名或表名。"
+            "只读，不建任何东西。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": list(_ACTION_KINDS),
+                          "description": "要建的任务类型：materialize / sync / transform"},
+                "target_datasource_id": {
+                    "type": "string",
+                    "description": "物化专用：给了才会去这个数据源上列库（databases），并按其类型定引擎",
+                },
+                "keyword": {"type": "string",
+                             "description": "按实体名/显示名过滤候选，候选很多时用它收窄"},
+            },
+            "required": ["kind"],
+        },
+    },
+}
+
+# 由服务端注入的 context 键——当前会话的本体是确定的，模型不必（也无从）给。
+_AUTO_ACTION_CONTEXT_KEYS: frozenset[str] = frozenset({"ontology_id"})
+
+_ACTION_CONTEXT_HINT = (
+    "这些是起草该任务必须先定下、且无法从本体推导的选项。用 request_form 把它们做成一张表单"
+    "让用户选（候选项用本结果里给出的真实值），拿到回填后再重新 propose_action。不要自己编 id。"
+)
+
+
+def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
+    """该类任务起草前还缺哪些 context 键。
+
+    判据取 Drafter 自己声明的 ``required_context``（其 ``require_context`` 的同一份字面值），
+    不在这里另抄一份——否则两处迟早分叉。注意**不能**改用规约的
+    ``required_metadata.per_artifact``：那约束的是 Spec 字段（如 sync 的 source/target），
+    由 Drafter 从本体推导，不是调用方要给的 context 键。
+    """
+    # 局部导入：app.agents 在导入期注册 Drafter/Executor（连带拉起 materialization_runner），
+    # 读侧模块不该为一次校验把整条写侧流水线拽进导入图。
+    from app.agents import registry
+
+    try:
+        drafter = registry.get_drafter(kind)
+    except registry.UnregisteredKindError:
+        return []
+    return [
+        key
+        for key in drafter.required_context
+        if key not in _AUTO_ACTION_CONTEXT_KEYS and not context.get(key)
+    ]
+
+
+def _action_context_candidates(db: Session, missing: list[str]) -> dict[str, Any]:
+    """缺失键的真实候选值——只说「缺 target_datasource_id」模型和用户都无从下手。
+
+    只返回选项本身（id/名称/类型/连通状态），凭据不出现（DSN 存的本就是 ``dsn_secret_ref``）。
+    """
+    if "target_datasource_id" not in missing:
+        return {}
+    from app.models import DataSource
+
+    rows = db.query(DataSource).order_by(DataSource.name).limit(50).all()
+    return {
+        "target_datasource_id_options": [
+            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status} for s in rows
+        ]
+    }
+
 
 _GET_TASK_STATUS_TOOL: dict[str, Any] = {
     "type": "function",
@@ -651,12 +772,23 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
             "建数任务需明确「目标表+更新策略+调度」等。"
             "select/radio/multiselect 的 options **必须来自工具返回的真实实体**；"
             "无从预置就用 text/number 让用户自填。调用后本轮结束、等用户填完提交再继续。"
-            "只需单个澄清用 ask_clarification；无需用户补参数别乱发表单。"
+            "只需单个澄清用 ask_clarification；无需用户补参数别乱发表单。\n"
+            "**建数任务（物化/同步/加工）传 task_kind**：服务端会按该类型补齐必问字段并填入真实"
+            "候选（物化=目标数据源/目标库/表名/装载方式/分区键/调度频率），你只需给 title；"
+            "fields 可留空，给了则作为额外字段追加。这样不会漏问参数。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "表单标题：这一步在收集什么（一句话）"},
+                "task_kind": {
+                    "type": "string", "enum": list(_ACTION_KINDS),
+                    "description": "建数任务表单填这个（materialize/sync/transform），服务端据此补齐必问字段与真实候选",
+                },
+                "target_datasource_id": {
+                    "type": "string",
+                    "description": "task_kind=materialize 且已定下数据源时给，服务端会据此把「目标库」也列成下拉",
+                },
                 "intent": {"type": "string", "description": "可选：为什么需要这些信息（一句话辅助说明）"},
                 "submit_label": {"type": "string", "description": "可选：提交按钮文案，缺省「提交」"},
                 "fields": {
@@ -702,6 +834,7 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _PROPOSE_DRAFT_TOOL,
         _LINT_TOOL,
         _PROPOSE_ACTION_TOOL,
+        _GET_TASK_OPTIONS_TOOL,
         _GET_TASK_STATUS_TOOL,
         _UPDATE_PLAN_TOOL,
     ]
@@ -1965,6 +2098,18 @@ class ChatBiService:
                     cells.append({"v": a["total_jumps"]})
                 if cells:
                     ledger.add_cells([], cells)
+            elif tool_name == "get_task_options" and isinstance(result, dict):
+                # P1：目录里的数据源名/库名/实体名都是**库里查出来的真实标识**。不入账的话，
+                # 模型照着候选说「可以物化到「仓库 Hive」的 dw 库」会被 F4 当成幻觉实体拒答——
+                # 我们把事实塞进它的上下文，又因为它用了而拒答，说不过去（同语义卡的处理）。
+                ledger.add_context_name(
+                    *[str(s.get("name") or "") for s in result.get("datasources") or []],
+                    *[str(d) for d in result.get("databases") or []],
+                    *[str(e.get("entity") or "") for e in result.get("entities") or []],
+                    *[str(e.get("display_name") or "") for e in result.get("entities") or []],
+                    *[str(o.get("name") or "") for o in result.get("objects") or []],
+                    *[str(o.get("display_name") or "") for o in result.get("objects") or []],
+                )
             elif isinstance(result, dict) and "data" in result:
                 # P4：外部工具返回（{"data": ...}）是本轮工具的真实产出——把其中的字符串/数值
                 # 登记为可信事实，让答案复述外部结果时不被 F4 判成幻觉。
@@ -2795,14 +2940,214 @@ class ChatBiService:
         proposal = {"kind": "preference", "text": text[:255], "domain_id": domain_id}
         return proposal, f"提案：记住约定「{text[:24]}」", False
 
+    def _dispatch_get_task_options(
+        self, db: Session, *, ontology_id: str, args: dict
+    ) -> tuple[dict, str, bool]:
+        """P1：建数任务的可选项目录（只读）。
+
+        读的是**物理侧事实**——数据源、目标库、物化契约、执行侧支持的装载方式——而这些
+        此前对模型完全不可见，于是它生成的建数表单只能是一堆文本框。本方法与
+        MaterializeModal 读同一批服务，保证两条路给出的候选一致。
+        """
+        kind = str(args.get("kind") or "").strip()
+        if kind not in _ACTION_KINDS:
+            return (
+                {"error": f"kind 须为 {'/'.join(_ACTION_KINDS)}，收到「{kind}」",
+                 "available": list(_ACTION_KINDS)},
+                "任务类型非法",
+                True,
+            )
+        keyword = str(args.get("keyword") or "").strip()
+        if kind == "materialize":
+            return self._materialize_options(
+                db,
+                ontology_id=ontology_id,
+                datasource_id=str(args.get("target_datasource_id") or "").strip(),
+                keyword=keyword,
+            )
+        return self._entity_task_options(db, kind=kind, ontology_id=ontology_id, keyword=keyword)
+
+    @staticmethod
+    def _engine_of_datasource(ds: Any) -> str | None:
+        """由数据源类型推导物化引擎（DDL/ETL 方言）。仅仓库类型可作物化目标。
+
+        与前端 MaterializeModal.engineOfKind 同口径：数据源 kind 命中已注册引擎即用它。
+        """
+        from app.warehouse import list_engines
+
+        key = (getattr(ds, "kind", None) or "").lower()
+        return key if key in set(list_engines()) else None
+
+    def _materialize_options(
+        self, db: Session, *, ontology_id: str, datasource_id: str, keyword: str
+    ) -> tuple[dict, str, bool]:
+        from app.models import DataSource
+        from app.services.materialization_contract import MaterializationContractService
+        from app.warehouse import DEFAULT_ENGINE
+
+        contracts_svc = MaterializationContractService()
+
+        sources = db.query(DataSource).order_by(DataSource.name).all()
+        datasources = [
+            {
+                "id": s.id,
+                "name": s.name,
+                "kind": s.kind,
+                "status": s.status,
+                "engine": self._engine_of_datasource(s),
+                # 没配连接串的源物化时会被 runner 直接拒——先说出来，别让它进表单当选项。
+                "writable": bool(s.dsn_secret_ref),
+            }
+            for s in sources
+        ]
+
+        chosen = next((s for s in sources if s.id == datasource_id), None) if datasource_id else None
+        engine = (self._engine_of_datasource(chosen) if chosen else None) or DEFAULT_ENGINE
+
+        # 目标库：只有指定了数据源才去连它列库。连不上不是错误——弹窗那边也是降级成手填。
+        databases: list[str] | None = None
+        databases_error: str | None = None
+        if chosen is not None:
+            from app.services.data_app import DataAppService
+
+            try:
+                databases = DataAppService().list_databases(db, chosen.id)
+            except Exception as exc:  # noqa: BLE001 — 列不出库只降级为手填，不该中断建数
+                databases_error = f"列不出该数据源的库（{exc}）；请让用户手填库名"
+
+        rows = contracts_svc.list_contracts(db, ontology_id, materialized_only=True)
+        names = contracts_svc.resolve_target_names(db, rows)
+        entities: list[dict[str, Any]] = []
+        for c in rows:
+            name, display = names.get(c.target_id, (None, None))
+            label = display or name or c.target_id
+            if keyword and keyword.lower() not in f"{name or ''}{display or ''}".lower():
+                continue
+            entities.append({
+                # contract_id 是 overrides / table_overrides 的键，必须回给模型，
+                # 否则「给这张表设个分区键」在对话里根本无从表达。
+                "contract_id": c.id,
+                "entity": name or c.target_id,
+                "display_name": display,
+                "layer": c.target_layer,
+                "partition_key": c.partition_key,
+                "load_strategy": c.load_strategy,
+                "refresh_cron": c.refresh_cron,
+            })
+            if len(entities) >= _TASK_OPTIONS_LIMIT:
+                break
+
+        # 执行侧真支持哪些装载方式。问不到（未配 Airflow/runner）返回 null，此时**不设限**：
+        # 凭猜锁死选项比不锁更糟（与物化弹窗同一决策，见 sync_tool_resolver.engine_modes）。
+        supported: list[str] | None = None
+        modes_detail = ""
+        try:
+            from app.services.sync_tool_resolver import engine_modes
+
+            airflow = self.settings_service.get_airflow_runtime(db)
+            supported, modes_detail = engine_modes(airflow, engine, choice_tool=None)
+        except Exception as exc:  # noqa: BLE001 — 问不到只是不设限，不该中断建数
+            modes_detail = f"问不到执行侧能力（{exc}），装载方式不设限。"
+        load_strategies = [
+            {**s, "supported": (supported is None or s["value"] in supported)}
+            for s in _LOAD_STRATEGIES
+        ]
+
+        result = {
+            "kind": "materialize",
+            "engine": engine,
+            "datasources": datasources,
+            "databases": databases,
+            "databases_error": databases_error,
+            "layers": sorted({e["layer"] for e in entities}),
+            "entities": entities,
+            "total_entities": len(rows),
+            "returned": len(entities),
+            "truncated": len(entities) < len(rows),
+            "load_strategies": load_strategies,
+            "load_strategies_detail": modes_detail,
+            "cron_presets": [dict(p) for p in _CRON_PRESETS],
+            "usage": (
+                "目标库经 database_overrides={层: 库名} 指定（各层可同库）；逐实体的分区键/"
+                "装载方式/调度经 overrides={contract_id: {...}}；整批一个调度用 refresh_cron。"
+            ),
+        }
+        summary = (
+            f"可选项：{len(datasources)} 个数据源 / "
+            f"{len(databases) if databases is not None else '—'} 个库 / "
+            f"{len(rows)} 个待物化实体"
+        )
+        return result, summary, False
+
+    def _entity_task_options(
+        self, db: Session, *, kind: str, ontology_id: str, keyword: str
+    ) -> tuple[dict, str, bool]:
+        """同步/加工的候选对象。
+
+        两者的 Drafter 在没给 object_type / target_table 时会用 ``select_by_intent`` **猜**
+        一个对象——把候选摆出来让用户选，猜就不必发生了。
+        """
+        from app.connectors.datahub import _extract_dataset_name
+        from app.models import ObjectType
+
+        q = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+        rows = q.order_by(ObjectType.name).all()
+        objects: list[dict[str, Any]] = []
+        for o in rows:
+            if keyword and keyword.lower() not in f"{o.name or ''}{o.display_name or ''}".lower():
+                continue
+            # 同步要从源表搬，没有 source_ref 的对象定位不到源，不该进候选。
+            if kind == "sync" and not o.source_ref:
+                continue
+            objects.append({
+                "name": o.name,
+                "display_name": o.display_name,
+                "source_table": _extract_dataset_name(o.source_ref) if o.source_ref else None,
+            })
+            if len(objects) >= _TASK_OPTIONS_LIMIT:
+                break
+
+        eligible = (
+            len([o for o in rows if o.source_ref]) if kind == "sync" else len(rows)
+        )
+        result: dict[str, Any] = {
+            "kind": kind,
+            # 键名对齐各自 Drafter 认的 context 键，模型照抄即可，不必自己映射。
+            "context_key": "object_type" if kind == "sync" else "target_table",
+            "objects": objects,
+            "total_objects": eligible,
+            "returned": len(objects),
+            "truncated": len(objects) < eligible,
+        }
+        if kind == "sync":
+            result["load_strategies"] = [dict(s) for s in _LOAD_STRATEGIES]
+            result["note"] = (
+                "同步的装载方式与分区键取自该对象的物化契约；无 source_ref 的对象定位不到源表，"
+                "已从候选里排除。"
+            )
+        else:
+            from app.agents.drafters.transform import SUPPORTED_CLEANSING_RULES
+
+            # 清洗规则是**闭集**：Drafter 只认这几条，说不出的需求会被静默丢掉，
+            # 故把词表交给模型，让它当场告诉用户哪些做得了。
+            result["cleansing_rules"] = [
+                {"rule": code, "description": desc} for code, desc in SUPPORTED_CLEANSING_RULES
+            ]
+            result["note"] = "清洗需求只有落到上述规则才会进 Spec，词表外的需求请如实告诉用户做不了。"
+        return result, f"可选项：{len(objects)}/{eligible} 个候选对象", False
+
     def _dispatch_propose_action(
-        self, *, ontology_id: str, domain_id: str, args: dict
+        self, db: Session, *, ontology_id: str, domain_id: str, args: dict
     ) -> tuple[dict, str, bool]:
         """P0：为新建数据任务（物化/同步/加工）产出**提案**（纯 spec，不写库、不执行）。
 
         与 propose_draft 同构：ask() 保持只读——真正的 draft（写一条 GovernanceArtifact）
         由用户在前端点「去校验并执行」后触发，落在 publisher 门控 + 人工确认（含 dry-run 差异）
         之后。本方法只组装前端按钮原样回传给 POST /api/agents/draft 的载荷。
+
+        **提案前先查 Drafter 声明的必填 context**：缺了就当场判错、告诉模型缺什么并附上真实
+        候选，让它在本轮补齐。此前不校验，缺 target_datasource_id 的物化提案照发不误，
+        用户点了「去校验并执行」才在 Drafter 里抛 ValueError → 400——错误被推迟到了按钮之后。
         """
         kind = str(args.get("kind") or "").strip()
         if kind not in _ACTION_KINDS:
@@ -2818,6 +3163,18 @@ class ChatBiService:
         context = args.get("context")
         if not isinstance(context, dict):
             context = {}
+        missing = _missing_action_context(kind, context)
+        if missing:
+            return (
+                {
+                    "error": f"提案缺少必要上下文：{'、'.join(missing)}",
+                    "missing": missing,
+                    "hint": _ACTION_CONTEXT_HINT,
+                    **_action_context_candidates(db, missing),
+                },
+                f"提案缺上下文：{'、'.join(missing)}",
+                True,
+            )
         proposal = {
             "kind": kind,
             "intent": intent,
@@ -2865,24 +3222,141 @@ class ChatBiService:
         done = sum(1 for s in steps if s["status"] == "done")
         return {"plan": plan}, f"计划 {len(steps)} 步（完成 {done}）", False
 
-    @staticmethod
-    def _dispatch_request_form(args: dict) -> tuple[dict, str, bool]:
+    def _task_form_template(
+        self, db: Session, *, kind: str, ontology_id: str, datasource_id: str
+    ) -> list[dict]:
+        """建数任务的必问字段骨架，候选取自 get_task_options 的同一份目录。
+
+        取值要能原样回到 context，而表单回填是**纯文本**（无后端会话态，见 P6）——故 id 类
+        字段的选项带上 id（``名称｜id``），否则下一轮只拿到一个名字，还得再猜是哪条记录。
+        """
+        if kind != "materialize":
+            opts, _s, err = self._entity_task_options(
+                db, kind=kind, ontology_id=ontology_id, keyword=""
+            )
+            if err:
+                return []
+            names = [
+                f"{o['display_name'] or o['name']}｜{o['name']}" for o in opts.get("objects") or []
+            ]
+            fields: list[dict] = [{
+                "name": opts["context_key"],
+                "label": "目标对象" if kind == "sync" else "目标表（业务对象）",
+                "type": "select" if names else "text",
+                "required": True,
+                "help": "Drafter 不再按意图猜对象——这里选定的就是最终目标",
+                **({"options": names[:50]} if names else {}),
+            }]
+            if kind == "sync":
+                fields.append({
+                    "name": "load_strategy", "label": "装载方式", "type": "radio",
+                    "options": [s["label"] for s in _LOAD_STRATEGIES],
+                    "help": "；".join(f"{s['label']}：{s['hint']}" for s in _LOAD_STRATEGIES),
+                })
+            else:
+                rules = opts.get("cleansing_rules") or []
+                fields.append({
+                    "name": "cleansing_rules", "label": "清洗规则", "type": "multiselect",
+                    "options": [f"{r['description']}｜{r['rule']}" for r in rules],
+                    "help": "只有这几条做得了；词表外的清洗需求本任务承载不了",
+                })
+            return fields
+
+        # 只有一个可写数据源时直接定下它：既省一次追问，也让「目标库」这一轮就能列成下拉。
+        catalog, _summary, err = self._materialize_options(
+            db, ontology_id=ontology_id, datasource_id=datasource_id, keyword=""
+        )
+        if err:
+            return []
+        writable = [d for d in catalog["datasources"] if d["writable"]]
+        if not datasource_id and len(writable) == 1:
+            catalog, _summary, err = self._materialize_options(
+                db, ontology_id=ontology_id, datasource_id=writable[0]["id"], keyword=""
+            )
+            if err:
+                return []
+
+        ds_options = [f"{d['name']}｜{d['id']}" for d in catalog["datasources"] if d["writable"]]
+        databases = catalog.get("databases") or []
+        supported = [s for s in catalog["load_strategies"] if s["supported"]] or list(
+            _LOAD_STRATEGIES
+        )
+        # 分区键**不给默认值**：它是逐表的列名，全域最常见的那个未必在这张表上存在——实测
+        # 就被填进了一个「账户」根本没有的字段。候选留给用户填，或走逐实体 overrides。
+        pk_samples = sorted(
+            {e["partition_key"] for e in catalog.get("entities") or [] if e["partition_key"]}
+        )[:5]
+
+        return [
+            {
+                "name": "target_datasource_id", "label": "目标数据源",
+                "type": "select" if ds_options else "text", "required": True,
+                "help": "物化落库的目标仓；引擎由数据源类型决定。未配连接串的源不在候选里",
+                **({"options": ds_options} if ds_options else {}),
+                **({"default": ds_options[0]} if len(ds_options) == 1 else {}),
+            },
+            {
+                "name": "target_database", "label": "目标库",
+                "type": "select" if databases else "text", "required": True,
+                "help": "各分层的表都建在这个库里；物化不会自动建库"
+                + ("" if databases else "（列不出库，请手填）"),
+                **({"options": databases[:50]} if databases else {}),
+            },
+            {"name": "target_table", "label": "目标表名", "type": "text", "required": True,
+             "help": "物理表名，将按命名规约自检"},
+            {
+                "name": "load_strategy", "label": "装载方式", "type": "radio",
+                "required": True,
+                "options": [s["label"] for s in supported],
+                "default": supported[0]["label"],
+                "help": "；".join(f"{s['label']}：{s['hint']}" for s in supported),
+            },
+            {"name": "partition_key", "label": "分区键", "type": "text",
+             "help": "增量追加必须有分区键，否则会退化成无谓词追加"
+             + (f"；本域现有分区键示例：{'、'.join(pk_samples)}" if pk_samples else "")},
+            {
+                "name": "refresh_cron", "label": "调度频率", "type": "select",
+                "options": [f"{p['label']}｜{p['expr']}".rstrip("｜") for p in _CRON_PRESETS],
+                "default": "不定时（仅手动触发）",
+                "help": "整批调度；留「不定时」则只在你手动触发时跑",
+            },
+        ]
+
+    def _dispatch_request_form(
+        self, db: Session, *, ontology_id: str, args: dict
+    ) -> tuple[dict, str, bool]:
         """P6：生成一张可填写表单收集结构化上下文（纯 spec，不写库、不接地）。
 
         与 ask_clarification 同为**终态出口**：本轮到此为止，等用户在前端填完提交后作为新一
         轮问题（结构化回填文本）带回。表单只描述「要收集什么」（字段 + 候选项），不携带任何
         业务结论，故不入接地账本、不参与拒答判定。候选项须来自真实工具结果由提示词约束，此处
         只做结构校验与归一：非法/空字段丢弃，选项类字段无候选项时退化为文本输入（避免空下拉）。
+
+        **P2：建数任务走模板**（``task_kind``）。哪些参数非问不可，是 Drafter 与治理规约
+        已经确定的事实，不该每轮重新赌模型记不记得——实测它就漏过装载方式与分区键。故这三类
+        表单的字段骨架由服务端出、候选由目录填，模型只管标题；它另给的 fields 作为额外字段
+        追加在后面（不覆盖骨架）。
         """
         title = str(args.get("title") or "").strip()
         raw_fields = args.get("fields")
+        task_kind = str(args.get("task_kind") or "").strip()
+        template: list[dict] = []
+        if task_kind in _ACTION_KINDS:
+            template = self._task_form_template(
+                db,
+                kind=task_kind,
+                ontology_id=ontology_id,
+                datasource_id=str(args.get("target_datasource_id") or "").strip(),
+            )
         if not title:
             return {"error": "需要 title（表单标题）"}, "表单缺标题", True
-        if not isinstance(raw_fields, list) or not raw_fields:
+        if not template and (not isinstance(raw_fields, list) or not raw_fields):
             return {"error": "需要 fields（非空字段数组）"}, "表单无字段", True
+        if not isinstance(raw_fields, list):
+            raw_fields = []
 
-        fields: list[dict] = []
-        seen: set[str] = set()
+        fields: list[dict] = list(template)
+        seen: set[str] = {f["name"] for f in template}
         for item in raw_fields[:_FORM_MAX_FIELDS]:
             if not isinstance(item, dict):
                 continue
@@ -2911,6 +3385,8 @@ class ChatBiService:
             if item.get("default") is not None:
                 field["default"] = item["default"]
             fields.append(field)
+            if len(fields) >= _FORM_MAX_FIELDS:
+                break
 
         if not fields:
             return {"error": "fields 里没有有效字段（需 name/label/合法 type）"}, "表单无有效字段", True
@@ -3120,16 +3596,20 @@ class ChatBiService:
                 return self._dispatch_propose_draft(domain_id=domain_id, args=args)
             if name == "lint_against_standard":
                 return self._dispatch_lint(db, args=args)
+            if name == "get_task_options":
+                return self._dispatch_get_task_options(
+                    db, ontology_id=ontology_id, args=args
+                )
             if name == "propose_action":
                 return self._dispatch_propose_action(
-                    ontology_id=ontology_id, domain_id=domain_id, args=args
+                    db, ontology_id=ontology_id, domain_id=domain_id, args=args
                 )
             if name == "propose_preference":
                 return self._dispatch_propose_preference(domain_id=domain_id, args=args)
             if name == "update_plan":
                 return self._dispatch_update_plan(args)
             if name == "request_form":
-                return self._dispatch_request_form(args)
+                return self._dispatch_request_form(db, ontology_id=ontology_id, args=args)
             # get_task_status 在 agent 循环里特判（需注入 conversation_id 做跨轮解析），不走此处。
             if name == "ask_clarification":
                 q = str(args.get("question") or "").strip()
@@ -3605,7 +4085,7 @@ class ChatBiService:
                         "get_object", "get_logic", "get_domain_overview",
                         "find_join_path", "profile_values", "compile_metric", "get_lineage",
                         "propose_draft", "propose_action", "get_task_status",
-                        "propose_preference",
+                        "propose_preference", "get_task_options",
                     ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
                     # P5：结果分析成功=基于真实数据的统计，算接地。

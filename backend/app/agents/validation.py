@@ -31,6 +31,9 @@ _WARNING_CODES = frozenset(
     {
         "engine_unverified",
         "ontology_issue",
+        # 提交前自检的**提醒项**（blocking=False）与「自检本身没跑成」——呈现但不拦。
+        "preflight_warning",
+        "preflight_unavailable",
     }
 )
 
@@ -68,6 +71,8 @@ def validate_spec(
     issues.extend(_check_ontology_refs(db, spec, ontology_id))
     issues.extend(_check_required_metadata(kind, spec, standard))
     issues.extend(_check_standard(kind, spec, standard))
+    if kind == "materialize":
+        issues.extend(_check_materialize_preflight(db, spec, ontology_id))
 
     # 本体范围的制品：连带跑既有的发布前一致性校验（warning 级，不阻断制品本身）。
     if ontology_id and db.query(Ontology).filter(Ontology.id == ontology_id).first():
@@ -225,6 +230,55 @@ def _check_required_metadata(
                 )
             )
     return issues
+
+
+def _check_materialize_preflight(
+    db: Session, spec: dict[str, Any], ontology_id: str | None
+) -> list[ValidationIssue]:
+    """物化的提交前自检并入闸门（Airflow 连通/鉴权/建表连接/DAG 目录）。
+
+    **为什么在这里**：物化弹窗强制「跑完自检且无阻断项」才让提交，而 Data Agent 那条路
+    直接 validate→confirm→execute，同一件破坏性操作走了两套门槛——agent 提的任务会在
+    三分钟后的任务日志里失败，而弹窗提的当场就被拦住。闸门是两条路唯一的公共必经点，
+    判据放这里两边才守同一条线。
+
+    自检本身跑不起来（缺 target_datasource_id、报错）不算阻断：那属于「没验成」，
+    与「验了不通过」是两回事，故给 warning 级并说清原因。
+    """
+    target_datasource_id = spec.get("target_datasource_id")
+    if not ontology_id or not target_datasource_id:
+        # 缺这两样另有 missing_required_field 报，不在这里重复喊一遍。
+        return []
+    from app.services.materialize_preflight import run_preflight
+
+    try:
+        report = run_preflight(
+            db,
+            ontology_id,
+            target_datasource_id=str(target_datasource_id),
+            engine=str(spec.get("engine") or "hive"),
+            selected_targets=spec.get("selected_targets"),
+        )
+    except Exception as exc:  # noqa: BLE001 — 自检炸了不该把校验一起带走
+        return [
+            ValidationIssue(
+                code="preflight_unavailable",
+                message=f"提交前自检未能运行（{exc}）；执行前请自行确认编排环境可用",
+                entity_type="artifact",
+            )
+        ]
+    return [
+        ValidationIssue(
+            code="preflight_blocked" if (item.status == "fail" and item.blocking)
+            else "preflight_warning",
+            message=f"提交前自检 · {item.label}：{item.detail}"
+            + (f"（下一步：{item.next_step}）" if item.next_step else ""),
+            entity_type="artifact",
+            entity_name=item.key,
+        )
+        for item in report.items
+        if item.status != "pass"
+    ]
 
 
 def _check_standard(

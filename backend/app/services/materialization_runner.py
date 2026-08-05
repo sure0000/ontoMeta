@@ -451,6 +451,7 @@ def run(
     load_strategy: str | None = None,
     selected_targets: list[str] | None = None,
     overrides: dict[str, dict[str, Any]] | None = None,
+    refresh_cron: str | None = None,
     sync_contracts: bool = True,
     artifact_id: str | None = None,
 ) -> dict[str, Any]:
@@ -468,6 +469,11 @@ def run(
     ``overrides``：``{contract_id: {字段: 值}}``，弹窗里人工改的存储策略/层/表名等。
     经 ``MaterializationContractService.update`` 写回并钉住，使生成读到的契约与展示
     一致（不另存一份配置）。
+
+    ``refresh_cron``：**整批**调度，展开到本次选中的每个契约。弹窗逐实体配 cron（它本来
+    就摊开了所有实体），而 Data Agent 那边「每天凌晨跑一次」说的是整批，不该要求调用方
+    先知道契约 id。展开在契约对齐**之后**做，故新推导出来的契约也能被覆盖到；
+    ``overrides`` 里显式给了 refresh_cron 的实体保持不变——细粒度优先于整批默认。
 
     ``database_overrides``（层 → 库名）与 ``table_overrides``（contract_id → 表名）
     是本次落库的目标位置，只作用于本次生成、不写回契约。
@@ -490,7 +496,11 @@ def run(
     # 再应用人工覆盖（override 会钉住，后续机器推导不覆盖）。
     if sync_contracts:
         _contract_service.sync(db, ontology_id)
-    for contract_id, patch in (overrides or {}).items():
+    patches: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (overrides or {}).items()}
+    if refresh_cron is not None:
+        for contract in _contract_service.list_selected(db, ontology_id, selected_targets):
+            patches.setdefault(contract.id, {}).setdefault("refresh_cron", refresh_cron)
+    for contract_id, patch in patches.items():
         _contract_service.update(db, contract_id, patch)
 
     ddl = _generator.generate_ddl(

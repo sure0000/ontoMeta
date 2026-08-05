@@ -12,10 +12,11 @@ import {
   message,
 } from "antd";
 import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api";
 import { ArtifactDetail } from "../../components/AgentsPanel";
+import { CronPicker } from "../../components/CronPicker";
 import type {
   ChatBiAgentStep,
   ChatBiBlock,
@@ -27,6 +28,7 @@ import type {
   ChatBiFormField,
   ChatBiFormRequest,
   ChatBiReference,
+  DataSource,
   GovernanceArtifact,
   GraphEdge,
   GraphNode,
@@ -200,6 +202,20 @@ const CALIBER_KIND_COLOR: Record<ChatBiCaliberKind, string> = {
   business_logic: "purple",
 };
 
+/**
+ * 出现这些块就不挂「生成面板」动作条：终态出口（等用户回填，本轮没有结论）与写侧提案/状态
+ * （建数任务车道，与看板无关）。此前判据只看接没接地，于是一张物化表单底下也会挂出
+ * 「基于此口径生成面板」——它为找物化对象调过 get_object，一样算接地。
+ */
+const NON_ANALYTIC_BLOCKS = new Set<ChatBiBlock["type"]>([
+  "clarify",
+  "form",
+  "action_proposal",
+  "draft_proposal",
+  "preference_proposal",
+  "task_status",
+]);
+
 export function ChatBubble({
   message,
   question,
@@ -221,14 +237,6 @@ export function ChatBubble({
   onClarify?: (text: string) => void;
 }) {
   const isUser = message.role === "user";
-  const grounded =
-    !isUser &&
-    !message.payload?.grounding_refused &&
-    Boolean(
-      message.payload?.referenced_objects?.length ||
-        message.payload?.caliber_decomposition?.length,
-    );
-  const canGenerate = grounded && Boolean(onGenerateApp && question);
   // V3 S0：回答由渲染块序列投影而来。后端双写 blocks 优先；流式/旧消息由 answerToBlocks
   // 从扁平字段兜底（流式时正文取实时 content）。用户气泡仍是纯文本。
   const blocks: ChatBiBlock[] = isUser
@@ -236,6 +244,18 @@ export function ChatBubble({
     : message.payload?.blocks?.length
       ? message.payload.blocks
       : answerToBlocks(message.payload, message.content);
+  // 「生成面板」的判据是**这条回答自己产出了口径或数据**，不是「查过本体」。动作条生成的
+  // 图表由 caliber_decomposition + referenced_objects 服务端重建（见 ChatBiPage 的
+  // generateWidgetFromChat），没有口径展开也没有数据行时，生成出来的只会是个空壳。
+  const analytic =
+    !isUser &&
+    !message.payload?.grounding_refused &&
+    ((message.payload?.caliber_decomposition?.length ?? 0) > 0 ||
+      (message.payload?.data_result?.rows?.length ?? 0) > 0);
+  const canGenerate =
+    analytic &&
+    !blocks.some((b) => NON_ANALYTIC_BLOCKS.has(b.type)) &&
+    Boolean(onGenerateApp && question);
   return (
     <div
       className={`chatbi-bubble chatbi-bubble--${
@@ -466,25 +486,33 @@ function composeFormReply(form: ChatBiFormRequest, values: Record<string, unknow
   return `【已填写：${form.title}】\n${lines.join("\n")}`;
 }
 
-function FormControl({ field }: { field: ChatBiFormField }) {
+/**
+ * 单个字段的控件。
+ *
+ * **`...rest` 必须透传**：Form.Item 是把 value/onChange 注入到它的**直接子节点**上的，
+ * 而这里的直接子节点是本组件，不是里面的 Input。不透传就等于把注入的 onChange 吃掉——
+ * 界面上照常能打字（DOM 自己的值），但 Form 的 store 一直是空的，提交时每个必填项都报
+ * 「请填写…」。整张交互表单因此从未真正提交成功过。
+ */
+function FormControl({ field, ...rest }: { field: ChatBiFormField } & Record<string, unknown>) {
   const options = (field.options ?? []).map((o) => ({ label: o, value: o }));
   switch (field.type) {
     case "textarea":
-      return <Input.TextArea placeholder={field.placeholder} autoSize={{ minRows: 2, maxRows: 6 }} />;
+      return <Input.TextArea {...rest} placeholder={field.placeholder} autoSize={{ minRows: 2, maxRows: 6 }} />;
     case "number":
-      return <InputNumber placeholder={field.placeholder} style={{ width: "100%" }} />;
+      return <InputNumber {...rest} placeholder={field.placeholder} style={{ width: "100%" }} />;
     case "select":
-      return <Select placeholder={field.placeholder} options={options} allowClear />;
+      return <Select {...rest} placeholder={field.placeholder} options={options} allowClear />;
     case "multiselect":
-      return <Select mode="multiple" placeholder={field.placeholder} options={options} allowClear />;
+      return <Select {...rest} mode="multiple" placeholder={field.placeholder} options={options} allowClear />;
     case "radio":
-      return <Radio.Group options={options} />;
+      return <Radio.Group {...rest} options={options} />;
     case "boolean":
-      return <Switch />;
+      return <Switch {...rest} />;
     case "date":
-      return <DatePicker style={{ width: "100%" }} placeholder={field.placeholder} />;
+      return <DatePicker {...rest} style={{ width: "100%" }} placeholder={field.placeholder} />;
     default:
-      return <Input placeholder={field.placeholder} />;
+      return <Input {...rest} placeholder={field.placeholder} />;
   }
 }
 
@@ -842,10 +870,252 @@ const TASK_STATUS_COLOR: Record<string, string> = {
   failed: "red",
 };
 
+/** 提案 context 的键 → 中文标签。没收录的键原样显示键名（不猜、不隐藏）。 */
+const CONTEXT_LABELS: Record<string, string> = {
+  target_datasource_id: "目标数据源",
+  target_database: "目标库",
+  target_table: "目标表",
+  object_type: "目标对象",
+  engine: "引擎",
+  database_prefix: "库名前缀",
+  load_strategy: "装载方式",
+  partition_key: "分区键",
+  refresh_cron: "调度频率",
+  sync_tool: "搬运工具",
+  source_ref_alias: "源连接别名",
+  selected_targets: "物化范围",
+  database_overrides: "各层目标库",
+  table_overrides: "表名覆盖",
+  overrides: "逐实体覆盖",
+  cleansing_rules: "清洗规则",
+};
+
+const LOAD_STRATEGY_LABELS: Record<string, string> = {
+  full: "全量覆盖",
+  incremental: "增量追加",
+  cdc: "CDC 变更捕获",
+};
+
+/** 可就地改的标量键。嵌套结构（*_overrides）只读展示——在气泡里编 JSON 不是好体验。 */
+const EDITABLE_KEYS = new Set([
+  "target_datasource_id",
+  "target_database",
+  "target_table",
+  "object_type",
+  "database_prefix",
+  "load_strategy",
+  "partition_key",
+  "refresh_cron",
+]);
+
+/** 数仓分层展示名（与 MaterializeModal 的 LAYER_LABEL 同口径）。 */
+const LAYER_LABELS: Record<string, string> = {
+  dim: "维度层 DIM",
+  dwd: "明细层 DWD",
+  ads: "应用层 ADS",
+};
+
+/** 逐实体覆盖里各字段的中文说法。 */
+const PATCH_LABELS: Record<string, string> = {
+  load_strategy: "装载方式",
+  partition_key: "分区键",
+  refresh_cron: "调度",
+  target_layer: "分层",
+};
+
+function contextValueText(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (Array.isArray(value)) return value.length ? value.join("、") : "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+/** 一条逐实体补丁 → 「装载方式 全量覆盖 · 分区键 无」。 */
+function patchText(patch: Record<string, unknown>): string {
+  const parts = Object.entries(patch).map(([k, v]) => {
+    const label = PATCH_LABELS[k] ?? k;
+    if (v === null || v === undefined || v === "") {
+      return `${label} ${k === "refresh_cron" ? "不定时" : "无"}`;
+    }
+    if (k === "load_strategy") return `${label} ${LOAD_STRATEGY_LABELS[String(v)] ?? v}`;
+    return `${label} ${String(v)}`;
+  });
+  return parts.join(" · ") || "—";
+}
+
+/**
+ * 把 `{层/契约id: 值}` 这类嵌套覆盖摊成「谁 → 什么」的行。
+ *
+ * 契约 id 是内部主键，直接摆出来等于没说——用契约清单换成实体显示名；换不到（清单还没
+ * 到、或该契约已不在）就退回原 id，**不隐藏**：宁可露一个 id，也不能让一条覆盖凭空消失。
+ */
+function overrideRows(
+  key: string,
+  value: Record<string, unknown>,
+  nameOf: (contractId: string) => string,
+): Array<{ k: string; v: string }> {
+  return Object.entries(value).map(([k, v]) => {
+    if (key === "database_overrides") return { k: LAYER_LABELS[k] ?? k, v: String(v) };
+    const who = nameOf(k);
+    if (key === "overrides" && v && typeof v === "object" && !Array.isArray(v)) {
+      return { k: who, v: patchText(v as Record<string, unknown>) };
+    }
+    return { k: who, v: contextValueText(v) };
+  });
+}
+
+/**
+ * 提案参数表：把 context 摊开成「中文标签 + 可改的值」。
+ *
+ * 此前这里是一行 `JSON.stringify(context)`——用户既看不懂 Drafter 替他定了什么，也改不了。
+ * 而 sync/transform 的 Drafter 在没给对象时会**按意图猜**一个，猜完不回显，等于让人闭着眼
+ * 点「去校验并执行」。
+ */
+function ProposalContextForm({
+  kind,
+  context,
+  ontologyId,
+  onChange,
+}: {
+  kind: string;
+  context: Record<string, unknown>;
+  ontologyId?: string | null;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  const [dataSources, setDataSources] = useState<DataSource[] | null>(null);
+  const needsDataSource = "target_datasource_id" in context;
+  useEffect(() => {
+    if (!needsDataSource || dataSources !== null) return;
+    api
+      .listDataSources()
+      .then(setDataSources)
+      .catch(() => setDataSources([]));
+  }, [needsDataSource, dataSources]);
+
+  // 契约 id → 实体显示名。只有确实出现了按契约 id 索引的覆盖才去拉清单。
+  const [contractNames, setContractNames] = useState<Record<string, string> | null>(null);
+  const needsContracts = "table_overrides" in context || "overrides" in context;
+  useEffect(() => {
+    if (!needsContracts || !ontologyId || contractNames !== null) return;
+    api
+      .listMaterializationContracts(ontologyId)
+      .then((list) =>
+        setContractNames(
+          Object.fromEntries(
+            list.map((c) => [c.id, c.target_display_name ?? c.target_name ?? c.id]),
+          ),
+        ),
+      )
+      .catch(() => setContractNames({}));
+  }, [needsContracts, ontologyId, contractNames]);
+  const nameOf = (contractId: string) => contractNames?.[contractId] ?? contractId;
+
+  const keys = Object.keys(context).filter((k) => context[k] !== null && context[k] !== undefined);
+  if (keys.length === 0) {
+    return (
+      <div className="chatbi-draft-note">
+        提案未带任何参数；起草时会由本体与物化契约推导默认值，可在下一步的校验结果里核对。
+      </div>
+    );
+  }
+  return (
+    <div className="chatbi-proposal-params">
+      {keys.map((key) => {
+        const value = context[key];
+        const label = CONTEXT_LABELS[key] ?? key;
+        if (!EDITABLE_KEYS.has(key)) {
+          // 覆盖类嵌套结构摊成「谁 → 什么」；其余只读值仍单行显示。
+          const nested =
+            value && typeof value === "object" && !Array.isArray(value)
+              ? overrideRows(key, value as Record<string, unknown>, nameOf)
+              : null;
+          return (
+            <div className="chatbi-proposal-param" key={key}>
+              <span className="chatbi-proposal-param-label">{label}</span>
+              {nested ? (
+                <div className="chatbi-proposal-nested">
+                  {nested.length === 0 ? (
+                    <span className="chatbi-proposal-param-ro">—</span>
+                  ) : (
+                    nested.map((row) => (
+                      <div className="chatbi-proposal-nested-row" key={row.k}>
+                        <span className="chatbi-proposal-nested-k">{row.k}</span>
+                        <span className="chatbi-proposal-nested-v">{row.v}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : (
+                <code className="chatbi-proposal-param-ro">{contextValueText(value)}</code>
+              )}
+            </div>
+          );
+        }
+        let control = (
+          <Input
+            size="small"
+            value={typeof value === "string" ? value : contextValueText(value)}
+            onChange={(e) => onChange(key, e.target.value)}
+          />
+        );
+        if (key === "target_datasource_id") {
+          control = (
+            <Select
+              size="small"
+              style={{ width: "100%" }}
+              loading={dataSources === null}
+              value={typeof value === "string" ? value : undefined}
+              onChange={(v) => onChange(key, v)}
+              options={(dataSources ?? []).map((d) => ({
+                value: d.id,
+                label: `${d.name}（${d.kind}）`,
+              }))}
+              notFoundContent="尚无数据源，请到 系统设置 → 数据源 添加"
+            />
+          );
+        } else if (key === "load_strategy") {
+          control = (
+            <Select
+              size="small"
+              style={{ width: "100%" }}
+              value={typeof value === "string" ? value : undefined}
+              onChange={(v) => onChange(key, v)}
+              options={Object.entries(LOAD_STRATEGY_LABELS).map(([v, l]) => ({
+                value: v,
+                label: l,
+              }))}
+            />
+          );
+        } else if (key === "refresh_cron") {
+          control = (
+            <CronPicker
+              value={typeof value === "string" ? value : ""}
+              onChange={(v) => onChange(key, v)}
+            />
+          );
+        }
+        return (
+          <div className="chatbi-proposal-param" key={key}>
+            <span className="chatbi-proposal-param-label">{label}</span>
+            <span className="chatbi-proposal-param-ctl">{control}</span>
+          </div>
+        );
+      })}
+      {kind !== "materialize" && !("object_type" in context) && !("target_table" in context) && (
+        <div className="chatbi-draft-note">
+          未指定目标对象：起草时会按意图匹配一个，匹配结果可在下一步的校验结果里核对。
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * 数据任务提案块（P0）：Data Agent 只出提案（不执行、不写库）；点「去校验并执行」才由用户动作
  * POST /api/agents/draft 建一条治理制品，随后在复用的 ArtifactDetail 抽屉里走
  * 校验→看 dry-run 差异→确认→执行。写侧全程 publisher 门控 + 人工确认，agent 不碰。
+ *
+ * P2：参数不再是一行 JSON——摊成可改的表，用户点之前看得见、也改得动。
  */
 function ActionProposalBlock({
   proposal,
@@ -855,12 +1125,16 @@ function ActionProposalBlock({
   conversationId?: string;
 }) {
   const [drafting, setDrafting] = useState(false);
+  const [context, setContext] = useState<Record<string, unknown>>(
+    () => ({ ...(proposal.context ?? {}) }),
+  );
   const { open, node } = useArtifactDrawer();
   const kindLabel = ACTION_KIND_LABEL[proposal.kind] ?? proposal.kind;
   const onConfirm = async () => {
     setDrafting(true);
     try {
-      const artifact = await api.draftArtifact(proposal.draft_payload);
+      // 用户改过的参数为准：draft_payload 的 context 以本地编辑值覆盖后再提交。
+      const artifact = await api.draftArtifact({ ...proposal.draft_payload, context });
       // P1：把本会话与该任务关联，后续可免 id 追踪。best-effort，失败不阻断主流程。
       if (conversationId) {
         void api
@@ -891,11 +1165,12 @@ function ActionProposalBlock({
         <span>新建{kindLabel}任务</span>
       </div>
       <div className="chatbi-draft-name">{proposal.intent}</div>
-      {proposal.context && Object.keys(proposal.context).length > 0 && (
-        <div className="chatbi-draft-desc">
-          <code>{JSON.stringify(proposal.context)}</code>
-        </div>
-      )}
+      <ProposalContextForm
+        kind={proposal.kind}
+        context={context}
+        ontologyId={proposal.ontology_id}
+        onChange={(key, value) => setContext((prev) => ({ ...prev, [key]: value }))}
+      />
       <div className="chatbi-draft-note">
         点击后创建治理制品，并在弹窗里过「校验 → dry-run 差异 → 人工确认 → 执行」；不会自动执行，也不直接改动数据。
       </div>

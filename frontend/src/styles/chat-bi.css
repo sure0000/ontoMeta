@@ -999,6 +999,73 @@
   margin: 4px 0 10px;
 }
 
+/* 提案参数表（P2）：标签一列、值一列；标量可改，嵌套结构只读。 */
+.chatbi-proposal-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+
+.chatbi-proposal-param {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.chatbi-proposal-param-label {
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-proposal-param-ro {
+  font-size: 12px;
+  color: var(--om-text-secondary);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.chatbi-proposal-param-ctl {
+  min-width: 0;
+}
+
+/* 覆盖类嵌套结构：「谁 → 什么」逐行列出，替代一坨 JSON。 */
+.chatbi-proposal-nested {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chatbi-proposal-nested-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.chatbi-proposal-nested-k {
+  color: var(--om-text-secondary);
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatbi-proposal-nested-k::after {
+  content: " →";
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-proposal-nested-v {
+  color: var(--om-text-primary);
+  min-width: 0;
+  overflow-x: auto;
+}
+
 .chatbi-draft-error {
   font-size: 12px;
   color: var(--om-error, #d4380d);

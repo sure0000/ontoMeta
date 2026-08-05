@@ -101,14 +101,23 @@ SKILLS: dict[str, Skill] = {
         prompt_overlay=(
             "【建/管数据任务技能】用户想建数据任务（物化 materialize / 同步 sync / 加工 transform）"
             "或查任务进度。\n"
-            "建任务：先把「对哪张/哪些表做什么」说清楚，再用 **propose_action(kind, intent, context)** "
-            "产出一份**提案**（**不执行、不写库**）；真正的创建/校验/dry-run/确认/执行由用户在前端点击后走"
-            "既有治理流程，你不直接建表或跑作业。若提案涉及具体物理表名，先用 **lint_against_standard** "
-            "自检命名是否合规约、按返回的 fix 修正后再提。\n"
+            "建任务分三步，**顺序不能颠倒**：\n"
+            "1. **先调 get_task_options(kind)** 拿到可选项（物化：目标数据源/目标库/待物化实体及其"
+            "契约 id、分层、分区键、装载方式、现有调度/装载方式/调度频率预置；同步与加工：候选对象）。"
+            "不先问就不知道有哪些数据源，只能编——而编出来的 id 一定过不了校验。\n"
+            "2. 缺的参数用 **request_form(title, task_kind=该类型)** 一次收齐——带上 task_kind，"
+            "服务端会按该类型补齐必问字段（物化=目标数据源/目标库/表名/装载方式/分区键/调度频率）"
+            "并填入真实候选，你**不用也不该**自己列 fields；确有额外要问的再追加。\n"
+            "   用户填回的选项形如「名称｜id」：取 ｜ 右边那段作为 context 里的 id/取值。\n"
+            "3. 参数齐了再用 **propose_action(kind, intent, context)** 产出**提案**（**不执行、不写库**）；"
+            "真正的创建/校验/dry-run/确认/执行由用户在前端点击后走既有治理流程，你不直接建表或跑作业。"
+            "若提案涉及具体物理表名，先用 **lint_against_standard** 自检命名是否合规约、按 fix 修正后再提。\n"
             "查进度：用 **get_task_status(artifact_id 或 kind)** 回读任务状态与执行回执，据实回答"
             "「跑完没/成没成功」；不要臆造状态。"
         ),
-        extra_tool_names=("propose_action", "get_task_status", "lint_against_standard"),
+        extra_tool_names=(
+            "get_task_options", "propose_action", "get_task_status", "lint_against_standard",
+        ),
         block_types=("markdown", "action_proposal", "task_status"),
         attach_governance=True,
     ),

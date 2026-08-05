@@ -31,9 +31,10 @@ from app.models.warehouse import TargetKind
 
 class MetricDrafter(Drafter):
     kind = "metric"
+    required_context = ("ontology_id",)
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
-        require_context(context, "ontology_id")
+        require_context(context, *self.required_context)
         ontology_id = context["ontology_id"]
         with SessionLocal() as db:
             logic = self._select_logic(db, intent, ontology_id, context.get("metric_name"))

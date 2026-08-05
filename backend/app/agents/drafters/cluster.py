@@ -57,9 +57,10 @@ _DEFAULT_LAYOUT = {
 
 class ClusterDrafter(Drafter):
     kind = "cluster"
+    required_context = ("hosts",)
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
-        require_context(context, "hosts")
+        require_context(context, *self.required_context)
         hosts = [str(h).strip() for h in context["hosts"] if str(h).strip()]
         if not hosts:
             raise ValueError("hosts 为空")

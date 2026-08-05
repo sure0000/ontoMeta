@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from app.agents.executors.base import Executor
+from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 
 
 def _job(name: str, source_alias: str, source_table: str, sink_table: str, mode: str,
@@ -41,7 +42,9 @@ class SyncExecutor(Executor):
     def _artifacts(self, spec: dict[str, Any]) -> dict[str, Any]:
         source = spec["source"]
         target = spec["target"]
-        alias = spec.get("source_ref_alias") or "default"
+        # 与 SyncDrafter / job_planner 同一个缺省别名；此前这里写的是 "default"，
+        # 一个执行侧根本没有的 conn_id——真走到这条兜底只会在运行时找不到连接。
+        alias = spec.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS
         mode = spec.get("mode") or "full"
         partition_key = spec.get("partition_key")
 

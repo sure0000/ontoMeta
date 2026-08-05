@@ -18,9 +18,11 @@ from app.agents.drafters.base import Drafter
 
 class MaterializeDrafter(Drafter):
     kind = "materialize"
+    # 目标数据源无从推导（本体不知道要落到哪个仓），必须由调用方选定。
+    required_context = ("ontology_id", "target_datasource_id")
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
-        require_context(context, "ontology_id", "target_datasource_id")
+        require_context(context, *self.required_context)
         return {
             "ontology_id": context["ontology_id"],
             "target_datasource_id": context["target_datasource_id"],
@@ -33,6 +35,12 @@ class MaterializeDrafter(Drafter):
             "sync_tool": context.get("sync_tool"),
             "selected_targets": list(context.get("selected_targets") or []) or None,
             "overrides": dict(context.get("overrides") or {}),
+            # 整批调度：弹窗是逐实体配 cron（写进各自契约的 refresh_cron），要求调用方先知道
+            # 契约 id。对话里「每天凌晨跑一次」说的是整批，故提到 Spec 顶层，由 Executor 展开
+            # 到本次选中的各契约；``overrides`` 里显式给了 refresh_cron 的实体不受影响。
+            "refresh_cron": (str(context.get("refresh_cron")).strip() or None)
+            if context.get("refresh_cron") is not None
+            else None,
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

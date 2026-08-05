@@ -163,3 +163,49 @@ def resolve_sync_tool(
         ),
         uncovered_modes=uncovered,
     )
+
+
+def engine_modes(
+    airflow, engine: str, *, choice_tool: str | None
+) -> tuple[list[str] | None, str]:
+    """目标引擎在**执行侧**真正支持的装载方式。问不到返回 ``(None, 原因)``。
+
+    **宁可返回 None 也不猜**：这个值用于置灰/过滤「同步方式」，猜错的代价是让人选不了
+    一个其实能跑的方式，或选了一个其实跑不了的。
+
+    与 ``resolve_sync_tool`` 同住这里，是因为二者答的是同一个问题的两半（用什么搬 /
+    搬得动哪些方式），且物化弹窗与 Data Agent 的建数表单必须拿到同一个答案——此前它
+    只存在于 ``api/warehouse`` 的一个私有函数里，agent 那条路便无从得知。
+    """
+    channel = (airflow.sync_channel or "runner").lower()
+    key = (engine or "").lower()
+    if channel != "runner":
+        if not choice_tool or choice_tool == "auto":
+            return None, "docker 通道且未定下工具，无法确定可用的装载方式。"
+        adapter = get_job_adapter(choice_tool)
+        return (
+            [m for m in ("full", "incremental", "cdc") if adapter.supports(m)],
+            f"取自 {adapter.name} 适配器声明的能力。",
+        )
+    if not airflow.sync_runner_endpoint:
+        return None, "未配置 sync-runner 地址，问不到执行侧能力。"
+    from app.connectors.sync_runner import SyncRunnerClient, SyncRunnerError
+
+    client = SyncRunnerClient(
+        airflow.sync_runner_endpoint,
+        token=airflow.sync_runner_token,
+        # 调用方（弹窗打开 / agent 循环内）都在等这一次同步调用，超时要短：
+        # 问不到只是不置灰，不该让界面或对话卡住。
+        timeout=5.0,
+    )
+    try:
+        caps = client.capabilities()
+    except SyncRunnerError as exc:
+        return None, f"sync-runner 不可达，问不到执行侧能力（{exc}）。"
+    finally:
+        client.close()
+    modes = (caps.get("sink_modes") or {}).get(key)
+    if modes is None:
+        sinks = ", ".join(caps.get("sinks") or []) or "无"
+        return [], f"runner 不支持写入 {engine}（它声明的目标：{sinks}）。"
+    return list(modes), f"取自 sync-runner 声明的 {engine} 能力。"

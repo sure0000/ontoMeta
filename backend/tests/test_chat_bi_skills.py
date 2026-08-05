@@ -27,7 +27,7 @@ def test_registry_has_overview_and_query():
     assert SKILLS["lineage"].extra_tool_names == ("get_lineage",)
     assert SKILLS["create"].extra_tool_names == ("propose_draft", "lint_against_standard")
     assert SKILLS["task"].extra_tool_names == (
-        "propose_action", "get_task_status", "lint_against_standard"
+        "get_task_options", "propose_action", "get_task_status", "lint_against_standard"
     )
     assert "overview" in skill_choices_text() and "query" in skill_choices_text()
 
@@ -369,29 +369,90 @@ def test_create_skill_flow_stays_read_only(client):
 
 
 def test_propose_action_builds_draft_payload():
-    r, _summary, is_error = svc._dispatch_propose_action(
-        ontology_id="onto1", domain_id="dom1",
-        args={"kind": "materialize", "intent": "把客户主数据物化到 dim_customer",
-              "context": {"target_table": "dim_customer"}},
-    )
+    with SessionLocal() as db:
+        r, _summary, is_error = svc._dispatch_propose_action(
+            db,
+            ontology_id="onto1", domain_id="dom1",
+            args={"kind": "materialize", "intent": "把客户主数据物化到 dim_customer",
+                  "context": {"target_table": "dim_customer",
+                              "target_datasource_id": "ds-1"}},
+        )
     assert is_error is False
     assert r["kind"] == "materialize"
     dp = r["draft_payload"]
     assert dp["kind"] == "materialize" and dp["ontology_id"] == "onto1"
     assert dp["intent"] == "把客户主数据物化到 dim_customer"
-    assert dp["context"] == {"target_table": "dim_customer"}
+    assert dp["context"]["target_table"] == "dim_customer"
 
 
 def test_propose_action_rejects_bad_kind_and_missing_intent():
-    # cluster 不在数据任务白名单（归基建，不由聊天 agent 提）
-    _r, _s, e1 = svc._dispatch_propose_action(
-        ontology_id="o", domain_id="d", args={"kind": "cluster", "intent": "x"}
-    )
-    assert e1 is True
-    _r2, _s2, e2 = svc._dispatch_propose_action(
-        ontology_id="o", domain_id="d", args={"kind": "materialize"}
-    )
+    with SessionLocal() as db:
+        # cluster 不在数据任务白名单（归基建，不由聊天 agent 提）
+        _r, _s, e1 = svc._dispatch_propose_action(
+            db, ontology_id="o", domain_id="d", args={"kind": "cluster", "intent": "x"}
+        )
+        assert e1 is True
+        _r2, _s2, e2 = svc._dispatch_propose_action(
+            db, ontology_id="o", domain_id="d", args={"kind": "materialize"}
+        )
     assert e2 is True  # 缺 intent
+
+
+def test_propose_action_rejects_missing_required_context(client):
+    """物化缺 target_datasource_id：当场判错并给出真实候选，不放一份点了必 400 的提案出去。
+
+    此前不校验，提案照发，用户点「去校验并执行」才在 MaterializeDrafter 里抛
+    「缺少必要上下文」——错误被推迟到了按钮之后。
+    """
+    from app.models import DataSource
+
+    with SessionLocal() as db:
+        db.add(DataSource(id="ds-hive", name="仓库 Hive", kind="hive", status="ok"))
+        db.commit()
+        r, summary, is_error = svc._dispatch_propose_action(
+            db,
+            ontology_id="onto1", domain_id="dom1",
+            args={"kind": "materialize", "intent": "把客户主数据物化到数仓"},
+        )
+    assert is_error is True
+    assert r["missing"] == ["target_datasource_id"]
+    assert "target_datasource_id" in summary
+    # 「怎么补」不能只说缺了什么：附上真实候选，模型才能据此发一张能选的表单。
+    options = r["target_datasource_id_options"]
+    assert {"id": "ds-hive", "name": "仓库 Hive", "kind": "hive", "status": "ok"} in options
+    # 凭据不出现在候选里
+    assert all("dsn" not in k for o in options for k in o)
+
+
+def test_propose_action_allows_kinds_whose_context_is_derivable():
+    """sync/transform 的必填 Spec 字段由 Drafter 从本体推导，不该当成必填 context 拦下。
+
+    判据取 Drafter 的 required_context，而非规约的 required_metadata.per_artifact
+    （后者约束的是 Spec 字段，如 sync 的 source/target）。
+    """
+    with SessionLocal() as db:
+        for kind in ("sync", "transform"):
+            _r, _s, is_error = svc._dispatch_propose_action(
+                db, ontology_id="onto1", domain_id="dom1",
+                args={"kind": kind, "intent": "把订单表搬到数仓"},
+            )
+            assert is_error is False, kind
+
+
+def test_materialize_required_context_matches_standard():
+    """物化的必填 context 与规约的必填 Spec 字段一致——提案前置校验与 Validation Gate
+    守同一份判据，不得一处改了另一处没跟上。
+
+    其余类型不做此断言：它们的必填 Spec 字段（sync 的 source/target、metric 的
+    metric_name）由 Drafter 从本体推导，本就不是调用方要给的 context 键。
+    """
+    from app.agents import registry
+    from app.governance import active_standard
+
+    per_artifact = active_standard().required_metadata.per_artifact
+    assert set(registry.get_drafter("materialize").required_context) == set(
+        per_artifact["materialize"]
+    )
 
 
 def test_task_skill_unlocks_action_tools_and_governance():
@@ -457,7 +518,9 @@ def test_task_skill_flow_stays_read_only(client):
         ToolTurn([("select_skill", {"skill": "task"})]),
         ToolTurn([("propose_action", {"kind": "materialize",
                                        "intent": "把客户主数据物化到 dim_customer",
-                                       "context": {"target_table": "dim_customer"}})]),
+                                       # 物化必须给目标数据源，否则提案在 dispatch 就被判错
+                                       "context": {"target_table": "dim_customer",
+                                                   "target_datasource_id": "ds-1"}})]),
         FinalTurn("已拟好物化任务提案，确认后即可创建并运行。"),
     ]
     completions = _StubCompletions(script, aliases)
@@ -487,6 +550,138 @@ def test_task_skill_flow_stays_read_only(client):
     assert "action_proposal" in [b["type"] for b in answer_to_blocks(payload)]
     # 只读不变式：propose_action 只出提案，不建制品
     assert _count() == before
+
+
+# ---------------- P1：建数任务可选项目录（get_task_options） ----------------
+
+
+def test_task_options_materialize_lists_real_datasources_and_entities(client):
+    """物化可选项：数据源 + 待物化实体（带契约 id / 分层 / 分区键 / 装载方式 / 调度）
+    + 装载方式 + 调度频率预置。
+
+    这是建数表单能长出下拉框的前提：此前模型没有任何工具读得到这些，request_form 的
+    「候选项须来自真实实体」永远无法满足，只能退化成文本框。
+    """
+    from app.models import DataSource
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        db.add(DataSource(id="ds-dw", name="数仓 Hive", kind="hive", status="ok",
+                          dsn_secret_ref="ref://dw"))
+        db.commit()
+        try:
+            # 契约由本体推导，先对齐一次
+            from app.api.deps import materialization_contract_service as contracts_svc
+
+            contracts_svc.sync(db, onto_id)
+            r, summary, is_error = svc._dispatch_get_task_options(
+                db, ontology_id=onto_id, args={"kind": "materialize"},
+            )
+        finally:
+            # 用例间共用一个库：带 dsn 的源会被 _resolve_domain_data_source 选去当
+            # run_sql 的执行源，留着会串到别的用例（取数用例就会连错库）。
+            db.query(DataSource).filter(DataSource.id == "ds-dw").delete()
+            db.commit()
+
+    assert is_error is False
+    assert {"id": "ds-dw", "name": "数仓 Hive", "kind": "hive", "status": "ok",
+            "engine": "hive", "writable": True} in r["datasources"]
+    assert r["engine"] == "hive"
+    # 实体候选带得出 overrides 的键，否则「给这张表设分区键」在对话里无从表达
+    assert r["entities"] and all(
+        {"contract_id", "entity", "layer", "partition_key", "load_strategy", "refresh_cron"}
+        <= set(e) for e in r["entities"]
+    )
+    assert [s["value"] for s in r["load_strategies"]] == ["full", "incremental", "cdc"]
+    assert any(p["expr"] == "0 2 * * *" for p in r["cron_presets"])
+    assert "个数据源" in summary
+
+
+def test_task_options_caps_and_filters_entities(client):
+    """候选按 search_* 的既有约定给 {total/returned/truncated}，并支持关键词收窄——
+    一个 700+ 对象的域整份倒进上下文既挤爆预算也没人读。"""
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        from app.api.deps import materialization_contract_service as contracts_svc
+
+        contracts_svc.sync(db, onto_id)
+        r, _s, is_error = svc._dispatch_get_task_options(
+            db, ontology_id=onto_id, args={"kind": "materialize", "keyword": "订单"},
+        )
+    assert is_error is False
+    assert r["returned"] == len(r["entities"]) <= r["total_entities"]
+    # 过滤掉了别的实体，但订单本身留下了——否则这条断言是空真的
+    assert r["entities"] and r["returned"] < r["total_entities"]
+    assert all("订单" in (e["display_name"] or "") or "order" in e["entity"]
+               for e in r["entities"])
+
+
+def test_task_options_sync_excludes_objects_without_source(client):
+    """同步候选只留有 source_ref 的对象——没有源表定位不了，选了也只会在起草时报错。"""
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, _s, is_error = svc._dispatch_get_task_options(
+            db, ontology_id=onto_id, args={"kind": "sync"},
+        )
+    assert is_error is False
+    assert r["context_key"] == "object_type"  # 键名对齐 SyncDrafter 认的 context 键
+    assert all(o["source_table"] for o in r["objects"])
+
+
+def test_task_options_transform_exposes_cleansing_vocabulary(client):
+    """加工候选带上清洗规则词表：规则是闭集，词表外的需求会被 Drafter 静默丢掉，
+    得让模型当场告诉用户做不了，而不是产出一个什么都不做的 ETL 任务。"""
+    from app.agents.drafters.transform import SUPPORTED_CLEANSING_RULES
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, _s, is_error = svc._dispatch_get_task_options(
+            db, ontology_id=onto_id, args={"kind": "transform"},
+        )
+    assert is_error is False
+    assert r["context_key"] == "target_table"
+    assert [x["rule"] for x in r["cleansing_rules"]] == [c for c, _d in SUPPORTED_CLEANSING_RULES]
+
+
+def test_task_options_rejects_unknown_kind(client):
+    with SessionLocal() as db:
+        _r, _s, is_error = svc._dispatch_get_task_options(
+            db, ontology_id="o", args={"kind": "cluster"},
+        )
+    assert is_error is True
+
+
+def test_task_options_names_enter_ledger(client):
+    """目录里的数据源名/库名/实体名要入账本，否则模型照着候选作答会被 F4 判成幻觉拒答。"""
+    from app.services.agent_grounding import FactLedger
+
+    ledger = FactLedger()
+    svc._ledger_register(
+        ledger,
+        "get_task_options",
+        {"datasources": [{"name": "数仓 Hive"}], "databases": ["dw"],
+         "entities": [{"entity": "order", "display_name": "订单"}]},
+        False,
+    )
+    assert ledger.has_entity_named("数仓 Hive")
+    assert ledger.has_entity_named("dw")
+    assert ledger.has_entity_named("订单")
+
+
+def test_materialize_spec_carries_batch_cron():
+    """整批调度提到 Spec 顶层：对话里「每天凌晨跑」说的是整批，不该要求先知道契约 id。"""
+    from app.agents import registry
+
+    spec = registry.get_drafter("materialize").draft(
+        "把客户主数据物化到数仓",
+        {"ontology_id": "onto1", "target_datasource_id": "ds-1", "refresh_cron": "0 2 * * *"},
+    )
+    assert spec["refresh_cron"] == "0 2 * * *"
+    # 不给就是 None（不定时），不能凭空塞一个默认调度
+    spec2 = registry.get_drafter("materialize").draft(
+        "把客户主数据物化到数仓", {"ontology_id": "onto1", "target_datasource_id": "ds-1"}
+    )
+    assert spec2["refresh_cron"] is None
 
 
 # ---------------- P1：跨轮任务记忆（会话 ↔ 任务关联） ----------------

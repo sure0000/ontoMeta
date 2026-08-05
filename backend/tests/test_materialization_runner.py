@@ -220,6 +220,64 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
     assert any("warehouse_prod" in s and "dim_customer" in s for s in spec["ddl"])
 
 
+def test_batch_refresh_cron_expands_to_selected_contracts(tmp_path, monkeypatch):
+    """整批调度写回本次选中的每个契约；逐实体显式给的 cron 不被整批默认盖掉。
+
+    Data Agent 那条路只能说「整批每天凌晨跑」——它拿不到、也不该要求先拿到契约 id。
+    """
+    ids = _seed("batchcron")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        service = materialization_runner._contract_service
+        service.sync(db, ids["ontology_id"])
+        contracts = service.list_contracts(db, ids["ontology_id"], materialized_only=True)
+        names = service.resolve_target_names(db, contracts)
+        customer = next(c for c in contracts if names.get(c.target_id, (None,))[0] == "customer")
+
+        materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            refresh_cron="0 2 * * *",
+            overrides={customer.id: {"refresh_cron": "0 5 * * *"}},
+            artifact_id="art-batchcron",
+        )
+        after = service.list_contracts(db, ids["ontology_id"], materialized_only=True)
+        by_id = {c.id: c for c in after}
+
+    assert by_id[customer.id].refresh_cron == "0 5 * * *"  # 细粒度优先
+    others = [c for cid, c in by_id.items() if cid != customer.id]
+    assert others and all(c.refresh_cron == "0 2 * * *" for c in others)
+
+
+def test_no_refresh_cron_leaves_contracts_untouched(tmp_path, monkeypatch):
+    """不传整批调度就不动契约的 refresh_cron——不能凭空塞一个默认调度。"""
+    ids = _seed("nocron")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        service = materialization_runner._contract_service
+        service.sync(db, ids["ontology_id"])
+        before = {
+            c.id: c.refresh_cron
+            for c in service.list_contracts(db, ids["ontology_id"], materialized_only=True)
+        }
+        materialization_runner.run(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="art-nocron",
+        )
+        after = {
+            c.id: c.refresh_cron
+            for c in service.list_contracts(db, ids["ontology_id"], materialized_only=True)
+        }
+    assert after == before
+
+
 def _set_airflow(**fields):
     """改设置行上的编排旋钮（原来是环境变量，现已全部入库）。"""
     from app.services.settings_service import SettingsService

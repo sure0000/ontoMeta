@@ -18,7 +18,6 @@ from app.api.deps import (
     settings_service,
     warehouse_generator,
 )
-from app.connectors.sync_runner import SyncRunnerClient, SyncRunnerError
 from app.database import get_db
 from app.models import MaterializationContract, Ontology
 from app.models.agent import ArtifactStatus
@@ -157,6 +156,7 @@ def list_warehouse_sync_tools(
     """
     from app.services.sync_tool_resolver import (
         SyncToolResolutionError,
+        engine_modes,
         required_modes,
         resolve_sync_tool,
     )
@@ -214,7 +214,7 @@ def list_warehouse_sync_tools(
             "error": str(exc),
         }
 
-    supported, modes_detail = _engine_modes(airflow, engine, choice_tool=resolved["resolved"])
+    supported, modes_detail = engine_modes(airflow, engine, choice_tool=resolved["resolved"])
     return {
         "channel": (airflow.sync_channel or "runner").lower(),
         "default": DEFAULT_SYNC_TOOL,
@@ -223,47 +223,6 @@ def list_warehouse_sync_tools(
         "tools": tools,
         **resolved,
     }
-
-
-def _engine_modes(
-    airflow, engine: str, *, choice_tool: str | None
-) -> tuple[list[str] | None, str]:
-    """目标引擎在执行侧真正支持的装载方式。问不到返回 ``(None, 原因)``。
-
-    **宁可返回 None 也不猜**：这个值直接用于置灰「同步方式」，猜错的代价是让人选不了
-    一个其实能跑的方式，或选了一个其实跑不了的。
-    """
-    channel = (airflow.sync_channel or "runner").lower()
-    key = (engine or "").lower()
-    if channel != "runner":
-        if not choice_tool or choice_tool == "auto":
-            return None, "docker 通道且未定下工具，无法确定可用的装载方式。"
-        from app.warehouse.jobs import get_job_adapter
-
-        adapter = get_job_adapter(choice_tool)
-        return (
-            [m for m in ("full", "incremental", "cdc") if adapter.supports(m)],
-            f"取自 {adapter.name} 适配器声明的能力。",
-        )
-    if not airflow.sync_runner_endpoint:
-        return None, "未配置 sync-runner 地址，问不到执行侧能力。"
-    client = SyncRunnerClient(
-        airflow.sync_runner_endpoint,
-        token=airflow.sync_runner_token,
-        # 弹窗打开时同步调一次，超时要短：问不到只是不置灰，不该让弹窗卡住。
-        timeout=5.0,
-    )
-    try:
-        caps = client.capabilities()
-    except SyncRunnerError as exc:
-        return None, f"sync-runner 不可达，问不到执行侧能力（{exc}）。"
-    finally:
-        client.close()
-    modes = (caps.get("sink_modes") or {}).get(key)
-    if modes is None:
-        sinks = ", ".join(caps.get("sinks") or []) or "无"
-        return [], f"runner 不支持写入 {engine}（它声明的目标：{sinks}）。"
-    return list(modes), f"取自 sync-runner 声明的 {engine} 能力。"
 
 
 @router.get("/warehouse/engines")
