@@ -686,14 +686,23 @@ export interface ChatBiCaliberItem {
 
 export interface ChatBiAgentStep {
   index: number;
-  /** "tool"（默认）= 工具调用步；"thought" = 工具间的模型自述，按时序穿插展示。 */
-  kind?: "tool" | "thought";
+  /**
+   * "tool"（默认）= 工具调用步；"thought" = 工具间的模型自述；
+   * "repair" = 可靠性校验未过、正在重写（P4.3）。
+   */
+  kind?: "tool" | "thought" | "repair";
   tool: string;
   /** kind==="thought" 时的思考文本。 */
   text?: string;
   arguments?: Record<string, unknown>;
   status?: "running" | "succeeded" | "failed";
   summary?: string | null;
+}
+
+export interface ChatBiClarification {
+  question: string;
+  options: string[];
+  reason?: string;
 }
 
 export interface ChatBiDataResult {
@@ -713,6 +722,11 @@ export interface ChatBiAnswer {
   referenced_logics?: ChatBiReference[];
   used_mock: boolean;
   grounding_refused?: boolean;
+  /**
+   * 需要用户澄清的缺口（P4.1）。与 grounding_refused 是**两种不同结局**：
+   * 拒答是「答不了」，澄清是「先确认再答」。
+   */
+  clarification?: ChatBiClarification | null;
   steps?: ChatBiAgentStep[];
   data_result?: ChatBiDataResult | null;
   conversation_id?: string | null;
@@ -724,6 +738,8 @@ export type ChatBiStreamEvent =
   | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
   | { type: "step_done"; index: number; status: "succeeded" | "failed"; summary?: string | null }
   | { type: "thought"; index: number; text: string }
+  /** 答案未过可靠性校验，正在让模型重写一次（P4.3 自愈回环）。 */
+  | { type: "repair"; reasons: string[] }
   | { type: "token"; delta: string }
   | { type: "done"; payload: ChatBiAnswer }
   | { type: "error"; message: string };

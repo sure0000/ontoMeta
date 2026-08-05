@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -26,6 +27,8 @@ from app.schemas import (
     OntologyDraftOutput,
 )
 from app.services.common import log_change
+
+logger = logging.getLogger("ontometa.publish")
 from app.services.version_diff import (
     capture_ontology_snapshot,
     compute_version_diff,
@@ -47,6 +50,25 @@ def _log_change(
     summary: str | None = None,
 ) -> None:
     log_change(db, entity_type, entity_id, action, operator, summary)
+
+
+def _rebuild_semantic_index(db: Session, ontology_id: str) -> None:
+    """发布后重建语义检索索引（P1.5）。
+
+    挂在发布这一刻，是因为**只有已发布内容可被 Agent 检索**——索引与可检索集必须同步，
+    否则语义检索会召回一个查得到名字、`get_object` 却拿不到的实体。
+
+    绝不阻断发布：未配置嵌入服务时它本就返回 0；调用失败也只记日志。
+    发布是不可逆的治理动作，不能因为一个检索增强而失败。
+    """
+    try:
+        from app.services.semantic_search import build_index
+
+        n = build_index(db, ontology_id)
+        if n:
+            logger.info("语义索引已重建：ontology=%s，%d 条", ontology_id, n)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("语义索引重建失败（不影响发布）：%s", exc)
 
 
 class DraftPersistenceService:
@@ -472,6 +494,7 @@ class PublishService:
         _log_change(db, "ontology", ontology.id, "publish", operator, f"v{ontology.version}")
         db.commit()
         db.refresh(ontology)
+        _rebuild_semantic_index(db, ontology.id)
         return ontology
 
     def publish_business_logic(
@@ -498,6 +521,7 @@ class PublishService:
         _log_change(db, "business_logic", logic.id, "publish", operator, "发布业务逻辑")
         db.commit()
         db.refresh(logic)
+        _rebuild_semantic_index(db, logic.ontology_id)
         return logic
 
 

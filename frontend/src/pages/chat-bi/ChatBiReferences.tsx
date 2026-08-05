@@ -182,6 +182,7 @@ export function ChatBubble({
   question,
   onGenerateApp,
   onAddToDashboard,
+  onClarify,
 }: {
   message: ChatMessage;
   question?: string;
@@ -191,6 +192,8 @@ export function ChatBubble({
     payload?: ChatMessage["payload"],
   ) => void;
   onAddToDashboard?: (question: string, payload?: ChatMessage["payload"]) => void;
+  /** 点击澄清候选项 → 直接以该选项追问（P4.1）。 */
+  onClarify?: (text: string) => void;
 }) {
   const isUser = message.role === "user";
   const grounded =
@@ -231,10 +234,38 @@ export function ChatBubble({
                 </div>
               </div>
             )}
-            <div className="chatbi-answer-wrap">
-              <MarkdownLite content={message.content} />
-              {message.streaming && <span className="chatbi-answer-caret" />}
-            </div>
+            {!isUser && message.payload?.clarification ? (
+              // 澄清反问：正文已含问题与候选项，这里把候选项做成可点击的追问，
+              // 让用户一步接上，而不是自己再打一遍。
+              <div className="chatbi-clarify">
+                <div className="chatbi-clarify-q">
+                  {message.payload.clarification.question}
+                </div>
+                {message.payload.clarification.reason && (
+                  <div className="chatbi-clarify-why">
+                    {message.payload.clarification.reason}
+                  </div>
+                )}
+                <div className="chatbi-clarify-options">
+                  {message.payload.clarification.options.map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      className="chatbi-clarify-option"
+                      disabled={!onClarify}
+                      onClick={() => onClarify?.(`${question ?? ""}（${opt}）`.trim())}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="chatbi-answer-wrap">
+                <MarkdownLite content={message.content} />
+                {message.streaming && <span className="chatbi-answer-caret" />}
+              </div>
+            )}
             {message.payload?.caliber_decomposition &&
               message.payload.caliber_decomposition.length > 0 && (
                 <CaliberDecomposition
@@ -338,7 +369,9 @@ function stepAction(step: ChatBiAgentStep): { icon: string; text: string } {
 function StepTrace({ steps }: { steps: ChatBiAgentStep[] }) {
   const running = steps.some((s) => s.status === "running");
   const hasFailed = steps.some((s) => s.status === "failed");
-  const toolCount = steps.filter((s) => s.kind !== "thought").length;
+  const toolCount = steps.filter(
+    (s) => s.kind !== "thought" && s.kind !== "repair",
+  ).length;
   // 进行中/失败自动展开，其余默认折叠；用户手动点击后固定
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen ?? (running || hasFailed);
@@ -363,6 +396,14 @@ function StepTrace({ steps }: { steps: ChatBiAgentStep[] }) {
               return (
                 <li key={s.index} className="chatbi-step chatbi-step--thought">
                   <span className="chatbi-step-emoji">💭</span>
+                  <span className="chatbi-step-thought">{s.text}</span>
+                </li>
+              );
+            }
+            if (s.kind === "repair") {
+              return (
+                <li key={s.index} className="chatbi-step chatbi-step--thought">
+                  <span className="chatbi-step-emoji">🔁</span>
                   <span className="chatbi-step-thought">{s.text}</span>
                 </li>
               );

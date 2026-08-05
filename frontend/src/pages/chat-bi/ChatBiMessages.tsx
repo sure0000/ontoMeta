@@ -100,6 +100,7 @@ export function ChatBiMessages({
               question={precedingQuestion}
               onGenerateApp={onGenerateApp}
               onAddToDashboard={onAddToDashboard}
+              onClarify={onSuggestionClick}
             />
           );
         })

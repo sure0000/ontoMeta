@@ -138,7 +138,12 @@ def test_most_connected_disambiguates_duplicate_display_names(client):
 
 
 def test_search_reports_true_total_not_page_size(client):
-    """search_* 必须回真实命中总数：原来只回 8 条裸列表，模型把「前 8 条」当成了全部。"""
+    """search_* 必须回真实命中总数：原来只回 8 条裸列表，模型把「前 8 条」当成了全部。
+
+    P2.3 起「样本 ≠ 全集」由**键名**保证：截断时字段叫 ``sample`` 而不是 ``items``，
+    并附 ``sample_note`` / ``sample_facets``。原先无论截不截断都叫 ``items``，
+    只能靠一整段 prompt 铁律去堵——那段铁律已随本次改造删除。
+    """
     did, oid = _seed("检索域", n_linked_pairs=20, n_isolated=0)
     with SessionLocal() as db:
         result, summary, is_error = ChatBiService()._dispatch_agent_tool(
@@ -149,9 +154,26 @@ def test_search_reports_true_total_not_page_size(client):
     assert result["total_matched"] == 20
     assert result["returned"] == _SEARCH_LIMIT
     assert result["truncated"] is True
-    assert len(result["items"]) == _SEARCH_LIMIT
+    # 截断时**不得**出现 items——键名本身就在说「这只是样本」
+    assert "items" not in result
+    assert len(result["sample"]) == _SEARCH_LIMIT
+    assert "样本" in result["sample_note"] and "20" in result["sample_note"]
     # 摘要（会展示给用户）不能再把页大小说成命中数
     assert "命中 20 个关系" in summary
+
+
+def test_search_uses_items_when_complete(client):
+    """未截断时键名是 items——「这就是全部命中」，与截断态形成对照。"""
+    did, oid = _seed("完整检索域", n_linked_pairs=3, n_isolated=0)
+    with SessionLocal() as db:
+        result, summary, _ = ChatBiService()._dispatch_agent_tool(
+            db, domain_id=did, ontology_id=oid, name="search_relations",
+            args={"keyword": "关联关系"},
+        )
+    assert result["total_matched"] == 3
+    assert len(result["items"]) == 3
+    assert "sample" not in result and "truncated" not in result
+    assert summary == "命中 3 个关系"
 
 
 def test_search_envelope_still_feeds_ledger(client):

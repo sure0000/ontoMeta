@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.ontology_types import Cardinality, SemanticType
 from app.services.ontology_projection import ObjView, OntologyProjection, PropView, RelView
 from app.services.sql_soundness import SqlCertificate, SqlRejection, prove_sql_sound
@@ -43,10 +45,15 @@ def _proj() -> OntologyProjection:
             "label": PropView("label", "tag", SemanticType.TEXTUAL, "varchar"),
         },
     )
-    rel_cust = RelView("r1", "order_belongs_to_customer", "order", "customer",
-                       Cardinality.MANY_TO_ONE, "foreign_key")
-    rel_tag = RelView("r2", "order_has_tag", "order", "tag",
-                      Cardinality.MANY_TO_MANY, "bridge_table")
+    rel_cust = RelView(
+        "r1", "order_belongs_to_customer", "订单归属客户", "order", "customer",
+        Cardinality.MANY_TO_ONE, "foreign_key",
+        src_key="customer_id", tgt_key="id",
+    )
+    rel_tag = RelView(
+        "r2", "order_has_tag", "订单打标", "order", "tag",
+        Cardinality.MANY_TO_MANY, "bridge_table",
+    )
     return OntologyProjection(
         objects={"order": order, "customer": customer, "tag": tag},
         relations_by_pair={
@@ -126,3 +133,38 @@ def test_count_star_no_fanout_check():
         "SELECT COUNT(*) FROM order o JOIN tag t ON o.id = t.id", _proj()
     )
     assert isinstance(r, SqlCertificate), getattr(r, "message", r)
+
+
+# ---------------------------------------------------------------- 输出别名
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # sqlglot 的 qualify 会把 ORDER BY 里的聚合归一成「引用输出别名」，
+        # 于是别名以裸列形态出现——曾被误判成臆造字段而拒掉。
+        "SELECT status, COUNT(*) AS cnt FROM order GROUP BY status ORDER BY COUNT(*) DESC",
+        "SELECT status, COUNT(*) AS cnt FROM order GROUP BY status ORDER BY cnt DESC",
+        "SELECT city, SUM(amount) AS total FROM order GROUP BY city ORDER BY total DESC",
+    ],
+)
+def test_order_by_output_alias_not_a_fabricated_column(sql):
+    """「按金额降序取 TopN」是最常见的查询形态，不得被误拒。"""
+    r = prove_sql_sound(sql, _proj())
+    assert isinstance(r, SqlCertificate), getattr(r, "message", r)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # 别名只是「引用」被豁免，其**定义式**照样逐列证明
+        "SELECT ghost AS x FROM order ORDER BY x",
+        "SELECT status AS s FROM order WHERE ghost = 1",
+        # 裸列的输出名与列名相同——不能靠「自己给自己当别名」蒙混过关
+        "SELECT fake_col FROM order",
+        "SELECT fake_col AS fake_col FROM order ORDER BY fake_col",
+    ],
+)
+def test_alias_does_not_launder_fabricated_columns(sql):
+    r = prove_sql_sound(sql, _proj())
+    assert isinstance(r, SqlRejection) and r.code == "unknown_column"

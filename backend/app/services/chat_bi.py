@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import types
+from collections import Counter
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -44,8 +45,12 @@ from app.services.query import OntologyQueryService
 from app.services.settings_service import SettingsService
 from app.services.ontology_projection import build_projection
 from app.services.sql_soundness import SqlRejection, prove_sql_sound
+from app.services import agent_telemetry
 from app.services.agent_grounding import FactLedger
+from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
+from app.services.domain_semantic_card import build_card
+from app.services.tool_result_compaction import compact_tool_result
 
 logger = logging.getLogger("ontometa.chat_bi")
 
@@ -57,7 +62,12 @@ _FILTER_KEYWORDS = ("按", "where", "筛选", "条件", "等于", "大于", "小
 # ---------------------------------------------------------------------------
 # Data Agent（工具编排）运行常量 —— 均衡档（见 DATA_AGENT_REDESIGN.md §9.1）
 # ---------------------------------------------------------------------------
-_AGENT_MAX_STEPS = 6            # Agent 循环步数上限，超出强制收尾作答
+# P4.4 预算分离：工具轮与自愈轮各自计数，不再共用一个全局上限。
+# 原来 6 步一刀切，「检索 → 读细节 → 写 SQL → 被拒 → 改 → 重跑」正好撑满，
+# 此后又加了 find_join_path / profile_values / compile_metric 三个工具，
+# 预算只会更紧——真被拒一次就没有余量修正了。
+_AGENT_MAX_STEPS = 8            # 工具轮上限，超出强制收尾作答
+_AGENT_REPAIR_ATTEMPTS = 1      # 自愈重写次数上限（独立预算，不占工具轮）
 _RUN_SQL_LIMIT = 100           # run_sql 默认返回行上限
 _TOOL_RESULT_MAX_CHARS = 8000  # 单个工具结果回灌前的截断阈值
 _SQL_TIMEOUT_SECONDS = 15      # run_sql 语句超时（execute_sql 既有能力）
@@ -65,43 +75,38 @@ _SEARCH_LIMIT = 8              # 检索类工具默认返回条数
 _OVERVIEW_LIST_LIMIT = 100     # 概览里 objects/relations 样本清单各自的条数上限
 _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 
+# 提示词只保留**无法由构造保证**的部分。
+#
+# 随 P1–P3 迁走的那些（原 1b/1c/一半的 1/4b）已由架构承担：
+#   · 域骨架   → 域语义卡常驻 system（P2.1），不必再要求「概览题先调 get_domain_overview」
+#   · 样本≠全集 → 截断时键名即为 `sample` 且带 sample_note/facets（P2.3），
+#                 不必再用一整段铁律去堵「把 8 条当成全部」
+#   · 结果完整性 → 语义降级压缩保证回灌永远是合法 JSON（P2.2）
+#   · 不得编造   → FactLedger + answer_verifier 断言级核验（F4）当场拒答，
+#                 比反复叮嘱「宁可少答不可编造」有效得多
+# 保留下来的都是**工具选择策略**——这类「该先调谁」的判断，守卫拦得住结果却教不会顺序。
 _AGENT_SYSTEM_PROMPT = (
     "你是企业数据问答助手（Data Agent），基于**已发布本体**回答业务问题。\n"
-    "你可以多步调用工具来检索本体（业务对象/字段/关系/业务逻辑）并执行只读 SQL，"
-    "像分析师一样先查清口径再作答。\n\n"
-    "工作纪律：\n"
-    "0. 【铁律·数据来源】只能基于工具**实际返回**的数据作答：对象/字段/关系/口径/数值/统计"
-    "一律**只能来自工具结果**，工具没返回的内容绝不可编造或凭常识补充；"
-    "所有内容**仅限已发布(published)本体**，不得提及或杜撰未发布的草稿。\n"
-    "1. 先用 search_objects / search_logics / search_relations 找到相关实体，"
-    "再用 get_object / get_logic 拿字段与口径细节；不要臆造对象名或字段名。"
-    "检索关键词优先用**中文**（本体以中文命名，英文词多半命不中）。\n"
-    "1b. 概览/列举类问题（如“有哪些对象/本体/关系”、“哪些本体有关系”）**必须先调用 get_domain_overview**，"
-    "严格基于它返回的已发布对象/关系清单与总数作答；若需更多关系细节再调 search_relations。"
-    "问“哪些/多少对象有关系”时，直接引用 objects_with_relations、objects_without_relations、"
-    "most_connected_objects 三个字段作答，**不要**用抽样到的几条关系去反推全局。\n"
-    "**绝不允许凭常识/行业经验（如 ERP/ERPNext 的 tabXxx 表名）猜测或穷举对象/关系/数量名称**，"
-    "答案里出现的每一个对象名/关系名/字段名都必须是工具本次**实际返回**过的名称；宁可少答不可编造。\n"
-    "1c. 【铁律·不得把样本当全集】工具结果里的清单都可能被截断："
-    "get_domain_overview 的 objects/relations 看 objects_truncated / relations_truncated，"
-    "search_* 看 truncated 与 total_matched（total_matched 才是真实命中总数，items 只是前几条）。"
-    "truncated=true 时**必须**在答案里写明这是“N 条中的示例”并给出真实总数，"
-    "严禁用“全部/所有/共有以下”等措辞把样本说成完整清单；"
-    "更不得由样本去推断全集的性质或覆盖范围（例如由几条关系断言“这些关系覆盖了全部 N 个对象”）。"
-    "需要完整清单时如实说明清单过长、只能给示例，并建议用户到本体页面查看。\n"
-    "2. 若问题需要具体数值/明细，用 get_object 拿到真实字段后写 SQL；"
-    "**只要你写了查询 SQL，就必须通过 run_sql 提交**（哪怕只为取数/校验），"
-    "不要仅在正文里贴 SQL 而不调用 run_sql。表名/字段名必须来自本体。\n"
-    "3. run_sql 只读：只能 SELECT。若返回“无可执行数据源”，就把该查询作为建议 SQL 给出，"
-    "并说明未实际执行。\n"
-    "4. 用中文、Markdown 作答：先给口径解读，再给结论/建议；有数据时用表格或要点呈现。\n"
-    "4b. 【作答粒度】列举/概览类只用工具返回的**对象显示名**或**关系显示名(display_name)**作答，"
-    "不要擅自展开到字段名、列名或底层表名（如 to_currency、campaign_name、tabXxx）——除非你确实通过 get_object 取到了该字段；"
-    "也不要用「」或反引号包裹任何非工具返回的英文标识符。宁可只给已检索到的名称清单，也不要补充未接地的细节。\n"
-    "5. 若本体中确实找不到相关对象/逻辑，如实说明无法基于当前本体回答，不要编造。\n"
-    "6. 不要在正文里堆砌调试信息；工具调用过程会单独展示给用户。"
-    "**绝不要在回答正文里提及工具名（如 get_domain_overview、search_relations）或用「」/反引号包裹它们**，"
-    "直接用自然语言陈述结果即可。"
+    "可多步调用工具检索本体并执行只读 SQL，像分析师一样先查清口径再作答。\n\n"
+    "工具选择：\n"
+    "1. 先 search_* 定位实体，再 get_object / get_logic 取细节。"
+    "**若关键词要来回试几次**（域大、说法不确定），改用 locate_entities 整体外包，"
+    "试错过程不占本对话上下文。\n"
+    "2. 【JOIN】SQL 涉及两个及以上对象时先调 **find_join_path**，ON 条件照抄它给的；"
+    "它返回空即表示本体中两者无从关联，如实说明。有扇出风险时改用它建议的安全聚合。\n"
+    "3. 【字面量】WHERE 要写具体值时先调 **profile_values** 看真实取值并照抄；"
+    "猜错的字面量不会报错，只会返回 0 行，让你得出「无数据」这个错误结论。\n"
+    "4. 【口径】问题涉及已有指标/标签/规则时先 search_logics，再用 **compile_metric** 编译出 SQL，"
+    "不要自己照着口径说明重写——口径以本体为准，重写会算出与其它系统不一致的数。"
+    "编译结果的 caliber_trace 即权威口径展开；失败时按 hint 修正。\n"
+    "5. 写了查询 SQL 就必须经 **run_sql** 提交（只读，仅 SELECT）；"
+    "返回「无可执行数据源」时作为建议 SQL 给出并说明未实际执行。\n"
+    "6. 【缺口反问】只有用户能补齐的歧义（多个候选指标/时间字段、口径值不明确），"
+    "调 **ask_clarification** 反问，不要挑一个可能错的解释硬答；"
+    "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n\n"
+    "作答：中文 Markdown，先口径解读再结论；有数据用表格。"
+    "用对象/关系的**显示名**称呼它们，不要在正文提及工具名。"
+    "本体中确实没有的，如实说明无法回答。"
 )
 
 # OpenAI 原生 function-calling 工具（自建 GLM 实测支持）。
@@ -208,6 +213,150 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "locate_entities",
+            "description": (
+                "把「在本体里找出与问题相关的对象/口径」这件事**整体外包**给检索助手，"
+                "只拿回一份标识符清单。当你不确定该用什么关键词、或域很大需要来回试几次时用它——"
+                "试错过程不会占用本对话上下文。"
+                "拿到清单后再对具体标识符调 get_object / get_logic 取细节。"
+                "若你已经知道要找什么，直接用 search_* 更快，不必绕这一道。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "description": "要定位什么（用自然语言描述，可直接转述用户问题）",
+                    },
+                },
+                "required": ["intent"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_join_path",
+            "description": (
+                "查两个业务对象之间**如何关联**：返回已声明的关系路径（可多跳）、"
+                "每段的 ON 条件、基数链、扇出风险与安全聚合建议。"
+                "写涉及两个及以上对象的 SQL **之前必须先调用它**——"
+                "JOIN 条件只能来自这里，自行猜测外键字段会被语义证明拒绝。"
+                "返回空列表表示本体中这两个对象无从关联。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_object": {"type": "string", "description": "起点对象标识符（name）"},
+                    "to_object": {"type": "string", "description": "终点对象标识符（name）"},
+                    "measure_object": {
+                        "type": "string",
+                        "description": "被聚合度量所在对象的 name（判扇出用，默认取起点）",
+                    },
+                },
+                "required": ["from_object", "to_object"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compile_metric",
+            "description": (
+                "把一条**已发布业务逻辑**按给定维度/过滤/时间粒度编译成 SQL，并返回口径展开轨迹。"
+                "支持三类：**指标**（GMV/客单价…→ 聚合查询）、"
+                "**标签**（客户分层/订单分级…→ 各分桶取值的分布）、"
+                "**规则**（金额必须为正…→ 统计**违规**行数）。"
+                "**凡是问已有指标/标签/规则的问题，一律用它，不要自己写 SQL**——"
+                "口径以本体为准，自己重写会算出与其它系统不一致的数。"
+                "返回的 sql 可直接交给 run_sql 执行；结果里的 logic_type 告诉你它是哪一类。"
+                "编译失败会给出原因与修复信号（如维度不可关联、口径尚未形式化）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "logic_id": {
+                        "type": "string",
+                        "description": "业务逻辑 id（来自 search_logics，指标/标签/规则均可）",
+                    },
+                    "dimensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "拆分维度，写成 对象.字段（如 customer.region）或本对象字段名",
+                    },
+                    "filters": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "追加过滤，每项 {property, op, value|values}；"
+                            "op ∈ =,!=,>,>=,<,<=,like,in。"
+                            "**字面量必须来自 profile_values 的真实取值**，不得凭空猜。"
+                        ),
+                    },
+                    "grain": {
+                        "type": "string",
+                        "description": "时间粒度：day/week/month/quarter/year",
+                    },
+                    "time_property": {
+                        "type": "string",
+                        "description": "时间粒度作用的时间字段（有多个时间字段时必填）",
+                    },
+                },
+                "required": ["logic_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "profile_values",
+            "description": (
+                "查某个字段**实际存着什么值**：类别/标识字段给 TopN 取值及频次与去重数，"
+                "度量字段给最小/最大/均值，时间字段给时间区间；另有空值率。"
+                "**写带字面量的 WHERE 之前必须先调用它**——"
+                "本体只定义字段存在，不保证你猜的枚举值（如「已完成」）真的在库里；"
+                "猜错的字面量会让查询返回 0 行而不报错，答案就错得看不出来。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": "string", "description": "业务对象 id 或标识符(name)"},
+                    "property": {"type": "string", "description": "字段标识符（本体属性 name）"},
+                },
+                "required": ["object_id", "property"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_clarification",
+            "description": (
+                "当问题存在**必须由用户澄清才能继续**的缺口时调用它反问，而不是挑一个可能错的解释硬答。"
+                "适用：问的指标在本体里有多个候选、时间字段有多个不知按哪个、"
+                "口径里的分类值不明确、问题范围过宽无法确定主对象。"
+                "**不适用**：本体里查不到相关内容（那应如实说明无法回答）、"
+                "或你只是没检索够（那应继续调检索工具）。"
+                "调用后本轮结束并把问题抛给用户，不要再输出别的内容。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "向用户提出的澄清问题（中文，一句话）"},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "供用户选择的候选项（**必须来自工具返回的真实实体**）",
+                    },
+                    "reason": {"type": "string", "description": "为什么需要澄清（一句话）"},
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_sql",
             "description": (
                 "在当前数据域的物理数据源上执行**只读 SELECT**，返回列与真实数据行。"
@@ -227,9 +376,13 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def _search_items(result: Any) -> list[dict]:
-    """取检索类工具结果里的条目列表。兼容新信封 {items:[...]} 与历史的裸列表。"""
+    """取检索类工具结果里的条目列表。
+
+    兼容三种形态：完整信封 ``{items:[…]}``、截断信封 ``{sample:[…]}``（P2.3）、
+    以及历史的裸列表。
+    """
     if isinstance(result, dict):
-        result = result.get("items")
+        result = result.get("items") or result.get("sample")
     if not isinstance(result, list):
         return []
     return [x for x in result if isinstance(x, dict)]
@@ -277,6 +430,7 @@ class ChatBiService:
         domain_id: str,
         question: str,
         history: list[dict] | None = None,
+        principal_role: str | None = None,
     ) -> dict:
         domain = db.get(DomainContext, domain_id)
         if not domain:
@@ -349,6 +503,7 @@ class ChatBiService:
         else:
             # Agent 路径：LLM 自主多步调用工具检索/跑数；refs/sql/data_result 从工具轨迹收割。
             # 不再一次性灌全量本体 —— 上下文由分页工具按需拉取，结构上根治 413。
+            tel = RunTelemetry()
             try:
                 payload = await self._run_agent_loop(
                     db,
@@ -360,6 +515,8 @@ class ChatBiService:
                     resolver=resolver,
                     seed_objects=grounded_objects,
                     seed_logics=grounded_logics,
+                    principal_role=principal_role,
+                    telemetry=tel,
                 )
             except Exception as exc:
                 logger.exception("ChatBI agent loop failed: %s", exc)
@@ -372,14 +529,22 @@ class ChatBiService:
             # 概览 / 跑出数据）就视为接地，即便未产出具体引用（如“有哪些对象”这类概览问题）。
             # F4：校验失败（_unverified 非空）优先拒答，不被 referenced_* 兜底覆盖。
             unverified = payload.get("_unverified") or []
+            # 拒答时保留已产生的工具轨迹，供用户查看「做了什么才拒答」——
+            # 与 ask_stream() 的处置对齐（那边靠 _prev_steps 保留），此前非流式路径
+            # 会被拒答 payload 整体覆盖而丢掉 steps，同一次问答两条路径回执不一致。
+            _prev_steps = payload.get("steps") or []
             if unverified:
-                return self._ungrounded_refusal(
+                tel.refuse("unverified")
+                agent_telemetry.record(tel)
+                refusal = self._ungrounded_refusal(
                     domain_id=domain_id,
                     domain_name=domain.name,
                     ontology_id=ontology.id,
                     question=question,
                     reasons=unverified,
                 )
+                refusal["steps"] = _prev_steps
+                return refusal
             grounded = bool(
                 payload.pop("_grounded", False)
                 or payload.get("referenced_objects")
@@ -387,12 +552,17 @@ class ChatBiService:
                 or payload.get("data_result")
             )
             if not grounded:
-                return self._ungrounded_refusal(
+                tel.refuse("ungrounded")
+                agent_telemetry.record(tel)
+                refusal = self._ungrounded_refusal(
                     domain_id=domain_id,
                     domain_name=domain.name,
                     ontology_id=ontology.id,
                     question=question,
                 )
+                refusal["steps"] = _prev_steps
+                return refusal
+            agent_telemetry.record(tel)
 
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
@@ -414,6 +584,7 @@ class ChatBiService:
         domain_id: str,
         question: str,
         history: list[dict] | None = None,
+        principal_role: str | None = None,
     ) -> AsyncIterator[dict]:
         """ask() 的流式版：yield step_start / step_done / token / done。
 
@@ -479,11 +650,13 @@ class ChatBiService:
 
         # Agent 流式路径：透传事件流，done 事件走与 ask() 相同的后处理
         payload: dict | None = None
+        tel = RunTelemetry()
         try:
             async for ev in self._stream_agent_events(
                 db, runtime=runtime, domain=domain, ontology=ontology,
                 question=question, history=history or [],
                 seed_objects=grounded_objects, seed_logics=grounded_logics,
+                principal_role=principal_role, telemetry=tel,
             ):
                 if ev["type"] == "done":
                     payload = ev["payload"]
@@ -502,6 +675,7 @@ class ChatBiService:
         # 避免拒答 payload 覆盖前端已流式出来的 steps。
         _prev_steps = payload.get("steps") or []
         if unverified:
+            tel.refuse("unverified")
             payload = self._ungrounded_refusal(
                 domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id,
                 question=question, reasons=unverified)
@@ -514,9 +688,11 @@ class ChatBiService:
                 or payload.get("data_result")
             )
             if not grounded:
+                tel.refuse("ungrounded")
                 payload = self._ungrounded_refusal(
                     domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)
                 payload["steps"] = _prev_steps
+        agent_telemetry.record(tel)
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
         payload.update({"domain_id": domain_id, "domain_name": domain.name,
@@ -968,8 +1144,25 @@ class ChatBiService:
         ]
         return base
 
+    @staticmethod
+    def _may_run_sql(principal_role: str | None) -> bool:
+        """当前主体是否够格让 Agent 代跑 SQL（P1.1）。
+
+        权限必须约束到**工具粒度**：``/chat-bi/ask`` 端点兜底只要 editor，但它内部的
+        run_sql 直打真实 DSN，而手动执行端点要 publisher——不在这里卡一道，工具化就把
+        权限模型绕过去了。fail-closed：拿不到角色一律视为不够格。
+        """
+        from app.models.principal import role_satisfies
+
+        return role_satisfies(principal_role, env_settings.agent_run_sql_min_role)
+
     def _dispatch_run_sql(
-        self, db: Session, *, args: dict, ontology_id: str | None = None
+        self,
+        db: Session,
+        *,
+        args: dict,
+        ontology_id: str | None = None,
+        principal_role: str | None = None,
     ) -> tuple[Any, str, bool]:
         from app.services import data_app_executor
 
@@ -986,18 +1179,36 @@ class ChatBiService:
         if not ok:
             return {"executed": False, "error": f"仅允许只读 SELECT：{reason}", "sql": sql}, "被只读校验拒绝", True
 
-        source = self._resolve_domain_data_source(db)
+        # 权限不足时不解析数据源——降级为「仅建议 SQL」，而不是硬报错：
+        # 检索类工具对低权角色仍合法，问答体验不掉，只是不代跑数。
+        may_run = self._may_run_sql(principal_role)
+        source = self._resolve_domain_data_source(db) if may_run else None
         mapping = _loads_payload(source.mapping_json) if source is not None else None
 
         # ★ SQL 语义证明（F3）：执行/建议前静态证明语义合法，不过则不放行。
         #   即便无可执行数据源（仅建议 SQL），也要证明——臆造字段/JOIN 与是否落库无关。
-        rejection = self._prove_sql_or_reject(db, sql, ontology_id, source, mapping)
+        rejection, proved = self._prove_sql_or_reject(db, sql, ontology_id, source, mapping)
         if rejection is not None:
             return rejection
 
+        if not may_run:
+            return (
+                {
+                    "executed": False,
+                    "reason": (
+                        f"当前角色无权让 Agent 执行 SQL（需 "
+                        f"{env_settings.agent_run_sql_min_role} 及以上），仅能给出建议 SQL"
+                    ),
+                    "sql": sql,
+                    "proved": proved,
+                },
+                "权限不足，仅建议 SQL",
+                False,
+            )
         if source is None:
             return (
-                {"executed": False, "reason": "当前数据域未绑定可执行数据源，仅能给出建议 SQL", "sql": sql},
+                {"executed": False, "reason": "当前数据域未绑定可执行数据源，仅能给出建议 SQL",
+                 "sql": sql, "proved": proved},
                 "无可执行数据源",
                 False,
             )
@@ -1019,6 +1230,7 @@ class ChatBiService:
                 "rows": rows,
                 "row_count": len(rows),
                 "truncated": len(rows) >= limit,
+                "proved": proved,
             },
             f"返回 {len(rows)} 行",
             False,
@@ -1026,18 +1238,23 @@ class ChatBiService:
 
     def _prove_sql_or_reject(
         self, db: Session, sql: str, ontology_id: str | None, source, mapping
-    ) -> tuple[Any, str, bool] | None:
-        """SQL 语义证明门（F3）。返回拒绝三元组（阻断）或 None（放行）。
+    ) -> tuple[tuple[Any, str, bool] | None, dict]:
+        """SQL 语义证明门（F3）。返回 (拒绝三元组或 None, 证书摘要)。
 
         受 ``settings.agent_soundness`` 开关：off=跳过；warn=只记日志不拦；on=拒绝执行。
         证明本身出错（解析器异常等）绝不误伤正常查询——降级为放行并记日志。
+
+        **证书要带回去**：``SqlCertificate.tables/columns`` 是「这些表/列确实是已发布
+        本体成员」的**证明结论**，不是模型的主张。不回传的话，模型写了一条被证明合法的
+        SQL、再在正文里解释它引用的字段，会因账本里没有该字段而被 F4 判成幻觉——
+        自己证过的东西反过来拒自己。
         """
         from app.config import settings as env_settings
         from app.services import data_app_executor
 
         mode = (getattr(env_settings, "agent_soundness", "on") or "on").lower()
         if mode == "off" or not ontology_id:
-            return None
+            return None, {}
         try:
             proj = build_projection(db, ontology_id, mapping)
             dialect = (
@@ -1048,19 +1265,25 @@ class ChatBiService:
             verdict = prove_sql_sound(sql, proj, dialect=dialect)
         except Exception as exc:  # noqa: BLE001 — 证明器故障不得拖垮问答
             logger.warning("sql soundness prover error, allowing SQL: %s", exc)
-            return None
+            return None, {}
         if not isinstance(verdict, SqlRejection):
-            return None
+            return None, {
+                "tables": list(verdict.tables),
+                "columns": list(verdict.columns),
+            }
         if mode == "warn":
             logger.info("[soundness=warn] 本应拒答 SQL：%s | %s", verdict.code, verdict.message)
-            return None
+            return None, {}
         # mode == "on"：拒绝执行。is_error=True → 不计入接地，避免用拒绝当命中。
+        # hint（P1.4）必须随结果回灌：这条 dict 会 json 化进 role:tool，
+        # 模型据此在下一步自修（补对候选字段、换合法对端、改安全聚合）。
         return (
             {"executed": False, "rejected": True, "sql": sql,
-             "reason": verdict.message, "code": verdict.code},
+             "reason": verdict.message, "code": verdict.code,
+             "hint": verdict.hint or {}},
             f"SQL 语义证明未通过：{verdict.code}",
             True,
-        )
+        ), {}
 
     # -------------------------------------------------------------- F4 断言级可靠性
 
@@ -1093,8 +1316,60 @@ class ChatBiService:
                 for r in result.get("relations") or []:
                     if isinstance(r, dict):
                         ledger.add_relation(r)
-            elif tool_name == "run_sql" and isinstance(result, dict) and result.get("executed"):
-                ledger.add_cells(result.get("columns") or [], result.get("rows") or [])
+            elif tool_name == "find_join_path" and isinstance(result, dict):
+                # 路径里的关系名与两端对象名都是工具真实返回的事实，
+                # 答案引用「订单归属客户」这类关系名时不得被判幻觉。
+                for p in result.get("paths") or []:
+                    for hop in (p or {}).get("hops") or []:
+                        ledger.add_relation({
+                            "id": hop.get("relation"),
+                            "name": hop.get("relation"),
+                            "display_name": hop.get("relation_display"),
+                            "source_object_name": hop.get("from"),
+                            "target_object_name": hop.get("to"),
+                        })
+            elif tool_name == "compile_metric" and isinstance(result, dict):
+                # 编译成功即证明了：口径名、涉及的对象、证书里的表/列都是本体成员。
+                # 不入账的话，模型复述自己刚编出来的口径会被 F4 判成幻觉。
+                labels = result.get("object_labels") or {}
+                names = (
+                    [result.get("logic")]
+                    + list(result.get("objects") or [])
+                    + list(labels.values())
+                )
+                cert = result.get("certificate") or {}
+                names += list(cert.get("tables") or [])
+                for col in cert.get("columns") or []:
+                    names += [col, str(col).rsplit(".", 1)[-1]]
+                for hop in result.get("join_hops") or []:
+                    names += [hop.get("relation"), hop.get("relation_display")]
+                ledger.add_context_name(*[str(n) for n in names if n])
+            elif tool_name == "profile_values" and isinstance(result, dict):
+                # 画像返回的是**库里真实存在的取值**，与 run_sql 的数据行同级可信：
+                # 答案引用「状态取值有 Completed/Draft」时不得被判幻觉。
+                ledger.add_cells(
+                    [], [{"v": tv.get("value")} for tv in result.get("top_values") or []]
+                )
+                ledger.add_context_name(
+                    *[str(tv.get("value")) for tv in result.get("top_values") or []
+                      if tv.get("value") is not None]
+                )
+                for key in ("min_value", "max_value", "avg_value", "row_count", "distinct_count"):
+                    if result.get(key) is not None:
+                        ledger.add_cells([], [{"v": result[key]}])
+            elif tool_name == "run_sql" and isinstance(result, dict):
+                # SQL 语义证书里的表/列是**证明结论**（它们确实是已发布本体成员），
+                # 与 get_object 返回的字段同等可信，故入账。否则模型解释自己那条
+                # 已被证明合法的 SQL 时，会因账本没这些名字而被判幻觉。
+                proved = result.get("proved") or {}
+                names: list[str] = list(proved.get("tables") or [])
+                for col in proved.get("columns") or []:
+                    names.append(col)                       # "order.amount"
+                    names.append(str(col).rsplit(".", 1)[-1])  # "amount"
+                if names:
+                    ledger.add_context_name(*names)
+                if result.get("executed"):
+                    ledger.add_cells(result.get("columns") or [], result.get("rows") or [])
         except Exception as exc:  # noqa: BLE001 — 登记失败不得拖垮问答
             logger.warning("fact ledger register failed for %s: %s", tool_name, exc)
 
@@ -1102,6 +1377,34 @@ class ChatBiService:
     def _asks_number(question: str) -> bool:
         """问题是否在问具体数值/计量（决定数值断言是否要求 run_sql 凭证）。"""
         return any(k in (question or "") for k in _AGG_KEYWORDS)
+
+    @staticmethod
+    def _repair_instruction(unverified: list[str], ledger: FactLedger) -> str:
+        """自愈指令：既指出**哪几句没凭证**，也给出**能说什么**。
+
+        只说「你错了」模型多半会换个说法再错一次；把可证事实清单一并给它，
+        它才知道边界在哪。这与 P1.4 给拒绝加修复信号是同一条思路——
+        守卫要当教练，不能只当守门员。
+        """
+        provable = ledger.provable_names()
+        lines = [
+            "你上一条回答里有内容无法由本次检索到的事实证实，请**重写**这条回答。",
+            "",
+            "无法证实的部分：",
+            *[f"  · {u}" for u in unverified[:8]],
+            "",
+        ]
+        if provable:
+            lines += [
+                "本轮**已检索到、可以引用**的实体（只能用这些）：",
+                "  " + "、".join(provable),
+                "",
+            ]
+        lines += [
+            "重写要求：删掉或改写无法证实的部分；不要引入任何新的名称或数字；",
+            "确实无法回答的部分如实说明「当前本体中查不到」。只输出重写后的回答正文。",
+        ]
+        return "\n".join(lines)
 
     def _verify_answer(
         self, answer: str, ledger: FactLedger, question: str
@@ -1126,24 +1429,37 @@ class ChatBiService:
         return False, verdict.unverified
 
     @staticmethod
-    def _search_envelope(items: list[dict], total: int, noun: str) -> tuple[Any, str, bool]:
-        """检索类工具的统一返回：**必须**带上真实命中总数与截断标记。
+    def _search_envelope(
+        items: list[dict], total: int, noun: str, facet_key: str | None = None
+    ) -> tuple[Any, str, bool]:
+        """检索类工具的统一返回。
 
-        只回裸列表会让模型把「前 8 条」当成「全部命中」——问 “有哪些关系” 时，
-        140 条里挑出的 8 条会被当作完整清单写进答案。总数与 truncated 一起给出，
-        模型才能如实说明「这是 N 条里的示例」。
+        「样本 ≠ 全集」由**结构**保证，不靠 prompt 求模型自觉（P2.3）：
+        - 未截断 → 键名是 ``items``（这就是全部命中）；
+        - 截断   → 键名换成 ``sample``，并给 ``facets`` 描述剩下那些的构成。
+
+        键名本身就在说明它是什么。原先无论如何都叫 ``items``，于是
+        140 条里挑出的 8 条会被当作完整清单写进答案，只能靠一大段铁律去堵。
         """
         truncated = total > len(items)
-        return (
-            {
-                "total_matched": total,
-                "returned": len(items),
-                "truncated": truncated,
-                "items": items,
-            },
-            f"命中 {total} 个{noun}，返回前 {len(items)} 个" if truncated else f"命中 {total} 个{noun}",
-            False,
+        payload: dict[str, Any] = {"total_matched": total, "returned": len(items)}
+        if not truncated:
+            payload["items"] = items
+            return payload, f"命中 {total} 个{noun}", False
+
+        payload["truncated"] = True
+        payload["sample"] = items
+        payload["sample_note"] = (
+            f"这是 {total} 个{noun}中的前 {len(items)} 个**样本**，不是完整清单；"
+            "作答时须说明是示例并给出总数，不得由样本推断全集。"
         )
+        if facet_key:
+            facets = Counter(
+                str(it.get(facet_key) or "unknown") for it in items if isinstance(it, dict)
+            )
+            if len(facets) > 1:
+                payload["sample_facets"] = {facet_key: dict(facets)}
+        return payload, f"命中 {total} 个{noun}，返回样本 {len(items)} 个", False
 
     def _dispatch_domain_overview(self, db: Session, *, ontology_id: str) -> tuple[Any, str, bool]:
         """已发布本体概览：总数 + 连通性统计 + **明确标注截断**的样本清单。
@@ -1248,8 +1564,292 @@ class ChatBiService:
             "top": top,
         }
 
+    def _dispatch_join_path(
+        self, db: Session, *, ontology_id: str, args: dict
+    ) -> tuple[Any, str, bool]:
+        """P1.2：两对象之间的关联路径。语义层从「事后否决」转为「事前给答案」。
+
+        找不到路径**不是错误**——「本体中这两个对象无从关联」本身就是一条可作答的
+        事实（is_error=False），模型据此如实说明，而不是继续臆造 JOIN。
+        """
+        from app.services.semantic_navigator import describe_paths, find_join_path
+
+        src = str(args.get("from_object") or "").strip()
+        tgt = str(args.get("to_object") or "").strip()
+        if not src or not tgt:
+            return {"error": "需要 from_object 与 to_object"}, "缺少对象参数", True
+
+        proj = build_projection(db, ontology_id, None)
+        for token, label in ((src, "from_object"), (tgt, "to_object")):
+            if proj.object_of(token) is None:
+                return (
+                    {"error": f"{label}「{token}」不是已发布业务对象"},
+                    f"未知对象：{token}",
+                    True,
+                )
+
+        paths = find_join_path(
+            proj, src, tgt, measure_object=str(args.get("measure_object") or "") or None
+        )
+        result = {
+            "from": src,
+            "to": tgt,
+            "found": len(paths),
+            "paths": describe_paths(paths),
+        }
+        if not paths:
+            result["note"] = (
+                "本体中这两个对象之间没有可用的关联路径；不得自行构造 JOIN，"
+                "请如实说明无法关联，或换用其它对象。"
+            )
+            return result, f"「{src}」与「{tgt}」无可用关联路径", False
+        best = paths[0]
+        summary = f"找到 {len(paths)} 条路径，最短 {best.hop_count} 跳"
+        if best.fanout_risk:
+            summary += "（有扇出风险）"
+        return result, summary, False
+
+    def _dispatch_compile_metric(self, db: Session, *, args: dict) -> tuple[Any, str, bool]:
+        """P3：口径编译。模型从「照着口径文本重写 SQL」变成「选口径 + 选维度」。
+
+        编译失败一律带 code + hint 回灌（同 P1.4 取向）：口径没形式化、维度不可关联、
+        会扇出——每种都有明确下一步，比一句「编译失败」有用得多。
+        """
+        from app.services import data_app_executor
+        from app.services.metric_compiler import MetricCompileError, compile_metric
+
+        logic_id = str(args.get("logic_id") or "").strip()
+        if not logic_id:
+            return {"error": "需要 logic_id"}, "缺少 logic_id", True
+
+        source = self._resolve_domain_data_source(db)
+        dims = [str(d) for d in (args.get("dimensions") or []) if str(d).strip()]
+        filters = [f for f in (args.get("filters") or []) if isinstance(f, dict)]
+        try:
+            compiled = compile_metric(
+                db,
+                logic_id,
+                dimensions=dims,
+                filters=filters,
+                grain=str(args.get("grain") or "") or None,
+                time_property=str(args.get("time_property") or "") or None,
+                dialect=data_app_executor.backend_of(
+                    source.dsn_secret_ref if source is not None else None
+                ),
+                mapping=_loads_payload(source.mapping_json) if source is not None else None,
+            )
+        except MetricCompileError as exc:
+            return (
+                {"compiled": False, "logic_id": logic_id, "code": exc.code,
+                 "reason": exc.message, "hint": exc.hint},
+                f"口径编译失败：{exc.code}",
+                True,
+            )
+        result = compiled.to_dict()
+        result["compiled"] = True
+        dim_note = f"，{len(compiled.dimensions)} 个维度" if compiled.dimensions else ""
+        return result, f"已编译口径「{compiled.logic_display_name}」{dim_note}", False
+
+    def _dispatch_profile_values(
+        self, db: Session, *, ontology_id: str, args: dict, principal_role: str | None
+    ) -> tuple[Any, str, bool]:
+        """P1.3：字段取值画像。堵住「谓词字面量猜错 → 返回 0 行 → 静默错答」。
+
+        画像要读真实数据，与 run_sql 是同一类数据暴露，故用**同一道权限闸门**；
+        权限不足或无数据源时优雅降级（available=False + 说明），不报错。
+        """
+        from app.services import data_app_executor
+        from app.services.column_profiler import profile_property
+
+        obj_token = str(args.get("object_id") or "").strip()
+        prop_token = str(args.get("property") or "").strip()
+        if not obj_token or not prop_token:
+            return {"error": "需要 object_id 与 property"}, "缺少参数", True
+
+        proj = build_projection(db, ontology_id, None)
+        obj = proj.object_of(obj_token)
+        if obj is None:
+            # 模型常把 id 当 name 传（反之亦然），两种都认
+            detail = self.query_service.get_object_type(db, obj_token)
+            obj = proj.object_of(detail.name) if detail else None
+        if obj is None:
+            return {"error": f"对象「{obj_token}」不存在或未发布"}, "对象未命中", True
+        prop = obj.resolve_property(prop_token)
+        if prop is None:
+            return (
+                {
+                    "error": f"字段「{prop_token}」不属于对象「{obj.display_name}」",
+                    "available_columns": sorted(p.name for p in obj.props.values())[:20],
+                },
+                "字段未命中",
+                True,
+            )
+
+        may_run = self._may_run_sql(principal_role)
+        source = self._resolve_domain_data_source(db) if may_run else None
+        if not may_run:
+            return (
+                {
+                    "object": obj.name, "property": prop.name, "available": False,
+                    "note": (
+                        f"当前角色无权读取真实取值（需 "
+                        f"{env_settings.agent_run_sql_min_role} 及以上）。"
+                        "不得据此猜测字面量。"
+                    ),
+                },
+                "权限不足，未画像",
+                False,
+            )
+
+        mapping = _loads_payload(source.mapping_json) if source is not None else None
+        dsn = source.dsn_secret_ref if source is not None else None
+        profile = profile_property(
+            proj, obj, prop,
+            dsn=dsn,
+            mapping=mapping,
+            backend=data_app_executor.backend_of(dsn),
+            scope_key=f"{ontology_id}|{getattr(source, 'id', '')}",
+        )
+        result = profile.to_dict()
+        if not profile.available:
+            return result, f"「{obj.display_name}.{prop.name}」未能画像", False
+        if profile.top_values:
+            summary = (
+                f"「{prop.name}」{profile.distinct_count or len(profile.top_values)} 个取值，"
+                f"返回前 {len(profile.top_values)} 个"
+            )
+        else:
+            summary = f"「{prop.name}」区间 {profile.min_value} ~ {profile.max_value}"
+        return result, summary, False
+
+    async def _dispatch_locate_entities(
+        self,
+        db: Session,
+        *,
+        client,
+        model: str,
+        domain_id: str,
+        ontology_id: str,
+        args: dict,
+        telemetry: RunTelemetry,
+    ) -> tuple[Any, str, bool]:
+        """P4.2：把检索外包给子 agent，只把结论带回主上下文。"""
+        from app.services.retrieval_agent import locate_entities
+
+        intent = str(args.get("intent") or "").strip()
+        if not intent:
+            return {"error": "需要 intent"}, "缺少 intent", True
+        try:
+            res = await locate_entities(
+                db,
+                client=client,
+                model=model,
+                intent=intent,
+                domain_id=domain_id,
+                ontology_id=ontology_id,
+                dispatch=self._dispatch_agent_tool,
+                tool_schemas=_AGENT_TOOL_SCHEMAS,
+                to_thread=asyncio.to_thread,
+            )
+        except Exception as exc:  # noqa: BLE001 — 子 agent 故障不得拖垮主问答
+            logger.warning("retrieval sub-agent failed: %s", exc)
+            return (
+                {"error": f"检索助手未能完成定位：{str(exc)[:200]}",
+                 "fix": "请直接使用 search_objects / search_logics 检索。"},
+                "检索助手失败",
+                True,
+            )
+
+        telemetry.subagent(
+            llm_calls=res.llm_calls, steps=res.steps, isolated_chars=res.isolated_chars
+        )
+        hit = len(res.objects) + len(res.logics)
+        return (
+            res.to_dict(),
+            f"检索助手定位到 {hit} 个实体（{res.steps} 步在隔离上下文中完成）",
+            False,
+        )
+
+    # ------------------------------------------------------------ P1.5 混合检索
+
+    def _load_object_summaries(self, db: Session, ids: list[str]) -> list[dict]:
+        objs = db.query(ObjectType).filter(ObjectType.id.in_(ids)).all()
+        by_id = {o.id: o for o in objs}
+        return [
+            {
+                "id": o.id, "name": o.name, "display_name": o.display_name,
+                "description": o.description, "table_role": o.table_role,
+            }
+            for oid in ids
+            if (o := by_id.get(oid)) is not None
+        ]
+
+    def _load_logic_summaries(self, db: Session, ids: list[str]) -> list[dict]:
+        rows = db.query(BusinessLogic).filter(BusinessLogic.id.in_(ids)).all()
+        by_id = {l.id: l for l in rows}
+        return [
+            {
+                "id": l.id, "name": l.name, "display_name": l.display_name,
+                "logic_type": l.logic_type, "expression_summary": l.expression_summary,
+                "description": l.description,
+            }
+            for lid in ids
+            if (l := by_id.get(lid)) is not None
+        ]
+
+    def _augment_semantic(
+        self,
+        db: Session,
+        *,
+        ontology_id: str,
+        keyword: str | None,
+        kind: str,
+        items: list[dict],
+        loader,
+    ) -> tuple[list[dict], int]:
+        """在 ILIKE 结果后补上向量召回（P1.5）。返回 (合并后条目, 新增条数)。
+
+        字面命中**始终排前**——用户打出的词是最强意图信号，不该被一个分数更高的
+        近义实体挤掉。向量只负责补 ILIKE 够不到的同义表达（往来单位 → 客户）。
+        未配置嵌入服务/索引未建时返回原样，功能不受影响。
+        """
+        if not keyword or len(items) >= _SEARCH_LIMIT:
+            return items, 0
+        try:
+            from app.services import semantic_search
+
+            ontology = db.get(Ontology, ontology_id)
+            if ontology is None:
+                return items, 0
+            hits = semantic_search.search(
+                db, ontology, keyword, kind=kind, limit=_SEARCH_LIMIT
+            )
+            if not hits:
+                return items, 0
+            have = {i.get("id") for i in items}
+            new_ids = [h.entity_id for h in hits if h.entity_id not in have][
+                : _SEARCH_LIMIT - len(items)
+            ]
+            if not new_ids:
+                return items, 0
+            extra_items = loader(db, new_ids)
+            for it in extra_items:
+                # 标注来源：字面没命中、是语义近似召回的，模型据此措辞更准
+                it["matched_by"] = "semantic"
+            return items + extra_items, len(extra_items)
+        except Exception as exc:  # noqa: BLE001 — 语义检索是增强，坏了不能拖垮检索
+            logger.info("semantic augmentation skipped: %s", exc)
+            return items, 0
+
     def _dispatch_agent_tool(
-        self, db: Session, *, domain_id: str, ontology_id: str, name: str, args: dict
+        self,
+        db: Session,
+        *,
+        domain_id: str,
+        ontology_id: str,
+        name: str,
+        args: dict,
+        principal_role: str | None = None,
     ) -> tuple[Any, str, bool]:
         """执行一个工具调用，返回 (结果对象, 人类可读摘要, 是否错误)。同步，供 to_thread 调用。"""
         qs = self.query_service
@@ -1260,7 +1860,13 @@ class ChatBiService:
                     db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
                 )
                 items = [self._compact_object_summary(o) for o in page.items]
-                return self._search_envelope(items, page.total, "对象")
+                items, extra = self._augment_semantic(
+                    db, ontology_id=ontology_id, keyword=kw, kind="object_type",
+                    items=items, loader=self._load_object_summaries,
+                )
+                return self._search_envelope(
+                    items, page.total + extra, "对象", facet_key="table_role"
+                )
             if name == "get_object":
                 detail = qs.get_object_type(db, str(args.get("object_id") or ""))
                 if not detail or detail.status != "published":
@@ -1272,14 +1878,20 @@ class ChatBiService:
                     db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
                 )
                 items = [self._compact_relation(r) for r in page.items]
-                return self._search_envelope(items, page.total, "关系")
+                return self._search_envelope(items, page.total, "关系", facet_key="cardinality")
             if name == "search_logics":
                 kw = str(args.get("keyword") or "").strip() or None
                 page = qs.list_business_logics(
                     db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
                 )
                 items = [self._compact_logic_summary(l) for l in page.items]
-                return self._search_envelope(items, page.total, "口径")
+                items, extra = self._augment_semantic(
+                    db, ontology_id=ontology_id, keyword=kw, kind="business_logic",
+                    items=items, loader=self._load_logic_summaries,
+                )
+                return self._search_envelope(
+                    items, page.total + extra, "口径", facet_key="logic_type"
+                )
             if name == "get_logic":
                 detail = qs.get_business_logic(db, str(args.get("logic_id") or ""))
                 if not detail or detail.status != "published":
@@ -1287,8 +1899,29 @@ class ChatBiService:
                 return self._compact_logic_detail(detail), f"口径「{detail.display_name}」", False
             if name == "get_domain_overview":
                 return self._dispatch_domain_overview(db, ontology_id=ontology_id)
+            if name == "find_join_path":
+                return self._dispatch_join_path(db, ontology_id=ontology_id, args=args)
+            if name == "profile_values":
+                return self._dispatch_profile_values(
+                    db, ontology_id=ontology_id, args=args, principal_role=principal_role
+                )
+            if name == "compile_metric":
+                return self._dispatch_compile_metric(db, args=args)
+            if name == "ask_clarification":
+                q = str(args.get("question") or "").strip()
+                if not q:
+                    return {"error": "需要 question"}, "澄清问题为空", True
+                opts = [str(o) for o in (args.get("options") or []) if str(o).strip()]
+                return (
+                    {"clarification": True, "question": q, "options": opts,
+                     "reason": str(args.get("reason") or "")},
+                    f"向用户澄清：{q}",
+                    False,
+                )
             if name == "run_sql":
-                return self._dispatch_run_sql(db, args=args, ontology_id=ontology_id)
+                return self._dispatch_run_sql(
+                    db, args=args, ontology_id=ontology_id, principal_role=principal_role
+                )
             return {"error": f"未知工具：{name}"}, "未知工具", True
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent tool %s failed: %s", name, exc)
@@ -1358,12 +1991,30 @@ class ChatBiService:
 
     @staticmethod
     def _steps_to_caliber(
-        steps: list[dict], referenced_objects: list[dict], referenced_logics: list[dict]
+        steps: list[dict],
+        referenced_objects: list[dict],
+        referenced_logics: list[dict],
+        compiled: list[dict] | None = None,
     ) -> list[dict]:
-        """由工具轨迹派生口径拆解卡（决策点3：保留字段，内容由 steps 生成，而非逼模型吐 JSON）。"""
+        """口径拆解卡。
+
+        ``compiled``（P3 口径编译器的 ``caliber_trace``）**排在最前且优先**：它是
+        「口径如何展开成这条查询」的**契约**——由本体确定性生成；而下面按 steps 反推的
+        卡片只是事后猜测（「调了 get_object，那大概是个对象口径」）。有契约就别用猜测。
+        """
         obj_by_id = {o["id"]: o for o in referenced_objects if o.get("id")}
         logic_by_id = {l["id"]: l for l in referenced_logics if l.get("id")}
         items: list[dict] = []
+        for c in compiled or []:
+            items.append({
+                "label": f"口径展开 · {c.get('logic') or ''}".strip(" ·"),
+                "description": "\n".join(c.get("caliber_trace") or []),
+                "references": (
+                    [{"kind": "business_logic", "id": c["logic_id"],
+                      "display_name": c.get("logic")}]
+                    if c.get("logic_id") else []
+                ),
+            })
         seen_obj: set[str] = set()
         seen_logic: set[str] = set()
         for s in steps:
@@ -1436,6 +2087,8 @@ class ChatBiService:
         history: list[dict],
         seed_objects: list[_ObjectSnapshot],
         seed_logics: list[BusinessLogic],
+        principal_role: str | None = None,
+        telemetry: RunTelemetry | None = None,
     ) -> AsyncIterator[dict]:
         """多步工具编排的事件流：yield step_start / step_done / token / done。
 
@@ -1468,8 +2121,18 @@ class ChatBiService:
                 + "\n".join(seed_lines)
             )
 
+        # P2.1：域语义卡常驻 system——模型开口前就知道域的骨架，
+        # 不必先花一步调 get_domain_overview，也不必靠 prompt 铁律约束概览类问题。
+        card = None
+        try:
+            card = build_card(db, ontology, domain.name)
+            card_text = "\n\n" + card.render()
+        except Exception as exc:  # noqa: BLE001 — 卡是增强，算不出就退回原样
+            logger.info("domain semantic card unavailable: %s", exc)
+            card_text = f"\n\n当前数据域：{domain.name}"
+
         messages: list[dict] = [
-            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}\n\n当前数据域：{domain.name}{seed_note}"}
+            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{seed_note}"}
         ]
         for item in history[-6:]:
             role = item.get("role")
@@ -1485,6 +2148,9 @@ class ChatBiService:
         seen_logic: set[str] = set()
         data_result: dict | None = None
         last_sql: str | None = None
+        compiled_metrics: list[dict] = []  # P3：口径编译轨迹（权威口径卡的来源）
+        compiled_sql: str | None = None
+        clarification: dict | None = None  # P4.1：待用户澄清的缺口
         grounded_hit = False
         answer = ""
         ledger = FactLedger()  # F4：断言级凭证账本（只登记工具真实返回的事实）
@@ -1495,8 +2161,20 @@ class ChatBiService:
         ledger.add_context_name(
             *[t["function"]["name"] for t in _AGENT_TOOL_SCHEMAS]
         )
+        # 语义卡上的名字是**服务端从已发布本体算出来的**，与 get_domain_overview 同源同可信。
+        # 不入账的话，模型引用卡上看到的核心对象/指标名会被 F4 当成幻觉——
+        # 我们把事实塞进它的上下文，又因为它用了而拒答，说不过去。
+        if card is not None:
+            ledger.add_context_name(
+                *[n for n, _ in card.core_objects],
+                *[n for n, _ in card.clusters],
+                *card.metrics,
+            )
+
+        tel = telemetry if telemetry is not None else RunTelemetry()
 
         for _ in range(_AGENT_MAX_STEPS):
+            tel.llm_call()
             resp = await client.chat.completions.create(
                 model=runtime.model,
                 messages=messages,
@@ -1510,12 +2188,18 @@ class ChatBiService:
                 # 解析并当作工具调用执行，避免把一堆标记当答案输出。
                 tool_calls = self._extract_text_tool_calls(msg.content or "")
             if not tool_calls:
-                # 先缓冲完整答案，待 ask_stream 接地校验通过后再逐字流式吐出，
-                # 避免"先给内容、校验不过再撤回"的观感。
-                async for tok in self._stream_final_answer(client, runtime.model, messages):
-                    answer += tok
-                # 兑底：若最终轮仍泄漏了工具调用标记，剔除后再作为答案。
-                answer = self._strip_tool_markup(answer)
+                # 没有工具调用 = 这一轮的 content 就是最终答案，**直接用**（P4.5）。
+                # 原实现把它丢掉、再发一次全上下文请求去"流式"重新生成一遍：
+                # 那次的 token 同样被 buffer 起来（没有透传给前端），最终仍由
+                # `_emit_answer_tokens` 假打字机吐出——等于每问一次白付一整轮
+                # prefill + 生成，换来一个模拟的流式效果。
+                answer = self._strip_tool_markup(msg.content or "")
+                if not answer:
+                    # 少数模型会返回「空 content + 无 tool_calls」，此时才补一次显式收尾轮
+                    tel.llm_call()
+                    async for tok in self._stream_final_answer(client, runtime.model, messages):
+                        answer += tok
+                    answer = self._strip_tool_markup(answer)
                 break
 
             # 存入历史的 content 去掉工具标记，避免污染上下文并被当作 thought 展示。
@@ -1553,19 +2237,58 @@ class ChatBiService:
                 idx = len(steps)
                 yield {"type": "step_start", "index": idx, "tool": tool_name, "arguments": call_args}
 
-                result, summary, is_error = await asyncio.to_thread(
-                    self._dispatch_agent_tool,
-                    db,
-                    domain_id=domain.id,
-                    ontology_id=ontology.id,
-                    name=tool_name,
-                    args=call_args,
-                )
+                if tool_name == "locate_entities":
+                    # P4.2：子 agent 在**隔离上下文**里跑检索循环，
+                    # 只有结论回到主上下文；试错过程一个字符都不进来。
+                    result, summary, is_error = await self._dispatch_locate_entities(
+                        db, client=client, model=runtime.model,
+                        domain_id=domain.id, ontology_id=ontology.id,
+                        args=call_args, telemetry=tel,
+                    )
+                else:
+                    result, summary, is_error = await asyncio.to_thread(
+                        self._dispatch_agent_tool,
+                        db,
+                        domain_id=domain.id,
+                        ontology_id=ontology.id,
+                        name=tool_name,
+                        args=call_args,
+                        principal_role=principal_role,
+                    )
+                tel.tool(tool_name, is_error=is_error)
+                if isinstance(result, dict):
+                    if result.get("clarification") and not is_error:
+                        # P4.1：模型判定缺口只能由用户补齐 → 本轮到此为止，把问题抛回去。
+                        # 这**不是拒答**：拒答是「答不了」，澄清是「先确认再答」，
+                        # 两者对用户的下一步指引完全不同，也不该混进拒答率里。
+                        clarification = {
+                            "question": result["question"],
+                            "options": result.get("options") or [],
+                            "reason": result.get("reason") or "",
+                        }
+                        steps.append({
+                            "index": idx, "tool": tool_name, "arguments": call_args,
+                            "status": "succeeded", "summary": summary,
+                        })
+                        yield {"type": "step_done", "index": idx,
+                               "status": "succeeded", "summary": summary}
+                        tel.clarification()
+                        break
+                    if result.get("code"):
+                        tel.rejection(str(result["code"]))
+                    if tool_name == "run_sql":
+                        tel.run_sql_outcome(
+                            "executed" if result.get("executed")
+                            else ("rejected" if result.get("rejected") else "suggest_only")
+                        )
 
                 # 从工具轨迹收割结构化产物
                 if not is_error and (
                     (tool_name.startswith("search_") and _search_items(result))
-                    or (tool_name in ("get_object", "get_logic", "get_domain_overview"))
+                    or (tool_name in (
+                        "get_object", "get_logic", "get_domain_overview",
+                        "find_join_path", "profile_values", "compile_metric",
+                    ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
                 ):
                     grounded_hit = True
@@ -1580,6 +2303,14 @@ class ChatBiService:
                         referenced_logics.append(
                             {"id": result["id"], "name": result.get("name"), "display_name": result.get("display_name")}
                         )
+                    elif tool_name == "compile_metric" and result.get("compiled"):
+                        compiled_metrics.append({
+                            "logic_id": result.get("logic_id"),
+                            "logic": result.get("logic"),
+                            "caliber_trace": result.get("caliber_trace") or [],
+                        })
+                        # 模型可能只编译不执行（无数据源时很常见）——SQL 不能丢
+                        compiled_sql = result.get("sql") or compiled_sql
                     elif tool_name == "run_sql":
                         if result.get("sql"):
                             last_sql = result["sql"]
@@ -1599,12 +2330,15 @@ class ChatBiService:
                 )
                 yield {"type": "step_done", "index": idx, "status": step_status, "summary": summary}
 
-                result_text = json.dumps(result, ensure_ascii=False, default=str)
-                if len(result_text) > _TOOL_RESULT_MAX_CHARS:
-                    result_text = result_text[:_TOOL_RESULT_MAX_CHARS] + "…(结果过长已截断)"
+                # P2.2：超预算时按语义降级，不按字符砍——回灌的永远是合法 JSON
+                result_text, _compacted = compact_tool_result(result, _TOOL_RESULT_MAX_CHARS)
                 messages.append({"role": "tool", "tool_call_id": t.id, "content": result_text})
+
+            if clarification is not None:
+                break  # 澄清请求：跳出整个 agent 循环，不再作答
         else:
             # 步数耗尽仍未收敛：强制不带工具收尾（同样仅缓冲，稍后校验通过再流式）
+            tel.llm_call()
             async for tok in self._stream_final_answer(
                 client,
                 runtime.model,
@@ -1614,13 +2348,59 @@ class ChatBiService:
                 answer += tok
             answer = self._strip_tool_markup(answer)
 
-        # 兜底：模型若把 SQL 写进正文却没走 run_sql，从围栏块抽出，避免前端丢弃 SQL
+        if clarification is not None:
+            # 澄清出口：不生成答案、不跑接地校验（没有断言可校验），直接把问题抛给用户。
+            # 答案正文用澄清问题本身，前端无需改动即可显示；结构化字段供 UI 渲染选项。
+            body = clarification["question"]
+            if clarification["options"]:
+                body += "\n\n" + "\n".join(f"- {o}" for o in clarification["options"])
+            yield {
+                "type": "done",
+                "payload": {
+                    "answer": body,
+                    "clarification": clarification,
+                    "suggested_sql": None,
+                    "caliber_decomposition": [],
+                    "referenced_objects": referenced_objects,
+                    "referenced_logics": referenced_logics,
+                    "steps": steps,
+                    "data_result": None,
+                    "_grounded": True,   # 反问不是拒答，不该被接地判定拦下
+                    "_unverified": [],
+                },
+            }
+            return
+
+        # SQL 收割优先级：run_sql 实际提交的 > 口径编译产物 > 正文围栏块兜底。
+        # 编译产物排在正文之前——它是本体确定性生成且已自证的，比模型正文里写的可信。
         if not last_sql:
-            last_sql = self._extract_sql_from_text(answer)
+            last_sql = compiled_sql or self._extract_sql_from_text(answer)
 
         # F4：断言级可靠性校验。答案里出现账本外的具名实体/未证实数值 → 判不可靠。
         # 受 settings.agent_soundness 开关：off 跳过；warn 仅记录不拦；on 生效。
         verify_ok, unverified = self._verify_answer(answer, ledger, question)
+
+        # P4.3 自愈回环：校验不过时先给模型**一次**重写机会，而不是直接拒答。
+        # 此前 unverified 是终局判决——模型连「哪句没凭证」都收不到，
+        # 而它往往只是多写了一个未检索的字段名，删掉即可成立。拒答的代价是整轮白跑。
+        for _ in range(_AGENT_REPAIR_ATTEMPTS if not verify_ok else 0):
+            tel.repair()
+            yield {"type": "repair", "reasons": list(unverified)}
+            messages.append({"role": "assistant", "content": answer})
+            messages.append({"role": "user", "content": self._repair_instruction(unverified, ledger)})
+            tel.llm_call()
+            repaired = ""
+            async for tok in self._stream_final_answer(client, runtime.model, messages):
+                repaired += tok
+            repaired = self._strip_tool_markup(repaired)
+            if not repaired:
+                break
+            answer = repaired
+            verify_ok, unverified = self._verify_answer(answer, ledger, question)
+            if verify_ok:
+                tel.repair_succeeded()
+                break
+
         grounded = grounded_hit and verify_ok
 
         yield {
@@ -1628,7 +2408,9 @@ class ChatBiService:
             "payload": {
                 "answer": answer or "（模型未返回回答）",
                 "suggested_sql": last_sql,
-                "caliber_decomposition": self._steps_to_caliber(steps, referenced_objects, referenced_logics),
+                "caliber_decomposition": self._steps_to_caliber(
+                    steps, referenced_objects, referenced_logics, compiled=compiled_metrics
+                ),
                 "referenced_objects": referenced_objects,
                 "referenced_logics": referenced_logics,
                 "steps": steps,
@@ -1650,6 +2432,8 @@ class ChatBiService:
         resolver: "_ReferenceResolver",
         seed_objects: list[_ObjectSnapshot],
         seed_logics: list[BusinessLogic],
+        principal_role: str | None = None,
+        telemetry: RunTelemetry | None = None,
     ) -> dict:
         """非流式包装：消费事件流、聚合 done.payload 返回（供 ask() agent 路径复用）。"""
         payload: dict | None = None
@@ -1662,6 +2446,8 @@ class ChatBiService:
             history=history,
             seed_objects=seed_objects,
             seed_logics=seed_logics,
+            principal_role=principal_role,
+            telemetry=telemetry,
         ):
             if ev["type"] == "done":
                 payload = ev["payload"]

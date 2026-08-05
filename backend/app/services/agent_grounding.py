@@ -182,6 +182,31 @@ class FactLedger:
                 return m
         return None
 
+    def provable_names(self, limit: int = 40) -> list[str]:
+        """本轮**可被引用**的业务实体名，供自愈回环把「能说什么」告诉模型。
+
+        只列对象/关系/口径/字段这些业务实体，不含 ``add_context_name`` 登记的
+        工具名与数据域名——那些是机制性上下文，写进答案反而是噪声。
+        显示名优先（答案该用显示名称呼实体）。
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for fact in (
+            *self.objects.values(),
+            *self.metrics.values(),
+            *self.relations.values(),
+            *self.props.values(),
+        ):
+            name = getattr(fact, "display_name", "") or getattr(fact, "name", "")
+            key = _norm(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(name)
+            if len(out) >= limit:
+                break
+        return out
+
 
 __all__ = [
     "FactLedger",

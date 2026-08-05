@@ -1363,3 +1363,48 @@
 @keyframes chatbi-caret-blink {
   to { opacity: 0; }
 }
+
+/* 澄清反问（P4.1）：候选项做成可点击追问，用户一步接上而不必重打一遍 */
+.chatbi-clarify {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-left: 3px solid var(--om-primary, #2563eb);
+  border-radius: 8px;
+  background: var(--om-neutral-subtle, #f8fafc);
+}
+.chatbi-clarify-q {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--om-text-primary, #0f172a);
+}
+.chatbi-clarify-why {
+  font-size: 12px;
+  color: var(--om-text-tertiary, #64748b);
+}
+.chatbi-clarify-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+.chatbi-clarify-option {
+  padding: 5px 12px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-radius: 999px;
+  background: var(--om-surface, #fff);
+  color: var(--om-text-secondary, #475569);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.chatbi-clarify-option:hover:not(:disabled) {
+  border-color: var(--om-primary, #2563eb);
+  color: var(--om-primary, #2563eb);
+}
+.chatbi-clarify-option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

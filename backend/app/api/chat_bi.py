@@ -1,12 +1,13 @@
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import chat_bi_service
 from app.database import get_db
+from app.services import agent_telemetry
 from app.services.data_app_executor import ExecutionError
 from app.schemas import (
     ChatBiAnswer,
@@ -140,8 +141,19 @@ def chat_bi_get_messages(
 # ---- Ask
 
 
+def _principal_role(request: Request) -> str | None:
+    """当前请求主体的角色（由 AdminAuthMiddleware 写入 request.state）。
+
+    Agent 的 run_sql 按此做工具粒度授权（P1.1）——不能只靠端点粒度，
+    否则 editor 自己执行 SQL 被 403、让 Agent 代跑却放行。
+    """
+    return getattr(request.state, "principal_role", None)
+
+
 @router.post("/chat-bi/ask", response_model=ChatBiAnswer)
-async def chat_bi_ask(data: ChatBiAskRequest, db: Session = Depends(get_db)):
+async def chat_bi_ask(
+    data: ChatBiAskRequest, request: Request, db: Session = Depends(get_db)
+):
     try:
         conversation_id = data.conversation_id
 
@@ -171,6 +183,7 @@ async def chat_bi_ask(data: ChatBiAskRequest, db: Session = Depends(get_db)):
             domain_id=data.domain_id,
             question=data.question,
             history=data.history,
+            principal_role=_principal_role(request),
         )
 
         chat_bi_service.save_message(
@@ -193,10 +206,14 @@ async def chat_bi_ask(data: ChatBiAskRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/chat-bi/ask/stream")
-async def chat_bi_ask_stream(data: ChatBiAskRequest, db: Session = Depends(get_db)):
+async def chat_bi_ask_stream(
+    data: ChatBiAskRequest, request: Request, db: Session = Depends(get_db)
+):
     """SSE 流式问答：实时推送 agent 工具步骤与逐字答案。
 
-    事件（`data: {json}\\n\\n`）：meta / step_start / step_done / token / done / error。
+    事件（`data: {json}\\n\\n`）：
+    meta / step_start / step_done / thought / repair / token / done / error。
+    ``repair``（P4.3）表示答案未过可靠性校验、正在让模型重写一次。
     会话创建与 user 消息在流开始前落库；assistant 消息在 done 后落库。
     """
     conversation_id = data.conversation_id
@@ -234,6 +251,7 @@ async def chat_bi_ask_stream(data: ChatBiAskRequest, db: Session = Depends(get_d
                 domain_id=data.domain_id,
                 question=data.question,
                 history=data.history,
+                principal_role=_principal_role(request),
             ):
                 if ev.get("type") == "done":
                     payload = ev["payload"]
@@ -267,6 +285,16 @@ async def chat_bi_ask_stream(data: ChatBiAskRequest, db: Session = Depends(get_d
             "X-Accel-Buffering": "no",  # 禁 nginx 缓冲，确保逐块下发
         },
     )
+
+
+@router.get("/chat-bi/telemetry")
+def chat_bi_telemetry():
+    """Data Agent 改造期遥测快照（P0）：步数 / 工具分布 / 拒绝码 / LLM 调用次数。
+
+    进程内计数器，重启即清零——它是 DATA_AGENT_V2_PLAN 各期的**对照基线**，
+    不是生产可观测性。改造收尾后可整体摘除。
+    """
+    return agent_telemetry.snapshot()
 
 
 @router.get("/chat-bi/suggestions", response_model=ChatBiSuggestions)

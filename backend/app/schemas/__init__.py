@@ -2,6 +2,7 @@
 
 from app.schemas.chat_bi import (
     ChatBiAnswer,
+    ChatBiClarification,
     ChatBiAskRequest,
     ChatBiCaliberItem,
     ChatBiCaliberReference,
@@ -312,6 +313,7 @@ __all__ = [
     "ChatBiCaliberItem",
     "ChatBiAskRequest",
     "ChatBiAnswer",
+    "ChatBiClarification",
     "ChatBiSuggestions",
     "ChatBiConversationSummary",
     "ChatBiConversationCreate",

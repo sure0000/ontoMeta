@@ -101,6 +101,23 @@ class Settings(BaseSettings):
     #   warn — 只记录「本应拒答」到回执，不真拒（观测泄漏基线/误杀率）
     #   on   — 正式生效：SQL 语义证明不过则不执行、断言不可证则拒答
     agent_soundness: str = "on"
+    # Data Agent 的 run_sql 工具最低角色（P1.1）。
+    # 手动执行端点 `POST /chat-bi/messages/{id}/execute` 要求 publisher，而 `/chat-bi/ask`
+    # 兜底只要 editor——工具化会绕过权限模型：editor 自己跑 SQL 被 403，让 Agent 代跑却放行。
+    # 故 run_sql 在**工具粒度**上与 /execute 同价。降为 "editor" 可回到改造前行为。
+    agent_run_sql_min_role: str = "publisher"
+    # 字段取值画像（P1.3）：缓存秒数（0=禁用缓存）与 TopN 条数。
+    # 取值分布变化慢，缓存主要是防「每问一次就打一次库」。
+    agent_profile_cache_seconds: int = 900
+    agent_profile_top_n: int = 20
+    # 语义检索（P1.5）。**留空即关闭**——检索退回纯 ILIKE，功能不受影响，
+    # 只是同义词召回不到。填入嵌入模型名（走已配置的 OpenAI 兼容服务）即启用。
+    agent_embedding_model: str = ""
+    # 向量截断维度：现代嵌入模型前若干维已承载主要语义，截短能让纯 Python 暴力检索
+    # 快数倍而召回基本无损。设 0 表示不截断。
+    agent_embedding_dim: int = 256
+    # 余弦相似度下限：低于此分不作为召回结果（0 表示不过滤）
+    agent_embedding_min_score: float = 0.0
     # 发布时形式化不变式校验（F2）：
     #   off  — 不检查
     #   warn — 检查并返回报告，不阻断发布（默认，迁移期安全）

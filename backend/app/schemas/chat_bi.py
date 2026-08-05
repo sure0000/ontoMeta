@@ -51,6 +51,14 @@ class ChatBiAskRequest(BaseModel):
     conversation_id: str | None = None
 
 
+class ChatBiClarification(BaseModel):
+    """需要用户澄清的缺口（P4.1）。``options`` 必须来自工具返回的真实实体。"""
+
+    question: str
+    options: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 class ChatBiAnswer(BaseModel):
     domain_id: str
     domain_name: str
@@ -65,6 +73,9 @@ class ChatBiAnswer(BaseModel):
     # Agent 工具编排（P1）：过程轨迹 + run_sql 真实结果。旧数据/Mock 路径可为空。
     steps: list[ChatBiAgentStep] = Field(default_factory=list)
     data_result: ChatBiDataResult | None = None
+    # P4.1 澄清反问：模型判定缺口只能由用户补齐时，本轮不作答而是回问。
+    # 与 grounding_refused 是**两种不同结局**——拒答是「答不了」，澄清是「先确认再答」。
+    clarification: ChatBiClarification | None = None
     conversation_id: str | None = None
     conversation_title: str | None = None
 

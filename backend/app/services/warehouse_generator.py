@@ -28,6 +28,7 @@ from app.models import (
     RelationType,
 )
 from app.models.warehouse import TargetKind
+from app.services.ontology_projection import foreign_key_names, primary_key_name
 from app.warehouse import (
     CapabilityError,
     DEFAULT_ENGINE,
@@ -293,15 +294,18 @@ class WarehouseGenerator:
 
     @staticmethod
     def _primary_key_of(obj: ObjectType) -> str | None:
-        """身份属性：优先 ``<表名>_id``，其次首个 identifier 语义字段。"""
-        by_name = {p.name: p for p in obj.properties}
-        preferred = f"{obj.name}_id"
-        if preferred in by_name:
-            return preferred
-        identifiers = sorted(
-            (p.name for p in obj.properties if (p.semantic_type or "") == "identifier")
+        """身份属性：优先 ``<表名>_id``，其次首个 identifier 语义字段。
+
+        命名约定本身由 ``ontology_projection.primary_key_name`` 固化——语义导航器
+        （P1.2）推 JOIN 键用的是同一份规则，两处必须一致，否则「导航器给的 ON」
+        和「物化建的外键」会指向不同的列。语义类型判定仍留在本侧（物化按原始字符串
+        精确匹配 identifier，不走归一别名），以保持既有产物不变。
+        """
+        return primary_key_name(
+            obj.name,
+            [p.name for p in obj.properties],
+            [p.name for p in obj.properties if (p.semantic_type or "") == "identifier"],
         )
-        return identifiers[0] if identifiers else None
 
     def _foreign_keys_by_object(
         self,
@@ -338,17 +342,8 @@ class WarehouseGenerator:
                 continue
 
             ev = _loads(rel.source_evidence, {}) or {}
-            fk = (
-                ev.get("foreign_key")
-                or ev.get("source_field")
-                or ev.get("fk_column")
-                or f"{tgt.name}_id"
-            )
-            ref_col = (
-                ev.get("target_field")
-                or ev.get("pk_column")
-                or self._primary_key_of(tgt)
-                or _DEFAULT_REF_COLUMN
+            fk, ref_col = foreign_key_names(
+                ev, target_name=tgt.name, target_pk=self._primary_key_of(tgt)
             )
             ref_db = naming.database_of(tgt_contract.target_layer)
             ref_table = naming.table_of(tgt_contract, tgt.name)
@@ -440,8 +435,13 @@ class WarehouseGenerator:
     ) -> list[LogicalTable]:
         """业务逻辑 → ADS 指标表。
 
-        口径表达式（``expression_summary``）不在此翻译成 SQL——那属于 M6 的
-        MetricSpec Executor。这里只把指标物化成一张可承载结果的表。
+        口径表达式不在此翻译成 SQL——那属于 M6 的 MetricSpec Executor。
+        这里只把指标物化成一张可承载结果的表。
+
+        **M6 落地时请直接调用 ``metric_compiler.compile_metric``**（P3 已交付），
+        不要在这里另写一套口径→SQL 的翻译：口径一致性的全部意义就在于
+        问数、数据应用、物化三处**共用同一个编译器**；各写一套，同一个「GMV」
+        迟早算出三个数，而这种偏差在生产里几乎不可能被发现。
         """
         tables: list[LogicalTable] = []
         logics = (

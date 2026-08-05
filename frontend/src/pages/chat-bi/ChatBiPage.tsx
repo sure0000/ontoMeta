@@ -932,6 +932,21 @@ const ChatBiMain = memo(function ChatBiMain({
                   ];
                   cur.payload = payload;
                   break;
+                case "repair":
+                  // 校验未过、正在重写。不展示是最差的选择——用户只会看到一段
+                  // 无解释的停顿；这里如实说明「在核对」，而不是假装无事发生。
+                  payload.steps = [
+                    ...(payload.steps ?? []),
+                    {
+                      index: (payload.steps ?? []).length,
+                      kind: "repair",
+                      tool: "",
+                      text: "答案未通过可靠性核验，正在依据已检索到的事实重写",
+                      status: "running",
+                    } as ChatBiAgentStep,
+                  ];
+                  cur.payload = payload;
+                  break;
                 case "token":
                   cur.content =
                     (cur.content === "思考中…" ? "" : cur.content) + ev.delta;

@@ -40,6 +40,7 @@ from app.models.agent import (
     HIGH_RISK_KINDS,
 )
 from app.models.principal import Principal, Role, role_rank, role_satisfies
+from app.models.semantic_index import SemanticIndexEntry
 from app.models.settings import (
     AirflowSetting,
     CubeSetting,
@@ -94,6 +95,7 @@ __all__ = [
     "ScdType",
     "TargetKind",
     "Principal",
+    "SemanticIndexEntry",
     "Role",
     "role_rank",
     "role_satisfies",
