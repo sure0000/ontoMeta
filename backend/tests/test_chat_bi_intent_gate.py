@@ -1,7 +1,7 @@
 """Data Agent 意图门控单测（结构性问题不被追加取数 SQL）。
 
 覆盖架构强制的三层：
-1. `_classify_intent` 规则分类（analytical 赢平局、fail-open）。
+1. `_classify_intent` 规则分类（取数/结构才需精准接地，其余默认 general 自由作答）。
 2. `_tools_for_skill(..., sql_allowed=False)` 收窄——从工具集移除 run_sql/compile_metric。
 3. 端到端穿真实 agent 循环：结构性问题下 dispatch 硬拒取数工具、正文示例 SQL 不被提升；
    取数问题不受影响；显式 select_skill('query') 经升级阀重新放开取数。
@@ -38,6 +38,8 @@ def test_classify_intent_analytical():
     assert cls("近30天订单总额是多少") == "analytical"
     assert cls("各区域销售额对比") == "analytical"
     assert cls("统计每个客户的订单数量") == "analytical"
+    # 时间窗即取数信号：问某时段的业务表现，即便没写聚合动词也需接地
+    assert cls("今年公司利润率怎么样") == "analytical"
 
 
 def test_classify_intent_analytical_wins_ties():
@@ -48,10 +50,24 @@ def test_classify_intent_analytical_wins_ties():
     assert cls("各业务对象的属性数量统计") == "analytical"
 
 
-def test_classify_intent_defaults_analytical():
-    """都不命中 → analytical（fail-open）。"""
-    assert ChatBiService._classify_intent("帮我看看这个") == "analytical"
-    assert ChatBiService._classify_intent("") == "analytical"
+def test_classify_intent_defaults_general():
+    """未命中取数/结构标记 → general（默认自由作答，不要求接地）。"""
+    cls = ChatBiService._classify_intent
+    assert cls("怎么创建数据任务") == "general"   # 产品 how-to，不该被拒答
+    assert cls("你可以做什么") == "general"
+    assert cls("你能做什么？") == "general"
+    assert cls("你有什么功能") == "general"
+    assert cls("你好") == "general"
+    assert cls("帮我看看这个") == "general"
+    assert cls("") == "general"
+
+
+def test_classify_intent_precise_intents_win_over_general():
+    """需要精准回答的意图优先于 general：带取数/结构标记的真问题仍要求接地。"""
+    cls = ChatBiService._classify_intent
+    assert cls("近30天订单总额是多少") == "analytical"
+    assert cls("你能帮我统计订单数量吗") == "analytical"   # 「统计/数量」→取数
+    assert cls("订单有哪些字段") == "structural"
 
 
 def test_tools_narrow_removes_sql_tools_when_not_allowed():
@@ -228,3 +244,21 @@ def test_escalation_via_query_skill_reenables_sql(client):
 
     assert payload.get("skill") == "query"
     assert payload.get("data_result") and payload["data_result"]["rows"] == [{"gmv": 100}]
+
+
+def test_general_question_not_refused_without_tool_hit(client):
+    """一般/元问题（产品 how-to）：模型不调任何工具直接作答，也不被接地判定拦成拒答。"""
+    domain_id, _onto, aliases = _seed_golden_domain()
+
+    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+        return ({"error": f"unexpected {name}"}, "", True)  # 一般问题不该调任何工具
+
+    script = [FinalTurn("在「数据任务」页点击新建，选择来源与目标即可创建同步/转换任务。")]
+    service = _make_service(_StubCompletions(script, aliases))
+    service._dispatch_agent_tool = fake_dispatch  # type: ignore[assignment]
+
+    payload = _ask(service, domain_id, "怎么创建数据任务")
+
+    assert not payload.get("grounding_refused"), "产品 how-to 一般问题不应被判为未接地拒答"
+    assert "无法基于" not in payload.get("answer", "")
+    assert "数据任务" in payload.get("answer", "")

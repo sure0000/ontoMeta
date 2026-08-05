@@ -119,6 +119,8 @@ _AGENT_SYSTEM_PROMPT = (
     "作答：中文 Markdown，先口径解读再结论；有数据用表格。"
     "用对象/关系的**显示名**称呼它们，不要在正文提及工具名。"
     "本体中确实没有的，如实说明无法回答。"
+    "但对『你能做什么/怎么用/打招呼』这类与具体业务数据无关的一般性问题，"
+    "直接友好作答、简介你的能力即可，无需检索本体、也不受上述『查不到就拒答』约束。"
 )
 
 # OpenAI 原生 function-calling 工具（自建 GLM 实测支持）。
@@ -660,12 +662,21 @@ _ANALYTICAL_MARKERS: tuple[str, ...] = (
     "多少", "数量", "几个", "趋势", "环比", "同比", "对比", "占比",
     "比例", "排名", "排行", "top", "明细", "统计", "近", "分布", "增长",
     "均值", "平均", "合计", "汇总", "求和", "计数",
+    # 时间窗——问「某时段的业务表现」即在要真数据（即便没写聚合动词）。
+    # 与结构问题正交（结构问对象/字段/口径定义，不带时段），加进来不误伤结构分类。
+    "今年", "去年", "本年", "本月", "上月", "当月", "本周", "上周",
+    "本季", "季度", "年度", "今日", "当日", "昨天",
 )
 _STRUCTURAL_MARKERS: tuple[str, ...] = (
     "有哪些", "哪些属性", "哪些字段", "包含哪些", "由哪些", "组成", "构成",
     "属性", "字段", "结构", "定义", "关系", "关联", "主键", "外键",
     "数据类型", "schema", "元数据", "是什么意思", "怎么理解",
 )
+# 接地判定的适用范围由「需要精准回答的意图」正向定义，而非反向枚举「哪些不必拒答」：
+# 只有 analytical（要真数据）和 structural（要具体本体元数据）**才要求接地**——答业务事实
+# 却没查过就该拦。其余一切（打招呼、问能力、产品用法/how-to、一般解释）默认 general，
+# 自由作答、不要求接地，因此**无需维护一张一般问题白名单**（默认即豁免）。
+# 即便 general 里混进真本体问题，F4 断言校验仍拦得住捏造的具名实体/数值，是最后一道网。
 
 
 def _tools_for_skill(
@@ -3074,17 +3085,22 @@ class ChatBiService:
 
     @staticmethod
     def _classify_intent(question: str) -> str:
-        """意图分类：``"structural"``（纯元数据/结构问题）或 ``"analytical"``（取数）。
+        """意图分类：``"analytical"`` / ``"structural"`` / ``"general"``。
 
-        规则优先、确定性、零额外 LLM 调用。**analytical 赢平局**：命中任一取数标记即取数；
-        否则命中结构标记且无取数标记才判结构；都不命中 → 取数（fail-open，绝不误伤真实取数）。
+        以「需要精准回答的意图」正向定义，规则优先、确定性、零额外 LLM 调用：
+        - 命中取数标记 → analytical（要真数据，需接地；赢平局，绝不误伤真实取数）；
+        - 否则命中结构标记 → structural（要具体本体元数据，需接地）；
+        - 否则 → **general**（默认；打招呼/问能力/产品用法等，自由作答、不要求接地）。
+
+        注意默认落到 general 而非 analytical：拒答是少数精准场景的例外，不是常态。
+        取数工具可用性（sql_allowed）另按 `intent != structural` 判，仍对 general 放开取数。
         """
         q = (question or "").lower()
         if any(m in q for m in _ANALYTICAL_MARKERS):
             return "analytical"
         if any(m in q for m in _STRUCTURAL_MARKERS):
             return "structural"
-        return "analytical"
+        return "general"
 
     @staticmethod
     def _extract_sql_from_text(text: str | None) -> str | None:
@@ -3260,10 +3276,11 @@ class ChatBiService:
 
         tel = telemetry if telemetry is not None else RunTelemetry()
 
-        # 意图门控（架构强制，非提示词）：结构性问题（问对象有哪些属性/字段/关系等）
-        # 不提供取数工具，避免答非所问地追加取数 SQL。规则确定性分类，analytical fail-open。
+        # 意图门控（架构强制，非提示词）：仅**结构性**问题（问对象有哪些属性/字段/关系等）
+        # 收窄取数工具，避免答非所问地追加取数 SQL。analytical 与 general 都保留取数能力
+        # （对 general 放开是 fail-open：万一是未加标记的真实取数问题，工具仍在，不误伤）。
         intent = self._classify_intent(question)
-        sql_allowed = intent == "analytical"
+        sql_allowed = intent != "structural"
 
         # V3 S1：技能层运行态。base_system 是不含技能 overlay 的系统提示基线，
         # 选中技能后就地重建 messages[0] = base_system + overlay（重复选取以最后一次为准）。
@@ -3587,7 +3604,12 @@ class ChatBiService:
                 tel.repair_succeeded()
                 break
 
-        grounded = grounded_hit and verify_ok
+        # 接地判定：只有需要精准回答的意图（analytical/structural）才要求命中本体工具。
+        # 其余默认 general（打招呼/问能力/产品 how-to/一般解释）——与具体业务数据无关，
+        # 直接作答即可，豁免 grounded_hit。拒答是少数精准场景的例外，不是常态。
+        # 但仍**保留** verify_ok（F4）：万一 general 混进真本体问题、模型据此编造具名实体/数值，
+        # 断言校验照样拦下。所以 general 只放开「没查本体」，不放开「乱说本体」。
+        grounded = (grounded_hit or intent == "general") and verify_ok
 
         yield {
             "type": "done",
