@@ -49,6 +49,42 @@ class RunTelemetry:
     subagent_llm_calls: int = 0
     subagent_steps: int = 0
     subagent_isolated_chars: int = 0
+    # V4 O6.3 上下文预算：每次 LLM 调用前 messages 的字符估算累加，
+    # 除以调用次数得 context_chars_per_call——看 O1 compaction / O2 离场的收益。
+    context_chars: int = 0
+    context_calls: int = 0
+    # V4 O1 compaction：是否触发了摘要、摘了几轮。
+    compaction_triggered: bool = False
+    compaction_summarized_turns: int = 0
+    # V4 O6.2 skill 路由：选中了哪个技能、是否“路对”（用上了该技能族的工具）。
+    # misroute = 选了技能却没用上它解锁的任何工具——路由又白加一轮的信号。
+    # V5 F1：另分出 skill_no_entity——「路对了但目标实体不存在、未及调解锁工具就拒答」，
+    # 不该计作 misroute（那是域里没这个东西，不是路由选错）。
+    skill_routed: str | None = None
+    skill_matched: bool | None = None
+    skill_no_entity: bool = False
+    # V4 O2 大结果离场：被移出上下文的字符数（全量 JSON − 样例 JSON）。
+    offloaded_chars: int = 0
+    offload_count: int = 0
+
+    def offload(self, chars: int) -> None:
+        self.offloaded_chars += max(0, int(chars))
+        self.offload_count += 1
+
+    def context(self, chars: int) -> None:
+        self.context_chars += max(0, int(chars))
+        self.context_calls += 1
+
+    def compaction(self, *, triggered: bool, summarized_turns: int) -> None:
+        self.compaction_triggered = triggered
+        self.compaction_summarized_turns = summarized_turns
+
+    def route(self, skill: str) -> None:
+        self.skill_routed = skill
+
+    def route_outcome(self, matched: bool, *, no_entity: bool = False) -> None:
+        self.skill_matched = matched
+        self.skill_no_entity = no_entity
 
     def clarification(self) -> None:
         self.clarifications += 1
@@ -110,6 +146,15 @@ class _Aggregate:
             self.subagent_llm_calls = 0
             self.subagent_steps = 0
             self.subagent_isolated_chars = 0
+            self.context_chars = 0
+            self.context_calls = 0
+            self.compaction_runs = 0
+            self.compaction_summarized_turns = 0
+            self.skill_routed: Counter = Counter()
+            self.skill_misrouted = 0
+            self.skill_no_entity = 0
+            self.offloaded_chars = 0
+            self.offload_count = 0
 
     def record(self, run: RunTelemetry) -> None:
         with self._lock:
@@ -123,6 +168,19 @@ class _Aggregate:
             self.subagent_llm_calls += run.subagent_llm_calls
             self.subagent_steps += run.subagent_steps
             self.subagent_isolated_chars += run.subagent_isolated_chars
+            self.context_chars += run.context_chars
+            self.context_calls += run.context_calls
+            if run.compaction_triggered:
+                self.compaction_runs += 1
+                self.compaction_summarized_turns += run.compaction_summarized_turns
+            if run.skill_routed:
+                self.skill_routed[run.skill_routed] += 1
+                if run.skill_no_entity:
+                    self.skill_no_entity += 1
+                elif run.skill_matched is False:
+                    self.skill_misrouted += 1
+            self.offloaded_chars += run.offloaded_chars
+            self.offload_count += run.offload_count
             self.tool_calls.update(run.tool_calls)
             self.tool_errors.update(run.tool_errors)
             self.rejection_codes.update(run.rejection_codes)
@@ -153,6 +211,29 @@ class _Aggregate:
                 "subagent_steps": self.subagent_steps,
                 # 被隔离掉、**没有**进主上下文的字符数——P4.2 的收益就是这个数
                 "subagent_isolated_chars": self.subagent_isolated_chars,
+                # V4 O6.3：每次 LLM 调用平均上下文字符数（O1/O2 降它）
+                "context_chars_per_call": (
+                    round(self.context_chars / self.context_calls, 1)
+                    if self.context_calls else 0.0
+                ),
+                # V4 O1：触发摘要的运行数与累计被摘要轮数
+                "compaction_runs": self.compaction_runs,
+                "compaction_summarized_turns": self.compaction_summarized_turns,
+                # V4 O6.2 / V5 F1：技能路由分布、“路错率”与“路对但无实体”。
+                # misroute 率只统计「真路错」（分母排除 no_entity）——否则会把「域里没这个对象」造成的拒答误计为路由缺陷。
+                "skill_routed": dict(self.skill_routed),
+                "skill_no_entity_runs": self.skill_no_entity,
+                "skill_misroute_rate": (
+                    round(
+                        self.skill_misrouted
+                        / max(1, sum(self.skill_routed.values()) - self.skill_no_entity),
+                        4,
+                    )
+                    if (sum(self.skill_routed.values()) - self.skill_no_entity) > 0 else 0.0
+                ),
+                # V4 O2：大结果离场——被移出上下文的总字符数与离场次数
+                "offloaded_chars": self.offloaded_chars,
+                "offload_count": self.offload_count,
             }
 
 

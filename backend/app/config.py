@@ -129,6 +129,21 @@ class Settings(BaseSettings):
     agent_embedding_dim: int = 256
     # 余弦相似度下限：低于此分不作为召回结果（0 表示不过滤）
     agent_embedding_min_score: float = 0.0
+    # V4 O1 上下文 compaction：对齐 pi 的结构化摘要 + 近轮保留。
+    #   on  — 历史超预算时把旧轮抽取为结构化摘要，仅保留近轮原文
+    #   off — 回到 history[-6:] 硬截断（零风险回滚）
+    agent_compaction: str = "on"
+    # 近轮保留的字符预算（约等于 token×2，CJK 场景取字符更稳）。超此预算的更早轮被摘要。
+    agent_history_char_budget: int = 6000
+    # V4 O2 大结果离场存储：run_sql 结果表辇大时，回给模型的只是「列名 + 样例 N 行 + 总行数 + 句柄」，
+    # 全量行存在进程内 per-run store，模型需要更多行时用 read_result(handle, offset, limit) 分页取。
+    #   上下文只看到样例，不再被整张表污染、也不被字符截断丢列。前端/渲染/analyze 仍拿全量。
+    agent_result_offload: str = "on"  # on/off（off 回到直接回灰全量行的旧行为）
+    agent_result_sample_rows: int = 5  # 回给模型的样例行数
+    # V4 O6 运行轨迹落地（pi JSONL session 风格，非 DB 表，改造后可整目录摘除）。
+    #   关闭时不写文件；开启后每问追加一行 JSON 到 agent_trace_dir。
+    agent_trace_enabled: bool = False
+    agent_trace_dir: str = ".logs/agent_traces"
     # 发布时形式化不变式校验（F2）：
     #   off  — 不检查
     #   warn — 检查并返回报告，不阻断发布（默认，迁移期安全）

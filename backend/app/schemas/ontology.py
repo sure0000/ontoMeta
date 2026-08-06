@@ -57,6 +57,8 @@ class ObjectTypeEvidencePack(BaseModel):
     role_reason: str | None = None
     # 分类证据快照：score / needs_review / signals，供复核界面展示「判定依据」。
     role_signals: dict | None = None
+    # DataHub profiling：导入时沉淀，供落库到 ObjectType 表。
+    row_count: int | None = None
 
 
 class PropertyEvidencePack(BaseModel):
@@ -67,6 +69,7 @@ class PropertyEvidencePack(BaseModel):
     data_type: str | None = None
     semantic_type: str | None = None
     sample_values: list[str] = Field(default_factory=list)
+    unique_count: int | None = None
     confidence: float = 0.5
     evidence_refs: list[str] = Field(default_factory=list)
 
@@ -114,6 +117,8 @@ class DraftObjectType(BaseModel):
     table_role: str = "business_object"
     role_confidence: float = 0.5
     role_reason: str | None = None
+    # DataHub profiling：导入时沉淀，供落库到 ObjectType 表。
+    row_count: int | None = None
     role_signals: dict | None = None
 
 
@@ -127,6 +132,9 @@ class DraftProperty(BaseModel):
     source_field_ref: str | None = None
     required: bool = False
     confidence: float = 0.5
+    # DataHub profiling：导入时沉淀，供落库到 Property 表。
+    sample_values: list[str] = Field(default_factory=list)
+    unique_count: int | None = None
 
 
 class DraftRelationType(BaseModel):

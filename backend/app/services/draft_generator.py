@@ -374,6 +374,7 @@ class OntologyDraftGenerator:
                 description=desc_map[ot.candidate_name],
                 source_ref=ot.source_dataset_urn,
                 confidence=ot.confidence,
+                row_count=ot.row_count,
                 # 结构判定证据随对象一路带下去；与 LLM 是否改判标签无关（signals 是
                 # 分类器的原始观测，分歧时仍是有效证据）。_resolve_role 不含该键，无冲突。
                 role_signals=ot.role_signals,
@@ -405,6 +406,8 @@ class OntologyDraftGenerator:
                 source_field_ref=item.evidence_refs[0] if item.evidence_refs else None,
                 required=item.semantic_type == "identifier",
                 confidence=item.confidence,
+                sample_values=item.sample_values,
+                unique_count=item.unique_count,
             )
             for item in evidence.properties
         ]

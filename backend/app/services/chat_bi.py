@@ -26,8 +26,6 @@ from openai import AsyncOpenAI
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session, joinedload
 
-import sqlparse
-
 from app.config import settings as env_settings
 
 from app.governance import active_standard, lint_against_standard
@@ -51,12 +49,16 @@ from app.services.settings_service import SettingsService
 from app.services.ontology_projection import build_projection
 from app.services.sql_soundness import SqlRejection, prove_sql_sound
 from app.services import agent_telemetry
+from app.services import agent_trace
+from app.services.agent_compaction import compact_conversation
+from app.services.agent_result_store import RunResultStore, project_run_sql_for_model
 from app.services.agent_grounding import FactLedger
 from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
 from app.services.domain_semantic_card import build_card
+from app.services.ontology_ladder import OntologyLadderLoader
 from app.services import chat_bi_external_tools as external_tools
-from app.services.chat_bi_skills import SKILLS, Skill, skill_choices_text
+from app.services.chat_bi_skills import SKILLS, Skill
 from app.services.tool_result_compaction import compact_tool_result
 
 logger = logging.getLogger("ontometa.chat_bi")
@@ -72,1037 +74,65 @@ _FILTER_KEYWORDS = ("按", "where", "筛选", "条件", "等于", "大于", "小
 # P4.4 预算分离：工具轮与自愈轮各自计数，不再共用一个全局上限。
 # 原来 6 步一刀切，「检索 → 读细节 → 写 SQL → 被拒 → 改 → 重跑」正好撑满，
 # 此后又加了 find_join_path / profile_values / compile_metric 三个工具，
-# 预算只会更紧——真被拒一次就没有余量修正了。
-_AGENT_MAX_STEPS = 8            # 工具轮上限，超出强制收尾作答
-_AGENT_REPAIR_ATTEMPTS = 1      # 自愈重写次数上限（独立预算，不占工具轮）
-_RUN_SQL_LIMIT = 100           # run_sql 默认返回行上限
-_TOOL_RESULT_MAX_CHARS = 8000  # 单个工具结果回灌前的截断阈值
-_SQL_TIMEOUT_SECONDS = 15      # run_sql 语句超时（execute_sql 既有能力）
-_SEARCH_LIMIT = 8              # 检索类工具默认返回条数
-_OVERVIEW_LIST_LIMIT = 100     # 概览里 objects/relations 样本清单各自的条数上限
-_OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 
-# 提示词只保留**无法由构造保证**的部分。
-#
-# 随 P1–P3 迁走的那些（原 1b/1c/一半的 1/4b）已由架构承担：
-#   · 域骨架   → 域语义卡常驻 system（P2.1），不必再要求「概览题先调 get_domain_overview」
-#   · 样本≠全集 → 截断时键名即为 `sample` 且带 sample_note/facets（P2.3），
-#                 不必再用一整段铁律去堵「把 8 条当成全部」
-#   · 结果完整性 → 语义降级压缩保证回灌永远是合法 JSON（P2.2）
-#   · 不得编造   → FactLedger + answer_verifier 断言级核验（F4）当场拒答，
-#                 比反复叮嘱「宁可少答不可编造」有效得多
-# 保留下来的都是**工具选择策略**——这类「该先调谁」的判断，守卫拦得住结果却教不会顺序。
-_AGENT_SYSTEM_PROMPT = (
-    "你是企业数据问答助手（Data Agent），基于**已发布本体**回答业务问题。\n"
-    "可多步调用工具检索本体并执行只读 SQL，像分析师一样先查清口径再作答。\n\n"
-    "若问题明确属于某类任务（了解域结构 / 取数分析），可先调 select_skill 选对应技能，"
-    "它会给出该类任务的专门策略与能力；不确定则直接按下面的通用策略作答。\n\n"
-    "工具选择：\n"
-    "1. 先 search_* 定位实体，再 get_object / get_logic 取细节。"
-    "**若关键词要来回试几次**（域大、说法不确定），改用 locate_entities 整体外包，"
-    "试错过程不占本对话上下文。\n"
-    "2. 【JOIN】SQL 涉及两个及以上对象时先调 **find_join_path**，ON 条件照抄它给的；"
-    "它返回空即表示本体中两者无从关联，如实说明。有扇出风险时改用它建议的安全聚合。\n"
-    "3. 【字面量】WHERE 要写具体值时先调 **profile_values** 看真实取值并照抄；"
-    "猜错的字面量不会报错，只会返回 0 行，让你得出「无数据」这个错误结论。\n"
-    "4. 【口径】问题涉及已有指标/标签/规则时先 search_logics，再用 **compile_metric** 编译出 SQL，"
-    "不要自己照着口径说明重写——口径以本体为准，重写会算出与其它系统不一致的数。"
-    "编译结果的 caliber_trace 即权威口径展开；失败时按 hint 修正。\n"
-    "5. 写了查询 SQL 就必须经 **run_sql** 提交（只读，仅 SELECT）；"
-    "返回「无可执行数据源」时作为建议 SQL 给出并说明未实际执行。\n"
-    "6. 【缺口反问】只有用户能补齐的歧义（多个候选指标/时间字段、口径值不明确），"
-    "调 **ask_clarification** 反问，不要挑一个可能错的解释硬答；"
-    "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n"
-    "6b.【多参数收集】若需用户**一次补齐多个**结构化参数（取数的指标+时间范围+分组维度、"
-    "建数任务的目标数据源+目标库+更新策略+调度）才能继续，调 **request_form** 生成可填写表单"
-    "一并收集，比逐条追问高效；候选项须来自真实实体——**先用工具把候选查出来再发表单**"
-    "（建数任务用 get_task_options），别因为没查就把本该是下拉的字段退化成文本框。"
-    "用户在对话里**已经说过**的取值走 prefill 预填进表单，别原样再问一遍。"
-    "仅单个歧义仍用 ask_clarification。\n"
-    "7. 【结构性问题】问对象有哪些属性/字段/关系、口径定义这类元数据问题，"
-    "直接用 get_object/get_logic 的本体元数据作答，**不要取数、不要在正文写取数 SQL**；"
-    "此时取数工具可能不可用。用户确实要据此查数时，再 select_skill('query') 切到取数。\n\n"
-    "作答：中文 Markdown，先口径解读再结论；有数据用表格。"
-    "用对象/关系的**显示名**称呼它们，不要在正文提及工具名。"
-    "本体中确实没有的，如实说明无法回答。"
-    "但对『你能做什么/怎么用/打招呼』这类与具体业务数据无关的一般性问题，"
-    "直接友好作答、简介你的能力即可，无需检索本体、也不受上述『查不到就拒答』约束。"
+# V4 O5：工具 schema/常量/工具集构建已拆到 chat_bi_tool_schemas.py（纯声明，无运行态）。
+# 这里全量 re-export，保持 `chat_bi._AGENT_TOOL_SCHEMAS` 等对外符号逐字节不变（测试/其它模块 import 契约不动）。
+from app.services.chat_bi_tool_schemas import (  # noqa: F401
+    _AGENT_MAX_STEPS,
+    _AGENT_REPAIR_ATTEMPTS,
+    _RUN_SQL_LIMIT,
+    _TOOL_RESULT_MAX_CHARS,
+    _SQL_TIMEOUT_SECONDS,
+    _SEARCH_LIMIT,
+    _OVERVIEW_LIST_LIMIT,
+    _OVERVIEW_TOP_CONNECTED,
+    _AGENT_SYSTEM_PROMPT,
+    _AGENT_TOOL_SCHEMAS,
+    _SELECT_SKILL_TOOL,
+    _RENDER_CHART_TOOL,
+    _ANALYZE_RESULT_TOOL,
+    _READ_RESULT_TOOL,
+    _SCOUT_QUERY_TOOL,
+    _GET_LINEAGE_TOOL,
+    _PROPOSE_DRAFT_TOOL,
+    _LINT_TOOL,
+    _ACTION_KINDS,
+    _ACTION_KIND_LABEL,
+    _PIPELINE_KINDS,
+    _PIPELINE_MAX_STEPS,
+    _PROPOSE_ACTION_TOOL,
+    _PROPOSE_PIPELINE_TOOL,
+    _CRON_PRESETS,
+    _LOAD_STRATEGIES,
+    _TASK_OPTIONS_LIMIT,
+    _GET_TASK_OPTIONS_TOOL,
+    _AUTO_ACTION_CONTEXT_KEYS,
+    _ACTION_CONTEXT_HINT,
+    _missing_action_context,
+    _action_context_candidates,
+    _GET_TASK_STATUS_TOOL,
+    _PLAN_STATUSES,
+    _PLAN_MAX_STEPS,
+    _UPDATE_PLAN_TOOL,
+    _PROPOSE_PREFERENCE_TOOL,
+    _FORM_FIELD_TYPES,
+    _FORM_MAX_FIELDS,
+    _FORM_DATASOURCE_PROBE_LIMIT,
+    _FORM_LOCATION_LIMIT,
+    _normalize_form_options,
+    _match_option,
+    _apply_prefill,
+    _REQUEST_FORM_TOOL,
+    _BASE_TOOL_SCHEMAS,
+    _TOOL_BY_NAME,
+    _ALL_AGENT_TOOL_NAMES,
+    _SQL_TOOL_NAMES,
+    _ANALYTICAL_MARKERS,
+    _STRUCTURAL_MARKERS,
+    _tools_for_skill,
+    _search_items,
+    _format_sql,
 )
-
-# OpenAI 原生 function-calling 工具（自建 GLM 实测支持）。
-# 检索类直呼 OntologyQueryService（带 q 关键词 + limit），避免 MCP 目录“仅按域全返”导致的巨结果。
-_AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_objects",
-            "description": (
-                "按关键词检索当前数据域的已发布业务对象。返回 "
-                "{total_matched, returned, truncated, items}："
-                "total_matched 是真实命中总数，items 只是前几条；truncated=true 表示还有更多未返回。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string", "description": "检索关键词（对象名/含义）"},
-                },
-                "required": ["keyword"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_object",
-            "description": "获取单个业务对象的完整定义：字段（name/显示名/类型/语义）、进出关系、绑定的业务逻辑。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "object_id": {"type": "string", "description": "业务对象 id（来自 search_objects）"},
-                },
-                "required": ["object_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_relations",
-            "description": (
-                "按关键词检索业务关系（两个对象之间的关联）。返回 "
-                "{total_matched, returned, truncated, items}："
-                "total_matched 是真实命中总数，items 只是前几条；truncated=true 表示还有更多未返回，"
-                "此时不得把 items 当作全部关系。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string", "description": "检索关键词"},
-                },
-                "required": ["keyword"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_logics",
-            "description": (
-                "按关键词检索业务逻辑/指标口径（如 GMV、活跃客户）。返回 "
-                "{total_matched, returned, truncated, items}："
-                "total_matched 是真实命中总数，items 只是前几条。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {"type": "string", "description": "检索关键词"},
-                },
-                "required": ["keyword"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_logic",
-            "description": "获取单个业务逻辑/指标的完整口径：表达式、绑定的对象与字段。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "logic_id": {"type": "string", "description": "业务逻辑 id（来自 search_logics）"},
-                },
-                "required": ["logic_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_domain_overview",
-            "description": (
-                "获取当前数据域【已发布本体】的概览：对象/关系总数、"
-                "有关系与无关系的对象数（objects_with_relations / objects_without_relations）、"
-                "关系最多的对象（most_connected_objects），以及**可能被截断的**对象与关系样本清单"
-                "（objects_truncated / relations_truncated 标示是否截断）。"
-                "回答“有哪些对象/本体”“哪些对象有关系”这类概览问题时首选此工具。"
-                "**仅含已发布内容，不含未发布草稿**。"
-            ),
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "locate_entities",
-            "description": (
-                "把「在本体里找出与问题相关的对象/口径」这件事**整体外包**给检索助手，"
-                "只拿回一份标识符清单。当你不确定该用什么关键词、或域很大需要来回试几次时用它——"
-                "试错过程不会占用本对话上下文。"
-                "拿到清单后再对具体标识符调 get_object / get_logic 取细节。"
-                "若你已经知道要找什么，直接用 search_* 更快，不必绕这一道。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "intent": {
-                        "type": "string",
-                        "description": "要定位什么（用自然语言描述，可直接转述用户问题）",
-                    },
-                },
-                "required": ["intent"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_join_path",
-            "description": (
-                "查两个业务对象之间**如何关联**：返回已声明的关系路径（可多跳）、"
-                "每段的 ON 条件、基数链、扇出风险与安全聚合建议。"
-                "写涉及两个及以上对象的 SQL **之前必须先调用它**——"
-                "JOIN 条件只能来自这里，自行猜测外键字段会被语义证明拒绝。"
-                "返回空列表表示本体中这两个对象无从关联。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "from_object": {"type": "string", "description": "起点对象标识符（name）"},
-                    "to_object": {"type": "string", "description": "终点对象标识符（name）"},
-                    "measure_object": {
-                        "type": "string",
-                        "description": "被聚合度量所在对象的 name（判扇出用，默认取起点）",
-                    },
-                },
-                "required": ["from_object", "to_object"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "compile_metric",
-            "description": (
-                "把一条**已发布业务逻辑**按给定维度/过滤/时间粒度编译成 SQL，并返回口径展开轨迹。"
-                "支持三类：**指标**（GMV/客单价…→ 聚合查询）、"
-                "**标签**（客户分层/订单分级…→ 各分桶取值的分布）、"
-                "**规则**（金额必须为正…→ 统计**违规**行数）。"
-                "**凡是问已有指标/标签/规则的问题，一律用它，不要自己写 SQL**——"
-                "口径以本体为准，自己重写会算出与其它系统不一致的数。"
-                "返回的 sql 可直接交给 run_sql 执行；结果里的 logic_type 告诉你它是哪一类。"
-                "编译失败会给出原因与修复信号（如维度不可关联、口径尚未形式化）。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "logic_id": {
-                        "type": "string",
-                        "description": "业务逻辑 id（来自 search_logics，指标/标签/规则均可）",
-                    },
-                    "dimensions": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "拆分维度，写成 对象.字段（如 customer.region）或本对象字段名",
-                    },
-                    "filters": {
-                        "type": "array",
-                        "items": {"type": "object"},
-                        "description": (
-                            "追加过滤，每项 {property, op, value|values}；"
-                            "op ∈ =,!=,>,>=,<,<=,like,in。"
-                            "**字面量必须来自 profile_values 的真实取值**，不得凭空猜。"
-                        ),
-                    },
-                    "grain": {
-                        "type": "string",
-                        "description": "时间粒度：day/week/month/quarter/year",
-                    },
-                    "time_property": {
-                        "type": "string",
-                        "description": "时间粒度作用的时间字段（有多个时间字段时必填）",
-                    },
-                },
-                "required": ["logic_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "profile_values",
-            "description": (
-                "查某个字段**实际存着什么值**：类别/标识字段给 TopN 取值及频次与去重数，"
-                "度量字段给最小/最大/均值，时间字段给时间区间；另有空值率。"
-                "**写带字面量的 WHERE 之前必须先调用它**——"
-                "本体只定义字段存在，不保证你猜的枚举值（如「已完成」）真的在库里；"
-                "猜错的字面量会让查询返回 0 行而不报错，答案就错得看不出来。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "object_id": {"type": "string", "description": "业务对象 id 或标识符(name)"},
-                    "property": {"type": "string", "description": "字段标识符（本体属性 name）"},
-                },
-                "required": ["object_id", "property"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ask_clarification",
-            "description": (
-                "当问题存在**必须由用户澄清才能继续**的缺口时调用它反问，而不是挑一个可能错的解释硬答。"
-                "适用：问的指标在本体里有多个候选、时间字段有多个不知按哪个、"
-                "口径里的分类值不明确、问题范围过宽无法确定主对象。"
-                "**不适用**：本体里查不到相关内容（那应如实说明无法回答）、"
-                "或你只是没检索够（那应继续调检索工具）。"
-                "调用后本轮结束并把问题抛给用户，不要再输出别的内容。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "description": "向用户提出的澄清问题（中文，一句话）"},
-                    "options": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "供用户选择的候选项（**必须来自工具返回的真实实体**）",
-                    },
-                    "reason": {"type": "string", "description": "为什么需要澄清（一句话）"},
-                },
-                "required": ["question"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_sql",
-            "description": (
-                "在当前数据域的物理数据源上执行**只读 SELECT**，返回列与真实数据行。"
-                "表名/字段名必须使用本体标识符。若无可执行数据源会返回提示，此时改为给出建议 SQL。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {"type": "string", "description": "单条 SELECT 语句"},
-                    "limit": {"type": "integer", "description": f"返回行上限，默认 {_RUN_SQL_LIMIT}"},
-                },
-                "required": ["sql"],
-            },
-        },
-    },
-]
-
-
-# --- V3 S1：技能层工具 ---------------------------------------------------------
-# select_skill 是基础工具（永远可用）；render_chart 由 query 技能解锁（只解锁不收窄）。
-_SELECT_SKILL_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "select_skill",
-        "description": (
-            "当问题明确属于某类数据任务时，先选对应技能，获得该任务类型的专门策略与能力。"
-            "可选技能：" + skill_choices_text() + "。不确定就不必选，按通用方式作答即可。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "skill": {"type": "string", "enum": list(SKILLS.keys()), "description": "要切换到的技能名"},
-            },
-            "required": ["skill"],
-        },
-    },
-}
-
-_RENDER_CHART_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "render_chart",
-        "description": (
-            "把最近一次 run_sql 的结果渲染成图表（供前端展示）。仅在已取到数据且适合可视化时用；"
-            "x/y 必须照抄结果表里的真实列名，否则会被拒绝。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": ["bar", "line", "area"],
-                         "description": "图型：类别对比用 bar；时间序列用 line 或 area"},
-                "x": {"type": "string", "description": "X 轴列名（维度/时间），须为结果表列"},
-                "y": {"type": "string", "description": "Y 轴列名（度量），须为结果表列"},
-                "title": {"type": "string", "description": "可选：图表标题"},
-            },
-            "required": ["kind", "x", "y"],
-        },
-    },
-}
-
-_ANALYZE_RESULT_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "analyze_result",
-        "description": (
-            "对最近一次 run_sql 的结果做统计画像 + 离群检测（均值/分位/标准差 + IQR 异常值）。"
-            "回答「有没有异常/分布怎样/哪些离群」时用它拿到**真实计算**，别口头臆测。仅分析数值列。"
-            "给 order_by（如时间/月份列）还会算**趋势方向 + 突变点**（回答「趋势如何/哪里突变」）。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "columns": {"type": "array", "items": {"type": "string"},
-                             "description": "可选：只分析这些结果列（缺省=全部数值列）"},
-                "order_by": {"type": "string",
-                              "description": "可选：按此列（时间/序号）排序后算趋势与突变；须为结果列"},
-                "max_outliers": {"type": "integer", "description": "每列最多返回的离群/突变样例数，默认 5"},
-            },
-            "required": [],
-        },
-    },
-}
-
-_GET_LINEAGE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "get_lineage",
-        "description": (
-            "查看某业务对象的血缘/上下游邻域子图（中心对象 + depth 跳关系）。"
-            "center_id 用 search_objects/get_object 拿到的对象 id。"
-            "structure_type=derivation 的边是数据加工血缘，其它是业务关系（外键/引用等）。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "center_id": {"type": "string",
-                              "description": "中心业务对象的 id（来自 search_objects/get_object）"},
-                "depth": {"type": "integer", "description": "邻域跳数，默认 1，最多 3"},
-            },
-            "required": ["center_id"],
-        },
-    },
-}
-
-_PROPOSE_DRAFT_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "propose_draft",
-        "description": (
-            "为新建一个口径定义（指标 metric / 标签 tag / 规则 rule）产出**提案**（不写库）。"
-            "只给中文名、类型与口径自然语言说明；**不要编具体表达式**——口径由人在确认后补全。"
-            "提案由用户在前端点击确认后才创建为草稿口径。建前应先 search_logics 查重。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "display_name": {"type": "string", "description": "口径中文名，如「复购率」"},
-                "logic_type": {"type": "string", "enum": ["metric", "tag", "rule"],
-                               "description": "指标 metric / 标签 tag / 规则 rule"},
-                "name": {"type": "string",
-                         "description": "英文标识符（snake_case，如 repurchase_rate）；缺省则由中文名派生"},
-                "description": {"type": "string", "description": "口径的自然语言说明/意图"},
-            },
-            "required": ["display_name", "logic_type"],
-        },
-    },
-}
-
-_LINT_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "lint_against_standard",
-        "description": (
-            "用当前数据治理规约自检一份建数/建表规格（提案前调、据返回的 fix 自行修正）。"
-            "主要查物理表名等命名规约；返回违规项列表，空列表=合规。口径提案无物理表名时返回空。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "description": "制品类型，如 transform / materialize / metric（可空）",
-                },
-                "spec": {
-                    "type": "object",
-                    "description": '待自检的规格，如 {"target_table": "dim_customer"}',
-                },
-            },
-            "required": ["spec"],
-        },
-    },
-}
-
-# 数据任务类型白名单——agent 只在「物化/同步/加工」车道出提案；metric 归 propose_draft、
-# cluster（基建）不开，避免与口径提案重叠混淆。
-_ACTION_KINDS: tuple[str, ...] = ("materialize", "sync", "transform")
-_ACTION_KIND_LABEL: dict[str, str] = {
-    "materialize": "物化", "sync": "同步", "transform": "加工", "metric": "聚合",
-}
-
-# 任务链上可以出现的环节。比 _ACTION_KINDS 多一个 metric——「物化完清洗、清洗完聚合」里的
-# 聚合就是它（按已定义的业务逻辑口径产聚合 SQL）。单发提案不开 metric 是怕与口径提案
-# （propose_draft 产的是**口径定义**）混淆；在链里它的位置明确，不存在这个歧义。
-# cluster（基建）不进链：它与数据加工不是一条流水线上的事。
-_PIPELINE_KINDS: tuple[str, ...] = ("materialize", "sync", "transform", "metric")
-_PIPELINE_MAX_STEPS: int = 8
-
-_PROPOSE_ACTION_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "propose_action",
-        "description": (
-            "为新建一个数据任务（物化 materialize / 同步 sync / 加工 transform）产出**提案**"
-            "（不执行、不写库）。提案由用户在前端点击后走「校验→看 dry-run 差异→人工确认→执行」"
-            "的既有治理流程创建并运行。提案前先把「要对哪张/哪些表做什么」说清楚。\n"
-            "**物化必须在 context 里给 target_datasource_id**（落到哪个数据源，本体推导不出来）。"
-            "不知道选哪个就先调 request_form 让用户选，别自己编 id；缺了会被当场判错并给出真实候选。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": list(_ACTION_KINDS),
-                          "description": "物化 materialize / 同步 sync / 加工 transform"},
-                "intent": {"type": "string",
-                            "description": "自然语言任务意图，如「把客户主数据物化到数仓 dim_customer」"},
-                "context": {"type": "object",
-                             "description": (
-                                 "结构化上下文，取值一律来自 get_task_options 的真实候选。物化常用："
-                                 "target_datasource_id（必填）、target_database（目标库，一个库通吃各层；"
-                                 '要逐层分库才用 database_overrides={"层":"库名"}）、'
-                                 'table_overrides={"契约id":"表名"}、refresh_cron（整批调度）、'
-                                 'selected_targets=["实体名"]（只物化其中几个）、'
-                                 'overrides={"契约id":{"partition_key":"dt","load_strategy":"incremental"}}'
-                                 "（逐实体的分区键/装载方式/调度）。凭据只能传 *_ref/*_alias，勿传明文"
-                             )},
-            },
-            "required": ["kind", "intent"],
-        },
-    },
-}
-
-_PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "propose_pipeline",
-        "description": (
-            "当用户要的是**前后相继的多个任务**（如「物化到数仓，然后清洗，再按口径聚合」）时，"
-            "产出一条**任务链提案**（不执行、不写库）。链上每一步仍是一条独立任务，各自走"
-            "「校验→dry-run→人工确认→执行」；链负责的是记住下一步、并把上游已定下的目标数据源/"
-            "目标库/引擎接到下游，用户不必逐步重报。\n"
-            "**只有一个任务时用 propose_action**，别为单步套一条链。\n"
-            "**上游给过的选项下游不用再给**：target_datasource_id / target_database / engine 沿链"
-            "继承。第一步是 materialize 时它仍必须自己给 target_datasource_id（不知道就先 "
-            "request_form 问）。metric（聚合）要求口径已在「业务逻辑」里定义好，否则起草时会报错。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "这条链叫什么，一句话（如「客户主数据入仓链」）"},
-                "intent": {"type": "string", "description": "整条链要达成什么，一句话"},
-                "steps": {
-                    "type": "array",
-                    "description": f"有序步骤（2-{_PIPELINE_MAX_STEPS} 步），按执行先后排列",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "kind": {
-                                "type": "string", "enum": list(_PIPELINE_KINDS),
-                                "description": "物化 materialize / 同步 sync / 清洗加工 transform / 聚合 metric",
-                            },
-                            "intent": {"type": "string", "description": "这一步做什么，一句话"},
-                            "context": {
-                                "type": "object",
-                                "description": (
-                                    "这一步的结构化上下文，键与 propose_action 同；"
-                                    "上游已给过的落点（数据源/库/引擎）不必重复"
-                                ),
-                            },
-                        },
-                        "required": ["kind", "intent"],
-                    },
-                },
-            },
-            "required": ["name", "steps"],
-        },
-    },
-}
-
-# ---- P1：建数任务的可选项目录 ----
-# 建数表单此前长不出下拉框，根因是模型没有任何工具能读到物理侧的候选（数据源/库/契约/
-# 装载方式/调度）——request_form 的「options 必须来自真实实体」于是永远无法满足，只能退化
-# 成文本输入。本工具就是那份缺失的目录：与物化弹窗（MaterializeModal）读同一批服务，
-# 保证「对话里选到的」和「弹窗里选到的」是同一套事实。
-
-# 调度频率预置项。与前端 CronPicker 同域：那里是任意 cron 的下拉编辑器，这里给几个常用
-# 值让模型直接摆进表单；用户要别的频率仍可自填合法 cron 表达式。
-_CRON_PRESETS: tuple[dict[str, str], ...] = (
-    {"expr": "0 2 * * *", "label": "每天 02:00"},
-    {"expr": "0 */6 * * *", "label": "每 6 小时"},
-    {"expr": "0 * * * *", "label": "每小时"},
-    {"expr": "0 3 * * 1", "label": "每周一 03:00"},
-    {"expr": "0 4 1 * *", "label": "每月 1 日 04:00"},
-    {"expr": "", "label": "不定时（仅手动触发）"},
-)
-
-# 装载方式的中文标签与**实际语义**。语义不能省：CDC 在物化里其实按全量跑，模型若照字面
-# 理解会给用户一个错误的承诺（与 MaterializeModal 的 STRATEGY_HINT 是同一句话）。
-_LOAD_STRATEGIES: tuple[dict[str, str], ...] = (
-    {"value": "full", "label": "全量覆盖",
-     "hint": "INSERT OVERWRITE：重写整表/分区"},
-    {"value": "incremental", "label": "增量追加",
-     "hint": "INSERT INTO：按分区键追加，水位由调度器注入；未配分区键会退化为无谓词追加"},
-    {"value": "cdc", "label": "CDC 变更捕获",
-     "hint": "物化内不承载变更捕获，本次按全量覆盖执行；要 CDC 请改用同步作业"},
-)
-
-# 候选清单的回灌上限。物化契约会有几百条（一个 734 对象的域即如此），整份倒进上下文
-# 既挤爆预算也没人读——按 search_* 的既有约定给 {total, returned, truncated, items}。
-_TASK_OPTIONS_LIMIT: int = 30
-
-_GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "get_task_options",
-        "description": (
-            "读取新建数据任务时**可选什么**：物化的目标数据源/目标库/待物化实体（含各自的"
-            "契约 id、分层、分区键、装载方式、现有调度）/装载方式/调度频率预置；同步与加工的"
-            "候选对象。\n"
-            "**建数任务开工第一步就调它**：propose_action 的 context 与 request_form 的 "
-            "options 都必须用这里返回的真实值，不得自己编数据源 id、库名或表名。"
-            "只读，不建任何东西。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": list(_ACTION_KINDS),
-                          "description": "要建的任务类型：materialize / sync / transform"},
-                "target_datasource_id": {
-                    "type": "string",
-                    "description": "物化专用：给了才会去这个数据源上列库（databases），并按其类型定引擎",
-                },
-                "keyword": {"type": "string",
-                             "description": "按实体名/显示名过滤候选，候选很多时用它收窄"},
-            },
-            "required": ["kind"],
-        },
-    },
-}
-
-# 由服务端注入的 context 键——当前会话的本体是确定的，模型不必（也无从）给。
-_AUTO_ACTION_CONTEXT_KEYS: frozenset[str] = frozenset({"ontology_id"})
-
-_ACTION_CONTEXT_HINT = (
-    "这些是起草该任务必须先定下、且无法从本体推导的选项。用 request_form 把它们做成一张表单"
-    "让用户选（候选项用本结果里给出的真实值），拿到回填后再重新 propose_action。不要自己编 id。"
-)
-
-
-def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
-    """该类任务起草前还缺哪些 context 键。
-
-    判据取 Drafter 自己声明的 ``required_context``（其 ``require_context`` 的同一份字面值），
-    不在这里另抄一份——否则两处迟早分叉。注意**不能**改用规约的
-    ``required_metadata.per_artifact``：那约束的是 Spec 字段（如 sync 的 source/target），
-    由 Drafter 从本体推导，不是调用方要给的 context 键。
-    """
-    # 局部导入：app.agents 在导入期注册 Drafter/Executor（连带拉起 materialization_runner），
-    # 读侧模块不该为一次校验把整条写侧流水线拽进导入图。
-    from app.agents import registry
-
-    try:
-        drafter = registry.get_drafter(kind)
-    except registry.UnregisteredKindError:
-        return []
-    return [
-        key
-        for key in drafter.required_context
-        if key not in _AUTO_ACTION_CONTEXT_KEYS and not context.get(key)
-    ]
-
-
-def _action_context_candidates(db: Session, missing: list[str]) -> dict[str, Any]:
-    """缺失键的真实候选值——只说「缺 target_datasource_id」模型和用户都无从下手。
-
-    只返回选项本身（id/名称/类型/连通状态），凭据不出现（DSN 存的本就是 ``dsn_secret_ref``）。
-    """
-    if "target_datasource_id" not in missing:
-        return {}
-    from app.models import DataSource
-
-    rows = db.query(DataSource).order_by(DataSource.name).limit(50).all()
-    return {
-        "target_datasource_id_options": [
-            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status} for s in rows
-        ]
-    }
-
-
-_GET_TASK_STATUS_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "get_task_status",
-        "description": (
-            "回读数据任务（治理制品）的执行状态与回执摘要——回答「某任务跑到哪了/成没成功」。"
-            "给 artifact_id 查单个；否则按 kind/limit 列最近若干。只读，不触发执行。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "artifact_id": {"type": "string", "description": "指定任务（制品）id；缺省则列最近的"},
-                "kind": {"type": "string", "enum": list(_ACTION_KINDS),
-                          "description": "按类型过滤（可空）"},
-                "limit": {"type": "integer", "description": "列表条数上限，默认 5"},
-            },
-            "required": [],
-        },
-    },
-}
-
-# 计划步骤状态（P2 显式规划）
-_PLAN_STATUSES: frozenset[str] = frozenset({"pending", "active", "done"})
-_PLAN_MAX_STEPS: int = 12
-
-_UPDATE_PLAN_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "update_plan",
-        "description": (
-            "为开放式/多步分析列一份**计划**（2-5 步为宜），让用户看到你打算怎么拆解这个问题。"
-            "整份计划**每次调用整体覆盖**（同 TodoWrite）；进展时可再调一次把某步 status 改为 "
-            "active/done，但不必每步都回来更新（执行轨迹已实时展示进度）。单值/单步问题不必规划。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "steps": {
-                    "type": "array",
-                    "description": "计划步骤（有序）；每步一句话标题",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "该步要做什么，一句话"},
-                            "status": {"type": "string", "enum": list(_PLAN_STATUSES),
-                                        "description": "pending/active/done，缺省 pending"},
-                        },
-                        "required": ["title"],
-                    },
-                },
-                "note": {"type": "string", "description": "对整体思路的一句可选说明"},
-            },
-            "required": ["steps"],
-        },
-    },
-}
-
-_PROPOSE_PREFERENCE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "propose_preference",
-        "description": (
-            "当用户明确表达一个**应跨会话记住的口径/范围约定**（如「以后成交额都按含税口径」"
-            "「华东含上海」）时，产出一份**记忆提案**（不写库）。由用户在前端点「记住」后才落库为"
-            "本域约定，后续作为软提示注入。仅在用户确实在立约定时用，普通提问别调。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "要记住的约定，一句话（如「成交额默认含税口径」）"},
-            },
-            "required": ["text"],
-        },
-    },
-}
-
-# P6 交互表单：需一次补齐多个结构化参数才能继续时，Agent 生成一张可填写表单收集上下文，
-# 比逐条 ask_clarification 追问高效。与 clarification 同为终态出口（本轮结束等用户回填）。
-_FORM_FIELD_TYPES: tuple[str, ...] = (
-    "text", "textarea", "number", "select", "multiselect", "radio", "boolean", "date",
-    # autocomplete = 带候选建议的文本框（候选是建议不是闭集，如分区键：物理表上可能有
-    # 本体没建模的列）；cron = 与 CronPicker 同一个调度选择器（任意合法 cron，非预置项）。
-    "autocomplete", "cron",
-)
-_FORM_MAX_FIELDS: int = 10
-# 建表单时最多探几个数据源的库列表：每个源一次真实连接，全探会把发表单这一步拖成秒级。
-_FORM_DATASOURCE_PROBE_LIMIT: int = 8
-# 「数据源 → 库」合并候选的条数上限：一个源上几百个库时下拉本身就没法用了。
-_FORM_LOCATION_LIMIT: int = 200
-
-
-def _normalize_form_options(raw: Any) -> list[dict[str, str]]:
-    """候选项归一为 ``{label, value}``（可带 disabled）。
-
-    **显示什么和回填什么是两件事**：带 id 的候选（数据源、对象）此前只能写成「名称｜id」，
-    那串 id 就直接糊在下拉里给人看。模型给纯字符串时 label = value，行为不变。
-    """
-    if not isinstance(raw, list):
-        return []
-    out: list[dict[str, str]] = []
-    for item in raw:
-        if isinstance(item, str):
-            text = item.strip()
-            if text:
-                out.append({"label": text, "value": text})
-            continue
-        if not isinstance(item, dict):
-            continue
-        value = str(item.get("value") if item.get("value") is not None else "").strip()
-        label = str(item.get("label") or value).strip()
-        if not value:
-            value = label
-        if not label:
-            continue
-        option: dict[str, Any] = {"label": label[:120], "value": value[:255]}
-        if item.get("disabled"):
-            option["disabled"] = True
-        out.append(option)
-    return out
-
-
-def _match_option(field: dict, value: Any) -> Any | None:
-    """把一个预填值对到该字段的真实候选上；对不上返回 None。
-
-    对不上就**丢掉**：一个听错的库名若原样落进 default，用户看到的是一张「系统已经替我
-    确认过」的表单，而它是错的——错得比空着更贵。
-    """
-    options = field.get("options") or []
-    if not options:
-        # 无候选的字段（text/number/cron/…）自由取值，原样采用。
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    if field.get("type") == "autocomplete":
-        # 候选是**建议**不是闭集：分区键可以是本体没建模的物理列，对不上也照填。
-        for option in options:
-            if text in (option["value"], option["label"]):
-                return option["value"]
-        return text
-    for option in options:
-        if option.get("disabled"):
-            continue  # 选不了的候选不能被预填绕过（如执行侧不支持的装载方式）
-        if text == option["value"] or text == option["label"]:
-            return option["value"]
-    lowered = text.lower()
-    for option in options:
-        if option.get("disabled"):
-            continue
-        if lowered in (option["value"].lower(), option["label"].lower()):
-            return option["value"]
-    # 退到「唯一子串命中」：用户说「落到 dw 库」，候选是「仓库（hive） → dw」。
-    hits = [
-        o for o in options
-        if not o.get("disabled") and (lowered in o["label"].lower() or lowered in o["value"].lower())
-    ]
-    return hits[0]["value"] if len(hits) == 1 else None
-
-
-def _apply_prefill(fields: list[dict], raw: Any) -> list[str]:
-    """把模型读到的「用户已经说过的取值」核对后填成默认值。返回命中的字段名。"""
-    if not isinstance(raw, dict):
-        return []
-    by_name = {f["name"]: f for f in fields}
-    hit: list[str] = []
-    for name, value in raw.items():
-        field = by_name.get(str(name).strip())
-        if field is None or value is None or value == "":
-            continue
-        if field["type"] == "multiselect":
-            values = value if isinstance(value, list) else [value]
-            matched = [m for m in (_match_option(field, v) for v in values) if m is not None]
-            if matched:
-                field["default"] = matched
-                hit.append(field["name"])
-            continue
-        if isinstance(value, list):
-            continue
-        matched = _match_option(field, value)
-        if matched is not None:
-            field["default"] = matched
-            hit.append(field["name"])
-    return hit
-
-
-_REQUEST_FORM_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "request_form",
-        "description": (
-            "当需要用户**一次补齐多个结构化参数**才能继续时，生成一张**可填写表单**收集上下文，"
-            "而不是来回追问多轮。适用：取数需明确「指标+时间范围+分组维度」、"
-            "建数任务需明确「目标表+更新策略+调度」等。"
-            "select/radio/multiselect 的 options **必须来自工具返回的真实实体**；"
-            "无从预置就用 text/number 让用户自填。调用后本轮结束、等用户填完提交再继续。"
-            "只需单个澄清用 ask_clarification；无需用户补参数别乱发表单。\n"
-            "**建数任务（物化/同步/加工）传 task_kind**：服务端会按该类型补齐必问字段并填入真实"
-            "候选（物化=目标数据源与库/表名/装载方式/分区键/调度频率），你只需给 title；"
-            "fields 可留空，给了则作为额外字段追加。这样不会漏问参数。\n"
-            "**用户已经说过的用 prefill 预填**（如「物化到 dw 库、每天凌晨跑」）：服务端会拿真实"
-            "候选核对，对得上就填成默认值、对不上就丢掉。别把已经问到的答案再问一遍。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "表单标题：这一步在收集什么（一句话）"},
-                "task_kind": {
-                    "type": "string", "enum": list(_ACTION_KINDS),
-                    "description": "建数任务表单填这个（materialize/sync/transform），服务端据此补齐必问字段与真实候选",
-                },
-                "target_datasource_id": {
-                    "type": "string",
-                    "description": "task_kind=materialize 且已定下数据源时给，服务端会据此把「目标库」也列成下拉",
-                },
-                "intent": {"type": "string", "description": "可选：为什么需要这些信息（一句话辅助说明）"},
-                "submit_label": {"type": "string", "description": "可选：提交按钮文案，缺省「提交」"},
-                "prefill": {
-                    "type": "object",
-                    "description": (
-                        "可选：{字段名: 取值}，把用户在对话里**已经说过**的填成默认值。"
-                        "取值可以是候选的 label 或 value（也接受能唯一命中的片段，如库名 dw）；"
-                        "服务端核对不上的会被丢掉，故不必怕填错，但也别拿它编造用户没说过的东西"
-                    ),
-                },
-                "fields": {
-                    "type": "array",
-                    "description": f"表单字段（1-{_FORM_MAX_FIELDS} 个）",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string",
-                                      "description": "字段标识（英文 snake_case，回填时作键）"},
-                            "label": {"type": "string", "description": "字段中文标签"},
-                            "type": {"type": "string", "enum": list(_FORM_FIELD_TYPES),
-                                      "description": ("控件类型：text 单行/textarea 多行/number 数字/"
-                                                      "select 单选下拉/multiselect 多选/radio 单选按钮/"
-                                                      "boolean 开关/date 日期/autocomplete 带建议的文本框/"
-                                                      "cron 调度选择器")},
-                            "options": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "label": {"type": "string", "description": "给人看的名称"},
-                                        "value": {"type": "string",
-                                                   "description": "回填给你的取值（id 类放这里，界面上不显示）"},
-                                    },
-                                    "required": ["label", "value"],
-                                },
-                                "description": (
-                                    "select/radio/multiselect/autocomplete 的候选项（须来自真实实体）。"
-                                    "**label 是给人看的、value 是回给你的**：带 id 的候选把 id 放 value，"
-                                    "别把 id 塞进 label 糊在下拉里。纯字符串也接受（label = value）"
-                                ),
-                            },
-                            "required": {"type": "boolean", "description": "是否必填，缺省 false"},
-                            "placeholder": {"type": "string", "description": "可选：占位提示"},
-                            "help": {"type": "string", "description": "可选：字段说明"},
-                            "default": {"description": "可选：默认值（字符串/数字/布尔/数组）"},
-                        },
-                        "required": ["name", "label", "type"],
-                    },
-                },
-            },
-            "required": ["title", "fields"],
-        },
-    },
-}
-
-# 基础工具集 = 12 检索/执行工具 + select_skill + 记忆提案 + 交互表单；技能激活后再并上其 extra 工具。
-_BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [
-    *_AGENT_TOOL_SCHEMAS, _SELECT_SKILL_TOOL, _PROPOSE_PREFERENCE_TOOL, _REQUEST_FORM_TOOL,
-]
-_TOOL_BY_NAME: dict[str, dict[str, Any]] = {
-    t["function"]["name"]: t
-    for t in [
-        *_BASE_TOOL_SCHEMAS,
-        _RENDER_CHART_TOOL,
-        _ANALYZE_RESULT_TOOL,
-        _GET_LINEAGE_TOOL,
-        _PROPOSE_DRAFT_TOOL,
-        _LINT_TOOL,
-        _PROPOSE_ACTION_TOOL,
-        _PROPOSE_PIPELINE_TOOL,
-        _GET_TASK_OPTIONS_TOOL,
-        _GET_TASK_STATUS_TOOL,
-        _UPDATE_PLAN_TOOL,
-    ]
-}
-# 所有可能出现的工具名——供 FactLedger 登记为可信上下文（工具名非业务实体）。
-_ALL_AGENT_TOOL_NAMES: list[str] = list(_TOOL_BY_NAME.keys())
-
-# 取数（写 SQL / 产出可执行 SQL）工具——结构性问题下按意图门控从工具集移除并在 dispatch 硬拒。
-_SQL_TOOL_NAMES: frozenset[str] = frozenset({"run_sql", "compile_metric"})
-
-# 意图分类关键词（规则优先、确定性；无额外 LLM 调用）。
-# 结构性=纯元数据/结构问题（对象有哪些属性/字段/关系、口径定义），应基于本体元数据直接作答；
-# 取数=需要实际查库出数。**analytical 赢平局**（fail-open）：宁可多给取数能力，绝不误伤真实取数。
-# 注意：取数标记只收「聚合动词/量词」（多少/统计/求和…），**不收营收名词**（金额/总额/总数）——
-# 后者是指标名/字段名的组成部分（如指标「订单总额」），会把「…的定义」这类结构问题误判成取数。
-_ANALYTICAL_MARKERS: tuple[str, ...] = (
-    "多少", "数量", "几个", "趋势", "环比", "同比", "对比", "占比",
-    "比例", "排名", "排行", "top", "明细", "统计", "近", "分布", "增长",
-    "均值", "平均", "合计", "汇总", "求和", "计数",
-    # 时间窗——问「某时段的业务表现」即在要真数据（即便没写聚合动词）。
-    # 与结构问题正交（结构问对象/字段/口径定义，不带时段），加进来不误伤结构分类。
-    "今年", "去年", "本年", "本月", "上月", "当月", "本周", "上周",
-    "本季", "季度", "年度", "今日", "当日", "昨天",
-)
-_STRUCTURAL_MARKERS: tuple[str, ...] = (
-    "有哪些", "哪些属性", "哪些字段", "包含哪些", "由哪些", "组成", "构成",
-    "属性", "字段", "结构", "定义", "关系", "关联", "主键", "外键",
-    "数据类型", "schema", "元数据", "是什么意思", "怎么理解",
-)
-# 接地判定的适用范围由「需要精准回答的意图」正向定义，而非反向枚举「哪些不必拒答」：
-# 只有 analytical（要真数据）和 structural（要具体本体元数据）**才要求接地**——答业务事实
-# 却没查过就该拦。其余一切（打招呼、问能力、产品用法/how-to、一般解释）默认 general，
-# 自由作答、不要求接地，因此**无需维护一张一般问题白名单**（默认即豁免）。
-# 即便 general 里混进真本体问题，F4 断言校验仍拦得住捏造的具名实体/数值，是最后一道网。
-
-
-def _tools_for_skill(
-    skill: "Skill | None", *, sql_allowed: bool = True
-) -> list[dict[str, Any]]:
-    """当前可用工具集：基础工具 + 激活技能解锁的额外工具（只增不减）。
-
-    ``sql_allowed=False``（结构性问题）时**收窄**——从工具集移除取数工具
-    （run_sql / compile_metric），让模型在 API 层就无法调用它们。这是「只解锁不收窄」
-    的意图门控例外：默认 True 保持旧行为，仅结构性 turn 显式收窄。
-    """
-    base = _BASE_TOOL_SCHEMAS if skill is None else [
-        *_BASE_TOOL_SCHEMAS,
-        *[_TOOL_BY_NAME[n] for n in skill.extra_tool_names if n in _TOOL_BY_NAME],
-    ]
-    if sql_allowed:
-        return base
-    return [t for t in base if t["function"]["name"] not in _SQL_TOOL_NAMES]
-
-
-def _search_items(result: Any) -> list[dict]:
-    """取检索类工具结果里的条目列表。
-
-    兼容三种形态：完整信封 ``{items:[…]}``、截断信封 ``{sample:[…]}``（P2.3）、
-    以及历史的裸列表。
-    """
-    if isinstance(result, dict):
-        result = result.get("items") or result.get("sample")
-    if not isinstance(result, list):
-        return []
-    return [x for x in result if isinstance(x, dict)]
-
-
-def _format_sql(sql: str | None) -> str | None:
-    """使用 sqlparse 美化 SQL；失败时原样返回。"""
-    if not sql or not sql.strip():
-        return sql
-    try:
-        formatted = sqlparse.format(
-            sql,
-            reindent=True,
-            keyword_case="upper",
-            strip_comments=False,
-            use_space_around_operators=True,
-        )
-        return formatted.rstrip()
-    except Exception:
-        return sql
-
 
 @dataclass
 class _ObjectSnapshot:
@@ -1170,36 +200,12 @@ class ChatBiService:
         )
 
         if use_mock:
-            # Mock 路径：保持原有关键词接地 —— 无命中直接拒绝，避免编造
-            if not grounded_objects and not grounded_logics:
-                return self._ungrounded_refusal(
-                    domain_id=domain_id,
-                    domain_name=domain.name,
-                    ontology_id=ontology.id,
-                    question=question,
-                )
-            payload = self._mock_answer(
-                question=question,
-                snapshots=snapshots,
-                relations=relations,
-                logics=logics,
-                matched_objects=grounded_objects,
-                matched_logics=grounded_logics,
+            # 未配置 LLM：不再用规则模板伪造回答，直接提示去接入模型。
+            return self._llm_not_configured(
+                domain_id=domain_id,
+                domain_name=domain.name,
+                ontology_id=ontology.id,
             )
-            payload = resolver.resolve_payload(payload)
-            payload = self._enforce_grounded_refs(
-                payload,
-                grounded_objects=grounded_objects,
-                grounded_logics=grounded_logics,
-                resolver=resolver,
-            )
-            if not payload.get("referenced_objects") and not payload.get("referenced_logics"):
-                return self._ungrounded_refusal(
-                    domain_id=domain_id,
-                    domain_name=domain.name,
-                    ontology_id=ontology.id,
-                    question=question,
-                )
         else:
             # Agent 路径：LLM 自主多步调用工具检索/跑数；refs/sql/data_result 从工具轨迹收割。
             # 不再一次性灌全量本体 —— 上下文由分页工具按需拉取，结构上根治 413。
@@ -1328,26 +334,9 @@ class ChatBiService:
         resolver = _ReferenceResolver(objects=snapshots, relations=relations, logics=logics)
 
         if use_mock:
-            # Mock 无过程可流：直接产出终态 done（逻辑与 ask() 的 mock 分支一致）
-            if not grounded_objects and not grounded_logics:
-                yield {"type": "done", "payload": self._ungrounded_refusal(
-                    domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)}
-                return
-            payload = self._mock_answer(
-                question=question, snapshots=snapshots, relations=relations, logics=logics,
-                matched_objects=grounded_objects, matched_logics=grounded_logics)
-            payload = resolver.resolve_payload(payload)
-            payload = self._enforce_grounded_refs(
-                payload, grounded_objects=grounded_objects, grounded_logics=grounded_logics, resolver=resolver)
-            if not payload.get("referenced_objects") and not payload.get("referenced_logics"):
-                yield {"type": "done", "payload": self._ungrounded_refusal(
-                    domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)}
-                return
-            if payload.get("suggested_sql"):
-                payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
-            payload.update({"domain_id": domain_id, "domain_name": domain.name,
-                            "ontology_id": ontology.id, "used_mock": True})
-            yield {"type": "done", "payload": payload}
+            # 未配置 LLM：直接产出提示去接入模型的终态，不再伪造规则回答。
+            yield {"type": "done", "payload": self._llm_not_configured(
+                domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id)}
             return
 
         # Agent 流式路径：透传事件流，done 事件走与 ask() 相同的后处理
@@ -2082,17 +1071,27 @@ class ChatBiService:
             )
         except Exception as exc:  # noqa: BLE001
             return {"executed": False, "error": str(exc)[:300], "sql": sql}, "SQL 执行失败", True
+        truncated = len(rows) >= limit
+        result: dict[str, Any] = {
+            "executed": True,
+            "sql": sql,
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+            "proved": proved,
+        }
+        # 截断 + 无 ORDER BY → 这是一份「无序样本」（执行层虽已自动补 ORDER BY 1
+        # 保证可复现，但首列排序无业务含义），明确告知不是全集、非按业务键取样，
+        # 避免用户把两次样例当作数据矛盾。
+        if truncated and not re.search(r"\border\s+by\b", sql, flags=re.IGNORECASE):
+            result["sample_note"] = (
+                f"已截断到前 {limit} 行且原 SQL 未指定排序：这是一份无业务序的样本、非全集。"
+                "若需稳定/可复现的明细，请按主键或时间键显式 ORDER BY 后重取。"
+            )
         return (
-            {
-                "executed": True,
-                "sql": sql,
-                "columns": columns,
-                "rows": rows,
-                "row_count": len(rows),
-                "truncated": len(rows) >= limit,
-                "proved": proved,
-            },
-            f"返回 {len(rows)} 行",
+            result,
+            f"返回 {len(rows)} 行" + ("（无序样本）" if result.get("sample_note") else ""),
             False,
         )
 
@@ -2709,6 +1708,55 @@ class ChatBiService:
         return (
             res.to_dict(),
             f"检索助手定位到 {hit} 个实体（{res.steps} 步在隔离上下文中完成）",
+            False,
+        )
+
+    async def _dispatch_scout_query(
+        self,
+        db: Session,
+        *,
+        client,
+        model: str,
+        domain_id: str,
+        ontology_id: str,
+        args: dict,
+        telemetry: RunTelemetry,
+    ) -> tuple[Any, str, bool]:
+        """V4 O4：把取数探路（定位/profile/找 join/编口径）外包给隔离子 agent，
+        只把候选 SQL + 要点带回主上下文。子 agent 不执行 SQL——执行仍由主 agent 过闸。"""
+        from app.services.query_scout_agent import scout_query
+
+        intent = str(args.get("intent") or "").strip()
+        if not intent:
+            return {"error": "需要 intent"}, "缺少 intent", True
+        try:
+            res = await scout_query(
+                db,
+                client=client,
+                model=model,
+                intent=intent,
+                domain_id=domain_id,
+                ontology_id=ontology_id,
+                dispatch=self._dispatch_agent_tool,
+                tool_schemas=_AGENT_TOOL_SCHEMAS,
+                to_thread=asyncio.to_thread,
+            )
+        except Exception as exc:  # noqa: BLE001 — 子 agent 故障不得拖垮主问答
+            logger.warning("query scout sub-agent failed: %s", exc)
+            return (
+                {"error": f"探路助手未能完成：{str(exc)[:200]}",
+                 "fix": "请直接用 profile_values / find_join_path 探路后自己写 SQL。"},
+                "探路助手失败",
+                True,
+            )
+
+        telemetry.subagent(
+            llm_calls=res.llm_calls, steps=res.steps, isolated_chars=res.isolated_chars
+        )
+        return (
+            res.to_dict(),
+            f"探路助手产出候选 SQL（{res.steps} 步在隔离上下文中完成）"
+            + ("" if res.sql else "：未探出可用 SQL"),
             False,
         )
 
@@ -4191,6 +3239,33 @@ class ChatBiService:
             return "structural"
         return "general"
 
+    # V5 F2：拒答譍气——用于判「首轮未搜就拒答」。宁可少逗也不乱逗：只当正文确
+    # 实在表达“找不到/无法回答/未检索到”时才算（已经给出实体内容的正常答案不命中）。
+    _REFUSAL_MARKERS: tuple[str, ...] = (
+        "无法回答", "无法完成", "无法查询", "无法基于", "无法为您", "无法提供",
+        "未找到", "未检索到", "没有找到", "找不到", "未发现",
+        "不包含", "未包含", "不存在", "没有相关", "未发布", "没有发布",
+        "很抱歉", "抱歉", "没有名为", "不存在名为",
+        # “没有/不存在 … 对象/字段”类（实测高频拒答句式）
+        "没有这个对象", "没有该对象", "不包含该对象", "没有相关对象",
+    )
+
+    # “没有/不存在/不包含…对象/字段/业务对象”：两个否定词与实体名词同现即算拒答（避免逐一枚举句式）。
+    _REFUSAL_PATTERN = re.compile(
+        r"(没有|不存在|不包含|未包含|无)[^。\n]{0,20}(对象|字段|业务对象|业务逻辑|指标|口径)"
+    )
+
+    @classmethod
+    def _looks_like_refusal(cls, text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return False
+        # 只看开头一段（拒答通常第一句就亮明），避免长答案末尾隔靶词误伤。
+        head = t[:150]
+        if any(m in head for m in cls._REFUSAL_MARKERS):
+            return True
+        return bool(cls._REFUSAL_PATTERN.search(head))
+
     @staticmethod
     def _extract_sql_from_text(text: str | None) -> str | None:
         """从答案正文里抽取 ```sql 围栏块（兜底：模型未走 run_sql 时不丢 SQL）。"""
@@ -4305,6 +3380,47 @@ class ChatBiService:
                 + "\n".join(seed_lines)
             )
 
+        # 阶梯式加载（窄而深）：优先锁定**最可能相关**的少数本体，对命中者一次性带回
+        # 完整信息包（字段全集/关系/口径/取值样例/物化引擎），模型开口前即掌握细节，
+        # 不必来回 get_object→profile_values→查物化。无命中/置信度过低则不注入，
+        # 不把无关实体倒进上下文——与"全量加载"相反：范围窄、信息全。
+        ladder_note = ""
+        ladder_names: list[str] = []
+        try:
+            ladder = OntologyLadderLoader(self.query_service).load(
+                db,
+                domain_id=domain.id,
+                ontology_id=ontology.id,
+                question=question,
+                principal_role=principal_role,
+                want=2,
+                # 结构性/概览类无需真实取数样例；取数意图才拉画像（真实数据、成本高）。
+                with_profiles=self._classify_intent(question) == "analytical",
+            )
+            if ladder.objects:
+                import json as _json
+
+                pkgs = [o.to_dict() for o in ladder.objects]
+                ladder_note = (
+                    "\n\n【已深加载的相关本体】以下是系统为本次问题精确锁定并**完整加载**的"
+                    "业务对象（含字段、关系、绑定口径、取值样例/统计、物化引擎），已是当前问题"
+                    "最相关的实体，可直接据此作答或写取数 SQL；如需其它实体再调 search_*：\n"
+                    + _json.dumps(pkgs, ensure_ascii=False)
+                )
+                # 深加载出的对象/字段名是服务端从已发布本体算出的可信事实，登记进账本，
+                # 否则模型引用它们会被 F4 当成幻觉而误拒答。
+                for pkg in pkgs:
+                    if pkg.get("display_name"):
+                        ladder_names.append(pkg["display_name"])
+                    if pkg.get("name"):
+                        ladder_names.append(pkg["name"])
+                    for p in pkg.get("properties") or []:
+                        for k in ("display_name", "name"):
+                            if p.get(k):
+                                ladder_names.append(p[k])
+        except Exception as exc:  # noqa: BLE001 — 阶梯加载是增强，坏了不拖垮问答
+            logger.info("ontology ladder load skipped: %s", exc)
+
         # P2.1：域语义卡常驻 system——模型开口前就知道域的骨架，
         # 不必先花一步调 get_domain_overview，也不必靠 prompt 铁律约束概览类问题。
         card = None
@@ -4323,13 +3439,18 @@ class ChatBiService:
             memory_text = ""
 
         messages: list[dict] = [
-            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{memory_text}{seed_note}"}
+            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{memory_text}{ladder_note}{seed_note}"}
         ]
-        for item in history[-6:]:
-            role = item.get("role")
-            content = item.get("content")
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": str(content)})
+        # V4 O1：跨轮 compaction 取代 history[-6:] 硬截断——超预算的旧轮抽取式摘要，
+        # 近轮原样保留。摘要不额外调 LLM（护住 avg_llm_calls）。摘要里的实体名稍后入账防误拒答。
+        comp = compact_conversation(
+            history,
+            char_budget=getattr(env_settings, "agent_history_char_budget", 6000),
+            enabled=(getattr(env_settings, "agent_compaction", "on") or "on").lower() != "off",
+        )
+        if comp.summary:
+            messages.append({"role": "system", "content": comp.summary})
+        messages.extend(comp.recent)
         messages.append({"role": "user", "content": question})
 
         steps: list[dict] = []
@@ -4363,8 +3484,28 @@ class ChatBiService:
                 *[n for n, _ in card.clusters],
                 *card.metrics,
             )
+        # 阶梯深加载出的对象/字段名同样是服务端算出的可信事实，入账免被 F4 误判幻觉。
+        if ladder_names:
+            ledger.add_context_name(*ladder_names)
+        # V4 O1：早前对话摘要里出现的具名实体也入账——否则模型引用「摘要里看到的旧对象」
+        # 会被 F4 当幻觉误拒答（compaction 的接地不变式）。
+        if comp.carried_names:
+            ledger.add_context_name(*comp.carried_names)
+        # V5 T3：摘要里完整保留的关键 SQL，其表/列标识符也入账——模型若复述“上一轮用
+        # 的是 order.amount”不得被 F4 当幻觉（SQL 已在早前轮过 F3 证明，同源可信）。
+        if comp.key_sql:
+            _sql_idents: list[str] = []
+            for _sql in comp.key_sql:
+                # 抽表/列名：单词与点分隔的限定名（order.amount 同时入 order.amount 与 amount）。
+                for _tok in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", _sql):
+                    _sql_idents.append(_tok)
+                    if "." in _tok:
+                        _sql_idents.append(_tok.rsplit(".", 1)[-1])
+            if _sql_idents:
+                ledger.add_context_name(*_sql_idents)
 
         tel = telemetry if telemetry is not None else RunTelemetry()
+        tel.compaction(triggered=comp.triggered, summarized_turns=comp.summarized_turns)
 
         # 意图门控（架构强制，非提示词）：仅**结构性**问题（问对象有哪些属性/字段/关系等）
         # 收窄取数工具，避免答非所问地追加取数 SQL。analytical 与 general 都保留取数能力
@@ -4384,10 +3525,20 @@ class ChatBiService:
             logger.info("external tools unavailable: %s", exc)
             external_schemas, external_names = [], set()
 
+        # V4 O3 渐进披露：read_result 不进基础工具集——它只在有 run_sql 结果可翻时才有意义。
+        # 首轮不暴露（省首轮 prefill）；首次 run_sql 取到数后再解锁。
+        read_result_unlocked = False
+
         def _compose_tools(skill: "Skill | None") -> list[dict]:
-            return [*_tools_for_skill(skill, sql_allowed=sql_allowed), *external_schemas]
+            tools = [*_tools_for_skill(skill, sql_allowed=sql_allowed), *external_schemas]
+            if read_result_unlocked:
+                tools.append(_READ_RESULT_TOOL)
+            return tools
 
         active_tools = _compose_tools(active_skill)
+        # V5 F2：首轮“先搜再拒”守卫——结构性/取数意图下，若模型首轮不调任何工具就
+        # 直接拒答（实测：“X 对象有哪些字段” 0 步就拒），先逆一次逗它至少 search 一次再判。只逗一次。
+        _search_nudged = False
         # 规约意识：备好当前生效规约的约束卡；选中带 attach_governance 的技能（建数）时并入 overlay。
         try:
             governance_card = active_standard(db).compile_prompt_card()
@@ -4403,14 +3554,23 @@ class ChatBiService:
         pipeline_proposals: list[dict] = []  # propose_pipeline 产出的任务链提案（供 pipeline_proposal 块）
         task_statuses: list[dict] = []  # get_task_status 产出的任务状态（供 task_status 块）
         plan: dict | None = None  # update_plan 产出的多步分析计划（供 plan 块；整体覆盖）
+        # V4 O2：本次问答的大结果离场 store（run_sql 全量行寄存于此，上下文只见样例）。
+        result_store = RunResultStore()
+        _offload_on = (getattr(env_settings, "agent_result_offload", "on") or "on").lower() != "off"
+        _sample_rows = int(getattr(env_settings, "agent_result_sample_rows", 5))
 
         for _ in range(_AGENT_MAX_STEPS):
             tel.llm_call()
+            # V4 O6.3：量一次发出去的上下文字符数（看 O1/O2 降它）。
+            tel.context(sum(len(str(m.get("content") or "")) for m in messages))
             resp = await client.chat.completions.create(
                 model=runtime.model,
                 messages=messages,
                 tools=active_tools,
                 tool_choice="auto",
+                # 取数/建 SQL 场景下确定性优先：固定 temperature=0，让同一问题两次
+                # 生成同一条 SQL，避免「两次查样例」连 SQL 本身都抄动。
+                temperature=0,
             )
             msg = resp.choices[0].message
             tool_calls = msg.tool_calls or []
@@ -4419,12 +3579,31 @@ class ChatBiService:
                 # 解析并当作工具调用执行，避免把一堆标记当答案输出。
                 tool_calls = self._extract_text_tool_calls(msg.content or "")
             if not tool_calls:
+                _candidate = self._strip_tool_markup(msg.content or "")
+                # V5 F2：首轮无工具且看着像拒答 + 结构性/取数意图 + 还没搜过，
+                # 逆一次“先 search_objects 再判”（避免未搜就拒）。只逗一次，不成就放行。
+                if (
+                    not _search_nudged
+                    and intent in ("structural", "analytical")
+                    and not grounded_hit
+                    and self._looks_like_refusal(_candidate)
+                ):
+                    _search_nudged = True
+                    messages.append({"role": "assistant", "content": _candidate})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "先别下结论。请至少先用 search_objects / search_logics 换几个关键词"
+                            "（中英文、同义词、上位词）检索一次；确实搜不到再说无法回答。"
+                        ),
+                    })
+                    continue
                 # 没有工具调用 = 这一轮的 content 就是最终答案，**直接用**（P4.5）。
                 # 原实现把它丢掉、再发一次全上下文请求去"流式"重新生成一遍：
                 # 那次的 token 同样被 buffer 起来（没有透传给前端），最终仍由
                 # `_emit_answer_tokens` 假打字机吐出——等于每问一次白付一整轮
                 # prefill + 生成，换来一个模拟的流式效果。
-                answer = self._strip_tool_markup(msg.content or "")
+                answer = _candidate
                 if not answer:
                     # 少数模型会返回「空 content + 无 tool_calls」，此时才补一次显式收尾轮
                     tel.llm_call()
@@ -4478,11 +3657,27 @@ class ChatBiService:
                     active_skill, result, summary, is_error = self._apply_select_skill(
                         call_args, messages, base_system, governance_card
                     )
+                    # V4 O6.2：记下路由到哪个技能（成功选中才计），供 misroute 度量。
+                    if active_skill is not None and not is_error:
+                        tel.route(active_skill.name)
                     # 升级阀：模型显式选 query（取数）技能=有意识的取数请求 → 放开取数能力。
                     # 只挡「无意识漂移」，给规则误判留一条可恢复路径。
                     if active_skill is not None and active_skill.name == "query":
                         sql_allowed = True
                     active_tools = _compose_tools(active_skill)
+                elif tool_name == "read_result":
+                    # V4 O2：从离场 store 分页取行（大结果不进上下文，模型按需句柄调行）。
+                    page = result_store.page(
+                        str(call_args.get("handle") or ""),
+                        offset=int(call_args.get("offset") or 0),
+                        limit=int(call_args.get("limit") or 20),
+                    )
+                    is_error = bool(page.get("error"))
+                    result = page
+                    summary = (
+                        page["error"] if is_error
+                        else f"取 {page.get('returned', 0)} 行（offset={page.get('offset', 0)}/共 {page.get('total', 0)}）"
+                    )
                 elif tool_name == "render_chart":
                     # V3 S1：把最近的 run_sql 结果渲染成图表；x/y 须为真实结果列（接地）。
                     result, summary, is_error = self._dispatch_render_chart(
@@ -4497,6 +3692,14 @@ class ChatBiService:
                     # P4.2：子 agent 在**隔离上下文**里跑检索循环，
                     # 只有结论回到主上下文；试错过程一个字符都不进来。
                     result, summary, is_error = await self._dispatch_locate_entities(
+                        db, client=client, model=runtime.model,
+                        domain_id=domain.id, ontology_id=ontology.id,
+                        args=call_args, telemetry=tel,
+                    )
+                elif tool_name == "scout_query":
+                    # V4 O4：取数探路子 agent——多次 profile/find_join 的试错关在隔离上下文，
+                    # 只把候选 SQL 带回。子 agent 不执行；真取数仍由下方 run_sql 过只读校验+证明。
+                    result, summary, is_error = await self._dispatch_scout_query(
                         db, client=client, model=runtime.model,
                         domain_id=domain.id, ontology_id=ontology.id,
                         args=call_args, telemetry=tel,
@@ -4613,6 +3816,10 @@ class ChatBiService:
                                 "rows": result.get("rows") or [],
                                 "truncated": bool(result.get("truncated")),
                             }
+                            # V4 O3：首次取到结果 → 解锁 read_result（下一轮工具集才出现它）。
+                            if not read_result_unlocked:
+                                read_result_unlocked = True
+                                active_tools = _compose_tools(active_skill)
                     elif tool_name == "get_lineage" and result.get("nodes"):
                         lineage = result
                     elif tool_name == "propose_draft" and result.get("create_payload"):
@@ -4638,7 +3845,21 @@ class ChatBiService:
                 yield {"type": "step_done", "index": idx, "status": step_status, "summary": summary}
 
                 # P2.2：超预算时按语义降级，不按字符砍——回灌的永远是合法 JSON
-                result_text, _compacted = compact_tool_result(result, _TOOL_RESULT_MAX_CHARS)
+                # V4 O2：run_sql 大结果先离场（全量行寄存 store，回模型只留样例 + 句柄），
+                # 再走语义降级——避免整张表进上下文又被字符截断丢列。已在上方收割/入账拿过全量，此处只影响回模型的副本。
+                inject_result = result
+                if _offload_on and tool_name == "run_sql":
+                    projected = project_run_sql_for_model(
+                        result, result_store, sample_rows=_sample_rows
+                    )
+                    if projected is not result:
+                        # 度量离场收益：全量 JSON 与样例 JSON 的字数差（没进上下文的那部分）。
+                        tel.offload(
+                            len(compact_tool_result(result, 10**9)[0])
+                            - len(compact_tool_result(projected, 10**9)[0])
+                        )
+                        inject_result = projected
+                result_text, _compacted = compact_tool_result(inject_result, _TOOL_RESULT_MAX_CHARS)
                 messages.append({"role": "tool", "tool_call_id": t.id, "content": result_text})
 
             if clarification is not None or form_request is not None:
@@ -4740,6 +3961,46 @@ class ChatBiService:
         # 断言校验照样拦下。所以 general 只放开「没查本体」，不放开「乱说本体」。
         grounded = (grounded_hit or intent == "general") and verify_ok
 
+        # V4 O6.2 / V5 F1：路由结果——选了技能却没用上它解锁的任何工具 = misroute（白加一轮）。
+        # 但若本轮**拒答且真搜索过**（search_*/locate_entities），则是「路对了但域里没这个实体」，
+        # 不该计作 misroute（实测 F1：选 lineage/create 后反复搜不到对象、未及调解锁工具就拒）。
+        if active_skill is not None:
+            matched = active_skill.name == "query" and sql_allowed or any(
+                n in tel.tool_calls for n in active_skill.extra_tool_names
+            )
+            searched = any(
+                t in tel.tool_calls
+                for t in ("search_objects", "search_logics", "search_relations", "locate_entities")
+            )
+            no_entity = (not matched) and (not grounded) and searched
+            tel.route_outcome(bool(matched), no_entity=no_entity)
+        # V4 O6.1：运行轨迹落 JSONL（对齐 pi session，默认关闭；开关开才写文件）。
+        agent_trace.write_trace({
+            "conversation_id": conversation_id,
+            "domain_id": domain.id,
+            "question": question,
+            "intent": intent,
+            "skill": active_skill.name if active_skill else None,
+            "skill_matched": tel.skill_matched,
+            "skill_no_entity": tel.skill_no_entity,
+            "llm_calls": tel.llm_calls,
+            "steps": tel.steps,
+            "tools": dict(tel.tool_calls),
+            "refused": not grounded,
+            "unverified": list(unverified),
+            "context_chars_per_call": (
+                round(tel.context_chars / tel.context_calls, 1) if tel.context_calls else 0
+            ),
+            "compaction_triggered": comp.triggered,
+            "compaction_summarized_turns": comp.summarized_turns,
+            # V5 T1.2：把离场/子 agent 收益也落进每次轨迹，汇总脚本直读。
+            "offloaded_chars": tel.offloaded_chars,
+            "offload_count": tel.offload_count,
+            "subagent_runs": tel.subagent_runs,
+            "subagent_llm_calls": tel.subagent_llm_calls,
+            "subagent_isolated_chars": tel.subagent_isolated_chars,
+        })
+
         yield {
             "type": "done",
             "payload": {
@@ -4813,134 +4074,6 @@ class ChatBiService:
 
     # ------------------------------------------------------------------ mock
 
-    def _mock_answer(
-        self,
-        *,
-        question: str,
-        snapshots: list[_ObjectSnapshot],
-        relations: list[RelationType],
-        logics: list[BusinessLogic],
-        matched_objects: list[_ObjectSnapshot] | None = None,
-        matched_logics: list[BusinessLogic] | None = None,
-    ) -> dict:
-        q_lower = question.lower()
-
-        matched_objects = matched_objects if matched_objects is not None else self._match_objects(
-            question, snapshots
-        )
-        if not matched_objects:
-            # 调用方应已拦截无命中；此处兜底为空回答，避免回退到 snapshots[:1]
-            return {
-                "answer": "当前问题未能命中已发布本体中的对象或业务逻辑，无法给出基于本体的解读。",
-                "suggested_sql": None,
-                "caliber_decomposition": [],
-                "referenced_objects": [],
-                "referenced_logics": [],
-            }
-        primary = matched_objects[0]
-
-        if matched_logics is None:
-            matched_logics = self._match_logics(question, logics)
-        matched_logics = matched_logics[:2]
-
-        is_aggregation = any(k in q_lower for k in _AGG_KEYWORDS) or any(
-            k in question for k in _AGG_KEYWORDS
-        )
-        time_window = self._detect_time_window(question)
-
-        amount_prop = next(
-            (p for p in primary.properties if "amount" in p.name or p.semantic_type == "amount"),
-            None,
-        )
-        date_prop = next(
-            (p for p in primary.properties if p.semantic_type == "date" or "date" in p.name),
-            None,
-        )
-
-        # ---- answer text
-        lines: list[str] = []
-        lines.append(f"基于「{primary.display_name}」本体解读你的问题：")
-        lines.append("")
-        lines.append("**口径解读**")
-        bullet_bits: list[str] = []
-        bullet_bits.append(f"主对象：{primary.display_name}（`{primary.name}`）")
-        if amount_prop:
-            bullet_bits.append(f"度量字段：{amount_prop.display_name}（`{amount_prop.name}`）")
-        if date_prop:
-            bullet_bits.append(f"时间字段：{date_prop.display_name}（`{date_prop.name}`）")
-        if time_window:
-            bullet_bits.append(f"时间范围：{time_window}")
-        if is_aggregation:
-            bullet_bits.append("聚合方式：求和 / 计数")
-        for b in bullet_bits:
-            lines.append(f"- {b}")
-
-        if matched_logics:
-            lines.append("")
-            lines.append("**关联业务逻辑**")
-            for logic in matched_logics:
-                summary = f" — {logic.expression_summary}" if logic.expression_summary else ""
-                lines.append(f"- {logic.display_name}（`{logic.name}`）{summary}")
-        elif logics:
-            lines.append("")
-            lines.append(
-                f"> 当前本体共有 {len(logics)} 条业务逻辑，但未在问题中匹配到关键词，"
-                "可在「业务逻辑」页确认口径。"
-            )
-
-        # ---- suggested SQL
-        suggested_sql = self._build_mock_sql(
-            primary=primary,
-            amount_prop=amount_prop,
-            date_prop=date_prop,
-            is_aggregation=is_aggregation,
-            time_window=time_window,
-        )
-        if suggested_sql:
-            lines.append("")
-            lines.append("**建议查询（基于本体语义，需映射到物理表后执行）**")
-            lines.append("```sql")
-            lines.append(suggested_sql)
-            lines.append("```")
-
-        lines.append("")
-        lines.append(
-            "_当前为 Mock 模式回答（未配置真实 LLM），可在「设置 → LLM 服务」中接入模型获得更智能的解读。_"
-        )
-
-        # ---- caliber decomposition
-        caliber = self._build_mock_caliber(
-            primary=primary,
-            amount_prop=amount_prop,
-            date_prop=date_prop,
-            is_aggregation=is_aggregation,
-            time_window=time_window,
-            matched_objects=matched_objects,
-            matched_logics=matched_logics,
-        )
-
-        return {
-            "answer": "\n".join(lines),
-            "suggested_sql": suggested_sql,
-            "caliber_decomposition": caliber,
-            "referenced_objects": [
-                {
-                    "id": o.id,
-                    "name": o.name,
-                    "display_name": o.display_name,
-                }
-                for o in matched_objects
-            ],
-            "referenced_logics": [
-                {
-                    "id": logic.id,
-                    "name": logic.name,
-                    "display_name": logic.display_name,
-                }
-                for logic in matched_logics
-            ],
-        }
-
     def _match_objects(
         self, question: str, snapshots: list[_ObjectSnapshot]
     ) -> list[_ObjectSnapshot]:
@@ -4973,6 +4106,31 @@ class ChatBiService:
             )
         ]
         return matched[:3]
+
+    @staticmethod
+    def _llm_not_configured(
+        *,
+        domain_id: str,
+        domain_name: str,
+        ontology_id: str,
+    ) -> dict:
+        """未配置 LLM API Key 时的提示回答。直接引导去设置，不伪造答案。"""
+        return {
+            "domain_id": domain_id,
+            "domain_name": domain_name,
+            "ontology_id": ontology_id,
+            "answer": (
+                f"💡 「{domain_name}」的智能问答需要接入大语言模型。\n\n"
+                "请前往 **设置 → LLM 服务** 配置 API Key（支持 OpenAI、智谱、通义千问等兼容接口）。\n"
+                "配置完成后，即可进行本体问答、多步推理、自动取数分析。"
+            ),
+            "suggested_sql": None,
+            "caliber_decomposition": [],
+            "referenced_objects": [],
+            "referenced_logics": [],
+            "used_mock": False,
+            "grounding_refused": False,
+        }
 
     @staticmethod
     def _ungrounded_refusal(
@@ -5016,45 +4174,6 @@ class ChatBiService:
         }
 
     @staticmethod
-    def _enforce_grounded_refs(
-        payload: dict,
-        *,
-        grounded_objects: list[_ObjectSnapshot],
-        grounded_logics: list[BusinessLogic],
-        resolver: "_ReferenceResolver",
-    ) -> dict:
-        """过滤无法落地的引用；若 LLM 未给引用则回填检索命中。"""
-        cleaned_objs = [
-            ref
-            for ref in payload.get("referenced_objects") or []
-            if isinstance(ref, dict) and ref.get("id") in resolver.obj_by_id
-        ]
-        if not cleaned_objs and grounded_objects:
-            cleaned_objs = [
-                {"id": o.id, "name": o.name, "display_name": o.display_name}
-                for o in grounded_objects
-            ]
-
-        cleaned_logics = [
-            ref
-            for ref in payload.get("referenced_logics") or []
-            if isinstance(ref, dict) and ref.get("id") in resolver.logic_by_id
-        ]
-        if not cleaned_logics and grounded_logics:
-            cleaned_logics = [
-                {
-                    "id": logic.id,
-                    "name": logic.name,
-                    "display_name": logic.display_name,
-                }
-                for logic in grounded_logics
-            ]
-
-        payload["referenced_objects"] = cleaned_objs
-        payload["referenced_logics"] = cleaned_logics
-        return payload
-
-    @staticmethod
     def _tokens(text: str) -> list[str]:
         # 简单中英文分词：英文按非字母数字切，中文按字符切。
         if not text:
@@ -5063,192 +4182,6 @@ class ChatBiService:
         alpha = re.findall(r"[a-z_][a-z0-9_]+", text)
         cjk = re.findall(r"[\u4e00-\u9fa5]", text)
         return alpha + cjk
-
-    @staticmethod
-    def _detect_time_window(question: str) -> str | None:
-        if "近 7 天" in question or "近7天" in question or "最近一周" in question or "近一周" in question:
-            return "近 7 天"
-        if "近 30 天" in question or "近30天" in question or "最近一个月" in question or "近一个月" in question:
-            return "近 30 天"
-        if "今日" in question or "今天" in question:
-            return "今日"
-        if "本月" in question:
-            return "本月"
-        if "上月" in question:
-            return "上月"
-        if "最近" in question or "近" in question:
-            return "近 7 天"
-        return None
-
-    @staticmethod
-    def _build_mock_sql(
-        *,
-        primary: _ObjectSnapshot,
-        amount_prop: Property | None,
-        date_prop: Property | None,
-        is_aggregation: bool,
-        time_window: str | None,
-    ) -> str | None:
-        if not primary:
-            return None
-        select_parts: list[str] = []
-        group_parts: list[str] = []
-        where_parts: list[str] = []
-
-        if date_prop:
-            group_parts.append(date_prop.name)
-
-        if is_aggregation:
-            if amount_prop:
-                select_parts.append(f"SUM({amount_prop.name}) AS total_{amount_prop.name}")
-            select_parts.append(f"COUNT(*) AS record_count")
-        else:
-            select_parts.append(f"{primary.name}_id")
-            for p in primary.properties[:4]:
-                if p.name and p.name != f"{primary.name}_id":
-                    select_parts.append(p.name)
-
-        if date_prop and time_window:
-            where_parts.append(f"{date_prop.name} >= DATE_SUB(CURDATE(), INTERVAL _N DAY)")
-        # 替换占位 _N
-        days_map = {
-            "近 7 天": "7",
-            "近 30 天": "30",
-            "今日": "0",
-            "本月": "0",
-            "上月": "30",
-        }
-        days = days_map.get(time_window or "", "7") if time_window else None
-
-        select_clause = ", ".join(select_parts) if select_parts else "*"
-        sql_lines = [f"SELECT {select_clause}", f"FROM {primary.name}"]
-        if group_parts and is_aggregation:
-            sql_lines.append(f"GROUP BY {', '.join(group_parts)}")
-        if where_parts:
-            clause = "; ".join(where_parts)
-            if days is not None:
-                clause = clause.replace("_N", days)
-            sql_lines.append(f"WHERE {clause}")
-        sql_lines.append("LIMIT 100;")
-        return "\n".join(sql_lines)
-
-    def _build_mock_caliber(
-        self,
-        *,
-        primary: _ObjectSnapshot,
-        amount_prop: Property | None,
-        date_prop: Property | None,
-        is_aggregation: bool,
-        time_window: str | None,
-        matched_objects: list[_ObjectSnapshot],
-        matched_logics: list[BusinessLogic],
-    ) -> list[dict]:
-        items: list[dict] = []
-
-        items.append(
-            {
-                "label": "主对象",
-                "description": f"查询主体为「{primary.display_name}」",
-                "references": [
-                    {
-                        "kind": "object_type",
-                        "id": primary.id,
-                        "name": primary.name,
-                        "display_name": primary.display_name,
-                    }
-                ],
-            }
-        )
-
-        if amount_prop:
-            items.append(
-                {
-                    "label": "度量字段",
-                    "description": f"对「{amount_prop.display_name}」进行聚合",
-                    "references": [
-                        {
-                            "kind": "property",
-                            "id": amount_prop.id,
-                            "name": amount_prop.name,
-                            "display_name": amount_prop.display_name,
-                        }
-                    ],
-                }
-            )
-
-        if date_prop:
-            items.append(
-                {
-                    "label": "时间维度",
-                    "description": f"按「{date_prop.display_name}」筛选时间范围",
-                    "references": [
-                        {
-                            "kind": "property",
-                            "id": date_prop.id,
-                            "name": date_prop.name,
-                            "display_name": date_prop.display_name,
-                        }
-                    ],
-                }
-            )
-
-        if time_window:
-            items.append(
-                {
-                    "label": "时间范围",
-                    "description": f"统计窗口：{time_window}",
-                    "references": [],
-                }
-            )
-
-        if is_aggregation:
-            items.append(
-                {
-                    "label": "聚合方式",
-                    "description": "按主对象记录求和 / 计数",
-                    "references": [],
-                }
-            )
-
-        if matched_logics:
-            items.append(
-                {
-                    "label": "关联业务逻辑",
-                    "description": "回答依据以下业务逻辑口径",
-                    "references": [
-                        {
-                            "kind": "business_logic",
-                            "id": logic.id,
-                            "name": logic.name,
-                            "display_name": logic.display_name,
-                        }
-                        for logic in matched_logics
-                    ],
-                }
-            )
-
-        # 关联对象（除主对象外的命中对象）
-        extra_objects = [o for o in matched_objects if o.id != primary.id]
-        if extra_objects:
-            items.append(
-                {
-                    "label": "关联对象",
-                    "description": "问题中提到的其它业务对象",
-                    "references": [
-                        {
-                            "kind": "object_type",
-                            "id": o.id,
-                            "name": o.name,
-                            "display_name": o.display_name,
-                        }
-                        for o in extra_objects
-                    ],
-                }
-            )
-
-        return items
-
-
 
     # ---------- M4：把 suggested_sql 真正执行掉 ----------
 

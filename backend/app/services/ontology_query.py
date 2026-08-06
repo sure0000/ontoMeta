@@ -454,6 +454,39 @@ class OntologyQueryService:
             for oid in object_ids
         }
 
+    def _object_referenced_logic_map(
+        self, db: Session, object_ids: list[str]
+    ) -> dict[str, set[str]]:
+        """object_type_id -> {business_logic_id}，基于口径表达式的 refs 引用。
+
+        仅扫描这些对象所属本体下的业务逻辑，避免全表扫描。与
+        ``logic_query.OntologyQueryService`` 的同名方法同口径（都走
+        ``_logic_referenced_ids``）——此处补齐是因为 ``_bulk_object_stats``
+        位在本类，而拆分后该方法只落到了另一个同名类上。
+        """
+        if not object_ids:
+            return {}
+        rows = (
+            db.query(ObjectType.id, ObjectType.ontology_id)
+            .filter(ObjectType.id.in_(object_ids))
+            .all()
+        )
+        ontology_ids = {ont_id for _, ont_id in rows}
+        result: dict[str, set[str]] = {oid: set() for oid in object_ids}
+        if not ontology_ids:
+            return result
+        logics = (
+            db.query(BusinessLogic)
+            .filter(BusinessLogic.ontology_id.in_(list(ontology_ids)))
+            .all()
+        )
+        for logic in logics:
+            ref_obj_ids, _ = _logic_referenced_ids(logic)
+            for oid in ref_obj_ids:
+                if oid in result:
+                    result[oid].add(logic.id)
+        return result
+
     def list_relation_types(
         self,
         db: Session,

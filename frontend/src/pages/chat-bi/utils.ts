@@ -114,10 +114,6 @@ export function answerToBlocks(
     });
   }
 
-  if (payload.used_mock) {
-    blocks.push({ id: id(), type: "notice", level: "info", variant: "mock" });
-  }
-
   return blocks;
 }
 

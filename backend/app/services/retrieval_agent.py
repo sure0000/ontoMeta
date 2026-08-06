@@ -22,6 +22,8 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
+from app.services.agent_subagent import SubAgentSpec, run_subagent
+
 logger = logging.getLogger("ontometa.retrieval_agent")
 
 # 子 agent 可用的工具：**只有检索**。加工具前先想清楚它是不是「定位」职责的一部分。
@@ -43,6 +45,17 @@ _SYSTEM_PROMPT = (
     '"reason": "一句话说明为何相关"}\n'
     "   标识符必须是工具真实返回过的 name 字段；宁可少给，不可编造。\n"
     "   确实找不到就回 {\"objects\": [], \"logics\": [], \"reason\": \"未找到相关实体\"}。"
+)
+
+# V4 O4：把检索子 agent 的「系统提示 + 工具子集 + 预算」声明成一份 spec，
+# 循环骨架复用 agent_subagent.run_subagent（不再自己维一套）。
+RETRIEVAL_SPEC = SubAgentSpec(
+    name="检索",
+    system_prompt=_SYSTEM_PROMPT,
+    allowed_tools=RETRIEVAL_TOOLS,
+    max_steps=MAX_STEPS,
+    tool_result_max_chars=TOOL_RESULT_MAX_CHARS,
+    final_nudge="请立即只输出结论 JSON。",
 )
 
 
@@ -87,66 +100,26 @@ async def locate_entities(
     ``dispatch`` / ``tool_schemas`` 由调用方注入（就是主 agent 那套），
     保证子 agent 与主 agent 的工具行为**完全一致**——不另起一套实现，
     否则两边的检索语义迟早分叉。
+
+    V4 O4：循环骨架已抽到 ``agent_subagent.run_subagent``，本函数只负责
+    提供检索 spec + 把最终文本按检索结论 schema 解析回 RetrievalResult。
     """
-    schemas = [
-        t for t in tool_schemas if t.get("function", {}).get("name") in RETRIEVAL_TOOLS
-    ]
-    messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": f"请定位与以下问题相关的实体：\n{intent}"},
-    ]
-    result = RetrievalResult()
-
-    for _ in range(MAX_STEPS):
-        result.llm_calls += 1
-        resp = await client.chat.completions.create(
-            model=model, messages=messages, tools=schemas, tool_choice="auto"
-        )
-        msg = resp.choices[0].message
-        tool_calls = msg.tool_calls or []
-        if not tool_calls:
-            _parse_conclusion(msg.content or "", result)
-            return result
-
-        messages.append({
-            "role": "assistant",
-            "content": msg.content or "",
-            "tool_calls": [
-                {"id": t.id, "type": "function",
-                 "function": {"name": t.function.name, "arguments": t.function.arguments}}
-                for t in tool_calls
-            ],
-        })
-        for t in tool_calls:
-            name = t.function.name
-            if name not in RETRIEVAL_TOOLS:
-                # 越权调用：明确回绝而不是静默忽略，否则模型会一直重试
-                payload = {"error": f"检索子 agent 不能调用 {name}，只能检索定位。"}
-            else:
-                try:
-                    args = json.loads(t.function.arguments or "{}")
-                    if not isinstance(args, dict):
-                        args = {}
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                payload, _summary, _err = await to_thread(
-                    dispatch, db, domain_id=domain_id, ontology_id=ontology_id,
-                    name=name, args=args,
-                )
-                result.steps += 1
-            text = json.dumps(payload, ensure_ascii=False, default=str)
-            if len(text) > TOOL_RESULT_MAX_CHARS:
-                text = text[:TOOL_RESULT_MAX_CHARS]
-            result.isolated_chars += len(text)
-            messages.append({"role": "tool", "tool_call_id": t.id, "content": text})
-
-    # 步数耗尽：再要一次结论，不带工具
-    result.llm_calls += 1
-    resp = await client.chat.completions.create(
+    run = await run_subagent(
+        db,
+        client=client,
         model=model,
-        messages=messages + [{"role": "user", "content": "请立即只输出结论 JSON。"}],
+        spec=RETRIEVAL_SPEC,
+        user_prompt=f"请定位与以下问题相关的实体：\n{intent}",
+        domain_id=domain_id,
+        ontology_id=ontology_id,
+        dispatch=dispatch,
+        tool_schemas=tool_schemas,
+        to_thread=to_thread,
     )
-    _parse_conclusion(resp.choices[0].message.content or "", result)
+    result = RetrievalResult(
+        steps=run.steps, llm_calls=run.llm_calls, isolated_chars=run.isolated_chars
+    )
+    _parse_conclusion(run.final_text, result)
     return result
 
 

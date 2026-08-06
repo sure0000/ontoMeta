@@ -90,6 +90,8 @@ class ObjectType(Base, ProvenanceMixin):
     canonical_term_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source_ref: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    # DataHub profiling：导入时沉淀的行数，供阶梯式加载/接地判断直接读取，减少源库查询。
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 字段级溯源与三方合并元数据（见 ONTOLOGY_VERSIONING_PLAN.md）。
     origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
     overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -150,6 +152,10 @@ class Property(Base, ProvenanceMixin):
     semantic_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     required: Mapped[bool] = mapped_column(Boolean, default=False)
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # DataHub profiling：导入时沉淀，供阶梯式加载直接读取，减少源库查询。
+    # sample_values_json: JSON 文本，反序列化为 list[str]（最多 5 个样例值）。
+    sample_values_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unique_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     # 字段级溯源与三方合并元数据。
     origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")

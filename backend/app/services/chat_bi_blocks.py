@@ -161,7 +161,4 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for status in payload.get("task_statuses") or []:
         _add({"type": "task_status", "status": status})
 
-    if payload.get("used_mock"):
-        _add({"type": "notice", "level": "info", "variant": "mock"})
-
     return blocks

@@ -150,6 +150,9 @@ def test_data_app_full_flow(client, admin_headers):
 def test_generate_app_from_chat(client, admin_headers):
     domain_id, _, obj_id, _ = _seed_published_ontology()
 
+    # 无载荷的 generate-app 会回退到 ask() 现问。去 mock 改造后，无 LLM 环境下
+    # ask() 返回配置提示（空引用），无法落地 → 400。真实落地能力由
+    # test_generate_app_reuses_provided_caliber 覆盖（传口径载荷，不走 ask）。
     res = client.post(
         "/api/chat-bi/generate-app",
         headers=admin_headers,
@@ -159,11 +162,7 @@ def test_generate_app_from_chat(client, admin_headers):
             "question": "最近 30 天各渠道的订单金额合计是多少？",
         },
     )
-    assert res.status_code == 200, res.text
-    app = res.json()
-    assert app["source"] == "chat_generated"
-    assert app["app_type"] == "data_table"
-    assert len(app["datasets"]) >= 1
+    assert res.status_code == 400, res.text
 
 
 def test_generate_app_refuses_ungrounded(client, admin_headers):
@@ -296,6 +295,7 @@ def test_dashboard_create_and_generate(client, admin_headers):
 
 def test_generate_dashboard_from_chat(client, admin_headers):
     domain_id, *_ = _seed_published_ontology()
+    # 同 test_generate_app_from_chat：无载荷 + 无 LLM → ask() 配置提示→无法落地→400。
     res = client.post(
         "/api/chat-bi/generate-app",
         headers=admin_headers,
@@ -305,12 +305,7 @@ def test_generate_dashboard_from_chat(client, admin_headers):
             "question": "最近 30 天各渠道的订单金额合计",
         },
     )
-    assert res.status_code == 200, res.text
-    app = res.json()
-    assert app["app_type"] == "dashboard"
-    assert app["spec"]["layout"] == "grid"
-    assert len(app["spec"]["panels"]) == 1
-    assert len(app["datasets"]) == 1
+    assert res.status_code == 400, res.text
 
 
 def test_widget_crud_and_add_to_dashboard(client, admin_headers):

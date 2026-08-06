@@ -213,7 +213,8 @@ def test_chat_bi_no_hit_refuses_fiction(client, admin_headers):
     with SessionLocal() as db:
         PublishService().publish(db, ontology_id)
 
-    # 无命中问题：不应返回订单/客户等对象名作为“命中解读”
+    # 无 LLM 环境：不再走 mock 规则拒答，而是提示去配置模型（去 mock 改造后）。
+    # 关键不变式：不得把本体对象名（订单/客户）当作已命中主对象来编造口径。
     ask = client.post(
         "/api/chat-bi/ask",
         headers=admin_headers,
@@ -224,21 +225,20 @@ def test_chat_bi_no_hit_refuses_fiction(client, admin_headers):
     )
     assert ask.status_code == 200, ask.text
     payload = ask.json()
-    assert payload.get("grounding_refused") is True
+    # 无 LLM → 配置提示：不拒答、不用 mock、不编造引用。
+    assert payload["used_mock"] is False
+    assert payload.get("grounding_refused") is False
     assert payload["referenced_objects"] == []
     assert payload["referenced_logics"] == []
     assert payload["suggested_sql"] is None
     answer = payload["answer"]
-    assert "未检索到" in answer or "无法基于" in answer
-    # 不应把本体对象名当作已匹配主对象来编造口径
+    assert "LLM 服务" in answer or "大语言模型" in answer
+    # 不得把本体对象名当作已匹配主对象来编造口径
     assert "基于「订单」本体解读" not in answer
     assert "基于「客户」本体解读" not in answer
-    # V3 S0：终态 payload 经 API funnel 投影出渲染块（双写）。
-    # 本测试无 LLM → mock 模式拒答：拒答提示块 + 正文块 + mock 提示块。
+    # 渲染块：无 LLM 时正文块即可（不再有 mock 提示块）。
     blocks = payload["blocks"]
-    assert [b["type"] for b in blocks] == ["notice", "markdown", "notice"]
-    assert blocks[0]["variant"] == "refused"
-    assert blocks[-1]["variant"] == "mock"
+    assert [b["type"] for b in blocks] == ["markdown"]
     assert all(b.get("id") for b in blocks)
 
 

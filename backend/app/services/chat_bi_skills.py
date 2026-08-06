@@ -54,13 +54,19 @@ SKILLS: dict[str, Skill] = {
             "【取数分析技能】用户要具体数据/趋势/对比。流程：定位实体 → 有现成口径就 "
             "compile_metric、跨对象先 find_join_path、写死值前先 profile_values → 用 run_sql "
             "提交只读 SQL 取数。\n"
+            "取**数据样例/明细预览**（无明确排序诉求的『看看有哪些数据』）时，SQL **必须显式带 "
+            "ORDER BY**（优先主键/时间键，拿不到就 `ORDER BY 1`）——否则 `LIMIT` 返回哪几行由引擎"
+            "自由决定，同一份数据两次取样会不一致。\n"
             "若是开放式/多步分析（如「探索销售数据有没有异常」），**先用 update_plan 列 2-5 步计划**"
             "让用户看到你的拆解思路，再逐步执行；单值或单步取数不必规划。\n"
+            "跨多个对象、或要先摸好几个字段取值分布才能写对 SQL 时，可用 **scout_query** 把这段探路"
+            "（定位/profile/找 join）扔进隔离子 agent，只拿回候选 SQL——探路过程不占本对话上下文；"
+            "拿回候选 SQL 后仔细看一眼再用 run_sql 提交。单对象、无需探值的取数直接写 SQL 更快。\n"
             "拿到结果后：找异常/看分布/离群用 **analyze_result** 对结果做统计画像（均值/分位/IQR 离群），"
             "别口头臆测；若适合可视化就调 **render_chart** 出图：时间/日期维度用 line 或 area，"
             "类别对比用 bar；x/y 必须照抄结果表里的真实列名。单值或纯明细不必作图。"
         ),
-        extra_tool_names=("update_plan", "analyze_result", "render_chart"),
+        extra_tool_names=("update_plan", "scout_query", "analyze_result", "render_chart"),
         block_types=("markdown", "plan", "sql", "table", "insight", "chart", "mapping"),
     ),
     "lineage": Skill(

@@ -22,7 +22,7 @@ from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golde
 
 def test_registry_has_overview_and_query():
     assert set(SKILLS) == {"overview", "query", "lineage", "create", "task"}
-    assert SKILLS["query"].extra_tool_names == ("update_plan", "analyze_result", "render_chart")
+    assert SKILLS["query"].extra_tool_names == ("update_plan", "scout_query", "analyze_result", "render_chart")
     assert SKILLS["overview"].extra_tool_names == ()
     assert SKILLS["lineage"].extra_tool_names == ("get_lineage",)
     assert SKILLS["create"].extra_tool_names == ("propose_draft", "lint_against_standard")
@@ -82,7 +82,7 @@ def test_select_skill_appends_overlay_and_unlocks():
     assert skill is not None and skill.name == "query"
     assert messages[0]["content"].startswith("BASE\n\n")
     assert "取数分析技能" in messages[0]["content"]
-    assert result["tools_unlocked"] == ["update_plan", "analyze_result", "render_chart"]
+    assert result["tools_unlocked"] == ["update_plan", "scout_query", "analyze_result", "render_chart"]
 
 
 def test_select_skill_reselect_replaces_not_stacks():

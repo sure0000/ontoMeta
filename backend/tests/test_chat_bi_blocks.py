@@ -127,13 +127,6 @@ def test_table_skipped_when_no_rows():
     assert _types(payload) == ["markdown"]
 
 
-def test_mock_notice_appended_last():
-    payload = {"answer": "规则匹配的回答。", "used_mock": True}
-    blocks = answer_to_blocks(payload)
-    assert blocks[-1]["type"] == "notice"
-    assert blocks[-1]["variant"] == "mock"
-
-
 def test_chart_block_follows_table_and_carries_data():
     """V3 S1：render_chart 产出的图表规格投影成 chart 块，紧随结果表并自带数据行。"""
     payload = {

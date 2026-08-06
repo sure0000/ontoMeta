@@ -146,8 +146,15 @@ def is_read_only(sql: str) -> tuple[bool, str | None]:
 
 def _ensure_limit(sql: str, limit: int) -> str:
     body = sql.rstrip().rstrip(";")
+    # 已显式带 LIMIT → 认为取数意图（含排序）由调用方掌控，原样返回。
     if re.search(r"\blimit\b", body, flags=re.IGNORECASE):
         return body
+    # 自动补 LIMIT 时，若原 SQL 无 ORDER BY，追加一个稳定排序键（按第一列）。
+    # 否则 `LIMIT N` 返回哪几行、何顺序由引擎自由决定（数仓并行扫描尤甚），
+    # 同一份数据两次取样本会不一致——见 chat-bi「数据样例结果不同」问题。
+    # ORDER BY 1 按输出列位置排序，对 `SELECT *`/聚合/UNION 均合法，保证可复现。
+    if not re.search(r"\border\s+by\b", body, flags=re.IGNORECASE):
+        return f"{body}\nORDER BY 1\nLIMIT {limit}"
     return f"{body}\nLIMIT {limit}"
 
 

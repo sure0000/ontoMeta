@@ -249,6 +249,7 @@ class OntologyMergeService:
                     description=item.description,
                     source_ref=item.source_ref,
                     source_confidence=item.confidence,
+                    row_count=item.row_count,
                     table_role=item.table_role,
                     role_confidence=item.role_confidence,
                     role_reason=item.role_reason,
@@ -361,6 +362,8 @@ class OntologyMergeService:
                     source_field_ref=item.source_field_ref,
                     required=item.required,
                     source_confidence=item.confidence,
+                    sample_values_json=_dumps(item.sample_values) if item.sample_values else None,
+                    unique_count=item.unique_count,
                     status=EntityStatus.SUGGESTED.value,
                     origin="machine",
                     machine_baseline=_dumps(incoming),
@@ -383,6 +386,9 @@ class OntologyMergeService:
                 # 跟随当前源：源字段引用可能随重命名/重摄取变化，更新为本次生成的值。
                 existing.source_field_ref = item.source_field_ref
                 existing.source_confidence = item.confidence
+                # profiling 是机器数据，直接刷新（不参与三方合并的用户覆盖）。
+                existing.sample_values_json = _dumps(item.sample_values) if item.sample_values else None
+                existing.unique_count = item.unique_count
                 existing.last_generation_id = gen_id
                 existing.upstream_removed = False
                 existing.origin = (
