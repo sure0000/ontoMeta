@@ -65,6 +65,17 @@ class Settings(BaseSettings):
     # 让人去配（而不是产出一个连不上 runner 的 DAG）。
     sync_runner_endpoint: str = ""
 
+    # Flink on YARN 计算任务（P1-3）的部署参数。属部署基础设施，不进设置页。
+    # flink_sql_runner_jar 是预置的通用 SqlRunner JAR（读 SQL 文件、用环境变量替换占位符
+    # 后逐条 executeSql），runner_class 是其 main class，flink_bin 是 flink 命令路径。
+    # 缺 runner_jar 时 transform/metric 不执行、只产 SQL（回退「仅产出」模式）。
+    flink_sql_runner_jar: str = ""
+    flink_sql_runner_class: str = "com.ontometa.flink.SqlRunner"
+    flink_bin: str = "flink"
+    flink_deploy_target: str = "yarn-per-job"
+    flink_parallelism: int = 1
+    flink_yarn_queue: str = ""
+
     @property
     def sync_tool_image_map(self) -> dict[str, str]:
         """``sync_tool_images`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。"""

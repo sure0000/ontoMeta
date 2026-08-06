@@ -236,6 +236,8 @@ class TaskPipelineService:
                 # 那会让人以为已经建了一条制品。
                 "artifact_status": artifact.status if artifact else None,
                 "artifact_name": artifact.name if artifact else None,
+                # P3-2：显式依赖的上游步序列表（DAG 形态）
+                "depends_on": _loads(step.depends_on_json, []) or [],
             })
 
         next_index = self._next_index(step_rows)
@@ -248,6 +250,9 @@ class TaskPipelineService:
             "steps": step_rows,
             "next_step_index": next_index,
             "next_blocked_reason": self._blocked_reason(step_rows, next_index),
+            "schedule_cron": pipeline.schedule_cron,
+            "compiled_dag_id": pipeline.compiled_dag_id,
+            "compiled_at": pipeline.compiled_at,
             "created_at": pipeline.created_at,
             "updated_at": pipeline.updated_at,
         }

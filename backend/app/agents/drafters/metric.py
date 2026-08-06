@@ -111,6 +111,7 @@ class MetricDrafter(Drafter):
             "engine": context.get("engine") or (contract.engines[0] if contract and contract.engines else "hive"),
             "target_layer": contract.target_layer if contract else "ads",
             "database_prefix": context.get("database_prefix"),
+            "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming（metric 允许 streaming）
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

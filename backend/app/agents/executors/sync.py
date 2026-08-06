@@ -84,8 +84,60 @@ class SyncExecutor(Executor):
         }
 
     def execute(self, spec: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        return {
-            **self._artifacts(spec),
-            "handoff": "SeaTunnel + DolphinScheduler",
-            "note": "作业配置中只含数据源别名，连接串由 SeaTunnel 侧解析",
-        }
+        # 未配 target_datasource，退回「仅产出」（与 transform/metric 同逻辑）
+        target_datasource_id = spec.get("target_datasource_id") or context.get("target_datasource_id")
+        if not target_datasource_id:
+            return {
+                **self._artifacts(spec),
+                "handoff": "SeaTunnel + DolphinScheduler",
+                "note": "未配置 target_datasource_id，ontoMeta 只生成作业配置，不执行（链上游会传入此字段）",
+            }
+
+        # 进链执行路径（P3-1）：sync = 对单对象跑搬运。复用 materialization_runner 的
+        # 搬运通道（runner/docker），传 selected_targets=[对象名] 只搬那一个对象。
+        # 搬运通道产 dag_id，使其可被 pipeline_compiler 串进链 DAG。
+        object_type = spec.get("object_type")
+        if not object_type:
+            return {
+                **self._artifacts(spec),
+                "handoff": "SeaTunnel + DolphinScheduler",
+                "note": "spec 缺 object_type，无法定位要搬的对象，退回仅产出",
+            }
+
+        try:
+            from app.services import materialization_runner
+        except ImportError as exc:
+            return {
+                **self._artifacts(spec),
+                "handoff": "import_error",
+                "note": f"搬运模块导入失败：{exc}，退回仅产出",
+            }
+
+        ontology_id = spec.get("ontology_id")
+        if not ontology_id:
+            raise ValueError("Spec 缺 ontology_id")
+        engine = spec.get("engine") or "hive"
+
+        from app.database import SessionLocal
+
+        with SessionLocal() as db:
+            try:
+                receipt = materialization_runner.run(
+                    db,
+                    ontology_id,
+                    target_datasource_id=target_datasource_id,
+                    engine=engine,
+                    database_prefix=spec.get("database_prefix"),
+                    load_strategy=spec.get("mode"),
+                    # 只搬这一个对象（按实体名裁剪）
+                    selected_targets=[object_type],
+                    artifact_id=context.get("artifact_id"),
+                )
+            except materialization_runner.MaterializationError as exc:
+                # 未配 Airflow / 投递失败：退回仅产出，不静默假装执行了
+                return {
+                    **self._artifacts(spec),
+                    "handoff": "SeaTunnel + DolphinScheduler",
+                    "note": f"搬运未执行（{exc}），退回仅产出",
+                }
+            return receipt

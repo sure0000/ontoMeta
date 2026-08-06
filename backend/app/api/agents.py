@@ -22,6 +22,8 @@ from app.schemas import (
     ArtifactDraftRequest,
     ArtifactExecuteRequest,
     GovernanceArtifactOut,
+    PipelineCompileOut,
+    PipelineScheduleRequest,
     TaskPipelineAdvanceOut,
     TaskPipelineCreateRequest,
     TaskPipelineOut,
@@ -106,7 +108,55 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db)):
     artifact = agent_pipeline.get(db, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="制品不存在")
-    return _to_out(artifact)
+    out = _to_out(artifact)
+    # P1-6：best-effort 回读 DagRun 实时态（失败退制品 status，复用 chat_bi._live_task_state 逻辑）
+    out.live_state = _try_live_state(db, artifact)
+    return out
+
+
+def _try_live_state(db: Session, artifact: GovernanceArtifact) -> dict | None:
+    """尽力回读一个制品的 Airflow 实时态（多批 DagRun 聚合）。从不抛异常。
+
+    制品状态在 execute() 提交 DAG 后即置 succeeded，但 DAG 在 Airflow 里可能还在跑——
+    故实时权威是 Airflow。复用 warehouse 的批次解析 + 状态聚合，读不到就返回 None。
+    """
+    try:
+        from app.api.warehouse import _aggregate_state, _receipt_batches
+        from app.connectors.airflow import AirflowClient, AirflowError, is_terminal
+        from app.services.settings_service import SettingsService
+
+        batches = _receipt_batches(db, artifact.id)
+        if not batches:
+            return None
+        rt = SettingsService().get_airflow_runtime(db)
+        if not rt.available:
+            return None
+        client = AirflowClient(
+            rt.endpoint, username=rt.username, password=rt.password,
+            token=rt.token, api_version=rt.api_version,
+        )
+        try:
+            states: list = []
+            run_url = None
+            for b in batches:
+                bid, brun = b.get("dag_id"), b.get("dag_run_id")
+                if not bid or not brun:
+                    states.append(b.get("state") or "failed")
+                    continue
+                try:
+                    run = client.get_dag_run(bid, brun)
+                    states.append(run.get("state"))
+                    run_url = run_url or client.run_url(bid, brun)
+                except AirflowError:
+                    states.append(None)
+        finally:
+            client.close()
+        agg = _aggregate_state(states)
+        if not agg:
+            return None
+        return {"live_state": agg, "terminal": is_terminal(agg), "run_url": run_url}
+    except Exception:  # noqa: BLE001 — 实时态是增强，读不到退回制品态，绝不炸 API
+        return None
 
 
 @router.post("/agents/draft", response_model=GovernanceArtifactOut)
@@ -215,3 +265,74 @@ def advance_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
         pipeline=TaskPipelineOut(**task_pipeline.detail(db, pipeline_id)),
         artifact=_to_out(artifact),
     )
+
+
+@router.put("/agents/pipelines/{pipeline_id}/schedule", response_model=TaskPipelineOut)
+def set_pipeline_schedule(
+    pipeline_id: str, data: PipelineScheduleRequest, db: Session = Depends(get_db)
+):
+    """给链设置周期调度 cron。设置后即可编译成周期 DAG。
+
+    只落 cron 到链上，不触发编译——编译是显式的第二步（要校验所有步骤已确认）。
+    """
+    def _set():
+        pipeline = task_pipeline.require(db, pipeline_id)
+        pipeline.schedule_cron = (data.schedule_cron or "").strip() or None
+        db.commit()
+        return task_pipeline.detail(db, pipeline_id)
+
+    return TaskPipelineOut(**_guard(_set))
+
+
+@router.post("/agents/pipelines/{pipeline_id}/compile", response_model=PipelineCompileOut)
+def compile_pipeline_endpoint(pipeline_id: str, db: Session = Depends(get_db)):
+    """把链编译成一条周期 DAG。
+
+    **编译前提**（不满足则 409/400）：所有步骤已确认、已执行过一次、spec 未在确认后变更。
+    周期调度天然是「无人值守反复执行」，与「每次执行都要人确认」冲突——折中是把确认前移：
+    人确认的是「这条链的这个版本可以反复跑」，编译时把各步 spec 快照进 DAG。
+    """
+    from app.services.pipeline_compiler import PipelineCompileError, compile_pipeline
+
+    def _compile():
+        try:
+            return compile_pipeline(db, pipeline_id)
+        except PipelineCompileError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    result = _guard(_compile)
+    return PipelineCompileOut(**result)
+
+
+@router.delete("/agents/pipelines/{pipeline_id}/schedule", response_model=TaskPipelineOut)
+def unschedule_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
+    """下线周期调度：清 schedule_cron 与 compiled_dag_id。
+
+    注意：这只清 ontoMeta 侧的记录。已落盘的 DAG 文件需另行删除（或让 Airflow 停用）——
+    ontoMeta 不直接删 Airflow 的 DAG 文件，避免误删部署方手动接管的东西。
+    """
+    def _unschedule():
+        pipeline = task_pipeline.require(db, pipeline_id)
+        pipeline.schedule_cron = None
+        pipeline.compiled_dag_id = None
+        pipeline.compiled_at = None
+        db.commit()
+        return task_pipeline.detail(db, pipeline_id)
+
+    return TaskPipelineOut(**_guard(_unschedule))
+
+
+@router.get("/agents/pipelines/{pipeline_id}/lineage")
+def preview_pipeline_lineage(pipeline_id: str, db: Session = Depends(get_db)):
+    """预览链级血缘边（P3-3）：串联各步产出表（物化→清洗→聚合）。纯读，不触碰 DataHub。"""
+    from app.services.pipeline_lineage import PipelineLineageEmitter
+
+    return _guard(lambda: PipelineLineageEmitter().preview(db, pipeline_id))
+
+
+@router.post("/agents/pipelines/{pipeline_id}/lineage")
+def apply_pipeline_lineage(pipeline_id: str, db: Session = Depends(get_db)):
+    """上报链级血缘到 DataHub（P3-3）。逐条记录失败，不因单条中断整体。"""
+    from app.services.pipeline_lineage import PipelineLineageEmitter
+
+    return _guard(lambda: PipelineLineageEmitter().apply_sync(db, pipeline_id))

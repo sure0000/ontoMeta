@@ -81,6 +81,26 @@ def test_unknown_pinned_tool_is_rejected_before_submit():
         resolve_sync_tool(_airflow(sync_channel="docker", sync_tool="nosuchtool"))
 
 
+def test_flink_cannot_be_pinned_as_a_sync_tool():
+    """flink 已退出搬运：同步只走 seatunnel/datax，强指 flink 为搬运工具两条通道都拒。"""
+    for channel in ("docker", "runner"):
+        with pytest.raises(SyncToolResolutionError) as exc:
+            resolve_sync_tool(_airflow(sync_channel=channel, sync_tool="flink"))
+        assert "flink" in str(exc.value)
+
+
+def test_docker_auto_never_picks_flink_even_with_an_image():
+    """flink 有官方镜像，但已退出搬运：auto 只能落在 seatunnel/datax，绝不选 flink。"""
+    import app.services.sync_tool_resolver as resolver
+
+    # 只留 flink 可用（它默认有镜像）：剔除后无可用搬运工具，应显式报错而非选中 flink。
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(resolver, "available_sync_tools", lambda overrides=None: ["flink"])
+        with pytest.raises(SyncToolResolutionError) as exc:
+            resolve_sync_tool(_airflow(sync_channel="docker"), modes=("full",))
+    assert "没有任何搬运工具" in str(exc.value)
+
+
 def test_required_modes_dedups_and_defaults_to_full():
     contracts = [
         SimpleNamespace(load_strategy="incremental"),

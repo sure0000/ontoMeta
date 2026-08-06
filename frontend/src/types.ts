@@ -1601,6 +1601,10 @@ export interface TaskPipeline {
   next_step_index?: number | null;
   /** 下一步为什么还不能起草（上游没跑成功）；能起草为 null。 */
   next_blocked_reason?: string | null;
+  // P2：编译成周期 DAG 的状态
+  schedule_cron?: string | null;
+  compiled_dag_id?: string | null;
+  compiled_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1608,6 +1612,21 @@ export interface TaskPipeline {
 export interface TaskPipelineAdvanceResult {
   pipeline: TaskPipeline;
   artifact: GovernanceArtifact;
+}
+
+/** 编译成周期 DAG 的结果（P2）。 */
+export interface PipelineCompileResult {
+  pipeline_id: string;
+  compiled_dag_id: string;
+  schedule_cron: string;
+  steps: {
+    step_index: number;
+    kind: string;
+    artifact_id: string;
+    dag_ids: string[];
+  }[];
+  dag_path: string;
+  spec_path: string;
 }
 
 export interface AgentKinds {

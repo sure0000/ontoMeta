@@ -73,6 +73,7 @@ class TransformDrafter(Drafter):
                 or (contract.engines[0] if contract and contract.engines else "hive"),
                 "target_layer": contract.target_layer if contract else "dim",
                 "database_prefix": context.get("database_prefix"),
+                "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming
                 "cleansing_rules": self._rules(intent),
                 "notes": intent,
             }

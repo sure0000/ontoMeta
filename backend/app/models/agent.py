@@ -119,6 +119,12 @@ class GovernanceTaskPipeline(Base):
     name: Mapped[str] = mapped_column(String(255), default="")
     intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     ontology_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # P2：编译成周期 DAG 后的状态。链态仍由各步制品聚合推导（不落第二份），但「已挂成
+    # 周期任务」是链级事实、无处可聚合，故在此落：schedule_cron 是挂的 cron，compiled_dag_id
+    # 是编译出的 DAG，compiled_at 是编译时间。任一步 spec 确认后变动，compiled_dag_id 失效、需重编。
+    schedule_cron: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    compiled_dag_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    compiled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -149,6 +155,10 @@ class GovernanceTaskPipelineStep(Base):
     step_index: Mapped[int] = mapped_column(Integer, default=0)
     kind: Mapped[str] = mapped_column(String(30))
     intent: Mapped[str] = mapped_column(Text, default="")
+    # P3-2：显式依赖的上游步序列表（JSON 数组）。空/None = 沿用线性默认（依赖上一步）。
+    # 给了则支持扇出/汇聚：一个上游分叉到多个下游（扇出）、多个上游汇到一个下游（汇聚）。
+    # 提案层仍以线性为主（易读易起草），分叉只在编译成 DAG 时生效。
+    depends_on_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 本步显式给定的 context；起草时与上游继承来的合并，**显式的优先**。
     context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 软引用（不设 FK）：制品的权威在 agent 流水线，这里只记「这一步落成了哪条制品」。

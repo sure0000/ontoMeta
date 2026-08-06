@@ -65,6 +65,7 @@ import type {
   GovernanceArtifact,
   TaskPipeline,
   TaskPipelineAdvanceResult,
+  PipelineCompileResult,
   ChatBiExternalTool,
   LlmConnectionTestResult,
   ObjectTypeDetail,
@@ -1383,5 +1384,21 @@ export const api = {
   advancePipeline: (id: string) =>
     request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance`, {
       method: "POST",
+    }),
+  /** 给链设置周期 cron（不触发编译；编译是显式的第二步）。 */
+  setPipelineSchedule: (id: string, scheduleCron: string | null) =>
+    request<TaskPipeline>(`/api/agents/pipelines/${id}/schedule`, {
+      method: "PUT",
+      body: JSON.stringify({ schedule_cron: scheduleCron }),
+    }),
+  /** 把链编译成周期 DAG。前提不满足时后端 409，错误里说清卡在哪一步。 */
+  compilePipeline: (id: string) =>
+    request<PipelineCompileResult>(`/api/agents/pipelines/${id}/compile`, {
+      method: "POST",
+    }),
+  /** 下线周期调度：清 schedule_cron 与 compiled_dag_id。 */
+  unschedulePipeline: (id: string) =>
+    request<TaskPipeline>(`/api/agents/pipelines/${id}/schedule`, {
+      method: "DELETE",
     }),
 };

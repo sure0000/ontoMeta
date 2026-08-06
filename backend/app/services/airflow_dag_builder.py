@@ -49,8 +49,9 @@ class DagBundle:
     dag_source: str
     spec_filename: str
     spec: dict
-    # {文件名: SeaTunnel 作业配置}，落到 jobs 目录供任务容器读取
-    job_files: dict[str, dict] = field(default_factory=dict)
+    # {文件名: 作业配置}。dict 值落成 JSON（搬运作业配置）；str 值原样落成文本
+    # （Flink SQL 脚本 .sql）。两类都落到 jobs 目录供任务读取。
+    job_files: dict[str, dict | str] = field(default_factory=dict)
 
     def write(self, dags_dir: str, jobs_dir: str) -> dict[str, str]:
         """落盘，返回 {用途: 绝对路径}。目录不存在即创建。"""
@@ -73,7 +74,11 @@ class DagBundle:
         for name, conf in sorted(self.job_files.items()):
             job_path = os.path.join(jobs_dir, name)
             with open(job_path, "w", encoding="utf-8") as fh:
-                json.dump(conf, fh, ensure_ascii=False, indent=2, sort_keys=True)
+                if isinstance(conf, str):
+                    # Flink SQL 脚本：原样落成文本，供 flink run 的 SqlRunner 读取。
+                    fh.write(conf)
+                else:
+                    json.dump(conf, fh, ensure_ascii=False, indent=2, sort_keys=True)
         written["jobs_dir"] = jobs_dir
         return written
 
@@ -698,6 +703,216 @@ def _render_runner_dag_source(dag_id: str, spec_filename: str) -> str:
     return _RUNNER_DAG_TEMPLATE.replace("__DAG_ID__", dag_id).replace(
         "__SPEC_FILENAME__", spec_filename
     )
+
+
+# ======================================================================
+# Flink SQL 计算 DAG（P1-3）：transform 清洗 / metric 聚合。
+#
+# 与上面的搬运 DAG 分开一条路径：搬运是「DockerOperator 起兄弟容器 / runner HTTP」，
+# 而 Flink on YARN 的提交在 Airflow worker 上用 flink client 完成（需 HADOOP_CONF_DIR），
+# 故走 BashOperator：`flink run -t yarn-per-job -c <SqlRunner> <jar> --file <job.sql>`。
+# ontoMeta 只产 .sql（做法 A），SqlRunner JAR 由部署方预置：读 SQL 文件、用环境变量
+# 替换其中的 ${ALIAS_FIELD} 占位符、再逐条 executeSql。凭据由 BashOperator 的 env（Jinja
+# conn 表达式）在运行期注入，产物里不含凭据。
+# ======================================================================
+
+
+@dataclass(frozen=True)
+class FlinkSubmitConfig:
+    """Flink on YARN 提交参数（部署事实）。``runner_jar`` 必填——就是那个预置的
+    通用 SqlRunner JAR；其余有合理默认。"""
+
+    runner_jar: str
+    runner_class: str = "com.ontometa.flink.SqlRunner"
+    flink_bin: str = "flink"
+    deploy_target: str = "yarn-per-job"
+    parallelism: int = 1
+    yarn_queue: str | None = None
+    # 额外的 flink run 参数（如 -Djobmanager.memory.process.size=…），原样拼进命令。
+    extra_args: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FlinkSqlTask:
+    """一个 Flink SQL 计算任务。``sql`` 是 flink_sql_generator 产的完整脚本。"""
+
+    task_id: str
+    sql: str
+    # 依赖的同 DAG 内其他 flink 任务 task_id（空 = 接在建表任务之后）。
+    depends_on: tuple[str, ...] = ()
+    # 运行期凭据：{环境变量名: Jinja conn 表达式}，由 BashOperator env 注入。
+    env: dict[str, str] = field(default_factory=dict)
+    # streaming 作业提交即 detached（-d），提交成功任务即结束；batch attached 阻塞到完成。
+    detached: bool = False
+
+
+def flink_dag_id_for(base: str, suffix: str | None = None) -> str:
+    """稳定的 Flink 计算 DAG id。``base`` 取制品 id / 本体 id。"""
+    short = (base or "").replace("-", "")[:12]
+    dag_id = f"ontometa_flink_{short}"
+    return f"{dag_id}__{suffix}" if suffix else dag_id
+
+
+def _flink_run_command(
+    task: FlinkSqlTask, sql_path: str, cfg: FlinkSubmitConfig
+) -> str:
+    """拼 `flink run` 命令行。sql_path 是 worker 可见的 .sql 绝对路径。"""
+    parts = [cfg.flink_bin, "run", "-t", cfg.deploy_target, "-p", str(cfg.parallelism)]
+    if task.detached:
+        parts.append("-d")
+    if cfg.yarn_queue:
+        parts += ["-Dyarn.application.queue=" + cfg.yarn_queue]
+    parts += list(cfg.extra_args)
+    parts += ["-c", cfg.runner_class, cfg.runner_jar, "--file", sql_path]
+    return " ".join(parts)
+
+
+def build_flink_sql_dag(
+    *,
+    base: str,
+    tasks: tuple[FlinkSqlTask, ...],
+    warehouse_conn_id: str,
+    flink: FlinkSubmitConfig,
+    jobs_dir: str,
+    warehouse_ddl: tuple[str, ...] = (),
+    schedule: str | None = None,
+    dag_id_suffix: str | None = None,
+    max_active_tasks: int = 16,
+) -> DagBundle:
+    """把一批 Flink SQL 计算任务编译成一条 Airflow DAG。
+
+    DAG 结构：（可选）create_sink_tables（数仓建 sink 表 DDL）→ 各 flink run 任务
+    （按 depends_on 串，缺省接在建表任务后）。
+
+    Args:
+        base: DAG id 的基（制品 id / 本体 id）
+        tasks: Flink SQL 任务
+        warehouse_conn_id: 数仓连接（建 sink 表用）
+        flink: Flink on YARN 提交参数
+        jobs_dir: worker 视角的 jobs 目录（拼进 command 的 .sql 路径）
+        warehouse_ddl: 建 sink 表的数仓 DDL（空则不建，transform 目标表已由物化建好）
+        schedule: cron（空 = 只手动触发）
+        dag_id_suffix: 批次 / cron 分组后缀
+    """
+    if not tasks:
+        raise ValueError("build_flink_sql_dag 需至少一个 Flink SQL 任务")
+    dag_id = flink_dag_id_for(base, dag_id_suffix)
+
+    job_files: dict[str, dict | str] = {}
+    task_specs: list[dict] = []
+    for task in tasks:
+        filename = f"{dag_id}__{task.task_id}.sql"
+        job_files[filename] = task.sql
+        sql_path = f"{jobs_dir.rstrip('/')}/{filename}"
+        task_specs.append(
+            {
+                "task_id": task.task_id,
+                "command": _flink_run_command(task, sql_path, flink),
+                "env": dict(task.env),
+                "depends_on": list(task.depends_on),
+                "sql_file": sql_path,
+                "detached": task.detached,
+            }
+        )
+
+    spec = {
+        "dag_id": dag_id,
+        "base": base,
+        "kind": "flink_sql",
+        "schedule": schedule or None,
+        "warehouse_conn_id": warehouse_conn_id,
+        "max_active_tasks": max_active_tasks,
+        # 建 sink 表：逐条去分号（SQLExecuteQueryOperator 一次一条）。
+        "warehouse_ddl": [_as_single_statement(s) for s in warehouse_ddl],
+        "flink_runner_jar": flink.runner_jar,
+        "tasks": task_specs,
+    }
+    return DagBundle(
+        dag_id=dag_id,
+        dag_filename=f"{dag_id}.py",
+        dag_source=_render_flink_dag_source(dag_id, f"{dag_id}.json"),
+        spec_filename=f"{dag_id}.json",
+        spec=spec,
+        job_files=job_files,
+    )
+
+
+_FLINK_DAG_TEMPLATE = '''"""ontoMeta Flink SQL 计算 DAG（自动生成，勿手改）。
+
+由 ``app/services/airflow_dag_builder.py`` 生成，同目录的 {spec_filename} 是它的输入。
+任务：（可选）create_sink_tables → 各 flink run 任务（提交到 YARN）。
+SQL 脚本已落在 jobs 目录，flink run 的 SqlRunner 读它、用环境变量替换占位符后执行。
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+
+import pendulum
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+_SPEC = json.loads(
+    (pathlib.Path(__file__).with_name("{spec_filename}")).read_text(encoding="utf-8")
+)
+
+
+with DAG(
+    dag_id="{dag_id}",
+    description="ontoMeta Flink SQL 计算：清洗 / 聚合",
+    schedule=_SPEC.get("schedule"),
+    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
+    catchup=False,
+    max_active_runs=1,
+    max_active_tasks=_SPEC.get("max_active_tasks", 16),
+    default_args={{
+        "retries": 2,
+        "retry_exponential_backoff": True,
+        "retry_delay": pendulum.duration(seconds=30),
+    }},
+    tags=["ontometa", "flink-sql"],
+) as dag:
+    # 建 sink 表（可选）：transform 目标表多数已由物化建好，metric 的 ads 表需在此建。
+    upstream = []
+    _ddl = _SPEC.get("warehouse_ddl") or []
+    if _ddl:
+        create_sink_tables = SQLExecuteQueryOperator(
+            task_id="create_sink_tables",
+            conn_id=_SPEC["warehouse_conn_id"],
+            sql=_ddl,
+        )
+        upstream = [create_sink_tables]
+
+    _ops = {{}}
+    for task in _SPEC["tasks"]:
+        _ops[task["task_id"]] = BashOperator(
+            task_id=task["task_id"],
+            # flink run 提交到 YARN。batch attached 阻塞到完成，Airflow 任务终态即作业终态；
+            # streaming 以 -d 提交，提交成功任务即结束。
+            bash_command=task["command"],
+            # 凭据：值是 {{{{ conn.… }}}} 表达式，env 是模板字段，运行期才解析 Connection。
+            # append_env 保留 worker 环境（PATH / HADOOP_CONF_DIR / FLINK_HOME 等）。
+            env=task.get("env") or {{}},
+            append_env=True,
+        )
+
+    # 依赖串联：有 depends_on 按其串；无则接在建表任务之后（若有）。
+    for task in _SPEC["tasks"]:
+        op = _ops[task["task_id"]]
+        deps = task.get("depends_on") or []
+        if deps:
+            for d in deps:
+                _ops[d] >> op
+        elif upstream:
+            for u in upstream:
+                u >> op
+'''
+
+
+def _render_flink_dag_source(dag_id: str, spec_filename: str) -> str:
+    return _FLINK_DAG_TEMPLATE.format(dag_id=dag_id, spec_filename=spec_filename)
 
 
 dag_builder = AirflowDagBuilder()

@@ -34,7 +34,14 @@ AUTO = ""
 
 # docker 通道下的挑选优先级。seatunnel 在前：仓库既有 SyncExecutor 已在产它的配置、
 # 且有官方镜像；datax 在后：无官方镜像，除非部署方配过 SYNC_TOOL_IMAGES 否则不可用。
-_PRIORITY = (DEFAULT_SYNC_TOOL, "flink", "datax")
+# **flink 不在此列**：同步一律走 SeaTunnel / DataX，flink 已退出搬运序列（见 _NON_SYNC_TOOLS）。
+_PRIORITY = (DEFAULT_SYNC_TOOL, "datax")
+
+# 已退出搬运序列的工具（2026-08-06 决策）：同步不论是否同源都走 SeaTunnel / DataX；
+# flink 专职做计算（transform/metric 的 Flink SQL），不再作搬运工具——既不被 auto 选中，
+# 也不接受被强制指定为搬运工具。FlinkAdapter 仍留在注册表供计算侧复用其类与命令形态，
+# 故这里用工具名黑名单表达「退出搬运」，而非从注册表删除。
+_NON_SYNC_TOOLS = frozenset({"flink"})
 
 
 class SyncToolResolutionError(RuntimeError):
@@ -83,6 +90,15 @@ def resolve_sync_tool(
     channel = (airflow.sync_channel or "runner").lower()
     pinned = (forced or getattr(airflow, "sync_tool", "") or AUTO).strip().lower()
 
+    # flink 已退出搬运：把它强制指定为搬运工具是矛盾指令，两条通道下都直接拒，
+    # 不静默照收（照收会让人以为「换 flink 搬」是个有效选择）。
+    if pinned in _NON_SYNC_TOOLS:
+        raise SyncToolResolutionError(
+            f"「{pinned}」已不作搬运工具：同步一律走 SeaTunnel / DataX，"
+            f"{pinned} 专职计算（transform/metric 的 Flink SQL）。"
+            "请改用 seatunnel 或 datax，或设为自动。"
+        )
+
     if channel != "docker":
         if pinned:
             return SyncToolChoice(
@@ -125,7 +141,8 @@ def resolve_sync_tool(
             uncovered_modes=uncovered,
         )
 
-    available = available_sync_tools(overrides)
+    # flink 即便有官方镜像也不作搬运候选：在源头剔除，auto 序列与兜底都不会再碰它。
+    available = [t for t in available_sync_tools(overrides) if t not in _NON_SYNC_TOOLS]
     if not available:
         raise SyncToolResolutionError(
             "docker 通道下没有任何搬运工具有可用镜像："

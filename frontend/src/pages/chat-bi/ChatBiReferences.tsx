@@ -1525,6 +1525,91 @@ function PipelineProposalBlock({
         })}
       </div>
 
+      {/* P2-4：周期任务控件——链走通（status=succeeded）后显示 */}
+      {pipeline && pipeline.status === "succeeded" && (
+        <div className="chatbi-pipeline-schedule" style={{ marginTop: 16, padding: "12px 16px", background: "#f5f5f5", borderRadius: 4 }}>
+          {!pipeline.compiled_dag_id ? (
+            <>
+              <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 500 }}>挂成周期任务</div>
+              <div style={{ color: "#666", marginBottom: 12, fontSize: 12 }}>
+                整条链已走通，可编译成一条 Airflow DAG、挂上调度周期后自动反复执行。
+              </div>
+              <Space>
+                <span style={{ fontSize: 12 }}>调度周期</span>
+                <CronPicker
+                  value={pipeline.schedule_cron ?? "0 2 * * *"}
+                  onChange={async (cron) => {
+                    try {
+                      setPipeline(await api.setPipelineSchedule(pipeline.id, cron));
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : "设置失败");
+                    }
+                  }}
+                  size="small"
+                />
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={busy}
+                  disabled={!pipeline.schedule_cron}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await api.compilePipeline(pipeline.id);
+                      await refresh(pipeline.id);
+                      message.success("已编译成周期 DAG");
+                    } catch (err) {
+                      message.error(
+                        err instanceof Error
+                          ? err.message
+                          : "编译失败（检查所有步骤是否已确认且执行过）",
+                      );
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  编译并挂起
+                </Button>
+              </Space>
+            </>
+          ) : (
+            <>
+              <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 500 }}>周期任务已挂起</div>
+              <div style={{ color: "#666", marginBottom: 8, fontSize: 12 }}>
+                DAG ID: <code>{pipeline.compiled_dag_id}</code>
+              </div>
+              <div style={{ color: "#666", marginBottom: 12, fontSize: 12 }}>
+                调度周期: {pipeline.schedule_cron ? cronstrue.toString(pipeline.schedule_cron, { locale: "zh_CN" }) : "无"}
+              </div>
+              <Space>
+                <Button
+                  size="small"
+                  danger
+                  loading={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      setPipeline(await api.unschedulePipeline(pipeline.id));
+                      message.success("已下线周期任务");
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : "下线失败");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  下线
+                </Button>
+                <span style={{ fontSize: 12, color: "#999" }}>
+                  （下线只清 ontoMeta 记录，DAG 文件需另行从 Airflow dags_dir 删除）
+                </span>
+              </Space>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="chatbi-draft-note">
         {pipeline
           ? "每一步都要各自过「校验 → dry-run 差异 → 人工确认 → 执行」；上一步执行成功后，下一步才可起草，届时目标数据源/库会自动接过去。"

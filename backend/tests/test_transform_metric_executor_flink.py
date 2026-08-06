@@ -1,0 +1,149 @@
+"""P1-4/P1-5：transform/metric executor 集成测试。
+
+验收：有 datasource+SqlRunner JAR 时返回 dag_run_id/run_url；无配置时退回「仅产出」。
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.agents.executors.transform import TransformExecutor
+from app.agents.executors.metric import MetricExecutor
+from app.database import SessionLocal
+from app.models import DataSource
+
+
+def _make_datasource(ds_id: str = "ds-123") -> None:
+    """建一个目标数据源（幂等：已存在则跳过）。"""
+    with SessionLocal() as db:
+        if db.get(DataSource, ds_id):
+            return
+        db.add(DataSource(id=ds_id, name="warehouse", kind="hive", dsn_secret_ref="hive://..."))
+        db.commit()
+
+
+@pytest.fixture
+def transform_spec():
+    return {
+        "ontology_id": "onto-123",
+        "target_table": "customer",
+        "engine": "hive",
+        "database_prefix": "erp",
+        "execution_mode": "batch",
+        "cleansing_rules": [],
+    }
+
+
+@pytest.fixture
+def metric_spec():
+    return {
+        "ontology_id": "onto-123",
+        "metric_name": "gmv",
+        "engine": "hive",
+        "database_prefix": "erp",
+        "target_layer": "ads",
+        "execution_mode": "batch",
+        "subject_objects": ["sales_order"],
+        "group_by": [],
+        "expression": "SUM(amount)",
+    }
+
+
+def test_transform_without_datasource_returns_handoff(transform_spec):
+    """未配 target_datasource_id 退回「仅产出」（不报错）。"""
+    executor = TransformExecutor()
+    with patch.object(executor, "_artifacts") as mock_artifacts:
+        mock_artifacts.return_value = {"engine": "hive", "sql": "SELECT 1;", "target_table": "customer"}
+        receipt = executor.execute(transform_spec, context={})
+    assert receipt["handoff"] == "DolphinScheduler"
+    assert "未配置 target_datasource_id" in receipt["note"]
+
+
+def test_metric_without_datasource_returns_handoff(metric_spec):
+    """metric 同上。"""
+    executor = MetricExecutor()
+    with patch.object(executor, "_artifacts") as mock_artifacts:
+        mock_artifacts.return_value = {"engine": "hive", "ddl": "CREATE TABLE ads_gmv (...);", "sql": "INSERT ..."}
+        receipt = executor.execute(metric_spec, context={})
+    assert receipt["handoff"] == "DolphinScheduler"
+    assert "未配置 target_datasource_id" in receipt["note"]
+
+
+def test_transform_with_datasource_but_no_runner_jar_returns_handoff(transform_spec):
+    """有 datasource 但无 SqlRunner JAR 时，run_flink_sql 内部退回「仅产出」。"""
+    _make_datasource("ds-123")
+
+    with patch("app.services.flink_job_runner.env_settings") as env:
+        env.flink_sql_runner_jar = ""  # 未配 JAR
+        with patch("app.services.flink_job_runner._settings") as settings:
+            settings.get_airflow_runtime.return_value = MagicMock(available=True)
+            with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
+                mock_input.return_value = {
+                    "source_table": MagicMock(name="src_customer", columns=()),
+                    "target_table": MagicMock(name="customer", qualified_name="dim_erp.customer", columns=()),
+                    "source_physical": "erp_ods.tab_customer",
+                    "target_physical": "dim_erp.customer",
+                    "source_platform": "hive",
+                    "target_platform": "hive",
+                    "select_body": "SELECT `cust_id` AS `customer_id` FROM `src_customer`",
+                }
+                executor = TransformExecutor()
+                receipt = executor.execute(
+                    {**transform_spec, "target_datasource_id": "ds-123"},
+                    context={"artifact_id": "artifact-456"},
+                )
+
+    assert receipt["execute_mode"] == "handoff"
+    assert "未配置 Flink SqlRunner JAR" in receipt["note"]
+
+
+def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
+    """有 datasource+SqlRunner JAR+Airflow 时，返回 dag_run_id/run_url（Airflow mock 解析到 DAG）。"""
+    _make_datasource("ds-123")
+
+    with patch("app.services.flink_job_runner.env_settings") as env:
+        env.flink_sql_runner_jar = "/opt/flink/runner.jar"
+        env.flink_sql_runner_class = "com.ontometa.flink.SqlRunner"
+        env.flink_bin = "flink"
+        env.flink_deploy_target = "yarn-per-job"
+        env.flink_parallelism = 1
+        env.flink_yarn_queue = ""
+        with patch("app.services.flink_job_runner._settings") as settings:
+            airflow = MagicMock(
+                available=True,
+                dags_dir=str(tmp_path / "dags"),
+                jobs_dir=str(tmp_path / "jobs"),
+                endpoint="http://airflow",
+                max_active_tasks_per_dag=16,
+                dag_parse_timeout=0.1,
+            )
+            settings.get_airflow_runtime.return_value = airflow
+            with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
+                client = MagicMock()
+                client_cls.return_value = client
+                client.dag_exists.return_value = True
+                client.trigger_dag.return_value = {"state": "queued"}
+                client.run_url.return_value = "http://airflow/dags/x/grid"
+
+                with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
+                    mock_input.return_value = {
+                        "source_table": MagicMock(name="src_customer", columns=()),
+                        "target_table": MagicMock(name="customer", qualified_name="dim_erp.customer", columns=()),
+                        "source_physical": "erp_ods.tab_customer",
+                        "target_physical": "dim_erp.customer",
+                        "source_platform": "hive",
+                        "target_platform": "hive",
+                        "select_body": "SELECT `cust_id` AS `customer_id` FROM `src_customer`",
+                    }
+                    executor = TransformExecutor()
+                    receipt = executor.execute(
+                        {**transform_spec, "target_datasource_id": "ds-123"},
+                        context={"artifact_id": "artifact-456"},
+                    )
+
+    assert receipt["execute_mode"] == "flink_on_yarn"
+    assert receipt["dag_run_id"] == "ontometa__artifact-456"
+    assert receipt["state"] == "queued"
+    assert "http://airflow" in receipt["run_url"]

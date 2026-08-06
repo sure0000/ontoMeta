@@ -4,6 +4,9 @@
 调度执行；与 ``generate_cube_model_files`` 生成 Cube 文件让 Cube 自己加载同理。
 保持 ontoMeta 是语义层，不变成又一个调度器。
 
+P1-5 执行路径：Flink on YARN（经 flink_job_runner），未配 SqlRunner JAR 退回「仅产出」。
+metric 的 ads 表需先在数仓建（warehouse_ddl），再执行 Flink 聚合。
+
 幂等：产物由 Spec 确定性推导，同一 Spec 反复执行结果逐字节一致。
 """
 
@@ -12,6 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents.executors.base import Executor
+from app.database import SessionLocal
+from app.models import DataSource
+from app.services.flink_sql_generator import FlinkEndpoint, generate_flink_sql
 from app.warehouse import (
     LogicalColumn,
     LogicalTable,
@@ -108,9 +114,102 @@ class MetricExecutor(Executor):
         }
 
     def execute(self, spec: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        # 未配 target_datasource，退回「仅产出」（与 transform 同逻辑）
+        target_datasource_id = spec.get("target_datasource_id") or context.get("target_datasource_id")
+        if not target_datasource_id:
+            artifacts = self._artifacts(spec)
+            return {
+                **artifacts,
+                "handoff": "DolphinScheduler",
+                "note": "未配置 target_datasource_id，ontoMeta 只生成 DDL+SQL，不执行",
+            }
+
+        # Flink on YARN 执行路径（P1-5）
+        try:
+            from app.services.flink_job_runner import run_flink_sql
+            from app.services.airflow_dag_builder import FlinkSqlTask
+        except ImportError as exc:
+            artifacts = self._artifacts(spec)
+            return {
+                **artifacts,
+                "handoff": "import_error",
+                "note": f"Flink 模块导入失败：{exc}，退回仅产出",
+            }
+
         artifacts = self._artifacts(spec)
-        return {
-            **artifacts,
-            "handoff": "DolphinScheduler",
-            "note": "ontoMeta 只生成产物，不直接执行；请由调度器加载后运行",
-        }
+        engine = artifacts["engine"]
+        execution_mode = spec.get("execution_mode") or "batch"
+        metric_name = spec.get("metric_name")
+
+        with SessionLocal() as db:
+            ds = db.get(DataSource, target_datasource_id)
+            if not ds:
+                return {
+                    **artifacts,
+                    "handoff": "datasource_not_found",
+                    "note": f"target_datasource_id={target_datasource_id} 不存在，退回仅产出",
+                }
+            warehouse_conn_id = _warehouse_conn_id(ds)
+
+            # metric 的 ads 表构造：源是 dwd/dws（主对象），目标是 ads（结果表）
+            database, name = _qualified(spec)
+            target_table = _build_table(spec)
+            # 源表：主对象的物化表（假设已物化到 dwd/dws）
+            subjects = spec.get("subject_objects") or spec.get("object_types") or []
+            if not subjects:
+                return {
+                    **artifacts,
+                    "handoff": "no_subject",
+                    "note": "指标未绑定主对象，无法生成 Flink 聚合作业",
+                }
+            source_entity = subjects[0]  # 主对象的实体名
+            # 源表逻辑名加 src_ 前缀，物理名就是主对象的物化表（假设在 dwd）
+            source_physical = f"dwd_{spec.get('database_prefix') or ''}.{source_entity}".replace("..", ".")
+            source_table = LogicalTable(
+                name=f"src_{source_entity}",
+                database=None,
+                layer="dwd",
+                columns=target_table.columns,  # 简化：假设源表列与结果表列一致（实际需按 subject 查）
+            )
+
+            # 聚合 SELECT 体：复用 _build_sql 的逻辑，但 FROM 引用 Flink 源表逻辑名
+            group_by = spec.get("group_by") or []
+            filters = spec.get("filters") or []
+            expression = (spec.get("expression") or "").strip() or "COUNT(1)"
+            select_cols = ["  CURRENT_DATE AS stat_date"]
+            select_cols += [f"  {c} AS {c}" for c in group_by]
+            select_cols.append(f"  {expression} AS metric_value")
+            select_body = "SELECT\n" + ",\n".join(select_cols) + f"\nFROM `{source_table.name}`"
+            if filters:
+                select_body += "\nWHERE " + " AND ".join(f"`{f}` IS NOT NULL" for f in filters)
+            if group_by:
+                select_body += "\nGROUP BY " + ", ".join(f"`{c}`" for c in group_by)
+
+            # 生成完整 Flink SQL
+            flink_sql = generate_flink_sql(
+                source_table=source_table,
+                target_table=target_table,
+                source=FlinkEndpoint(warehouse_conn_id, engine),
+                target=FlinkEndpoint(warehouse_conn_id, engine),
+                select_body=select_body,
+                execution_mode=execution_mode,
+                source_physical=source_physical,
+                target_physical=target_table.qualified_name,
+            )
+
+            # 提交 Flink 作业（ads 表 DDL 先在数仓建，再执行聚合）
+            receipt = run_flink_sql(
+                db,
+                base=context.get("artifact_id") or metric_name,
+                tasks=(FlinkSqlTask(task_id="aggregate", sql=flink_sql),),
+                warehouse_conn_id=warehouse_conn_id,
+                warehouse_ddl=(artifacts["ddl"],),  # 先建 ads 表
+                artifact_id=context.get("artifact_id"),
+            )
+            return receipt
+
+
+def _warehouse_conn_id(ds: DataSource) -> str:
+    """目标仓的 Airflow Connection id（复用 materialization_runner 逻辑）。"""
+    slug = "".join(c if c.isalnum() else "_" for c in (ds.name or ds.id)).strip("_").lower()
+    return f"ontometa_ds_{slug or ds.id[:8]}"
