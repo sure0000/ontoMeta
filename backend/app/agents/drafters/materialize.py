@@ -14,6 +14,24 @@ from typing import Any
 
 from app.agents.common import require_context
 from app.agents.drafters.base import Drafter
+from app.models.warehouse import MaterializationLayer
+
+
+def _database_overrides(context: dict[str, Any]) -> dict[str, str]:
+    """目标库：逐层的 ``database_overrides``，外加把标量 ``target_database`` 摊到各层。
+
+    执行侧只认「层 → 库名」这一种形式。而人（和对话）说的是「物化到 dw 库」——一个库，
+    不分层；物化弹窗里也是**一个**目标库输入框，提交时逐层填上同一个值。此前建数表单
+    收上来的 ``target_database`` 在这里被静默丢掉，选中的库根本没生效，表落回默认库。
+
+    逐层显式给的优先：``database_overrides`` 命中的层不被标量覆盖。
+    """
+    overrides = {str(k): str(v) for k, v in (context.get("database_overrides") or {}).items()}
+    database = str(context.get("target_database") or "").strip()
+    if database:
+        for layer in MaterializationLayer:
+            overrides.setdefault(layer.value, database)
+    return overrides
 
 
 class MaterializeDrafter(Drafter):
@@ -28,7 +46,7 @@ class MaterializeDrafter(Drafter):
             "target_datasource_id": context["target_datasource_id"],
             "engine": context.get("engine") or "hive",
             "database_prefix": context.get("database_prefix"),
-            "database_overrides": dict(context.get("database_overrides") or {}),
+            "database_overrides": _database_overrides(context),
             "table_overrides": dict(context.get("table_overrides") or {}),
             "load_strategy": context.get("load_strategy"),
             # 搬运工具（seatunnel/datax/flink）；空 = 默认 seatunnel。

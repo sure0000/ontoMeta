@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.agents import registry
-from app.api.deps import agent_pipeline
+from app.api.deps import agent_pipeline, task_pipeline
 from app.database import get_db
 from app.models.agent import HIGH_RISK_KINDS, GovernanceArtifact
 from app.schemas import (
@@ -22,6 +22,9 @@ from app.schemas import (
     ArtifactDraftRequest,
     ArtifactExecuteRequest,
     GovernanceArtifactOut,
+    TaskPipelineAdvanceOut,
+    TaskPipelineCreateRequest,
+    TaskPipelineOut,
 )
 from app.services.agent_pipeline import PipelineError
 
@@ -163,3 +166,52 @@ def execute_artifact(
     context = data.context if data else {}
     artifact = _guard(lambda: agent_pipeline.execute(db, artifact_id, context=context))
     return _to_out(artifact)
+
+
+# ---------------- 任务链（多任务编排） ----------------
+#
+# 链只管顺序与上下文传递：每一步仍是一条独立制品，照旧各自走上面那套
+# validate → confirm → execute。故这里**没有**「执行整条链」的端点——那会绕过逐制品的
+# 人工确认，而「未确认不得执行」是这条流水线的硬不变量。
+
+
+@router.post("/agents/pipelines", response_model=TaskPipelineOut)
+def create_pipeline(data: TaskPipelineCreateRequest, db: Session = Depends(get_db)):
+    """建一条任务链（如 物化 → 清洗 → 聚合）。只落意图，不起草任何制品。"""
+    pipeline = _guard(
+        lambda: task_pipeline.create(
+            db,
+            name=data.name,
+            intent=data.intent,
+            ontology_id=data.ontology_id,
+            steps=[s.model_dump() for s in data.steps],
+        )
+    )
+    return TaskPipelineOut(**task_pipeline.detail(db, pipeline.id))
+
+
+@router.get("/agents/pipelines", response_model=list[TaskPipelineOut])
+def list_pipelines(
+    ontology_id: str | None = Query(None), db: Session = Depends(get_db)
+):
+    rows = task_pipeline.list_pipelines(db, ontology_id=ontology_id)
+    return [TaskPipelineOut(**task_pipeline.detail(db, p.id)) for p in rows]
+
+
+@router.get("/agents/pipelines/{pipeline_id}", response_model=TaskPipelineOut)
+def get_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
+    return TaskPipelineOut(**_guard(lambda: task_pipeline.detail(db, pipeline_id)))
+
+
+@router.post("/agents/pipelines/{pipeline_id}/advance", response_model=TaskPipelineAdvanceOut)
+def advance_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
+    """起草链上的下一步，返回它的制品。**只起草**——校验/确认/执行仍走各自的端点。
+
+    上游还没执行成功时拒绝（409），并说清卡在哪一步：这两种情形对用户意味着完全不同的
+    下一步动作，含糊成一句「不能推进」等于没说。
+    """
+    artifact = _guard(lambda: task_pipeline.advance(db, pipeline_id))
+    return TaskPipelineAdvanceOut(
+        pipeline=TaskPipelineOut(**task_pipeline.detail(db, pipeline_id)),
+        artifact=_to_out(artifact),
+    )

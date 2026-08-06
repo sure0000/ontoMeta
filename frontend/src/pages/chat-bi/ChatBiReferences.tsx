@@ -1,4 +1,5 @@
 import {
+  AutoComplete,
   Button,
   DatePicker,
   Form,
@@ -12,7 +13,8 @@ import {
   message,
 } from "antd";
 import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
-import { useEffect, useMemo, useState } from "react";
+import cronstrue from "cronstrue/i18n";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api";
 import { ArtifactDetail } from "../../components/AgentsPanel";
@@ -32,6 +34,7 @@ import type {
   GovernanceArtifact,
   GraphEdge,
   GraphNode,
+  TaskPipeline,
 } from "../../types";
 import {
   answerToBlocks,
@@ -383,6 +386,10 @@ function BlockRenderer({
       return <DraftProposalBlock proposal={block.proposal} />;
     case "action_proposal":
       return <ActionProposalBlock proposal={block.proposal} conversationId={conversationId} />;
+    case "pipeline_proposal":
+      return (
+        <PipelineProposalBlock proposal={block.proposal} conversationId={conversationId} />
+      );
     case "preference_proposal":
       return <PreferenceProposalBlock proposal={block.proposal} />;
     case "task_status":
@@ -480,9 +487,48 @@ function formatFormValue(v: unknown): string {
   return String(v);
 }
 
+/** cron 表达式 → 中文描述；空 = 不定时，解析不了则原样回显（与 CronPicker 同口径）。 */
+function describeCronValue(expr: string): string {
+  if (!expr.trim()) return "不定时（仅手动触发）";
+  try {
+    return cronstrue.toString(expr, {
+      locale: "zh_CN",
+      use24HourTimeFormat: true,
+      throwExceptionOnParseError: true,
+    });
+  } catch {
+    return expr;
+  }
+}
+
+/**
+ * 一个字段的回填文本。
+ *
+ * 候选类字段回「名称（取值）」：**名称给人读、取值给模型用**。id 类候选（数据源、对象）
+ * 只回名称的话，模型下一轮还得再猜是哪条记录；只回 id 则这条消息在对话里没法读。
+ * 自由输入类（text/autocomplete/number）没有这层映射，原样回即可。
+ */
+function formatFieldValue(field: ChatBiFormField, raw: unknown): string {
+  if (field.type === "cron") {
+    const expr = typeof raw === "string" ? raw.trim() : "";
+    return expr ? `${describeCronValue(expr)}（${expr}）` : "不定时（仅手动触发）";
+  }
+  const decorate = (v: unknown): string => {
+    const text = String(v);
+    const hit = (field.options ?? []).find((o) => o.value === text);
+    return hit && hit.label !== hit.value ? `${hit.label}（${hit.value}）` : text;
+  };
+  if (Array.isArray(raw)) {
+    return raw.length ? raw.map(decorate).join("、") : "（未填写）";
+  }
+  if (raw === undefined || raw === null || raw === "") return "（未填写）";
+  if (typeof raw === "boolean" || typeof raw === "object") return formatFormValue(raw);
+  return decorate(raw);
+}
+
 /** 把填好的表单值拼成既可读、又便于 LLM 解析的结构化回填文本。 */
 function composeFormReply(form: ChatBiFormRequest, values: Record<string, unknown>): string {
-  const lines = form.fields.map((f) => `- ${f.label}：${formatFormValue(values[f.name])}`);
+  const lines = form.fields.map((f) => `- ${f.label}：${formatFieldValue(f, values[f.name])}`);
   return `【已填写：${form.title}】\n${lines.join("\n")}`;
 }
 
@@ -495,25 +541,80 @@ function composeFormReply(form: ChatBiFormRequest, values: Record<string, unknow
  * 「请填写…」。整张交互表单因此从未真正提交成功过。
  */
 function FormControl({ field, ...rest }: { field: ChatBiFormField } & Record<string, unknown>) {
-  const options = (field.options ?? []).map((o) => ({ label: o, value: o }));
+  const options = field.options ?? [];
   switch (field.type) {
     case "textarea":
       return <Input.TextArea {...rest} placeholder={field.placeholder} autoSize={{ minRows: 2, maxRows: 6 }} />;
     case "number":
       return <InputNumber {...rest} placeholder={field.placeholder} style={{ width: "100%" }} />;
     case "select":
-      return <Select {...rest} placeholder={field.placeholder} options={options} allowClear />;
+      // 「某某数据源 → 某某库」这类合并候选可能上百条，恒开搜索；搜的是 label（给人看的
+      // 那串），不是藏着 id 的 value。
+      return (
+        <Select
+          {...rest}
+          placeholder={field.placeholder}
+          options={options}
+          showSearch
+          optionFilterProp="label"
+          allowClear
+        />
+      );
     case "multiselect":
-      return <Select {...rest} mode="multiple" placeholder={field.placeholder} options={options} allowClear />;
+      return (
+        <Select
+          {...rest}
+          mode="multiple"
+          placeholder={field.placeholder}
+          options={options}
+          optionFilterProp="label"
+          allowClear
+        />
+      );
     case "radio":
       return <Radio.Group {...rest} options={options} />;
     case "boolean":
       return <Switch {...rest} />;
     case "date":
       return <DatePicker {...rest} style={{ width: "100%" }} placeholder={field.placeholder} />;
+    case "autocomplete":
+      // 候选是**建议**不是闭集（分区键：物理表上可能有本体没建模的列），故是能打字的输入框。
+      return (
+        <AutoComplete
+          {...rest}
+          options={options}
+          placeholder={field.placeholder}
+          filterOption={(input, option) =>
+            String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())
+          }
+        />
+      );
+    case "cron":
+      // 与业务对象详情里点「物化」弹出的那个「定时策略」是同一个控件：任意合法 cron，
+      // 不是几个预置项——弹窗里配得出来的频率，对话里也要配得出来。
+      return <CronPickerControl {...rest} />;
     default:
       return <Input {...rest} placeholder={field.placeholder} />;
   }
+}
+
+/** CronPicker 的受控适配：Form.Item 注入的是 value/onChange，而 CronPicker 要求 value 非空串。 */
+function CronPickerControl({
+  value,
+  onChange,
+  disabled,
+}: {
+  value?: unknown;
+  onChange?: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <CronPicker
+      value={typeof value === "string" ? value : ""}
+      onChange={(v) => onChange?.(v)}
+      disabled={disabled}
+    />
+  );
 }
 
 /**
@@ -534,7 +635,11 @@ function FormBlock({
   const initialValues = useMemo(() => {
     const iv: Record<string, unknown> = {};
     for (const f of form.fields) {
-      if (f.default !== undefined && f.default !== null) iv[f.name] = f.default;
+      if (f.default === undefined || f.default === null) continue;
+      // date 的默认值经 JSON 过来是字符串，而 DatePicker 要 dayjs——宁可空着让用户自己选，
+      // 也不能把一个它读不懂的值塞进去。
+      if (f.type === "date") continue;
+      iv[f.name] = f.default;
     }
     return iv;
   }, [form]);
@@ -819,7 +924,7 @@ function PlanBlock({
  * 任务制品抽屉（P0）：复用治理面板的 ArtifactDetail（已含 dry-run 差异 + 校验/确认/执行 + 回执）。
  * agent 只出提案，人在此抽屉里过既有人审门；写全部落在 publisher 门控之后。
  */
-function useArtifactDrawer() {
+function useArtifactDrawer(onClose?: () => void) {
   const [detail, setDetail] = useState<GovernanceArtifact | null>(null);
   const [busy, setBusy] = useState(false);
   const STEP_LABEL: Record<string, string> = { validate: "校验", confirm: "确认", execute: "执行" };
@@ -850,7 +955,16 @@ function useArtifactDrawer() {
     }
   };
   const node = (
-    <ArtifactDetail artifact={detail} busy={busy} onClose={() => setDetail(null)} onStep={onStep} />
+    <ArtifactDetail
+      artifact={detail}
+      busy={busy}
+      onClose={() => {
+        setDetail(null);
+        // 任务链要据此回读链态：抽屉里刚走完的那一步可能已经成功，下一步随之可以起草。
+        onClose?.();
+      }}
+      onStep={onStep}
+    />
   );
   return { open: setDetail, node };
 }
@@ -859,6 +973,7 @@ const ACTION_KIND_LABEL: Record<string, string> = {
   materialize: "物化",
   sync: "同步",
   transform: "加工",
+  metric: "聚合",
 };
 
 const TASK_STATUS_COLOR: Record<string, string> = {
@@ -992,6 +1107,31 @@ function ProposalContextForm({
       .catch(() => setDataSources([]));
   }, [needsDataSource, dataSources]);
 
+  // 目标库跟着数据源走——与物化弹窗同一联动：换了源，上一个源上的库不再有意义。
+  // 列不出库（连不通/缺驱动）时退回手填，不拦提案（落库由 Airflow 执行，这里只是顺带列个库）。
+  const dsId = typeof context.target_datasource_id === "string" ? context.target_datasource_id : "";
+  const [databases, setDatabases] = useState<string[] | null>(null);
+  const needsDatabase = "target_database" in context;
+  useEffect(() => {
+    if (!needsDatabase || !dsId) {
+      setDatabases(null);
+      return;
+    }
+    let stale = false;
+    setDatabases(null);
+    api
+      .listDataSourceDatabases(dsId)
+      .then((r) => {
+        if (!stale) setDatabases(r.databases);
+      })
+      .catch(() => {
+        if (!stale) setDatabases([]);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [needsDatabase, dsId]);
+
   // 契约 id → 实体显示名。只有确实出现了按契约 id 索引的覆盖才去拉清单。
   const [contractNames, setContractNames] = useState<Record<string, string> | null>(null);
   const needsContracts = "table_overrides" in context || "overrides" in context;
@@ -1071,6 +1211,18 @@ function ProposalContextForm({
                 label: `${d.name}（${d.kind}）`,
               }))}
               notFoundContent="尚无数据源，请到 系统设置 → 数据源 添加"
+            />
+          );
+        } else if (key === "target_database" && databases && databases.length > 0) {
+          control = (
+            <Select
+              size="small"
+              style={{ width: "100%" }}
+              showSearch
+              value={typeof value === "string" && value ? value : undefined}
+              onChange={(v) => onChange(key, v)}
+              options={databases.map((d) => ({ value: d, label: d }))}
+              placeholder="选择目标库"
             />
           );
         } else if (key === "load_strategy") {
@@ -1179,6 +1331,212 @@ function ActionProposalBlock({
           去校验并执行
         </Button>
       </Space>
+      {node}
+    </div>
+  );
+}
+
+/** 链上一步的制品状态 → 中文标签与色。未起草的如实显示「待起草」，不冒充 drafted。 */
+const STEP_STATUS_LABEL: Record<string, { label: string; color: string }> = {
+  drafted: { label: "待校验", color: "default" },
+  validated: { label: "待确认", color: "blue" },
+  confirmed: { label: "待执行", color: "gold" },
+  executing: { label: "执行中", color: "processing" },
+  succeeded: { label: "已完成", color: "green" },
+  failed: { label: "失败", color: "red" },
+};
+
+const PIPELINE_STATUS_LABEL: Record<string, { label: string; color: string }> = {
+  drafted: { label: "未开始", color: "default" },
+  running: { label: "进行中", color: "processing" },
+  succeeded: { label: "已完成", color: "green" },
+  failed: { label: "有失败", color: "red" },
+};
+
+/**
+ * 任务链提案块：Data Agent 出的**一条链**（如 物化 → 清洗 → 聚合）。
+ *
+ * 链只管两件此前只能靠人肉完成的事：记住下一步是什么，以及把上游定下的落点（目标数据源/
+ * 库/引擎）接给下游。**它不替谁确认**——每一步仍是一条独立制品，点「起草第 N 步」后照旧
+ * 在复用的 ArtifactDetail 抽屉里过「校验 → dry-run → 人工确认 → 执行」。
+ *
+ * 故这里没有「一键跑完整条链」的按钮：那必然绕过逐制品的人工确认，而「未确认不得执行」是
+ * 这条流水线的硬不变量。
+ */
+function PipelineProposalBlock({
+  proposal,
+  conversationId,
+}: {
+  proposal: Extract<ChatBiBlock, { type: "pipeline_proposal" }>["proposal"];
+  conversationId?: string;
+}) {
+  // 建链前：可就地改各步参数。建链后：以服务端的链态为准（本地草稿不再有意义）。
+  const [drafts, setDrafts] = useState<Record<string, unknown>[]>(() =>
+    proposal.steps.map((s) => ({ ...(s.context ?? {}) })),
+  );
+  const [pipeline, setPipeline] = useState<TaskPipeline | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async (id: string) => {
+    try {
+      setPipeline(await api.getPipeline(id));
+    } catch {
+      /* 回读失败不打断主流程：下次操作还会再拉一次 */
+    }
+  }, []);
+  // 抽屉里刚走完的那一步可能已经成功，下一步随之解锁——关掉抽屉就回读一次链态。
+  const { open, node } = useArtifactDrawer(() => {
+    if (pipeline) void refresh(pipeline.id);
+  });
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      setPipeline(
+        await api.createPipeline({
+          ...proposal.create_payload,
+          // 用户改过的参数为准
+          steps: proposal.create_payload.steps.map((s, i) => ({ ...s, context: drafts[i] })),
+        }),
+      );
+      message.success("任务链已创建，可逐步起草");
+    } catch (err) {
+      message.error(
+        err instanceof ApiError && err.status === 403
+          ? "需要 publisher 角色：写侧任务仅 publisher 可创建"
+          : err instanceof Error
+            ? err.message
+            : "创建任务链失败",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const advance = async () => {
+    if (!pipeline) return;
+    setBusy(true);
+    try {
+      const result = await api.advancePipeline(pipeline.id);
+      setPipeline(result.pipeline);
+      if (conversationId) {
+        // 与单发提案同构：把本会话与该任务关联，后续可免 id 追踪。best-effort。
+        void api
+          .linkChatBiTask(conversationId, {
+            artifact_id: result.artifact.id,
+            kind: result.artifact.kind,
+            intent: result.artifact.intent ?? undefined,
+          })
+          .catch(() => {});
+      }
+      open(result.artifact);
+    } catch (err) {
+      // 409 = 上游还没跑成功，后端已说清卡在哪一步——原样透出，别糊成「操作失败」。
+      message.warning(err instanceof Error ? err.message : "无法推进到下一步");
+      void refresh(pipeline.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openStep = async (artifactId: string) => {
+    try {
+      open(await api.getArtifact(artifactId));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "读取任务失败");
+    }
+  };
+
+  const steps = pipeline?.steps ?? null;
+  const overall = pipeline ? PIPELINE_STATUS_LABEL[pipeline.status] : null;
+
+  return (
+    <div className="chatbi-draft chatbi-pipeline">
+      <div className="chatbi-draft-head">
+        <Tag color="geekblue" bordered={false}>任务链提案</Tag>
+        <span>{proposal.name}</span>
+        {overall && (
+          <Tag color={overall.color} bordered={false}>{overall.label}</Tag>
+        )}
+      </div>
+      {proposal.intent && <div className="chatbi-draft-name">{proposal.intent}</div>}
+
+      <div className="chatbi-pipeline-steps">
+        {proposal.steps.map((step, i) => {
+          const live = steps?.[i];
+          const status = live?.artifact_status
+            ? STEP_STATUS_LABEL[live.artifact_status] ?? {
+                label: live.artifact_status,
+                color: "default",
+              }
+            : null;
+          const isNext = pipeline?.next_step_index === i;
+          return (
+            <div className="chatbi-pipeline-step" key={step.kind + i}>
+              <div className="chatbi-pipeline-step-head">
+                <span className="chatbi-pipeline-step-no">{i + 1}</span>
+                <Tag bordered={false}>{ACTION_KIND_LABEL[step.kind] ?? step.kind}</Tag>
+                <span className="chatbi-pipeline-step-intent">{step.intent}</span>
+                {/* 还没起草到这一步就如实说「待起草」——不拿 drafted 冒充「已经建了制品」。 */}
+                <Tag color={status?.color ?? "default"} bordered={false}>
+                  {status?.label ?? "待起草"}
+                </Tag>
+              </div>
+              {!pipeline && (
+                <ProposalContextForm
+                  kind={step.kind}
+                  context={drafts[i] ?? {}}
+                  ontologyId={proposal.ontology_id}
+                  onChange={(key, value) =>
+                    setDrafts((prev) =>
+                      prev.map((c, j) => (j === i ? { ...c, [key]: value } : c)),
+                    )
+                  }
+                />
+              )}
+              {pipeline && (
+                <div className="chatbi-pipeline-step-actions">
+                  {live?.artifact_id ? (
+                    <Button size="small" onClick={() => void openStep(live.artifact_id!)}>
+                      {live.artifact_status === "succeeded" ? "查看" : "继续校验/确认/执行"}
+                    </Button>
+                  ) : isNext ? (
+                    <Button
+                      size="small"
+                      type="primary"
+                      loading={busy}
+                      disabled={Boolean(pipeline.next_blocked_reason)}
+                      onClick={() => void advance()}
+                    >
+                      起草第 {i + 1} 步
+                    </Button>
+                  ) : (
+                    <span className="chatbi-pipeline-step-wait">等前一步完成</span>
+                  )}
+                  {isNext && pipeline.next_blocked_reason && (
+                    <span className="chatbi-pipeline-step-wait">
+                      {pipeline.next_blocked_reason}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="chatbi-draft-note">
+        {pipeline
+          ? "每一步都要各自过「校验 → dry-run 差异 → 人工确认 → 执行」；上一步执行成功后，下一步才可起草，届时目标数据源/库会自动接过去。"
+          : "点击后只创建这条链，不会起草或执行任何任务；随后逐步起草，每步仍需人工确认才执行。"}
+      </div>
+      {!pipeline && (
+        <Space>
+          <Button type="primary" size="small" loading={busy} onClick={() => void create()}>
+            创建任务链
+          </Button>
+        </Space>
+      )}
       {node}
     </div>
   );

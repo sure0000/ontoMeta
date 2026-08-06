@@ -63,6 +63,8 @@ import type {
   RolePolicy,
   AgentKinds,
   GovernanceArtifact,
+  TaskPipeline,
+  TaskPipelineAdvanceResult,
   ChatBiExternalTool,
   LlmConnectionTestResult,
   ObjectTypeDetail,
@@ -1357,5 +1359,29 @@ export const api = {
     request<GovernanceArtifact>(`/api/agents/artifacts/${id}/execute`, {
       method: "POST",
       body: JSON.stringify({ context: context ?? {} }),
+    }),
+
+  // ---- 任务链（多任务编排）----
+  // 链只管顺序与上下文传递，逐步的校验/确认/执行仍走上面那几个制品端点。
+  // 故这里**没有** executePipeline：一键跑完必然绕过逐制品的人工确认。
+  createPipeline: (body: {
+    name: string;
+    intent?: string | null;
+    ontology_id?: string | null;
+    steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
+  }) =>
+    request<TaskPipeline>("/api/agents/pipelines", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getPipeline: (id: string) => request<TaskPipeline>(`/api/agents/pipelines/${id}`),
+  listPipelines: (ontologyId?: string) =>
+    request<TaskPipeline[]>(
+      `/api/agents/pipelines${buildQuery({ ontology_id: ontologyId })}`,
+    ),
+  /** 起草链上的下一步。上游还没跑成功时后端 409，错误里说清卡在哪一步。 */
+  advancePipeline: (id: string) =>
+    request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance`, {
+      method: "POST",
     }),
 };

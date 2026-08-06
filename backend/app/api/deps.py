@@ -15,6 +15,7 @@ from app.services.principal_service import PrincipalService
 from app.services.publish import ConfirmationService
 from app.services.query import OntologyQueryService, WorkspaceService
 from app.services.settings_service import SettingsService
+from app.services.task_pipeline import TaskPipelineService
 from app.services.warehouse_generator import WarehouseGenerator
 
 workspace = WorkspaceService()
@@ -32,5 +33,6 @@ materialization_contract_service = MaterializationContractService()
 warehouse_generator = WarehouseGenerator()
 principal_service = PrincipalService()
 agent_pipeline = AgentPipelineService()
+task_pipeline = TaskPipelineService()
 datahub_writeback = DataHubWritebackService()
 lineage_emitter = LineageEmitter()

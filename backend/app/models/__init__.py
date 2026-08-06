@@ -43,7 +43,10 @@ from app.models.agent import (
     ArtifactKind,
     ArtifactStatus,
     GovernanceArtifact,
+    GovernanceTaskPipeline,
+    GovernanceTaskPipelineStep,
     HIGH_RISK_KINDS,
+    PipelineStatus,
 )
 from app.models.principal import Principal, Role, role_rank, role_satisfies
 from app.models.governance import GovernanceStandardRecord
@@ -110,8 +113,11 @@ __all__ = [
     "role_rank",
     "role_satisfies",
     "GovernanceArtifact",
+    "GovernanceTaskPipeline",
+    "GovernanceTaskPipelineStep",
     "GovernanceStandardRecord",
     "ArtifactKind",
     "ArtifactStatus",
+    "PipelineStatus",
     "HIGH_RISK_KINDS",
 ]

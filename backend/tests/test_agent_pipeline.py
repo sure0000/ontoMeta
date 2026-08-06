@@ -13,12 +13,23 @@ from typing import Any
 
 import pytest
 
-from app.agents import registry
+from app.agents import register_builtin_agents, registry
 from app.agents.drafters.base import Drafter
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
 from app.governance.standard import DEFAULT_STANDARD
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
+
+
+@pytest.fixture(autouse=True)
+def restore_builtin_agents():
+    """本模块拿假 Drafter 顶掉真实注册（还有几处故意 unregister）——用完必须还回去。
+
+    ``registry`` 是**进程级全局**：只 unregister 不恢复，后面所有用到 metric/cluster 的
+    模块就都以为这两类「尚未实现」。这类污染只在整套跑时暴露，单跑本文件永远是绿的。
+    """
+    yield
+    register_builtin_agents()  # 幂等
 
 
 class _FakeDrafter(Drafter):

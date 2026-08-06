@@ -1818,3 +1818,71 @@
 .chatbi-form-actions {
   margin-top: 2px;
 }
+
+/* 任务链（多任务编排）：一条链上的若干步，按序号纵向排开。
+   链只管顺序与上下文传递——每一步仍各自过校验/确认/执行，故这里没有「一键跑完」的样式位。 */
+.chatbi-pipeline-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.chatbi-pipeline-step {
+  position: relative;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface, #fff);
+}
+
+/* 相邻两步之间画一段连线，让「前后相继」在视觉上就成立。 */
+.chatbi-pipeline-step + .chatbi-pipeline-step::before {
+  content: "";
+  position: absolute;
+  left: 21px;
+  top: -8px;
+  height: 8px;
+  border-left: 2px dotted var(--om-border);
+}
+
+.chatbi-pipeline-step-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chatbi-pipeline-step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--om-border);
+  color: var(--om-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  flex: none;
+}
+
+.chatbi-pipeline-step-intent {
+  font-size: 13px;
+  color: var(--om-text-primary);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chatbi-pipeline-step-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.chatbi-pipeline-step-wait {
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+}

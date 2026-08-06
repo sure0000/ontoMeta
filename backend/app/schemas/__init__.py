@@ -188,6 +188,11 @@ from app.schemas.agent import (
     ArtifactDraftRequest,
     ArtifactExecuteRequest,
     GovernanceArtifactOut,
+    PipelineStepInput,
+    PipelineStepOut,
+    TaskPipelineAdvanceOut,
+    TaskPipelineCreateRequest,
+    TaskPipelineOut,
 )
 from app.schemas.principal import (
     PrincipalCreate,
@@ -394,6 +399,11 @@ __all__ = [
     "ArtifactExecuteRequest",
     "GovernanceArtifactOut",
     "AgentKindsOut",
+    "PipelineStepInput",
+    "PipelineStepOut",
+    "TaskPipelineCreateRequest",
+    "TaskPipelineOut",
+    "TaskPipelineAdvanceOut",
 ]
 
 

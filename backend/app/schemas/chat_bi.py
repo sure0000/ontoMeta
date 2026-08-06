@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class ChatBiReference(BaseModel):
     id: str | None = None
@@ -59,21 +59,47 @@ class ChatBiClarification(BaseModel):
     reason: str = ""
 
 
+class ChatBiFormOption(BaseModel):
+    """表单候选项：**显示什么**（label）与**回填什么**（value）分开。
+
+    此前两者是同一个字符串，于是需要带 id 的候选（数据源、对象）只能写成「名称｜id」，
+    那串 id 就直接糊在下拉里给人看。分开之后：界面只显示 label，id 留在 value 里，
+    提交时随回填文本带回给模型。
+
+    ``disabled`` 用于「摆出来但选不了」的候选——执行侧不支持的装载方式必须**看得见**
+    （否则用户以为系统只会全量），但不能真被选中（与 MaterializeModal 的置灰同口径）。
+    """
+
+    label: str
+    value: str
+    disabled: bool = False
+
+
 class ChatBiFormField(BaseModel):
     """交互表单的单个字段（P6）。``type`` 决定前端用哪种控件渲染。
 
-    ``options`` 仅对 select/multiselect/radio 有意义，且**必须来自工具返回的真实实体**
-    （与 clarification.options 同一约束）；没有候选项时应退化为 text/number 让用户自填。
+    ``options`` 仅对 select/multiselect/radio/autocomplete 有意义，且**必须来自工具返回
+    的真实实体**（与 clarification.options 同一约束）；没有候选项时应退化为 text/number
+    让用户自填。为兼容纯字符串候选，字符串会被归一为 ``label == value`` 的候选项。
     """
 
     name: str  # 字段标识（回填时作键）
     label: str  # 中文标签
-    type: str  # text/textarea/number/select/multiselect/radio/boolean/date
-    options: list[str] = Field(default_factory=list)
+    # text/textarea/number/select/multiselect/radio/boolean/date/autocomplete/cron
+    type: str
+    options: list[ChatBiFormOption] = Field(default_factory=list)
     required: bool = False
     placeholder: str | None = None
     help: str | None = None
     default: Any | None = None
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _normalize_options(cls, v: Any) -> Any:
+        """字符串候选项归一为 {label, value}——老的纯字符串写法仍然合法。"""
+        if not isinstance(v, list):
+            return v
+        return [{"label": o, "value": o} if isinstance(o, str) else o for o in v]
 
 
 class ChatBiFormRequest(BaseModel):

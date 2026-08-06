@@ -117,6 +117,7 @@ _AGENT_SYSTEM_PROMPT = (
     "建数任务的目标数据源+目标库+更新策略+调度）才能继续，调 **request_form** 生成可填写表单"
     "一并收集，比逐条追问高效；候选项须来自真实实体——**先用工具把候选查出来再发表单**"
     "（建数任务用 get_task_options），别因为没查就把本该是下拉的字段退化成文本框。"
+    "用户在对话里**已经说过**的取值走 prefill 预填进表单，别原样再问一遍。"
     "仅单个歧义仍用 ask_clarification。\n"
     "7. 【结构性问题】问对象有哪些属性/字段/关系、口径定义这类元数据问题，"
     "直接用 get_object/get_logic 的本体元数据作答，**不要取数、不要在正文写取数 SQL**；"
@@ -533,8 +534,15 @@ _LINT_TOOL: dict[str, Any] = {
 # cluster（基建）不开，避免与口径提案重叠混淆。
 _ACTION_KINDS: tuple[str, ...] = ("materialize", "sync", "transform")
 _ACTION_KIND_LABEL: dict[str, str] = {
-    "materialize": "物化", "sync": "同步", "transform": "加工",
+    "materialize": "物化", "sync": "同步", "transform": "加工", "metric": "聚合",
 }
+
+# 任务链上可以出现的环节。比 _ACTION_KINDS 多一个 metric——「物化完清洗、清洗完聚合」里的
+# 聚合就是它（按已定义的业务逻辑口径产聚合 SQL）。单发提案不开 metric 是怕与口径提案
+# （propose_draft 产的是**口径定义**）混淆；在链里它的位置明确，不存在这个歧义。
+# cluster（基建）不进链：它与数据加工不是一条流水线上的事。
+_PIPELINE_KINDS: tuple[str, ...] = ("materialize", "sync", "transform", "metric")
+_PIPELINE_MAX_STEPS: int = 8
 
 _PROPOSE_ACTION_TOOL: dict[str, Any] = {
     "type": "function",
@@ -557,7 +565,8 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
                 "context": {"type": "object",
                              "description": (
                                  "结构化上下文，取值一律来自 get_task_options 的真实候选。物化常用："
-                                 'target_datasource_id（必填）、database_overrides={"层":"库名"}（目标库）、'
+                                 "target_datasource_id（必填）、target_database（目标库，一个库通吃各层；"
+                                 '要逐层分库才用 database_overrides={"层":"库名"}）、'
                                  'table_overrides={"契约id":"表名"}、refresh_cron（整批调度）、'
                                  'selected_targets=["实体名"]（只物化其中几个）、'
                                  'overrides={"契约id":{"partition_key":"dt","load_strategy":"incremental"}}'
@@ -565,6 +574,53 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
                              )},
             },
             "required": ["kind", "intent"],
+        },
+    },
+}
+
+_PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_pipeline",
+        "description": (
+            "当用户要的是**前后相继的多个任务**（如「物化到数仓，然后清洗，再按口径聚合」）时，"
+            "产出一条**任务链提案**（不执行、不写库）。链上每一步仍是一条独立任务，各自走"
+            "「校验→dry-run→人工确认→执行」；链负责的是记住下一步、并把上游已定下的目标数据源/"
+            "目标库/引擎接到下游，用户不必逐步重报。\n"
+            "**只有一个任务时用 propose_action**，别为单步套一条链。\n"
+            "**上游给过的选项下游不用再给**：target_datasource_id / target_database / engine 沿链"
+            "继承。第一步是 materialize 时它仍必须自己给 target_datasource_id（不知道就先 "
+            "request_form 问）。metric（聚合）要求口径已在「业务逻辑」里定义好，否则起草时会报错。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "这条链叫什么，一句话（如「客户主数据入仓链」）"},
+                "intent": {"type": "string", "description": "整条链要达成什么，一句话"},
+                "steps": {
+                    "type": "array",
+                    "description": f"有序步骤（2-{_PIPELINE_MAX_STEPS} 步），按执行先后排列",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string", "enum": list(_PIPELINE_KINDS),
+                                "description": "物化 materialize / 同步 sync / 清洗加工 transform / 聚合 metric",
+                            },
+                            "intent": {"type": "string", "description": "这一步做什么，一句话"},
+                            "context": {
+                                "type": "object",
+                                "description": (
+                                    "这一步的结构化上下文，键与 propose_action 同；"
+                                    "上游已给过的落点（数据源/库/引擎）不必重复"
+                                ),
+                            },
+                        },
+                        "required": ["kind", "intent"],
+                    },
+                },
+            },
+            "required": ["name", "steps"],
         },
     },
 }
@@ -759,8 +815,110 @@ _PROPOSE_PREFERENCE_TOOL: dict[str, Any] = {
 # 比逐条 ask_clarification 追问高效。与 clarification 同为终态出口（本轮结束等用户回填）。
 _FORM_FIELD_TYPES: tuple[str, ...] = (
     "text", "textarea", "number", "select", "multiselect", "radio", "boolean", "date",
+    # autocomplete = 带候选建议的文本框（候选是建议不是闭集，如分区键：物理表上可能有
+    # 本体没建模的列）；cron = 与 CronPicker 同一个调度选择器（任意合法 cron，非预置项）。
+    "autocomplete", "cron",
 )
 _FORM_MAX_FIELDS: int = 10
+# 建表单时最多探几个数据源的库列表：每个源一次真实连接，全探会把发表单这一步拖成秒级。
+_FORM_DATASOURCE_PROBE_LIMIT: int = 8
+# 「数据源 → 库」合并候选的条数上限：一个源上几百个库时下拉本身就没法用了。
+_FORM_LOCATION_LIMIT: int = 200
+
+
+def _normalize_form_options(raw: Any) -> list[dict[str, str]]:
+    """候选项归一为 ``{label, value}``（可带 disabled）。
+
+    **显示什么和回填什么是两件事**：带 id 的候选（数据源、对象）此前只能写成「名称｜id」，
+    那串 id 就直接糊在下拉里给人看。模型给纯字符串时 label = value，行为不变。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                out.append({"label": text, "value": text})
+            continue
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value") if item.get("value") is not None else "").strip()
+        label = str(item.get("label") or value).strip()
+        if not value:
+            value = label
+        if not label:
+            continue
+        option: dict[str, Any] = {"label": label[:120], "value": value[:255]}
+        if item.get("disabled"):
+            option["disabled"] = True
+        out.append(option)
+    return out
+
+
+def _match_option(field: dict, value: Any) -> Any | None:
+    """把一个预填值对到该字段的真实候选上；对不上返回 None。
+
+    对不上就**丢掉**：一个听错的库名若原样落进 default，用户看到的是一张「系统已经替我
+    确认过」的表单，而它是错的——错得比空着更贵。
+    """
+    options = field.get("options") or []
+    if not options:
+        # 无候选的字段（text/number/cron/…）自由取值，原样采用。
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if field.get("type") == "autocomplete":
+        # 候选是**建议**不是闭集：分区键可以是本体没建模的物理列，对不上也照填。
+        for option in options:
+            if text in (option["value"], option["label"]):
+                return option["value"]
+        return text
+    for option in options:
+        if option.get("disabled"):
+            continue  # 选不了的候选不能被预填绕过（如执行侧不支持的装载方式）
+        if text == option["value"] or text == option["label"]:
+            return option["value"]
+    lowered = text.lower()
+    for option in options:
+        if option.get("disabled"):
+            continue
+        if lowered in (option["value"].lower(), option["label"].lower()):
+            return option["value"]
+    # 退到「唯一子串命中」：用户说「落到 dw 库」，候选是「仓库（hive） → dw」。
+    hits = [
+        o for o in options
+        if not o.get("disabled") and (lowered in o["label"].lower() or lowered in o["value"].lower())
+    ]
+    return hits[0]["value"] if len(hits) == 1 else None
+
+
+def _apply_prefill(fields: list[dict], raw: Any) -> list[str]:
+    """把模型读到的「用户已经说过的取值」核对后填成默认值。返回命中的字段名。"""
+    if not isinstance(raw, dict):
+        return []
+    by_name = {f["name"]: f for f in fields}
+    hit: list[str] = []
+    for name, value in raw.items():
+        field = by_name.get(str(name).strip())
+        if field is None or value is None or value == "":
+            continue
+        if field["type"] == "multiselect":
+            values = value if isinstance(value, list) else [value]
+            matched = [m for m in (_match_option(field, v) for v in values) if m is not None]
+            if matched:
+                field["default"] = matched
+                hit.append(field["name"])
+            continue
+        if isinstance(value, list):
+            continue
+        matched = _match_option(field, value)
+        if matched is not None:
+            field["default"] = matched
+            hit.append(field["name"])
+    return hit
+
 
 _REQUEST_FORM_TOOL: dict[str, Any] = {
     "type": "function",
@@ -774,8 +932,10 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
             "无从预置就用 text/number 让用户自填。调用后本轮结束、等用户填完提交再继续。"
             "只需单个澄清用 ask_clarification；无需用户补参数别乱发表单。\n"
             "**建数任务（物化/同步/加工）传 task_kind**：服务端会按该类型补齐必问字段并填入真实"
-            "候选（物化=目标数据源/目标库/表名/装载方式/分区键/调度频率），你只需给 title；"
-            "fields 可留空，给了则作为额外字段追加。这样不会漏问参数。"
+            "候选（物化=目标数据源与库/表名/装载方式/分区键/调度频率），你只需给 title；"
+            "fields 可留空，给了则作为额外字段追加。这样不会漏问参数。\n"
+            "**用户已经说过的用 prefill 预填**（如「物化到 dw 库、每天凌晨跑」）：服务端会拿真实"
+            "候选核对，对得上就填成默认值、对不上就丢掉。别把已经问到的答案再问一遍。"
         ),
         "parameters": {
             "type": "object",
@@ -791,6 +951,14 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
                 },
                 "intent": {"type": "string", "description": "可选：为什么需要这些信息（一句话辅助说明）"},
                 "submit_label": {"type": "string", "description": "可选：提交按钮文案，缺省「提交」"},
+                "prefill": {
+                    "type": "object",
+                    "description": (
+                        "可选：{字段名: 取值}，把用户在对话里**已经说过**的填成默认值。"
+                        "取值可以是候选的 label 或 value（也接受能唯一命中的片段，如库名 dw）；"
+                        "服务端核对不上的会被丢掉，故不必怕填错，但也别拿它编造用户没说过的东西"
+                    ),
+                },
                 "fields": {
                     "type": "array",
                     "description": f"表单字段（1-{_FORM_MAX_FIELDS} 个）",
@@ -803,9 +971,25 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
                             "type": {"type": "string", "enum": list(_FORM_FIELD_TYPES),
                                       "description": ("控件类型：text 单行/textarea 多行/number 数字/"
                                                       "select 单选下拉/multiselect 多选/radio 单选按钮/"
-                                                      "boolean 开关/date 日期")},
-                            "options": {"type": "array", "items": {"type": "string"},
-                                         "description": "select/radio/multiselect 的候选项（须来自真实实体）"},
+                                                      "boolean 开关/date 日期/autocomplete 带建议的文本框/"
+                                                      "cron 调度选择器")},
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string", "description": "给人看的名称"},
+                                        "value": {"type": "string",
+                                                   "description": "回填给你的取值（id 类放这里，界面上不显示）"},
+                                    },
+                                    "required": ["label", "value"],
+                                },
+                                "description": (
+                                    "select/radio/multiselect/autocomplete 的候选项（须来自真实实体）。"
+                                    "**label 是给人看的、value 是回给你的**：带 id 的候选把 id 放 value，"
+                                    "别把 id 塞进 label 糊在下拉里。纯字符串也接受（label = value）"
+                                ),
+                            },
                             "required": {"type": "boolean", "description": "是否必填，缺省 false"},
                             "placeholder": {"type": "string", "description": "可选：占位提示"},
                             "help": {"type": "string", "description": "可选：字段说明"},
@@ -834,6 +1018,7 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _PROPOSE_DRAFT_TOOL,
         _LINT_TOOL,
         _PROPOSE_ACTION_TOOL,
+        _PROPOSE_PIPELINE_TOOL,
         _GET_TASK_OPTIONS_TOOL,
         _GET_TASK_STATUS_TOOL,
         _UPDATE_PLAN_TOOL,
@@ -2978,6 +3163,94 @@ class ChatBiService:
         key = (getattr(ds, "kind", None) or "").lower()
         return key if key in set(list_engines()) else None
 
+    @staticmethod
+    def _partition_key_candidates(
+        db: Session, ontology_id: str, contracts: list[Any]
+    ) -> list[dict[str, Any]]:
+        """整批可用的分区键候选 = **业务属性**，按覆盖的实体数排序。
+
+        分区键是逐表的列名，凭空给一个「全域最常见」的默认值会填进一个这张表根本没有的
+        字段（实测就发生过）。故这里不给默认值，只把**真实属性**摆成候选，并如实标注它
+        覆盖了几个待物化实体——覆盖不全的键整批用会让没这列的表退化成无谓词追加。
+
+        排序把已被现有契约用作分区键的排在最前：那是人已经认过的选择。
+        """
+        from app.models import ObjectType, Property
+
+        object_ids = [
+            c.target_id for c in contracts if c.target_kind == "object_type"
+        ]
+        if not object_ids:
+            return []
+        # 只认本体内的对象，防止契约里残留的陈旧 target_id 把别的域的属性带进来。
+        alive = {
+            row.id
+            for row in db.query(ObjectType.id)
+            .filter(ObjectType.ontology_id == ontology_id, ObjectType.id.in_(object_ids))
+            .all()
+        }
+        if not alive:
+            return []
+        coverage: dict[str, set[str]] = {}
+        display: dict[str, str] = {}
+        semantic: dict[str, str | None] = {}
+        for p in db.query(Property).filter(Property.object_type_id.in_(alive)).all():
+            name = (p.name or "").strip()
+            if not name:
+                continue
+            coverage.setdefault(name, set()).add(p.object_type_id)
+            display.setdefault(name, p.display_name or name)
+            semantic.setdefault(name, p.semantic_type or p.data_type)
+        in_use = {
+            (c.partition_key or "").strip() for c in contracts if (c.partition_key or "").strip()
+        }
+        total = len(alive)
+        items = [
+            {
+                "name": name,
+                "display_name": display.get(name) or name,
+                "semantic_type": semantic.get(name),
+                "covers": len(ids),
+                "total": total,
+                # 已在用的键放在最前：那是人已经认过的选择，不该被一个覆盖面更广的挤下去。
+                "in_use": name in in_use,
+            }
+            for name, ids in coverage.items()
+        ]
+        items.sort(key=lambda it: (not it["in_use"], -it["covers"], it["name"]))
+        return items[:_TASK_OPTIONS_LIMIT]
+
+    def _materialize_locations(
+        self, db: Session, sources: list[Any]
+    ) -> list[dict[str, Any]]:
+        """逐个可写数据源列出它上面的库，供「某某数据源下的某某库」合并成一次选择。
+
+        物化弹窗里目标库是**选完数据源才去连它列库**的联动下拉；表单是一次性提交、没有
+        联动，故把两级摊平成一级：候选本身就是「数据源 → 库」这一对。
+
+        列不出库的源不静默丢掉——记下原因，让它以「手填库名」的形式仍能被选到，否则一个
+        连接暂时不通的仓就凭空从候选里消失了。
+        """
+        from app.services.data_app import DataAppService
+
+        svc = DataAppService()
+        out: list[dict[str, Any]] = []
+        for s in sources:
+            try:
+                databases = svc.list_databases(db, s.id)
+                error = None
+            except Exception as exc:  # noqa: BLE001 — 列不出库只降级为手填，不该中断建数
+                databases, error = [], f"列不出该数据源的库（{exc}）"
+            out.append({
+                "id": s.id,
+                "name": s.name,
+                "kind": s.kind,
+                "engine": self._engine_of_datasource(s),
+                "databases": list(databases or []),
+                "error": error,
+            })
+        return out
+
     def _materialize_options(
         self, db: Session, *, ontology_id: str, datasource_id: str, keyword: str
     ) -> tuple[dict, str, bool]:
@@ -3017,6 +3290,7 @@ class ChatBiService:
 
         rows = contracts_svc.list_contracts(db, ontology_id, materialized_only=True)
         names = contracts_svc.resolve_target_names(db, rows)
+        partition_candidates = self._partition_key_candidates(db, ontology_id, rows)
         entities: list[dict[str, Any]] = []
         for c in rows:
             name, display = names.get(c.target_id, (None, None))
@@ -3066,10 +3340,13 @@ class ChatBiService:
             "truncated": len(entities) < len(rows),
             "load_strategies": load_strategies,
             "load_strategies_detail": modes_detail,
+            # 分区键是**这些表上真实存在的列**，故候选取自本体属性（覆盖面越广越适合整批用）。
+            "partition_key_candidates": partition_candidates,
             "cron_presets": [dict(p) for p in _CRON_PRESETS],
             "usage": (
-                "目标库经 database_overrides={层: 库名} 指定（各层可同库）；逐实体的分区键/"
-                "装载方式/调度经 overrides={contract_id: {...}}；整批一个调度用 refresh_cron。"
+                "目标库用 target_database（一个库通吃各层，与物化弹窗同口径；要逐层分库才用 "
+                "database_overrides={层: 库名}）；逐实体的分区键/装载方式/调度经 "
+                "overrides={contract_id: {...}}；整批一个调度用 refresh_cron。"
             ),
         }
         summary = (
@@ -3191,6 +3468,94 @@ class ChatBiService:
         label = _ACTION_KIND_LABEL[kind]
         return proposal, f"提案：新建{label}任务「{intent[:24]}」", False
 
+    def _dispatch_propose_pipeline(
+        self, db: Session, *, ontology_id: str, args: dict
+    ) -> tuple[dict, str, bool]:
+        """产出一条**任务链**提案（纯 spec，不写库、不执行）。
+
+        与 propose_action 同构：ask() 保持只读，真正建链由用户在前端点击后 POST
+        /api/agents/pipelines。链只管顺序与上下文传递，逐步的「校验→确认→执行」原样不动。
+
+        **必填 context 的校验要把继承算进去**：第 2 步的清洗不必自己给目标数据源——那是第 1
+        步物化已经定下的，链会接过去。若在这里照单步的口径判缺，模型就会被迫在每一步都重报
+        一遍同样的 id，那正是任务链要消灭的事。
+        """
+        name = str(args.get("name") or "").strip()
+        raw_steps = args.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return {"error": "需要 steps（非空步骤数组）"}, "任务链无步骤", True
+        if len(raw_steps) < 2:
+            return (
+                {"error": "任务链至少两步；只有一个任务请用 propose_action"},
+                "任务链只有一步",
+                True,
+            )
+        if len(raw_steps) > _PIPELINE_MAX_STEPS:
+            return (
+                {"error": f"任务链最多 {_PIPELINE_MAX_STEPS} 步，收到 {len(raw_steps)} 步"},
+                "任务链过长",
+                True,
+            )
+
+        steps: list[dict[str, Any]] = []
+        # 沿链累积「上游已经定下的键」，据此判下游还缺什么。
+        available: set[str] = set(_AUTO_ACTION_CONTEXT_KEYS)
+        for i, raw in enumerate(raw_steps):
+            if not isinstance(raw, dict):
+                return {"error": f"第 {i + 1} 步不是对象"}, "任务链步骤非法", True
+            kind = str(raw.get("kind") or "").strip()
+            if kind not in _PIPELINE_KINDS:
+                return (
+                    {"error": f"第 {i + 1} 步的 kind 须为 {'/'.join(_PIPELINE_KINDS)}，收到「{kind}」",
+                     "available": list(_PIPELINE_KINDS)},
+                    "任务链步骤类型非法",
+                    True,
+                )
+            step_intent = str(raw.get("intent") or "").strip()
+            if not step_intent:
+                return {"error": f"第 {i + 1} 步（{kind}）缺少 intent"}, "任务链步骤缺意图", True
+            context = raw.get("context")
+            if not isinstance(context, dict):
+                context = {}
+            missing = [
+                key
+                for key in _missing_action_context(kind, context)
+                if key not in available
+            ]
+            if missing:
+                label = _ACTION_KIND_LABEL.get(kind, kind)
+                return (
+                    {
+                        "error": f"第 {i + 1} 步（{label}）缺少必要上下文：{'、'.join(missing)}",
+                        "step_index": i,
+                        "missing": missing,
+                        "hint": _ACTION_CONTEXT_HINT,
+                        **_action_context_candidates(db, missing),
+                    },
+                    f"任务链第 {i + 1} 步缺上下文",
+                    True,
+                )
+            available |= {k for k, v in context.items() if v}
+            steps.append({"kind": kind, "intent": step_intent, "context": context})
+
+        intent = str(args.get("intent") or "").strip()
+        chain = " → ".join(_ACTION_KIND_LABEL.get(s["kind"], s["kind"]) for s in steps)
+        proposal = {
+            "kind": "pipeline",
+            "name": name or f"任务链 · {chain}",
+            "intent": intent or chain,
+            "ontology_id": ontology_id,
+            "steps": steps,
+            # 前端「创建任务链」按钮原样 POST /api/agents/pipelines 的载荷。
+            "create_payload": {
+                "name": name or f"任务链 · {chain}",
+                "intent": intent or chain,
+                "ontology_id": ontology_id,
+                "steps": steps,
+            },
+        }
+        return proposal, f"提案：任务链 {chain}（{len(steps)} 步）", False
+
     @staticmethod
     def _dispatch_update_plan(args: dict) -> tuple[dict, str, bool]:
         """P2：产出/更新一份多步分析计划（纯 echo，不写库、不接地）。
@@ -3228,99 +3593,207 @@ class ChatBiService:
         """建数任务的必问字段骨架，候选取自 get_task_options 的同一份目录。
 
         取值要能原样回到 context，而表单回填是**纯文本**（无后端会话态，见 P6）——故 id 类
-        字段的选项带上 id（``名称｜id``），否则下一轮只拿到一个名字，还得再猜是哪条记录。
+        候选把 id 放进 ``value``，界面只显示 ``label``。此前二者是同一个字符串（``名称｜id``），
+        那串 id 就糊在下拉里给人看。
+
+        **与专属界面同构**：物化的这几个控件必须和 MaterializeModal 是同一套事实与同一套
+        呈现——目标库跟着数据源走、执行侧不支持的装载方式摆出来但置灰、分区键从业务属性里
+        选、调度频率用 cron 选择器。对话里配出来的任务与弹窗里配出来的应当没有差别。
         """
         if kind != "materialize":
-            opts, _s, err = self._entity_task_options(
-                db, kind=kind, ontology_id=ontology_id, keyword=""
-            )
-            if err:
-                return []
-            names = [
-                f"{o['display_name'] or o['name']}｜{o['name']}" for o in opts.get("objects") or []
-            ]
-            fields: list[dict] = [{
-                "name": opts["context_key"],
-                "label": "目标对象" if kind == "sync" else "目标表（业务对象）",
-                "type": "select" if names else "text",
-                "required": True,
-                "help": "Drafter 不再按意图猜对象——这里选定的就是最终目标",
-                **({"options": names[:50]} if names else {}),
-            }]
-            if kind == "sync":
-                fields.append({
-                    "name": "load_strategy", "label": "装载方式", "type": "radio",
-                    "options": [s["label"] for s in _LOAD_STRATEGIES],
-                    "help": "；".join(f"{s['label']}：{s['hint']}" for s in _LOAD_STRATEGIES),
-                })
-            else:
-                rules = opts.get("cleansing_rules") or []
-                fields.append({
-                    "name": "cleansing_rules", "label": "清洗规则", "type": "multiselect",
-                    "options": [f"{r['description']}｜{r['rule']}" for r in rules],
-                    "help": "只有这几条做得了；词表外的清洗需求本任务承载不了",
-                })
-            return fields
+            return self._entity_form_template(db, kind=kind, ontology_id=ontology_id)
+        return self._materialize_form_template(
+            db, ontology_id=ontology_id, datasource_id=datasource_id
+        )
 
-        # 只有一个可写数据源时直接定下它：既省一次追问，也让「目标库」这一轮就能列成下拉。
+    def _entity_form_template(self, db: Session, *, kind: str, ontology_id: str) -> list[dict]:
+        """同步 / 加工的字段骨架。"""
+        opts, _s, err = self._entity_task_options(
+            db, kind=kind, ontology_id=ontology_id, keyword=""
+        )
+        if err:
+            return []
+        objects = [
+            {"label": o["display_name"] or o["name"], "value": o["name"]}
+            for o in opts.get("objects") or []
+        ]
+        fields: list[dict] = [{
+            "name": opts["context_key"],
+            "label": "目标对象" if kind == "sync" else "目标表（业务对象）",
+            "type": "select" if objects else "text",
+            "required": True,
+            "help": "Drafter 不再按意图猜对象——这里选定的就是最终目标",
+            **({"options": objects[:50]} if objects else {}),
+        }]
+        if kind == "sync":
+            fields.append({
+                "name": "load_strategy", "label": "装载方式", "type": "radio",
+                "options": [
+                    {"label": s["label"], "value": s["value"]} for s in _LOAD_STRATEGIES
+                ],
+                "help": "；".join(f"{s['label']}：{s['hint']}" for s in _LOAD_STRATEGIES),
+            })
+        else:
+            rules = opts.get("cleansing_rules") or []
+            fields.append({
+                "name": "cleansing_rules", "label": "清洗规则", "type": "multiselect",
+                "options": [
+                    {"label": r["description"], "value": r["rule"]} for r in rules
+                ],
+                "help": "只有这几条做得了；词表外的清洗需求本任务承载不了",
+            })
+        return fields
+
+    def _materialize_form_template(
+        self, db: Session, *, ontology_id: str, datasource_id: str
+    ) -> list[dict]:
+        """物化的字段骨架：目标（数据源+库）/ 表名 / 装载方式 / 分区键 / 调度频率。"""
         catalog, _summary, err = self._materialize_options(
             db, ontology_id=ontology_id, datasource_id=datasource_id, keyword=""
         )
         if err:
             return []
         writable = [d for d in catalog["datasources"] if d["writable"]]
-        if not datasource_id and len(writable) == 1:
-            catalog, _summary, err = self._materialize_options(
-                db, ontology_id=ontology_id, datasource_id=writable[0]["id"], keyword=""
-            )
-            if err:
-                return []
+        engine = catalog["engine"]
 
-        ds_options = [f"{d['name']}｜{d['id']}" for d in catalog["datasources"] if d["writable"]]
-        databases = catalog.get("databases") or []
-        supported = [s for s in catalog["load_strategies"] if s["supported"]] or list(
-            _LOAD_STRATEGIES
-        )
-        # 分区键**不给默认值**：它是逐表的列名，全域最常见的那个未必在这张表上存在——实测
-        # 就被填进了一个「账户」根本没有的字段。候选留给用户填，或走逐实体 overrides。
-        pk_samples = sorted(
-            {e["partition_key"] for e in catalog.get("entities") or [] if e["partition_key"]}
-        )[:5]
-
-        return [
-            {
-                "name": "target_datasource_id", "label": "目标数据源",
-                "type": "select" if ds_options else "text", "required": True,
-                "help": "物化落库的目标仓；引擎由数据源类型决定。未配连接串的源不在候选里",
-                **({"options": ds_options} if ds_options else {}),
-                **({"default": ds_options[0]} if len(ds_options) == 1 else {}),
-            },
-            {
-                "name": "target_database", "label": "目标库",
-                "type": "select" if databases else "text", "required": True,
-                "help": "各分层的表都建在这个库里；物化不会自动建库"
-                + ("" if databases else "（列不出库，请手填）"),
-                **({"options": databases[:50]} if databases else {}),
-            },
+        fields: list[dict] = [
+            *self._target_location_fields(db, writable=writable, datasource_id=datasource_id),
             {"name": "target_table", "label": "目标表名", "type": "text", "required": True,
              "help": "物理表名，将按命名规约自检"},
-            {
-                "name": "load_strategy", "label": "装载方式", "type": "radio",
-                "required": True,
-                "options": [s["label"] for s in supported],
-                "default": supported[0]["label"],
-                "help": "；".join(f"{s['label']}：{s['hint']}" for s in supported),
-            },
-            {"name": "partition_key", "label": "分区键", "type": "text",
-             "help": "增量追加必须有分区键，否则会退化成无谓词追加"
-             + (f"；本域现有分区键示例：{'、'.join(pk_samples)}" if pk_samples else "")},
-            {
-                "name": "refresh_cron", "label": "调度频率", "type": "select",
-                "options": [f"{p['label']}｜{p['expr']}".rstrip("｜") for p in _CRON_PRESETS],
-                "default": "不定时（仅手动触发）",
-                "help": "整批调度；留「不定时」则只在你手动触发时跑",
-            },
         ]
+
+        # 装载方式**三种都摆出来**，执行侧不支持的置灰并说明原因——与 MaterializeModal 同一
+        # 决策。此前这里把不支持的直接过滤掉，界面上只剩「全量覆盖」一项，看着像是系统只会
+        # 全量，而真正的原因（这个目标引擎在执行侧只声明了全量）一个字都没说。
+        supported = [s for s in catalog["load_strategies"] if s["supported"]]
+        strategy_options = [
+            {
+                "label": s["label"] if s["supported"] else f"{s['label']}（{engine} 目标不支持）",
+                "value": s["value"],
+                "disabled": not s["supported"],
+            }
+            for s in catalog["load_strategies"]
+        ]
+        strategy_help = "；".join(
+            f"{s['label']}：{s['hint']}" for s in catalog["load_strategies"]
+        )
+        modes_detail = catalog.get("load_strategies_detail") or ""
+        fields.append({
+            "name": "load_strategy", "label": "装载方式", "type": "radio", "required": True,
+            "options": strategy_options,
+            **({"default": supported[0]["value"]} if supported else {}),
+            "help": (strategy_help + ("；" + modes_detail if modes_detail else ""))[:200],
+        })
+
+        # 分区键从**业务属性**里选：它必须是这张表上真实存在的列，凭印象手填过一个
+        # 「账户」根本没有的字段。用 autocomplete 而不是 select——候选是建议不是闭集，
+        # 物理表上可能有本体没建模的分区列。
+        pk_candidates = catalog.get("partition_key_candidates") or []
+        pk_options = [
+            {
+                "label": (
+                    f"{c['name']}（{c['display_name']}）"
+                    if c["display_name"] and c["display_name"] != c["name"]
+                    else c["name"]
+                )
+                + (f" · 覆盖 {c['covers']}/{c['total']} 个实体" if c["total"] else "")
+                + ("｜现用" if c["in_use"] else ""),
+                "value": c["name"],
+            }
+            for c in pk_candidates
+        ]
+        fields.append({
+            "name": "partition_key", "label": "分区键",
+            "type": "autocomplete" if pk_options else "text",
+            **({"options": pk_options[:50]} if pk_options else {}),
+            "help": "从业务属性里选（也可自填物理列名）；增量追加必须有分区键，"
+                    "否则会退化成无谓词追加。覆盖不全的键只对有这列的表生效",
+        })
+
+        # 调度频率用 cron 选择器：与业务对象详情里点「物化」弹出的那个「定时策略」是同一个
+        # 控件（CronPicker），产出的表达式恒定合法。此前这里是六个固定预置项，用户在弹窗里
+        # 能配的频率在对话里配不出来。
+        fields.append({
+            "name": "refresh_cron", "label": "调度频率", "type": "cron", "default": "",
+            "help": "整批调度；留「不定时」则只在你手动触发时跑",
+        })
+        return fields
+
+    def _target_location_fields(
+        self, db: Session, *, writable: list[dict], datasource_id: str
+    ) -> list[dict]:
+        """「目标数据源 + 目标库」的字段。
+
+        能列出库时合并成**一次**选择（「某某数据源 → 某某库」），因为这两者在物化弹窗里
+        本来就是联动的：先选源、再从这个源上列出的库里挑。表单一次性提交、没有联动，两个
+        独立下拉就会让人选出「A 源 + B 源上的库」这种根本不存在的组合。
+
+        候选的 ``value`` 直接写成 ``键=值`` 对，故回填文本自解释，模型不必再猜哪段是 id。
+        一个库都列不出来时退回两个字段（数据源下拉 + 库名手填）。
+        """
+        if not writable:
+            return [
+                {"name": "target_datasource_id", "label": "目标数据源", "type": "text",
+                 "required": True,
+                 "help": "尚无可写数据源（未配连接串的源不能作物化目标），请先到 系统设置 → 数据源 配置"},
+                {"name": "target_database", "label": "目标库", "type": "text", "required": True,
+                 "help": "各分层的表都建在这个库里；物化不会自动建库"},
+            ]
+
+        # 已定下数据源就只探它，否则探全部可写源（每个源一次连接，故限个数）。
+        probe = (
+            [d for d in writable if d["id"] == datasource_id] or writable
+            if datasource_id
+            else writable
+        )[:_FORM_DATASOURCE_PROBE_LIMIT]
+        from app.models import DataSource
+
+        rows = db.query(DataSource).filter(DataSource.id.in_([d["id"] for d in probe])).all()
+        by_id = {r.id: r for r in rows}
+        locations = self._materialize_locations(
+            db, [by_id[d["id"]] for d in probe if d["id"] in by_id]
+        )
+
+        options: list[dict] = []
+        unreachable: list[str] = []
+        for loc in locations:
+            if not loc["databases"]:
+                unreachable.append(loc["name"])
+                continue
+            for database in loc["databases"]:
+                options.append({
+                    "label": f"{loc['name']}（{loc['kind']}） → {database}",
+                    "value": f"target_datasource_id={loc['id']},target_database={database}",
+                })
+        if not options:
+            ds_options = [
+                {"label": f"{d['name']}（{d['kind']}）", "value": d["id"]} for d in writable
+            ]
+            return [
+                {
+                    "name": "target_datasource_id", "label": "目标数据源",
+                    "type": "select", "required": True,
+                    "options": ds_options[:50],
+                    "help": "物化落库的目标仓；引擎由数据源类型决定。未配连接串的源不在候选里",
+                    **({"default": ds_options[0]["value"]} if len(ds_options) == 1 else {}),
+                },
+                {
+                    "name": "target_database", "label": "目标库", "type": "text",
+                    "required": True,
+                    "help": "列不出这些源上的库（连接不通或缺驱动），请手填库名；"
+                            "各分层的表都建在这个库里，物化不会自动建库",
+                },
+            ]
+        help_text = "选「哪个数据源下的哪个库」；各分层的表都建在这个库里，物化不会自动建库"
+        if unreachable:
+            help_text += f"。列不出库的源未展开：{'、'.join(unreachable[:3])}"
+        return [{
+            "name": "target_location", "label": "目标数据源与库", "type": "select",
+            "required": True,
+            "options": options[:_FORM_LOCATION_LIMIT],
+            "help": help_text,
+            **({"default": options[0]["value"]} if len(options) == 1 else {}),
+        }]
 
     def _dispatch_request_form(
         self, db: Session, *, ontology_id: str, args: dict
@@ -3336,6 +3809,10 @@ class ChatBiService:
         已经确定的事实，不该每轮重新赌模型记不记得——实测它就漏过装载方式与分区键。故这三类
         表单的字段骨架由服务端出、候选由目录填，模型只管标题；它另给的 fields 作为额外字段
         追加在后面（不覆盖骨架）。
+
+        **prefill：用户已经说过的不再问一遍**。模型把从对话里读到的取值给进来，服务端按字段
+        的真实候选核对后填成默认值——核不上的**丢掉**而不是原样塞进去，否则一个听错的库名会
+        以「系统已经确认过」的样子出现在表单里。
         """
         title = str(args.get("title") or "").strip()
         raw_fields = args.get("fields")
@@ -3375,11 +3852,15 @@ class ChatBiService:
             help_text = str(item.get("help") or "").strip()
             if help_text:
                 field["help"] = help_text[:200]
-            if ftype in ("select", "multiselect", "radio"):
-                options = [str(o).strip() for o in (item.get("options") or []) if str(o).strip()]
+            if ftype in ("select", "multiselect", "radio", "autocomplete"):
+                options = _normalize_form_options(item.get("options"))
                 if not options:
                     # 选项类字段没有候选项就退化成文本输入，避免出一个点不动的空下拉。
-                    field["type"] = "textarea" if ftype == "multiselect" else "text"
+                    # autocomplete 本来就是文本框，没候选只是少了建议，不必改类型。
+                    if ftype == "multiselect":
+                        field["type"] = "textarea"
+                    elif ftype != "autocomplete":
+                        field["type"] = "text"
                 else:
                     field["options"] = options[:50]
             if item.get("default") is not None:
@@ -3391,6 +3872,8 @@ class ChatBiService:
         if not fields:
             return {"error": "fields 里没有有效字段（需 name/label/合法 type）"}, "表单无有效字段", True
 
+        prefilled = _apply_prefill(fields, args.get("prefill"))
+
         form: dict[str, Any] = {"title": title[:120], "fields": fields}
         intent = str(args.get("intent") or "").strip()
         if intent:
@@ -3398,7 +3881,9 @@ class ChatBiService:
         submit_label = str(args.get("submit_label") or "").strip()
         if submit_label:
             form["submit_label"] = submit_label[:24]
-        return {"form": form}, f"表单：{title[:24]}（{len(fields)} 项）", False
+        summary = f"表单：{title[:24]}（{len(fields)} 项"
+        summary += f"，已预填 {len(prefilled)} 项）" if prefilled else "）"
+        return {"form": form}, summary, False
 
     def _live_task_state(self, db: Session, artifact: Any) -> dict | None:
         """尽力回读一个物化任务的 Airflow 实时态（多批 DagRun 聚合）。**从不抛异常**。
@@ -3603,6 +4088,10 @@ class ChatBiService:
             if name == "propose_action":
                 return self._dispatch_propose_action(
                     db, ontology_id=ontology_id, domain_id=domain_id, args=args
+                )
+            if name == "propose_pipeline":
+                return self._dispatch_propose_pipeline(
+                    db, ontology_id=ontology_id, args=args
                 )
             if name == "propose_preference":
                 return self._dispatch_propose_preference(domain_id=domain_id, args=args)
@@ -3911,6 +4400,7 @@ class ChatBiService:
         draft_proposals: list[dict] = []  # propose_draft 产出的建数提案（供 draft_proposal 块）
         preference_proposals: list[dict] = []  # propose_preference 产出的记忆提案（供 preference_proposal 块）
         action_proposals: list[dict] = []  # propose_action 产出的数据任务提案（供 action_proposal 块）
+        pipeline_proposals: list[dict] = []  # propose_pipeline 产出的任务链提案（供 pipeline_proposal 块）
         task_statuses: list[dict] = []  # get_task_status 产出的任务状态（供 task_status 块）
         plan: dict | None = None  # update_plan 产出的多步分析计划（供 plan 块；整体覆盖）
 
@@ -4084,7 +4574,8 @@ class ChatBiService:
                     or (tool_name in (
                         "get_object", "get_logic", "get_domain_overview",
                         "find_join_path", "profile_values", "compile_metric", "get_lineage",
-                        "propose_draft", "propose_action", "get_task_status",
+                        "propose_draft", "propose_action", "propose_pipeline",
+                        "get_task_status",
                         "propose_preference", "get_task_options",
                     ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
@@ -4130,6 +4621,8 @@ class ChatBiService:
                         preference_proposals.append(result)
                     elif tool_name == "propose_action" and result.get("draft_payload"):
                         action_proposals.append(result)
+                    elif tool_name == "propose_pipeline" and result.get("create_payload"):
+                        pipeline_proposals.append(result)
                     elif tool_name == "get_task_status" and "tasks" in result:
                         task_statuses.append(result)
                     elif tool_name == "update_plan" and result.get("plan"):
@@ -4265,6 +4758,7 @@ class ChatBiService:
                 "draft_proposals": draft_proposals,
                 "preference_proposals": preference_proposals,
                 "action_proposals": action_proposals,
+                "pipeline_proposals": pipeline_proposals,
                 "task_statuses": task_statuses,
                 "plan": plan,
                 "skill": active_skill.name if active_skill else None,

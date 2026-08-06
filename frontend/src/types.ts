@@ -705,6 +705,19 @@ export interface ChatBiClarification {
   reason?: string;
 }
 
+/**
+ * 表单候选项：**显示什么**（label）与**回填什么**（value）分开。
+ *
+ * 带 id 的候选（数据源、对象）此前只能写成「名称｜id」，那串 id 就直接糊在下拉里给人看。
+ * `disabled` 用于「摆出来但选不了」的候选——执行侧不支持的装载方式必须看得见（否则用户
+ * 以为系统只会全量），但不能真被选中（与 MaterializeModal 的置灰同口径）。
+ */
+export interface ChatBiFormOption {
+  label: string;
+  value: string;
+  disabled?: boolean;
+}
+
 /** 交互表单字段（P6）：`type` 决定前端用哪种控件渲染。 */
 export interface ChatBiFormField {
   name: string;
@@ -717,9 +730,13 @@ export interface ChatBiFormField {
     | "multiselect"
     | "radio"
     | "boolean"
-    | "date";
-  /** select/multiselect/radio 的候选项（须来自真实实体）。 */
-  options?: string[];
+    | "date"
+    /** 带候选建议的文本框：候选是建议不是闭集（如分区键）。 */
+    | "autocomplete"
+    /** 调度选择器：与业务对象详情里那个「定时策略」同一个 CronPicker。 */
+    | "cron";
+  /** select/multiselect/radio/autocomplete 的候选项（须来自真实实体）。 */
+  options?: ChatBiFormOption[];
   required?: boolean;
   placeholder?: string;
   help?: string;
@@ -852,6 +869,28 @@ export type ChatBiBlock =
           intent: string;
           context?: Record<string, unknown>;
           ontology_id?: string | null;
+        };
+      };
+    }
+  | {
+      id: string;
+      /**
+       * 任务链提案（propose_pipeline 产出）：前后相继的多个任务。
+       * 点「创建任务链」只建链、不起草任何制品；每一步仍各自走校验/确认/执行。
+       */
+      type: "pipeline_proposal";
+      proposal: {
+        kind: "pipeline";
+        name: string;
+        intent?: string;
+        ontology_id?: string | null;
+        steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
+        /** 「创建任务链」按钮原样传给 api.createPipeline 的载荷。 */
+        create_payload: {
+          name: string;
+          intent?: string;
+          ontology_id?: string | null;
+          steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
         };
       };
     }
@@ -1525,6 +1564,50 @@ export interface GovernanceArtifact {
   origin: string;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * 任务链的一步：**先是一份待起草的意图，起草后才有制品**。
+ *
+ * `artifact_id` 为空 = 还没起草到这一步；此时 `artifact_status` 也是 null，
+ * 不是 "drafted"——那会让人以为已经建了一条制品。
+ */
+export interface TaskPipelineStep {
+  id: string;
+  step_index: number;
+  kind: string;
+  intent: string;
+  context: Record<string, unknown>;
+  artifact_id?: string | null;
+  artifact_status?: string | null;
+  artifact_name?: string | null;
+}
+
+/**
+ * 任务链：把「物化 → 清洗 → 聚合」这种前后相继的任务串起来。
+ *
+ * 链只管顺序与上下文传递——每一步仍是一条独立制品，照旧各自走「校验 → dry-run →
+ * 人工确认 → 执行」。故这里没有、也不该有「一键跑完整条链」。
+ */
+export interface TaskPipeline {
+  id: string;
+  name: string;
+  intent?: string | null;
+  ontology_id?: string | null;
+  /** 由各步制品聚合推导：drafted / running / succeeded / failed。 */
+  status: string;
+  steps: TaskPipelineStep[];
+  /** 下一个待起草的步序；全起草完为 null。 */
+  next_step_index?: number | null;
+  /** 下一步为什么还不能起草（上游没跑成功）；能起草为 null。 */
+  next_blocked_reason?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskPipelineAdvanceResult {
+  pipeline: TaskPipeline;
+  artifact: GovernanceArtifact;
 }
 
 export interface AgentKinds {

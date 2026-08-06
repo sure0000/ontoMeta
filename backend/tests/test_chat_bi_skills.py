@@ -27,7 +27,8 @@ def test_registry_has_overview_and_query():
     assert SKILLS["lineage"].extra_tool_names == ("get_lineage",)
     assert SKILLS["create"].extra_tool_names == ("propose_draft", "lint_against_standard")
     assert SKILLS["task"].extra_tool_names == (
-        "get_task_options", "propose_action", "get_task_status", "lint_against_standard"
+        "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
+        "lint_against_standard",
     )
     assert "overview" in skill_choices_text() and "query" in skill_choices_text()
 

@@ -148,6 +148,11 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for proposal in payload.get("action_proposals") or []:
         _add({"type": "action_proposal", "proposal": proposal})
 
+    # 多任务编排：任务链提案块（propose_pipeline 产出）。纯提案 + 「创建任务链」载荷；
+    # 建链本身也不起草任何制品，逐步的校验/确认/执行照旧由用户在制品抽屉里走。
+    for proposal in payload.get("pipeline_proposals") or []:
+        _add({"type": "pipeline_proposal", "proposal": proposal})
+
     # P3.1：记忆提案块（propose_preference 产出）。纯提案 + 「记住」写入本域约定；不写库。
     for proposal in payload.get("preference_proposals") or []:
         _add({"type": "preference_proposal", "proposal": proposal})

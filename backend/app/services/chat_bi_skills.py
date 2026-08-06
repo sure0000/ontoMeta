@@ -108,17 +108,24 @@ SKILLS: dict[str, Skill] = {
             "2. 缺的参数用 **request_form(title, task_kind=该类型)** 一次收齐——带上 task_kind，"
             "服务端会按该类型补齐必问字段（物化=目标数据源/目标库/表名/装载方式/分区键/调度频率）"
             "并填入真实候选，你**不用也不该**自己列 fields；确有额外要问的再追加。\n"
-            "   用户填回的选项形如「名称｜id」：取 ｜ 右边那段作为 context 里的 id/取值。\n"
+            "   用户填回的选项形如「名称（取值）」：括号里那段才是 context 要的 id/取值；"
+            "形如「target_datasource_id=xxx,target_database=yyy」的直接按等号两边拆成 context 键值。"
+            "用户上一轮已经说过的参数，发表单时用 **prefill** 预填，别原样再问一遍。\n"
             "3. 参数齐了再用 **propose_action(kind, intent, context)** 产出**提案**（**不执行、不写库**）；"
             "真正的创建/校验/dry-run/确认/执行由用户在前端点击后走既有治理流程，你不直接建表或跑作业。"
             "若提案涉及具体物理表名，先用 **lint_against_standard** 自检命名是否合规约、按 fix 修正后再提。\n"
+            "4. **要连着做好几件事**（如「物化到数仓，然后清洗，再按口径聚合」）时改用 "
+            "**propose_pipeline(name, steps)** 出一条任务链，而不是发好几条独立提案：链会记住下一步、"
+            "并把上游定下的数据源/库/引擎接给下游。链上每一步仍各自过校验与人工确认，你同样不执行。"
+            "只有一件事就用 propose_action，别为单步套链。\n"
             "查进度：用 **get_task_status(artifact_id 或 kind)** 回读任务状态与执行回执，据实回答"
             "「跑完没/成没成功」；不要臆造状态。"
         ),
         extra_tool_names=(
-            "get_task_options", "propose_action", "get_task_status", "lint_against_standard",
+            "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
+            "lint_against_standard",
         ),
-        block_types=("markdown", "action_proposal", "task_status"),
+        block_types=("markdown", "action_proposal", "pipeline_proposal", "task_status"),
         attach_governance=True,
     ),
 }
