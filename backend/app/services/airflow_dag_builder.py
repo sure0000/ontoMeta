@@ -53,34 +53,32 @@ class DagBundle:
     # （Flink SQL 脚本 .sql）。两类都落到 jobs 目录供任务读取。
     job_files: dict[str, dict | str] = field(default_factory=dict)
 
-    def write(self, dags_dir: str, jobs_dir: str) -> dict[str, str]:
-        """落盘，返回 {用途: 绝对路径}。目录不存在即创建。"""
-        import os
+    def write(self, dags_dir: str, jobs_dir: str, delivery=None) -> dict[str, str]:
+        """投递产物，返回 {用途: 绝对路径}。
 
-        os.makedirs(dags_dir, exist_ok=True)
-        os.makedirs(jobs_dir, exist_ok=True)
-        written: dict[str, str] = {}
+        ``delivery`` 为 DagDelivery 实例，默认 None 时用 LocalFsDelivery（直接写本地
+        文件系统，与原行为完全一致）。跨机部署可传入 GitSyncDelivery，写完自动
+        commit + push——产物仍先落盘，方案 A 的「可 diff/review/回滚」全保留。
+        """
+        from app.services.dag_delivery import DagDeliveryError, LocalFsDelivery
 
-        dag_path = os.path.join(dags_dir, self.dag_filename)
-        with open(dag_path, "w", encoding="utf-8") as fh:
-            fh.write(self.dag_source)
-        written["dag"] = dag_path
-
-        spec_path = os.path.join(dags_dir, self.spec_filename)
-        with open(spec_path, "w", encoding="utf-8") as fh:
-            json.dump(self.spec, fh, ensure_ascii=False, indent=2, sort_keys=True)
-        written["spec"] = spec_path
-
-        for name, conf in sorted(self.job_files.items()):
-            job_path = os.path.join(jobs_dir, name)
-            with open(job_path, "w", encoding="utf-8") as fh:
-                if isinstance(conf, str):
-                    # Flink SQL 脚本：原样落成文本，供 flink run 的 SqlRunner 读取。
-                    fh.write(conf)
-                else:
-                    json.dump(conf, fh, ensure_ascii=False, indent=2, sort_keys=True)
-        written["jobs_dir"] = jobs_dir
-        return written
+        if delivery is None:
+            delivery = LocalFsDelivery()
+        try:
+            result = delivery.deliver(
+                dags_dir=dags_dir,
+                jobs_dir=jobs_dir,
+                dag_filename=self.dag_filename,
+                dag_source=self.dag_source,
+                spec_filename=self.spec_filename,
+                spec=self.spec,
+                job_files=self.job_files,
+            )
+        except DagDeliveryError as exc:
+            # 调用侧（materialization_runner / flink_job_runner）捕 OSError 报「投递失败」；
+            # 保持同一入口，把投递器的错误翻成 OSError 以复用那条可读报错路径。
+            raise OSError(str(exc)) from exc
+        return result.files_written
 
 
 def dag_id_for(ontology_id: str, suffix: str | None = None) -> str:

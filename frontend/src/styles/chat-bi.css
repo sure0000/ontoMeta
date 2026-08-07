@@ -389,6 +389,46 @@
   opacity: 1;
 }
 
+/* ---- Batch mode ---- */
+
+.chatbi-batch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  background: var(--om-primary-soft, #eef2ff);
+  border-radius: 8px;
+  border: 1px solid var(--om-primary, #2563eb);
+}
+
+.chatbi-batch-toolbar-info {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--om-primary, #2563eb);
+  white-space: nowrap;
+}
+
+.chatbi-batch-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.chatbi-conv-batch-checkbox {
+  flex-shrink: 0;
+}
+
+.chatbi-conv-item--batch-selected {
+  background: var(--om-primary-soft, #eef2ff) !important;
+}
+
+.chatbi-conv-item--batch-selected:hover {
+  background: var(--om-primary-soft, #eef2ff) !important;
+}
+
 /* ---- Archived section ---- */
 
 .chatbi-archived-header {
@@ -576,68 +616,72 @@
 
 .chatbi-bubble {
   display: flex;
-  gap: 14px;
+  gap: 12px;
   max-width: 820px;
   width: 100%;
-  animation: chatbi-fade-in 0.25s ease;
+  animation: chatbi-fade-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 @keyframes chatbi-fade-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* 用户消息：右对齐气泡，柔和底色。 */
 .chatbi-bubble--user {
   align-self: flex-end;
   flex-direction: row-reverse;
   width: auto;
-  max-width: 78%;
+  max-width: 80%;
 }
 
+/* 助手消息：ChatGPT/Claude 式扁平布局——头像 + 透明正文，不套卡片。 */
 .chatbi-bubble--assistant {
-  align-self: flex-start;
+  align-self: stretch;
+  max-width: 820px;
 }
 
 .chatbi-bubble-avatar {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
   font-size: 15px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-}
-
-.chatbi-bubble--assistant .chatbi-bubble-avatar {
-  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-  color: #3b82f6;
-}
-
-.chatbi-bubble--user .chatbi-bubble-avatar {
-  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
-  color: #6b7280;
+  margin-top: 2px;
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.22);
 }
 
 .chatbi-bubble-body {
   flex: 1;
-  background: #ffffff;
-  border: 1px solid var(--om-border);
-  border-radius: 14px;
-  padding: 14px 18px;
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--om-text);
   min-width: 0;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  font-size: 15px;
+  line-height: 1.72;
+  color: var(--om-text);
 }
 
+/* 助手正文直接落在画布上，无背景/边框/阴影。 */
+.chatbi-bubble--assistant .chatbi-bubble-body {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+/* 用户气泡：圆角胶囊，软底色，窄宽。 */
 .chatbi-bubble--user .chatbi-bubble-body {
   flex: 0 1 auto;
   width: fit-content;
   max-width: 100%;
-  background: #eff6ff;
-  border-color: #bfdbfe;
+  background: #f4f6f9;
+  border: 1px solid #e6ebf2;
+  border-radius: 18px;
+  padding: 10px 16px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .chatbi-bubble-pending {
@@ -672,66 +716,125 @@
   40% { transform: scale(1); opacity: 1; }
 }
 
+/* 回答内每个渲染块依次浮入：流式拼装时给出“逐块到位”的节奏感。
+   delay 由内联 style 按 index 阶梯给出（见 ChatBubble），这里只定义动画。 */
+@keyframes chatbi-block-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.chatbi-block-in {
+  animation: chatbi-block-in 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
 /* ---------- Markdown ---------- */
 
 .chatbi-md {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 7px;
+}
+
+/* 主题分隔线：LLM 常用 `---` 分节，这里化作一条柔和的渐变细线，
+   而不是把字面 "---" 渲染出来。上下留白略大于普通行，起分节作用。 */
+.chatbi-md-hr {
+  border: 0;
+  height: 1px;
+  margin: 12px 0 8px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--om-border, #e2e8f0) 18%,
+    var(--om-border, #e2e8f0) 82%,
+    transparent
+  );
 }
 
 .chatbi-md-line {
   min-height: 1em;
+  word-break: break-word;
 }
 
 .chatbi-md-h1,
 .chatbi-md-h2,
 .chatbi-md-h3,
 .chatbi-md-h4 {
-  font-weight: 650;
+  font-weight: 600;
   color: var(--om-text);
-  margin-top: 8px;
-  line-height: 1.4;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
 }
 
-.chatbi-md-h1 { font-size: 17px; }
-.chatbi-md-h2 { font-size: 15px; }
-.chatbi-md-h3 { font-size: 14px; }
-.chatbi-md-h4 { font-size: 14px; }
+.chatbi-md-h1 {
+  font-size: 19px;
+  margin: 14px 0 2px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--om-border, #e6ebf2);
+}
+.chatbi-md-h2 {
+  font-size: 16.5px;
+  margin: 12px 0 2px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--om-border, #eef2f7);
+}
+.chatbi-md-h3 { font-size: 15px; margin: 10px 0 2px; }
+.chatbi-md-h4 { font-size: 14px; margin: 8px 0 2px; color: var(--om-text-secondary); }
 
 .chatbi-md-listitem {
   display: flex;
   gap: 8px;
-  padding-left: 4px;
+  padding-left: 2px;
+}
+
+.chatbi-md-listitem--ordered {
+  padding-left: 0;
 }
 
 .chatbi-md-bullet {
+  color: var(--om-text-tertiary);
+  flex-shrink: 0;
+  line-height: 1.72;
+}
+
+.chatbi-md-num {
   color: var(--om-text-secondary);
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  min-width: 1.4em;
+  text-align: right;
 }
 
 .chatbi-md-quote {
   margin: 4px 0;
-  padding: 8px 12px;
-  border-left: 3px solid #93c5fd;
-  background: #f0f7ff;
+  padding: 4px 14px;
+  border-left: 3px solid var(--om-border-strong, #cbd5e1);
   color: var(--om-text-secondary);
-  border-radius: 0 8px 8px 0;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .chatbi-md-inline-code {
   font-family: var(--om-font-mono);
-  background: var(--om-neutral-soft);
+  background: var(--om-neutral-soft, #f1f5f9);
+  border: 1px solid var(--om-border, #e6ebf2);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: 5px;
   font-size: 12.5px;
   color: var(--om-text);
 }
 
+.chatbi-md-link {
+  color: var(--om-primary, #2563eb);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s ease;
+}
+.chatbi-md-link:hover {
+  border-bottom-color: currentColor;
+}
+
 .chatbi-codeblock {
-  margin: 8px 0 4px;
+  margin: 10px 0 6px;
   background: #0f172a;
   color: #e2e8f0;
   padding: 14px 16px;
@@ -740,6 +843,7 @@
   font-size: 12.5px;
   line-height: 1.6;
   overflow-x: auto;
+  border: 1px solid #1e293b;
 }
 
 .chatbi-codeblock code {
@@ -1645,25 +1749,31 @@
 .chatbi-md-tablewrap {
   margin: 10px 0;
   overflow-x: auto;
+  border: 1px solid var(--om-border, #e6ebf2);
+  border-radius: 10px;
 }
 .chatbi-md-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13px;
+  font-size: 13.5px;
   line-height: 1.5;
 }
 .chatbi-md-table th,
 .chatbi-md-table td {
-  border: 1px solid var(--om-border, #e2e8f0);
-  padding: 6px 10px;
+  padding: 8px 12px;
   text-align: left;
   vertical-align: top;
+  border-bottom: 1px solid var(--om-border, #eef2f7);
 }
 .chatbi-md-table th {
   background: var(--om-neutral-soft, #f8fafc);
   font-weight: 600;
   color: var(--om-text-primary, #1e293b);
   white-space: nowrap;
+  border-bottom: 1px solid var(--om-border-strong, #d8e0ea);
+}
+.chatbi-md-table tbody tr:last-child td {
+  border-bottom: none;
 }
 .chatbi-md-table tbody tr:nth-child(even) {
   background: var(--om-neutral-soft, #fafcff);

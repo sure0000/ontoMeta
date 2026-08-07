@@ -12,13 +12,15 @@ import {
   Tag,
   message,
 } from "antd";
-import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, SafetyOutlined } from "@ant-design/icons";
+import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, RobotOutlined, SafetyOutlined } from "@ant-design/icons";
 import cronstrue from "cronstrue/i18n";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api";
 import { ArtifactDetail } from "../../components/AgentsPanel";
 import { CronPicker } from "../../components/CronPicker";
+import { SpecForm } from "../../components/artifact-spec/SpecForm";
+import { SPEC_FIELDS } from "../../components/artifact-spec/specFields";
 import type {
   ChatBiAgentStep,
   ChatBiBlock,
@@ -30,7 +32,6 @@ import type {
   ChatBiFormField,
   ChatBiFormRequest,
   ChatBiReference,
-  DataSource,
   GovernanceArtifact,
   GraphEdge,
   GraphNode,
@@ -59,6 +60,9 @@ function MarkdownLite({ content }: { content: string }) {
         }
         if (block.type === "table") {
           return <MarkdownTable key={key++} header={block.header} rows={block.rows} />;
+        }
+        if (block.type === "hr") {
+          return <hr key={key++} className="chatbi-md-hr" />;
         }
         return <Line key={key++} raw={block.raw} />;
       })}
@@ -98,6 +102,10 @@ function MarkdownTable({ header, rows }: { header: string[]; rows: string[][] })
 function Line({ raw }: { raw: string }) {
   if (!raw.trim()) return <div className="chatbi-md-line" />;
 
+  // 兜底：未被解析器识别的裸 `---`/`***`/`___`（例如流式中途尚未成行）当作分隔线。
+  if (/^(?:-{3,}|\*{3,}|_{3,})[\s-*_]*$/.test(raw.trim()) && !raw.includes("|")) {
+    return <hr className="chatbi-md-hr" />;
+  }
   if (raw.trim().startsWith(">")) {
     return (
       <blockquote className="chatbi-md-quote">
@@ -105,10 +113,24 @@ function Line({ raw }: { raw: string }) {
       </blockquote>
     );
   }
+  // 缩进量→左移：支持嵌套列表/引用块在视觉上分层。
+  const indent = /^\s+/.exec(raw)?.[0].replace(/\t/g, "  ").length ?? 0;
+  const indentPx = Math.min(indent, 24) * 7;
+  const orderedMatch = raw.match(/^\s*(\d+)\.\s+(.*)$/);
+  if (orderedMatch) {
+    return (
+      <div className="chatbi-md-listitem chatbi-md-listitem--ordered" style={{ marginLeft: indentPx }}>
+        <span className="chatbi-md-num">{orderedMatch[1]}</span>
+        <span>
+          <InlineRender text={orderedMatch[2]} />
+        </span>
+      </div>
+    );
+  }
   const listMatch = raw.match(/^\s*[-*]\s+(.*)$/);
   if (listMatch) {
     return (
-      <div className="chatbi-md-listitem">
+      <div className="chatbi-md-listitem" style={{ marginLeft: indentPx }}>
         <span className="chatbi-md-bullet">•</span>
         <span>
           <InlineRender text={listMatch[1]} />
@@ -148,6 +170,19 @@ function InlineRender({ text }: { text: string }) {
             <code key={key++} className="chatbi-md-inline-code">
               {part.value}
             </code>
+          );
+        }
+        if (part.type === "link") {
+          return (
+            <a
+              key={key++}
+              className="chatbi-md-link"
+              href={part.href}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {part.value}
+            </a>
           );
         }
         return <span key={key++}>{part.value}</span>;
@@ -265,6 +300,11 @@ export function ChatBubble({
         isUser ? "user" : "assistant"
       }`}
     >
+      {!isUser && (
+        <div className="chatbi-bubble-avatar" aria-hidden>
+          <RobotOutlined />
+        </div>
+      )}
       <div className="chatbi-bubble-body">
         {message.pending ? (
           <div className="chatbi-bubble-pending">
@@ -281,15 +321,20 @@ export function ChatBubble({
           </div>
         ) : (
           <>
-            {blocks.map((block) => (
-              <BlockRenderer
+            {blocks.map((block, idx) => (
+              <div
                 key={block.id}
-                block={block}
-                streaming={message.streaming}
-                question={question}
-                conversationId={conversationId}
-                onClarify={onClarify}
-              />
+                className="chatbi-block-in"
+                style={{ animationDelay: `${Math.min(idx, 6) * 55}ms` }}
+              >
+                <BlockRenderer
+                  block={block}
+                  streaming={message.streaming}
+                  question={question}
+                  conversationId={conversationId}
+                  onClarify={onClarify}
+                />
+              </div>
             ))}
             {message.error && (
               <div className="chatbi-notice chatbi-notice--error">
@@ -1011,18 +1056,6 @@ const LOAD_STRATEGY_LABELS: Record<string, string> = {
   cdc: "CDC 变更捕获",
 };
 
-/** 可就地改的标量键。嵌套结构（*_overrides）只读展示——在气泡里编 JSON 不是好体验。 */
-const EDITABLE_KEYS = new Set([
-  "target_datasource_id",
-  "target_database",
-  "target_table",
-  "object_type",
-  "database_prefix",
-  "load_strategy",
-  "partition_key",
-  "refresh_cron",
-]);
-
 /** 数仓分层展示名（与 MaterializeModal 的 LAYER_LABEL 同口径）。 */
 const LAYER_LABELS: Record<string, string> = {
   dim: "维度层 DIM",
@@ -1097,41 +1130,6 @@ function ProposalContextForm({
   ontologyId?: string | null;
   onChange: (key: string, value: unknown) => void;
 }) {
-  const [dataSources, setDataSources] = useState<DataSource[] | null>(null);
-  const needsDataSource = "target_datasource_id" in context;
-  useEffect(() => {
-    if (!needsDataSource || dataSources !== null) return;
-    api
-      .listDataSources()
-      .then(setDataSources)
-      .catch(() => setDataSources([]));
-  }, [needsDataSource, dataSources]);
-
-  // 目标库跟着数据源走——与物化弹窗同一联动：换了源，上一个源上的库不再有意义。
-  // 列不出库（连不通/缺驱动）时退回手填，不拦提案（落库由 Airflow 执行，这里只是顺带列个库）。
-  const dsId = typeof context.target_datasource_id === "string" ? context.target_datasource_id : "";
-  const [databases, setDatabases] = useState<string[] | null>(null);
-  const needsDatabase = "target_database" in context;
-  useEffect(() => {
-    if (!needsDatabase || !dsId) {
-      setDatabases(null);
-      return;
-    }
-    let stale = false;
-    setDatabases(null);
-    api
-      .listDataSourceDatabases(dsId)
-      .then((r) => {
-        if (!stale) setDatabases(r.databases);
-      })
-      .catch(() => {
-        if (!stale) setDatabases([]);
-      });
-    return () => {
-      stale = true;
-    };
-  }, [needsDatabase, dsId]);
-
   // 契约 id → 实体显示名。只有确实出现了按契约 id 索引的覆盖才去拉清单。
   const [contractNames, setContractNames] = useState<Record<string, string> | null>(null);
   const needsContracts = "table_overrides" in context || "overrides" in context;
@@ -1150,114 +1148,56 @@ function ProposalContextForm({
   }, [needsContracts, ontologyId, contractNames]);
   const nameOf = (contractId: string) => contractNames?.[contractId] ?? contractId;
 
-  const keys = Object.keys(context).filter((k) => context[k] !== null && context[k] !== undefined);
-  if (keys.length === 0) {
-    return (
-      <div className="chatbi-draft-note">
-        提案未带任何参数；起草时会由本体与物化契约推导默认值，可在下一步的校验结果里核对。
-      </div>
-    );
-  }
+  // schema 里定义了控件的字段交给 SpecForm 渲染成完整可编辑表单（含 LLM 没填的空字段）；
+  // schema 之外、但 LLM 填了的键（selected_targets / *_overrides / sync_tool 等嵌套覆盖）
+  // 保留只读展示——它们无标准控件，但不能凭空消失。
+  const schemaKeys = new Set((SPEC_FIELDS[kind] ?? []).map((f) => f.key));
+  const extraKeys = Object.keys(context).filter(
+    (k) =>
+      !schemaKeys.has(k) &&
+      k !== "ontology_id" &&
+      context[k] !== null &&
+      context[k] !== undefined,
+  );
+
   return (
     <div className="chatbi-proposal-params">
-      {keys.map((key) => {
+      <SpecForm
+        kind={kind}
+        mode="proposal"
+        value={context}
+        ontologyId={ontologyId}
+        onChange={onChange}
+      />
+      {extraKeys.map((key) => {
         const value = context[key];
         const label = CONTEXT_LABELS[key] ?? key;
-        if (!EDITABLE_KEYS.has(key)) {
-          // 覆盖类嵌套结构摊成「谁 → 什么」；其余只读值仍单行显示。
-          const nested =
-            value && typeof value === "object" && !Array.isArray(value)
-              ? overrideRows(key, value as Record<string, unknown>, nameOf)
-              : null;
-          return (
-            <div className="chatbi-proposal-param" key={key}>
-              <span className="chatbi-proposal-param-label">{label}</span>
-              {nested ? (
-                <div className="chatbi-proposal-nested">
-                  {nested.length === 0 ? (
-                    <span className="chatbi-proposal-param-ro">—</span>
-                  ) : (
-                    nested.map((row) => (
-                      <div className="chatbi-proposal-nested-row" key={row.k}>
-                        <span className="chatbi-proposal-nested-k">{row.k}</span>
-                        <span className="chatbi-proposal-nested-v">{row.v}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              ) : (
-                <code className="chatbi-proposal-param-ro">{contextValueText(value)}</code>
-              )}
-            </div>
-          );
-        }
-        let control = (
-          <Input
-            size="small"
-            value={typeof value === "string" ? value : contextValueText(value)}
-            onChange={(e) => onChange(key, e.target.value)}
-          />
-        );
-        if (key === "target_datasource_id") {
-          control = (
-            <Select
-              size="small"
-              style={{ width: "100%" }}
-              loading={dataSources === null}
-              value={typeof value === "string" ? value : undefined}
-              onChange={(v) => onChange(key, v)}
-              options={(dataSources ?? []).map((d) => ({
-                value: d.id,
-                label: `${d.name}（${d.kind}）`,
-              }))}
-              notFoundContent="尚无数据源，请到 系统设置 → 数据源 添加"
-            />
-          );
-        } else if (key === "target_database" && databases && databases.length > 0) {
-          control = (
-            <Select
-              size="small"
-              style={{ width: "100%" }}
-              showSearch
-              value={typeof value === "string" && value ? value : undefined}
-              onChange={(v) => onChange(key, v)}
-              options={databases.map((d) => ({ value: d, label: d }))}
-              placeholder="选择目标库"
-            />
-          );
-        } else if (key === "load_strategy") {
-          control = (
-            <Select
-              size="small"
-              style={{ width: "100%" }}
-              value={typeof value === "string" ? value : undefined}
-              onChange={(v) => onChange(key, v)}
-              options={Object.entries(LOAD_STRATEGY_LABELS).map(([v, l]) => ({
-                value: v,
-                label: l,
-              }))}
-            />
-          );
-        } else if (key === "refresh_cron") {
-          control = (
-            <CronPicker
-              value={typeof value === "string" ? value : ""}
-              onChange={(v) => onChange(key, v)}
-            />
-          );
-        }
+        const nested =
+          value && typeof value === "object" && !Array.isArray(value)
+            ? overrideRows(key, value as Record<string, unknown>, nameOf)
+            : null;
         return (
           <div className="chatbi-proposal-param" key={key}>
             <span className="chatbi-proposal-param-label">{label}</span>
-            <span className="chatbi-proposal-param-ctl">{control}</span>
+            {nested ? (
+              <div className="chatbi-proposal-nested">
+                {nested.length === 0 ? (
+                  <span className="chatbi-proposal-param-ro">—</span>
+                ) : (
+                  nested.map((row) => (
+                    <div className="chatbi-proposal-nested-row" key={row.k}>
+                      <span className="chatbi-proposal-nested-k">{row.k}</span>
+                      <span className="chatbi-proposal-nested-v">{row.v}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              <code className="chatbi-proposal-param-ro">{contextValueText(value)}</code>
+            )}
           </div>
         );
       })}
-      {kind !== "materialize" && !("object_type" in context) && !("target_table" in context) && (
-        <div className="chatbi-draft-note">
-          未指定目标对象：起草时会按意图匹配一个，匹配结果可在下一步的校验结果里核对。
-        </div>
-      )}
     </div>
   );
 }

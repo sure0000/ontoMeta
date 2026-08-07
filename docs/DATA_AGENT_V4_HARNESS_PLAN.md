@@ -1,7 +1,7 @@
 # Data Agent V4 改造方案：从「成熟推理层」到「专用 data-agent harness」
 
 > 状态：**S0–S3 全部交付**（O6 trace + O1 compaction + O2 大结果离场 + O3 渐进披露 + O4 子 agent 框架化 + O5 循环模块化）。本方案收尾。
-> 前序：[DATA_AGENT_REDESIGN.md](./DATA_AGENT_REDESIGN.md)（V1：单发问答 → 多步工具编排）、
+> 前序：DATA_AGENT_REDESIGN（V1 评审草案，已并入 V2）、
 > [DATA_AGENT_V2_PLAN.md](./DATA_AGENT_V2_PLAN.md)（P0–P4：语义层从「否决者」变「生成器」）、
 > [DATA_AGENT_V3_SKILLS_PLAN.md](./DATA_AGENT_V3_SKILLS_PLAN.md)（skill + 渲染块，S0–S3 已交付）、
 > [FORMAL_VALIDATION_PLAN.md](./FORMAL_VALIDATION_PLAN.md)（宁可拒答不可错答）

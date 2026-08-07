@@ -38,6 +38,12 @@ interface FormValues {
   enabled: boolean;
   dags_dir: string;
   jobs_dir: string;
+  dag_delivery_method: string;
+  git_remote: string;
+  git_branch: string;
+  git_auto_init: boolean;
+  git_author: string;
+  git_email: string;
   sync_channel: string;
   sync_runner_endpoint: string;
   docker_network: string;
@@ -71,6 +77,12 @@ export function AirflowSettingsPanel() {
           enabled: s.enabled,
           dags_dir: s.dags_dir,
           jobs_dir: s.jobs_dir,
+          dag_delivery_method: s.dag_delivery_method,
+          git_remote: s.git_remote,
+          git_branch: s.git_branch,
+          git_auto_init: s.git_auto_init,
+          git_author: s.git_author,
+          git_email: s.git_email,
           sync_channel: s.sync_channel,
           sync_runner_endpoint: s.sync_runner_endpoint,
           docker_network: s.docker_network,
@@ -207,9 +219,22 @@ export function AirflowSettingsPanel() {
               children: (
                 <>
                   <Form.Item
+                    label="投递方式"
+                    name="dag_delivery_method"
+                    extra="local：直接写本地目录（Airflow 与本服务同机或共享网络卷 NFS/SMB）；git：写完自动 commit + push 到远程仓，Airflow 侧 git-sync 拉取（跨机部署）"
+                  >
+                    <Radio.Group
+                      optionType="button"
+                      options={[
+                        { label: "local（本地/共享卷）", value: "local" },
+                        { label: "git（git-sync 跨机）", value: "git" },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item
                     label="DAG 目录"
                     name="dags_dir"
-                    extra="必须是 Airflow 真正挂进容器的那个目录；两侧不一致时 DAG 落了盘也没人解析（提交前自检会验这一项）"
+                    extra="local 通道：必须是 Airflow 真正挂进容器的那个目录；git 通道：本地 git 工作副本里的 dags 目录（两侧不一致时提交前自检会验）"
                   >
                     <Input placeholder="/opt/airflow/dags 在宿主机上的路径" />
                   </Form.Item>
@@ -219,6 +244,69 @@ export function AirflowSettingsPanel() {
                     extra="docker 通道的搬运作业配置落在这里，并挂进搬运容器；runner 通道不用"
                   >
                     <Input placeholder="…/seatunnel/jobs" />
+                  </Form.Item>
+                  <Form.Item
+                    noStyle
+                    shouldUpdate={(prev, cur) =>
+                      prev.dag_delivery_method !== cur.dag_delivery_method
+                    }
+                  >
+                    {({ getFieldValue }) =>
+                      getFieldValue("dag_delivery_method") === "git" ? (
+                        <>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message="git-sync 前置条件"
+                            description="DAG 目录须在一个已配好 remote 的 git 工作副本内，且本服务进程有推送凭据（SSH key / HTTPS token）。Airflow 侧用 git-sync sidecar（2.x）或内置 DAG bundle（3.x）拉取同一仓库。产物进 git 天然可 diff / review / 回滚。"
+                          />
+                          <Space align="start" wrap>
+                            <Form.Item
+                              label="remote 名称"
+                              name="git_remote"
+                              extra="默认 origin"
+                            >
+                              <Input placeholder="origin" style={{ width: 160 }} />
+                            </Form.Item>
+                            <Form.Item
+                              label="推送分支"
+                              name="git_branch"
+                              extra="默认 main"
+                            >
+                              <Input placeholder="main" style={{ width: 160 }} />
+                            </Form.Item>
+                          </Space>
+                          <Form.Item
+                            label="目录不是 git 仓库时自动 init"
+                            name="git_auto_init"
+                            valuePropName="checked"
+                            extra="关闭时若 DAG 目录不是 git 仓库则报错（提交前自检会验仓库与 remote 连通性）"
+                          >
+                            <Switch />
+                          </Form.Item>
+                          <Space align="start" wrap>
+                            <Form.Item
+                              label="commit 作者名"
+                              name="git_author"
+                              extra="留空则用 git 全局配置"
+                            >
+                              <Input placeholder="ontoMeta" style={{ width: 200 }} />
+                            </Form.Item>
+                            <Form.Item
+                              label="commit 邮箱"
+                              name="git_email"
+                              extra="留空则用 git 全局配置"
+                            >
+                              <Input
+                                placeholder="ontometa@example.com"
+                                style={{ width: 240 }}
+                              />
+                            </Form.Item>
+                          </Space>
+                        </>
+                      ) : null
+                    }
                   </Form.Item>
                 </>
               ),

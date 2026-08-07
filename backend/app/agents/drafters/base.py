@@ -29,3 +29,11 @@ class Drafter(ABC):
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
         return (intent or self.kind).strip()[:80] or self.kind
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
+        """仅凭 spec 派生名字（手动结构化起草路径，无 intent 可用）。
+
+        默认回退到 kind；各 drafter 覆写以给出更可读的名字。命名口味只定义一处，
+        意图路径的 ``suggested_name`` 应复用本方法。
+        """
+        return self.kind

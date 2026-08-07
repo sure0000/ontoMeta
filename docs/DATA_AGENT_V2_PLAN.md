@@ -1,7 +1,7 @@
 # Data Agent V2 改造方案：让语义层从「否决者」变成「生成器」
 
 > 状态：**全部交付** —— P0 / P1 / P2 / P3 / P4 五期完结（见 §8.1）
-> 前序：[DATA_AGENT_REDESIGN.md](./DATA_AGENT_REDESIGN.md)（V1：单发问答 → 多步工具编排）、
+> 前序：DATA_AGENT_REDESIGN（V1 评审草案，已并入本方案）、
 > [FORMAL_VALIDATION_PLAN.md](./FORMAL_VALIDATION_PLAN.md)（F1–F4：宁可拒答不可错答）
 > 主战场：`backend/app/services/chat_bi.py`
 
@@ -411,7 +411,7 @@ verifier 不过 → 回灌 unverified 片段 + 账本可证事实 → 重写一�
 
 - 行为开关按**具体语义**取名，不搞笼统的 `v1/v2`（见 §8.2 第 1 条）
 - 新验证层先上 `warn` 观察，再转 `on`（沿用 `agent_soundness` 三档风格）
-- 每期结束在 §8.2–8.6 记录「设计与实现的差异」（沿用 `DATA_AGENT_REDESIGN.md §11` 的写法）
+- 每期结束在 §8.2–8.6 记录「设计与实现的差异」（沿用 V1 评审草案 §11 的写法）
 
 ### 8.1 进度
 

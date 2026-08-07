@@ -169,6 +169,9 @@ def draft_artifact(data: ArtifactDraftRequest, db: Session = Depends(get_db)):
             intent=data.intent,
             context=data.context,
             ontology_id=data.ontology_id,
+            spec=data.spec,
+            name=data.name,
+            user_created=data.user_created,
         )
     )
     return _to_out(artifact)

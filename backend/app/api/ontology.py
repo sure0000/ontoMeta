@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import edit_service, provenance_service, query
 from app.database import get_db
+from app.models import ObjectType, Property
 from app.schemas import (
     ClusterDetail,
     ConflictResolveRequest,
@@ -136,6 +138,39 @@ def list_object_types_by_ontology(
         limit=limit,
         offset=offset,
     )
+
+
+class OntologyPropertyOption(BaseModel):
+    """本体字段选项：供结构化 Spec 表单的字段下拉使用（metric 的 properties/group_by/filters）。"""
+
+    name: str
+    display_name: str
+    object_type_name: str
+
+
+@router.get(
+    "/ontologies/{ontology_id}/properties",
+    response_model=list[OntologyPropertyOption],
+)
+def list_ontology_properties(ontology_id: str, db: Session = Depends(get_db)):
+    """列出某本体下全部字段（跨对象），供手动结构化 Spec 表单下拉。
+
+    与 validation._check_ontology_refs 的 known_properties 查询同构：spec 里引用的字段
+    名必须在此集合内，否则校验闸门报 unknown_property。
+    """
+    rows = (
+        db.query(Property.name, Property.display_name, ObjectType.name)
+        .join(ObjectType, Property.object_type_id == ObjectType.id)
+        .filter(ObjectType.ontology_id == ontology_id)
+        .order_by(ObjectType.name, Property.name)
+        .all()
+    )
+    return [
+        OntologyPropertyOption(
+            name=name, display_name=display_name, object_type_name=obj_name
+        )
+        for (name, display_name, obj_name) in rows
+    ]
 
 
 @router.get("/ontologies/{ontology_id}/graph", response_model=OntologyGraph)

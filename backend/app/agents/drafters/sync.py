@@ -86,8 +86,11 @@ class SyncDrafter(Drafter):
                 "target": f"{database}.{target.name}",
                 "object_type": target.name,
                 "ontology_id": ontology_id,
-                "mode": (contract.load_strategy if contract else "full"),
-                "partition_key": contract.partition_key if contract else None,
+                # 表单显式选的装载方式/分区键优先；否则回退契约，再回退默认。
+                "mode": context.get("mode")
+                or (contract.load_strategy if contract else "full"),
+                "partition_key": context.get("partition_key")
+                or (contract.partition_key if contract else None),
                 "engine": context.get("engine")
                 or (contract.engines[0] if contract and contract.engines else "hive"),
                 "preservation": decide_preservation(intent, source_table),
@@ -98,4 +101,7 @@ class SyncDrafter(Drafter):
             }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
+        return self.name_from_spec(spec)
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
         return f"同步 · {spec.get('source')} → {spec.get('target')}"

@@ -601,6 +601,14 @@ export interface AirflowSettings {
   /** DAG 与作业配置的投递目录（必须是 Airflow 真正挂进容器的那个）。 */
   dags_dir: string;
   jobs_dir: string;
+  /** DAG 投递方式：local（写共享目录）/ git（commit+push，Airflow 侧 git-sync 拉取）。 */
+  dag_delivery_method: string;
+  /** git 投递参数（仅 dag_delivery_method=git 时生效）。 */
+  git_remote: string;
+  git_branch: string;
+  git_auto_init: boolean;
+  git_author: string;
+  git_email: string;
   /** runner：向常驻 sync-runner 发 HTTP；docker：经 docker.sock 起搬运容器。 */
   sync_channel: string;
   sync_runner_endpoint: string;
@@ -626,6 +634,54 @@ export interface SyncRunnerSecret {
   /** store：设置页写入 runner 存储，可改；env：部署时钉死的环境变量，只读。 */
   source: string;
   values: Record<string, string>;
+}
+
+// ===== 依赖组件统一部署管理（DEPENDENCY_DEPLOYMENT_REDESIGN Phase 0） =====
+
+export interface DependencySchemaField {
+  name: string;
+  type: "str" | "int" | "bool";
+  secret: boolean;
+  required: boolean;
+  default?: string | number | boolean | null;
+}
+export interface DependencyComponentMeta {
+  key: string;
+  label: string;
+  multi: boolean;
+}
+export interface DependencySchema {
+  components: DependencyComponentMeta[];
+  connection_schemas: Record<string, DependencySchemaField[]>;
+  deploy_modes: string[];
+  deploy_spec_schemas: Record<string, DependencySchemaField[]>;
+  bare_metal_params: Record<string, DependencySchemaField[]>;
+  docker_params: Record<string, DependencySchemaField[]>;
+  deploy_statuses: string[];
+}
+export interface DependencyComponent {
+  id: string;
+  key: string;
+  name: string;
+  deploy_mode: string;
+  deploy_spec: Record<string, unknown>;
+  deploy_status: string;
+  deploy_error?: string | null;
+  connection: Record<string, unknown>;
+  enabled: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+export interface DependencyProbeResult {
+  ok: boolean;
+  message: string;
+  latency_ms?: number;
+}
+export interface DependencyDeployResult {
+  status: string;
+  ok: boolean;
+  message?: string;
 }
 
 export interface ChatBiConversation {

@@ -129,6 +129,13 @@ class AirflowSettingsOut(BaseModel):
     # ---- 投递目录 ----
     dags_dir: str = ""
     jobs_dir: str = ""
+    # ---- DAG 投递方式（local 默认 / git-sync 跨机）----
+    dag_delivery_method: str = "local"
+    git_remote: str = "origin"
+    git_branch: str = "main"
+    git_auto_init: bool = False
+    git_author: str = ""
+    git_email: str = ""
     # ---- 执行通道 ----
     sync_channel: str = "runner"
     sync_runner_endpoint: str = ""
@@ -158,6 +165,13 @@ class AirflowSettingsUpdate(BaseModel):
     enabled: bool = False
     dags_dir: str = ""
     jobs_dir: str = ""
+    # DAG 投递方式：local（同机/共享卷，默认）或 git（跨机，落盘后 push 到远程仓）。
+    dag_delivery_method: str = Field(default="local", pattern="^(local|git)$")
+    git_remote: str = "origin"
+    git_branch: str = "main"
+    git_auto_init: bool = False
+    git_author: str = ""
+    git_email: str = ""
     # runner：Airflow 任务向常驻 sync-runner 发 HTTP；docker：经 docker.sock 起搬运容器。
     sync_channel: str = Field(default="runner", pattern="^(runner|docker)$")
     sync_runner_endpoint: str = ""

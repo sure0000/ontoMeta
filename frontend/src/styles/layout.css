@@ -959,6 +959,49 @@
   padding: 0;
 }
 
+/* 纵向 Tabs：设置页 tab 过多时改为左侧竖排，避免横向溢出 */
+.om-tabs--vertical.ant-tabs {
+  flex-direction: row;
+}
+.om-tabs--vertical .ant-tabs-nav {
+  padding: 8px 0;
+  width: 168px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--om-border);
+  border-bottom: none;
+}
+.om-tabs--vertical .ant-tabs-nav::before {
+  border-right: none !important;
+  border-bottom: none !important;
+}
+.om-tabs--vertical .ant-tabs-tab {
+  padding: 10px 16px !important;
+  margin: 0 !important;
+  justify-content: flex-start;
+}
+.om-tabs--vertical .ant-tabs-tab + .ant-tabs-tab {
+  margin-left: 0 !important;
+  margin-top: 2px !important;
+}
+.om-tabs--vertical .ant-tabs-ink-bar {
+  width: 2px !important;
+  height: auto !important;
+  top: 0;
+  left: 0;
+}
+.om-tabs--vertical .ant-tabs-content-holder {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 0 0 16px;
+}
+
+/* 合并 tab 内多个 SectionCard 纵向堆叠时的间距 */
+.om-tab-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 /* 嵌入 section-card 内的 Tabs：tab bar 视觉上充当卡片头部 */
 .om-tabs--inset.ant-tabs {
   height: auto;

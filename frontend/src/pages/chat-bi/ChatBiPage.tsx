@@ -109,6 +109,10 @@ export function ChatBiPage() {
   const [renameTarget, setRenameTarget] = useState<ChatBiConversation | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelectedIds, setBatchSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
+
   const [catDialogOpen, setCatDialogOpen] = useState(false);
   const [catDialogMode, setCatDialogMode] = useState<"create" | "rename" | "delete">("create");
   const [catDialogName, setCatDialogName] = useState("");
@@ -120,6 +124,8 @@ export function ChatBiPage() {
 
   useEffect(() => {
     setActiveConversationId(null);
+    setBatchMode(false);
+    setBatchSelectedIds(new Set());
     hasConversationDataRef.current = false;
   }, [domainId]);
 
@@ -276,6 +282,74 @@ export function ChatBiPage() {
     },
     [activeConversationId, removeConversationFromLists],
   );
+
+  const displayConversations = showArchived ? archivedConversations : conversations;
+
+  const handleEnterBatchMode = useCallback(() => {
+    setBatchMode(true);
+    setBatchSelectedIds(new Set());
+  }, []);
+
+  const handleExitBatchMode = useCallback(() => {
+    setBatchMode(false);
+    setBatchSelectedIds(new Set());
+  }, []);
+
+  const handleToggleBatchSelect = useCallback((id: string) => {
+    setBatchSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleBatchSelectAll = useCallback(
+    (selectAll: boolean) => {
+      if (selectAll) {
+        setBatchSelectedIds(new Set(displayConversations.map((c) => c.id)));
+      } else {
+        setBatchSelectedIds(new Set());
+      }
+    },
+    [displayConversations],
+  );
+
+  const handleBatchDelete = useCallback(async () => {
+    const ids = Array.from(batchSelectedIds);
+    if (ids.length === 0) return;
+    Modal.confirm({
+      title: "批量删除对话",
+      content: `确定删除选中的 ${ids.length} 个对话吗？对话内的所有消息将被一并删除，不可恢复。`,
+      okText: "删除",
+      okType: "danger",
+      cancelText: "取消",
+      onOk: async () => {
+        setBatchDeleting(true);
+        let failed = 0;
+        await Promise.all(
+          ids.map((id) =>
+            api.deleteChatBiConversation(id).then(() => {
+              removeConversationFromLists(id);
+            }).catch(() => {
+              failed++;
+            }),
+          ),
+        );
+        setBatchDeleting(false);
+        if (activeConversationId && ids.includes(activeConversationId)) {
+          setActiveConversationId(null);
+        }
+        setBatchMode(false);
+        setBatchSelectedIds(new Set());
+        if (failed > 0) {
+          message.error(`${ids.length - failed} 个已删除，${failed} 个删除失败`);
+        } else {
+          message.success(`已删除 ${ids.length} 个对话`);
+        }
+      },
+    });
+  }, [batchSelectedIds, activeConversationId, removeConversationFromLists]);
 
   const openCategoryDialog = useCallback(
     (
@@ -444,8 +518,6 @@ export function ChatBiPage() {
     });
   }, []);
 
-  const displayConversations = showArchived ? archivedConversations : conversations;
-
   const { categorizedConvs, uncategorizedConvs } = useMemo(() => {
     const withCat: Record<string, ChatBiConversation[]> = {};
     const withoutCat: ChatBiConversation[] = [];
@@ -545,6 +617,14 @@ export function ChatBiPage() {
               onCreateConvInCategory={handleCreateConvInCategory}
               onSetSearchParams={setSearchParams}
               onSetShowArchived={setShowArchived}
+              batchMode={batchMode}
+              batchSelectedIds={batchSelectedIds}
+              batchDeleting={batchDeleting}
+              onEnterBatchMode={handleEnterBatchMode}
+              onExitBatchMode={handleExitBatchMode}
+              onToggleBatchSelect={handleToggleBatchSelect}
+              onBatchSelectAll={handleBatchSelectAll}
+              onBatchDelete={handleBatchDelete}
             />
           )}
           <ChatBiMain

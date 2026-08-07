@@ -16,12 +16,12 @@ M10 上线后在真实实例上逐个踩到并修掉的（这些修复都已在�
 
 | 报错原文 | 真实原因 | 修在哪 |
 |---|---|---|
-| `pull access denied for …, repository does not exist` | 选的工具在本部署没有可用镜像（DataX 无官方镜像） | [registry.py:47](backend/app/warehouse/jobs/registry.py:47) `resolve_docker_image` |
-| `Exception rendering Jinja template … field 'command'` | DockerOperator 的 `template_ext` 默认含 `.sh`，把命令首元素当模板文件去读 | [airflow_dag_builder.py:273](backend/app/services/airflow_dag_builder.py:273) 清空 `template_ext` |
-| `ParseException: extraneous input ';' expecting EOF` | 生成器产的是脚本形态 SQL（带 `;`），DAG 里逐条交给 DB-API | [airflow_dag_builder.py:102](backend/app/services/airflow_dag_builder.py:102) `_as_single_statement` |
-| `No suitable driver found for ${ERP_READONLY_URL}` | SeaTunnel 的 `${…}` 只认 `-i`，不读环境变量 | [seatunnel.py:69](backend/app/warehouse/jobs/seatunnel.py:69) 改走 `-i` |
-| `the options('table_name') are required` | Hive sink 要一个 `table_name`，不是 database/table 两项 | [seatunnel.py:145](backend/app/warehouse/jobs/seatunnel.py:145) |
-| `ClassNotFoundException: com.mysql.cj.jdbc.Driver` | 搬运镜像因授权不带 JDBC 驱动 | [airflow_dag_builder.py:84](backend/app/services/airflow_dag_builder.py:84) `_driver_jars` 逐个挂 |
+| `pull access denied for …, repository does not exist` | 选的工具在本部署没有可用镜像（DataX 无官方镜像） | [registry.py:47](../backend/app/warehouse/jobs/registry.py:47) `resolve_docker_image` |
+| `Exception rendering Jinja template … field 'command'` | DockerOperator 的 `template_ext` 默认含 `.sh`，把命令首元素当模板文件去读 | [airflow_dag_builder.py:273](../backend/app/services/airflow_dag_builder.py:273) 清空 `template_ext` |
+| `ParseException: extraneous input ';' expecting EOF` | 生成器产的是脚本形态 SQL（带 `;`），DAG 里逐条交给 DB-API | [airflow_dag_builder.py:102](../backend/app/services/airflow_dag_builder.py:102) `_as_single_statement` |
+| `No suitable driver found for ${ERP_READONLY_URL}` | SeaTunnel 的 `${…}` 只认 `-i`，不读环境变量 | [seatunnel.py:69](../backend/app/warehouse/jobs/seatunnel.py:69) 改走 `-i` |
+| `the options('table_name') are required` | Hive sink 要一个 `table_name`，不是 database/table 两项 | [seatunnel.py:145](../backend/app/warehouse/jobs/seatunnel.py:145) |
+| `ClassNotFoundException: com.mysql.cj.jdbc.Driver` | 搬运镜像因授权不带 JDBC 驱动 | [airflow_dag_builder.py:84](../backend/app/services/airflow_dag_builder.py:84) `_driver_jars` 逐个挂 |
 
 六条的共同点，比六条各自的原因重要得多：
 
@@ -32,8 +32,8 @@ M10 上线后在真实实例上逐个踩到并修掉的（这些修复都已在�
 ### 1.1 结构性原因：一次搬运要同时成立九件事
 
 当前通道是「Airflow worker 经 docker.sock 起一个一次性兄弟容器跑 SeaTunnel」
-（[airflow_dag_builder.py:293](backend/app/services/airflow_dag_builder.py:293)，
-[docker-compose.yml:43](docker/orchestration/docker-compose.yml:43) 挂 sock）。它要求：
+（[airflow_dag_builder.py:293](../backend/app/services/airflow_dag_builder.py:293)，
+[docker-compose.yml:43](../docker/orchestration/docker-compose.yml:43) 挂 sock）。它要求：
 
 | # | 必须成立的事 | 由谁决定 | 提交时 ontoMeta 能验证吗 | 不成立时长什么样 |
 |---|---|---|---|---|
@@ -45,7 +45,7 @@ M10 上线后在真实实例上逐个踩到并修掉的（这些修复都已在�
 | 6 | Airflow Connection `erp_readonly`、`ontometa_ds_<slug>` 存在 | 部署 | ❌ | **渲染期抛错，全部任务一起红** |
 | 7 | SeaTunnel 该版本的连接器参数形状与渲染一致 | 工具版本 | ❌ | `the options(...) are required` 之类 |
 | 8 | Hive sink 所需的 hadoop conf / HDFS 可达 | 部署 | ❌ | 超时或权限拒绝 |
-| 9 | DAG 已被 Airflow 解析完成 | 时序 | ❌ | 触发 404，且[被吞掉](backend/app/services/materialization_runner.py:198)只记进回执 |
+| 9 | DAG 已被 Airflow 解析完成 | 时序 | ❌ | 触发 404，且[被吞掉](../backend/app/services/materialization_runner.py:198)只记进回执 |
 
 **九件事里只验证了一件。** 第 3 条尤其隐蔽：ontoMeta 写的是**自己文件系统**的路径，
 DAG 里却当**宿主机**路径挂载——ontoMeta 一旦容器化部署，这两个路径必然不同，
@@ -57,10 +57,10 @@ DAG 里却当**宿主机**路径挂载——ontoMeta 一旦容器化部署，这
 
 | 缺陷 | 位置 | 后果 |
 |---|---|---|
-| 全量模式 sink 是 `DROP_DATA`，**先删后写、无回滚** | [seatunnel.py:141](backend/app/warehouse/jobs/seatunnel.py:141) | 搬到一半失败 = 目标表被清空，且原数据没了。这是最贵的一种「不稳定」 |
-| 凭据经 `-i KEY=值` 走命令行 | [seatunnel.py:69](backend/app/warehouse/jobs/seatunnel.py:69) | 明文进 `docker inspect`、进容器内 `ps`、进 Airflow 的 rendered fields |
-| 一个本体一个 DAG、一个 DagRun 装全部表，层内无闸门、`max_active_runs=1` | [airflow_dag_builder.py:321](backend/app/services/airflow_dag_builder.py:321) | 734 张表 = 734 个并发容器；任一张表失败，整轮显示为红；重跑粒度只有「整轮」 |
-| DAG 的 `schedule` 取各表 cron 的**众数** | [materialization_runner.py:103](backend/app/services/materialization_runner.py:103) | 少数派表的定时策略静默失效，UI 上却显示已配置 |
+| 全量模式 sink 是 `DROP_DATA`，**先删后写、无回滚** | [seatunnel.py:141](../backend/app/warehouse/jobs/seatunnel.py:141) | 搬到一半失败 = 目标表被清空，且原数据没了。这是最贵的一种「不稳定」 |
+| 凭据经 `-i KEY=值` 走命令行 | [seatunnel.py:69](../backend/app/warehouse/jobs/seatunnel.py:69) | 明文进 `docker inspect`、进容器内 `ps`、进 Airflow 的 rendered fields |
+| 一个本体一个 DAG、一个 DagRun 装全部表，层内无闸门、`max_active_runs=1` | [airflow_dag_builder.py:321](../backend/app/services/airflow_dag_builder.py:321) | 734 张表 = 734 个并发容器；任一张表失败，整轮显示为红；重跑粒度只有「整轮」 |
+| DAG 的 `schedule` 取各表 cron 的**众数** | [materialization_runner.py:103](../backend/app/services/materialization_runner.py:103) | 少数派表的定时策略静默失效，UI 上却显示已配置 |
 
 ---
 
@@ -128,7 +128,7 @@ DAG、spec、作业配置里始终只有 alias。
 **native backend 的能力边界**（不吹）：按主键/分区键分片、批量 `SELECT` → 批量写入，
 覆盖 full 与 incremental。**CDC 不做**，`load_strategy=cdc` 的表路由到 seatunnel 档；
 runner 的 `GET /capabilities` 如实声明，planner 据此把不支持的表列进 `unsupported`——
-沿用既有的「不静默降级」约定（[job_planner.py:118](backend/app/services/job_planner.py:118)）。
+沿用既有的「不静默降级」约定（[job_planner.py:118](../backend/app/services/job_planner.py:118)）。
 
 **seatunnel 档（已落地，接口形状为实测非照抄文档）**：native 写不了 Hive（要写 HDFS 上的
 ORC、要过 metastore，逐行 JDBC 不成立），而 Hive 是本仓的 `DEFAULT_ENGINE`。这一档把作业
@@ -161,12 +161,12 @@ ORC、要过 metastore，逐行 JDBC 不成立），而 Hive 是本仓的 `DEFAU
 
 新增 `POST /api/warehouse/materialize/preflight`，物化弹窗在「提交」前必须跑一次，
 未全绿则按钮禁用（可显式忽略非阻断项）。每一项失败都给**可执行的下一步**，
-照 [preflight.sh](docker/orchestration/preflight.sh) 的风格，不只是报错。
+照 [preflight.sh](../docker/orchestration/preflight.sh) 的风格，不只是报错。
 
 | 检查项 | 怎么检 | 失败时给什么 |
 |---|---|---|
 | Airflow 可达 | `GET /health` | endpoint 是否写错、是否被反向代理挡了登录页 |
-| Airflow API 鉴权真的可用 | `GET /api/{v}/dags?limit=1`（[ping_api](backend/app/connectors/airflow.py:120) 已实现） | `AIRFLOW__API__AUTH_BACKENDS` 该怎么配 |
+| Airflow API 鉴权真的可用 | `GET /api/{v}/dags?limit=1`（[ping_api](../backend/app/connectors/airflow.py:120) 已实现） | `AIRFLOW__API__AUTH_BACKENDS` 该怎么配 |
 | REST 版本 | `GET /openapi.json` 自探 v1/v2，不照抄文档 | 自动纠正 `api_version`，并在回执里说明 |
 | runner 可达且契约匹配 | `GET /capabilities`，比对 `contract_version` | 版本不匹配即拒绝提交，并给出该升哪一侧 |
 | 源库可连 | `POST /probe {source_alias}` | 该 alias 在 runner 侧的 secret 没配 / 网络不通 |
@@ -231,10 +231,10 @@ Hive 分区表走 `INSERT OVERWRITE` 到目标分区，非分区表只能 rename
 
 | 文件 | 改动 |
 |---|---|
-| [airflow_dag_builder.py](backend/app/services/airflow_dag_builder.py) | DAG 模板由 DockerOperator 改 PythonOperator（`inlets`/`outlets` 保留，M11 血缘不受影响）；按 cron 分组、按上限分批；spec 里去掉 `jobs_host_dir` / `driver_jars` / `docker_network` |
-| [materialization_runner.py](backend/app/services/materialization_runner.py) | 提交前调 preflight；`_schedule_of` 众数逻辑删除，改分组；触发前等解析 |
-| [seatunnel.py](backend/app/warehouse/jobs/seatunnel.py) | `data_save_mode` 不再用 `DROP_DATA`，改写 staging；凭据不再进 `-i`（runner 自解析） |
-| [job_planner.py](backend/app/services/job_planner.py) | 按 runner 的 `capabilities` 判定可搬性，替代现在的硬编码平台表 |
+| [airflow_dag_builder.py](../backend/app/services/airflow_dag_builder.py) | DAG 模板由 DockerOperator 改 PythonOperator（`inlets`/`outlets` 保留，M11 血缘不受影响）；按 cron 分组、按上限分批；spec 里去掉 `jobs_host_dir` / `driver_jars` / `docker_network` |
+| [materialization_runner.py](../backend/app/services/materialization_runner.py) | 提交前调 preflight；`_schedule_of` 众数逻辑删除，改分组；触发前等解析 |
+| [seatunnel.py](../backend/app/warehouse/jobs/seatunnel.py) | `data_save_mode` 不再用 `DROP_DATA`，改写 staging；凭据不再进 `-i`（runner 自解析） |
+| [job_planner.py](../backend/app/services/job_planner.py) | 按 runner 的 `capabilities` 判定可搬性，替代现在的硬编码平台表 |
 | `settings_service.py` / `config.py` | 增 runner endpoint；`airflow_sync_drivers_dir` / `sync_tool_images` / `airflow_docker_network` 随 docker 通道一起标记为 deprecated |
 | `MaterializeModal.tsx` | 提交前展示 preflight 结果；回执按批次展示多个 DagRun |
 

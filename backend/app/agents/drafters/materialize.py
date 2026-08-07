@@ -62,5 +62,8 @@ class MaterializeDrafter(Drafter):
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
+        return (intent or self.name_from_spec(spec)).strip()[:80]
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
         engine = spec.get("engine") or "hive"
-        return (intent or f"物化 → {engine}").strip()[:80]
+        return f"物化 → {engine}"

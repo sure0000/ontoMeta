@@ -55,6 +55,7 @@ from app.models.settings import (
     AirflowSetting,
     CubeSetting,
     DatahubSetting,
+    DependencyComponent,
     DraftGenerationSetting,
     LlmServiceConfig,
 )

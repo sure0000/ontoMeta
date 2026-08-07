@@ -8,6 +8,7 @@ from app.api import (
     chat_bi,
     confirmations,
     data_app,
+    dependencies,
     governance,
     ontology,
     principals,
@@ -19,6 +20,7 @@ from app.api import (
 
 router = APIRouter()
 router.include_router(settings.router)
+router.include_router(dependencies.router)
 router.include_router(workspace.router)
 router.include_router(ontology.router)
 router.include_router(business_logic.router)

@@ -127,4 +127,7 @@ class ClusterDrafter(Drafter):
         return sorted(set(expanded))
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
+        return self.name_from_spec(spec)
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
         return f"集群 · {len(spec.get('hosts') or [])} 节点 · {'/'.join(spec.get('services') or [])}"

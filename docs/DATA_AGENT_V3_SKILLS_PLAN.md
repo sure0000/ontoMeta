@@ -1,7 +1,7 @@
 # Data Agent V3 改造方案：从「一套模板答所有」到「skill + 渲染块」
 
 > 状态：**S0–S3 全部交付**（§11–§14）。§10 四项决策全部拍板。V3 五 skill、块协议、写侧桥接闭环完成。
-> 前序：[DATA_AGENT_REDESIGN.md](./DATA_AGENT_REDESIGN.md)（V1：单发问答 → 多步工具编排）、
+> 前序：DATA_AGENT_REDESIGN（V1 评审草案，已并入 V2）、
 > [DATA_AGENT_V2_PLAN.md](./DATA_AGENT_V2_PLAN.md)（P0–P4：语义层从「否决者」变「生成器」，五期已交付）、
 > [FORMAL_VALIDATION_PLAN.md](./FORMAL_VALIDATION_PLAN.md)（宁可拒答不可错答）
 > 主战场：后端 `backend/app/services/chat_bi.py` + `backend/app/schemas/chat_bi.py`；

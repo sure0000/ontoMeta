@@ -226,6 +226,7 @@ export function tokenizeSqlLine(line: string): Array<{ text: string; kind: "comm
 export type MarkdownBlock =
   | { type: "code"; lang: string; code: string }
   | { type: "table"; header: string[]; rows: string[][] }
+  | { type: "hr" }
   | { type: "line"; raw: string };
 
 function parseTableRow(line: string): string[] {
@@ -240,10 +241,31 @@ function isTableSeparator(line: string): boolean {
   return t.includes("-") && /^\|?[\s:|-]+\|?$/.test(t);
 }
 
+/** GFM 主题分隔线（thematic break）：仅由 3 个及以上同类字符 `-`/`*`/`_` 与空白组成。
+ * LLM 常用 `---` 分节，若不当成分隔线就会把字面 "---" 渲染出来。 */
+function isThematicBreak(line: string): boolean {
+  const t = line.trim();
+  return /^(?:-{3,}|\*{3,}|_{3,})[\s-*_]*$/.test(t) && !t.includes("|");
+}
+
 export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
   const blocks: MarkdownBlock[] = [];
   const lines = content.split("\n");
   let i = 0;
+  // 连续空白/分隔线折叠：避免 LLM 输出里成串的空行与 `---` 把版面撑开、
+  // 或多个相邻分隔线叠成一组粗线。push 前用下面的 helper 做去重。
+  const push = (b: MarkdownBlock) => {
+    const prev = blocks[blocks.length - 1];
+    if (b.type === "hr") {
+      // 相邻 hr 合并；hr 紧跟空行/空行紧跟 hr 也跳过。
+      if (prev && (prev.type === "hr")) return;
+    }
+    if (b.type === "line" && b.raw.trim() === "") {
+      // 连续空行只保留一条；hr 后不接空行。
+      if (prev && (prev.type === "line" && prev.raw.trim() === "" || prev?.type === "hr")) return;
+    }
+    blocks.push(b);
+  };
   while (i < lines.length) {
     const line = lines[i];
     const fenceMatch = line.trim().match(/^```(\w*)$/);
@@ -257,8 +279,14 @@ export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
       }
       i++;
       if (lang !== "sql") {
-        blocks.push({ type: "code", lang, code: codeLines.join("\n") });
+        push({ type: "code", lang, code: codeLines.join("\n") });
       }
+      continue;
+    }
+    // 主题分隔线：先于表格判定，避免把 `---` 误当表格分隔行。
+    if (isThematicBreak(line)) {
+      push({ type: "hr" });
+      i++;
       continue;
     }
     // GFM 表格：当前行是 | 开头的表头，紧接一行分隔线 |---|---|
@@ -274,18 +302,25 @@ export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
         rows.push(parseTableRow(lines[i]));
         i++;
       }
-      blocks.push({ type: "table", header, rows });
+      push({ type: "table", header, rows });
       continue;
     }
-    blocks.push({ type: "line", raw: line });
+    push({ type: "line", raw: line });
     i++;
+  }
+  // 去掉首尾空行块，避免气泡上下出现多余间距。
+  while (blocks.length && blocks[0].type === "line" && (blocks[0] as { raw: string }).raw.trim() === "") {
+    blocks.shift();
+  }
+  while (blocks.length && blocks[blocks.length - 1].type === "line" && (blocks[blocks.length - 1] as { raw: string }).raw.trim() === "") {
+    blocks.pop();
   }
   return blocks;
 }
 
-export function splitInlineTokens(text: string): Array<{ type: "text" | "bold" | "code"; value: string }> {
-  const parts: Array<{ type: "text" | "bold" | "code"; value: string }> = [];
-  const regex = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+export function splitInlineTokens(text: string): Array<{ type: "text" | "bold" | "code" | "link"; value: string; href?: string }> {
+  const parts: Array<{ type: "text" | "bold" | "code" | "link"; value: string; href?: string }> = [];
+  const regex = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^\s)]+\))/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(text)) !== null) {
@@ -297,6 +332,10 @@ export function splitInlineTokens(text: string): Array<{ type: "text" | "bold" |
       parts.push({ type: "bold", value: token.slice(2, -2) });
     } else if (token.startsWith("`")) {
       parts.push({ type: "code", value: token.slice(1, -1) });
+    } else if (token.startsWith("[")) {
+      const m = /^\[([^\]]+)\]\(([^\s)]+)\)$/.exec(token);
+      if (m) parts.push({ type: "link", value: m[1], href: m[2] });
+      else parts.push({ type: "text", value: token });
     }
     lastIndex = match.index + token.length;
   }

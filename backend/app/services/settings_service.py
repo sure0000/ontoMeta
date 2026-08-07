@@ -113,9 +113,17 @@ class AirflowRuntimeConfig:
     password: str | None
     token: str | None
     api_version: str
-    # 投递目录不在设置页配：属部署基础设施，由 config.airflow_dags_dir/jobs_dir 给默认。
+    # 投递目录在设置页配（空则退默认路径）。
     dags_dir: str
     jobs_dir: str
+    # DAG 投递方式与 git-sync 参数（设置页配）：method=local 时 git_* 均忽略；
+    # method=git 时落盘后 commit + push 到远程仓，Airflow 侧用 git-sync sidecar 拉取。
+    dag_delivery_method: str
+    git_remote: str
+    git_branch: str
+    git_auto_init: bool
+    git_author: str
+    git_email: str
     # 搬运容器接的 Docker 网络，同属部署基础设施（见 config.airflow_docker_network）。
     docker_network: str
     # JDBC 驱动目录（宿主机路径），挂进搬运容器的 lib 目录。
@@ -145,6 +153,23 @@ class AirflowRuntimeConfig:
         # 没有投递目录就没法把 DAG 交出去（缺省已由 config 给了），未启用/无 endpoint 也不可用。
         return bool(self.enabled and self.endpoint and self.dags_dir and self.jobs_dir)
 
+    def build_delivery(self):
+        """按 dag_delivery_method 构造投递器（local 默认 / git-sync）。
+
+        放在运行期配置上，调用侧（materialization_runner / flink_job_runner）拿到后
+        传给 ``DagBundle.write(..., delivery=...)``。
+        """
+        from app.services.dag_delivery import get_delivery
+
+        return get_delivery(
+            self.dag_delivery_method,
+            git_remote=self.git_remote,
+            git_branch=self.git_branch,
+            git_auto_init=self.git_auto_init,
+            git_author=self.git_author or None,
+            git_email=self.git_email or None,
+        )
+
 
 @dataclass
 class CubeRuntimeConfig:
@@ -169,91 +194,55 @@ class SettingsService:
     # 当唯一 LLM 行被删除时由 delete_llm_service 重置。
     _defaults_initialized: bool = False
 
+    def __init__(self) -> None:
+        # Phase 1：DataHub / Cube / LLM 读取侧改为从统一注册表投影，委托给 DependencyComponentService。
+        # Airflow 仍读旧表（编排参数与连接混合，待后续迁移）。
+        from app.services.dependency_service import DependencyComponentService
+        self._deps = DependencyComponentService()
+
     def list_llm_models(self) -> list[dict]:
         return DEEPSEEK_MODELS
 
-    def list_llm_services(self, db: Session) -> list[LlmServiceConfig]:
+    def list_llm_services(self, db: Session) -> list[dict]:
         self.ensure_defaults(db)
-        return (
-            db.query(LlmServiceConfig)
-            .order_by(LlmServiceConfig.is_default.desc(), LlmServiceConfig.updated_at.desc())
-            .all()
-        )
+        return self._deps.list_llm(db)
 
-    def get_llm_service(self, db: Session, service_id: str) -> LlmServiceConfig | None:
-        return db.get(LlmServiceConfig, service_id)
-
-    def create_llm_service(self, db: Session, data: dict) -> LlmServiceConfig:
+    def get_llm_service(self, db: Session, service_id: str) -> dict | None:
         self.ensure_defaults(db)
-        if data.get("is_default"):
-            self._clear_default_llm(db)
-        service = LlmServiceConfig(**data)
-        db.add(service)
-        db.commit()
-        db.refresh(service)
-        if not db.query(LlmServiceConfig).filter(LlmServiceConfig.is_default.is_(True)).first():
-            service.is_default = True
-            db.commit()
-            db.refresh(service)
-        return service
+        return self._deps.get_llm(db, service_id)
 
-    def update_llm_service(
-        self, db: Session, service_id: str, data: dict
-    ) -> LlmServiceConfig | None:
-        service = db.get(LlmServiceConfig, service_id)
-        if not service:
-            return None
-        if data.get("is_default"):
-            self._clear_default_llm(db)
-        for key, value in data.items():
-            if key == "api_key" and value is None:
-                continue
-            setattr(service, key, value)
-        db.commit()
-        db.refresh(service)
-        return service
+    def create_llm_service(self, db: Session, data: dict) -> dict:
+        self.ensure_defaults(db)
+        return self._deps.create_llm(db, data)
+
+    def update_llm_service(self, db: Session, service_id: str, data: dict) -> dict | None:
+        self.ensure_defaults(db)
+        return self._deps.update_llm(db, service_id, data)
 
     def delete_llm_service(self, db: Session, service_id: str) -> bool:
-        service = db.get(LlmServiceConfig, service_id)
-        if not service:
-            return False
-        was_default = service.is_default
-        db.delete(service)
-        db.commit()
-        remaining = db.query(LlmServiceConfig).count()
-        if remaining == 0:
+        self.ensure_defaults(db)
+        ok = self._deps.delete_llm(db, service_id)
+        if ok and not self._deps.list_llm(db):
             # 全部 LLM 配置被删除：下次访问需重新初始化默认项
             SettingsService._defaults_initialized = False
-        elif was_default:
-            fallback = db.query(LlmServiceConfig).order_by(LlmServiceConfig.updated_at.desc()).first()
-            if fallback:
-                fallback.is_default = True
-                db.commit()
-        return True
+        return ok
 
-    def get_datahub_settings(self, db: Session) -> DatahubSetting:
+    def get_datahub_settings(self, db: Session) -> dict:
         self.ensure_defaults(db)
-        row = db.get(DatahubSetting, "default")
-        assert row is not None
-        return row
+        return self._deps.get_datahub(db)
 
-    def update_datahub_settings(self, db: Session, data: dict) -> DatahubSetting:
-        row = self.get_datahub_settings(db)
-        for key, value in data.items():
-            if key == "token" and value is None:
-                continue
-            setattr(row, key, value)
-        db.commit()
-        db.refresh(row)
-        return row
+    def update_datahub_settings(self, db: Session, data: dict) -> dict:
+        self.ensure_defaults(db)
+        return self._deps.save_datahub(db, data)
 
     def get_datahub_runtime(self, db: Session) -> DatahubRuntimeConfig:
-        row = self.get_datahub_settings(db)
+        self.ensure_defaults(db)
+        c = self._deps.get_datahub(db)
         return DatahubRuntimeConfig(
-            gms_url=row.gms_url,
-            frontend_url=row.frontend_url,
-            token=row.token,
-            fabric=row.fabric or "PROD",
+            gms_url=c.get("gms_url", ""),
+            frontend_url=c.get("frontend_url", ""),
+            token=c.get("token"),
+            fabric=c.get("fabric") or "PROD",
         )
 
     def get_draft_generation_settings(self, db: Session) -> DraftGenerationSetting:
@@ -279,95 +268,81 @@ class SettingsService:
             relation_chunk_concurrency=row.relation_chunk_concurrency,
         )
 
-    def get_airflow_settings(self, db: Session) -> AirflowSetting:
+    def get_airflow_settings(self, db: Session) -> dict:
         self.ensure_defaults(db)
-        row = db.get(AirflowSetting, "default")
-        assert row is not None
-        return row
+        return self._deps.get_airflow(db)
 
-    def update_airflow_settings(self, db: Session, data: dict) -> AirflowSetting:
-        row = self.get_airflow_settings(db)
-        for key, value in data.items():
-            if key in ("password", "token", "sync_runner_token") and value is None:
-                continue  # 不传则保留原凭据
-            setattr(row, key, value)
-        db.commit()
-        db.refresh(row)
-        return row
+    def update_airflow_settings(self, db: Session, data: dict) -> dict:
+        self.ensure_defaults(db)
+        return self._deps.save_airflow(db, data)
 
     def get_airflow_runtime(self, db: Session) -> AirflowRuntimeConfig:
-        row = self.get_airflow_settings(db)
+        self.ensure_defaults(db)
+        a = self._deps.get_airflow(db)
         return AirflowRuntimeConfig(
-            endpoint=row.endpoint,
-            username=row.username,
-            password=row.password,
-            token=row.token,
-            api_version=row.api_version,
-            # 以下全部来自设置页那一行：环境变量只在建行时播过一次种，之后不再参与，
-            # 免得出现「改了 .env 却不生效」的两个事实源。
-            dags_dir=row.dags_dir or _default_dags_dir(),
-            jobs_dir=row.jobs_dir or _default_jobs_dir(),
-            docker_network=row.docker_network,
-            drivers_dir=row.drivers_dir,
-            sync_tool_images=parse_tool_images(row.sync_tool_images),
-            sync_tool=(row.sync_tool or "").strip().lower(),
-            sync_channel=row.sync_channel,
-            sync_runner_endpoint=row.sync_runner_endpoint,
-            sync_runner_token=row.sync_runner_token or None,
-            max_tasks_per_dag=row.max_tasks_per_dag,
-            max_active_tasks_per_dag=row.max_active_tasks_per_dag,
-            dag_parse_timeout=row.dag_parse_timeout,
-            preflight_sentinel_timeout=row.preflight_sentinel_timeout,
-            staging_swap=row.staging_swap,
-            enabled=row.enabled,
+            endpoint=a.get("endpoint", ""),
+            username=a.get("username"),
+            password=a.get("password"),
+            token=a.get("token"),
+            api_version=a.get("api_version", "v1"),
+            # 投递目录空时退回默认（与既有行为一致）
+            dags_dir=a.get("dags_dir") or _default_dags_dir(),
+            jobs_dir=a.get("jobs_dir") or _default_jobs_dir(),
+            # 投递方式与 git-sync 参数：纯数据库读取（法则：配置只在设置页，不读环境变量）。
+            dag_delivery_method=a.get("dag_delivery_method") or "local",
+            git_remote=a.get("git_remote") or "origin",
+            git_branch=a.get("git_branch") or "main",
+            git_auto_init=bool(a.get("git_auto_init")),
+            git_author=a.get("git_author") or "",
+            git_email=a.get("git_email") or "",
+            docker_network=a.get("docker_network") or "bridge",
+            drivers_dir=a.get("drivers_dir") or "",
+            sync_tool_images=parse_tool_images(a.get("sync_tool_images")),
+            sync_tool=(a.get("sync_tool") or "").strip().lower(),
+            sync_channel=a.get("sync_channel") or "runner",
+            sync_runner_endpoint=a.get("sync_runner_endpoint") or "",
+            sync_runner_token=a.get("sync_runner_token") or None,
+            max_tasks_per_dag=a.get("max_tasks_per_dag") or 50,
+            max_active_tasks_per_dag=a.get("max_active_tasks_per_dag") or 16,
+            dag_parse_timeout=a.get("dag_parse_timeout") or 60.0,
+            preflight_sentinel_timeout=a.get("preflight_sentinel_timeout") or 20.0,
+            staging_swap=a.get("staging_swap") if a.get("staging_swap") is not None else True,
+            enabled=a.get("enabled", False),
         )
 
-    def get_cube_settings(self, db: Session) -> CubeSetting:
+    def get_cube_settings(self, db: Session) -> dict:
         self.ensure_defaults(db)
-        row = db.get(CubeSetting, "default")
-        assert row is not None
-        return row
+        return self._deps.get_cube(db)
 
-    def update_cube_settings(self, db: Session, data: dict) -> CubeSetting:
-        row = self.get_cube_settings(db)
-        for key, value in data.items():
-            if key == "api_secret" and value is None:
-                continue  # 不传则保留原密钥
-            setattr(row, key, value)
-        db.commit()
-        db.refresh(row)
-        return row
+    def update_cube_settings(self, db: Session, data: dict) -> dict:
+        self.ensure_defaults(db)
+        return self._deps.save_cube(db, data)
 
     def get_cube_runtime(self, db: Session) -> CubeRuntimeConfig:
-        row = self.get_cube_settings(db)
+        self.ensure_defaults(db)
+        c = self._deps.get_cube(db)
         return CubeRuntimeConfig(
-            api_url=row.api_url,
-            api_secret=row.api_secret,
-            preagg_refresh=row.preagg_refresh,
-            tenant_dimension=(row.tenant_dimension or None),
-            timeout_seconds=row.timeout_seconds,
+            api_url=c.get("api_url", ""),
+            api_secret=c.get("api_secret"),
+            preagg_refresh=c.get("preagg_refresh", "1 hour"),
+            tenant_dimension=(c.get("tenant_dimension") or None),
+            timeout_seconds=int(c.get("timeout_seconds", 30) or 30),
         )
 
     def get_llm_runtime(self, db: Session) -> LlmRuntimeConfig:
         self.ensure_defaults(db)
-        service = (
-            db.query(LlmServiceConfig)
-            .filter(LlmServiceConfig.is_default.is_(True), LlmServiceConfig.enabled.is_(True))
-            .first()
-        )
-        if not service:
-            service = db.query(LlmServiceConfig).filter(LlmServiceConfig.enabled.is_(True)).first()
-        if service:
-            provider = (service.provider or "").lower()
+        svc = self._deps.get_default_llm(db)
+        if svc:
+            provider = (svc.get("provider") or "").lower()
             keyless_ok = provider in OPENAI_COMPATIBLE_PROVIDERS
             # 自建 OpenAI 兼容端点允许无 Key 直连（用占位符满足 SDK 非空要求）。
-            api_key = service.api_key or (
+            api_key = svc.get("api_key") or (
                 OPENAI_COMPATIBLE_PLACEHOLDER_KEY if keyless_ok else None
             )
             return LlmRuntimeConfig(
-                api_base_url=service.api_base_url,
+                api_base_url=svc.get("api_base_url", ""),
                 api_key=api_key,
-                model=service.model,
+                model=svc.get("model", ""),
             )
         return LlmRuntimeConfig(
             api_base_url="https://api.deepseek.com",
@@ -386,9 +361,9 @@ class SettingsService:
 
         api_key = (data.get("api_key") or "").strip() or None
         if not api_key and data.get("service_id"):
-            existing = db.get(LlmServiceConfig, data["service_id"])
-            if existing and existing.api_key:
-                api_key = existing.api_key
+            existing = self._deps.get_llm(db, data["service_id"])
+            if existing and existing.get("api_key"):
+                api_key = existing["api_key"]
         if not api_key:
             if keyless_ok:
                 api_key = OPENAI_COMPATIBLE_PLACEHOLDER_KEY
@@ -497,6 +472,10 @@ class SettingsService:
             db.commit()
 
         SettingsService._defaults_initialized = True
+
+        # Phase 1：把旧表（DatahubSetting/CubeSetting/LlmServiceConfig）搬进统一注册表。
+        # 幂等：已存在对应行则跳过。此后 DataHub/Cube/LLM 读取侧只认注册表。
+        self._deps.migrate_from_legacy(db)
 
     def _clear_default_llm(self, db: Session) -> None:
         for item in db.query(LlmServiceConfig).filter(LlmServiceConfig.is_default.is_(True)).all():

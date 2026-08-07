@@ -29,7 +29,7 @@ ontoMeta/
 | MCP `/api/mcp*` | 同上 API Key | tools/list、tools/call |
 | `GET /health` | 无 | 存活探针 |
 
-完整 RBAC（读/编/审/发四层角色 reader < editor < reviewer < publisher）已产品化（见「角色与令牌」设置页与 `POST /api/principals`）：按主体签发令牌、分级授权，写侧智能体（`/api/agents`）等高危操作需 publisher。`ONTOMETA_ADMIN_TOKEN` 仍为 superuser（等价 publisher）；未创建任何主体时行为与启用 RBAC 前一致。详见 [TECH_DESIGN.md](./TECH_DESIGN.md) §9、[DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0。
+完整 RBAC（读/编/审/发四层角色 reader < editor < reviewer < publisher）已产品化（见「角色与令牌」设置页与 `POST /api/principals`）：按主体签发令牌、分级授权，写侧智能体（`/api/agents`）等高危操作需 publisher。`ONTOMETA_ADMIN_TOKEN` 仍为 superuser（等价 publisher）；未创建任何主体时行为与启用 RBAC 前一致。详见 [TECH_DESIGN.md](./docs/TECH_DESIGN.md) §9、[DW_IMPLEMENTATION.md](./docs/DW_IMPLEMENTATION.md) M0。
 
 ## 快速开始
 
@@ -152,12 +152,33 @@ GitHub Actions：`.github/workflows/ci.yml`（backend pytest + frontend lint/bui
 
 ## 文档
 
-- [SSOT.md](./SSOT.md) — 项目 Single Source of Truth
-- [PRD.md](./PRD.md) — 产品需求
-- [TECH_DESIGN.md](./TECH_DESIGN.md) — 技术设计
-- [DOMAIN_MODEL.md](./DOMAIN_MODEL.md) — 领域模型
-- [IA.md](./IA.md) — 信息架构
-- [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md) — 工程优化方案（可分批执行）
-- [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) — 智能数仓实现执行文档（里程碑与编码规格）
-- [MATERIALIZE_ORCHESTRATION.md](./MATERIALIZE_ORCHESTRATION.md) — 物化执行改造方案（同步工具 + Airflow 编排 + 血缘）
-- [MATERIALIZE_SYNC_STABILITY.md](./MATERIALIZE_SYNC_STABILITY.md) — 同步执行稳定化方案（M13–M16，修订上一篇的执行通道）
+**产品与设计**
+- [SSOT.md](./docs/SSOT.md) — 项目 Single Source of Truth
+- [PRD.md](./docs/PRD.md) — 产品需求
+- [TECH_DESIGN.md](./docs/TECH_DESIGN.md) — 技术设计
+- [DOMAIN_MODEL.md](./docs/DOMAIN_MODEL.md) — 领域模型
+- [IA.md](./docs/IA.md) — 信息架构
+- [DATA_APP_GRAFANA_MODEL.md](./docs/DATA_APP_GRAFANA_MODEL.md) — 数据应用概念模型（Panel / Dashboard，Grafana 范式）
+
+**部署与运维**
+- [DEPLOYMENT.md](./docs/DEPLOYMENT.md) — 部署文档（功能×依赖矩阵、逐功能配置与验收、生产加固）
+- [DEPENDENCY_DEPLOYMENT_REDESIGN.md](./docs/DEPENDENCY_DEPLOYMENT_REDESIGN.md) — 依赖组件统一部署管理设计（物理机/Docker/K8s，设置页纳管）
+- [docker/orchestration/README.md](./docker/orchestration/README.md) — 物化编排本地验证栈
+
+**已建成执行规格（as-built）**
+- [DW_IMPLEMENTATION.md](./docs/DW_IMPLEMENTATION.md) — 智能数仓实现执行文档（里程碑与编码规格）
+- [GOVERNANCE_STANDARD.md](./docs/GOVERNANCE_STANDARD.md) — 数据治理规约（G0–G3）
+- [FORMAL_VALIDATION_IMPL.md](./docs/FORMAL_VALIDATION_IMPL.md) — 形式化校验实现设计（F1/F3/F4）
+
+**Data Agent 改造链**（V2→V5 逐期交付，V5 为现行计划）
+- [DATA_AGENT_V5_PLAN.md](./docs/DATA_AGENT_V5_PLAN.md) — V5：实测调参 + 收尾拆模块 + 能力延伸（现行）
+- [DATA_AGENT_V4_HARNESS_PLAN.md](./docs/DATA_AGENT_V4_HARNESS_PLAN.md) — V4：专用 data-agent harness
+- [DATA_AGENT_V3_SKILLS_PLAN.md](./docs/DATA_AGENT_V3_SKILLS_PLAN.md) — V3：skill + 渲染块
+- [DATA_AGENT_V2_PLAN.md](./docs/DATA_AGENT_V2_PLAN.md) — V2：语义层从「否决者」变「生成器」
+- [FORMAL_VALIDATION_PLAN.md](./docs/FORMAL_VALIDATION_PLAN.md) — 形式化校验方案（V2–V4 前序，配套 IMPL）
+
+**物化编排**
+- [MATERIALIZE_ORCHESTRATION.md](./docs/MATERIALIZE_ORCHESTRATION.md) — 物化执行改造方案（同步工具 + Airflow 编排 + 血缘）
+- [MATERIALIZE_ORCHESTRATION_PLAN.md](./docs/MATERIALIZE_ORCHESTRATION_PLAN.md) — 物化编排实施计划
+- [MATERIALIZE_SYNC_STABILITY.md](./docs/MATERIALIZE_SYNC_STABILITY.md) — 同步执行稳定化方案（M13–M16，修订执行通道）
+- [TASK_PIPELINE_PLAN.md](./docs/TASK_PIPELINE_PLAN.md) — 多任务编排剩余事项

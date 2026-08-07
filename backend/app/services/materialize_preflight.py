@@ -354,6 +354,123 @@ def _check_warehouse_conn(
     )
 
 
+def _check_git_sync_pipeline(report: PreflightReport, airflow) -> None:
+    """git-sync 投递的管道检查：验证 git 仓库与 remote 可达性。
+
+    local 投递的 sentinel 探测在 git-sync 下不成立（本地写的文件不 push 就到不了 Airflow），
+    而提交一次性 sentinel 又会污染 git 历史。改为直接验证 git 管道本身：
+    1. dags_dir 在不在一个 git 仓库里
+    2. 配置的 remote 存不存在、能不能连通（git ls-remote）
+
+    这两步过了，投递管道就是通的——产物能 commit + push、Airflow 侧 git-sync 能拉到。
+    不验「Airflow 侧配没配 git-sync」（那是 Airflow 部署的事，ontoMeta 管不到），只验
+    「ontoMeta 这头能不能推」。
+    """
+    import subprocess
+    from pathlib import Path
+
+    dags_dir = airflow.dags_dir
+    remote_name = getattr(airflow, "git_remote", "origin") or "origin"
+
+    # 1. dags_dir 在不在 git 仓库里
+    current = Path(dags_dir).resolve()
+    repo_root = None
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").is_dir():
+            repo_root = str(parent)
+            break
+
+    if not repo_root:
+        auto_init = getattr(airflow, "git_auto_init", False)
+        if auto_init:
+            report.add(
+                PreflightItem(
+                    key="dag_dir_visible",
+                    label="DAG 投递管道（git-sync）",
+                    status=PASS,
+                    blocking=False,
+                    detail=(
+                        f"{dags_dir} 当前不是 git 仓库，但 git_auto_init=True，"
+                        "首次投递时会自动 git init。"
+                    ),
+                )
+            )
+        else:
+            report.add(
+                PreflightItem(
+                    key="dag_dir_visible",
+                    label="DAG 投递管道（git-sync）",
+                    status=FAIL,
+                    blocking=True,
+                    detail=f"{dags_dir} 不在 git 仓库中，且 git_auto_init=False。",
+                    next_step=(
+                        f"在 {dags_dir} 执行 `git init` 并配置 remote，"
+                        "或在环境变量设置 AIRFLOW_GIT_AUTO_INIT=true。"
+                    ),
+                )
+            )
+        return
+
+    # 2. remote 能不能连通
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--exit-code", remote_name],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        remote_url = subprocess.run(
+            ["git", "remote", "get-url", remote_name],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        report.add(
+            PreflightItem(
+                key="dag_dir_visible",
+                label="DAG 投递管道（git-sync）",
+                status=PASS,
+                blocking=True,
+                detail=(
+                    f"git 仓库：{repo_root}\n"
+                    f"remote {remote_name}：{remote_url}\n"
+                    "ls-remote 成功，投递管道连通。"
+                ),
+            )
+        )
+    except subprocess.TimeoutExpired:
+        report.add(
+            PreflightItem(
+                key="dag_dir_visible",
+                label="DAG 投递管道（git-sync）",
+                status=FAIL,
+                blocking=True,
+                detail=f"git ls-remote {remote_name} 超时（10s），remote 可能不可达。",
+                next_step=(
+                    f"检查 git remote（在 {repo_root} 执行 `git remote -v`），"
+                    "确认推送凭据（SSH key / HTTPS token）已配置且有效。"
+                ),
+            )
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        report.add(
+            PreflightItem(
+                key="dag_dir_visible",
+                label="DAG 投递管道（git-sync）",
+                status=FAIL,
+                blocking=True,
+                detail=f"git ls-remote {remote_name} 失败：{stderr or '无输出'}",
+                next_step=(
+                    f"在 {repo_root} 执行 `git remote add {remote_name} <URL>` 配置 remote，"
+                    "或检查推送凭据（SSH key / HTTPS token）。"
+                ),
+            )
+        )
+
+
 def _check_dag_dir_visible(
     report: PreflightReport, client: AirflowClient, airflow
 ) -> None:
@@ -363,7 +480,19 @@ def _check_dag_dir_visible(
     先验本地可写（这一步单独就能抓到「ontoMeta 根本写不进去」）；再看 Airflow 侧能否看见。
     超时不硬失败——Airflow 的 dag_dir_list_interval 默认 300s（⚠ §8.1），慢≠不一致，
     故降级为提醒，并把两种可能都写清楚。
+
+    **git-sync 投递例外**：产物经 git push → Airflow 侧 git-sync 拉取，写一个本地
+    sentinel 再删掉根本进不了远程，探测必然假 WARN。故 git 模式改验「git 管道通不通」
+    ——仓库在不在、remote 能不能连——不污染 git 历史塞一次性 sentinel。
     """
+    if (getattr(airflow, "dag_delivery_method", "local") or "local").strip().lower() in (
+        "git",
+        "git-sync",
+        "gitsync",
+    ):
+        _check_git_sync_pipeline(report, airflow)
+        return
+
     dags_dir = airflow.dags_dir
     sentinel_id = f"ontometa_preflight_{uuid.uuid4().hex[:8]}"
     path = os.path.join(dags_dir, f"{sentinel_id}.py")

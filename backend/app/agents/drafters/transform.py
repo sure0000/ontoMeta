@@ -74,9 +74,27 @@ class TransformDrafter(Drafter):
                 "target_layer": contract.target_layer if contract else "dim",
                 "database_prefix": context.get("database_prefix"),
                 "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming
-                "cleansing_rules": self._rules(intent),
+                "cleansing_rules": self._rules_from_context(context.get("cleansing_rules"))
+                or self._rules(intent),
                 "notes": intent,
             }
+
+    # code → 描述，用于把表单下拉给的规则码结构化成 {rule, description}。
+    _RULE_DESC: dict[str, str] = {code: desc for _p, code, desc in _RULE_PATTERNS}
+
+    @classmethod
+    def _rules_from_context(cls, raw: Any) -> list[dict[str, str]]:
+        """表单多选给的是规则码列表（如 ["deduplicate"]）；结构化成执行器要的
+        [{rule, description}]。已是 dict 的原样保留；未知码丢弃（闭集外不臆造）。"""
+        if not raw or not isinstance(raw, (list, tuple)):
+            return []
+        out: list[dict[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict) and item.get("rule"):
+                out.append({"rule": str(item["rule"]), "description": str(item.get("description") or cls._RULE_DESC.get(str(item["rule"]), ""))})
+            elif isinstance(item, str) and item in cls._RULE_DESC:
+                out.append({"rule": item, "description": cls._RULE_DESC[item]})
+        return out
 
     @staticmethod
     def _rules(intent: str) -> list[dict[str, str]]:
@@ -88,4 +106,7 @@ class TransformDrafter(Drafter):
         ]
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
+        return self.name_from_spec(spec)
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
         return f"ETL · {spec.get('target_table')}"

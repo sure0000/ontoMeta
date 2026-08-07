@@ -37,7 +37,13 @@ class MetricDrafter(Drafter):
         require_context(context, *self.required_context)
         ontology_id = context["ontology_id"]
         with SessionLocal() as db:
-            logic = self._select_logic(db, intent, ontology_id, context.get("metric_name"))
+            logic = self._select_logic(
+                db,
+                intent,
+                ontology_id,
+                explicit_id=context.get("business_logic_id"),
+                explicit_name=context.get("metric_name"),
+            )
             if logic is None:
                 raise ValueError(
                     "未在本体中找到匹配的业务逻辑；指标口径须先在「业务逻辑」中定义"
@@ -45,15 +51,28 @@ class MetricDrafter(Drafter):
             return self._spec_from_logic(db, logic, ontology_id, context)
 
     def _select_logic(
-        self, db: Session, intent: str, ontology_id: str, explicit: str | None
+        self,
+        db: Session,
+        intent: str,
+        ontology_id: str,
+        *,
+        explicit_id: str | None = None,
+        explicit_name: str | None = None,
     ) -> BusinessLogic | None:
+        """挑口径。优先级：显式 id（表单下拉给的就是 id）> 显式 name > 意图匹配。
+
+        表单起草走 id 路径（下拉 value=BusinessLogic.id），对话/意图路径回退到
+        name 精确匹配或分词意图匹配。
+        """
         logics = (
             db.query(BusinessLogic)
             .filter(BusinessLogic.ontology_id == ontology_id)
             .all()
         )
-        if explicit:
-            return next((l for l in logics if l.name == explicit), None)
+        if explicit_id:
+            return next((l for l in logics if l.id == explicit_id), None)
+        if explicit_name:
+            return next((l for l in logics if l.name == explicit_name), None)
         return select_by_intent(
             intent, logics, key=lambda l: (l.name, l.display_name, l.description)
         )
@@ -115,4 +134,7 @@ class MetricDrafter(Drafter):
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:
+        return self.name_from_spec(spec)
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
         return f"指标 · {spec.get('display_name') or spec.get('metric_name')}"

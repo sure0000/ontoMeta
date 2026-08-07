@@ -85,6 +85,10 @@ import type {
   VersionDiff,
   VersionRecord,
   VersionSnapshot,
+  DependencySchema,
+  DependencyComponent,
+  DependencyProbeResult,
+  DependencyDeployResult,
 } from "./types";
 import { buildQuery } from "./utils/format";
 
@@ -760,6 +764,60 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // ===== 依赖组件统一部署管理 =====
+  getDependencySchema: () =>
+    request<DependencySchema>("/api/settings/dependencies/schema"),
+  listDependencies: () =>
+    request<DependencyComponent[]>("/api/settings/dependencies"),
+  createDependency: (body: {
+    key: string;
+    name?: string;
+    deploy_mode?: string;
+    deploy_spec?: Record<string, unknown>;
+    connection?: Record<string, unknown>;
+    enabled?: boolean;
+    is_default?: boolean;
+  }) =>
+    request<DependencyComponent>("/api/settings/dependencies", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateDependency: (
+    id: string,
+    body: {
+      name?: string;
+      deploy_mode?: string;
+      deploy_spec?: Record<string, unknown>;
+      connection?: Record<string, unknown>;
+      enabled?: boolean;
+      is_default?: boolean;
+    },
+  ) =>
+    request<DependencyComponent>(`/api/settings/dependencies/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deleteDependency: (id: string) =>
+    request<{ id: string; deleted: boolean }>(
+      `/api/settings/dependencies/${id}`,
+      { method: "DELETE" },
+    ),
+  probeDependency: (id: string) =>
+    request<DependencyProbeResult>(
+      `/api/settings/dependencies/${id}/probe`,
+      { method: "POST" },
+    ),
+  deployDependency: (id: string) =>
+    request<DependencyDeployResult>(
+      `/api/settings/dependencies/${id}/deploy`,
+      { method: "POST" },
+    ),
+  teardownDependency: (id: string) =>
+    request<{ status: string }>(
+      `/api/settings/dependencies/${id}/teardown`,
+      { method: "POST" },
+    ),
+
   askChatBi: (body: {
     domain_id: string;
     question: string;
@@ -1307,6 +1365,16 @@ export const api = {
   getArtifact: (id: string) =>
     request<GovernanceArtifact>(`/api/agents/artifacts/${id}`),
 
+  // 结构化 Spec 表单的字段下拉数据源
+  listWarehouseEngines: () =>
+    request<{ default: string; engines: { name: string; implemented: boolean }[] }>(
+      "/api/warehouse/engines",
+    ),
+  listOntologyProperties: (ontologyId: string) =>
+    request<{ name: string; display_name: string; object_type_name: string }[]>(
+      `/api/ontologies/${ontologyId}/properties`,
+    ),
+
   // P4：配置驱动的外部工具（Data Agent 免改代码扩能力）
   listExternalTools: (domainId?: string) =>
     request<ChatBiExternalTool[]>(
@@ -1338,9 +1406,14 @@ export const api = {
     }),
   draftArtifact: (body: {
     kind: string;
-    intent: string;
+    intent?: string | null;
     context?: Record<string, unknown>;
     ontology_id?: string | null;
+    // 手动结构化起草：给了 spec 就跳过 drafter，直接落库并进校验闸门。
+    spec?: Record<string, unknown> | null;
+    name?: string | null;
+    // 表单起草走 context+drafter 派生路径，但仍是用户发起：置 true 让溯源标 user。
+    user_created?: boolean;
   }) =>
     request<GovernanceArtifact>("/api/agents/draft", {
       method: "POST",

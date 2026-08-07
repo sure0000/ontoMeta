@@ -28,17 +28,17 @@ router = APIRouter()
 
 def _llm_service_out(service) -> LlmServiceConfigOut:
     return LlmServiceConfigOut(
-        id=service.id,
-        name=service.name,
-        provider=service.provider,
-        api_base_url=service.api_base_url,
-        model=service.model,
-        is_default=service.is_default,
-        enabled=service.enabled,
-        api_key_set=bool(service.api_key),
-        api_key_hint=mask_secret(service.api_key),
-        created_at=service.created_at,
-        updated_at=service.updated_at,
+        id=service["id"],
+        name=service["name"],
+        provider=service["provider"],
+        api_base_url=service["api_base_url"],
+        model=service["model"],
+        is_default=service["is_default"],
+        enabled=service["enabled"],
+        api_key_set=bool(service.get("api_key")),
+        api_key_hint=mask_secret(service.get("api_key")),
+        created_at=service["created_at"],
+        updated_at=service["updated_at"],
     )
 
 
@@ -52,12 +52,12 @@ def _llm_service_detail(service) -> LlmServiceConfigDetail:
 
 def _datahub_settings_out(row) -> DatahubSettingsOut:
     return DatahubSettingsOut(
-        gms_url=row.gms_url,
-        frontend_url=row.frontend_url,
-        token_set=bool(row.token),
-        token_hint=mask_secret(row.token),
-        fabric=row.fabric or "PROD",
-        updated_at=row.updated_at,
+        gms_url=row.get("gms_url", ""),
+        frontend_url=row.get("frontend_url", ""),
+        token_set=bool(row.get("token")),
+        token_hint=mask_secret(row.get("token")),
+        fabric=row.get("fabric") or "PROD",
+        updated_at=row.get("updated_at"),
     )
 
 @router.get("/config")
@@ -141,30 +141,35 @@ def update_draft_generation_settings(
 
 def _airflow_settings_out(row) -> AirflowSettingsOut:
     return AirflowSettingsOut(
-        endpoint=row.endpoint,
-        username=row.username,
-        password_set=bool(row.password),
-        password_hint=mask_secret(row.password),
-        token_set=bool(row.token),
-        api_version=row.api_version,
-        enabled=row.enabled,
-        # 投递目录空时读取侧会退回默认（见 settings_service），可用与否只看启用 + endpoint。
-        available=bool(row.enabled and row.endpoint),
-        dags_dir=row.dags_dir,
-        jobs_dir=row.jobs_dir,
-        sync_channel=row.sync_channel,
-        sync_runner_endpoint=row.sync_runner_endpoint,
-        sync_runner_token_set=bool(row.sync_runner_token),
-        docker_network=row.docker_network,
-        drivers_dir=row.drivers_dir,
-        sync_tool_images=row.sync_tool_images,
-        sync_tool=row.sync_tool or "",
-        max_tasks_per_dag=row.max_tasks_per_dag,
-        max_active_tasks_per_dag=row.max_active_tasks_per_dag,
-        dag_parse_timeout=row.dag_parse_timeout,
-        preflight_sentinel_timeout=row.preflight_sentinel_timeout,
-        staging_swap=row.staging_swap,
-        updated_at=row.updated_at,
+        endpoint=row.get("endpoint", ""),
+        username=row.get("username"),
+        password_set=bool(row.get("password")),
+        password_hint=mask_secret(row.get("password")),
+        token_set=bool(row.get("token")),
+        api_version=row.get("api_version", "v1"),
+        enabled=row.get("enabled", False),
+        available=bool(row.get("enabled") and row.get("endpoint")),
+        dags_dir=row.get("dags_dir") or "",
+        jobs_dir=row.get("jobs_dir") or "",
+        dag_delivery_method=row.get("dag_delivery_method") or "local",
+        git_remote=row.get("git_remote") or "origin",
+        git_branch=row.get("git_branch") or "main",
+        git_auto_init=bool(row.get("git_auto_init")),
+        git_author=row.get("git_author") or "",
+        git_email=row.get("git_email") or "",
+        sync_channel=row.get("sync_channel") or "runner",
+        sync_runner_endpoint=row.get("sync_runner_endpoint") or "",
+        sync_runner_token_set=bool(row.get("sync_runner_token")),
+        docker_network=row.get("docker_network") or "bridge",
+        drivers_dir=row.get("drivers_dir") or "",
+        sync_tool_images=row.get("sync_tool_images") or "",
+        sync_tool=row.get("sync_tool") or "",
+        max_tasks_per_dag=row.get("max_tasks_per_dag") or 50,
+        max_active_tasks_per_dag=row.get("max_active_tasks_per_dag") or 16,
+        dag_parse_timeout=row.get("dag_parse_timeout") or 60.0,
+        preflight_sentinel_timeout=row.get("preflight_sentinel_timeout") or 20.0,
+        staging_swap=row.get("staging_swap") if row.get("staging_swap") is not None else True,
+        updated_at=row.get("updated_at"),
     )
 
 
@@ -284,13 +289,13 @@ def test_airflow_connection(db: Session = Depends(get_db)):
 
 def _cube_settings_out(row) -> CubeSettingsOut:
     return CubeSettingsOut(
-        api_url=row.api_url,
-        secret_set=bool(row.api_secret),
-        secret_hint=mask_secret(row.api_secret),
-        preagg_refresh=row.preagg_refresh,
-        tenant_dimension=row.tenant_dimension,
-        timeout_seconds=row.timeout_seconds,
-        updated_at=row.updated_at,
+        api_url=row.get("api_url", ""),
+        secret_set=bool(row.get("api_secret")),
+        secret_hint=mask_secret(row.get("api_secret")),
+        preagg_refresh=row.get("preagg_refresh", "1 hour"),
+        tenant_dimension=row.get("tenant_dimension"),
+        timeout_seconds=int(row.get("timeout_seconds", 30) or 30),
+        updated_at=row.get("updated_at"),
     )
 
 

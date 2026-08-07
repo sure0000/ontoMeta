@@ -345,9 +345,12 @@ def _run_orchestrated(
 
     # 先全部落盘：等解析时一次 dag_dir 扫描即可全部认到，避免逐个各等一个解析周期。
     written_all: dict[str, dict] = {}
+    delivery = airflow.build_delivery()
     for _, bundle in bundles:
         try:
-            written_all[bundle.dag_id] = bundle.write(airflow.dags_dir, airflow.jobs_dir)
+            written_all[bundle.dag_id] = bundle.write(
+                airflow.dags_dir, airflow.jobs_dir, delivery=delivery
+            )
         except OSError as exc:
             raise MaterializationError(
                 f"DAG 投递失败（{airflow.dags_dir}）：{exc}"

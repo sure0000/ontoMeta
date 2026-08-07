@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -40,6 +41,9 @@ class _FakeDrafter(Drafter):
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
         return dict(self._spec)
+
+    def name_from_spec(self, spec: dict[str, Any]) -> str:
+        return f"指标 · {spec.get('metric_name')}"
 
 
 class _CountingExecutor(Executor):
@@ -82,8 +86,9 @@ def metric_agent():
 @pytest.fixture
 def ontology_id() -> str:
     with SessionLocal() as db:
+        # datahub_domain_id 唯一：用 uuid 避免多个测试共用本 fixture 时插入撞约束。
         domain = DomainContext(
-            datahub_domain_id="urn:li:domain:m5", name="m5-domain"
+            datahub_domain_id=f"urn:li:domain:m5-{uuid4().hex[:8]}", name="m5-domain"
         )
         db.add(domain)
         db.flush()
@@ -381,3 +386,87 @@ def test_missing_artifact_404(client, admin_headers):
     assert client.get(
         "/api/agents/artifacts/nope", headers=admin_headers
     ).status_code == 404
+
+
+# ---------- 手动结构化 spec 起草路径（跳过 drafter，仍进闸门） ----------
+
+
+def test_spec_path_bypasses_drafter(client, admin_headers, metric_agent):
+    """给了 spec 就直接落库，不调 drafter。
+
+    _FakeDrafter 恒返回 {metric_name: gmv,...}；这里显式传一份不同的 spec，
+    落库若是我传的那份，即证明 drafter 未被调用。"""
+    drafter, _ = metric_agent
+    my_spec = {"metric_name": "dau", "engine": "hive", "subject_objects": ["user"]}
+    a = _draft(client, admin_headers, intent=None, spec=my_spec, name="日活")
+    assert a["status"] == "drafted"
+    assert a["spec"]["metric_name"] == "dau"  # 不是 drafter 的 gmv
+    assert a["name"] == "日活"
+    assert a["origin"] == "user"
+
+
+def test_spec_path_name_derived_when_absent(client, admin_headers, metric_agent):
+    """spec 路径不给 name 时，用 drafter.name_from_spec 派生。"""
+    a = _draft(
+        client, admin_headers, intent=None,
+        spec={"metric_name": "gmv", "subject_objects": ["order"]}, name=None,
+    )
+    assert a["name"] == "指标 · gmv"
+
+
+def test_intent_required_without_spec(client, admin_headers, metric_agent):
+    """既没 spec、也没 intent、context 还空 → 400（三者全缺无从起草）。"""
+    resp = client.post(
+        "/api/agents/draft", headers=admin_headers,
+        json={"kind": "metric", "context": {}},
+    )
+    assert resp.status_code == 400
+
+
+def test_context_path_without_intent_succeeds(client, admin_headers, metric_agent):
+    """表单起草路径：只给结构化 context、无自然语言 intent 也能起草。
+
+    表单收的是 drafter 输入（下拉选择器），没有 intent 文本；此前 guard 强制 intent
+    非空会把整条表单路径挡死。给了非空 context 即放行，drafter 用显式选择器派生 spec。
+    并断言溯源标 user（user_created=True 由表单显式声明），而非 machine。"""
+    resp = client.post(
+        "/api/agents/draft", headers=admin_headers,
+        json={
+            "kind": "metric",
+            "context": {"ontology_id": "x", "business_logic_id": "bl-1"},
+            "user_created": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "drafted"
+    assert body["origin"] == "user"
+
+
+def test_spec_path_still_runs_gate(client, admin_headers, metric_agent, ontology_id):
+    """手填 spec 引用不存在的对象 → 校验闸门仍报 unknown_object（安全边界未被绕过）。"""
+    a = _draft(
+        client, admin_headers, intent=None, ontology_id=ontology_id,
+        spec={"metric_name": "x", "subject_objects": ["ghost"],
+              "object_types": ["ghost"]},
+    )
+    report = client.post(
+        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
+    ).json()["validation_report"]
+    assert report["blocking_count"] >= 1
+    assert any(i["code"] == "unknown_object" for i in report["issues"])
+
+
+def test_spec_path_produces_dry_run(client, admin_headers, metric_agent):
+    """手填 spec 无阻断项时，校验照常产 dry-run（执行方案预览）。"""
+    _, executor = metric_agent
+    a = _draft(
+        client, admin_headers, intent=None,
+        spec={"metric_name": "gmv", "subject_objects": ["order"]},
+    )
+    a = client.post(
+        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
+    ).json()
+    assert a["status"] == "validated"
+    assert a["validation_report"]["dry_run"]["will_create"] == "gmv"
+    assert executor.dry_runs == 1

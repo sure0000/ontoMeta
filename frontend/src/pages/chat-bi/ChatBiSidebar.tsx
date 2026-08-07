@@ -17,6 +17,7 @@ import {
 import {
   Badge,
   Button,
+  Checkbox,
   Dropdown,
   Input,
   Select,
@@ -66,6 +67,14 @@ export interface ChatBiSidebarProps {
   onCreateConvInCategory: (catName: string) => Promise<void>;
   onSetSearchParams: (params: Record<string, string>) => void;
   onSetShowArchived: (v: boolean) => void;
+  batchMode: boolean;
+  batchSelectedIds: Set<string>;
+  batchDeleting: boolean;
+  onEnterBatchMode: () => void;
+  onExitBatchMode: () => void;
+  onToggleBatchSelect: (id: string) => void;
+  onBatchSelectAll: (selectAll: boolean) => void;
+  onBatchDelete: () => void;
 }
 
 export const ChatBiSidebar = memo(function ChatBiSidebar({
@@ -98,6 +107,14 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
   onCreateConvInCategory,
   onSetSearchParams,
   onSetShowArchived,
+  batchMode,
+  batchSelectedIds,
+  batchDeleting,
+  onEnterBatchMode,
+  onExitBatchMode,
+  onToggleBatchSelect,
+  onBatchSelectAll,
+  onBatchDelete,
 }: ChatBiSidebarProps) {
   return (
     <aside className="chatbi-sidebar">
@@ -150,6 +167,15 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                 icon: <FolderAddOutlined />,
                 onClick: () => onOpenCategoryDialog("create"),
               },
+              { type: "divider" as const },
+              {
+                key: "batch-delete",
+                label: "批量删除",
+                icon: <DeleteOutlined />,
+                danger: true,
+                disabled: displayConversations.length === 0,
+                onClick: () => onEnterBatchMode(),
+              },
             ],
           }}
           trigger={["hover"]}
@@ -166,6 +192,48 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
       </div>
 
       <div className="chatbi-sidebar-list">
+        {batchMode && (
+          <div className="chatbi-batch-toolbar">
+            <div className="chatbi-batch-toolbar-info">
+              已选 {batchSelectedIds.size} 项
+            </div>
+            <div className="chatbi-batch-toolbar-actions">
+              <Button
+                size="small"
+                type="link"
+                disabled={displayConversations.length === 0}
+                onClick={() =>
+                  onBatchSelectAll(
+                    batchSelectedIds.size < displayConversations.length,
+                  )
+                }
+              >
+                {batchSelectedIds.size > 0 &&
+                batchSelectedIds.size === displayConversations.length
+                  ? "取消全选"
+                  : "全选"}
+              </Button>
+              <Button
+                size="small"
+                type="primary"
+                danger
+                icon={<DeleteOutlined />}
+                loading={batchDeleting}
+                disabled={batchSelectedIds.size === 0}
+                onClick={() => onBatchDelete()}
+              >
+                删除
+              </Button>
+              <Button
+                size="small"
+                type="text"
+                onClick={() => onExitBatchMode()}
+              >
+                取消
+              </Button>
+            </div>
+          </div>
+        )}
         {loadingConversations &&
         conversations.length === 0 &&
         archivedConversations.length === 0 ? (
@@ -201,6 +269,9 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                   onToggleArchive={onToggleArchive}
                   existingCategories={existingCategories}
                   onNewCategory={onNewCategory}
+                  batchMode={batchMode}
+                  batchSelected={batchSelectedIds.has(conv.id)}
+                  onToggleBatchSelect={onToggleBatchSelect}
                 />
               ))
             )}
@@ -285,6 +356,9 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                           onToggleArchive={onToggleArchive}
                           existingCategories={existingCategories}
                           onNewCategory={onNewCategory}
+                          batchMode={batchMode}
+                          batchSelected={batchSelectedIds.has(conv.id)}
+                          onToggleBatchSelect={onToggleBatchSelect}
                         />
                       ))}
                     </div>
@@ -314,6 +388,9 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                       onToggleArchive={onToggleArchive}
                       existingCategories={existingCategories}
                       onNewCategory={onNewCategory}
+                      batchMode={batchMode}
+                      batchSelected={batchSelectedIds.has(conv.id)}
+                      onToggleBatchSelect={onToggleBatchSelect}
                     />
                   ))}
                 </div>
@@ -329,7 +406,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
         )}
       </div>
 
-      {totalArchived > 0 && !showArchived && (
+      {totalArchived > 0 && !showArchived && !batchMode && (
         <div className="chatbi-sidebar-footer">
           <div style={{ flex: 1 }} />
           <Tooltip title={`归档 (${totalArchived})`}>
@@ -360,6 +437,9 @@ const ConversationItem = memo(function ConversationItem({
   onToggleArchive,
   existingCategories,
   onNewCategory,
+  batchMode,
+  batchSelected,
+  onToggleBatchSelect,
 }: {
   conversation: ChatBiConversation;
   isActive: boolean;
@@ -371,6 +451,9 @@ const ConversationItem = memo(function ConversationItem({
   onToggleArchive: (conv: ChatBiConversation) => void;
   existingCategories: string[];
   onNewCategory: (conv: ChatBiConversation) => void;
+  batchMode: boolean;
+  batchSelected: boolean;
+  onToggleBatchSelect: (id: string) => void;
 }) {
   const moveSubmenuItems = [
     {
@@ -398,15 +481,27 @@ const ConversationItem = memo(function ConversationItem({
 
   return (
     <div
-      className={`chatbi-conv-item${isActive ? " chatbi-conv-item--active" : ""}`}
-      onClick={() => onSelect(conversation.id)}
+      className={`chatbi-conv-item${isActive ? " chatbi-conv-item--active" : ""}${batchSelected ? " chatbi-conv-item--batch-selected" : ""}`}
+      onClick={() =>
+        batchMode ? onToggleBatchSelect(conversation.id) : onSelect(conversation.id)
+      }
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
-        if (e.key === "Enter") onSelect(conversation.id);
+        if (e.key === "Enter")
+          batchMode
+            ? onToggleBatchSelect(conversation.id)
+            : onSelect(conversation.id);
       }}
     >
-      {conversation.is_pinned && !isActive ? (
+      {batchMode ? (
+        <Checkbox
+          checked={batchSelected}
+          className="chatbi-conv-batch-checkbox"
+          onClick={(e) => e.stopPropagation()}
+          onChange={() => onToggleBatchSelect(conversation.id)}
+        />
+      ) : conversation.is_pinned && !isActive ? (
         <PushpinFilled className="chatbi-conv-pin-icon" />
       ) : (
         <MessageOutlined className="chatbi-conv-icon" />
@@ -431,7 +526,8 @@ const ConversationItem = memo(function ConversationItem({
       <span className="chatbi-conv-time">
         {relativeTime(conversation.updated_at)}
       </span>
-      <span className="chatbi-conv-menu">
+      {!batchMode && (
+        <span className="chatbi-conv-menu">
         <Dropdown
           menu={{
             items: [
@@ -480,6 +576,7 @@ const ConversationItem = memo(function ConversationItem({
           />
         </Dropdown>
       </span>
+      )}
     </div>
   );
 });

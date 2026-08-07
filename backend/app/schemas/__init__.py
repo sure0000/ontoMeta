@@ -182,6 +182,14 @@ from app.schemas.settings import (
     LlmServiceConfigOut,
     LlmServiceConfigUpdate,
 )
+from app.schemas.dependencies import (
+    DependencyComponentCreate,
+    DependencyComponentOut,
+    DependencyComponentUpdate,
+    DependencySchemaOut,
+    DeployResultOut,
+    ProbeResultOut,
+)
 from app.schemas.agent import (
     AgentKindsOut,
     ArtifactConfirmRequest,
@@ -310,6 +318,12 @@ __all__ = [
     "LlmServiceConfigUpdate",
     "LlmConnectionTestRequest",
     "LlmConnectionTestResult",
+    "DependencyComponentOut",
+    "DependencyComponentCreate",
+    "DependencyComponentUpdate",
+    "DependencySchemaOut",
+    "ProbeResultOut",
+    "DeployResultOut",
     "DatahubSettingsOut",
     "DatahubSettingsUpdate",
     "AirflowSettingsOut",

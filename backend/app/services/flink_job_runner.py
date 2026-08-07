@@ -121,8 +121,9 @@ def run_flink_sql(
     )
 
     # 落盘
+    delivery = airflow.build_delivery()
     try:
-        written = bundle.write(airflow.dags_dir, airflow.jobs_dir)
+        written = bundle.write(airflow.dags_dir, airflow.jobs_dir, delivery=delivery)
     except OSError as exc:
         raise FlinkJobError(
             f"DAG 投递失败（{airflow.dags_dir}）：{exc}"

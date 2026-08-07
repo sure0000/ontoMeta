@@ -1,6 +1,6 @@
 # Data Agent V5 计划：V4 实测调参 + 收尾拆模块 + 能力延伸
 
-> 状态：**P0 已交付 + P0.5/P0.6 真实会话实测完成 + P1 收官 + P2 已交付**（T3/T3.2 交付，T2 延后至可查数据域；T4 拆模块完成）。F1/F2 已修。trace 已关回。
+> 状态：**P0 已交付 + P0.5–P0.9 真实会话实测完成 + P1 收官 + P2 已交付 + P3 部分交付**（T3/T3.2 交付；T2 两半均已实测定案——history 维持 6000、sample_rows 维持 5；T4 拆模块完成；T5 scout 多步链交付）。F1/F2/F4/F5 已修，F3 已解（ERP 域可查）。仅 T6（trace 回放 eval）有设计缺口待定。trace 已关回。
 > 后续：承接 [DATA_AGENT_V4_HARNESS_PLAN.md](./DATA_AGENT_V4_HARNESS_PLAN.md)（S0–S3 全部交付）的「后续可选」。
 > 本计划做三件事：**① 用真实会话把 V4 的收益量出来并据实调参；② 收尾未拆完的模块化；③ 在已验证的骨架上做能力延伸。**
 > 主战场：`backend/app/services/chat_bi.py`、`chat_bi_tool_schemas.py`、`agent_compaction.py`、
@@ -55,7 +55,7 @@ V4 交付的六项优化（O1–O6）都带了**开关与遥测**，但收益值
 | 阶段 | 内容 | 风险 | 状态 |
 | --- | --- | --- | --- |
 | **P0** | T1 trace 实测 + 指标看板（先建「量」，后面调参有依据） | 低 | ✅ |
-| **P1** | T2 预算据实调优 + T3 compaction 关键段保留 | 低 | 🟡 **T3/T3.2 ✅；T2 的 history 半边实测后决定不调，sample_rows 仍卡 F3** |
+| **P1** | T2 预算据实调优 + T3 compaction 关键段保留 | 低 | ✅ **T3/T3.2 ✅；T2 两半均实测定案——history 维持 6000、sample_rows 维持 5（F3 已解）** |
 | **P2** | T4 收尾拆 `chat_bi_references.py`（纯结构、零行为变化） | 中 | ✅ |
 | **P3** | T5 scout 多步取数链 + T6 trace 回放型 eval | 中 | 🟡 **T5 ✅；T6 有设计缺口待定** |
 
@@ -294,8 +294,8 @@ F3 一解开就把 `agent_result_sample_rows` 补测了：同一问句序列（6
 - [x] T2.1（history 半边）按实测调 `agent_history_char_budget`：**实测后决定维持 6000**——
   ERP 域 12 轮长会话实测 history 峰值仅占 ctx/call 的 13.7%，调它最多省一成三，却要拿 T3 的口径延续性去换；
   上下文大头是常驻域语义卡/阶梯（见 P0.7 §T2.1 结论）。golden 不变、全库全绿。
-- [ ] T2.1（sample_rows 半边）`agent_result_sample_rows` **仍延后**：必须靠**真实大结果（run_sql 执行）**才能定。
-  本轮核实 F3 仍未解——有数据的库（`hengxin_erp`）上没有已发布本体，有本体的域指向的库已空。需先在有数据的库上建模发布。
+- [x] T2.1（sample_rows 半边）`agent_result_sample_rows` **实测后决定维持 5**——F3 已于 2026-08-07 解开（ERP 域接通 3308 库、生成 `mapping_json`、修 `_apply_mapping`/Decimal 序列化，见 P0.8）。
+  同一 6 问序列跑 5 vs 20：20 虽消掉 `read_result` 往返（离场省 2449 字符），但 `avg_llm_calls` 6.2→8.0、`avg_steps` 7.0→9.5、拒答率 0%→33.3%，触碰「llm_calls 不回涨」护栏，故**按实测维持 5**（见 P0.9）。
 - [x] T3.1 `agent_compaction.py` 抽取摘要时显式识别并**完整保留**旧轮的 ```sql 围栏块（只留 SELECT/WITH、去重、保最后 3 条），附在摘要末尾不进首句截断；`chat_bi` 把保留 SQL 的表/列标识符入 FactLedger（防误拒答）；+3 单测
 - [x] T3.2 golden 加长会话用例：摘要后「延续上一轮口径继续下钻」不重算、不误拒（`test_t3_2_caliber_continuity.py` 3 例）：长会话（history 7528 字符 > 6000）进真实 ask → compaction 触发 → GMV 口径 SQL 完整保留进摘要并入模型 system 上下文 → 延续轮复用口径作答而非重推/误拒
 
@@ -332,7 +332,7 @@ F3 一解开就把 `agent_result_sample_rows` 补测了：同一问句序列（6
 ### 验收护栏（每阶段必过）
 
 1. golden 20 例断言行为不变（工具序列、拒答、run_sql 三态、拒绝码）。
-2. `avg_llm_calls` 不回涨（护住 2.6）；全套件保持全绿（当前 1149 passed）。
+2. `avg_llm_calls` 不回涨（护住 2.6）；全套件保持全绿（当前 1184 passed）。
 3. 调参/延伸看**实测**指标：`context_chars_per_call`、`offloaded_chars`、`skill_misroute_rate`、`subagent_isolated_chars`。
 4. 不碰守卫：只读 SQL + RBAC + 治理闸门不动；`ask_stream` done 契约不变；scout 仍不执行 SQL。
 
@@ -365,12 +365,15 @@ F3 一解开就把 `agent_result_sample_rows` 补测了：同一问句序列（6
 | 2026-08-07 | P0.7 / F4 | ERP 域复采撞出 F4（自信作答被判未接地 → 好答案被换成拒答）：逆搜守卫从「像拒答才逆」放宽到「本轮零工具就逆」，守卫本身不放宽；+2 测，全库 **1156 passed**。真实会话验证：修前第 2/3 轮连拒，修后 1–3 轮全接地 |
 | 2026-08-07 | P1 T2.1 | 12 轮长会话实测（`scripts/drive_long_session.py` 固化驱动）：history 峰值仅占 ctx/call 的 13.7% → **`agent_history_char_budget` 维持 6000**；`agent_result_sample_rows` 仍卡 F3（有数据的库上没有已发布本体） |
 | 2026-08-07 | P3 T5 | scout `MAX_STEPS` 5 → 8 + 系统提示改成显式五步链（定位→取样→起草→校验改写→收尾），返回结构不变；+3 单测，全库 **1159 passed** |
+| 2026-08-07 | P0.8 / F3 | **F3 解除**：ERP 域真正可查——数据源改指 3308（ERPNext MariaDB，739 表/`tabGL Entry` 43.8 万行）；改 `_apply_mapping` 为表位置才替换（避免列名误替，+7 单测）；由 724 对象 `source_ref` 机械生成 `mapping_json`；修执行器边界 Decimal/date/bytes 序列化（+2 单测）。端到端：`SELECT COUNT(*) FROM sales_order` → 73,912 条 |
+| 2026-08-07 | P0.9 / T2.1 | `agent_result_sample_rows` 实测 5 vs 20：20 虽零离场往返但 `avg_llm_calls` 6.2→8.0、拒答率 0%→33.3%，触碰护栏→**维持 5**（算术预测被实测推翻） |
+| 2026-08-07 | P1.0 / F5 | 校验器抽取精度：拆复合串逐段核 + 多轮复述豁免 + 从句判别（疑问词/领起介词/>24 字→非实体名），SQL 片段不当实体核；真实会话拒答 2/6→0/6且答案皆实；+11 例回归，全库 **1184 passed** |
 
 ---
 
-## 6. 收官：V5 P0–P2 已交付
+## 6. 收官：V5 P0–P3 基本交付（仅 T6 待定）
 
-V5 承接 V4，把「收益从单测推断变生产实测」落地，并修掉49实测抢出的真问题：
+V5 承接 V4，把「收益从单测推断变生产实测」落地，并修掉实测抢出的真问题：
 
 | 项 | 交付物 | 状态 |
 | --- | --- | --- |
@@ -383,17 +386,17 @@ V5 承接 V4，把「收益从单测推断变生产实测」落地，并修掉49
 | F4 零工具作答被误拒 | 逆搜守卫覆盖「自信作答」那半 | ✅（实测复现 + 修后真实会话验证） |
 | T2 history 预算 | 实测后**维持 6000**（history 仅占上下文 13.7%） | ✅（12 轮长会话实测） |
 | T5 scout 多步链 | `MAX_STEPS`=8 + 五步链提示，返回结构不变 | ✅（+3 单测） |
-| T2 sample_rows | — | ⏳ 仍卡 F3（有数据的库上没有已发布本体） |
+| F3 ERP 域可查 | 数据源改指 3308 + `_apply_mapping` 修正 + `mapping_json` 生成 + 执行器边界序列化 | ✅（端到端 73,912 条） |
+| T2 sample_rows | 实测 5 vs 20 后**维持 5**（20 触碰 llm_calls 回涨护栏） | ✅（P0.9 实测） |
+| F5 校验器抽取精度 | 拆复合串/复述豁免/从句判别 + SQL 不当实体 | ✅（拒答 2/6→0/6，+11 例） |
 | T6 trace 回放 eval | — | ⏳ 有设计缺口待定（轨迹缺有序调用序列 + 实体落地方案） |
 
 **真实会话实测硬数据**（P0.5/P0.6）：O4 隔离比 928–995×；O1 在 10 轮长会话第 8 轮触发、抑住上下文爆涨；
-基线 `avg_llm_calls=2.6` 未回涨。全程不碰守卫，全库 **1159 passed**。
+基线 `avg_llm_calls=2.6` 未回涨。全程不碰守卫，全库 **1184 passed**。
 
 **重新采样方法（已固化）**：`backend/.env` 设 `AGENT_TRACE_ENABLED=true` → 清端口重启
 （`lsof -tiTCP:8000 | xargs kill -9`）→ `python scripts/drive_long_session.py --domain-id <id>`
 → `python scripts/summarize_agent_traces.py` → **采完把 `AGENT_TRACE_ENABLED` 关回**（观测非常驻）。
 
-**遗留（待环境）**：T2 需一个「有已验证可执行数据源 + 能长会话」的域才能定 `agent_result_sample_rows`；
-接入后可一并完成 O2 实测（F3）。P3（T5 scout 多步链 / T6 trace 回放 eval）未开工。
-
-**重新采样方法**：`backend/.env` 设 `AGENT_TRACE_ENABLED=true` → 清端口重启（`lsof -tiTCP:8000 | xargs kill -9`）→ 跑会话 → `python scripts/summarize_agent_traces.py`。
+**遗留（待方案）**：仅剩 **T6 trace 回放 eval** 未开工（有设计缺口：轨迹缺有序调用序列 + 实体落地方案，见 P3 详细任务）。
+另有若干「记录待评估」观察未改：英文标识符提问召回弱（P0.7）、系统报错文案被引回当实体核（P1.0，宜在账本侧改）、「生成」光杆动词加强调（P1.0 暂留）。

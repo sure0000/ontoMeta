@@ -332,7 +332,7 @@
 - 使用 **Alembic**（`backend/alembic/`）；应用启动时执行 `upgrade head`
 - 开发可用 SQLite；生产 / Docker Compose 使用 PostgreSQL（`DATABASE_URL`）
 - 遗留库（有表无 `alembic_version`）启动时 stamp，或运行 `scripts/alembic_stamp_legacy.py`
-- 详见 [backend/alembic/README.md](./backend/alembic/README.md)
+- 详见 [backend/alembic/README.md](../backend/alembic/README.md)
 
 ---
 

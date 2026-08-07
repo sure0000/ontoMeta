@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 import uuid
@@ -133,6 +133,42 @@ class CubeSetting(Base):
     preagg_refresh: Mapped[str] = mapped_column(String(50), default="1 hour")
     tenant_dimension: Mapped[str | None] = mapped_column(String(100), nullable=True)
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DependencyComponent(Base):
+    """依赖组件统一注册表（DEPENDENCY_DEPLOYMENT_REDESIGN §3）。
+
+    除 ontoMeta 自身前后端外，所有依赖组件（LLM / DataHub / Airflow / SeaTunnel /
+    目标数仓 / sync-runner / Cube / PG / Bigtop）在此统一管理部署方式与连接信息。
+
+    - ``deploy_mode`` 决定「怎么来的」：external(已有)/docker/k8s/bare_metal。
+    - ``connection`` 记「怎么连」：部署成功自动回写，或 external 时手填。
+    - ``deploy_spec`` / ``connection`` 以 Text(json) 存储，与项目既有范式一致（SQLite/PG 通用）。
+
+    Phase 0：本表与既有五张设置表并行存在，不接读取侧；Phase 1 起读取侧改为从本表投影。
+    ERPNext 等外部源库不在此纳管——它们是外部数据源，走 ``DataSource``。
+    """
+
+    __tablename__ = "dependency_components"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # 组件类型：llm/datahub/airflow/seatunnel/warehouse/sync_runner/cube/postgres/bigtop
+    key: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    # 部署：external | docker | k8s | bare_metal
+    deploy_mode: Mapped[str] = mapped_column(String(16), default="external")
+    deploy_spec_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # not_deployed|deploying|deployed|failed|connected
+    deploy_status: Mapped[str] = mapped_column(String(16), default="not_deployed")
+    deploy_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 连接信息（JSON），结构由 key 决定（见 DependencyComponentService.CONNECTION_SCHEMAS）
+    connection_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

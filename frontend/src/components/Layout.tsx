@@ -6,6 +6,7 @@ import {
   FolderOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  ProfileOutlined,
   RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
@@ -36,6 +37,7 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
+  if (pathname.startsWith("/tasks/")) return pathname;
   if (pathname.startsWith("/data-apps")) return "/data-apps";
   if (pathname.startsWith("/external-api/apps")) return "/external-api/apps";
   if (pathname.startsWith("/external-api/endpoints")) {
@@ -48,6 +50,7 @@ function getSelectedKey(pathname: string, search: string) {
 
 function getOpenKeys(pathname: string) {
   if (pathname.startsWith("/ontology")) return ["/ontology"];
+  if (pathname.startsWith("/tasks")) return ["/tasks"];
   if (pathname.startsWith("/external-api")) return ["/external-api"];
   return [];
 }
@@ -119,6 +122,19 @@ export function AppLayout() {
         label: "业务逻辑",
       },
       { key: "/chat-bi", icon: <RobotOutlined />, label: "Data Agent" },
+      {
+        key: "/tasks",
+        icon: <ProfileOutlined />,
+        label: "任务管理",
+        children: [
+          { key: "/tasks/materialize", label: "物化任务" },
+          { key: "/tasks/sync", label: "数据同步" },
+          { key: "/tasks/transform", label: "数据加工" },
+          { key: "/tasks/metric", label: "指标任务" },
+          { key: "/tasks/cluster", label: "集群拓扑" },
+          { key: "/tasks/pipelines", label: "任务链" },
+        ],
+      },
       { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },
       {
         key: "/external-api",

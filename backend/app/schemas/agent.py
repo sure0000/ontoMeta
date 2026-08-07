@@ -5,10 +5,18 @@ from pydantic import BaseModel, Field
 
 
 class ArtifactDraftRequest(BaseModel):
-    kind: str = Field(description="cluster / sync / transform / metric")
-    intent: str
+    kind: str = Field(description="cluster / sync / transform / metric / materialize")
+    # 意图驱动路径必填；给了 spec 的手动结构化路径可空。
+    intent: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
     ontology_id: str | None = None
+    # 手动结构化起草：直接给一份声明式 spec，跳过 drafter，仍进校验闸门兜底。
+    spec: dict[str, Any] | None = None
+    # 手填表单可直接给名；不给则由 spec 派生（name_from_spec）。
+    name: str | None = None
+    # 表单起草走 context+drafter 派生路径但仍是**用户发起**：置 True 让溯源标 user，
+    # 而非默认的 machine（对话/机器起草）。spec 直填路径恒为 user，不看此标。
+    user_created: bool = False
 
 
 class ArtifactConfirmRequest(BaseModel):

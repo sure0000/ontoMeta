@@ -52,25 +52,52 @@ class AgentPipelineService:
         db: Session,
         *,
         kind: str,
-        intent: str,
+        intent: str | None = None,
         context: dict[str, Any] | None = None,
         ontology_id: str | None = None,
+        spec: dict[str, Any] | None = None,
+        name: str | None = None,
+        user_created: bool = False,
     ) -> GovernanceArtifact:
         if kind not in {k.value for k in ArtifactKind}:
             raise PipelineError(
                 f"未知制品类型 {kind}，可选：{', '.join(registry.all_kinds())}"
             )
         drafter = registry.get_drafter(kind)  # 未注册 → UnregisteredKindError
-        spec = drafter.draft(intent, context or {})
+
+        if spec is not None:
+            # 手动结构化路径：不调 drafter，spec 直接落库。校验闸门（validate）独立于
+            # drafter 运行，仍会核对本体真实性/凭据/必填——安全边界不被绕过。
+            if not isinstance(spec, dict) or not spec:
+                raise ValueError("spec 不能为空对象")
+            resolved_spec = spec
+            resolved_name = (name or "").strip() or drafter.name_from_spec(spec)
+            origin = "user"
+            is_user_created = True
+        else:
+            # 意图/上下文驱动路径。intent 与 context 至少给一样：表单起草只给结构化
+            # context（无自然语言 intent），对话/意图起草只给 intent；两者皆空才拒绝。
+            # 各 drafter 用显式 context 选择器（object_type/business_logic_id/…）做确定性
+            # 派生，intent 仅作回退匹配与命名，故此处不再强制 intent 非空。
+            if not (intent or "").strip() and not (context or {}):
+                raise ValueError("未提供 spec 时，intent 与 context 至少给一样")
+            resolved_spec = drafter.draft(intent or "", context or {})
+            resolved_name = drafter.suggested_name(intent or "", resolved_spec)
+            # 表单起草是用户发起（user_created=True 由调用方显式声明），只是走 drafter
+            # 派生结构；对话/机器起草则维持 machine 溯源。
+            origin = "user" if user_created else "machine"
+            is_user_created = user_created
 
         artifact = GovernanceArtifact(
             kind=kind,
-            name=drafter.suggested_name(intent, spec),
+            name=resolved_name,
             ontology_id=ontology_id,
             intent=intent,
-            spec_json=_dumps(spec),
-            machine_baseline=_dumps(spec),
+            spec_json=_dumps(resolved_spec),
+            machine_baseline=_dumps(resolved_spec),
             status=ArtifactStatus.DRAFTED.value,
+            origin=origin,
+            user_created=is_user_created,
         )
         db.add(artifact)
         db.commit()
