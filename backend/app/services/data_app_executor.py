@@ -23,6 +23,8 @@ requirements.txt**——方言翻译与 backend 识别不需要它们，仅实�
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import logging
 import re
 from typing import Any
@@ -56,6 +58,21 @@ _FORBIDDEN = (
     "merge",
     "copy",
     "into",
+)
+
+# 写侧的**硬闸**：库级删除一律不许执行，任何调用方、任何理由。
+#
+# 只读路径（execute_sql / is_read_only）本就把 drop 整个关键字关在门外，Data Agent 碰不到。
+# 但写侧（execute_write）为了物化落库必须放行 DDL——它把生成的语句原样交给 DBAPI，
+# 此前**一条校验都没有**。库级删除与「建数」这件事没有任何交集：物化最多重建一张表，
+# 从不需要删掉整个库；而一旦有人（或某个生成器的 bug）递进来一条 DROP DATABASE，
+# 执行的代价是不可逆的整库丢失。故在此处拦死，宁可误伤也不放行。
+#
+# **不拦 DROP TABLE**：staging 切换（app/warehouse/adapters/base.py 的 `_with_swap`）
+# 靠 `DROP TABLE IF EXISTS <staging/old>` 收尾，拦掉就等于废掉物化的原子切换。
+# 表级删除的边界由物化契约管，库级删除在这里管——两码事，别混为一谈。
+_DESTRUCTIVE_WRITE = re.compile(
+    r"\bdrop\s+(database|schema)\b", re.IGNORECASE
 )
 
 _engine_cache: dict[str, Engine] = {}
@@ -181,17 +198,43 @@ def _translate_dialect(sql: str, backend: str) -> str:
     return sql
 
 
+# 表位置：FROM / JOIN / INTO / UPDATE / TABLE 之后紧跟的那个（或那串逗号分隔的）标识符。
+# 子查询 `FROM (SELECT …)` 下一个字符是 `(`，不匹配标识符字符类，天然不会误伤；
+# `FROM t alias` 只吃到 `t`，别名原样留着。
+_TABLE_POSITION = re.compile(
+    r"(?i)(\b(?:from|join|into|update|table)\s+)"
+    r"([\w`\"\[\].]+(?:\s*,\s*[\w`\"\[\].]+)*)"
+)
+
+
 def _apply_mapping(sql: str, mapping: dict[str, Any] | None) -> str:
-    """按 mapping_json 将本体 name 替换为物理表/列名（整词替换）。
+    """按 mapping_json 将本体 name 替换为物理表/列名。
 
     mapping 结构：{"tables": {ontologyName: physical}, "columns": {ontologyName: physical}}
+
+    **tables 只在表位置替换，columns 才做整词替换**。原实现两者混在一起整词替换，
+    在「对象名同时也是别的表的列名」时会静默改错——这在真实业务库里是常态而非例外：
+    ERPNext 的 724 个对象里有 203 个（`sales_order` / `customer` / `item` …）同时是子表的
+    外键列名，整词替换会把 `SELECT customer FROM tabSales_Order` 里的**列** `customer`
+    也换成表名 `` `tabCustomer` ``，产出一条语法合法、语义全错的 SQL。
+    报错还能被看见，静默错答不能——故按位置区分。
     """
     if not mapping:
         return sql
-    renames: dict[str, str] = {}
-    renames.update(mapping.get("tables") or {})
-    renames.update(mapping.get("columns") or {})
-    for src, dst in renames.items():
+    tables = {
+        str(k): str(v)
+        for k, v in (mapping.get("tables") or {}).items()
+        if k and v and k != v
+    }
+    if tables:
+        def _sub_tables(m: re.Match) -> str:
+            head, ident_list = m.group(1), m.group(2)
+            parts = re.split(r"(\s*,\s*)", ident_list)
+            out = [tables.get(p, p) if i % 2 == 0 else p for i, p in enumerate(parts)]
+            return head + "".join(out)
+
+        sql = _TABLE_POSITION.sub(_sub_tables, sql)
+    for src, dst in (mapping.get("columns") or {}).items():
         if not src or not dst or src == dst:
             continue
         sql = re.sub(rf"(?<![\w.]){re.escape(src)}(?![\w])", str(dst), sql)
@@ -226,6 +269,30 @@ def backend_of(dsn: str | None) -> str | None:
     return _backend_of(dsn)
 
 
+def _json_safe(value: Any) -> Any:
+    """把驱动返回的值转成 JSON 原生标量。**必须在执行器边界做**。
+
+    这里是物理库的值进入应用的唯一入口，往后要经过：回给模型的工具结果、`ask` 的
+    响应体、图表、`analyze_result` 的统计——任何一处遇到非原生类型都会当场炸。
+    MySQL 的金额列返回 `decimal.Decimal`，此前一条 `SELECT grand_total FROM sales_order`
+    就能让 `POST /chat-bi/ask` 直接 500（`Object of type Decimal is not JSON serializable`），
+    即「域一旦真能查，第一个金额问题就挂」。
+
+    **Decimal 转 float 而不是 str**：下游的图表与统计要的是数，转成字符串虽然精确，
+    却会让每一个金额列的图表和均值/离群统计悄悄失效——那比末位精度更贵。
+    需要精确金额的场景应在 SQL 里格式化，而不是指望这里替它保留。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def execute_sql(
     *,
     dsn: str,
@@ -253,7 +320,10 @@ def execute_sql(
                 )
             result = conn.execute(text(prepared))
             keys = list(result.keys())
-            rows = [dict(zip(keys, row)) for row in result.fetchall()]
+            rows = [
+                {k: _json_safe(v) for k, v in zip(keys, row)}
+                for row in result.fetchall()
+            ]
     except Exception as exc:  # noqa: BLE001
         logger.warning("data app SQL execution failed: %s", exc)
         raise ExecutionError(f"查询执行失败：{exc}") from exc
@@ -291,6 +361,15 @@ def execute_write(
             continue
         body = _apply_mapping(body, mapping)
         body = _translate_dialect(body, backend)
+        # 库级删除：**在动任何一条语句之前**就整批拒绝。放在 mapping/方言转换之后校验，
+        # 是因为要拦的是真正会递给 DBAPI 的那份文本——转换前干净、转换后变成 DROP DATABASE
+        # 的情况同样要挡住。整批拒绝而非跳过该条：一批语句本就是一个事务，
+        # 悄悄漏执行一条会留下半套结构，比直接失败更难查。
+        if _DESTRUCTIVE_WRITE.search(body):
+            raise ExecutionError(
+                f"拒绝执行库级删除语句（第 {idx + 1} 条）：ontoMeta 的写侧只用于建表与落数，"
+                "任何情况下都不删库。如确需删库，请由 DBA 在数据库侧手工操作。"
+            )
         prepared.append((idx, body))
 
     per_statement: list[dict[str, Any]] = []

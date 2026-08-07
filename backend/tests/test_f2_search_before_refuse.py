@@ -83,10 +83,54 @@ def test_f2_nudge_fires_at_most_once():
 
 
 def test_f2_normal_answer_not_nudged():
-    """正常给出实体内容的答案（非拒答）不被 F2 逆。"""
+    """一般性意图（general）下的无工具作答不被逆——那类问题本就豁免接地。"""
     domain_id, _o, aliases = _seed_golden_domain()
-    script = [FinalTurn("市场活动对象用于管理营销活动，包含名称、起止时间等字段。")]
+    script = [FinalTurn("我可以基于这个数据域的已发布本体回答业务问题、查数并解释口径。")]
     payload, completions, seen_user_msgs = _run(
-        script, "市场活动对象有哪些字段？", aliases, domain_id
+        script, "你能做什么？", aliases, domain_id
     )
-    assert not any("先用 search" in m for m in seen_user_msgs), "正常答案不该被逆"
+    assert not any("先用 search" in m for m in seen_user_msgs), "general 意图不该被逆"
+    assert not payload.get("grounding_refused"), "general 意图不该被接地判定拒答"
+
+
+# --------------------------------------------------------------------------- F4
+
+
+def test_f4_confident_answer_without_tools_gets_verified_before_refusing():
+    """V5 F4：长会话里模型照上一轮上下文自信作答、本轮一次工具没调。
+
+    此前：文本不像拒答 → F2 逆不到 → 但 `grounded` 要求本轮有工具命中 → 那条**答对了的**
+    答案被整段换成「未检索到匹配的对象类型」。用户看到拒答，模型其实答对了。
+    现在：同样逆一次，要它拿本轮的凭证，于是答案能正常落地。
+    """
+    domain_id, _o, aliases = _seed_golden_domain()
+    script = [
+        # ① 不调工具、内容也不像拒答——正是老逻辑逆不到的那半
+        FinalTurn("订单对象包含金额、状态、下单日期、客户ID 等字段。"),
+        # ② 被逆后老老实实查一次
+        ToolTurn([("get_object", {"object_id": "@order"})]),
+        FinalTurn("订单对象包含金额、状态、下单日期、客户ID 等字段。"),
+    ]
+    payload, _c, seen_user_msgs = _run(
+        script, "订单对象有哪些字段？", aliases, domain_id
+    )
+    assert any("还没调用任何工具" in m for m in seen_user_msgs), "F4 未逆核实"
+    assert not payload.get("grounding_refused"), "核实后不该再被判未接地"
+    assert any(
+        s.get("tool") == "get_object" for s in (payload.get("steps") or [])
+    ), "逆后应真的查了对象"
+
+
+def test_f4_nudge_shares_the_one_shot_budget_with_f2():
+    """逆只逆一次：F2 与 F4 共用同一个额度，逆完仍不查就照旧走接地判定拒答。"""
+    domain_id, _o, aliases = _seed_golden_domain()
+    script = [
+        FinalTurn("订单对象包含金额、状态等字段。"),  # ① 无工具 → 逆
+        FinalTurn("订单对象包含金额、状态等字段。"),  # ② 仍无工具 → 不再逆
+    ]
+    payload, _c, seen_user_msgs = _run(
+        script, "订单对象有哪些字段？", aliases, domain_id
+    )
+    nudges = [m for m in seen_user_msgs if "先用 search" in m or "还没调用任何工具" in m]
+    assert len(nudges) == 1, f"应只逆一次，实际 {len(nudges)}"
+    assert payload.get("grounding_refused"), "始终未核实的答案仍应被接地判定拦下"

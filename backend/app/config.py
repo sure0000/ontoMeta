@@ -139,7 +139,19 @@ class Settings(BaseSettings):
     # 全量行存在进程内 per-run store，模型需要更多行时用 read_result(handle, offset, limit) 分页取。
     #   上下文只看到样例，不再被整张表污染、也不被字符截断丢列。前端/渲染/analyze 仍拿全量。
     agent_result_offload: str = "on"  # on/off（off 回到直接回灰全量行的旧行为）
-    agent_result_sample_rows: int = 5  # 回给模型的样例行数
+    # 回给模型的样例行数。**V5 T2 实测过 5 vs 20，维持 5**（详见 DATA_AGENT_V5_PLAN §P0.9）。
+    #
+    # 调大的理由曾经很硬：ERP 域实测显示结果一超过 5 行，模型下一步必定
+    # `read_result(offset=5, limit=剩余)` 把余下的**全部**翻回来（20 行取走 15、8 行取走 3），
+    # 那次离场等于白花一次 LLM 往返；而多带 15 行只要 ~1000 字符，多一次往返要重付
+    # 一整轮 prefill ≈30800 字符——账面上差 30 倍。
+    #
+    # **同一问句序列跑 5 与 20 的对照，把这个预测推翻了**：往返确实省掉了
+    # （read_result 2→0、离场字符→0），但 `avg_llm_calls` 反而 6.2→8.0、步数 7.0→9.5，
+    # 逐轮配对是 5 涨 1 平 0 降——不是个别轮次的偏差。样例行变多之后模型在结果上
+    # 兜圈子的轮次也变多，省下的那一次往返被这个盖过去了。
+    # 「不回涨 avg_llm_calls」是 V5 的验收护栏，故按实测维持 5，不按算术预测改。
+    agent_result_sample_rows: int = 5
     # V4 O6 运行轨迹落地（pi JSONL session 风格，非 DB 表，改造后可整目录摘除）。
     #   关闭时不写文件；开启后每问追加一行 JSON 到 agent_trace_dir。
     agent_trace_enabled: bool = False

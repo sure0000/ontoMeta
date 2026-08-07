@@ -115,7 +115,7 @@ def _make_service(completions: _StubCompletions) -> ChatBiService:
     )
     service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
     # 接地校验与本测正交：放行，避免拒答改写盖掉我们要观察的 suggested_sql/data_result。
-    service._verify_answer = lambda answer, ledger, question: (True, [])  # type: ignore[assignment]
+    service._verify_answer = lambda answer, ledger, question, **_kw: (True, [])  # type: ignore[assignment]
     return service
 
 

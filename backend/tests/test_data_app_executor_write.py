@@ -72,3 +72,50 @@ def test_blank_statements_ignored(tmp_path):
     )
     assert receipt["total"] == 1
     assert receipt["executed"] == 1
+
+
+# --------------------------------------------------------------- 库级删除硬闸
+
+
+def test_write_refuses_drop_database(tmp_path):
+    """DROP DATABASE 一律拒绝——写侧只用于建表落数，任何情况下都不删库。"""
+    import pytest
+
+    from app.services.data_app_executor import ExecutionError
+
+    with pytest.raises(ExecutionError, match="库级删除"):
+        execute_write(dsn=_dsn(tmp_path), statements=["DROP DATABASE analytics"])
+
+
+def test_write_refuses_drop_schema_and_aborts_whole_batch(tmp_path):
+    """整批拒绝而非跳过那一条：批次本就是一个事务，漏执行会留下半套结构。"""
+    import pytest
+    from sqlalchemy import create_engine, inspect
+
+    from app.services.data_app_executor import ExecutionError
+
+    dsn = _dsn(tmp_path)
+    with pytest.raises(ExecutionError, match="库级删除"):
+        execute_write(
+            dsn=dsn,
+            statements=[
+                "CREATE TABLE IF NOT EXISTS keep_me (id INTEGER)",
+                "DROP SCHEMA IF EXISTS staging",
+            ],
+        )
+    # 前面那条建表也没有被执行——闸在执行之前就落下了
+    assert "keep_me" not in inspect(create_engine(dsn)).get_table_names()
+
+
+def test_write_still_allows_drop_table_for_staging_swap(tmp_path):
+    """不误伤 DROP TABLE：staging 原子切换靠它收尾，拦掉等于废掉物化。"""
+    dsn = _dsn(tmp_path)
+    receipt = execute_write(
+        dsn=dsn,
+        statements=[
+            "CREATE TABLE IF NOT EXISTS dim_x__stg (id INTEGER)",
+            "DROP TABLE IF EXISTS dim_x__stg",
+        ],
+    )
+    assert receipt["executed"] == 2
+    assert receipt["error"] is None

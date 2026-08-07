@@ -18,7 +18,6 @@ import types
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -134,13 +133,14 @@ from app.services.chat_bi_tool_schemas import (  # noqa: F401
     _format_sql,
 )
 
-@dataclass
-class _ObjectSnapshot:
-    id: str
-    name: str
-    display_name: str
-    description: str | None
-    properties: list[Property]
+# V5 T4：本体快照与引用归一已拆到 chat_bi_references.py（只依赖 ORM 模型，无运行态）。
+# 同样全量 re-export，`chat_bi._ObjectSnapshot` / `_ReferenceResolver` / `_loads_payload`
+# 的对外符号与对象 identity 不变。
+from app.services.chat_bi_references import (  # noqa: F401,E402
+    _ObjectSnapshot,
+    _ReferenceResolver,
+    _loads_payload,
+)
 
 
 class ChatBiService:
@@ -1347,10 +1347,26 @@ class ChatBiService:
         ]
         return "\n".join(lines)
 
+    @staticmethod
+    def _echo_corpus(question: str, history: list[dict] | None) -> str:
+        """「用户自己说过的话」全集：本轮问句 + 本会话里所有历史用户消息。
+
+        F5 的复述豁免要覆盖多轮：第 6 轮复述第 5 轮的问句（「总账分录按科目统计条数、
+        取前 50」）同样不是模型编的，只给本轮问句会漏掉——实测里就漏了。
+        """
+        parts = [question or ""]
+        for msg in history or []:
+            if (msg.get("role") or "") == "user":
+                parts.append(str(msg.get("content") or ""))
+        return "\n".join(p for p in parts if p)
+
     def _verify_answer(
-        self, answer: str, ledger: FactLedger, question: str
+        self, answer: str, ledger: FactLedger, question: str, *, echo: str = ""
     ) -> tuple[bool, list[str]]:
         """F4 校验入口。受 settings.agent_soundness 开关；off/warn 不拦，on 生效。
+
+        ``echo`` 是「用户说过的话」全集（见 :meth:`_echo_corpus`），供复述豁免用；
+        与 ``question`` 分开传是因为后者还决定数值严格模式，不该被历史问句带偏。
 
         返回 (ok, unverified)：ok=False 且 on 模式时，上层将拒答并展示 unverified。
         """
@@ -1361,7 +1377,9 @@ class ChatBiService:
             return True, []
         # 数值严格模式：只要本轮真跑过数（有 cells）或问题在问量，就要求数值有凭证。
         strict = bool(ledger.cells) or self._asks_number(question)
-        verdict = verify_answer(answer, ledger, strict_numbers=strict)
+        verdict = verify_answer(
+            answer, ledger, strict_numbers=strict, question=echo or question
+        )
         if verdict.ok:
             return True, []
         if mode == "warn":
@@ -3580,13 +3598,18 @@ class ChatBiService:
                 tool_calls = self._extract_text_tool_calls(msg.content or "")
             if not tool_calls:
                 _candidate = self._strip_tool_markup(msg.content or "")
-                # V5 F2：首轮无工具且看着像拒答 + 结构性/取数意图 + 还没搜过，
-                # 逆一次“先 search_objects 再判”（避免未搜就拒）。只逗一次，不成就放行。
+                # V5 F2/F4：结构性/取数意图下**本轮一次工具都没调**就想收尾——逆一次，
+                # 要它先核实。只逆一次，不成就放行（照旧由接地判定兜底）。
+                #
+                # F2 原本只逆「看着像拒答」的那种。F4（长会话实测）暴露出另一半、且更常见：
+                # 多轮会话里模型会**照着上一轮的上下文自信作答**而不再调工具——文本不像拒答，
+                # 于是逆不到；但 `grounded` 要求本轮真有工具命中，那条好答案最终仍被整段换成
+                # 「未检索到匹配的对象类型」的拒答。用户看到的是拒答，模型其实答对了。
+                # 两种都是「未经核实就收尾」，同一处逆，只是话术分开。
                 if (
                     not _search_nudged
                     and intent in ("structural", "analytical")
                     and not grounded_hit
-                    and self._looks_like_refusal(_candidate)
                 ):
                     _search_nudged = True
                     messages.append({"role": "assistant", "content": _candidate})
@@ -3595,6 +3618,12 @@ class ChatBiService:
                         "content": (
                             "先别下结论。请至少先用 search_objects / search_logics 换几个关键词"
                             "（中英文、同义词、上位词）检索一次；确实搜不到再说无法回答。"
+                        )
+                        if self._looks_like_refusal(_candidate)
+                        else (
+                            "这一轮你还没调用任何工具，答案无法被核实。请先用 search_objects /"
+                            " get_object 等工具把你要提到的对象、字段、口径核实一遍（早前轮查过"
+                            "也要重查，本轮的结论要有本轮的凭证），再据实作答。"
                         ),
                     })
                     continue
@@ -3931,7 +3960,9 @@ class ChatBiService:
 
         # F4：断言级可靠性校验。答案里出现账本外的具名实体/未证实数值 → 判不可靠。
         # 受 settings.agent_soundness 开关：off 跳过；warn 仅记录不拦；on 生效。
-        verify_ok, unverified = self._verify_answer(answer, ledger, question)
+        verify_ok, unverified = self._verify_answer(
+            answer, ledger, question, echo=self._echo_corpus(question, history)
+        )
 
         # P4.3 自愈回环：校验不过时先给模型**一次**重写机会，而不是直接拒答。
         # 此前 unverified 是终局判决——模型连「哪句没凭证」都收不到，
@@ -3949,7 +3980,9 @@ class ChatBiService:
             if not repaired:
                 break
             answer = repaired
-            verify_ok, unverified = self._verify_answer(answer, ledger, question)
+            verify_ok, unverified = self._verify_answer(
+            answer, ledger, question, echo=self._echo_corpus(question, history)
+        )
             if verify_ok:
                 tel.repair_succeeded()
                 break
@@ -4227,138 +4260,3 @@ class ChatBiService:
             "rows": rows,
             "row_count": len(rows),
         }
-
-
-class _ReferenceResolver:
-    """将 LLM/Mock 输出中的 name/display_name 解析为真实实体 id，供前端跳转。
-
-    LLM 经常返回伪造的 id（如 "payment"、""），因此一律以本体快照为准：
-    优先按 name/display_name 命中真实实体后覆写 id；命中失败时保留原 id。
-    """
-
-    def __init__(
-        self,
-        *,
-        objects: list[_ObjectSnapshot],
-        relations: list[RelationType],
-        logics: list[BusinessLogic],
-    ) -> None:
-        self.obj_by_key: dict[str, _ObjectSnapshot] = {}
-        self.obj_by_id: dict[str, _ObjectSnapshot] = {}
-        for o in objects:
-            self.obj_by_id[o.id] = o
-            for key in (o.name, o.display_name, o.name.lower(), o.display_name.lower()):
-                if key:
-                    self.obj_by_key.setdefault(key, o)
-        self.logic_by_key: dict[str, BusinessLogic] = {}
-        self.logic_by_id: dict[str, BusinessLogic] = {}
-        for logic in logics:
-            self.logic_by_id[logic.id] = logic
-            for key in (logic.name, logic.display_name, logic.name.lower(), logic.display_name.lower()):
-                if key:
-                    self.logic_by_key.setdefault(key, logic)
-        self.rel_by_key: dict[str, RelationType] = {}
-        for rel in relations:
-            for key in (rel.name, rel.display_name, rel.name.lower(), rel.display_name.lower()):
-                if key:
-                    self.rel_by_key.setdefault(key, rel)
-        # property: (object_id, property_name) -> Property
-        self.prop_by_obj_and_name: dict[tuple[str, str], Property] = {}
-        self.prop_by_name: dict[str, Property] = {}
-        for o in objects:
-            for p in o.properties:
-                self.prop_by_obj_and_name.setdefault((o.id, p.name.lower()), p)
-                self.prop_by_name.setdefault(p.name.lower(), p)
-                self.prop_by_name.setdefault(p.display_name.lower(), p)
-
-    def resolve_payload(self, payload: dict) -> dict:
-        payload["referenced_objects"] = [
-            r
-            for r in (
-                self._resolve_obj(ref) for ref in payload.get("referenced_objects") or []
-            )
-            if r and r.get("id") in self.obj_by_id
-        ]
-        payload["referenced_logics"] = [
-            r
-            for r in (
-                self._resolve_logic(ref)
-                for ref in payload.get("referenced_logics") or []
-            )
-            if r and r.get("id") in self.logic_by_id
-        ]
-        payload["caliber_decomposition"] = [
-            self._resolve_caliber_item(item)
-            for item in payload.get("caliber_decomposition") or []
-        ]
-        return payload
-
-    def _resolve_obj(self, ref: dict) -> dict:
-        ref = dict(ref)
-        snap = self._find(self.obj_by_key, ref)
-        if snap:
-            ref["id"] = snap.id
-            ref.setdefault("name", snap.name)
-            ref.setdefault("display_name", snap.display_name)
-        return ref
-
-    def _resolve_logic(self, ref: dict) -> dict:
-        ref = dict(ref)
-        logic = self._find(self.logic_by_key, ref)
-        if logic:
-            ref["id"] = logic.id
-            ref.setdefault("name", logic.name)
-            ref.setdefault("display_name", logic.display_name)
-        return ref
-
-    def _resolve_caliber_item(self, item: dict) -> dict:
-        item = dict(item)
-        refs = item.get("references") or []
-        resolved: list[dict] = []
-        for r in refs:
-            r = dict(r)
-            kind = r.get("kind") or "object_type"
-            if kind == "object_type":
-                resolved.append(self._resolve_obj(r))
-            elif kind == "business_logic":
-                resolved.append(self._resolve_logic(r))
-            elif kind == "relation_type":
-                rel = self._find(self.rel_by_key, r)
-                if rel:
-                    r["id"] = rel.id
-                    r.setdefault("name", rel.name)
-                    r.setdefault("display_name", rel.display_name)
-                resolved.append(r)
-            elif kind == "property":
-                prop = self._find(self.prop_by_name, r)
-                if prop:
-                    r["id"] = prop.id
-                    r.setdefault("name", prop.name)
-                    r.setdefault("display_name", prop.display_name)
-                resolved.append(r)
-            else:
-                resolved.append(r)
-        item["references"] = resolved
-        return item
-
-    @staticmethod
-    def _find(index: dict, ref: dict):
-        if not ref:
-            return None
-        for key in (ref.get("name"), ref.get("display_name"), ref.get("id")):
-            if not key:
-                continue
-            hit = index.get(key) or index.get(str(key).lower())
-            if hit:
-                return hit
-        return None
-
-
-def _loads_payload(raw: str | None) -> dict:
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}

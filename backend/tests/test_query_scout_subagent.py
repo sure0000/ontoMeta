@@ -216,3 +216,42 @@ def test_scout_failure_degrades_with_hint(env):
         ))
     assert is_error
     assert "profile_values" in result["fix"]
+# T5 追加到 tests/test_query_scout_subagent.py 末尾
+
+
+def test_scout_can_iterate_profile_then_rewrite_within_budget(env):
+    """V5 T5：探路→取样→按样例改写→再取，整条链在隔离上下文里跑完。
+
+    老预算 5 轮：定位 1 + join 1 + profile 1 + 改写后复查 1 + 收尾 1 —— 正好卡死，
+    稍一试错就被强制收尾，交回的是没验完的草稿。新预算给到 8 轮，链能跑完。
+    """
+    script = [
+        [("search_objects", {"keyword": "销售"})],
+        [("find_join_path", {"from_keyword": "销售", "to_keyword": "客户"})],
+        [("profile_values", {"object_keyword": "销售", "property_keyword": "状态"})],
+        [("get_object", {"object_id": "sales_order_000"})],
+        [("profile_values", {"object_keyword": "销售", "property_keyword": "金额"})],
+        [("compile_metric", {"keyword": "销售额"})],
+        '{"sql": "SELECT 1", "brief": "改写后已复查", "objects": ["sales_order_000"], "logics": []}',
+    ]
+    res, client = _run_scout(env, script)
+    assert res.sql == "SELECT 1"
+    assert res.steps == 6, f"6 步链应跑完，实际 {res.steps}"
+    assert client.calls == 7  # 6 轮工具 + 1 轮结论，未触发强制收尾
+
+
+def test_scout_budget_still_caps_the_chain(env):
+    """预算放大不等于无上限：超出 MAX_STEPS 仍被强制收尾（护住 LLM 调用不失控）。"""
+    script = [[("search_objects", {"keyword": f"k{i}"})] for i in range(MAX_STEPS + 3)]
+    script.append('{"sql": "", "brief": "被截断", "objects": [], "logics": []}')
+    res, client = _run_scout(env, script)
+    assert res.steps == MAX_STEPS, f"应封顶在 {MAX_STEPS} 步，实际 {res.steps}"
+    assert client.calls == MAX_STEPS + 1  # 预算内每轮 1 次 + 1 次强制收尾
+
+
+def test_scout_return_shape_unchanged_by_t5(env):
+    """T5.2：返回结构不变——主 agent 的执行链路不该因为 scout 变多步而要改。"""
+    res, _c = _run_scout(env, [
+        '{"sql": "SELECT 1", "brief": "b", "objects": ["o"], "logics": ["l"]}'
+    ])
+    assert set(res.to_dict()) == {"candidate_sql", "brief", "objects", "logics", "note"}
