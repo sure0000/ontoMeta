@@ -326,3 +326,88 @@ def test_machine_baseline_recorded(client, admin_headers):
     baseline = json.loads(contract.machine_baseline)
     assert baseline["target_layer"] == "dim"
     assert baseline["load_strategy"] == "incremental"
+
+
+def test_foreign_key_cannot_be_materialized(client, admin_headers):
+    """外键关系是列上的声明，人工显式标记 materialized=True 应被拒绝。"""
+    ids = _seed("fk-no-mat")
+    ontology_id = ids["ontology_id"]
+    client.post(
+        f"/api/ontologies/{ontology_id}/materialization-contracts/sync",
+        headers=admin_headers,
+    )
+    fk_contract = _contracts_by_target(ontology_id)[ids["fk_id"]]
+    assert fk_contract.materialized is False
+
+    # 人工尝试强制物化 → 422
+    resp = client.patch(
+        f"/api/materialization-contracts/{fk_contract.id}",
+        headers=admin_headers,
+        json={"materialized": True},
+    )
+    assert resp.status_code == 422
+    # 仍未物化
+    after = _contracts_by_target(ontology_id)[ids["fk_id"]]
+    assert after.materialized is False
+
+
+def test_foreign_key_pinned_true_reclaimed_on_sync(client, admin_headers):
+    """旧版可能已把外键 materialized 钉成 True；机器重推导时强制纠正。"""
+    ids = _seed("fk-reclaim")
+    ontology_id = ids["ontology_id"]
+    client.post(
+        f"/api/ontologies/{ontology_id}/materialization-contracts/sync",
+        headers=admin_headers,
+    )
+    # 模拟旧版遗留：直接在库里把外键契约改成 materialized=True 并钉住
+    with SessionLocal() as db:
+        from app.services.edit import _mark_overridden
+
+        contract = (
+            db.query(MaterializationContract)
+            .filter(MaterializationContract.target_id == ids["fk_id"])
+            .first()
+        )
+        contract.materialized = True
+        _mark_overridden(contract, ["materialized"])
+        db.commit()
+
+    # 机器重推导：即使钉住也要把外键拉回不物化
+    client.post(
+        f"/api/ontologies/{ontology_id}/materialization-contracts/sync",
+        headers=admin_headers,
+    )
+    after = _contracts_by_target(ontology_id)[ids["fk_id"]]
+    assert after.materialized is False
+
+
+def test_foreign_key_excluded_from_materialized_list_even_if_flag_true(client, admin_headers):
+    """防御性深度过滤：即使外键契约的 materialized 被直接改成 True
+    （绕过 update/sync），list_contracts(materialized_only=True) 也要挡住它。"""
+    ids = _seed("fk-deep")
+    ontology_id = ids["ontology_id"]
+    client.post(
+        f"/api/ontologies/{ontology_id}/materialization-contracts/sync",
+        headers=admin_headers,
+    )
+    # 直接改库，绕过 update/sync 的保护
+    with SessionLocal() as db:
+        contract = (
+            db.query(MaterializationContract)
+            .filter(MaterializationContract.target_id == ids["fk_id"])
+            .first()
+        )
+        contract.materialized = True
+        db.commit()
+
+    from app.services.materialization_contract import MaterializationContractService
+
+    with SessionLocal() as db:
+        service = MaterializationContractService()
+        materialized = service.list_contracts(db, ontology_id, materialized_only=True)
+    # 外键契约不出现在物化列表中
+    assert all(c.target_id != ids["fk_id"] for c in materialized)
+    # list_selected 同样挡住
+    with SessionLocal() as db:
+        selected = service.list_selected(db, ontology_id, selected_targets=None)
+    assert all(c.target_id != ids["fk_id"] for c in selected)

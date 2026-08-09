@@ -57,6 +57,7 @@ def test_all_engines_registered():
         "iceberg",
         "starrocks",
         "clickhouse",
+        "postgres",
     }
 
 
@@ -79,9 +80,16 @@ def test_every_adapter_declares_capabilities():
 
 
 def test_all_engines_verified_after_m8():
-    """M8 后四引擎能力矩阵均已对照官方文档逐项核实——不再把「没核实」藏在注释里。"""
+    """M8 后五个 OLAP 引擎能力矩阵均已对照官方文档逐项核实——不再把「没核实」藏在注释里。
+
+    postgres（后补）能力矩阵按 PG16 文档写但尚未在真实实例逐项核实，故 verified=False——
+    该机制正是要让「没核实」机器可见（产生 warning 缺口），不因新增引擎而失效。
+    """
     verified = {a.name for a in list_adapters() if a.capabilities().verified}
     assert verified == {"hive", "doris", "iceberg", "starrocks", "clickhouse"}
+    # postgres 已注册但故意未核实
+    assert "postgres" in set(list_engines())
+    assert not get_adapter("postgres").capabilities().verified
 
 
 def test_unverified_capabilities_yields_warning_gap():
@@ -110,7 +118,9 @@ def test_every_engine_renders_without_notimplemented():
     )
     for engine in list_engines():
         ddl = get_adapter(engine).render_create_table(simple)
-        assert ddl.startswith("CREATE TABLE") or ddl.startswith("CREATE EXTERNAL TABLE")
+        # 建表语句在不在即可——不能断言它打头：postgres 要先 CREATE SCHEMA，
+        # 分层在 postgres 上是 schema 而非 database，不预建整批 DDL 全报错。
+        assert "CREATE TABLE" in ddl or "CREATE EXTERNAL TABLE" in ddl
 
 
 def test_unimplemented_base_still_guards_future_engines():
@@ -519,6 +529,231 @@ def test_clickhouse_translate_sql_uses_today():
 
 
 def test_quote_identifier_delegated_to_adapter():
-    """引号规则住在 Adapter：生成器只委托 quote_identifier，不自己判引擎。"""
+    """引号规则住在 Adapter：生成器只委托 quote_identifier，不自己判引擎。
+
+    多数引擎用反引号，ANSI 双引号引擎（postgres）覆写本方法——这正是引号必须住在
+    Adapter 而非生成器的原因（生成器若自己判 `if engine==...` 就漏掉了这种差异）。
+    """
+    backtick = {"hive", "doris", "iceberg", "starrocks", "clickhouse"}
     for engine in list_engines():
-        assert get_adapter(engine).quote_identifier("col") == "`col`"
+        expected = '"col"' if engine == "postgres" else "`col`"
+        assert get_adapter(engine).quote_identifier("col") == expected, engine
+    # 反引号引擎集合未意外增减
+    assert {e for e in list_engines() if e != "postgres"} == backtick
+
+
+# ---------- Postgres Adapter ----------
+
+
+@pytest.mark.parametrize(
+    "data_type,semantic_type,expected",
+    [
+        ("string", "datetime", "TIMESTAMP"),
+        ("timestamp", None, "TIMESTAMP"),
+        ("date", None, "DATE"),
+        ("decimal", "amount", "NUMERIC(18,4)"),
+        ("string", "amount", "NUMERIC(18,4)"),
+        ("int", None, "INTEGER"),
+        ("bigint", None, "BIGINT"),
+        ("double", None, "DOUBLE PRECISION"),
+        ("boolean", None, "BOOLEAN"),
+        ("string", "flag", "BOOLEAN"),
+        (None, None, "TEXT"),
+    ],
+)
+def test_postgres_type_mapping(data_type, semantic_type, expected):
+    assert get_adapter("postgres").map_type(data_type, semantic_type) == expected
+
+
+def test_postgres_ddl_uses_ansi_dialect():
+    """postgres 建表：双引号标识符、真主键、NUMERIC/TIMESTAMP、无反引号/无分桶。"""
+    ddl = get_adapter("postgres").render_create_table(_customer_table())
+    assert 'CREATE TABLE IF NOT EXISTS "dim_erp"."customer"' in ddl
+    assert '"customer_id" TEXT NOT NULL' in ddl  # identifier→TEXT，非空主键列
+    assert '"total_amount" NUMERIC(18,4)' in ddl
+    assert '"created_at" TIMESTAMP' in ddl
+    assert 'PRIMARY KEY ("customer_id")' in ddl
+    # 标准 SQL：无反引号、无 OLAP 分桶/表模型
+    assert "`" not in ddl
+    assert "DISTRIBUTED BY" not in ddl
+    assert "STORED AS" not in ddl
+
+
+def test_postgres_ddl_renders_foreign_key():
+    """外键仍是真 FOREIGN KEY ... REFERENCES（postgres 能强制），但**分两段**下发。
+
+    内联进 CREATE TABLE 时被引用表必须先存在，于是「只物化本体的一部分」和「本体里有环」
+    都建不出来（ERP 本体的血缘本来就是环）。故建表语句里不该再有 FOREIGN KEY，
+    约束改由 render_foreign_keys 在建表之后补。
+    """
+    adapter = get_adapter("postgres")
+    ddl = adapter.render_create_table(_customer_table())
+    assert "FOREIGN KEY" not in ddl, "外键不该再内联进建表语句"
+
+    stmts = adapter.render_foreign_keys(_customer_table())
+    joined = "\n".join(stmts)
+    assert 'FOREIGN KEY ("region_id") REFERENCES "dim_erp"."region" ("region_id")' in joined
+    assert "ALTER TABLE \"dim_erp\".\"customer\" ADD CONSTRAINT" in joined
+
+
+def test_postgres_foreign_key_is_idempotent():
+    """物化会重跑：约束语句必须能重复执行，否则第二次直接 42710（约束已存在）整批红。"""
+    stmts = get_adapter("postgres").render_foreign_keys(_customer_table())
+    assert stmts and all("IF NOT EXISTS" in s and "pg_constraint" in s for s in stmts)
+    # 约束名要稳定，否则每跑一次多一条同义约束
+    assert get_adapter("postgres").render_foreign_keys(_customer_table()) == stmts
+
+
+def test_declarative_engines_emit_no_deferred_foreign_keys():
+    """声明式外键的引擎（hive 写进 TBLPROPERTIES）不产第二段，行为不变。"""
+    assert get_adapter("hive").render_foreign_keys(_customer_table()) == []
+
+
+def test_postgres_table_and_column_comments():
+    """postgres 注释走独立 COMMENT ON 语句（不能内联进 CREATE）。"""
+    ddl = get_adapter("postgres").render_create_table(_customer_table())
+    assert "COMMENT ON TABLE \"dim_erp\".\"customer\" IS '客户';" in ddl
+    assert (
+        "COMMENT ON COLUMN \"dim_erp\".\"customer\".\"customer_name\" IS '客户名称';"
+        in ddl
+    )
+
+
+def test_postgres_no_partition_declared():
+    """PoC 不建原生子分区：分区键仅作普通列（仍出现在列清单），无 PARTITION BY 子句。
+
+    能力矩阵 supports_partition=True——postgres 能承载分区键（作普通列），声明 False 会让
+    任何带分区键的表 guard() 报 error 而无法物化，那是错的；差别只在不建原生分区子表。
+    """
+    caps = get_adapter("postgres").capabilities()
+    assert caps.supports_partition is True
+    assert caps.supports_bucketing is False
+    ddl = get_adapter("postgres").render_create_table(_customer_table())
+    # 分区键 created_at 作为普通列存在，但没有 PARTITION BY 子句
+    assert '"created_at"' in ddl
+    assert "PARTITION" not in ddl
+
+
+def test_postgres_staging_and_swap_use_postgres_syntax():
+    """只换引号是不够的：postgres 的建表复制与改名语法都与基类默认不同。
+
+    真实跑一次物化才暴露的——``CREATE TABLE x LIKE y``（MySQL/Hive 写法）postgres 直接
+    报 "syntax error at or near LIKE"，整个 create_tables 任务红掉、下游全部 upstream_failed。
+    此前 M15 的 staging 只有 golden 断言、从未接到 DAG 运行时。
+    """
+    adapter = get_adapter("postgres")
+    table = _customer_table()
+    stg = adapter.render_create_staging(table, "run-1")
+    swap = adapter.render_swap(table, "run-1")
+    assert stg.startswith("CREATE TABLE IF NOT EXISTS")
+    assert "(LIKE " in stg and "INCLUDING ALL" in stg
+    assert '"' in stg and "`" not in stg
+    assert all("`" not in s for s in swap)
+    renames = [s for s in swap if "RENAME TO" in s]
+    assert len(renames) == 2
+    # RENAME TO 只接受裸名：新名不得带库前缀，否则 postgres 语法报错
+    for stmt in renames:
+        new_name = stmt.split("RENAME TO", 1)[1].strip().rstrip(";")
+        assert "." not in new_name, f"新名不该带库前缀：{new_name}"
+
+
+def test_postgres_alter_add_drop_modify():
+    """postgres 支持逐列增/删/改类型。"""
+    before = _customer_table()
+    after = _customer_table(
+        partition_key=None,  # 删掉 created_at 列，分区键随之清空（否则指向不存在的列）
+        columns=(
+            LogicalColumn("customer_id", "string", "identifier", "客户ID", nullable=False),
+            LogicalColumn("customer_name", "string", "attribute", "客户名称"),
+            # total_amount 从 decimal 改成纯 int（无 amount 语义干扰）→ NUMERIC→INTEGER
+            LogicalColumn("total_amount", "int", None, "累计成交额"),
+            LogicalColumn("email", "string", "attribute", "邮箱"),  # 新增
+            # 删除 is_vip / created_at
+        ),
+    )
+    stmts = get_adapter("postgres").render_alter(before, after)
+    joined = "\n".join(stmts)
+    assert 'ADD COLUMN "email" TEXT' in joined
+    assert 'DROP COLUMN "is_vip"' in joined
+    assert 'ALTER COLUMN "total_amount" TYPE' in joined
+
+
+def test_postgres_creates_schema_before_table():
+    """postgres 的「分层」是 schema，必须先建 schema 再建表。
+
+    没有这一句时，物化到一个新目标库会整批报 `schema "dim" does not exist`——
+    DDL 里 `"dim"."account"` 的前半段在 postgres 语义下是 schema，不是 database，
+    而它不会随建表自动出现。
+    """
+    table = LogicalTable(
+        name="account", database="dim", layer="dim",
+        columns=(LogicalColumn("id", "string", "identifier", "ID", nullable=False),),
+        constraints=(LogicalConstraint("primary_key", ("id",)),),
+    )
+    ddl = get_adapter("postgres").render_create_table(table)
+    assert 'CREATE SCHEMA IF NOT EXISTS "dim";' in ddl
+    assert ddl.index("CREATE SCHEMA") < ddl.index("CREATE TABLE"), "建 schema 必须在建表之前"
+
+
+def test_postgres_without_database_emits_no_schema_statement():
+    """没有分层（database 为空）时不该凭空造一个 schema。"""
+    table = LogicalTable(
+        name="account", database=None, layer="dim",
+        columns=(LogicalColumn("id", "string", "identifier", "ID", nullable=False),),
+    )
+    ddl = get_adapter("postgres").render_create_table(table)
+    assert "CREATE SCHEMA" not in ddl
+
+
+# ---------- 装载语句方言 ----------
+
+
+def test_hive_family_keeps_insert_overwrite():
+    """Hive 家族的写法不变——改动只针对没有 INSERT OVERWRITE 的标准 SQL 引擎。"""
+    for engine in ("hive", "doris", "starrocks", "iceberg"):
+        adapter = get_adapter(engine)
+        full = adapter.render_load("dim.customer", "SELECT 1", overwrite=True)
+        inc = adapter.render_load("dim.customer", "SELECT 1", overwrite=False)
+        assert full.startswith("INSERT OVERWRITE TABLE dim.customer"), engine
+        assert inc.startswith("INSERT INTO TABLE dim.customer"), engine
+
+
+def test_postgres_load_uses_truncate_insert():
+    """postgres 见到 INSERT OVERWRITE 直接语法报错，INSERT INTO 后也不能跟 TABLE。"""
+    adapter = get_adapter("postgres")
+    full = adapter.render_load("dim.customer", "SELECT 1", overwrite=True)
+    assert "INSERT OVERWRITE" not in full
+    assert full.startswith("TRUNCATE TABLE dim.customer;")
+    assert "INSERT INTO dim.customer" in full
+    inc = adapter.render_load("dim.customer", "SELECT 1", overwrite=False)
+    assert inc.startswith("INSERT INTO dim.customer")
+    assert "TRUNCATE" not in inc
+    assert "INSERT INTO TABLE" not in inc
+
+
+def test_clickhouse_load_uses_truncate_insert():
+    adapter = get_adapter("clickhouse")
+    full = adapter.render_load("dim.customer", "SELECT 1", overwrite=True)
+    assert full.startswith("TRUNCATE TABLE dim.customer;")
+    assert "INSERT OVERWRITE" not in full
+
+
+def test_map_type_strips_parameters_from_physical_types():
+    """带参数的原样类型要能命中：真实源给的是 INTEGER(11) / DECIMAL(21, 9)。
+
+    此前精确查表一个都命中不了，**整数列、金额列全被判成文本**落进数仓——数值语义
+    就此丢失，下游聚合要么报错要么按字符串比大小。日期类靠子串判断侥幸躲过，
+    数值类没这个运气。
+    """
+    for engine, integer, decimal in [
+        ("postgres", "INTEGER", "NUMERIC(18,4)"),
+        ("hive", "INT", "DECIMAL(18,4)"),
+        ("doris", "INT", "DECIMAL(18,4)"),
+        ("starrocks", "INT", "DECIMAL(18,4)"),
+        ("iceberg", "INT", "DECIMAL(18,4)"),
+    ]:
+        adapter = get_adapter(engine)
+        assert adapter.map_type("INTEGER(11)", None) == integer, engine
+        assert adapter.map_type("DECIMAL(21, 9)", "amount") == decimal, engine
+        # 无参数的写法行为不变
+        assert adapter.map_type("integer", None) == integer, engine

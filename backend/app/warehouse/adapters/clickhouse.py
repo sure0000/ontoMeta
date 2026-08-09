@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from app.warehouse.adapters.base import DialectAdapter
+from app.warehouse.adapters.base import DialectAdapter, base_type
 from app.warehouse.capabilities import Capabilities, ConstraintSupport
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
 
@@ -60,7 +60,9 @@ class ClickHouseAdapter(DialectAdapter):
 
     def map_type(self, data_type: str | None, semantic_type: str | None) -> str:
         """本体类型 → ClickHouse 基础类型（不含 Nullable 包裹，包裹在渲染时决定）。"""
-        dt = (data_type or "").lower()
+        # 去参数再判：INTEGER(11) / DECIMAL(21, 9) 这类原样类型精确查表命中不了，
+        # 会被整体误判成文本列（见 base.base_type）。
+        dt = base_type(data_type)
         st = (semantic_type or "").lower()
         if st == "date" or dt == "date":
             return "Date"
@@ -171,6 +173,14 @@ class ClickHouseAdapter(DialectAdapter):
             flags=re.IGNORECASE,
         )
         return re.sub(r"CURDATE\(\)", "today()", sql, flags=re.IGNORECASE)
+
+    def render_load(self, target: str, select_body: str, *, overwrite: bool) -> str:
+        """ClickHouse 同样没有 ``INSERT OVERWRITE``：覆盖装载 = ``TRUNCATE`` + ``INSERT``。
+
+        ⚠ 与建表能力矩阵同理，未在真实实例逐项核实（``verified=False``）。
+        """
+        insert = f"INSERT INTO {target}\n{select_body};"
+        return f"TRUNCATE TABLE {target};\n{insert}" if overwrite else insert
 
     def render_create_staging(self, table: LogicalTable, run_id: str) -> str:
         """ClickHouse 无 ``CREATE TABLE LIKE``；``CREATE TABLE ... AS <orig>`` 复制结构建空表。"""

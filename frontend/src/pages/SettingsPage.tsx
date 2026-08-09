@@ -25,7 +25,6 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PrincipalsPanel } from "../components/PrincipalsPanel";
 import { ExternalToolsPanel } from "../components/ExternalToolsPanel";
-import { AirflowSettingsPanel } from "../components/AirflowSettingsPanel";
 import { DependencyPanel } from "../components/DependencyPanel";
 import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
@@ -178,17 +177,6 @@ export function SettingsPage() {
               <div className="om-tab-stack">
                 <SectionCard title="依赖组件部署管理" icon={<ApiOutlined />}>
                   <DependencyPanel />
-                </SectionCard>
-                <SectionCard title="Airflow 编排参数" icon={<ApiOutlined />}>
-                  <Text
-                    type="secondary"
-                    style={{ display: "block", marginBottom: 16, fontSize: 13 }}
-                  >
-                    Airflow 与 sync-runner 的连接（endpoint/认证）、物化编排的
-                    专有参数（DAG 投递目录、执行通道、DAG 形状与时序）、以及搬运连接凭据都在此集中管理。
-                    DataHub/Cube/LLM 等其他依赖组件在上方通用面板管理。
-                  </Text>
-                  <AirflowSettingsPanel />
                 </SectionCard>
               </div>
             ),

@@ -120,13 +120,18 @@ def validate_ontology(db: Session, ontology_id: str) -> list[ValidationIssue]:
             else:
                 seen[prop.name] = prop.id
 
-    # 关系端点必须存在且属于本本体
+    # 关系端点必须存在且属于本本体。
+    # 外键关系(structure_type=foreign_key)是列上的声明，不是独立实体，允许同名
+    # （同一对象上可能有多条同名的列级外键声明）；其余结构类型的关系作为独立实体，
+    # 标识在本体内必须唯一。物化侧(materialization_contract)亦把外键判为不物化，
+    # 故外键不会成为物化源表，这里也不必以唯一性约束它。
     relations = (
         db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
     )
     seen_rel_names: dict[str, str] = {}
     for rel in relations:
-        if rel.name in seen_rel_names:
+        is_foreign_key = (rel.structure_type or "") == "foreign_key"
+        if not is_foreign_key and rel.name in seen_rel_names:
             issues.append(
                 ValidationIssue(
                     code="duplicate_relation_name",

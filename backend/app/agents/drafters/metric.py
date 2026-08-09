@@ -11,11 +11,12 @@ MetricSpec 只是把已有的 BusinessLogic 翻译成可物化的规格。
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.agents.common import require_context, select_by_intent
+from app.agents.common import require_context, resolve_spec_engine, select_by_intent
 from app.agents.drafters.base import Drafter
 from app.database import SessionLocal
 from app.models import (
@@ -27,6 +28,66 @@ from app.models import (
     Property,
 )
 from app.models.warehouse import TargetKind
+
+
+def _walk_refs(node: Any, out: list[str]) -> None:
+    """收集一棵表达式子树里出现的全部 ``ref`` id（过滤条件可以任意嵌套 and/or）。"""
+    if isinstance(node, dict):
+        ref = node.get("ref")
+        if isinstance(ref, str):
+            out.append(ref)
+        for value in node.values():
+            _walk_refs(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_refs(value, out)
+
+
+def _roles_from_expression(logic: BusinessLogic) -> dict[str, list[str]]:
+    """形式化口径（``expression_json``）→ 与绑定表同形的角色字典。
+
+    口径的 AST 自带 refs（对象名 + 属性名）与 body（聚合谁、按什么分组、过滤什么），
+    信息量不少于绑定表。没有 AST 或结构不合法时返回空 dict——不猜。
+    """
+    if not logic.expression_json:
+        return {}
+    try:
+        ast = json.loads(logic.expression_json)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(ast, dict):
+        return {}
+    refs = {
+        str(r.get("ref_id")): r
+        for r in (ast.get("refs") or [])
+        if isinstance(r, dict) and r.get("ref_id")
+    }
+    if not refs:
+        return {}
+    body = ast.get("body") if isinstance(ast.get("body"), dict) else {}
+
+    def names(ref_ids: list[str], key: str) -> list[str]:
+        return sorted({
+            str(refs[r][key]) for r in ref_ids if r in refs and refs[r].get(key)
+        })
+
+    measure_ids: list[str] = []
+    _walk_refs(body.get("args") or [], measure_ids)
+    group_ids: list[str] = []
+    _walk_refs(body.get("group_by") or [], group_ids)
+    filter_ids: list[str] = []
+    _walk_refs(body.get("filter"), filter_ids)
+    # 主对象 = 被聚合的那个属性所在的对象；纯计数口径（无 args）退回首个 ref。
+    subject_ids = measure_ids or list(refs)[:1]
+    return {
+        "object_types": names(list(refs), "object_name"),
+        "subject_objects": names(subject_ids, "object_name"),
+        "dimension_objects": names(group_ids, "object_name"),
+        "properties": names(list(refs), "property_name"),
+        "group_by": names(group_ids, "property_name"),
+        "filters": names(filter_ids, "property_name"),
+        "inputs": names(measure_ids, "property_name"),
+    }
 
 
 class MetricDrafter(Drafter):
@@ -111,11 +172,7 @@ class MetricDrafter(Drafter):
         for binding, prop in prop_bindings:
             by_role.setdefault(binding.role, []).append(prop.name)
 
-        return {
-            "metric_name": logic.name,
-            "display_name": logic.display_name,
-            "business_logic_id": logic.id,
-            "expression": logic.expression_summary or "",
+        roles = {
             "object_types": sorted({o.name for _, o in obj_bindings}),
             "subject_objects": sorted(
                 {o.name for b, o in obj_bindings if b.role == "subject"}
@@ -127,8 +184,28 @@ class MetricDrafter(Drafter):
             "group_by": sorted(set(by_role.get("group", []))),
             "filters": sorted(set(by_role.get("filter", []))),
             "inputs": sorted(set(by_role.get("input", []))),
-            "engine": context.get("engine") or (contract.engines[0] if contract and contract.engines else "hive"),
-            "target_layer": contract.target_layer if contract else "ads",
+        }
+        # 一条绑定都没有，但口径已经形式化了 → 从 expression_json 的 refs 反推。
+        # 形式化口径本身就写明了「聚合哪个对象的哪个属性、按什么分组、过滤什么」，
+        # 比绑定表更权威（编译器 metric_compiler 正是照它生成 SQL）。此前只看绑定表，
+        # 于是一条编译得出 SQL 的口径照样被判「未绑定主对象」，指标任务卡在校验、
+        # 一次都执行不了。
+        if not roles["object_types"]:
+            roles.update(_roles_from_expression(logic))
+
+        return {
+            "metric_name": logic.name,
+            "display_name": logic.display_name,
+            "business_logic_id": logic.id,
+            "expression": logic.expression_summary or "",
+            **roles,
+            # 见 sync.py 同名字段：引擎随目标数据源走，不取契约默认。
+            "engine": resolve_spec_engine(db, context, contract),
+            # 见 sync.py 同名字段：缺它执行器只渲染 DDL+SQL 不落库。
+            "target_datasource_id": context.get("target_datasource_id") or None,
+            # 表单显式选的层优先（此前一律取契约，表单里选的层被静默丢弃）。
+            "target_layer": context.get("target_layer")
+            or (contract.target_layer if contract else "ads"),
             "database_prefix": context.get("database_prefix"),
             "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming（metric 允许 streaming）
         }

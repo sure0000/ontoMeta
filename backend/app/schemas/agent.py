@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 
 class ArtifactDraftRequest(BaseModel):
-    kind: str = Field(description="cluster / sync / transform / metric / materialize")
+    kind: str = Field(description="sync / transform / metric / materialize")
     # 意图驱动路径必填；给了 spec 的手动结构化路径可空。
     intent: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
@@ -17,6 +17,18 @@ class ArtifactDraftRequest(BaseModel):
     # 表单起草走 context+drafter 派生路径但仍是**用户发起**：置 True 让溯源标 user，
     # 而非默认的 machine（对话/机器起草）。spec 直填路径恒为 user，不看此标。
     user_created: bool = False
+
+
+class ArtifactEditRequest(BaseModel):
+    """编辑草稿/已校验/失败态的制品。给 spec 走直填覆盖，给 intent/context 走
+    drafter 重新派生——与 draft() 的两条路径语义一致，不做字段级 patch（制品的
+    spec 是整体派生/直填的产物，混合新旧字段会产生不一致态）。"""
+
+    name: str | None = None
+    intent: str | None = None
+    context: dict[str, Any] | None = None
+    spec: dict[str, Any] | None = None
+    ontology_id: str | None = None
 
 
 class ArtifactConfirmRequest(BaseModel):
@@ -58,7 +70,7 @@ class AgentKindsOut(BaseModel):
 class PipelineStepInput(BaseModel):
     """建链时的一步：**只描述打算做什么**，制品要等轮到它才起草。"""
 
-    kind: str = Field(description="materialize / sync / transform / metric / cluster")
+    kind: str = Field(description="materialize / sync / transform / metric")
     intent: str
     context: dict[str, Any] = Field(default_factory=dict)
 

@@ -23,6 +23,8 @@ _TOKEN = re.compile(r"\b(?:ONTOMETA|SYNC|AIRFLOW)_[A-Z0-9_]{2,}\b")
 _FOREIGN = {
     # Airflow 自己的配置项（双下划线是它的层级分隔符），提示里教用户改 Airflow。
     "AIRFLOW__API__AUTH_BACKENDS",
+    "AIRFLOW__WEBSERVER__WEB_SERVER_PORT",
+    "AIRFLOW_HOME",
     # runner 侧的环境变量，由 sync_runner/ 定义，不在后端 Settings 里。
     "SYNC_CONN_",
     "SYNC_SECRETS_DIR",

@@ -262,8 +262,8 @@ def test_etl_falls_back_to_same_column_name(client, admin_headers):
     # 缺省同步方式 = full → INSERT OVERWRITE（正向生成既有行为不变）。
     assert "INSERT OVERWRITE TABLE dim_erp.customer" in sql
     assert "`customer_id` AS `customer_id`" in sql
-    # 源表由 source_ref(URN) 解析而来
-    assert "FROM erp_ods.tab_customer;" in sql
+    # 源表由 source_ref(URN) 解析而来，且逐段加引号（库名/表名各自引用）
+    assert "FROM `erp_ods`.`tab_customer`;" in sql
 
 
 def test_etl_load_strategy_incremental(client, admin_headers):
@@ -290,6 +290,34 @@ def test_etl_load_strategy_incremental(client, admin_headers):
     ).json()
     assert cdc["statements"]["dim_erp.customer"].startswith("INSERT OVERWRITE TABLE")
     assert any(w["feature"] == "cdc" for w in cdc["warnings"])
+
+
+def test_etl_quotes_source_table_with_space(client, admin_headers):
+    """真实源的表名带空格（Frappe 的 ``tabAccount Category``）——不引用就是废 SQL。
+
+    ERP 域里这类名字占比很高，此前生成的 ``FROM db.tabAsset Repair Purchase Invoice``
+    任何引擎都解析不了，却一路走到「执行成功」。
+    """
+    ids = _seed("etlspace")
+    with SessionLocal() as db:
+        obj = ObjectType(
+            ontology_id=ids["ontology_id"], name="account_category",
+            display_name="账户分类", table_role="business_object",
+            source_ref=_URN.format(table="tabAccount Category"),
+        )
+        db.add(obj)
+        db.flush()
+        db.add(Property(object_type_id=obj.id, name="name", display_name="名称",
+                        data_type="varchar", semantic_type="identifier"))
+        db.commit()
+    _sync(client, admin_headers, ids["ontology_id"])
+    stmts = client.get(
+        f"/api/ontologies/{ids['ontology_id']}/warehouse/etl",
+        headers=admin_headers, params={"database_prefix": "erp"},
+    ).json()["statements"]
+    sql = next(v for k, v in stmts.items() if k.endswith("account_category"))
+    assert "FROM `erp_ods`.`tabAccount Category`" in sql
+    assert "FROM erp_ods.tabAccount Category" not in sql
 
 
 def test_etl_skips_ads_layer(client, admin_headers):
@@ -444,3 +472,104 @@ def test_missing_ontology_returns_404(client, admin_headers):
         "/api/ontologies/nope/warehouse/ddl", headers=admin_headers
     )
     assert resp.status_code == 404
+
+
+# ---------- 两段式 DDL（postgres 真外键） ----------
+
+
+def test_postgres_foreign_keys_are_separate_statements(client, admin_headers):
+    """postgres 的外键不进建表语句，改由 constraints 段在建表后补。
+
+    内联时被引用表必须先存在，于是「只物化一部分」和「本体里有环」都建不出来。
+    """
+    ids = _seed("pgfk")
+    _sync(client, admin_headers, ids["ontology_id"])
+    body = client.get(
+        f"/api/ontologies/{ids['ontology_id']}/warehouse/ddl",
+        headers=admin_headers,
+        params={"engine": "postgres", "database_prefix": "erp"},
+    ).json()
+
+    create = body["statements"]["dim_erp.sales_order"]
+    assert "FOREIGN KEY" not in create, "外键不该内联进建表语句"
+    # schema 也要先建，否则 "dim_erp"."sales_order" 无处落
+    assert 'CREATE SCHEMA IF NOT EXISTS "dim_erp";' in create
+
+    # 外键列真的在表上时才产约束；种子里若无该列，则应在 warnings 里说明而不是静默消失
+    fks = body["constraints"].get("dim_erp.sales_order")
+    if fks:
+        assert any(c["ref"] == "dim_erp.customer" for c in fks)
+        assert all("ADD CONSTRAINT" in c["sql"] for c in fks)
+    else:
+        assert any(
+            w["feature"] in ("foreign_key_column_missing", "foreign_key_out_of_scope")
+            and w["target"] == "dim_erp.sales_order"
+            for w in body["warnings"]
+        ), "外键既没产出、也没报原因——这就是静默降级"
+
+
+def test_foreign_key_on_missing_column_is_dropped_with_warning(client, admin_headers):
+    """外键列不在表上时不得产出约束——那在任何引擎上都是非法 DDL，且必须报出来。
+
+    关系投影按「被引用实体名_id」推列名，真实源表（Frappe 系 ERP）并无此列：
+    真实 ERP 本体里 dim.account 的 5 条外键没有一条命中它自己的 29 个列。
+    此前这些外键内联在 CREATE TABLE 里，被更早的报错盖住了。
+    """
+    ids = _seed("pgfkmiss")
+    _sync(client, admin_headers, ids["ontology_id"])
+    body = client.get(
+        f"/api/ontologies/{ids['ontology_id']}/warehouse/ddl",
+        headers=admin_headers,
+        params={"engine": "postgres", "database_prefix": "erp"},
+    ).json()
+
+    # 造不出「列缺失」的种子时此用例无意义，故只在确有该 warning 时断言其形状
+    missing = [w for w in body["warnings"] if w["feature"] == "foreign_key_column_missing"]
+    for w in missing:
+        target = w["target"]
+        # 被丢掉的外键绝不能同时出现在 constraints 里
+        assert not any(
+            "ADD CONSTRAINT" in c["sql"] and w["detail"].split("→")[1].split("未创建")[0].strip() in c["sql"]
+            for c in body["constraints"].get(target, [])
+        )
+
+
+def test_uncertain_primary_key_is_not_enforced(client, admin_headers):
+    """猜出来的身份属性不发强制约束。
+
+    ERP 的 bank 表没有 bank_id，多个 *_id 里按字典序挑中了 custom_enterprise_seed_external_id
+    ——一个自定义扩展字段，既不唯一也大量为空。postgres 把它建成真 PRIMARY KEY 之后，
+    这张表永远装不进数据（duplicate key / not-null violation），一条没把握的推断变成了硬失败。
+    """
+    ids = _seed("pkguess")
+    with SessionLocal() as db:
+        obj = ObjectType(
+            ontology_id=ids["ontology_id"], name="bank", display_name="银行",
+            table_role="business_object", source_ref=_URN.format(table="tabBank"),
+        )
+        db.add(obj)
+        db.flush()
+        # 唯一的 identifier 候选，但它不叫 bank_id/id——「只有这一个」不等于「它唯一」。
+        # 真实 ERP 的 bank 就是这样：只有 custom_enterprise_seed_external_id 一个候选，
+        # 而它既不唯一也大量为空。
+        db.add_all([
+            Property(object_type_id=obj.id, name="custom_external_id", display_name="外部ID",
+                     data_type="varchar", semantic_type="identifier"),
+            Property(object_type_id=obj.id, name="bank_name", display_name="名称",
+                     data_type="varchar", semantic_type="attribute"),
+        ])
+        db.commit()
+    _sync(client, admin_headers, ids["ontology_id"])
+    body = client.get(
+        f"/api/ontologies/{ids['ontology_id']}/warehouse/ddl",
+        headers=admin_headers, params={"engine": "postgres"},
+    ).json()
+    ddl = next(v for k, v in body["statements"].items() if k.endswith("bank"))
+    assert "PRIMARY KEY" not in ddl
+    # 但必须说清为什么没建，不能静默
+    notes = [u for u in body["unsupported"] if "bank" in u["target"]]
+    assert any("未生成强制主键" in u["reason"] for u in notes), notes
+
+    # 对照：约定命中（customer_id）时仍然建主键
+    customer_ddl = next(v for k, v in body["statements"].items() if k.endswith("customer"))
+    assert "PRIMARY KEY" in customer_ddl

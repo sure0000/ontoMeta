@@ -221,6 +221,9 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     name: str
     display_name: str
     description: str | None = None
+    # 源表定位（DataHub urn）。列表里带上它，是因为「能不能建同步任务」等价于
+    # 「有没有 source_ref」——不给前端就只能让人选完提交才在 drafter 里被拒。
+    source_ref: str | None = None
     status: str
     property_count: int = 0
     relation_count: int = 0

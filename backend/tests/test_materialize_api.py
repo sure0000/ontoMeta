@@ -66,6 +66,17 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
             pass
 
     monkeypatch.setattr(materialization_runner, "AirflowClient", _FakeClient)
+
+    # 提交前 preflight（P2 强制闸门）会真连 Airflow 核实可达性/连接；本用例只替身了
+    # runner 通道的客户端，preflight 自有一套 AirflowClient。这里桩掉 preflight 直接放行——
+    # 本用例验证的是「环境就绪时端到端跑通」，preflight 本身另有 test_materialize_preflight.py 覆盖。
+    from app.services import materialize_preflight
+
+    monkeypatch.setattr(
+        materialize_preflight,
+        "run_preflight",
+        lambda *a, **kw: materialize_preflight.PreflightReport(items=[]),
+    )
     client.put(
         "/api/settings/airflow",
         headers=admin_headers,

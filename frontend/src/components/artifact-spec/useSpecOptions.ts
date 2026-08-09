@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api";
-import {
-  BM_MANAGED_SERVICES,
-  CLEANSING_RULES,
-  type OptionSource,
-} from "./specFields";
+import { CLEANSING_RULES, type OptionSource } from "./specFields";
 
 export interface SelectOption {
   value: string;
@@ -47,10 +43,6 @@ export function useSpecOptions(
     }
     if (optionSource.kind === "cleansingRules") {
       setOptions(CLEANSING_RULES);
-      return;
-    }
-    if (optionSource.kind === "bmServices") {
-      setOptions(BM_MANAGED_SERVICES);
       return;
     }
 

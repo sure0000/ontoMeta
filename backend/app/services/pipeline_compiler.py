@@ -205,7 +205,10 @@ def _validate_ready_to_compile(steps: list[dict], artifacts: dict[str, Governanc
             raise PipelineCompileError(
                 f"第 {step['step_index'] + 1} 步的制品 {artifact_id} 不存在"
             )
-        if artifact.status != ArtifactStatus.CONFIRMED.value:
+        if artifact.status not in (
+            ArtifactStatus.CONFIRMED.value,
+            ArtifactStatus.SUCCEEDED.value,
+        ):
             raise PipelineCompileError(
                 f"第 {step['step_index'] + 1} 步（{step['kind']}）尚未确认"
                 f"（当前 {artifact.status}），编译前请先确认"
@@ -215,8 +218,15 @@ def _validate_ready_to_compile(steps: list[dict], artifacts: dict[str, Governanc
                 f"第 {step['step_index'] + 1} 步（{step['kind']}）尚未执行过，"
                 "编译前请先执行一次验证 spec 可行"
             )
-        # spec 变更检测：updated_at > confirmed_at 说明确认后又改了
-        if artifact.confirmed_at and artifact.updated_at > artifact.confirmed_at:
+        # spec 变更检测：updated_at > confirmed_at 说明确认后又改了。
+        # 仅对 confirmed（未执行）态生效——succeeded 的 updated_at bump 来自 execute() 写
+        # 回执/状态，不是 spec 变更；而 edit() 对 confirmed/succeeded 一律拒改（409），
+        # 故执行后 spec 根本改不动，此检测对 succeeded 是纯误报。
+        if (
+            artifact.status == ArtifactStatus.CONFIRMED.value
+            and artifact.confirmed_at
+            and artifact.updated_at > artifact.confirmed_at
+        ):
             raise PipelineCompileError(
                 f"第 {step['step_index'] + 1} 步（{step['kind']}）的 spec 在确认后发生变更，"
                 "请重新确认或重新编译"

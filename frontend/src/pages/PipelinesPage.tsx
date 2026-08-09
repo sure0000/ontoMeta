@@ -118,8 +118,8 @@ function PipelineDrawer({
         <Alert
           type="info"
           showIcon
-          message="任务链只管顺序与上下文传递"
-          description="每一步仍是独立制品，各自走校验 → dry-run → 人工确认 → 执行；故无「一键跑完整条链」。起草下一步与设置调度在 Data Agent 对话里发起。"
+          message="关于任务编排"
+          description="任务编排管理多个任务的执行顺序和上下文传递。每一步仍是独立任务，需要分别进行校验、确认和执行。可在 Data Agent 中创建新的编排或设置调度。"
         />
         {pipeline.next_blocked_reason && (
           <Alert type="warning" showIcon message={pipeline.next_blocked_reason} />
@@ -219,11 +219,11 @@ export function PipelinesPage() {
     <PageContainer>
       <PageHeader
         icon={<ApartmentOutlined />}
-        title="任务链"
-        description="把「物化 → 清洗 → 聚合」这类前后相继的任务串起来管理与追踪。"
+        title="任务编排"
+        description="串联多个任务形成数据处理流水线，如「物化 → 清洗 → 聚合」等复杂作业链。"
       />
       <SectionCard
-        title="任务链"
+        title="任务编排列表"
         icon={<ApartmentOutlined />}
         count={rows.length}
         extra={<Button icon={<ReloadOutlined />} onClick={() => void load()} />}
@@ -233,7 +233,7 @@ export function PipelinesPage() {
             type="error"
             showIcon
             message="需要 publisher 角色"
-            description="任务链隶属写侧治理智能体，/api/agents 整个命名空间仅 publisher 可访问。请用 publisher 或 ADMIN Token。"
+            description="任务编排需要 publisher 权限才能访问。请使用 publisher 或 ADMIN Token。"
           />
         ) : (
           <Table

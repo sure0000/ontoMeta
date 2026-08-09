@@ -1,6 +1,6 @@
-"""M6 四类 Drafter/Executor：④指标 → ③ETL → ①同步 → ⓪部署（风险由低到高）。
+"""M6 三类 Drafter/Executor：④指标 → ③ETL → ①同步（风险由低到高）。
 
-贯穿全部四类的两条约束：
+贯穿全部三类的两条约束：
 - **凭据不进 Spec**：只允许主机/数据源别名。
 - **ontoMeta 只生成、不执行**：执行器产出可部署产物并交接，不直接改集群。
 """
@@ -12,11 +12,9 @@ import uuid
 
 import pytest
 
-from app.agents.drafters.cluster import ClusterDrafter
 from app.agents.drafters.metric import MetricDrafter
 from app.agents.drafters.sync import SyncDrafter, decide_preservation
 from app.agents.drafters.transform import TransformDrafter
-from app.agents.executors.cluster import ClusterExecutor
 from app.agents.executors.metric import MetricExecutor
 from app.agents.executors.sync import SyncExecutor
 from app.agents.executors.transform import TransformExecutor
@@ -155,6 +153,92 @@ def test_metric_executor_is_idempotent(seeded):
     assert ex.execute(spec, {}) == ex.execute(spec, {})
 
 
+@pytest.fixture
+def formal_logic() -> dict:
+    """一条**已形式化但没有任何绑定**的口径——真实库里就是这个形状。
+
+    ``expression_summary`` 是给人看的中文摘要，``expression_json`` 才是权威 AST。
+    """
+    from app.models import EntityStatus
+
+    tag = uuid.uuid4().hex[:8]
+    pub = EntityStatus.PUBLISHED.value
+    with SessionLocal() as db:
+        domain = DomainContext(datahub_domain_id=f"urn:li:domain:fx-{tag}", name=f"fx-{tag}")
+        db.add(domain)
+        db.flush()
+        onto = Ontology(
+            domain_context_id=domain.id, status=OntologyStatus.PUBLISHED.value, version=1
+        )
+        db.add(onto)
+        db.flush()
+        order = ObjectType(
+            ontology_id=onto.id, name="order", display_name="订单",
+            table_role="business_object", status=pub,
+            source_ref=_URN.format(t="tab_order"),
+        )
+        db.add(order)
+        db.flush()
+        amount = Property(object_type_id=order.id, name="amount", display_name="金额",
+                          data_type="decimal", semantic_type="measure", status=pub)
+        status_prop = Property(object_type_id=order.id, name="status", display_name="状态",
+                               data_type="varchar", semantic_type="categorical", status=pub)
+        db.add_all([amount, status_prop])
+        db.flush()
+        logic = BusinessLogic(
+            ontology_id=onto.id, name="order_total", display_name="订单总额",
+            logic_type="metric", status=pub,
+            expression_summary="SUM(订单.金额)",
+            expression_json=json.dumps({
+                "type": "metric",
+                "refs": [{
+                    "ref_id": "r1", "object_type_id": order.id, "object_name": "order",
+                    "object_display_name": "订单", "property_id": amount.id,
+                    "property_name": "amount", "property_display_name": "金额",
+                }],
+                "body": {"operation": "sum", "args": [{"ref": "r1"}],
+                         "filter": None, "group_by": [], "window": None},
+            }, ensure_ascii=False),
+        )
+        db.add(logic)
+        db.commit()
+        return {"ontology_id": onto.id, "logic_id": logic.id}
+
+
+def test_metric_drafter_falls_back_to_formal_expression(formal_logic):
+    """口径已形式化就不该被判「未绑定主对象」——绑定表为空时从 AST 反推。
+
+    真实库里的 order_total 正是这样：AST 里写明了 SUM(order.amount)，绑定表却是空的，
+    于是四条指标任务全部卡在校验，一次都没执行过。
+    """
+    spec = MetricDrafter().draft(
+        "订单总额",
+        {"ontology_id": formal_logic["ontology_id"],
+         "business_logic_id": formal_logic["logic_id"]},
+    )
+    assert spec["subject_objects"] == ["order"]
+    assert spec["inputs"] == ["amount"]
+    assert spec["object_types"] == ["order"]
+
+
+def test_metric_executor_compiles_formal_caliber(formal_logic):
+    """聚合 SQL 由 metric_compiler 从 AST 编译，不再把中文口径摘要拼进 SQL。"""
+    spec = MetricDrafter().draft(
+        "订单总额",
+        {"ontology_id": formal_logic["ontology_id"],
+         "business_logic_id": formal_logic["logic_id"]},
+    )
+    out = MetricExecutor().execute(spec, {})
+    sql = out["sql"]
+    assert "SUM(订单.金额)" not in sql, "中文显示名不该出现在 SQL 里"
+    assert "SUM(" in sql and "amount" in sql
+    # 保留字 order 必须被引起来，否则任何引擎都解析不了
+    assert "`order`" in sql
+    assert "AS metric_value" in sql
+    # 写库场景不能带 LIMIT：那会把结果悄悄截断
+    assert "LIMIT" not in sql.upper()
+
+
 # ---------- ③ ETL ----------
 
 
@@ -187,9 +271,68 @@ def test_transform_executor_reuses_m3_generator(seeded):
     out = TransformExecutor().execute(spec, {})
     assert out["target_table"] == "dim_erp.customer"
     assert "INSERT OVERWRITE TABLE dim_erp.customer" in out["sql"]
-    assert "FROM erp_ods.tab_customer" in out["sql"]
+    # 源表名逐段引用（真实源里带空格的表名不引用就是废 SQL）
+    assert "FROM `erp_ods`.`tab_customer`" in out["sql"]
     assert out["applied_rules"] == ["deduplicate"]
+    # 该本体没声明主键 → 退回整行去重，且**明说**是整行，不冒充按主键
     assert "SELECT DISTINCT" in out["sql"]
+    assert any(
+        n["rule"] == "deduplicate" and "整行去重" in n["detail"]
+        for n in out["rule_notes"]
+    )
+
+
+def test_transform_deduplicates_by_primary_key(seeded):
+    """有主键就按主键去重——整行 DISTINCT 对带审计列的源表一行都去不掉。"""
+    with SessionLocal() as db:
+        obj = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == seeded["ontology_id"],
+                    ObjectType.name == "customer")
+            .one()
+        )
+        db.add(Property(object_type_id=obj.id, name="customer_id", display_name="客户ID",
+                        data_type="bigint", semantic_type="identifier", required=True))
+        db.commit()
+    spec = TransformDrafter().draft(
+        "客户表去重", {"ontology_id": seeded["ontology_id"], "target_table": "customer"}
+    )
+    out = TransformExecutor().execute(spec, {})
+    assert out["applied_rules"] == ["deduplicate"]
+    assert "ROW_NUMBER() OVER (PARTITION BY `customer_id`" in out["sql"]
+    assert "`__rn` = 1" in out["sql"]
+    assert "SELECT DISTINCT" not in out["sql"]
+
+
+def test_transform_drop_null_emits_predicate(seeded):
+    """drop_null 曾只挂在可应用集合里而没有任何实现：回执说已应用、SQL 里没有 WHERE。"""
+    with SessionLocal() as db:
+        obj = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == seeded["ontology_id"],
+                    ObjectType.name == "customer")
+            .one()
+        )
+        db.add(Property(object_type_id=obj.id, name="customer_id", display_name="客户ID",
+                        data_type="bigint", semantic_type="identifier", required=True))
+        db.commit()
+    spec = TransformDrafter().draft(
+        "客户表过滤空值", {"ontology_id": seeded["ontology_id"], "target_table": "customer"}
+    )
+    out = TransformExecutor().execute(spec, {})
+    assert out["applied_rules"] == ["drop_null"]
+    assert "WHERE `customer_id` IS NOT NULL" in out["sql"]
+
+
+def test_transform_drop_null_unapplied_without_keys(seeded):
+    """说不出滤哪几列就不假装应用——归 unapplied 并给出原因。"""
+    spec = TransformDrafter().draft(
+        "客户表过滤空值", {"ontology_id": seeded["ontology_id"], "target_table": "customer"}
+    )
+    out = TransformExecutor().execute(spec, {})
+    assert out["applied_rules"] == []
+    assert out["unapplied_rules"] == ["drop_null"]
+    assert "IS NOT NULL" not in out["sql"]
 
 
 def test_transform_reports_unapplied_rules(seeded):
@@ -244,6 +387,34 @@ def test_sync_executor_emits_stg_job_when_preserved(seeded):
     assert any(k.startswith("preserve_") for k in out["jobs"])
 
 
+def test_sync_incremental_appends_not_overwrites(seeded):
+    """增量读 + 覆盖写 = 拿一个时间切片把整表换掉，历史数据当场没了。"""
+    spec = SyncDrafter().draft(
+        "同步客户", {"ontology_id": seeded["ontology_id"], "object_type": "customer"}
+    )
+    assert spec["mode"] == "incremental"
+    job = json.loads(SyncExecutor().execute(spec, {})["jobs"]["sync_customer"])
+    assert job["sink"][0]["save_mode"] == "append"
+    # 全量才允许覆盖
+    full = dict(spec, mode="full")
+    full_job = json.loads(SyncExecutor().execute(full, {})["jobs"]["sync_customer"])
+    assert full_job["sink"][0]["save_mode"] == "overwrite"
+
+
+def test_sync_sink_plugin_follows_target_engine(seeded):
+    """目标是 postgres 却渲染 Hive sink，照着这份配置跑不起来。"""
+    spec = SyncDrafter().draft(
+        "同步客户",
+        {"ontology_id": seeded["ontology_id"], "object_type": "customer",
+         "engine": "postgres"},
+    )
+    job = json.loads(SyncExecutor().execute(spec, {})["jobs"]["sync_customer"])
+    assert job["sink"][0]["plugin"] == "Jdbc"
+    doris = dict(spec, engine="doris")
+    doris_job = json.loads(SyncExecutor().execute(doris, {})["jobs"]["sync_customer"])
+    assert doris_job["sink"][0]["plugin"] == "Doris"
+
+
 def test_sync_job_contains_alias_not_credentials(seeded):
     """作业配置里只能有数据源别名，不得出现连接串或口令。"""
     spec = SyncDrafter().draft(
@@ -267,82 +438,7 @@ def test_sync_refuses_object_without_source_ref(seeded):
         )
 
 
-# ---------- ⓪ 部署 ----------
-
-
-def test_cluster_drafter_produces_aliases_only():
-    spec = ClusterDrafter().draft(
-        "部署 hdfs yarn hive spark 三节点",
-        {"hosts": ["node-1", "node-2", "node-3"]},
-    )
-    assert spec["hosts"] == ["node-1", "node-2", "node-3"]
-    assert set(spec["services"]) >= {"hdfs", "yarn", "hive", "spark"}
-    assert spec["credential_ref"] == "cluster_ssh_default"
-    # Spec 里不得有任何明文凭据
-    blob = json.dumps(spec).lower()
-    for leak in ("password", "private_key", "secret"):
-        assert leak not in blob
-
-
-def test_cluster_drafter_rejects_credentials_in_context():
-    """凭据一旦进入上下文就拒绝——安全边界不能只靠事后扫描。"""
-    with pytest.raises(ValueError, match="不得包含凭据字段"):
-        ClusterDrafter().draft(
-            "部署 hdfs", {"hosts": ["n1"], "ssh_password": "hunter2"}
-        )
-
-
-def test_cluster_drafter_rejects_inline_credential_host():
-    with pytest.raises(ValueError, match="疑似内联凭据"):
-        ClusterDrafter().draft("部署 hdfs", {"hosts": ["root@n1:pass"]})
-
-
-def test_cluster_drafter_rejects_services_bm_cannot_manage():
-    """BM 管不了的组件在起草期就拒绝，好过跑到执行期失败。"""
-    with pytest.raises(ValueError, match="Bigtop Manager 不纳管"):
-        ClusterDrafter().draft(
-            "部署 dolphinscheduler", {"hosts": ["n1"], "services": ["dolphinscheduler"]}
-        )
-    with pytest.raises(ValueError, match="Bigtop Manager 不纳管"):
-        ClusterDrafter().draft("部署", {"hosts": ["n1"], "services": ["ranger"]})
-
-
-def test_cluster_executor_does_not_dispatch_without_explicit_opt_in():
-    """默认只产载荷并停在交接点，不发起真实调用——下发须显式 opt-in。"""
-    spec = ClusterDrafter().draft("部署 hdfs", {"hosts": ["n1", "n2"]})
-    out = ClusterExecutor().execute(spec, {})
-    assert out["dispatched"] is False
-    assert "allow_dispatch=true" in out["note"]
-    assert "非生产集群核实" in out["note"]
-    assert out["payload"]["credential_ref"] == "cluster_ssh_default"
-
-
-def test_cluster_dry_run_flags_irreversibility():
-    spec = ClusterDrafter().draft("部署 hdfs", {"hosts": ["n1"]})
-    diff = ClusterExecutor().dry_run(spec, {})
-    assert diff["irreversible"] is True
-    assert diff["host_count"] == 1
-    assert "不可自动回滚" in diff["side_effects"]
-
-
 # ---------- 与流水线的衔接 ----------
-
-
-def test_credential_ref_not_flagged_as_credential_leak(client, admin_headers):
-    """``credential_ref`` 是指向密钥存储的引用，正是鼓励的写法，Gate 须放行。"""
-    resp = client.post(
-        "/api/agents/draft",
-        headers=admin_headers,
-        json={"kind": "cluster", "intent": "部署 hdfs yarn", "context": {"hosts": ["n1"]}},
-    )
-    assert resp.status_code == 200, resp.text
-    aid = resp.json()["id"]
-    a = client.post(
-        f"/api/agents/artifacts/{aid}/validate", headers=admin_headers, json={}
-    ).json()
-    codes = {i["code"] for i in a["validation_report"]["issues"]}
-    assert "credential_in_spec" not in codes
-    assert a["status"] == "validated"
 
 
 def test_full_pipeline_for_metric(client, admin_headers, seeded):
@@ -369,21 +465,6 @@ def test_full_pipeline_for_metric(client, admin_headers, seeded):
     assert "SUM(amount)" in a["execution_receipt"]["sql"]
 
 
-def test_high_risk_cluster_requires_dry_run_before_confirm(client, admin_headers):
-    a = client.post(
-        "/api/agents/draft",
-        headers=admin_headers,
-        json={"kind": "cluster", "intent": "部署 hdfs", "context": {"hosts": ["n1"]}},
-    ).json()
-    assert a["is_high_risk"] is True
-    a = client.post(
-        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
-    ).json()
-    # 高危制品必须拿到 dry-run 差异才能 validated
-    assert a["validation_report"]["dry_run"]["irreversible"] is True
-    assert a["status"] == "validated"
-
-
 def test_invalid_intent_returns_400_not_500(client, admin_headers, seeded):
     """Drafter 对无效意图抛 ValueError —— 属输入问题，必须是 4xx 而非 500。"""
     resp = client.post(
@@ -397,16 +478,6 @@ def test_invalid_intent_returns_400_not_500(client, admin_headers, seeded):
     )
     assert resp.status_code == 400, resp.text
     assert "未在本体中找到匹配的业务逻辑" in resp.json()["detail"]
-
-
-def test_missing_context_returns_400(client, admin_headers):
-    resp = client.post(
-        "/api/agents/draft",
-        headers=admin_headers,
-        json={"kind": "cluster", "intent": "部署 hdfs", "context": {}},
-    )
-    assert resp.status_code == 400
-    assert "hosts" in resp.json()["detail"]
 
 
 # ---------- 任务链（多任务编排） ----------
@@ -478,3 +549,154 @@ def test_pipeline_with_unregistered_kind_is_501(client, admin_headers, seeded):
         },
     )
     assert resp.status_code == 501
+
+
+# ---------- P2：物化 executor 强制 preflight 闸门 ----------
+
+
+def test_materialize_executor_blocks_on_preflight_failure(monkeypatch, seeded):
+    """MaterializeExecutor.execute 提交前跑 preflight，有阻断项就抛异常拒绝执行。
+
+    保护 Data Agent 提交的物化制品：手动弹窗有前端闸门，但 agents/draft+execute
+    绕过弹窗，必须在 executor 侧兜底，否则产出连不上 runner/Airflow 的 DAG。
+    """
+    from unittest.mock import patch
+
+    from app.agents.executors.materialize import MaterializeExecutor
+    from app.services.materialize_preflight import PreflightItem, PreflightReport
+
+    # 构造一份含阻断项的 preflight 报告
+    bad_report = PreflightReport()
+    bad_report.add(
+        PreflightItem(
+            key="sync_runner",
+            label="sync-runner",
+            status="fail",
+            blocking=True,
+            detail="通道为 runner，但未配置 sync-runner 地址。",
+            next_step="设 SYNC_RUNNER_ENDPOINT 指向常驻 runner。",
+        )
+    )
+
+    spec = {
+        "ontology_id": seeded["ontology_id"],
+        "target_datasource_id": "ds-x",
+    }
+
+    with patch(
+        "app.services.materialization_runner.resolve_engine", return_value="hive"
+    ), patch(
+        "app.services.materialize_preflight.run_preflight", return_value=bad_report
+    ), patch(
+        "app.services.materialization_runner.run"
+    ) as mock_run:
+        executor = MaterializeExecutor()
+        with pytest.raises(RuntimeError, match="提交前自检发现"):
+            executor.execute(spec, {})
+        # 有阻断项时绝不能真去提交 DAG
+        mock_run.assert_not_called()
+
+
+def test_materialize_executor_proceeds_when_preflight_ok(monkeypatch, seeded):
+    """preflight 无阻断项时，executor 照常调 runner.run 提交。"""
+    from unittest.mock import patch
+
+    from app.agents.executors.materialize import MaterializeExecutor
+    from app.services.materialize_preflight import PreflightReport
+
+    ok_report = PreflightReport()  # 无 item → 无阻断失败 → ok
+
+    spec = {
+        "ontology_id": seeded["ontology_id"],
+        "target_datasource_id": "ds-x",
+    }
+
+    with patch(
+        "app.services.materialization_runner.resolve_engine", return_value="hive"
+    ), patch(
+        "app.services.materialize_preflight.run_preflight", return_value=ok_report
+    ), patch(
+        "app.services.materialization_runner.run", return_value={"ok": True}
+    ) as mock_run:
+        executor = MaterializeExecutor()
+        receipt = executor.execute(spec, {"artifact_id": "art-1"})
+        assert receipt == {"ok": True}
+        mock_run.assert_called_once()
+
+
+def test_engine_follows_target_datasource_not_contract(seeded):
+    """选了 postgres 目标仓，产出的就该是 postgres 方言——此前一律取契约默认 hive，
+    于是同步/清洗任务对着 postgres 连接产 Hive DDL 与 Hive sink，建表那步必挂。"""
+    from app.models import DataSource
+
+    with SessionLocal() as db:
+        db.add(DataSource(id="ds-pg-eng", name="pg-eng", kind="postgres",
+                          dsn_secret_ref="postgresql://x/y"))
+        db.commit()
+    try:
+        ctx = {"ontology_id": seeded["ontology_id"], "object_type": "customer",
+               "target_datasource_id": "ds-pg-eng"}
+        assert SyncDrafter().draft("同步客户", ctx)["engine"] == "postgres"
+        assert TransformDrafter().draft(
+            "清洗客户", {**ctx, "target_table": "customer"}
+        )["engine"] == "postgres"
+        # 人显式选的仍然优先
+        assert SyncDrafter().draft("同步客户", {**ctx, "engine": "doris"})["engine"] == "doris"
+        # 没选目标数据源时行为不变（回退契约/缺省）
+        assert SyncDrafter().draft(
+            "同步客户", {"ontology_id": seeded["ontology_id"], "object_type": "customer"}
+        )["engine"] == "hive"
+    finally:
+        with SessionLocal() as db:
+            db.query(DataSource).filter(DataSource.id == "ds-pg-eng").delete()
+            db.commit()
+
+
+def test_transform_flink_declares_source_and_target_separately(seeded, monkeypatch):
+    """跨库由 Flink 承担：源表按**源库**声明、目标表按数仓声明，两个端点不能同一个别名。
+
+    此前两端都写死 warehouse_conn_id，背后是「sync 已把源搬进数仓 ODS 层」的假设，
+    而生成的 SQL 明明 FROM 原始源表——数仓根本看不见它，配上 Flink 也搬不动。
+    """
+    from app.models import DataSource
+
+    with SessionLocal() as db:
+        db.add(DataSource(id="ds-flink", name="pg-flink", kind="postgres",
+                          dsn_secret_ref="postgresql://x/y"))
+        db.commit()
+    captured: dict = {}
+
+    def _spy(**kwargs):
+        captured.update(kwargs)
+        return "-- flink sql --"
+
+    import app.agents.executors.transform as mod
+
+    monkeypatch.setattr(mod, "generate_flink_sql", _spy)
+    # 执行器在函数体内 import run_flink_sql，故要打在它的**定义处**
+    import app.services.flink_job_runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod, "run_flink_sql", lambda *a, **k: {"execute_mode": "handoff"}
+    )
+    try:
+        spec = TransformDrafter().draft(
+            "客户表去重",
+            {"ontology_id": seeded["ontology_id"], "target_table": "customer",
+             "target_datasource_id": "ds-flink"},
+        )
+        assert spec["source_ref_alias"] == "erp_readonly"
+        TransformExecutor().execute(spec, {})
+    finally:
+        with SessionLocal() as db:
+            db.query(DataSource).filter(DataSource.id == "ds-flink").delete()
+            db.commit()
+
+    assert captured, "generate_flink_sql 未被调用"
+    source, target = captured["source"], captured["target"]
+    assert source.alias == "erp_readonly"          # 源库别名
+    assert target.alias == "ontometa_ds_pg_flink"  # 数仓别名
+    assert source.alias != target.alias
+    # 两侧平台各归各的：源是源库的平台，目标是数仓引擎
+    assert source.platform == "mysql"
+    assert target.platform == "postgres"

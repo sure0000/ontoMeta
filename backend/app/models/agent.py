@@ -23,15 +23,16 @@ def _uuid() -> str:
 
 
 class ArtifactKind(str, enum.Enum):
-    CLUSTER = "cluster"  # 集群拓扑 → Bigtop Manager
     SYNC = "sync"  # 同步作业 → SeaTunnel
     TRANSFORM = "transform"  # ETL 任务 → Spark SQL
     METRIC = "metric"  # 指标任务 → 聚合 SQL
     MATERIALIZE = "materialize"  # 本体一键物化 → 目标数据源真正建表落数
 
 
-# 高危制品：执行不可逆或直接改动生产集群，必须展示 dry-run 差异后才可确认。
-HIGH_RISK_KINDS = frozenset({ArtifactKind.CLUSTER.value})
+# 高危制品：执行不可逆的制品必须展示 dry-run 差异后才可确认。
+# 目前为空——原唯一高危项 cluster（Bigtop Manager 部署）已移除。保留常量与
+# is_high_risk/流水线闸门接线不动：将来若要把 materialize 等列为高危，只需在此加回。
+HIGH_RISK_KINDS: frozenset[str] = frozenset()
 
 
 class ArtifactStatus(str, enum.Enum):
@@ -49,7 +50,7 @@ class GovernanceArtifact(Base, ProvenanceMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     kind: Mapped[str] = mapped_column(String(30), index=True)
     name: Mapped[str] = mapped_column(String(255), default="")
-    # 可选的本体归属：cluster 制品无本体，故不设外键约束。
+    # 可选的本体归属：部分制品（如手填 sync）可能无本体，故不设外键约束。
     ontology_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     spec_json: Mapped[str | None] = mapped_column(Text, nullable=True)

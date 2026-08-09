@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.agents.common import require_context, select_by_intent
+from app.agents.common import require_context, resolve_spec_engine, select_by_intent
 from app.agents.drafters.base import Drafter
 from app.connectors.datahub import _extract_dataset_name
 from app.database import SessionLocal
@@ -86,13 +86,19 @@ class SyncDrafter(Drafter):
                 "target": f"{database}.{target.name}",
                 "object_type": target.name,
                 "ontology_id": ontology_id,
+                # 目标数据源：执行器缺它就退回「只渲染作业配置、不真跑」。链上游会在
+                # execute 的 context 里传，但手工建的独立任务没有上游——不带进 Spec 的话
+                # 人在界面上选了目标仓也白选，任务会「成功」却什么都没搬。
+                "target_datasource_id": context.get("target_datasource_id") or None,
+                "database_prefix": prefix,
                 # 表单显式选的装载方式/分区键优先；否则回退契约，再回退默认。
                 "mode": context.get("mode")
                 or (contract.load_strategy if contract else "full"),
                 "partition_key": context.get("partition_key")
                 or (contract.partition_key if contract else None),
-                "engine": context.get("engine")
-                or (contract.engines[0] if contract and contract.engines else "hive"),
+                # 引擎随目标数据源走（人显式选的除外）：选了 postgres 目标仓却产
+                # Hive DDL/sink，建表那一步必挂。
+                "engine": resolve_spec_engine(db, context, contract),
                 "preservation": decide_preservation(intent, source_table),
                 # 凭据不入 Spec：只放连接别名（= Airflow conn_id），执行侧按别名取连接串。
                 # 默认值取 job_planner 的同一常量——三处各写各的 "erp_readonly" /

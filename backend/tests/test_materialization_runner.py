@@ -744,3 +744,78 @@ def test_datasource_without_dsn_raises(monkeypatch):
                 target_datasource_id=ids["datasource_id"],
                 engine="hive",
             )
+
+
+# ---------- 两段式 DDL：外键裁剪与分批 ----------
+
+
+def test_select_constraints_drops_refs_outside_selection():
+    """只物化一部分时，指向未勾选表的外键必须丢掉。
+
+    这是「选了 account_category 没选 account」当场整批红的那个 bug：postgres 加约束时
+    校验被引用表存在，不裁掉的话 add_constraints 任务必失败。
+    """
+    from app.services.materialization_runner import _select_constraints
+
+    constraints = {
+        "dim.account_category": [
+            {"ref": "dim.account", "sql": "ALTER ... account"},
+            {"ref": "dim.brand", "sql": "ALTER ... brand"},
+        ],
+    }
+    # 只建 account_category 和 brand，没建 account
+    ddl_items = [("dim.account_category", "CREATE ..."), ("dim.brand", "CREATE ...")]
+    out = _select_constraints(constraints, ddl_items)
+    assert out == {"dim.account_category": [{"ref": "dim.brand", "sql": "ALTER ... brand"}]}
+
+
+def test_select_constraints_keeps_all_when_both_ends_selected():
+    from app.services.materialization_runner import _select_constraints
+
+    constraints = {"dim.a": [{"ref": "dim.b", "sql": "S"}]}
+    ddl_items = [("dim.a", "CREATE a"), ("dim.b", "CREATE b")]
+    assert _select_constraints(constraints, ddl_items) == {"dim.a": [{"ref": "dim.b", "sql": "S"}]}
+
+
+def test_assign_ddl_defers_cross_batch_foreign_keys():
+    """跨批的外键不能下发：各批是独立 DAG、同时触发、彼此无先后。
+
+    下发了就可能在被引用表建出来之前执行。丢掉的要记进 constraints_deferred，
+    由回执报出去——不是静默降级。
+    """
+    from app.services.materialization_runner import _assign_ddl
+
+    batches = [
+        {"suffix": "c1", "schedule": "0 1 * * *", "jobs": ()},
+        {"suffix": "manual", "schedule": None, "jobs": ()},
+    ]
+    ddl_items = [("dim.a", "CREATE a"), ("dim.b", "CREATE b")]
+    # a 在 manual 批（孤儿 DDL 全归 manual），故 a→b 与 b→a 都是同批
+    constraints = {
+        "dim.a": [{"ref": "dim.b", "sql": "FK a->b"}],
+    }
+    out = _assign_ddl(batches, ddl_items, constraints)
+    manual = next(b for b in out if b["suffix"] == "manual")
+    assert manual["constraints"] == {"dim.a": ["FK a->b"]}
+    assert manual["constraints_deferred"] == []
+
+
+def test_assign_ddl_records_deferred_when_ref_in_other_batch(monkeypatch):
+    """被引用表落在别的批 → 该约束这次不建，并如实记进 constraints_deferred。"""
+    from types import SimpleNamespace
+
+    from app.services.materialization_runner import _assign_ddl
+
+    def _job(target):
+        return SimpleNamespace(target=SimpleNamespace(qualified=target))
+
+    batches = [
+        {"suffix": "c1", "schedule": "0 1 * * *", "jobs": (_job("dim.a"),)},
+        {"suffix": "c2", "schedule": "0 2 * * *", "jobs": (_job("dim.b"),)},
+    ]
+    ddl_items = [("dim.a", "CREATE a"), ("dim.b", "CREATE b")]
+    constraints = {"dim.a": [{"ref": "dim.b", "sql": "FK a->b"}]}
+    out = _assign_ddl(batches, ddl_items, constraints)
+    first = next(b for b in out if b["suffix"] == "c1")
+    assert first["constraints"] == {}
+    assert first["constraints_deferred"] == ["dim.a → dim.b"]

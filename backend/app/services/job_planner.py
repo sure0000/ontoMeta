@@ -103,6 +103,7 @@ class JobPlanner:
         table_overrides: dict[str, str] | None = None,
         selected_targets: list[str] | None = None,
         runner_capabilities: dict | None = None,
+        load_strategy: str | None = None,
     ) -> JobPlan:
         """产出搬运作业计划。
 
@@ -111,6 +112,10 @@ class JobPlanner:
         ``selected_targets`` 按**本体实体名**裁剪（不是物理表名，故改过表名也不会误裁）。
         ``runner_capabilities`` 给了则走 runner 通道的可搬性门禁（按执行侧实际能力判），
         为 None 则沿用 docker 通道的工具适配器门禁。
+
+        ``load_strategy``：**本次运行的全局装载方式覆盖**，缺省 None = 逐表按契约。
+        给了它，物化 Spec 上那个 ``load_strategy`` 才真的作数——此前它传到 runner
+        就没了，界面显示「全量覆盖」而作业按契约跑增量，两边说的不是一回事。
         """
         adapter = get_job_adapter(tool)
         logical = _generator.build_logical_schema(
@@ -152,7 +157,8 @@ class JobPlanner:
                 )
                 continue
 
-            mode = (table.load_strategy or "full").strip().lower()
+            # 显式覆盖 > 该表契约 > full。覆盖是「这一次这么跑」，不写回契约。
+            mode = (load_strategy or table.load_strategy or "full").strip().lower()
             # 可搬性门禁：runner 通道按执行侧 capabilities，docker 通道按工具适配器。
             if runner_capabilities is not None:
                 reason = _runner_reject(runner_capabilities, mode, platform, engine)

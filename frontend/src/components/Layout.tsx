@@ -37,7 +37,11 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
-  if (pathname.startsWith("/tasks/")) return pathname;
+  if (pathname.startsWith("/tasks/orchestration") || pathname.startsWith("/tasks/pipelines")) {
+    return "/tasks/orchestration";
+  }
+  if (pathname.startsWith("/tasks/connections")) return "/tasks/connections";
+  if (pathname.startsWith("/tasks")) return "/tasks";
   if (pathname.startsWith("/data-apps")) return "/data-apps";
   if (pathname.startsWith("/external-api/apps")) return "/external-api/apps";
   if (pathname.startsWith("/external-api/endpoints")) {
@@ -125,14 +129,11 @@ export function AppLayout() {
       {
         key: "/tasks",
         icon: <ProfileOutlined />,
-        label: "任务管理",
+        label: "任务中心",
         children: [
-          { key: "/tasks/materialize", label: "物化任务" },
-          { key: "/tasks/sync", label: "数据同步" },
-          { key: "/tasks/transform", label: "数据加工" },
-          { key: "/tasks/metric", label: "指标任务" },
-          { key: "/tasks/cluster", label: "集群拓扑" },
-          { key: "/tasks/pipelines", label: "任务链" },
+          { key: "/tasks", label: "📋 我的任务" },
+          { key: "/tasks/orchestration", label: "🔧 任务编排" },
+          { key: "/tasks/connections", label: "⚙️ 连接配置" },
         ],
       },
       { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },

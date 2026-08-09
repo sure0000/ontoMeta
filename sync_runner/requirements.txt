@@ -4,6 +4,13 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 sqlalchemy>=2.0
 pydantic>=2.6
+# 目标机可能是 macOS 自带的 python3（Xcode CLT = 3.9）：本包所有模块用 `str | None`
+# 这类 PEP 604 联合注解 + `from __future__ import annotations`（注解存为字符串）。
+# Pydantic v2 在类定义时延迟 eval 这些字符串注解，3.9 上 eval `'str | None'` 会抛
+# TypeError（Unable to evaluate type annotation）。装了 eval_type_backport 后 pydantic
+# 会自动用它把新语法回填到 3.9，无需改注解。3.10+ 上此包为 no-op。
+# ——治本仍是 ensure_python 卡 3.10+，见 install_platforms；此依赖是运行期兜底。
+eval_type_backport>=0.2
 # 数据库驱动：MariaDB/MySQL/Doris/StarRocks 走 MySQL 线协议（PyMySQL），Postgres 走 psycopg2。
 PyMySQL>=1.1
 psycopg2-binary>=2.9

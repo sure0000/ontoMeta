@@ -1,6 +1,6 @@
 # 物化编排验证栈：Airflow（调度 + 血缘上报）+ SeaTunnel（搬运）+ 可选 Doris（目标数仓）
 #
-# 本文件**只补齐本机缺的服务**。DataHub / ERPNext / Bigtop Manager 已在本机各自的 compose 里跑着，
+# 本文件**只补齐本机缺的服务**。DataHub / ERPNext 已在本机各自的 compose 里跑着，
 # 这里以 external network 接入，不重复起一套。
 #
 # 用法（仓库根目录）：
@@ -28,6 +28,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    # REST API 鉴权后端：2.x 默认只有 session（仅供 Web UI），basic_auth 不开则 /api/v1/* 一律 401。
+    # ontoMeta 用 admin/admin 走 basic auth 触发/回读 DagRun，必须显式加上 basic_auth 后端。
     # DataHub 血缘上报：插件按此 conn_id 找 GMS。conn 本身由 airflow-init 用 GMS 地址创建。
     AIRFLOW__DATAHUB__CONN_ID: datahub_rest_default
     AIRFLOW__DATAHUB__CAPTURE_EXECUTIONS: "true"

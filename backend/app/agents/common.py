@@ -61,3 +61,28 @@ def require_context(context: dict[str, Any], *keys: str) -> None:
     missing = [k for k in keys if not context.get(k)]
     if missing:
         raise ValueError(f"缺少必要上下文：{', '.join(missing)}")
+
+
+def resolve_spec_engine(db, context: dict[str, Any], contract: Any = None) -> str:
+    """Spec 该写哪个引擎（DDL/SQL 方言）。
+
+    优先级：**人显式选的 > 目标数据源的类型 > 契约默认 > hive**。
+
+    数据源必须压过契约：引擎决定的是产出什么方言的 DDL/作业，而数据最终落在哪个库是
+    由 ``target_datasource_id`` 说了算的。此前三类任务一律取契约（无契约则 hive），
+    于是选了 postgres 目标仓的同步任务照样产 Hive DDL 与 Hive sink，建表那一步必挂。
+
+    推定口径只有 ``materialization_runner.resolve_engine`` 一处（物化侧早已如此，
+    见 materialize drafter 的 "引擎不再进表单"），这里只是把同一口径接到另外三类任务上。
+    """
+    from app.services.materialization_runner import resolve_engine
+
+    explicit = context.get("engine")
+    if explicit:
+        return str(explicit)
+    target_datasource_id = context.get("target_datasource_id")
+    if target_datasource_id:
+        return resolve_engine(db, str(target_datasource_id), None)
+    if contract is not None and getattr(contract, "engines", None):
+        return contract.engines[0]
+    return "hive"

@@ -78,6 +78,29 @@ def primary_key_name(
     return identifiers[0] if identifiers else None
 
 
+#: 强到可以据以发强制约束的身份命名约定。除此之外都只是「像个 id 的列」。
+_CONFIDENT_PK_NAMES = ("{obj}_id", "id")
+
+
+def primary_key_is_confident(obj_name: str, prop_names, identifier_names) -> bool:
+    """这个身份属性是**命中命名约定**，还是只是「名字里有 id」。
+
+    只有 ``<对象名>_id`` / ``id`` 算数。**「全表只有这一个候选」不算**——候选少不等于
+    它唯一：ERP 的 bank 表只有 ``custom_enterprise_seed_external_id`` 一个标识语义字段
+    （一个自定义扩展字段），照样既不唯一也大量为空，建成主键后这张表一行都装不进。
+
+    真实源零 PK 声明、也没开 profiling（unique_count/row_count 全空），所以除了命名约定
+    没有别的证据可依。有了 profiling 之后，这里应改为「唯一值数 == 行数」的真证据判定。
+
+    有把握与否只决定**要不要发强制约束**：语义导航、去重这些用途照旧使用身份属性，
+    猜错顶多结果不准；而 postgres 建成真 PRIMARY KEY 后，猜错等于这张表永远装不进数据。
+    """
+    names = set(prop_names)
+    return any(
+        pattern.format(obj=obj_name) in names for pattern in _CONFIDENT_PK_NAMES
+    )
+
+
 def foreign_key_names(
     evidence: dict | None, *, target_name: str, target_pk: str | None
 ) -> tuple[str, str]:
@@ -295,6 +318,7 @@ __all__ = [
     "OntologyProjection",
     "build_projection",
     "primary_key_name",
+    "primary_key_is_confident",
     "foreign_key_names",
     "other_is_many",
     "DEFAULT_REF_COLUMN",

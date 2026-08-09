@@ -12,6 +12,7 @@ import pytest
 
 from app.services.flink_job_runner import FlinkJobError, run_flink_sql
 from app.services.airflow_dag_builder import FlinkSqlTask
+from app.services.dag_delivery import LocalFsDelivery
 
 
 @pytest.fixture
@@ -34,6 +35,9 @@ def test_without_runner_jar_returns_handoff_mode(db_mock):
     assert receipt["execute_mode"] == "handoff"
     assert "未配置 Flink SqlRunner JAR" in receipt["note"]
     assert "dag_run_id" not in receipt
+    # 「仅产出」必须真的产出东西：此前只给了几个从未落盘的文件名，人拿不到可执行的 SQL。
+    # 数据搬运一律走 Flink，那这条 Flink SQL 就是这个任务的交付物。
+    assert receipt["sql"] == {"clean": "INSERT INTO t SELECT 1;"}
 
 
 def test_without_airflow_raises(db_mock):
@@ -68,6 +72,9 @@ def test_with_runner_jar_writes_and_triggers(db_mock, tmp_path):
                 max_active_tasks_per_dag=16,
                 dag_parse_timeout=10.0,
             )
+            # 投递器要给**真的**：MagicMock 的 deliver() 什么都不写，落盘断言会变成空转
+            # （投递器是后加的 seam，这个用例当时没跟着更新）。
+            airflow.build_delivery.return_value = LocalFsDelivery()
             settings.get_airflow_runtime.return_value = airflow
             with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
                 client = MagicMock()

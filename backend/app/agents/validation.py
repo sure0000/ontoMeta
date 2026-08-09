@@ -76,17 +76,65 @@ def validate_spec(
 
     # 本体范围的制品：连带跑既有的发布前一致性校验（warning 级，不阻断制品本身）。
     if ontology_id and db.query(Ontology).filter(Ontology.id == ontology_id).first():
-        for issue in validate_ontology(db, ontology_id):
-            issues.append(
-                ValidationIssue(
-                    code="ontology_issue",
-                    message=f"本体一致性：{issue.message}",
-                    entity_type=issue.entity_type,
-                    entity_id=issue.entity_id,
-                    entity_name=issue.entity_name,
-                )
-            )
+        issues.extend(_scoped_ontology_issues(db, kind, spec, ontology_id))
     return issues
+
+
+def _artifact_entities(spec: dict[str, Any]) -> set[str]:
+    """这份 Spec 实际碰到的本体实体名。空集 = 碰整个本体（如未裁剪的全量物化）。"""
+    names: set[str] = set()
+    for key in ("object_type", "target_table"):
+        value = spec.get(key)
+        if isinstance(value, str) and value:
+            names.add(value)
+    for key in ("object_types", "subject_objects", "dimension_objects", "selected_targets"):
+        for value in spec.get(key) or ():
+            if isinstance(value, str) and value:
+                names.add(value)
+    return names
+
+
+def _scoped_ontology_issues(
+    db: Session, kind: str, spec: dict[str, Any], ontology_id: str
+) -> list[ValidationIssue]:
+    """本体一致性问题**只留与本制品相关的**，其余折成一条带计数的汇总。
+
+    由来：ERP 本体一次校验产出 188 条，其中 185 条是「某关系表未落地」这类与本次任务
+    毫不相干的存量问题。全量抄进每一份制品报告，等于把唯一那条真正该看的（如「指标未绑定
+    主对象」）埋进 185 条噪声里——人翻不到，也就不会去看。
+
+    折叠而不是丢弃：本体确实有那些问题，只是不该在这里逐条喊；给个数量和去处即可。
+    """
+    entities = _artifact_entities(spec)
+    scoped: list[ValidationIssue] = []
+    unrelated = 0
+    for issue in validate_ontology(db, ontology_id):
+        # 说不出碰了哪些实体（如全量物化）→ 本体的问题全都算数，一条不折。
+        if entities and issue.entity_name and issue.entity_name not in entities:
+            unrelated += 1
+            continue
+        scoped.append(
+            ValidationIssue(
+                code="ontology_issue",
+                message=f"本体一致性：{issue.message}",
+                entity_type=issue.entity_type,
+                entity_id=issue.entity_id,
+                entity_name=issue.entity_name,
+            )
+        )
+    if unrelated:
+        scoped.append(
+            ValidationIssue(
+                code="ontology_issue",
+                message=(
+                    f"本体一致性：另有 {unrelated} 条问题不涉及本任务的对象，已折叠"
+                    "（到本体页统一处理，不影响本任务执行）"
+                ),
+                entity_type="ontology",
+                entity_id=ontology_id,
+            )
+        )
+    return scoped
 
 
 def _check_engines(spec: dict[str, Any]) -> list[ValidationIssue]:
@@ -250,13 +298,14 @@ def _check_materialize_preflight(
         # 缺这两样另有 missing_required_field 报，不在这里重复喊一遍。
         return []
     from app.services.materialize_preflight import run_preflight
+    from app.services.materialization_runner import resolve_engine
 
     try:
         report = run_preflight(
             db,
             ontology_id,
             target_datasource_id=str(target_datasource_id),
-            engine=str(spec.get("engine") or "hive"),
+            engine=resolve_engine(db, str(target_datasource_id), spec.get("engine")),
             selected_targets=spec.get("selected_targets"),
         )
     except Exception as exc:  # noqa: BLE001 — 自检炸了不该把校验一起带走

@@ -20,6 +20,7 @@ from app.schemas import (
     AgentKindsOut,
     ArtifactConfirmRequest,
     ArtifactDraftRequest,
+    ArtifactEditRequest,
     ArtifactExecuteRequest,
     GovernanceArtifactOut,
     PipelineCompileOut,
@@ -42,7 +43,16 @@ def _loads(raw: str | None):
         return None
 
 
-def _to_out(a: GovernanceArtifact) -> GovernanceArtifactOut:
+def _to_out(a: GovernanceArtifact, *, live_state: dict | None = None) -> GovernanceArtifactOut:
+    """制品 → 输出 DTO。
+
+    ``live_state`` 是从 Airflow 实时回读的 DagRun 状态。当它存在且非终态时
+    (running/queued)，制品的 ``status`` 虽已置 succeeded（表示 DAG 提交成功），
+    但实际还在跑——此时输出 status 覆写为 ``executing``，使前端展示与 Airflow 一致。
+    """
+    effective_status = a.status
+    if live_state and not live_state.get("terminal", True):
+        effective_status = "executing"
     return GovernanceArtifactOut(
         id=a.id,
         kind=a.kind,
@@ -50,7 +60,7 @@ def _to_out(a: GovernanceArtifact) -> GovernanceArtifactOut:
         ontology_id=a.ontology_id,
         intent=a.intent,
         spec=_loads(a.spec_json) or {},
-        status=a.status,
+        status=effective_status,
         is_high_risk=a.is_high_risk,
         validation_report=_loads(a.validation_report_json),
         execution_receipt=_loads(a.execution_receipt_json),
@@ -100,7 +110,14 @@ def list_artifacts(
     rows = agent_pipeline.list_artifacts(
         db, kind=kind, status=status, ontology_id=ontology_id
     )
-    return [_to_out(a) for a in rows]
+    # P0a：列表端点也回读 live_state（只对 materialize，其他类型不需要轮询 Airflow）
+    out = []
+    for a in rows:
+        ls = _try_live_state(db, a) if a.kind == "materialize" else None
+        item = _to_out(a, live_state=ls)
+        item.live_state = ls
+        out.append(item)
+    return out
 
 
 @router.get("/agents/artifacts/{artifact_id}", response_model=GovernanceArtifactOut)
@@ -108,9 +125,10 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db)):
     artifact = agent_pipeline.get(db, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="制品不存在")
-    out = _to_out(artifact)
     # P1-6：best-effort 回读 DagRun 实时态（失败退制品 status，复用 chat_bi._live_task_state 逻辑）
-    out.live_state = _try_live_state(db, artifact)
+    ls = _try_live_state(db, artifact)
+    out = _to_out(artifact, live_state=ls)
+    out.live_state = ls
     return out
 
 
@@ -119,6 +137,9 @@ def _try_live_state(db: Session, artifact: GovernanceArtifact) -> dict | None:
 
     制品状态在 execute() 提交 DAG 后即置 succeeded，但 DAG 在 Airflow 里可能还在跑——
     故实时权威是 Airflow。复用 warehouse 的批次解析 + 状态聚合，读不到就返回 None。
+
+    **状态回写**：当 Airflow DagRun 已达终态时，把制品 status 同步到与 Airflow 一致
+    (success→succeeded, failed→failed)。这样即使后续 Airflow 不可达，制品状态也是对的。
     """
     try:
         from app.api.warehouse import _aggregate_state, _receipt_batches
@@ -154,7 +175,18 @@ def _try_live_state(db: Session, artifact: GovernanceArtifact) -> dict | None:
         agg = _aggregate_state(states)
         if not agg:
             return None
-        return {"live_state": agg, "terminal": is_terminal(agg), "run_url": run_url}
+        terminal = is_terminal(agg)
+        # 终态回写：让制品 status 与 Airflow 保持一致
+        if terminal and artifact.status == "succeeded":
+            from app.models.agent import ArtifactStatus
+            new_status = (
+                ArtifactStatus.SUCCEEDED.value if agg == "success"
+                else ArtifactStatus.FAILED.value
+            )
+            if new_status != artifact.status:
+                artifact.status = new_status
+                db.commit()
+        return {"live_state": agg, "terminal": terminal, "run_url": run_url}
     except Exception:  # noqa: BLE001 — 实时态是增强，读不到退回制品态，绝不炸 API
         return None
 
@@ -172,6 +204,26 @@ def draft_artifact(data: ArtifactDraftRequest, db: Session = Depends(get_db)):
             spec=data.spec,
             name=data.name,
             user_created=data.user_created,
+        )
+    )
+    return _to_out(artifact)
+
+
+@router.patch("/agents/artifacts/{artifact_id}", response_model=GovernanceArtifactOut)
+def edit_artifact(
+    artifact_id: str, data: ArtifactEditRequest, db: Session = Depends(get_db)
+):
+    """编辑草稿/已校验/失败态的制品。给 spec 直填、给 intent/context 走 drafter 重派生；
+    编辑后 status 打回 drafted，旧校验/确认记录一并清空。已确认/执行过的制品拒改（409）。"""
+    artifact = _guard(
+        lambda: agent_pipeline.edit(
+            db,
+            artifact_id,
+            name=data.name,
+            intent=data.intent,
+            context=data.context,
+            spec=data.spec,
+            ontology_id=data.ontology_id,
         )
     )
     return _to_out(artifact)

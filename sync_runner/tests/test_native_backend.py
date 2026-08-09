@@ -123,3 +123,68 @@ def test_columns_default_to_all_when_unmapped(tmp_path):
     spec.target.table = "cust"
     res = run_native(spec, source_url=src, target_url=tgt)
     assert res.rows_read == 3 and res.rows_written == 3
+
+
+def test_text_source_into_boolean_target_is_coerced(tmp_path):
+    """目标列类型由本体语义定（flag → BOOLEAN），源列却常是 TEXT——搬运负责转换。
+
+    此前一点转换都不做：建出来的布尔列装不下自己的源数据，每次都挂在
+    「Not a boolean value」上，报错还指向数据而不是那条语义判断。
+    """
+    from sqlalchemy import Boolean, Column, Integer, MetaData, Table
+
+    src = f"sqlite:///{tmp_path}/src2.db"
+    tgt = f"sqlite:///{tmp_path}/tgt2.db"
+    se, te = create_engine(src), create_engine(tgt)
+    with se.begin() as c:
+        c.execute(text("CREATE TABLE t (id INTEGER, flag TEXT)"))
+        c.execute(text("INSERT INTO t VALUES (1,'1'),(2,'0'),(3,'true')"))
+    meta = MetaData()
+    Table("t", meta, Column("id", Integer), Column("flag", Boolean))
+    meta.create_all(te)
+    se.dispose()
+
+    spec = WireJobSpec(
+        name="j",
+        source=WireEndpoint(alias="s", platform="sqlite", table="t"),
+        target=WireEndpoint(alias="t", platform="sqlite", table="t"),
+        columns=[WireColumn(source="id", target="id"),
+                 WireColumn(source="flag", target="flag")],
+        mode="full",
+    )
+    result = run_native(spec, source_url=make_url(src), target_url=make_url(tgt))
+    assert result.rows_written == 3
+    with te.connect() as c:
+        assert [r[0] for r in c.execute(text("SELECT flag FROM t ORDER BY id"))] == [1, 0, 1]
+    te.dispose()
+
+
+def test_unconvertible_value_fails_loudly(tmp_path):
+    """判不出真假的值不猜：静默塞 True 会把一次错误的语义判断变成一列错误的数据。"""
+    import pytest
+    from sqlalchemy import Boolean, Column, Integer, MetaData, Table
+
+    from sync_runner.backends.native import CoercionError
+
+    src = f"sqlite:///{tmp_path}/src3.db"
+    tgt = f"sqlite:///{tmp_path}/tgt3.db"
+    se, te = create_engine(src), create_engine(tgt)
+    with se.begin() as c:
+        c.execute(text("CREATE TABLE t (id INTEGER, flag TEXT)"))
+        c.execute(text('INSERT INTO t VALUES (1,\'["tag"]\')'))
+    meta = MetaData()
+    Table("t", meta, Column("id", Integer), Column("flag", Boolean))
+    meta.create_all(te)
+    se.dispose()
+
+    spec = WireJobSpec(
+        name="j",
+        source=WireEndpoint(alias="s", platform="sqlite", table="t"),
+        target=WireEndpoint(alias="t", platform="sqlite", table="t"),
+        columns=[WireColumn(source="id", target="id"),
+                 WireColumn(source="flag", target="flag")],
+        mode="full",
+    )
+    with pytest.raises(CoercionError, match="flag"):
+        run_native(spec, source_url=make_url(src), target_url=make_url(tgt))
+    te.dispose()

@@ -50,6 +50,7 @@ import type {
   MaterializationContractSyncResult,
   MaterializationContractUpdateInput,
   MaterializationTargetKind,
+  MaterializeTargetsResult,
   MaterializationRun,
   MaterializeRequestInput,
   MaterializeStatus,
@@ -769,6 +770,8 @@ export const api = {
     request<DependencySchema>("/api/settings/dependencies/schema"),
   listDependencies: () =>
     request<DependencyComponent[]>("/api/settings/dependencies"),
+  getDependency: (id: string) =>
+    request<DependencyComponent>(`/api/settings/dependencies/${id}`),
   createDependency: (body: {
     key: string;
     name?: string;
@@ -1262,6 +1265,10 @@ export const api = {
       })}`,
     ),
 
+  /** 物化任务选择树：每域一个工作本体 + 其可物化实体（含自动表名），一次请求拿全。 */
+  listMaterializeTargets: () =>
+    request<MaterializeTargetsResult>(`/api/materialize/targets`),
+
   /** 按本体实体重新推导默认值；人工钉住的字段不会被覆盖。 */
   syncMaterializationContracts: (ontologyId: string) =>
     request<MaterializationContractSyncResult>(
@@ -1417,6 +1424,22 @@ export const api = {
   }) =>
     request<GovernanceArtifact>("/api/agents/draft", {
       method: "POST",
+      body: JSON.stringify(body),
+    }),
+  // 编辑草稿/已校验/失败态的制品。已确认/执行过的制品不可编辑（后端 409），请新建。
+  // 给 spec 走直填覆盖，给 intent/context 走 drafter 重派生——语义与 draftArtifact 一致。
+  updateArtifact: (
+    id: string,
+    body: {
+      name?: string | null;
+      intent?: string | null;
+      context?: Record<string, unknown>;
+      spec?: Record<string, unknown> | null;
+      ontology_id?: string | null;
+    },
+  ) =>
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}`, {
+      method: "PATCH",
       body: JSON.stringify(body),
     }),
   validateArtifact: (id: string, context?: Record<string, unknown>) =>

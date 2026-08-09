@@ -17,6 +17,18 @@ from app.warehouse.capabilities import (
 from app.warehouse.logical_schema import LogicalTable
 
 
+def base_type(data_type: str | None) -> str:
+    """物理类型去掉参数与修饰，只留基名。``VARCHAR(140)`` → ``varchar``。
+
+    真实源采回来的是带参数的原样类型（``INTEGER(11)``、``DECIMAL(21, 9)``、
+    ``DATETIME(6)``）。各 Adapter 的 map_type 用精确匹配查表，这些一个都命中不了，
+    于是**整数列、金额列全被判成文本**落进数仓——数值语义就此丢失，下游聚合要么报错
+    要么按字符串比大小。日期类靠子串判断侥幸躲过，数值类没这个运气。
+    """
+    lowered = (data_type or "").strip().lower()
+    return re.split(r"[(\s]", lowered, maxsplit=1)[0] if lowered else ""
+
+
 class DialectAdapter(ABC):
     name: str
 
@@ -36,9 +48,35 @@ class DialectAdapter(ABC):
     def render_alter(self, before: LogicalTable, after: LogicalTable) -> list[str]:
         """本体变更 → ALTER 语句；无法用 ALTER 表达时返回重建指引。"""
 
+    def render_foreign_keys(self, table: LogicalTable) -> list[str]:
+        """**建表之后**再补的外键语句。默认空 = 该引擎把外键写进建表语句里。
+
+        真正强制外键的引擎（postgres）必须走这条路：``CREATE TABLE`` 内联 REFERENCES 时，
+        被引用表还不存在就直接报错，于是「只物化本体的一部分」「本体里存在环」这两件事都
+        做不了——而 ERP 这类真实本体的血缘本来就是环。拆成两段（先全部建表、再统一加约束）
+        才与建表顺序无关。
+
+        声明式外键的引擎（hive 写进 TBLPROPERTIES、doris 之流不支持）返回空即可：
+        它们的外键随建表一起落，本就没有顺序问题。
+        """
+        return []
+
     def translate_sql(self, sql: str) -> str:
         """SQL 方言翻译。默认原样返回。"""
         return sql
+
+    def render_load(self, target: str, select_body: str, *, overwrite: bool) -> str:
+        """装载语句：把一段 SELECT 的结果写进目标表。``overwrite`` 为覆盖装载。
+
+        默认是 Hive 家族的 ``INSERT OVERWRITE TABLE`` / ``INSERT INTO TABLE``。
+        **标准 SQL 引擎没有这两种写法**（postgres 见到 ``INSERT OVERWRITE`` 直接语法
+        报错，``INSERT INTO TABLE x`` 里的 TABLE 也是多余的），必须覆写——此前生成器
+        把这句写死成 Hive 写法，选了 postgres 目标仓时产出的是一条跑不了的 SQL。
+
+        返回单个字符串（可含多条语句，如 postgres 的 ``TRUNCATE`` + ``INSERT``）。
+        """
+        verb = "INSERT OVERWRITE TABLE" if overwrite else "INSERT INTO TABLE"
+        return f"{verb} {target}\n{select_body};"
 
     def quote_identifier(self, name: str) -> str:
         """引擎标识符引用规则。默认反引号；ANSI 双引号引擎须覆写。
@@ -47,6 +85,20 @@ class DialectAdapter(ABC):
         绝不允许自己判 ``if engine == ...``（遗留2 下沉的正是此处）。
         """
         return f"`{name}`"
+
+    def quote_table_ref(self, ref: str) -> str:
+        """``库.表`` 这类点分表引用**逐段**加引号。
+
+        源表名来自 DataHub URN，是真实源里的原名——Frappe/ERPNext 的
+        ``tabAccount Category``、``tabAsset Repair Purchase Invoice`` 带空格，
+        不引用产出的就是一条任何引擎都拒绝解析的 SQL。这类名字在 ERP 域里占比很高，
+        不是边角情况，故生成器一律走本方法而非直接拼字符串。
+
+        按 ``.`` 分段（``库.表``、``目录.库.表`` 均可）。段内含 ``.`` 的表名不在
+        本方法的表达范围内——那需要调用方自己拆好再逐段引用。
+        """
+        parts = [p for p in (ref or "").split(".") if p]
+        return ".".join(self.quote_identifier(p) for p in parts)
 
     # ---------- 全量落地：staging + 原子切换（M15） ----------
     #

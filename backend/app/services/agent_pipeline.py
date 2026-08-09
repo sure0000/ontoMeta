@@ -44,6 +44,79 @@ def _loads(raw: str | None, fallback):
         return fallback
 
 
+# 问题清单的展示优先级。数越小越靠前。
+# 由来：ERP 本体一次校验产出 188 条 issue，其中 185 条是 ontology_issue（关系表未落地之类，
+# 与本次执行无关的存量噪声），而「Airflow 没解析到 DAG」这条恰恰是执行必失败的原因，却排在
+# 第 2/188 条、藏在默认折叠的面板里——等于没提示。按「离本次执行有多近」排序。
+_ISSUE_RANK: dict[str, int] = {
+    "missing_required_field": 0,
+    "credential_in_spec": 0,
+    "unknown_object": 0,
+    "unknown_property": 0,
+    "preflight_blocked": 1,
+    "preflight_warning": 2,
+    "preflight_unavailable": 2,
+    "engine_unknown": 3,
+    "engine_unverified": 4,
+    "ontology_issue": 9,  # 存量噪声垫底
+}
+
+
+def _rank_issues(issues: list) -> list:
+    """稳定排序：阻断项/自检项在前，本体存量噪声垫底。不增删条目，只调顺序。"""
+    return sorted(issues, key=lambda i: _ISSUE_RANK.get(i.code, 5))
+
+
+def _unique_name(db: Session, kind: str, name: str) -> str:
+    """同类制品内给**自动派生**的任务名去重：撞名则加「（2）」「（3）」后缀。
+
+    派生名只由 spec 决定（同一本体同一配置必然同名），列表里一眼看去全是同一个名字，
+    人分不出哪个是哪个、更点不准要重跑的那个。
+
+    只用于派生名——调用方显式给的名字一律原样保留（见 test_spec_path_bypasses_drafter），
+    人自己起的名不该被我们改。
+    """
+    base = (name or kind).strip()[:80] or kind
+    taken = {
+        n
+        for (n,) in db.query(GovernanceArtifact.name).filter(
+            GovernanceArtifact.kind == kind,
+            GovernanceArtifact.name.like(f"{base}%"),
+        )
+    }
+    if base not in taken:
+        return base
+    for seq in range(2, 1000):
+        candidate = f"{base}（{seq}）"
+        if candidate not in taken:
+            return candidate
+    return base
+
+
+def _receipt_failure(receipt: Any) -> str | None:
+    """回执自陈的失败原因；None = 未自陈失败。
+
+    只认**显式**的失败信号（``ok is False`` / ``state == "failed"``），不把「字段缺失」
+    当失败——sync/transform/metric 的「仅产出」回执既没有 ok 也没有 state，那是正常产出，
+    不是失败。多批（materialize 按 cron 分组）里任一批投递失败即整体失败，与
+    ``_aggregate_state`` 的口径一致。
+    """
+    if not isinstance(receipt, dict):
+        return None
+    batches = receipt.get("batches")
+    candidates: list[dict] = [receipt]
+    if isinstance(batches, list):
+        candidates.extend(b for b in batches if isinstance(b, dict))
+    for item in candidates:
+        if item.get("ok") is False or str(item.get("state") or "") == "failed":
+            return str(
+                item.get("error")
+                or receipt.get("error")
+                or "执行失败（回执未给出原因）"
+            )
+    return None
+
+
 class AgentPipelineService:
     # ---------- 草稿 ----------
 
@@ -71,7 +144,9 @@ class AgentPipelineService:
             if not isinstance(spec, dict) or not spec:
                 raise ValueError("spec 不能为空对象")
             resolved_spec = spec
-            resolved_name = (name or "").strip() or drafter.name_from_spec(spec)
+            resolved_name = (name or "").strip() or _unique_name(
+                db, kind, drafter.name_from_spec(spec)
+            )
             origin = "user"
             is_user_created = True
         else:
@@ -82,7 +157,11 @@ class AgentPipelineService:
             if not (intent or "").strip() and not (context or {}):
                 raise ValueError("未提供 spec 时，intent 与 context 至少给一样")
             resolved_spec = drafter.draft(intent or "", context or {})
-            resolved_name = drafter.suggested_name(intent or "", resolved_spec)
+            # 调用方显式给的名字优先（手工建任务时人填的任务名）。此前一律用
+            # drafter 派生名，导致同一本体建的多个物化任务重名到无法分辨。
+            resolved_name = (name or "").strip() or _unique_name(
+                db, kind, drafter.suggested_name(intent or "", resolved_spec)
+            )
             # 表单起草是用户发起（user_created=True 由调用方显式声明），只是走 drafter
             # 派生结构；对话/机器起草则维持 machine 溯源。
             origin = "user" if user_created else "machine"
@@ -100,6 +179,70 @@ class AgentPipelineService:
             user_created=is_user_created,
         )
         db.add(artifact)
+        db.commit()
+        db.refresh(artifact)
+        return artifact
+
+    # ---------- 编辑 ----------
+
+    # 只有这几个状态允许改 spec：drafted/validated 尚未确认，failed 是执行失败后
+    # 回来改配置重试。confirmed/executing/succeeded 已被人确认或已产生副作用，
+    # 改动必须留痕，走「新建」而不是覆盖——这与「未确认不得执行」同一条不变量的另一面。
+    EDITABLE_STATUSES = frozenset(
+        {
+            ArtifactStatus.DRAFTED.value,
+            ArtifactStatus.VALIDATED.value,
+            ArtifactStatus.FAILED.value,
+        }
+    )
+
+    def edit(
+        self,
+        db: Session,
+        artifact_id: str,
+        *,
+        name: str | None = None,
+        intent: str | None = None,
+        context: dict[str, Any] | None = None,
+        spec: dict[str, Any] | None = None,
+        ontology_id: str | None = None,
+    ) -> GovernanceArtifact:
+        artifact = self._require(db, artifact_id)
+        if artifact.status not in self.EDITABLE_STATUSES:
+            raise PipelineError(
+                f"{artifact.status} 状态的制品不可编辑"
+                "（已确认/执行的制品改动必须留痕，请新建任务）"
+            )
+        drafter = registry.get_drafter(artifact.kind)
+
+        if spec is not None:
+            if not isinstance(spec, dict) or not spec:
+                raise ValueError("spec 不能为空对象")
+            resolved_spec = spec
+        elif context is not None or intent is not None:
+            if not (intent or "").strip() and not (context or {}):
+                raise ValueError("编辑 spec 时，intent 与 context 至少给一样")
+            resolved_spec = drafter.draft(intent or artifact.intent or "", context or {})
+        else:
+            raise ValueError("编辑必须提供 spec 或 intent/context 之一")
+
+        artifact.spec_json = _dumps(resolved_spec)
+        if name is not None:
+            artifact.name = name
+        if intent is not None:
+            artifact.intent = intent
+        if ontology_id is not None:
+            artifact.ontology_id = ontology_id
+        # spec 已变，旧校验报告/确认记录对新 spec 不再有效——打回草稿让用户重新走
+        # validate → confirm，不能让一个基于旧 spec 的 confirmed 状态继续存在。
+        artifact.status = ArtifactStatus.DRAFTED.value
+        artifact.validation_report_json = None
+        artifact.confirmed_by = None
+        artifact.confirmed_at = None
+        # 人工编辑过，标记溯源（与 confirm() 里 machine_edited 呼应）；不改
+        # machine_baseline——它是起草时的机器基线，编辑是人工覆盖，改了就失去了
+        # 「人工相对基线改了什么」的对比意义。
+        artifact.origin = "user"
         db.commit()
         db.refresh(artifact)
         return artifact
@@ -136,7 +279,7 @@ class AgentPipelineService:
 
         artifact.validation_report_json = _dumps(
             {
-                "issues": [i.to_dict() for i in issues],
+                "issues": [i.to_dict() for i in _rank_issues(issues)],
                 "blocking_count": len(blocking),
                 "dry_run": dry_run,
                 "dry_run_error": dry_run_error,
@@ -200,8 +343,13 @@ class AgentPipelineService:
         artifact.status = ArtifactStatus.EXECUTING.value
         db.commit()
 
+        # 制品 id 由流水线注入，不指望调用方回传：执行器拿它作 dag_run_id（
+        # ``ontometa__<制品id>__<批次>``）。前端调 execute 时不传 context，于是 id 一路
+        # 为空、run_id 退化成 ``ontometa__manual__manual``——同一本体的第二个任务撞上
+        # 同一个 run_id，而读时对账又会拿别人的 DagRun 状态回写自己的制品。
+        run_context = {**(context or {}), "artifact_id": artifact.id}
         try:
-            receipt = executor.execute(spec, context or {})
+            receipt = executor.execute(spec, run_context)
         except Exception as exc:  # noqa: BLE001
             artifact.status = ArtifactStatus.FAILED.value
             artifact.execution_receipt_json = _dumps({"error": str(exc)})
@@ -210,7 +358,14 @@ class AgentPipelineService:
             db.refresh(artifact)
             return artifact
 
-        artifact.status = ArtifactStatus.SUCCEEDED.value
+        # 执行器不抛异常 ≠ 执行成功。materialize/flink 的 runner 约定是「投递失败如实记进
+        # 回执的 error/state，不抛」（见 flink_job_runner 的 test_trigger_error_is_recorded），
+        # 此前这里一律置 SUCCEEDED，于是「Airflow 根本没解析到 DAG」的任务在列表里显示成功。
+        # 而 _reconcile_orchestrated_status 只在有真实 DagRun 时才对账，救不回这种投递期失败。
+        failure = _receipt_failure(receipt)
+        artifact.status = (
+            ArtifactStatus.FAILED.value if failure else ArtifactStatus.SUCCEEDED.value
+        )
         artifact.execution_receipt_json = _dumps(receipt)
         artifact.executed_at = datetime.now(timezone.utc)
         db.commit()
@@ -234,10 +389,96 @@ class AgentPipelineService:
             q = q.filter(GovernanceArtifact.status == status)
         if ontology_id:
             q = q.filter(GovernanceArtifact.ontology_id == ontology_id)
-        return q.order_by(desc(GovernanceArtifact.created_at)).all()
+        rows = q.order_by(desc(GovernanceArtifact.created_at)).all()
+        # P0b：读时对账 orchestrated 制品的 Airflow DagRun 状态，终态时回写 artifact.status
+        for a in rows:
+            self._reconcile_orchestrated_status(db, a)
+        return rows
 
     def get(self, db: Session, artifact_id: str) -> GovernanceArtifact | None:
-        return db.get(GovernanceArtifact, artifact_id)
+        artifact = db.get(GovernanceArtifact, artifact_id)
+        if artifact:
+            self._reconcile_orchestrated_status(db, artifact)
+        return artifact
+
+    def _reconcile_orchestrated_status(self, db: Session, artifact: GovernanceArtifact) -> None:
+        """P0b：读时对账 orchestrated 制品的 Airflow DagRun 状态，终态时回写 artifact.status。
+
+        制品 status 在 execute() 提交 DAG 后即置 succeeded，但 DAG 可能还在跑或已失败——
+        实时权威在 Airflow。此函数惰性对账：读到 SUCCEEDED 制品时查 Airflow，若 DagRun 报终态
+        （success/failed）且与制品 status 不一致，回写制品并 commit。
+
+        只对 execute_mode=orchestrated 的制品做（目前只有 materialize），且只在 SUCCEEDED 时查——
+        FAILED/EXECUTING 已是明确态，不浪费 Airflow 调用。读不到/报错则静默跳过（best-effort）。
+        """
+        # 只对账 SUCCEEDED 的 orchestrated 制品（避免反复查已知终态）
+        if artifact.status != ArtifactStatus.SUCCEEDED.value:
+            return
+        receipt = _loads(artifact.execution_receipt_json, {})
+        if receipt.get("execute_mode") != "orchestrated":
+            return
+
+        # 回执自陈失败 → 直接改判，不必问 Airflow。这类「投递就没成功」的制品压根没有
+        # DagRun 可查，下面的对账救不回来；execute() 修好之前落库的存量制品也靠这里治好。
+        if _receipt_failure(receipt):
+            artifact.status = ArtifactStatus.FAILED.value
+            db.commit()
+            return
+
+        # 解析批次：新回执带 batches[]，旧单 DAG 回执按单批兜底
+        batches = receipt.get("batches") or [
+            {
+                "dag_id": receipt.get("dag_id"),
+                "dag_run_id": receipt.get("dag_run_id"),
+                "state": receipt.get("state"),
+                "error": receipt.get("error"),
+            }
+        ]
+        if not any(b.get("dag_id") and b.get("dag_run_id") for b in batches):
+            return  # 没有真实 DagRun → 提交就失败了，制品已是 FAILED（或不应为 SUCCEEDED）
+
+        try:
+            from app.connectors.airflow import AirflowClient, is_terminal
+            from app.services.settings_service import SettingsService
+
+            rt = SettingsService().get_airflow_runtime(db)
+            if not rt.available:
+                return
+
+            client = AirflowClient(
+                rt.endpoint, username=rt.username, password=rt.password,
+                token=rt.token, api_version=rt.api_version,
+            )
+            try:
+                states: list = []
+                for b in batches:
+                    bid, brun = b.get("dag_id"), b.get("dag_run_id")
+                    if not bid or not brun:
+                        # 触发失败的批，用回执里的状态
+                        states.append(b.get("state") or "failed")
+                        continue
+                    try:
+                        run = client.get_dag_run(bid, brun)
+                        states.append(run.get("state"))
+                    except Exception:  # noqa: BLE001
+                        states.append(None)  # 读不到 → 未知，不影响其他批
+            finally:
+                client.close()
+
+            # 聚合多批状态：任一 failed → failed；全 success → success；否则 running/queued
+            from app.api.warehouse import _aggregate_state
+            agg = _aggregate_state(states)
+            if not agg or not is_terminal(agg):
+                return  # 非终态或读不到 → 保持 SUCCEEDED，前端读 live_state
+
+            # Airflow 已终态 → 回写制品 status（success → SUCCEEDED 保持不变；failed → FAILED）
+            if agg == "failed" and artifact.status != ArtifactStatus.FAILED.value:
+                artifact.status = ArtifactStatus.FAILED.value
+                db.commit()
+            # agg == "success" 时制品已是 SUCCEEDED，无需动作
+        except Exception:  # noqa: BLE001
+            # best-effort：任何异常都静默吞掉，不炸查询路径
+            pass
 
     def _require(self, db: Session, artifact_id: str) -> GovernanceArtifact:
         artifact = db.get(GovernanceArtifact, artifact_id)

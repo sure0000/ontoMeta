@@ -168,6 +168,40 @@ class AirflowClient:
                 return False
             raise
 
+    def list_dag_ids(self, *, limit: int = 200, pattern: str | None = None) -> list[str]:
+        """Airflow 已登记的 dag_id 列表。
+
+        用途是判定「我们投出去的 DAG，Airflow 到底看没看见」——比 sentinel 的定时轮询
+        强得多：sentinel 只等 20s，分不清「路径错」和「扫得慢」；而**历史**投过的 DAG
+        若一个都不在册，那就与扫描间隔无关了。
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if pattern:
+            params["dag_id_pattern"] = pattern
+        body = self._request("GET", "/dags", "list_dags", params=params)
+        return [d.get("dag_id") for d in (body.get("dags") or []) if d.get("dag_id")]
+
+    def get_config_option(self, section: str, option: str) -> str | None:
+        """读 Airflow 自己的配置项；读不到（expose_config=False → 403/406）返回 None。
+
+        能读到时可以把「两侧目录不一致」从推断变成对账：直接拿 core.dags_folder 和
+        ontoMeta 的投递目录比字符串。故这里一律 best-effort，不把失败当错误。
+        """
+        try:
+            body = self._request(
+                "GET", "/config", "get_config", params={"section": section}
+            )
+        except AirflowError:
+            return None
+        for sec in body.get("sections") or []:
+            if sec.get("name") != section:
+                continue
+            for opt in sec.get("options") or []:
+                if opt.get("key") == option:
+                    value = opt.get("value")
+                    return str(value) if value is not None else None
+        return None
+
     def get_connection(self, conn_id: str) -> dict:
         """读一个 Airflow Connection。物化建表任务按此 conn_id 连目标仓。
 
@@ -266,3 +300,47 @@ class AirflowClient:
 
 def is_terminal(state: str | None) -> bool:
     return (state or "").lower() in TERMINAL_STATES
+
+
+def explain_ping_failure(
+    client: "AirflowClient", configured_version: str, error: "AirflowError"
+) -> str:
+    """把 ``ping_api`` 的失败翻成人能照做的解释。
+
+    ``/health`` 能通但带版本前缀的 REST 打不通时，失败几乎只有两类，分别给出下一步：
+
+    - **401/403（鉴权）**：最常见是没开 basic_auth 后端（2.x 默认只有 session，仅供 Web UI），
+      或 token 过期。
+    - **404/405（版本）**：配的 ``api_version`` 与实例暴露的对不上。此时自探一次真实版本
+      （``detect_api_version``），若探到就直接告诉用户应改成哪个——这正是「地址密码都对却
+      连不上」最隐蔽的一种。
+
+    其余错误原样带出，不臆测。返回补充说明后的完整 detail 字符串。
+    """
+    detail = str(error)
+    if "401" in detail or "403" in detail:
+        return detail + (
+            "（/health 可通说明网络没问题，是 REST API 鉴权不通。"
+            "Airflow 2.x 默认 api.auth_backends 只有 session，仅供 Web UI；"
+            "请在 Airflow 侧设 AIRFLOW__API__AUTH_BACKENDS="
+            "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session "
+            "后重启 webserver，或改用 token 鉴权）"
+        )
+    if "404" in detail or "405" in detail:
+        detected = client.detect_api_version()
+        if detected and detected != configured_version:
+            return detail + (
+                f"（实测该实例暴露的 REST 版本是 {detected}，设置里配的是 "
+                f"{configured_version}；把 Airflow 设置的 api_version 改成 {detected} 再试）"
+            )
+        if detected:
+            return detail + (
+                f"（REST 版本 {detected} 与设置一致，404/405 可能是端点路径或部署问题，"
+                "非版本不符）"
+            )
+        return detail + (
+            f"（当前按 {configured_version} 请求且返回 404/405，"
+            "但探不到 openapi.json 无法自动确认版本；"
+            "手动核对该实例是 /api/v1（2.x）还是 /api/v2（3.x））"
+        )
+    return detail

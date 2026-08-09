@@ -142,7 +142,7 @@ class DependencyComponent(Base):
     """依赖组件统一注册表（DEPENDENCY_DEPLOYMENT_REDESIGN §3）。
 
     除 ontoMeta 自身前后端外，所有依赖组件（LLM / DataHub / Airflow / SeaTunnel /
-    目标数仓 / sync-runner / Cube / PG / Bigtop）在此统一管理部署方式与连接信息。
+    目标数仓 / sync-runner / Cube / PG）在此统一管理部署方式与连接信息。
 
     - ``deploy_mode`` 决定「怎么来的」：external(已有)/docker/k8s/bare_metal。
     - ``connection`` 记「怎么连」：部署成功自动回写，或 external 时手填。
@@ -155,7 +155,7 @@ class DependencyComponent(Base):
     __tablename__ = "dependency_components"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    # 组件类型：llm/datahub/airflow/seatunnel/warehouse/sync_runner/cube/postgres/bigtop
+    # 组件类型：llm/datahub/airflow/seatunnel/warehouse/sync_runner/cube/postgres
     key: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(255))
     # 部署：external | docker | k8s | bare_metal
@@ -164,6 +164,8 @@ class DependencyComponent(Base):
     # not_deployed|deploying|deployed|failed|connected
     deploy_status: Mapped[str] = mapped_column(String(16), default="not_deployed")
     deploy_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 最近一次部署的逐命令日志（SSH 安装等），部署失败时前端可查看定位
+    deploy_log: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 连接信息（JSON），结构由 key 决定（见 DependencyComponentService.CONNECTION_SCHEMAS）
     connection_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

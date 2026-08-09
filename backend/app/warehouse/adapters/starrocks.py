@@ -14,7 +14,7 @@ StarRocks 同走 MySQL 线协议，与 Doris 大体同构，但三处按官方�
 
 from __future__ import annotations
 
-from app.warehouse.adapters.base import DialectAdapter
+from app.warehouse.adapters.base import DialectAdapter, base_type
 from app.warehouse.capabilities import Capabilities, ConstraintSupport
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
 
@@ -60,7 +60,9 @@ class StarRocksAdapter(DialectAdapter):
 
     def map_type(self, data_type: str | None, semantic_type: str | None) -> str:
         """本体类型 → StarRocks 类型（与 Doris 同：无 TIMESTAMP，泛字符串落 VARCHAR）。"""
-        dt = (data_type or "").lower()
+        # 去参数再判：INTEGER(11) / DECIMAL(21, 9) 这类原样类型精确查表命中不了，
+        # 会被整体误判成文本列（见 base.base_type）。
+        dt = base_type(data_type)
         st = (semantic_type or "").lower()
         if st == "date" or dt == "date":
             return "DATE"

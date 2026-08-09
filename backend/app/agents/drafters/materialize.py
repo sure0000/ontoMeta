@@ -44,7 +44,9 @@ class MaterializeDrafter(Drafter):
         return {
             "ontology_id": context["ontology_id"],
             "target_datasource_id": context["target_datasource_id"],
-            "engine": context.get("engine") or "hive",
+            # 引擎不再进表单：由目标数据源类型推定（执行/校验侧 resolve_engine）。
+            # 对话/旧制品若显式给了 engine 则尊重其值，否则置空交下游推定。
+            "engine": context.get("engine") or None,
             "database_prefix": context.get("database_prefix"),
             "database_overrides": _database_overrides(context),
             "table_overrides": dict(context.get("table_overrides") or {}),
@@ -65,5 +67,17 @@ class MaterializeDrafter(Drafter):
         return (intent or self.name_from_spec(spec)).strip()[:80]
 
     def name_from_spec(self, spec: dict[str, Any]) -> str:
-        engine = spec.get("engine") or "hive"
-        return f"物化 → {engine}"
+        """派生名要说清「物化什么」。
+
+        原来是 ``物化 → {engine}``，而 engine 现已不进表单（由数据源类型推定）恒为空，
+        于是每个任务都叫「物化 → 目标数据库」。改为按范围命名；真正的唯一性由
+        ``agent_pipeline._unique_name`` 的去重后缀兜底。
+        """
+        targets = spec.get("selected_targets") or []
+        if not targets:
+            scope = "全部实体"
+        elif len(targets) == 1:
+            scope = str(targets[0])
+        else:
+            scope = f"{targets[0]} 等 {len(targets)} 个实体"
+        return f"物化 · {scope}"[:80]

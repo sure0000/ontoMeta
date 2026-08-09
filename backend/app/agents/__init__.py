@@ -2,16 +2,14 @@
 
 与读侧的 Data Agent（Chat BI）是同一智能体的两类技能：读侧问数，写侧造数。
 
-四类实现按风险由低到高注册：④指标 → ③ETL → ①同步 → ⓪部署。
+四类实现按风险由低到高注册：指标 → ETL → 同步 → 物化。
 """
 
 from app.agents import registry
-from app.agents.drafters.cluster import ClusterDrafter
 from app.agents.drafters.materialize import MaterializeDrafter
 from app.agents.drafters.metric import MetricDrafter
 from app.agents.drafters.sync import SyncDrafter
 from app.agents.drafters.transform import TransformDrafter
-from app.agents.executors.cluster import ClusterExecutor
 from app.agents.executors.materialize import MaterializeExecutor
 from app.agents.executors.metric import MetricExecutor
 from app.agents.executors.sync import SyncExecutor
@@ -23,7 +21,6 @@ def register_builtin_agents() -> None:
     registry.register("metric", MetricDrafter(), MetricExecutor())
     registry.register("transform", TransformDrafter(), TransformExecutor())
     registry.register("sync", SyncDrafter(), SyncExecutor())
-    registry.register("cluster", ClusterDrafter(), ClusterExecutor())
     registry.register("materialize", MaterializeDrafter(), MaterializeExecutor())
 
 

@@ -14,10 +14,16 @@ from typing import Any
 
 from app.agents.executors.base import Executor
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
+from app.warehouse.jobs.seatunnel import SINK_PLUGINS
+
+# 装载方式 → sink 落地语义。**增量必须追加**：增量只读出一个时间切片，再按覆盖写
+# 就是拿切片把整张表换掉——历史数据当场没了。此前这里恒为 overwrite，而真正执行的
+# SeaTunnelAdapter._sink 早已按 mode 分档，两处就这样分叉了。
+_SAVE_MODE = {"full": "overwrite", "incremental": "append", "cdc": "append"}
 
 
 def _job(name: str, source_alias: str, source_table: str, sink_table: str, mode: str,
-         partition_key: str | None) -> dict[str, Any]:
+         partition_key: str | None, engine: str) -> dict[str, Any]:
     source: dict[str, Any] = {
         "plugin": "Jdbc",
         # 只读从库别名；连接串由 SeaTunnel 侧解析，绝不写入本产物。
@@ -32,7 +38,14 @@ def _job(name: str, source_alias: str, source_table: str, sink_table: str, mode:
     return {
         "job": {"name": name, "mode": "BATCH" if mode != "cdc" else "STREAMING"},
         "source": [source],
-        "sink": [{"plugin": "Hive", "table": sink_table, "save_mode": "overwrite"}],
+        "sink": [{
+            # sink 插件随目标引擎走，不是恒 Hive——目标是 postgres/mysql 却渲染
+            # Hive sink，人照着这份配置去跑只会一头雾水。专用连接器的映射复用
+            # SeaTunnelAdapter 那一份，不在这里另抄一遍。
+            "plugin": SINK_PLUGINS.get((engine or "").lower(), "Jdbc"),
+            "table": sink_table,
+            "save_mode": _SAVE_MODE.get(mode, "overwrite"),
+        }],
     }
 
 
@@ -47,10 +60,12 @@ class SyncExecutor(Executor):
         alias = spec.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS
         mode = spec.get("mode") or "full"
         partition_key = spec.get("partition_key")
+        engine = spec.get("engine") or "hive"
 
         jobs: dict[str, dict] = {
             f"sync_{spec.get('object_type') or 'job'}": _job(
-                f"sync_{spec.get('object_type')}", alias, source, target, mode, partition_key
+                f"sync_{spec.get('object_type')}", alias, source, target, mode,
+                partition_key, engine,
             )
         }
 
@@ -58,7 +73,8 @@ class SyncExecutor(Executor):
         if preservation.get("preserve"):
             stg_table = f"stg.{source.split('.')[-1]}"
             jobs[f"preserve_{spec.get('object_type') or 'job'}"] = _job(
-                f"preserve_{spec.get('object_type')}", alias, source, stg_table, "full", None
+                f"preserve_{spec.get('object_type')}", alias, source, stg_table,
+                "full", None, engine,
             )
 
         return {

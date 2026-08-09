@@ -147,3 +147,48 @@ def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
     assert receipt["dag_run_id"] == "ontometa__artifact-456"
     assert receipt["state"] == "queued"
     assert "http://airflow" in receipt["run_url"]
+
+
+def test_metric_source_table_comes_from_ontology_not_hardcoded_dwd(monkeypatch):
+    """主对象的源表按本体+契约解析，不写死 dwd_ 前缀。
+
+    此前拼的是 f"dwd_{prefix}.{entity}"：prefix 为空就得到 `dwd_.brand` 这种根本不存在
+    的库名，且写死 dwd 层（对象可能物化在 dim/dws），列还照抄了结果表。
+    """
+    from app.agents.executors.metric import MetricExecutor
+    from app.warehouse import LogicalColumn, LogicalTable
+
+    subject = LogicalTable(
+        name="brand", database="dim", layer="dim", entity_name="brand",
+        columns=(LogicalColumn("brand_id", "bigint", "identifier"),
+                 LogicalColumn("amount", "decimal", "amount")),
+    )
+    monkeypatch.setattr(
+        MetricExecutor, "_subject_table", staticmethod(lambda db, spec, entity: subject)
+    )
+    captured: dict = {}
+    import app.agents.executors.metric as mod
+
+    monkeypatch.setattr(
+        mod, "generate_flink_sql", lambda **kw: captured.update(kw) or "-- sql --"
+    )
+    import app.services.flink_job_runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod, "run_flink_sql", lambda *a, **k: {"execute_mode": "handoff"}
+    )
+    with patch.object(mod, "SessionLocal") as session_cls:
+        db = MagicMock()
+        # 口径没有形式化 AST → 走 _build_sql 老路，本用例只关心源表怎么解析
+        db.get.return_value = MagicMock(id="ds1", name="dw", expression_json=None)
+        session_cls.return_value.__enter__.return_value = db
+        MetricExecutor().execute(
+            {"metric_name": "gmv", "business_logic_id": "bl1", "engine": "hive",
+             "subject_objects": ["brand"], "target_datasource_id": "ds1",
+             "expression": "SUM(amount)"},
+            {},
+        )
+    assert captured["source_physical"] == "dim.brand"
+    assert "dwd_." not in captured["source_physical"]
+    # 源表的列来自主对象，不是结果表的 stat_date/metric_value
+    assert [c.name for c in captured["source_table"].columns] == ["brand_id", "amount"]

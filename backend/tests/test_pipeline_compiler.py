@@ -139,6 +139,20 @@ def test_compile_rejects_unconfirmed_step(airflow_dir):
     assert "尚未确认" in str(exc.value)
 
 
+def test_compile_accepts_succeeded_step(airflow_dir):
+    """执行后状态=succeeded，也应可编译——真实流程里 execute() 把 confirmed 推到 succeeded。
+
+    此前门槛只认 confirmed，导致走完完整流程的链反而编不了周期 DAG。
+    """
+    pid, art_ids = _mk_pipeline()
+    with SessionLocal() as db:
+        for aid in art_ids:
+            db.get(GovernanceArtifact, aid).status = ArtifactStatus.SUCCEEDED.value
+        db.commit()
+        result = compile_pipeline(db, pid)
+    assert result["compiled_dag_id"]
+
+
 def test_compile_rejects_unexecuted_step(airflow_dir):
     pid, art_ids = _mk_pipeline()
     with SessionLocal() as db:

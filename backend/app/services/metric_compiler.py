@@ -472,7 +472,7 @@ def compile_metric(
     filters: list[dict] | tuple[dict, ...] = (),
     grain: str | None = None,
     time_property: str | None = None,
-    limit: int = _DEFAULT_LIMIT,
+    limit: int | None = _DEFAULT_LIMIT,
     dialect: str | None = None,
     mapping: dict | None = None,
 ) -> CompiledMetric:
@@ -834,7 +834,7 @@ def _assemble(
     grain_unit: str | None,
     conditions: list[exp.Expression],
     hops: list[JoinHop],
-    limit: int,
+    limit: int | None,
     tag_expr: exp.Expression | None = None,
     tag_alias: str = "tag",
 ) -> exp.Select:
@@ -870,7 +870,9 @@ def _assemble(
         select = select.where(where)
     if group_items:
         select = select.group_by(*group_items)
-    return select.limit(max(1, int(limit)))
+    # limit=None：不加 LIMIT。问答场景要截断（看个数），但写库场景（指标物化成 ADS 表）
+    # 加了 LIMIT 就只落 100 行——一个看不出来、结果全错的截断。
+    return select if limit is None else select.limit(max(1, int(limit)))
 
 
 def _render(select: exp.Select, dialect: str | None) -> str:

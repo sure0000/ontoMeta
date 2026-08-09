@@ -38,7 +38,7 @@ import type {
 import { LABELS, StatusBadge } from "./StatusBadge";
 
 // 目标数仓引擎（决定 DDL/ETL 方言）——与后端 app/warehouse/adapters 对齐。
-const ENGINE_OPTIONS = ["hive", "doris", "starrocks", "clickhouse", "iceberg"].map(
+const ENGINE_OPTIONS = ["hive", "doris", "starrocks", "clickhouse", "iceberg", "postgres"].map(
   (e) => ({ value: e, label: e }),
 );
 // 引擎名集合：选中数据源时其 kind 命中则据此推导引擎。

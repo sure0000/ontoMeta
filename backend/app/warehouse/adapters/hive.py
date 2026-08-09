@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from app.warehouse.adapters.base import DialectAdapter
+from app.warehouse.adapters.base import DialectAdapter, base_type
 from app.warehouse.capabilities import Capabilities, ConstraintSupport
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
 
@@ -59,7 +59,9 @@ class HiveAdapter(DialectAdapter):
         判定顺序沿用 ``connectors/cube.py::_dim_type``（语义优先于物理类型），
         但落到 Hive 原生类型而非 Cube 的维度类别。
         """
-        dt = (data_type or "").lower()
+        # 去参数再判：INTEGER(11) / DECIMAL(21, 9) 这类原样类型精确查表命中不了，
+        # 会被整体误判成文本列（见 base.base_type）。
+        dt = base_type(data_type)
         st = (semantic_type or "").lower()
         if st in {"date", "datetime", "time"} or "date" in dt or "time" in dt:
             return "TIMESTAMP"

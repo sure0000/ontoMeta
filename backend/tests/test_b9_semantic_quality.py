@@ -340,3 +340,75 @@ def test_failed_task_retry_and_duplicate_report(client, admin_headers):
             t.status = "cancelled"
             t.message = "test cleanup"
             db.commit()
+
+
+def test_duplicate_relation_name_excludes_foreign_key():
+    """外键关系允许同名（列声明），其余结构类型重名仍报错。"""
+    _, ontology_id = _seed_domain_with_ontology(name="dup-rel")
+    with SessionLocal() as db:
+        obj_a = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == ontology_id, ObjectType.name == "order")
+            .first()
+        )
+        obj_b = (
+            db.query(ObjectType)
+            .filter(
+                ObjectType.ontology_id == ontology_id, ObjectType.name == "customer"
+            )
+            .first()
+        )
+        # 两条同名外键 → 不报重名
+        db.add_all(
+            [
+                RelationType(
+                    ontology_id=ontology_id,
+                    name="fk_link",
+                    display_name="外键1",
+                    source_object_type_id=obj_a.id,
+                    target_object_type_id=obj_b.id,
+                    structure_type="foreign_key",
+                    status="suggested",
+                ),
+                RelationType(
+                    ontology_id=ontology_id,
+                    name="fk_link",
+                    display_name="外键2",
+                    source_object_type_id=obj_b.id,
+                    target_object_type_id=obj_a.id,
+                    structure_type="foreign_key",
+                    status="suggested",
+                ),
+            ]
+        )
+        # 两条同名事实表关系 → 报重名
+        db.add_all(
+            [
+                RelationType(
+                    ontology_id=ontology_id,
+                    name="places",
+                    display_name="下单1",
+                    source_object_type_id=obj_a.id,
+                    target_object_type_id=obj_b.id,
+                    structure_type="fact_table",
+                    status="suggested",
+                ),
+                RelationType(
+                    ontology_id=ontology_id,
+                    name="places",
+                    display_name="下单2",
+                    source_object_type_id=obj_b.id,
+                    target_object_type_id=obj_a.id,
+                    structure_type="fact_table",
+                    status="suggested",
+                ),
+            ]
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        issues = validate_ontology(db, ontology_id)
+    dup = [i for i in issues if i.code == "duplicate_relation_name"]
+    # 只有 fact_table 那对重名被报，外键那对不报
+    assert len(dup) == 1
+    assert dup[0].entity_name == "places"

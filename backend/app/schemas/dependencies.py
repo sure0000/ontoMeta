@@ -13,6 +13,13 @@ class DependencySchemaOut(BaseModel):
     connection_schemas: dict[str, list[dict[str, Any]]]
     deploy_modes: list[str]
     deploy_spec_schemas: dict[str, list[dict[str, Any]]]
+    # 未声明的字段会被 response_model 从响应里剔除，导致前端拿到 undefined 后
+    # 在 `schema.bare_metal_params[key]` 处抛 TypeError 白屏。必须显式声明。
+    bare_metal_params: dict[str, list[dict[str, Any]]]
+    docker_params: dict[str, list[dict[str, Any]]]
+    # 每组件允许的部署方式白名单（前端据此收窄模式选择器）。同样必须显式声明，
+    # 否则被 response_model 剔除，前端拿到 undefined 又会 TypeError 白屏。
+    component_deploy_modes: dict[str, list[str]]
     deploy_statuses: list[str]
 
 
@@ -24,6 +31,7 @@ class DependencyComponentOut(BaseModel):
     deploy_spec: dict[str, Any] = Field(default_factory=dict)
     deploy_status: str
     deploy_error: str | None = None
+    deploy_log: str | None = None
     connection: dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     is_default: bool

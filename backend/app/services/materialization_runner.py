@@ -38,6 +38,7 @@ from app.services.sync_tool_resolver import (
     resolve_sync_tool,
 )
 from app.services.warehouse_generator import WarehouseGenerator
+from app.warehouse import DEFAULT_ENGINE, list_engines
 from app.warehouse.jobs import (
     JobPlan,
     SyncImageUnavailableError,
@@ -50,6 +51,25 @@ _generator = WarehouseGenerator()
 _job_planner = JobPlanner()
 _dag_builder = AirflowDagBuilder()
 _settings = SettingsService()
+
+
+def resolve_engine(
+    db: Session, target_datasource_id: str | None, spec_engine: Any = None
+) -> str:
+    """物化引擎（DDL/ETL 方言）的唯一推定口径。
+
+    引擎信息就在目标数据源里（``DataSource.kind``），不再让用户/表单单独选。
+    与前端 ``MaterializeModal.engineOfKind`` 同口径：数据源 kind 命中已注册引擎即用它，
+    否则回退 ``DEFAULT_ENGINE``。显式传入的 ``spec_engine``（旧制品/对话链路）优先。
+    """
+    if spec_engine:
+        return str(spec_engine)
+    ds = db.get(DataSource, target_datasource_id) if target_datasource_id else None
+    if ds is not None:
+        key = (ds.kind or "").lower()
+        if key in set(list_engines()):
+            return key
+    return DEFAULT_ENGINE
 
 
 class MaterializationError(ValueError):
@@ -82,6 +102,31 @@ def _select(
     if selected is None:
         return items
     return [(q, s) for q, s in items if _bare_name(q) in selected]
+
+
+def _select_constraints(
+    constraints: dict[str, list[dict]] | None,
+    ddl_items: list[tuple[str, str]],
+) -> dict[str, list[dict]]:
+    """把外键语句裁到「本次真的会建的表」之内，返回 {表 → [{ref, sql}]}。
+
+    两头都要在范围内：**约束所在的表**要建，**被引用的表**也要建。物化一部分是常规
+    用法（弹窗就支持勾选），而 postgres 加外键时会校验被引用表存在——只按前者裁的话，
+    勾了子表没勾父表，加约束那步整批红。
+
+    ``ref`` 一路留到分批（``_assign_ddl``）之后才丢：跨批判定还要用它。
+
+    这里丢掉的约束不是错误：补物化被引用表后重跑，DO 块是幂等的，约束自然补上。
+    """
+    if not constraints:
+        return {}
+    in_scope = {q for q, _ in ddl_items}
+    out: dict[str, list[dict]] = {}
+    for qualified in (q for q, _ in ddl_items):
+        kept = [c for c in constraints.get(qualified) or [] if c.get("ref") in in_scope]
+        if kept:
+            out[qualified] = kept
+    return out
 
 
 def _selected_names(
@@ -163,7 +208,11 @@ def _plan_batches(jobs, cron_by_entity: dict[str, str | None], max_tasks: int) -
     return batches
 
 
-def _assign_ddl(batches: list[dict], ddl_items: list[tuple[str, str]]) -> list[dict]:
+def _assign_ddl(
+    batches: list[dict],
+    ddl_items: list[tuple[str, str]],
+    constraint_items: dict[str, list[str]] | None = None,
+) -> list[dict]:
     """把建表语句分给各批，并保证**每张表都有人建**。
 
     有搬运作业的表，建表跟着它那一批走。**没有任何搬运作业的表也必须建**——ADS 层
@@ -189,6 +238,23 @@ def _assign_ddl(batches: list[dict], ddl_items: list[tuple[str, str]]) -> list[d
             manual = {"suffix": "manual", "schedule": None, "jobs": (), "ddl": {}}
             batches.append(manual)
         manual["ddl"].update(orphans)
+
+    # 外键（两段式 DDL 的第二段）跟着**约束所在的表**那一批走，且只保留被引用表也在
+    # 同一批的那些：各批是彼此独立的 DAG、同时触发、互相之间没有先后，跨批引用就可能
+    # 在被引用表建出来之前执行。跨批被丢掉的记进 batch["constraints_deferred"]，由回执
+    # 报出去——补物化后重跑会补上（DO 块幂等）。
+    owner = {q: i for i, b in enumerate(batches) for q in (b.get("ddl") or {})}
+    for i, batch in enumerate(batches):
+        kept: dict[str, list[str]] = {}
+        deferred: list[str] = []
+        for qualified in sorted(batch.get("ddl") or {}):
+            for item in (constraint_items or {}).get(qualified) or []:
+                if owner.get(item["ref"]) == i:
+                    kept.setdefault(qualified, []).append(item["sql"])
+                else:
+                    deferred.append(f"{qualified} → {item['ref']}")
+        batch["constraints"] = kept
+        batch["constraints_deferred"] = deferred
     return batches
 
 
@@ -233,11 +299,13 @@ def _run_orchestrated(
     sync_tool: str | None,
     airflow,
     ddl_items: list[tuple[str, str]],
+    constraint_items: dict[str, list[str]],
     database_prefix: str | None,
     database_overrides: dict[str, str] | None,
     table_overrides: dict[str, str] | None,
     selected_targets: list[str] | None,
     artifact_id: str | None,
+    load_strategy: str | None = None,
 ) -> dict[str, Any]:
     """产出 DAG 与搬运作业 → 投递 → 触发一次运行。**不在本进程里落库**。"""
     # 执行通道（M14）：runner 走常驻服务，docker 走旧的兄弟容器通道。
@@ -303,6 +371,8 @@ def _run_orchestrated(
         selected_targets=selected_targets,
         # runner 通道按执行侧 capabilities 判可搬性，替代硬编码的工具平台表。
         runner_capabilities=runner_caps,
+        # 本次运行的装载方式覆盖（Spec 里选的「全量/增量」），缺省 None = 逐表按契约。
+        load_strategy=load_strategy,
     )
     # 目标表 URN 的 fabric 取自 DataHub 设置页（默认 PROD），与兜底 emitter 同一来源。
     fabric = _settings.get_datahub_runtime(db).fabric
@@ -317,7 +387,7 @@ def _run_orchestrated(
     )
     # 建表分配：有作业的表跟着自己那批，无作业的表（ADS/缺 source_ref/不支持的装载方式）
     # 归入 manual 批。无可搬作业但有建表时，这里会新开一个 create_tables-only 的 manual 批。
-    _assign_ddl(batches, ddl_items)
+    _assign_ddl(batches, ddl_items, constraint_items)
 
     bundles: list[tuple[dict, Any]] = []
     for batch in batches:
@@ -325,6 +395,7 @@ def _run_orchestrated(
             ontology_id=ontology_id,
             plan=JobPlan(jobs=batch["jobs"]),
             ddl_statements=batch["ddl"],
+            constraint_statements=batch.get("constraints") or {},
             schedule=batch["schedule"],
             channel=channel,
             runner_endpoint=airflow.sync_runner_endpoint,
@@ -466,8 +537,13 @@ def run(
     真实拓扑下不成立（见 `MATERIALIZE_ORCHESTRATION.md` §1）。
 
     ``sync_tool`` 通常**不传**：用什么搬由 ``services/sync_tool_resolver`` 决策（设置页
-    可强制指定），传了则盖过它。同步策略仍逐实体来自物化弹窗，随 ``overrides`` 写回契约，
+    可强制指定），传了则盖过它。同步策略逐实体来自物化弹窗，随 ``overrides`` 写回契约，
     ``JobPlanner`` 据契约逐表决定装载方式。
+
+    ``load_strategy``：**本次运行的全局覆盖**（Spec 里选的「全量/增量」），缺省 None
+    = 逐表按契约。它此前只是个签名上的摆设——收下就丢，于是 Spec 上写着 full、
+    DAG 里跑的却是契约的 incremental，连带 M15 的 staging+切换（只在全量时挂）
+    从来没被触发过。要改某张表的常态策略仍走 ``overrides`` 写回契约，两者不冲突。
 
     ``overrides``：``{contract_id: {字段: 值}}``，弹窗里人工改的存储策略/层/表名等。
     经 ``MaterializationContractService.update`` 写回并钉住，使生成读到的契约与展示
@@ -517,6 +593,7 @@ def run(
 
     selected = _selected_names(db, ontology_id, selected_targets, table_overrides)
     ddl_items = _select(ddl["statements"], selected)
+    constraint_items = _select_constraints(ddl.get("constraints"), ddl_items)
 
     return _run_orchestrated(
         db,
@@ -526,9 +603,11 @@ def run(
         sync_tool=sync_tool,
         airflow=airflow,
         ddl_items=ddl_items,
+        constraint_items=constraint_items,
         database_prefix=database_prefix,
         database_overrides=database_overrides,
         table_overrides=table_overrides,
         selected_targets=selected_targets,
         artifact_id=artifact_id,
+        load_strategy=load_strategy,
     )

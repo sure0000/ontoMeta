@@ -33,6 +33,7 @@ from app.models.data_app import DataSource
 from app.services.job_planner import (
     DEFAULT_SOURCE_ALIAS,
     DEFAULT_TARGET_ALIAS,
+    JobPlan,
     JobPlanner,
 )
 from app.services.materialization_contract import MaterializationContractService
@@ -405,7 +406,7 @@ def _check_git_sync_pipeline(report: PreflightReport, airflow) -> None:
                     detail=f"{dags_dir} 不在 git 仓库中，且 git_auto_init=False。",
                     next_step=(
                         f"在 {dags_dir} 执行 `git init` 并配置 remote，"
-                        "或在环境变量设置 AIRFLOW_GIT_AUTO_INIT=true。"
+                        "或在设置页开启 Airflow 的「git 自动初始化」（git_auto_init）。"
                     ),
                 )
             )
@@ -471,6 +472,108 @@ def _check_git_sync_pipeline(report: PreflightReport, airflow) -> None:
         )
 
 
+# 历史投递的 DAG 至少这么老还没被 Airflow 认领，才算「路径不一致」的确凿证据。
+# 取值要明显大于 Airflow 的 dag_dir_list_interval 默认值（300s），否则会把「扫得慢」
+# 误判成「路径错」——宁可退回 sentinel 探测给个提醒，也不要误报阻断。
+_DELIVERED_DAG_PROOF_AGE = 900.0
+
+
+def _delivered_dag_ids(dags_dir: str) -> list[tuple[str, float]]:
+    """ontoMeta 已投进 dags 目录的 (dag_id, 文件年龄秒)。sentinel 自己不算数。"""
+    out: list[tuple[str, float]] = []
+    now = time.time()
+    try:
+        names = os.listdir(dags_dir)
+    except OSError:
+        return out
+    for name in names:
+        if not name.startswith("ontometa_") or not name.endswith(".py"):
+            continue
+        dag_id = name[: -len(".py")]
+        if dag_id.startswith("ontometa_preflight_"):
+            continue
+        try:
+            age = now - os.path.getmtime(os.path.join(dags_dir, name))
+        except OSError:
+            continue
+        out.append((dag_id, age))
+    return out
+
+
+def _check_delivered_dags_visible(
+    report: PreflightReport, client: AirflowClient, airflow
+) -> bool:
+    """用**历史投递**判定两侧目录是否一致；判得了就 True（调用方不必再赌 sentinel）。
+
+    这是对 sentinel 探测的补强。sentinel 只等 ``preflight_sentinel_timeout``（默认 20s），
+    而 Airflow 的 ``dag_dir_list_interval`` 默认 300s——正常环境也会超时，于是那条永远是
+    「可能 A 可能 B」的提醒，久了就没人看，真出问题时反而被当噪声划过去。
+
+    历史投递没有这个歧义：一个 15 分钟前就写进去的 DAG 文件，Airflow 若仍不认，那与扫描
+    快慢无关，就是两侧路径不是同一个。这时才敢给 blocking。
+    """
+    dags_dir = airflow.dags_dir
+    delivered = _delivered_dag_ids(dags_dir)
+    if not delivered:
+        return False  # 头一次投，没有历史可依，交给 sentinel
+
+    try:
+        visible = set(client.list_dag_ids(pattern="ontometa"))
+    except AirflowError:
+        return False  # 读不到 DAG 列表（鉴权/网络）已由别的项报过
+
+    hit = [d for d, _ in delivered if d in visible]
+    if hit:
+        report.add(
+            PreflightItem(
+                key="dag_dir_visible",
+                label="DAG 目录双向可见",
+                status=PASS,
+                blocking=True,
+                detail=(
+                    f"Airflow 已认领 ontoMeta 投在 {dags_dir} 的 "
+                    f"{len(hit)}/{len(delivered)} 个 DAG，两侧目录一致。"
+                ),
+            )
+        )
+        return True
+
+    oldest_age = max(age for _, age in delivered)
+    if oldest_age < _DELIVERED_DAG_PROOF_AGE:
+        return False  # 投得太新，分不清「路径错」还是「还没扫到」→ 交给 sentinel
+
+    airflow_folder = client.get_config_option("core", "dags_folder")
+    where = (
+        f"Airflow 自报的 dags_folder 是 {airflow_folder}，ontoMeta 投的是 {dags_dir}——两者不是同一个目录。"
+        if airflow_folder
+        else (
+            f"Airflow 未开放配置查询（expose_config=False），无法直接读出它的 dags_folder；"
+            f"ontoMeta 投的是 {dags_dir}。"
+        )
+    )
+    report.add(
+        PreflightItem(
+            key="dag_dir_visible",
+            label="DAG 目录双向可见",
+            status=FAIL,
+            blocking=True,
+            detail=(
+                f"ontoMeta 已在 {dags_dir} 投了 {len(delivered)} 个 DAG 文件，最早的一个已存在 "
+                f"{oldest_age / 60:.0f} 分钟，Airflow 却一个都没认领。这不是扫描慢（远超 "
+                f"dag_dir_list_interval 默认的 300s），是两侧读写的不是同一个目录。" + where
+            ),
+            next_step=(
+                "二选一对齐路径："
+                f"①把 Airflow 的 core.dags_folder 改成 {dags_dir} 后重启 scheduler；"
+                "②或到 设置 → Airflow → DAG 投递目录，把它改成 Airflow 实际的 dags_folder"
+                "（在 Airflow 的 airflow.cfg 里查 dags_folder，或开 expose_config 后由本检查自动读出）。"
+                "改完重跑本自检，本项应转为通过。"
+            ),
+        )
+    )
+    return True
+
+
 def _check_dag_dir_visible(
     report: PreflightReport, client: AirflowClient, airflow
 ) -> None:
@@ -491,6 +594,10 @@ def _check_dag_dir_visible(
         "gitsync",
     ):
         _check_git_sync_pipeline(report, airflow)
+        return
+
+    # 先用历史投递对账：判得了就不必再赌 sentinel 的 20s 时序（且能给出 blocking 结论）。
+    if _check_delivered_dags_visible(report, client, airflow):
         return
 
     dags_dir = airflow.dags_dir
@@ -728,7 +835,7 @@ def _check_execution_channel(
         )
 
         _check_runner_sink(report, caps, engine)
-        _check_movability(
+        plan = _check_movability(
             report,
             db,
             ontology_id,
@@ -738,7 +845,15 @@ def _check_execution_channel(
             target_alias=_warehouse_conn_id(ds) if ds is not None else None,
         )
         # 源/目标连接：runner 按 alias 自解析，探不通就是搬运任务一定会失败。
-        _check_runner_alias(report, client, "sync_runner_source", "源库连接", DEFAULT_SOURCE_ALIAS)
+        # 源库多带一张**本次真要搬的表**去验：只验 SELECT 1 的话，别名指到了别的库
+        # 一样绿灯，失败要等到 DAG 跑起来才看得见。
+        sample = plan.jobs[0].source if plan and plan.jobs else None
+        _check_runner_alias(
+            report, client, "sync_runner_source", "源库连接", DEFAULT_SOURCE_ALIAS,
+            table=sample.table if sample else None,
+            database=sample.database if sample else None,
+            platform=sample.platform if sample else None,
+        )
         if ds is not None:
             _check_runner_alias(
                 report, client, "sync_runner_target", "目标仓连接", _warehouse_conn_id(ds)
@@ -803,8 +918,11 @@ def _check_movability(
     selected_targets: list[str] | None,
     caps: dict,
     target_alias: str | None,
-) -> None:
+) -> JobPlan | None:
     """预演一遍搬运计划：本次到底有几张表搬得了、搬不了的各是什么原因。
+
+    返回计划本身（预演失败为 None）：源库连接那一项要拿本次真要搬的一张源表去验，
+    不能只验 SELECT 1。计划在这里已经算过一遍，不必为此再编译一次本体。
 
     这些原因（缺 source_ref、ADS 由指标算出、runner 写不了这个「目标 × 装载方式」组合）
     此前只出现在**提交后**回执的 ``unsupported`` 里。工具选择被收走之后更该提前：人不再
@@ -833,7 +951,7 @@ def _check_movability(
                 next_step="不影响提交；若提交后回执里 unsupported 很多，回到这里再看一次。",
             )
         )
-        return
+        return None
 
     movable = len(plan.jobs)
     blocked = plan.unsupported
@@ -848,7 +966,7 @@ def _check_movability(
                 detail=f"本次 {movable} 张表都能搬。",
             )
         )
-        return
+        return plan
 
     # 按原因归并：40 张表各报一行没人看，「缺 source_ref：31 张」才是能照做的信息。
     by_reason: dict[str, int] = {}
@@ -874,6 +992,7 @@ def _check_movability(
             ),
         )
     )
+    return plan
 
 
 def _check_runner_alias(
@@ -882,10 +1001,20 @@ def _check_runner_alias(
     key: str,
     label: str,
     alias: str,
+    *,
+    table: str | None = None,
+    database: str | None = None,
+    platform: str | None = None,
 ) -> None:
-    """探一个 alias 在 runner 侧连不连得通。凭据只在 runner 一侧，故只有它能回答。"""
+    """探一个 alias 在 runner 侧连不连得通。凭据只在 runner 一侧，故只有它能回答。
+
+    给了 ``table``/``database`` 就顺带验能否读到那张表——**只验连通是不够的**：
+    源别名指到了另一个库（连得上、但一张源表都没有）时 ``SELECT 1`` 照样成功，
+    自检全绿，然后每个搬运任务都在 ``NoSuchTable`` 上失败。probe 端点本就支持验表，
+    此前只是没人把表名传进去。
+    """
     try:
-        result = client.probe(alias)
+        result = client.probe(alias, table=table, database=database, platform=platform)
     except SyncRunnerError as exc:
         report.add(
             PreflightItem(
@@ -899,13 +1028,35 @@ def _check_runner_alias(
         )
         return
     if result.get("reachable"):
+        if result.get("can_read_table") is False:
+            # 连上了却读不到本次要搬的表 = 别名指错了库（或权限不足）。这不是「大概率有问题」，
+            # 是搬运任务一定会失败，故阻断——提交出去只会换来一堆 NoSuchTable。
+            report.add(
+                PreflightItem(
+                    key=key,
+                    label=label,
+                    status=FAIL,
+                    blocking=True,
+                    detail=(
+                        f"别名「{alias}」连得上，但读不到本次要搬的源表"
+                        f"{f'{database}.' if database else ''}{table}："
+                        f"{result.get('detail') or '未知原因'}"
+                    ),
+                    next_step=(
+                        f"确认 runner 侧 {alias} 指向的是**源库**而不是别的库"
+                        "（常见是把它配成了目标仓），或确认该账号对这张表有读权限。"
+                    ),
+                )
+            )
+            return
         report.add(
             PreflightItem(
                 key=key,
                 label=label,
                 status=PASS,
                 blocking=True,
-                detail=f"别名「{alias}」在 runner 侧连接正常。",
+                detail=f"别名「{alias}」在 runner 侧连接正常。"
+                + (f"，可读到源表 {table}" if result.get("can_read_table") else ""),
             )
         )
         return

@@ -213,6 +213,39 @@ def test_contract_load_strategy_drives_job_mode():
     assert by_table["sales_order"].mode == "full"
 
 
+def test_explicit_load_strategy_overrides_contracts():
+    """物化 Spec 上选的装载方式必须真的作数。
+
+    此前 ``load_strategy`` 传到 runner 就被丢掉：Spec 写着「全量覆盖」、作业却按契约
+    跑增量，连带 M15 的 staging+原子切换（只在全量时挂）从没被触发过。
+    """
+    ontology_id = _seed("override")
+    with SessionLocal() as db:
+        cs = _contracts.list_contracts(db, ontology_id)
+        names = _contracts.resolve_target_names(db, cs)
+        by_name = {names.get(c.target_id, (None,))[0]: c for c in cs}
+        _contracts.update(
+            db,
+            by_name["customer"].id,
+            {"load_strategy": "incremental", "partition_key": "created_at"},
+        )
+
+    # 不给覆盖 → 逐表按契约
+    assert next(
+        j for j in _build(ontology_id).jobs if j.target.table == "customer"
+    ).mode == "incremental"
+    # 给了覆盖 → 本次全部按覆盖走（契约不变）
+    forced = _build(ontology_id, load_strategy="full")
+    assert {j.mode for j in forced.jobs} == {"full"}
+    with SessionLocal() as db:
+        cs = _contracts.list_contracts(db, ontology_id)
+        names = _contracts.resolve_target_names(db, cs)
+        customer = next(
+            c for c in cs if names.get(c.target_id, (None,))[0] == "customer"
+        )
+        assert customer.load_strategy == "incremental", "覆盖是一次性的，不得写回契约"
+
+
 def _set_cdc(ontology_id: str, entity: str) -> None:
     with SessionLocal() as db:
         cs = _contracts.list_contracts(db, ontology_id)

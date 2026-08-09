@@ -15,7 +15,7 @@ Doris 走 MySQL 线协议，与 Hive 有三处关键语义差异，正是引擎�
 
 from __future__ import annotations
 
-from app.warehouse.adapters.base import DialectAdapter
+from app.warehouse.adapters.base import DialectAdapter, base_type
 from app.warehouse.capabilities import Capabilities, ConstraintSupport
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
 
@@ -68,7 +68,9 @@ class DorisAdapter(DialectAdapter):
         注意 Doris **没有 TIMESTAMP 类型**，日期时间落 DATETIME；泛字符串落
         VARCHAR 而非 STRING——STRING 不能作 Key/分区列，会让主键模型建表失败。
         """
-        dt = (data_type or "").lower()
+        # 去参数再判：INTEGER(11) / DECIMAL(21, 9) 这类原样类型精确查表命中不了，
+        # 会被整体误判成文本列（见 base.base_type）。
+        dt = base_type(data_type)
         st = (semantic_type or "").lower()
         if st == "date" or dt == "date":
             return "DATE"

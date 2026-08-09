@@ -1,8 +1,7 @@
 """SeaTunnel 作业渲染器（M9 默认实现）。
 
 选它作默认的理由见 `MATERIALIZE_ORCHESTRATION.md` §4：仓库已有先例
-（``agents/executors/sync.py`` 就在产 SeaTunnel 配置），且 Bigtop Manager 的 Extra stack
-已纳管 SeaTunnel，不新增运维面。
+（``agents/executors/sync.py`` 就在产 SeaTunnel 配置），不新增运维面。
 
 产出结构对齐 SeaTunnel 的 ``env`` / ``source`` / ``transform`` / ``sink`` 四段。
 ⚠ **需实施前验证**：SeaTunnel 各版本间连接器参数名有出入（目标版本见
@@ -32,7 +31,9 @@ _CDC_PLUGINS: dict[str, str] = {
     "postgresql": "Postgres-CDC",
 }
 # 目标平台 → sink 插件。Doris/StarRocks 有专用 sink（走 Stream Load，远快于 JDBC 逐行）。
-_SINK_PLUGINS: dict[str, str] = {
+# **对外公开**：sync 执行器渲染「仅产出」的作业预览时用同一份映射——两处各存一份
+# 平台→插件的对照表，迟早有一处渲染出目标引擎根本不用的连接器。
+SINK_PLUGINS: dict[str, str] = {
     "hive": "Hive",
     "doris": "Doris",
     "starrocks": "StarRocks",
@@ -130,7 +131,7 @@ class SeaTunnelAdapter(SyncToolAdapter):
 
     def _sink(self, job: JobSpec) -> dict:
         platform = job.target.platform.lower()
-        plugin = _SINK_PLUGINS.get(platform)
+        plugin = SINK_PLUGINS.get(platform)
         if plugin is None:
             raise ValueError(f"目标引擎 {platform} 无 sink 连接器映射")
         sink: dict = {

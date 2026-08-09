@@ -8,6 +8,7 @@ test_airflow_connector.py），并把 preflight 依赖的 settings / 契约服�
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -54,6 +55,7 @@ def _make_handler(
     openapi_version="v1",
     connection=200,
     sentinel_found=True,
+    dag_list=(),
 ):
     """按路由分派的 MockTransport handler。各路由的响应可逐个覆盖以造不同失败。"""
 
@@ -65,8 +67,16 @@ def _make_handler(
             if openapi_version is None:
                 return httpx.Response(404)
             return httpx.Response(200, json={"servers": [{"url": f"/api/{openapi_version}"}]})
-        if path == "/api/v1/dags":  # ping_api（带版本前缀，不含 id）
-            return httpx.Response(ping, json={"dags": [], "total_entries": 0})
+        if path == "/api/v1/config":  # expose_config=False 的真实响应
+            return httpx.Response(403, text="config not exposed")
+        if path == "/api/v1/dags":  # ping_api / list_dag_ids（带版本前缀，不含 id）
+            return httpx.Response(
+                ping,
+                json={
+                    "dags": [{"dag_id": d} for d in dag_list],
+                    "total_entries": len(dag_list),
+                },
+            )
         if path.startswith("/api/v1/connections/"):
             return httpx.Response(connection, json={"connection_id": path.rsplit("/", 1)[-1]})
         if path.startswith("/api/v1/dags/"):  # dag_exists（sentinel 探测）
@@ -145,6 +155,14 @@ def _install(
         pf._contract_service, "resolve_target_names", lambda db, cs: names or {}
     )
     return SimpleNamespace(get=lambda model, _id: ds)
+
+
+def _fake_job(name: str, *, database: str = "erp_ods", table: str = "tab_a"):
+    """伪搬运作业：带 source 端点——源库连接那项要拿它去验「读不读得到这张表」。"""
+    return SimpleNamespace(
+        name=name,
+        source=SimpleNamespace(database=database, table=table, platform="mysql"),
+    )
 
 
 def _by_key(report):
@@ -370,6 +388,44 @@ def test_unreachable_alias_blocks_with_secret_hint(monkeypatch, tmp_path):
     assert report.ok is False
 
 
+def test_source_alias_pointing_at_wrong_database_blocks(monkeypatch, tmp_path):
+    """连得上但读不到源表 = 别名指错了库，搬运任务一定会失败，必须提交前拦。
+
+    真实踩过的一次：``erp_readonly`` 被配成了目标 Postgres 自己，``SELECT 1`` 一路绿灯，
+    DAG 起来后每张表都在 NoSuchTable 上挂掉、重试三次全红。
+    """
+    from app.warehouse.jobs import JobPlan
+
+    plan = JobPlan(jobs=(_fake_job("sync_dim_a", database="erp", table="tabAccount"),))
+    monkeypatch.setattr(pf._job_planner, "build", lambda *a, **k: plan)
+    seen: dict = {}
+
+    class _Probe(_FakeRunner):
+        def probe(self, alias, **kwargs):
+            seen[alias] = kwargs
+            if alias == "erp_readonly":
+                return {
+                    "alias": alias,
+                    "reachable": True,
+                    "can_read_table": False,
+                    "detail": "连上了但读不到表 tabAccount：tabAccount",
+                }
+            return {"alias": alias, "reachable": True, "detail": "连接正常"}
+
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    monkeypatch.setattr(pf, "SyncRunnerClient", _Probe)
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["sync_runner_source"]
+    assert item.status == pf.FAIL and item.blocking is True
+    assert "tabAccount" in item.detail
+    assert report.ok is False
+    # 探测时要真的把本次要搬的表带过去，否则只验了 SELECT 1
+    assert seen["erp_readonly"]["table"] == "tabAccount"
+    assert seen["erp_readonly"]["database"] == "erp"
+    # 目标仓不验表：建表任务还没跑，那时候表本来就不该存在
+    assert seen["ontometa_ds_dw"]["table"] is None
+
+
 def test_docker_channel_states_what_cannot_be_checked(monkeypatch, tmp_path):
     """docker 通道：不假装能查 docker.sock/网络名/驱动，但要如实说明这是残余风险。"""
     db = _install(
@@ -412,7 +468,7 @@ def test_movability_counts_tables_that_cannot_be_moved(monkeypatch, tmp_path):
     from app.warehouse.jobs import JobPlan
 
     plan = JobPlan(
-        jobs=(SimpleNamespace(name="sync_dim_a"),),
+        jobs=(_fake_job("sync_dim_a"),),
         unsupported=[
             {"target": "dim.b", "reason": "对象无 source_ref，无法定位源表"},
             {"target": "dim.c", "reason": "对象无 source_ref，无法定位源表"},
@@ -522,3 +578,72 @@ def test_preflight_endpoint_unknown_ontology_404(client, admin_headers):
         json={"target_datasource_id": "x", "engine": "hive"},
     )
     assert resp.status_code == 404
+
+
+# ---------- 用历史投递判「两侧目录不是同一个」 ----------
+
+
+def _deliver(tmp_path, dag_id: str, *, age_seconds: float) -> None:
+    """伪造一个 ontoMeta 已投出的 DAG 文件，并把 mtime 拨老。"""
+    path = tmp_path / f"{dag_id}.py"
+    path.write_text("# fake delivered dag\n", encoding="utf-8")
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_old_delivered_dags_unseen_by_airflow_is_blocking(monkeypatch, tmp_path):
+    """投了很久的 DAG 一个都没被认领 → 断定路径不一致并阻断。
+
+    sentinel 只等 20s，分不清「路径错」和「扫得慢」（dag_dir_list_interval 默认 300s），
+    于是永远只能给提醒；而 15 分钟前就落盘的文件仍不在册，与扫描快慢无关，是确凿证据。
+    """
+    _deliver(tmp_path, "ontometa_materialize_abc123", age_seconds=3600)
+    db = _install(monkeypatch, tmp_path, _make_handler(dag_list=()))
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+
+    item = _by_key(report)["dag_dir_visible"]
+    assert item.status == pf.FAIL
+    assert item.blocking is True
+    assert "不是同一个目录" in item.detail
+    assert report.ok is False, "确证路径不一致却仍允许提交"
+
+
+def test_delivered_dag_seen_by_airflow_passes_without_sentinel(monkeypatch, tmp_path):
+    """历史投递已被认领 → 直接判通过，不必再写 sentinel 赌时序。"""
+    _deliver(tmp_path, "ontometa_materialize_abc123", age_seconds=3600)
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(dag_list=("ontometa_materialize_abc123",)),
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+
+    item = _by_key(report)["dag_dir_visible"]
+    assert item.status == pf.PASS
+    assert "两侧目录一致" in item.detail
+    # 走了快路径就不该再落 sentinel 文件
+    assert not [f for f in os.listdir(tmp_path) if f.startswith("ontometa_preflight_")]
+
+
+def test_recent_delivery_falls_back_to_sentinel(monkeypatch, tmp_path):
+    """刚投的 DAG 还没被认领**不算**证据——那可能只是没扫到，不能误报阻断。"""
+    _deliver(tmp_path, "ontometa_materialize_abc123", age_seconds=5)
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(dag_list=(), sentinel_found=False),
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+
+    item = _by_key(report)["dag_dir_visible"]
+    assert item.status == pf.WARN, "投递太新时应退回 sentinel 的提醒级结论"
+    assert item.blocking is False
+
+
+def test_sentinel_files_are_not_counted_as_delivered(monkeypatch, tmp_path):
+    """遗留的 sentinel 不能被当成「我们投的 DAG」——否则它自己会把自己判成路径不一致。"""
+    _deliver(tmp_path, "ontometa_preflight_deadbeef", age_seconds=3600)
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(dag_list=(), sentinel_found=True),
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    assert _by_key(report)["dag_dir_visible"].status == pf.PASS

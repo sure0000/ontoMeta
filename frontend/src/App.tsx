@@ -19,6 +19,9 @@ import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
 import { PipelinesPage } from "./pages/PipelinesPage";
 import { TasksPage } from "./pages/TasksPage";
+import { TasksOverviewPage } from "./pages/TasksOverviewPage";
+import { TaskCreatePage } from "./pages/TaskCreatePage";
+import { TasksConnectionsPage } from "./pages/TasksConnectionsPage";
 import { RelationGroupDetailPage } from "./pages/RelationGroupDetailPage";
 import { RelationTypeDetailPage } from "./pages/RelationTypeDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -44,12 +47,16 @@ export default function App() {
         <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
         <Route path="/chat-bi" element={<ChatBiPage />} />
-        <Route path="/tasks" element={<Navigate to="/tasks/materialize" replace />} />
+        <Route path="/tasks" element={<TasksOverviewPage />} />
+        <Route path="/tasks/create" element={<TaskCreatePage />} />
+        <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />
+        <Route path="/tasks/orchestration" element={<PipelinesPage />} />
+        <Route path="/tasks/connections" element={<TasksConnectionsPage />} />
+        {/* 保留旧路由以兼容 */}
         <Route path="/tasks/materialize" element={<TasksPage kind="materialize" />} />
         <Route path="/tasks/sync" element={<TasksPage kind="sync" />} />
         <Route path="/tasks/transform" element={<TasksPage kind="transform" />} />
         <Route path="/tasks/metric" element={<TasksPage kind="metric" />} />
-        <Route path="/tasks/cluster" element={<TasksPage kind="cluster" />} />
         <Route path="/tasks/pipelines" element={<PipelinesPage />} />
         <Route path="/data-apps" element={<DataAppsPage />} />
         <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />

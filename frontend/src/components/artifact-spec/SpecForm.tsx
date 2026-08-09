@@ -18,20 +18,26 @@ export function SpecForm({
   ontologyId,
   onChange,
   mode,
+  skipKeys,
 }: {
   kind: string;
   value: Record<string, unknown>;
   ontologyId?: string | null;
   onChange: (key: string, next: unknown) => void;
   mode: "manual" | "proposal";
+  /** 要跳过不渲染的字段 key 集合——由外层级联选择接管的字段不在此重复出现。 */
+  skipKeys?: Set<string>;
 }) {
   const fields = SPEC_FIELDS[kind] ?? [];
-  if (!fields.length) {
+  const visible = skipKeys
+    ? fields.filter((f) => !skipKeys.has(f.key))
+    : fields;
+  if (!visible.length) {
     return null;
   }
   return (
     <>
-      {fields.map((field) => (
+      {visible.map((field) => (
         <SpecFieldControl
           key={field.key}
           def={field}
@@ -80,7 +86,8 @@ function SpecFieldControl({
       required={requiredMark && def.required}
       help={help}
       validateStatus={error ? "error" : undefined}
-      style={{ marginBottom: 12 }}
+      // 有说明文字的项要留出说明那一行的高度，否则它会压到下一项的标签上。
+      style={{ marginBottom: help ? 28 : 12 }}
     >
       {renderControl(def, value, options, loading, onChange)}
     </Form.Item>

@@ -185,3 +185,51 @@ def test_preflight_warning_codes_do_not_block():
 
     for code in ("preflight_warning", "preflight_unavailable"):
         assert not is_blocking(ValidationIssue(code=code, message="m", entity_type="artifact"))
+
+
+# ---------- 本体一致性问题的作用域 ----------
+
+
+def test_unrelated_ontology_issues_are_folded(db, monkeypatch):
+    """只留与本任务相关的本体问题，其余折成一条计数。
+
+    由来：ERP 本体一次校验产出 188 条，185 条与本次任务无关。全量抄进每份报告，
+    等于把唯一那条该看的埋进噪声里。
+    """
+    import app.agents.validation as validation
+    from app.models import DomainContext, Ontology, OntologyStatus
+    from app.services.draft_consistency import ValidationIssue
+
+    domain = DomainContext(datahub_domain_id="urn:li:domain:scope", name="scope")
+    db.add(domain)
+    db.flush()
+    onto = Ontology(
+        domain_context_id=domain.id, status=OntologyStatus.DRAFT.value, version=0
+    )
+    db.add(onto)
+    db.commit()
+
+    monkeypatch.setattr(
+        validation,
+        "validate_ontology",
+        lambda _db, _oid: [
+            ValidationIssue(code="x", message="本任务的表有问题",
+                            entity_type="object_type", entity_name="customer"),
+            ValidationIssue(code="x", message="别的表有问题",
+                            entity_type="object_type", entity_name="other_a"),
+            ValidationIssue(code="x", message="又一张别的表",
+                            entity_type="object_type", entity_name="other_b"),
+        ],
+    )
+    issues = validate_spec(
+        db,
+        kind="transform",
+        spec={"ontology_id": onto.id, "target_table": "customer"},
+        ontology_id=onto.id,
+    )
+    ontology_issues = [i for i in issues if i.code == "ontology_issue"]
+    assert len(ontology_issues) == 2  # 1 条相关 + 1 条折叠汇总
+    assert any("本任务的表有问题" in i.message for i in ontology_issues)
+    assert any("另有 2 条" in i.message for i in ontology_issues)
+    # 折叠的仍是 warning 级，不会把不相关的问题变成阻断项
+    assert not any(is_blocking(i) for i in ontology_issues)

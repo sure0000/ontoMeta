@@ -132,13 +132,16 @@ async function resolveBreadcrumbs(
     return [{ label: "任务管理", path: "/tasks/materialize" }, { label: "任务链" }];
   }
 
+  if (pathname === "/tasks/connections") {
+    return [{ label: "任务管理", path: "/tasks/materialize" }, { label: "搬运连接" }];
+  }
+
   if (pathname.startsWith("/tasks/")) {
     const TASK_KIND_LABEL: Record<string, string> = {
       materialize: "物化任务",
       sync: "数据同步",
       transform: "数据加工",
       metric: "指标任务",
-      cluster: "集群拓扑",
     };
     const kind = pathname.split("/")[2] ?? "";
     return [{ label: "任务管理" }, { label: TASK_KIND_LABEL[kind] ?? "任务" }];

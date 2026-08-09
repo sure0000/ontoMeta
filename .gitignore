@@ -35,3 +35,7 @@ backend/_ci_test.db*
 .pytest_cache/
 .pids/
 .logs/
+
+# Flink SqlRunner 构建产物（部署时按 README 自行构建）
+tools/flink-sql-runner/build/
+tools/flink-sql-runner/*.jar

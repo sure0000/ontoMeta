@@ -72,6 +72,118 @@ def _to_out(
     return out
 
 
+def _auto_table_name(layer: str, name: str) -> str:
+    """自动表名：层_实体名（已带层前缀则不重复加）。与前端 recommendTableName 同口径。"""
+    return name if name.startswith(f"{layer}_") else f"{layer}_{name}"
+
+
+@router.get("/materialize/targets")
+def list_materialize_targets(db: Session = Depends(get_db)):
+    """物化任务选择用：每个数据域一个**工作本体**及其**可物化实体**（业务对象 +
+    事实/桥表关系），附自动生成的表名。一次请求拿全树，供前端级联选择 + 搜索。
+
+    **为什么在后端聚合**：
+    - 去重：每域只取一个工作本体（优先最新已发布，否则最新更新），避免多版本/草稿同名实体刷屏。
+    - 只出可物化实体：直接用契约 ``derive``（实时推导，不读可能过期的已存契约），外键/
+      派生等**不落表**的关系天然被排除——外键无承接表，无法同步，不应可选。
+    - 同本体内按实体名去重：可物化实体名应唯一，重名是命名问题，不在选择面重复呈现。
+    """
+    from sqlalchemy import func as _func
+
+    from app.models import DomainContext, ObjectType, RelationType
+
+    # 每域的工作本体：先取最新已发布，没有则取最新更新的一个。
+    ontologies = (
+        db.query(Ontology).order_by(Ontology.updated_at.desc()).all()
+    )
+    working: dict[str, Ontology] = {}
+    for o in ontologies:
+        cur = working.get(o.domain_context_id)
+        if cur is None:
+            working[o.domain_context_id] = o
+        elif (
+            o.status == OntologyStatus.PUBLISHED.value
+            and cur.status != OntologyStatus.PUBLISHED.value
+        ):
+            working[o.domain_context_id] = o
+
+    domain_names = {
+        d.id: d.name for d in db.query(DomainContext).all()
+    }
+
+    result: list[dict] = []
+    for domain_id, ont in working.items():
+        derived = materialization_contract_service.derive(db, ont.id)
+        rows = [d for d in derived if d.get("materialized")]
+        if not rows:
+            continue
+        # 实体名/显示名（避免 N+1）。
+        obj_ids = [
+            r["target_id"] for r in rows if r["target_kind"] == "object_type"
+        ]
+        rel_ids = [
+            r["target_id"] for r in rows if r["target_kind"] == "relation_type"
+        ]
+        names: dict[str, tuple[str, str | None]] = {}
+        if obj_ids:
+            for row in (
+                db.query(ObjectType).filter(ObjectType.id.in_(obj_ids)).all()
+            ):
+                names[row.id] = (row.name, row.display_name)
+        if rel_ids:
+            rel_rows = (
+                db.query(RelationType).filter(RelationType.id.in_(rel_ids)).all()
+            )
+            # 桥表以桥接对象的业务名为展示名：LLM 常把桥表关系的 display_name
+            # 标成「属于」这类通用词，一屏「属于」无从区分；而每个桥表的 mapping_object
+            # （如「银行交易」）才是该物化表的真实业务实体，用它既可区分又可精确搜索。
+            mapping_ids = [
+                r.mapping_object_type_id
+                for r in rel_rows
+                if r.mapping_object_type_id
+            ]
+            bridge_display = {
+                o.id: o.display_name
+                for o in db.query(ObjectType)
+                .filter(ObjectType.id.in_(mapping_ids))
+                .all()
+            } if mapping_ids else {}
+            for row in rel_rows:
+                bridge_name = bridge_display.get(row.mapping_object_type_id)
+                names[row.id] = (row.name, bridge_name or row.display_name)
+
+        entities: list[dict] = []
+        seen: set[str] = set()
+        for r in rows:
+            name, display = names.get(r["target_id"], (None, None))
+            if not name or name in seen:  # 同名只留一个（重名=命名问题）
+                continue
+            seen.add(name)
+            layer = r["target_layer"]
+            entities.append(
+                {
+                    "name": name,
+                    "display_name": display,
+                    "kind": r["target_kind"],
+                    "layer": layer,
+                    "table": _auto_table_name(layer, name),
+                }
+            )
+        entities.sort(key=lambda e: (e["kind"], e["name"]))
+        result.append(
+            {
+                "ontology_id": ont.id,
+                "domain_name": domain_names.get(domain_id, domain_id),
+                "version": ont.version,
+                "status": ont.status,
+                "entities": entities,
+            }
+        )
+
+    result.sort(key=lambda x: x["domain_name"])
+    return {"ontologies": result}
+
+
 @router.get(
     "/ontologies/{ontology_id}/materialization-contracts",
     response_model=list[MaterializationContractOut],
@@ -118,9 +230,12 @@ def update_materialization_contract(
     db: Session = Depends(get_db),
 ):
     """人工编辑。提交的字段会被钉住，此后机器推导不再覆盖。"""
-    contract = materialization_contract_service.update(
-        db, contract_id, payload.model_dump(exclude_unset=True)
-    )
+    try:
+        contract = materialization_contract_service.update(
+            db, contract_id, payload.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     if contract is None:
         raise HTTPException(status_code=404, detail="物化契约不存在")
     names = materialization_contract_service.resolve_target_names(db, [contract])

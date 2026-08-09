@@ -26,6 +26,54 @@ from sqlalchemy.engine import URL
 from sync_runner.contract import WireColumn, WireJobSpec
 
 
+_TRUE_TOKENS = frozenset({"1", "true", "t", "yes", "y"})
+_FALSE_TOKENS = frozenset({"0", "false", "f", "no", "n", ""})
+
+
+class CoercionError(RuntimeError):
+    """源值无法安全转成目标列类型。带列名与原值——只说「类型错」找不到是哪一列。"""
+
+
+def _to_bool(column: str, value):
+    """源值 → 布尔。**只认能无损判定的**，其余报错而不是猜。
+
+    为什么需要它：目标列类型由本体的**语义类型**决定（``flag`` → BOOLEAN），源列的物理
+    类型却可能是 TEXT（Frappe 的 ``_user_tags`` 存 ``["a"]``）。这是既定设计——语义优先于
+    物理类型，转换是搬运该做的事。此前搬运一点转换都不做，于是建出来的表装不下自己的
+    源数据，每次都挂在「Not a boolean value」上，报错还指向数据而不是那条语义判断。
+
+    猜不出来的值不静默塞 True/False：那会把一列错误的语义判断变成一列错误的数据，
+    而且再也看不出来。报错让人回去把该属性的语义类型改对。
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):  # MySQL 的 TINYINT(1) 读出来是 0/1
+        return bool(value)
+    token = str(value).strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    raise CoercionError(
+        f"列 {column} 的目标类型是布尔，但源值 {value!r} 判不出真假。"
+        "多半是该属性的语义类型被推断成了 flag（而源里存的是文本）——"
+        "回本体把它改成 attribute，或在源侧规范该列取值。"
+    )
+
+
+def _coercers(tgt_tbl: Table) -> dict:
+    """目标表里需要转换的列 → 转换函数。目前只有布尔一种，够用即加。"""
+    out = {}
+    for col in tgt_tbl.columns:
+        try:
+            python_type = col.type.python_type
+        except NotImplementedError:  # 方言特有类型（如 JSONB）没有 python_type
+            continue
+        if python_type is bool:
+            out[col.name] = _to_bool
+    return out
+
+
 @dataclass
 class NativeResult:
     rows_read: int
@@ -91,6 +139,7 @@ def run_native(
                 # （如同一天多条、分区键为日期），这类应在契约上用更细的水位列。
                 stmt = stmt.where(src_tbl.c[pk_source] > watermark_before)
 
+        coercers = _coercers(tgt_tbl)
         rows_read = rows_written = 0
         # 新高水位从旧水位起步：本次没有更新行时，水位保持不变而非回退到 None。
         wm_after = watermark_before
@@ -106,6 +155,11 @@ def run_native(
                     break
                 dicts = [dict(row._mapping) for row in batch]
                 rows_read += len(dicts)
+                # 源列类型 ≠ 目标列类型时按目标列转换（目标类型由本体语义决定，见 _to_bool）。
+                for column, coerce in coercers.items():
+                    for row_dict in dicts:
+                        if column in row_dict:
+                            row_dict[column] = coerce(column, row_dict[column])
                 tconn.execute(tgt_tbl.insert(), dicts)
                 rows_written += len(dicts)
                 if pk_target:

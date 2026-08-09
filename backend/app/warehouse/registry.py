@@ -10,6 +10,7 @@ from app.warehouse.adapters.clickhouse import ClickHouseAdapter
 from app.warehouse.adapters.doris import DorisAdapter
 from app.warehouse.adapters.hive import HiveAdapter
 from app.warehouse.adapters.iceberg import IcebergAdapter
+from app.warehouse.adapters.postgres import PostgresAdapter
 from app.warehouse.adapters.starrocks import StarRocksAdapter
 
 # Hive 是权威写入路径（单一写入路径原则），其余由其派生。
@@ -23,6 +24,7 @@ _ADAPTERS: dict[str, DialectAdapter] = {
         IcebergAdapter(),
         StarRocksAdapter(),
         ClickHouseAdapter(),
+        PostgresAdapter(),
     )
 }
 

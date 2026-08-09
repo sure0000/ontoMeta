@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 from app.warehouse import LogicalColumn, LogicalTable
@@ -34,6 +36,10 @@ _TYPE_MAP = {
     "text": "STRING",
     "int": "INT",
     "integer": "INT",
+    # MySQL 的 TINYINT/SMALLINT 经 JDBC 返回 Integer——声明成 STRING 会在运行期
+    # ClassCastException（源端按物理类型声明，见 source_flink_type）。
+    "tinyint": "INT",
+    "smallint": "INT",
     "bigint": "BIGINT",
     "long": "BIGINT",
     "decimal": "DECIMAL(38, 18)",
@@ -70,6 +76,16 @@ _JDBC_DRIVERS = {
 }
 
 
+def quote_identifier(name: str) -> str:
+    """Flink SQL 的标识符引用规则：反引号。
+
+    **与目标数仓的方言无关**——同一条 Flink 语句写进 postgres，标识符仍按 Flink 的规则
+    引用，不是 postgres 的双引号。故引用规则住在本模块（Flink 方言的所在地），
+    调用方不得拿 Dialect Adapter 的 ``quote_identifier`` 来引 Flink 语句。
+    """
+    return f"`{name}`"
+
+
 @dataclass(frozen=True)
 class FlinkEndpoint:
     """Flink 里一张表对应的物理端点。``alias`` 是唯一的凭据线索（占位符由它派生），
@@ -79,9 +95,83 @@ class FlinkEndpoint:
     platform: str
 
 
-def _flink_type(col: LogicalColumn) -> str:
-    """列类型 → Flink SQL 类型（常规默认映射，未知回退 STRING）。"""
-    base = (col.data_type or "string").lower().strip()
+#: 引擎原生类型（Adapter.map_type 的产物）→ Flink 类型。按**前缀**匹配，第一条命中为准；
+#: 顺序有意义（timestamp 要在 int 之前、bigint 要在 int 之前）。
+_ENGINE_TO_FLINK: tuple[tuple[str, str], ...] = (
+    ("timestamp", "TIMESTAMP(3)"),
+    ("datetime", "TIMESTAMP(3)"),
+    ("date", "DATE"),
+    ("time", "TIMESTAMP(3)"),
+    ("bool", "BOOLEAN"),
+    ("bigint", "BIGINT"),
+    ("smallint", "INT"),
+    ("integer", "INT"),
+    ("int", "INT"),
+    ("double", "DOUBLE"),
+    ("float", "FLOAT"),
+    ("real", "DOUBLE"),
+)
+
+
+def _from_engine_type(native: str) -> str:
+    """引擎原生列类型 → Flink 类型。decimal/numeric 保精度，其余按前缀表。"""
+    lowered = (native or "").strip().lower()
+    if lowered.startswith(("decimal", "numeric")):
+        params = lowered[lowered.find("(") : ] if "(" in lowered else "(38, 18)"
+        return "DECIMAL" + params.replace(" ", "").replace(",", ", ")
+    for prefix, flink in _ENGINE_TO_FLINK:
+        if lowered.startswith(prefix):
+            return flink
+    return "STRING"
+
+
+def source_flink_type(col: LogicalColumn) -> str:
+    """**源端**列类型：JDBC 驱动按源库的物理类型返回值，故只看物理类型。
+
+    不能拿目标引擎的 Adapter 来算：那答的是「这列在数仓里该建成什么」，
+    而源端要的是「驱动会返回什么 Java 类型」。差一档就是运行期
+    ``ClassCastException: Integer cannot be cast to String``。
+    """
+    return _flink_type(col, None)
+
+
+def target_flink_type(col: LogicalColumn, engine: str) -> str:
+    """**目标端**列类型：镜像该引擎 Adapter 的产物（表就是照它建的）。"""
+    return _flink_type(col, engine)
+
+
+def _flink_type(col: LogicalColumn, platform: str | None = None) -> str:
+    """列类型 → Flink SQL 类型。
+
+    **目标端以 Dialect Adapter 的产物为准**：数仓里那一列到底是什么类型，是
+    ``adapter.map_type`` 说了算的（表就是照它建的）。Flink 侧另算一套，只要有一档
+    对不上，JDBC sink 就报 "Column types of query result and sink do not match"
+    ——踩过一次：stat_date 在数仓是 DATE，Flink 按语义算成了 TIMESTAMP(3)。
+
+    源端（platform 不是已注册的数仓引擎，如 mariadb）没有 Adapter 可问，按物理类型
+    映射；物理类型要先去参数（``VARCHAR(140)`` / ``DATETIME(6)`` 精确查表命中不了，
+    此前每一列都退成了 STRING）。
+    """
+    if platform:
+        try:
+            from app.warehouse import get_adapter
+
+            return _from_engine_type(
+                get_adapter(platform).map_type(col.data_type, col.semantic_type)
+            )
+        except Exception:  # noqa: BLE001 — 不是已注册引擎（源库多半如此）→ 按物理类型
+            pass
+    raw = (col.data_type or "string").lower().strip()
+    base = re.split(r"[(\s]", raw, maxsplit=1)[0]
+    st = (col.semantic_type or "").lower().strip()
+    if st == "date" or base == "date":
+        return "DATE"
+    if st in {"datetime", "time"} or "time" in base or "date" in base:
+        return "TIMESTAMP(3)"
+    if st == "amount" or base in {"decimal", "numeric", "money"}:
+        return "DECIMAL(38, 18)"
+    if st == "flag" or base in {"bool", "boolean"}:
+        return "BOOLEAN"
     return _TYPE_MAP.get(base, "STRING")
 
 
@@ -89,6 +179,26 @@ def _placeholder(alias: str, field: str) -> str:
     """凭据占位符，与搬运通道同构（不变量 5：凭据不进 Spec）。"""
     token = _alias_token(alias)
     return f"${{{token}_{field.upper()}}}"
+
+
+#: URL 里已经带了库名的平台（``jdbc:mysql://host:3306/<库>``）。
+#: 这些平台的「库」就是 URL 的那一段，``table-name`` 再带一次会被解析成 ``库.库.表``。
+_DATABASE_IN_URL = frozenset({"mysql", "mariadb"})
+
+
+def _jdbc_table_name(platform: str, physical: str) -> str:
+    """JDBC ``table-name`` 该写 ``表`` 还是 ``库.表``——两类平台答案不同。
+
+    - MySQL/MariaDB：URL 末段就是库，故这里只能写**裸表名**；带上库前缀会得到
+      ``Table '库.库.表' doesn't exist``（真跑一次才会看见，生成期看不出来）。
+    - PostgreSQL：URL 末段是**数据库**，而 ``dim`` 是库内的 **schema**，
+      必须写成 ``schema.表``，否则找不到表。
+
+    同一个词「database」在两边指的不是一层东西，这条差异只能按平台判。
+    """
+    if platform in _DATABASE_IN_URL and "." in physical:
+        return physical.rsplit(".", 1)[-1]
+    return physical
 
 
 def _connector_props(
@@ -130,7 +240,7 @@ def _connector_props(
     props = {
         "connector": "jdbc",
         "url": _placeholder(alias, "URL"),
-        "table-name": physical,
+        "table-name": _jdbc_table_name(platform, physical),
         "username": _placeholder(alias, "USER"),
         "password": _placeholder(alias, "PASSWORD"),
     }
@@ -146,6 +256,7 @@ def render_create_table(
     *,
     physical_name: str | None = None,
     watermark: tuple[str, str] | None = None,
+    is_target: bool = False,
 ) -> str:
     """渲染一张表的 Flink SQL ``CREATE TABLE ... WITH (...)``。
 
@@ -156,7 +267,7 @@ def render_create_table(
         watermark: streaming 源表的 ``(列名, 策略)``
     """
     col_lines = [
-        f"  `{c.name}` {_flink_type(c)}"
+        f"  `{c.name}` {_flink_type(c, endpoint.platform if is_target else None)}"
         + (f" COMMENT '{c.comment}'" if c.comment else "")
         for c in table.columns
     ]
@@ -210,7 +321,9 @@ def generate_flink_sql(
         ),
         "",
         "-- 目标表",
-        render_create_table(target_table, target, physical_name=target_physical),
+        render_create_table(
+            target_table, target, physical_name=target_physical, is_target=True
+        ),
         "",
         "-- 计算并写入",
         f"INSERT INTO `{target_table.name}`",

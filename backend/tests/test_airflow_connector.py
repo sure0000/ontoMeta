@@ -1,6 +1,6 @@
 """Airflow REST 客户端：请求形状、幂等触发、错误封装。
 
-用 httpx MockTransport，不需要真实 Airflow（比照 test_bigtop_manager.py 的做法）。
+用 httpx MockTransport，不需要真实 Airflow。
 真实实例上的 REST 版本与路径以起栈后 ``GET /openapi.json`` 为准，见
 docker/orchestration/README.md「起栈后待核实项」。
 """
@@ -145,6 +145,57 @@ def test_ping_api_surfaces_401():
     with pytest.raises(AirflowError) as exc:
         _client(handler).ping_api()
     assert "401" in str(exc.value)
+
+
+def test_explain_ping_failure_auth_hint_on_401():
+    """401 → 补上「开 basic_auth 后端」的下一步，不去探版本。"""
+    from app.connectors.airflow import explain_ping_failure
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text='{"title": "Unauthorized"}')
+
+    client = _client(handler)
+    try:
+        client.ping_api()
+    except AirflowError as exc:
+        msg = explain_ping_failure(client, "v1", exc)
+    assert "401" in msg
+    assert "AUTH_BACKENDS" in msg
+
+
+def test_explain_ping_failure_detects_version_mismatch_on_404():
+    """404 且配的版本与实测不符 → 自动探测并明确告知应改成哪个版本。"""
+    from app.connectors.airflow import explain_ping_failure
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # /api/v1/dags 打不通（404）；openapi 探测暴露的是 v2。
+        if "openapi" in request.url.path:
+            return httpx.Response(200, json={"servers": [{"url": "/api/v2"}]})
+        return httpx.Response(404, text='{"title": "Not Found"}')
+
+    client = _client(handler, api_version="v1")
+    try:
+        client.ping_api()
+    except AirflowError as exc:
+        msg = explain_ping_failure(client, "v1", exc)
+    assert "v2" in msg
+    assert "api_version" in msg
+
+
+def test_explain_ping_failure_404_when_version_undetectable():
+    """404 且探不到 openapi → 不臆测版本，只提示手动核对 v1/v2。"""
+    from app.connectors.airflow import explain_ping_failure
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text='{"title": "Not Found"}')
+
+    client = _client(handler, api_version="v1")
+    try:
+        client.ping_api()
+    except AirflowError as exc:
+        msg = explain_ping_failure(client, "v1", exc)
+    assert "404" in msg
+    assert "openapi.json" in msg
 
 
 def test_xcom_parses_json_value():

@@ -122,6 +122,17 @@ def _as_single_statement(sql: str) -> str:
     return (sql or "").rstrip().rstrip(";").rstrip()
 
 
+def _constraint_list(constraints: dict[str, list[str]] | None) -> list[str]:
+    """{表 → [约束语句]} 拍平成稳定有序的语句列表（表名升序，表内保序）。
+
+    顺序稳定是为了幂等：同一本体重复生成，spec.json 必须逐字节一致。
+    """
+    out: list[str] = []
+    for qualified in sorted(constraints or {}):
+        out.extend(_as_single_statement(s) for s in constraints[qualified])
+    return out
+
+
 def _task_group_order(jobs: tuple[JobSpec, ...]) -> list[str]:
     layers = {j.layer for j in jobs}
     known = [layer for layer in _LAYER_ORDER if layer in layers]
@@ -187,6 +198,7 @@ class AirflowDagBuilder:
         ontology_id: str,
         plan: JobPlan,
         ddl_statements: dict[str, str],
+        constraint_statements: dict[str, list[str]] | None = None,
         schedule: str | None = None,
         channel: str = "docker",
         runner_endpoint: str | None = None,
@@ -229,6 +241,7 @@ class AirflowDagBuilder:
                 ontology_id=ontology_id,
                 plan=plan,
                 ddl_statements=ddl_statements,
+                constraint_statements=constraint_statements,
                 schedule=schedule,
                 runner_endpoint=runner_endpoint,
                 engine=engine,
@@ -304,6 +317,9 @@ class AirflowDagBuilder:
             # 建表语句按目标表名排序，保证幂等
             "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
             "ddl_targets": sorted(ddl_statements),
+            # 两段式 DDL 的第二段：外键在**所有表建完之后**统一加，故必须是独立任务。
+            # 内联进建表会让「只物化一部分」和「本体里有环」都建不出来。
+            "constraints": _constraint_list(constraint_statements),
             # staging 表的建表语句，**跟在正式表 DDL 之后**执行（CREATE ... LIKE 要求它已存在）。
             "staging_ddl": stage.ddl,
             "tasks": tasks,
@@ -326,6 +342,7 @@ class AirflowDagBuilder:
         ontology_id: str,
         plan: JobPlan,
         ddl_statements: dict[str, str],
+        constraint_statements: dict[str, list[str]] | None = None,
         schedule: str | None,
         runner_endpoint: str | None,
         engine: str,
@@ -374,6 +391,9 @@ class AirflowDagBuilder:
             "max_active_tasks": max_active_tasks,
             "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
             "ddl_targets": sorted(ddl_statements),
+            # 两段式 DDL 的第二段：外键在**所有表建完之后**统一加，故必须是独立任务。
+            # 内联进建表会让「只物化一部分」和「本体里有环」都建不出来。
+            "constraints": _constraint_list(constraint_statements),
             # staging 表的建表语句，跟在正式表 DDL 之后执行。
             "staging_ddl": stage.ddl,
             "tasks": tasks,
@@ -492,6 +512,21 @@ with DAG(
         sql=_SPEC["ddl"] + (_SPEC.get("staging_ddl") or []),
     )
 
+    # 两段式 DDL 的第二段。外键必须等**全部**表建完再加：内联进 CREATE TABLE 时，
+    # 被引用表还没建就直接报错，于是「只物化一部分」和「本体里有环」都做不了。
+    # 声明式外键的引擎（hive/doris）这里恒为空列表，不会多出这个任务。
+    _constraints = _SPEC.get("constraints") or []
+    if _constraints:
+        add_constraints = SQLExecuteQueryOperator(
+            task_id="add_constraints",
+            conn_id=_SPEC["warehouse_conn_id"],
+            sql=_constraints,
+        )
+        create_tables >> add_constraints
+        _ddl_tail = [add_constraints]
+    else:
+        _ddl_tail = [create_tables]
+
     # heads 是搬运任务（上游接 create_tables / 上一层），tails 是该表链条的末端
     # （有 staging 时是 swap 任务）。下一层必须等 swap 完成，等到的才是正式表的数据。
     heads: dict[str, list] = {{}}
@@ -524,7 +559,7 @@ with DAG(
     # 层间串联。**逐个上游 >> 整组下游**，不能写成 previous >> group：第二层起
     # previous 是 list，而 Python 的 list >> list 直接 TypeError（两侧都是内建 list，
     # Operator 的 __rshift__/__rrshift__ 根本轮不到），整个 DAG 文件在解析期就导入失败。
-    previous = [create_tables]
+    previous = _ddl_tail
     for layer in _SPEC["layer_order"]:
         group = heads.get(layer) or []
         if not group:
@@ -665,6 +700,21 @@ with DAG(
         sql=_SPEC["ddl"] + (_SPEC.get("staging_ddl") or []),
     )
 
+    # 两段式 DDL 的第二段。外键必须等**全部**表建完再加：内联进 CREATE TABLE 时，
+    # 被引用表还没建就直接报错，于是「只物化一部分」和「本体里有环」都做不了。
+    # 声明式外键的引擎（hive/doris）这里恒为空列表，不会多出这个任务。
+    _constraints = _SPEC.get("constraints") or []
+    if _constraints:
+        add_constraints = SQLExecuteQueryOperator(
+            task_id="add_constraints",
+            conn_id=_SPEC["warehouse_conn_id"],
+            sql=_constraints,
+        )
+        create_tables >> add_constraints
+        _ddl_tail = [add_constraints]
+    else:
+        _ddl_tail = [create_tables]
+
     # heads 是搬运任务（上游接 create_tables / 上一层），tails 是该表链条的末端
     # （有 staging 时是 swap 任务）。下一层必须等 swap 完成，等到的才是正式表的数据。
     heads: dict[str, list] = {}
@@ -686,7 +736,7 @@ with DAG(
     # 层间串联。**逐个上游 >> 整组下游**，不能写成 previous >> group：第二层起
     # previous 是 list，而 Python 的 list >> list 直接 TypeError（两侧都是内建 list，
     # Operator 的 __rshift__/__rrshift__ 根本轮不到），整个 DAG 文件在解析期就导入失败。
-    previous = [create_tables]
+    previous = _ddl_tail
     for layer in _SPEC["layer_order"]:
         group = heads.get(layer) or []
         if not group:

@@ -1,7 +1,7 @@
 # 物化编排验证栈（本地）
 
-给 `MATERIALIZE_ORCHESTRATION.md` 方案做本地验证用。**只补齐本机缺的服务**——DataHub、ERPNext、
-Bigtop Manager 已各自在跑，这里以 external network 接入，不重起一套。
+给 `MATERIALIZE_ORCHESTRATION.md` 方案做本地验证用。**只补齐本机缺的服务**——DataHub、ERPNext
+已各自在跑，这里以 external network 接入，不重起一套。
 
 ## 本机基线（2026-08 实测）
 
@@ -9,7 +9,6 @@ Bigtop Manager 已各自在跑，这里以 external network 接入，不重起�
 |---|---|---|---|
 | DataHub | ✅ v1.6.0 在跑 | GMS `:8080`，前端 `:9002` | 血缘上报目标 |
 | ERPNext + MariaDB 11.8 | ✅ 在跑 | MariaDB `:3308` | 真实源库（本体「数据域-ERP-全量」即来自它） |
-| Bigtop Manager | ✅ 在跑 | `:18080` | 备选方案里用它部署 Hive |
 | Airflow | ❌ 缺 | 本栈提供 `:8081` | 调度 + 血缘自动注册 |
 | SeaTunnel | ❌ 缺 | 本栈提供 | 跨源搬运 |
 | 目标数仓 | ❌ 缺 | 本栈提供 Doris `:9030` | 物化落库目标 |
@@ -37,7 +36,6 @@ Airflow Web：http://localhost:8081 （admin/admin，`standalone` 模式，仅�
 | 方案 | 代价 | 保真度 | 何时选 |
 |---|---|---|---|
 | **Doris all-in-one**（本栈 `warehouse` profile） | 拉 ~3GB 镜像 | 高：仓库已有 Doris Dialect Adapter，MySQL 线协议便于校验建表结果 | 默认首选 |
-| Bigtop Manager 部署 Hive | 无需新镜像（bm-1/2/3 已在跑），但部署重、耗时长 | 最高：Hive 是方案里的权威副本 | 镜像拉不动，或要验 Hive 方言 |
 | 本机已有 MySQL 8 当假数仓 | 零成本 | **低**：仓库无 MySQL 方言 adapter，不验证 DDL 正确性 | 只验编排/血缘机制（M10 冒烟），不验方言 |
 
 ## 目录

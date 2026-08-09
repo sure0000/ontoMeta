@@ -56,6 +56,44 @@ def _is_technical_field(name: str) -> bool:
     return False
 
 
+# 名字猜出来的这几类语义会**决定目标列的物理类型**（datetime→TIMESTAMP、amount→DECIMAL、
+# flag→BOOLEAN，见各 Dialect Adapter 的 map_type）。猜错的代价不是标签难看，而是物化出一张
+# 装不下自己源数据的表：ERP 域里 date_format/time_format（VARCHAR，存 "dd-mm-yyyy"）被判
+# datetime、_user_tags（TEXT，存 ["a"]）被判 flag，搬运每次都挂在类型转换上。
+_PHYSICAL_SEMANTICS = frozenset({"datetime", "amount", "flag"})
+_TEXT_TYPE_TOKENS = ("text", "char", "string", "json", "blob", "clob")
+
+_TRUEISH = frozenset({"1", "0", "true", "false", "t", "f", "yes", "no", "y", "n"})
+
+
+def _is_text_physical(data_type: str | None) -> bool:
+    """物理类型是不是文本类。真实源给的是 ``VARCHAR(140)`` 这种带参数的原样类型。"""
+    lowered = (data_type or "").lower()
+    return any(token in lowered for token in _TEXT_TYPE_TOKENS)
+
+
+def _samples_support(semantic: str, samples: list[str] | None) -> bool:
+    """样例值是否支持这个语义判断。没有样例 → False（无证据即不支持）。
+
+    「字符串里存的是日期」是常见且合理的（源库偷懒），此时判 datetime 让目标列升级成
+    TIMESTAMP 是**对的**；而 "dd-mm-yyyy" 这种格式串则不是。两者只有看值才分得开。
+    """
+    values = [str(v).strip() for v in (samples or []) if str(v).strip()]
+    if not values:
+        return False
+    if semantic == "flag":
+        return all(v.lower() in _TRUEISH for v in values)
+    if semantic == "amount":
+        for value in values:
+            try:
+                float(value.replace(",", ""))
+            except ValueError:
+                return False
+        return True
+    # datetime：至少要以「4 位年 + 分隔符」开头，且含数字分隔——排除 dd-mm-yyyy 这类格式串。
+    return all(re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", v) for v in values)
+
+
 def _infer_object_name(dataset_name: str) -> str:
     base = _to_snake(dataset_name)
     if base.endswith("s"):
@@ -812,6 +850,21 @@ class EvidenceBuilder:
         )
 
     def _infer_semantic_type(self, field) -> str:
+        guess = self._guess_semantic_type(field)
+        # **名字是线索，物理类型与样例是事实**。物理类型是文本、而名字猜出的语义会把
+        # 目标列定成 TIMESTAMP/DECIMAL/BOOLEAN 时，除非样例值确实长那样，否则退回
+        # attribute——ERP 里 date_format(VARCHAR,"dd-mm-yyyy")、_user_tags(TEXT,'["a"]')
+        # 正是这么被判成 datetime / flag 的，物化出来的表装不下自己的源数据。
+        if guess in _PHYSICAL_SEMANTICS and _is_text_physical(
+            getattr(field, "data_type", None)
+        ):
+            if not _samples_support(guess, getattr(field, "sample_values", None)):
+                return "attribute"
+        return guess
+
+    @staticmethod
+    def _guess_semantic_type(field) -> str:
+        """只看字段名的那一层猜测。与物理类型的对账在 _infer_semantic_type 里做。"""
         name = field.name.lower()
         if field.is_primary_key or name.endswith("_id"):
             return "identifier"

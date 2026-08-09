@@ -23,6 +23,7 @@ from app.schemas import (
     BusinessLogicPropertyBindingCreate,
     BusinessLogicPropertyBindingOut,
     BusinessLogicUpdate,
+    ConfirmationCreate,
     ConfirmationOut,
     ExpressionFormatRequest,
     ExpressionFormatResponse,

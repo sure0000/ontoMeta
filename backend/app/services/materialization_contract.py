@@ -238,6 +238,18 @@ class MaterializationContractService:
                 if getattr(contract, field) != item[field]:
                     setattr(contract, field, item[field])
                     changed = True
+            # 外键关系永远不物化：即使人工曾把 materialized 钉成 True（旧版未拦），
+            # 机器重推导时也要强制纠正回来，否则它会被选进物化批次却无逻辑表。
+            if (
+                item.get("materialized") is False
+                and contract.target_kind == TargetKind.RELATION_TYPE.value
+                and contract.materialized is True
+            ):
+                rel = db.get(RelationType, contract.target_id)
+                if rel is not None and (rel.structure_type or "") == "foreign_key":
+                    contract.materialized = False
+                    _mark_overridden(contract, ["materialized"])
+                    changed = True
             contract.machine_baseline = baseline
             contract.derivation_reason = item["derivation_reason"]
             contract.upstream_removed = False
@@ -276,9 +288,35 @@ class MaterializationContractService:
             q = q.filter(MaterializationContract.target_kind == target_kind)
         if materialized_only:
             q = q.filter(MaterializationContract.materialized.is_(True))
-        return q.order_by(
+        rows = q.order_by(
             MaterializationContract.target_kind, MaterializationContract.target_id
         ).all()
+        # 防御性深度过滤：外键关系是列上的声明，永远不应作为物化源表。
+        # 即使 materialized 标志因遗留数据/直接改库而为 True，也在这里挡住，
+        # 不让它进入同步工具解析、批次计数、cron 分组、Chat BI 实体列表等下游。
+        if materialized_only:
+            rows = self._exclude_foreign_key_relations(db, rows)
+        return rows
+
+    @staticmethod
+    def _exclude_foreign_key_relations(
+        db: Session, contracts: list[MaterializationContract]
+    ) -> list[MaterializationContract]:
+        """从契约列表中剔除外键关系契约（防御性，不依赖 materialized 标志正确性）。"""
+        rel_ids = [
+            c.target_id
+            for c in contracts
+            if c.target_kind == TargetKind.RELATION_TYPE.value
+        ]
+        if not rel_ids:
+            return contracts
+        fk_ids: set[str] = set()
+        for rel in db.query(RelationType).filter(RelationType.id.in_(rel_ids)).all():
+            if (rel.structure_type or "") == "foreign_key":
+                fk_ids.add(rel.id)
+        if not fk_ids:
+            return contracts
+        return [c for c in contracts if c.target_id not in fk_ids]
 
     def list_selected(
         self,
@@ -326,6 +364,19 @@ class MaterializationContractService:
         )
         if contract is None:
             return None
+
+        # 外键关系是列上的声明，不是独立表，永远不应被物化为源表。
+        # 即使人工显式 patch materialized=True 也要拦住——否则它会被 list_selected
+        # 选进物化批次却无对应逻辑表，产生误导性的「已物化」状态。
+        if (
+            patch.get("materialized") is True
+            and contract.target_kind == TargetKind.RELATION_TYPE.value
+        ):
+            rel = db.get(RelationType, contract.target_id)
+            if rel is not None and (rel.structure_type or "") == "foreign_key":
+                raise ValueError(
+                    "外键关系是列上的声明，不是独立表，不能标记为物化"
+                )
 
         touched: list[str] = []
         for patch_key, value in patch.items():

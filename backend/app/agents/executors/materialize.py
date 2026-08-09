@@ -26,9 +26,12 @@ class MaterializeExecutor(Executor):
         ontology_id = spec.get("ontology_id")
         if not ontology_id:
             raise ValueError("Spec 缺少 ontology_id")
-        engine = spec.get("engine") or "hive"
         selected = set(spec.get("selected_targets") or []) or None
         with SessionLocal() as db:
+            # 引擎由目标数据源类型推定（旧制品显式给了则优先），不再靠表单单选。
+            engine = materialization_runner.resolve_engine(
+                db, spec.get("target_datasource_id"), spec.get("engine")
+            )
             ddl = _generator.generate_ddl(
                 db,
                 ontology_id,
@@ -68,12 +71,39 @@ class MaterializeExecutor(Executor):
         ontology_id = spec.get("ontology_id")
         if not ontology_id:
             raise ValueError("Spec 缺少 ontology_id")
+
+        # P2：提交前强制跑 preflight，有阻断项就拒绝执行（保护 Data Agent 提交的制品）
+        with SessionLocal() as db:
+            from app.services.materialize_preflight import run_preflight
+
+            engine = materialization_runner.resolve_engine(
+                db, spec.get("target_datasource_id"), spec.get("engine")
+            )
+            preflight = run_preflight(
+                db,
+                ontology_id,
+                target_datasource_id=spec["target_datasource_id"],
+                engine=engine,
+                selected_targets=spec.get("selected_targets"),
+            )
+            if not preflight.ok:
+                blocking = [
+                    f"[{i.label}] {i.detail}" + (f" → {i.next_step}" if i.next_step else "")
+                    for i in preflight.blocking_failures
+                ]
+                raise RuntimeError(
+                    f"提交前自检发现 {len(blocking)} 项阻断，无法执行物化：\n"
+                    + "\n".join(f"  {idx+1}. {msg}" for idx, msg in enumerate(blocking))
+                )
+
         with SessionLocal() as db:
             receipt = materialization_runner.run(
                 db,
                 ontology_id,
                 target_datasource_id=spec["target_datasource_id"],
-                engine=spec.get("engine") or "hive",
+                engine=materialization_runner.resolve_engine(
+                    db, spec.get("target_datasource_id"), spec.get("engine")
+                ),
                 sync_tool=spec.get("sync_tool"),
                 database_prefix=spec.get("database_prefix"),
                 database_overrides=spec.get("database_overrides"),

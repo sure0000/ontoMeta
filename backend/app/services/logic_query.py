@@ -393,7 +393,9 @@ class OntologyQueryService(_OntologyQueryBase):
         versions = self.list_versions(db, obj.id)
         ontology_versions = self.list_versions(db, obj.ontology_id)
         return ObjectTypeDetail(
-            **summary.model_dump(),
+            # 详情用 _resolve_object_datahub 解析后的 source_ref（可能回溯到父对象），
+            # 与摘要里那份原始值不同——排掉摘要的，以免同名 kwarg 撞车。
+            **summary.model_dump(exclude={"source_ref"}),
             ontology_id=obj.ontology_id,
             source_ref=source_ref,
             datahub_url=datahub_url,

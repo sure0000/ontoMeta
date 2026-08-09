@@ -5,7 +5,7 @@
 改为从本表投影，旧路由转薄层）。
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -79,12 +79,19 @@ def probe_dependency(component_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/settings/dependencies/{component_id}/deploy", response_model=DeployResultOut)
-def deploy_dependency(component_id: str, db: Session = Depends(get_db)):
-    """执行部署。Phase 0：external 直接拨测；docker/k8s/bare_metal 待 Phase 3。"""
+def deploy_dependency(
+    component_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """执行部署。external 同步拨测直接返回；docker/k8s/bare_metal（尤其 SSH 安装可能
+    持续数分钟）先置 deploying 立即返回，实际部署交后台执行，前端轮询组件状态。"""
     try:
-        result = _service.deploy(db, component_id)
+        result = _service.start_deploy(db, component_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if result.pop("need_background", False):
+        background_tasks.add_task(_service.run_deploy_detached, component_id)
     return DeployResultOut(**result)
 
 

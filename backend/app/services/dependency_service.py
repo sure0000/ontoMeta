@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.database import SessionLocal
 from app.models import DependencyComponent
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,7 +34,6 @@ COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
     "sync_runner": ("sync-runner", False),
     "cube": ("Cube 语义层", False),
     "postgres": ("ontoMeta 自身 PostgreSQL", False),
-    "bigtop": ("Bigtop Manager（Hive 备选）", False),
 }
 
 SINGLETON_KEYS = {k for k, (_, multi) in COMPONENT_CATALOG.items() if not multi}
@@ -84,14 +84,27 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
     "postgres": [
         ("sqlalchemy_url", "str", True, True, None),
     ],
-    "bigtop": [
-        ("api_url", "str", False, True, "http://localhost:18080"),
-    ],
 }
 
 # 部署参数 schema：按 mode（跨组件通用）。
 # Phase 0 只落地结构；docker/k8s/bare_metal 的实际部署在 Phase 3 实现。
 DEPLOY_MODES = ["external", "docker", "k8s", "bare_metal"]
+
+# 每组件允许的部署方式白名单：未列出的组件默认支持全部 DEPLOY_MODES。
+# datahub / warehouse(Doris) / llm 的裸机安装随发行版/集群差异极大，无自动化价值，
+# 只支持 external（登记已有服务）——前端据此收窄模式选择器，后端据此校验拦非法组合。
+COMPONENT_DEPLOY_MODES: dict[str, list[str]] = {
+    "datahub": ["external"],
+    "warehouse": ["external"],
+    "llm": ["external"],
+}
+
+
+def allowed_deploy_modes(key: str) -> list[str]:
+    """取组件允许的部署方式（无白名单则全支持）。"""
+    return COMPONENT_DEPLOY_MODES.get(key, DEPLOY_MODES)
+
+
 DEPLOY_SPEC_SCHEMAS: dict[str, list[ConnectionField]] = {
     "external": [],
     "docker": [
@@ -108,44 +121,58 @@ DEPLOY_SPEC_SCHEMAS: dict[str, list[ConnectionField]] = {
     ],
 }
 
-# 物理机模式：按组件给出「登记一台已装好的物理服务」所需的参数（host + 端口 + 凭据）。
-# deploy() 据此拼出 connection 并拨测——这是物理机模式的「部署执行」：
-# 不 SSH 装软件（那需运维脚本与授权），而是登记现成服务 + 自动回收连接 + 验活。
-BARE_METAL_PARAMS: dict[str, list[ConnectionField]] = {
+# 物理机模式：填目标机 IP + SSH 账密/私钥，ontoMeta 远程 SSH 安装、启动、回收连接、拨测。
+# 字段 = 通用 SSH 接入参数（所有组件共用）+ 每组件少量安装参数（端口/安装目录/管理员密码）。
+# 服务自身的 API 参数（如 Airflow 的 token/api_version）由安装流程自动生成回收，不再要人填。
+# 安装编排见 install_recipes.py；deploy() 开 SSH → 派发 recipe → 回收 connection → 拨测。
+_SSH_ACCESS_FIELDS: list[ConnectionField] = [
+    ("ssh_host", "str", False, True, None),
+    ("ssh_port", "int", False, False, 22),
+    ("ssh_user", "str", False, True, "root"),
+    ("auth_method", "str", False, False, "password"),  # password | key
+    ("ssh_password", "str", True, False, None),
+    ("ssh_private_key", "text", True, False, None),     # 多行 PEM 私钥
+    ("ssh_key_passphrase", "str", True, False, None),
+]
+
+# 每组件的安装参数（叠加在 SSH 接入参数之后）。端口给默认值即可，管理员密码等机密标 secret。
+_BARE_METAL_INSTALL_PARAMS: dict[str, list[ConnectionField]] = {
     "datahub": [
-        ("host", "str", False, True, None), ("gms_port", "int", False, False, 8080),
-        ("frontend_port", "int", False, False, 9002), ("token", "str", True, False, None),
+        ("gms_port", "int", False, False, 8080),
+        ("frontend_port", "int", False, False, 9002),
     ],
     "airflow": [
-        ("host", "str", False, True, None), ("port", "int", False, False, 8081),
-        ("username", "str", False, False, None), ("password", "str", True, False, None),
-        ("token", "str", True, False, None), ("api_version", "str", False, False, "v1"),
+        ("port", "int", False, False, 8081),
+        ("admin_username", "str", False, False, "admin"),
+        ("admin_password", "str", True, False, None),  # 留空则自动生成并回收
     ],
-    "seatunnel": [("host", "str", False, True, None), ("port", "int", False, False, 5801)],
+    "seatunnel": [("port", "int", False, False, 5801)],
     "warehouse": [
-        ("host", "str", False, True, None), ("port", "int", False, True, None),
-        ("dialect", "str", False, True, "doris"), ("username", "str", False, True, "root"),
-        ("password", "str", True, False, None), ("database", "str", False, False, ""),
+        ("port", "int", False, False, 9030),
+        ("dialect", "str", False, True, "doris"),
+        ("username", "str", False, True, "root"),
+        ("db_password", "str", True, False, None),
+        ("database", "str", False, False, ""),
     ],
-    "sync_runner": [
-        ("host", "str", False, True, None), ("port", "int", False, False, 8098),
-        ("token", "str", True, False, None),
-    ],
-    "cube": [
-        ("host", "str", False, True, None), ("port", "int", False, False, 4000),
-        ("api_secret", "str", True, False, None),
-    ],
+    "sync_runner": [("port", "int", False, False, None)],  # 留空则自动选空闲端口并回写
+    "cube": [("port", "int", False, False, 4000)],
     "postgres": [
-        ("host", "str", False, True, None), ("port", "int", False, False, 5432),
-        ("username", "str", False, True, "ontometa"), ("password", "str", True, True, None),
+        ("port", "int", False, False, 5432),
+        ("db_username", "str", False, True, "ontometa"),
+        ("db_password", "str", True, False, None),
         ("database", "str", False, True, "ontometa"),
     ],
-    "bigtop": [("host", "str", False, True, None), ("port", "int", False, False, 18080)],
     "llm": [
-        ("host", "str", False, True, None), ("port", "int", False, True, None),
-        ("path", "str", False, False, "/v1"), ("api_key", "str", True, False, None),
-        ("model", "str", False, True, ""), ("provider", "str", False, False, "openai-compatible"),
+        ("port", "int", False, True, None),
+        ("path", "str", False, False, "/v1"),
+        ("model", "str", False, True, ""),
+        ("provider", "str", False, False, "openai-compatible"),
     ],
+}
+
+BARE_METAL_PARAMS: dict[str, list[ConnectionField]] = {
+    key: [*_SSH_ACCESS_FIELDS, *_BARE_METAL_INSTALL_PARAMS.get(key, [])]
+    for key in COMPONENT_CATALOG
 }
 
 # Docker 模式：compose 片段 + 要探测的服务名与容器端口（用于 docker compose port 回收映射）。
@@ -188,8 +215,6 @@ def build_bare_metal_connection(key: str, spec: dict[str, Any]) -> dict[str, Any
     if key == "cube":
         return {"api_url": f"http://{h}:{spec.get('port', 4000)}", "api_secret": spec.get("api_secret"),
                 "preagg_refresh": "1 hour", "tenant_dimension": None, "timeout_seconds": 30}
-    if key == "bigtop":
-        return {"api_url": f"http://{h}:{spec.get('port', 18080)}"}
     if key == "llm":
         return {"provider": spec.get("provider", "openai-compatible"),
                 "api_base_url": f"http://{h}:{spec.get('port')}{spec.get('path', '/v1')}",
@@ -266,6 +291,69 @@ def _validate_connection(
     return cleaned
 
 
+def _spec_schema_for(key: str, mode: str) -> list[ConnectionField]:
+    """按部署方式取对应的 deploy_spec 字段 schema（脱敏/合并/校验共用同一张表）。"""
+    if mode == "bare_metal":
+        return BARE_METAL_PARAMS.get(key, [])
+    if mode == "docker":
+        return DOCKER_PARAMS.get(key, [])
+    if mode == "k8s":
+        return DEPLOY_SPEC_SCHEMAS.get("k8s", [])
+    return []
+
+
+# deploy_spec 里由安装流程写回、不属于任何输入 schema 的内部键，脱敏时原样保留。
+_SPEC_PRESERVE_KEYS = {"extra", "_datasource_id"}
+
+
+def _mask_deploy_spec(key: str, mode: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """deploy_spec 脱敏：secret 字段（SSH 密码/私钥、管理员密码等）只回 *_set + *_hint。
+
+    非 secret 原样带出；schema 之外的内部键（extra/_datasource_id）保留，
+    其余未知键为安全起见不外泄。堵住 to_out 明文回显 SSH 凭据的口子。
+    """
+    out: dict[str, Any] = {}
+    schema = _spec_schema_for(key, mode)
+    known = {f[0] for f in schema}
+    for name, _typ, secret, _req, _default in schema:
+        val = spec.get(name)
+        if secret:
+            out[f"{name}_set"] = bool(val)
+            # text 型机密（PEM 私钥）不回尾 4 位：私钥尾部识别价值≈0、敏感度极高，
+            # 只回是否已设 + 固定占位；密码等短机密沿用全局 last-4 提示便于用户辨认。
+            if _typ == "text":
+                out[f"{name}_hint"] = "****" if val else None
+            else:
+                out[f"{name}_hint"] = mask_secret(val if isinstance(val, str) else None)
+        else:
+            out[name] = val
+    for k, v in spec.items():
+        if k in known or k.endswith("_set") or k.endswith("_hint"):
+            continue
+        if k in _SPEC_PRESERVE_KEYS:
+            out[k] = v  # 内部回写字段，原样保留
+    return out
+
+
+def _merge_deploy_spec(
+    key: str, mode: str, current: dict[str, Any], incoming: dict[str, Any]
+) -> dict[str, Any]:
+    """编辑态合并 deploy_spec：secret 字段留空(None/"")表示保留原值；其余覆盖。
+
+    与连接信息的 secret-merge 语义一致，避免编辑时清空 SSH 密码/私钥。
+    """
+    merged = dict(current)
+    schema = _spec_schema_for(key, mode)
+    secret_names = {f[0] for f in schema if f[2]}
+    for k, v in incoming.items():
+        if k.endswith("_set") or k.endswith("_hint"):
+            continue  # 脱敏回显字段不回写
+        if k in secret_names and (v is None or v == ""):
+            continue  # 机密留空 = 保留原值
+        merged[k] = v
+    return merged
+
+
 # --------------------------------------------------------------------- 服务
 
 
@@ -296,6 +384,10 @@ class DependencyComponentService:
                 k: field_list(fields) for k, fields in CONNECTION_SCHEMAS.items()
             },
             "deploy_modes": DEPLOY_MODES,
+            # 每组件允许的部署方式（前端据此收窄模式选择器）；未列出=全支持。
+            "component_deploy_modes": {
+                k: allowed_deploy_modes(k) for k in COMPONENT_CATALOG
+            },
             "deploy_spec_schemas": {
                 m: field_list(fields) for m, fields in DEPLOY_SPEC_SCHEMAS.items()
             },
@@ -332,9 +424,12 @@ class DependencyComponentService:
             "key": row.key,
             "name": row.name,
             "deploy_mode": row.deploy_mode,
-            "deploy_spec": _loads(row.deploy_spec_json),
+            "deploy_spec": _mask_deploy_spec(
+                row.key, row.deploy_mode, _loads(row.deploy_spec_json)
+            ),
             "deploy_status": row.deploy_status,
             "deploy_error": row.deploy_error,
+            "deploy_log": row.deploy_log,
             "connection": _mask_connection(row.key, _loads(row.connection_json)),
             "enabled": row.enabled,
             "is_default": row.is_default,
@@ -354,6 +449,10 @@ class DependencyComponentService:
         conn = _validate_connection(key, data.get("connection") or {}, require=(mode == "external"))
         if mode not in DEPLOY_MODES:
             raise ValueError(f"未知部署方式: {mode}")
+        if mode not in allowed_deploy_modes(key):
+            raise ValueError(
+                f"组件 {key} 不支持部署方式 {mode}（仅支持 {'/'.join(allowed_deploy_modes(key))}）"
+            )
         row = DependencyComponent(
             key=key,
             name=data.get("name") or COMPONENT_CATALOG[key][0],
@@ -382,9 +481,18 @@ class DependencyComponentService:
         if "name" in data:
             row.name = data["name"]
         if "deploy_mode" in data and data["deploy_mode"] in DEPLOY_MODES:
+            if data["deploy_mode"] not in allowed_deploy_modes(row.key):
+                raise ValueError(
+                    f"组件 {row.key} 不支持部署方式 {data['deploy_mode']}"
+                    f"（仅支持 {'/'.join(allowed_deploy_modes(row.key))}）"
+                )
             row.deploy_mode = data["deploy_mode"]
         if "deploy_spec" in data:
-            row.deploy_spec_json = _dumps(data["deploy_spec"] or {})
+            # secret-merge：机密字段（SSH 密码/私钥等）留空表示保留原值，避免编辑清空
+            merged_spec = _merge_deploy_spec(
+                row.key, row.deploy_mode, _loads(row.deploy_spec_json), data["deploy_spec"] or {}
+            )
+            row.deploy_spec_json = _dumps(merged_spec)
         if "enabled" in data:
             row.enabled = data["enabled"]
         if "is_default" in data:
@@ -851,49 +959,76 @@ class DependencyComponentService:
         mode = row.deploy_mode
         row.deploy_status = "deploying"
         row.deploy_error = None
+        row.deploy_log = None
         db.commit()
+        # 部署日志：本次部署的逐命令/阶段记录，失败/成功后都落库供前端查看
+        log: list[str] = [f"== {row.key} 部署开始（mode={mode}）=="]
 
         try:
             if mode == "external":
+                log.append("external：直接拨测已填连接")
                 result = self.probe(db, component_id)
+                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
+                row.deploy_log = "\n".join(log)
+                db.commit()
                 return {"status": row.deploy_status, "ok": result.ok, "message": result.message}
 
             spec = _loads(row.deploy_spec_json)
 
             if mode == "bare_metal":
-                conn = build_bare_metal_connection(row.key, spec)
+                # SSH 远程安装：开会话 → 派发组件配方 → 回收 connection → 落库 → 拨测。
+                from app.services.install_recipes import run_install
+
+                conn = run_install(row.key, spec, log=log)
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
+                # 回写配方解析出的端口等运行期值（sync_runner 自动选端口），重装/卸载保持一致。
+                # 对不改 spec 的既有配方是无害 no-op。
+                row.deploy_spec_json = _dumps(spec)
+                row.deploy_log = "\n".join(log)
                 db.commit()
                 if row.key == "warehouse":
                     self._link_warehouse_datasource(db, row)
                 result = self.probe(db, component_id)
-                msg = result.message if not result.ok else f"已登记物理机服务并连通（{result.latency_ms}ms）"
+                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
+                row.deploy_log = "\n".join(log)
+                db.commit()
+                msg = result.message if not result.ok else f"SSH 远程安装完成并连通（{result.latency_ms}ms）"
                 return {"status": row.deploy_status, "ok": result.ok, "message": msg}
 
             if mode == "docker":
-                conn = _deploy_docker(row.key, spec)
+                conn = _deploy_docker(row.key, spec, log=log)
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
+                row.deploy_log = "\n".join(log)
                 db.commit()
                 if row.key == "warehouse":
                     self._link_warehouse_datasource(db, row)
                 result = self.probe(db, component_id)
+                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
+                row.deploy_log = "\n".join(log)
+                db.commit()
                 msg = result.message if not result.ok else f"Docker 部署完成并连通（{result.latency_ms}ms）"
                 return {"status": row.deploy_status, "ok": result.ok, "message": msg}
 
             if mode == "k8s":
-                conn = _deploy_k8s(row.key, spec)
+                conn = _deploy_k8s(row.key, spec, log=log)
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
+                row.deploy_log = "\n".join(log)
                 db.commit()
                 if row.key == "warehouse":
                     self._link_warehouse_datasource(db, row)
                 result = self.probe(db, component_id)
+                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
+                row.deploy_log = "\n".join(log)
+                db.commit()
                 msg = result.message if not result.ok else f"K8s 部署完成并连通（{result.latency_ms}ms）"
                 return {"status": row.deploy_status, "ok": result.ok, "message": msg}
 
             raise ValueError(f"未知部署方式: {mode}")
         except Exception as exc:  # noqa: BLE001
+            log.append(f"! {type(exc).__name__}: {exc}")
             row.deploy_status = "failed"
             row.deploy_error = f"{type(exc).__name__}: {exc}"[:500]
+            row.deploy_log = "\n".join(log)
             db.commit()
             return {"status": row.deploy_status, "ok": False, "message": row.deploy_error}
 
@@ -908,11 +1043,54 @@ class DependencyComponentService:
             err = _teardown_docker(row.key, spec)
         elif mode == "k8s":
             err = _teardown_k8s(row.key, spec)
-        # bare_metal/external 无需卸载（未在远端装东西）
+        elif mode == "bare_metal":
+            # SSH 模式在远端装了软件，卸载须回到目标机停服务/清理（best-effort，失败可见）
+            from app.services.install_recipes import run_teardown
+
+            err = run_teardown(row.key, spec)
+        # external 无需卸载（未在远端装东西）
         row.deploy_status = "not_deployed"
         row.deploy_error = err
         db.commit()
         return {"status": row.deploy_status, "message": err}
+
+    # ---- 部署调度（同步 external / 后台 docker·k8s·bare_metal）----
+    def start_deploy(self, db: Session, component_id: str) -> dict[str, Any]:
+        """部署入口：external 同步拨测直接返回；其余模式（尤其 bare_metal SSH 安装可能
+        持续数分钟）先置 deploying 落库并立即返回，实际部署交后台任务执行，前端轮询状态。
+
+        返回 need_background=True 时，调用方（路由）须调度 run_deploy_detached。
+        """
+        row = db.get(DependencyComponent, component_id)
+        if not row:
+            raise ValueError("组件不存在")
+        if row.deploy_mode == "external":
+            result = self.deploy(db, component_id)
+            return {**result, "need_background": False}
+        # 后台模式：先占位 deploying，避免前端在任务起来前看到旧状态
+        row.deploy_status = "deploying"
+        row.deploy_error = None
+        row.deploy_log = None
+        db.commit()
+        return {
+            "status": "deploying",
+            "ok": True,
+            "message": "部署已在后台开始，请稍候刷新查看状态",
+            "need_background": True,
+        }
+
+    def run_deploy_detached(self, component_id: str) -> None:
+        """后台任务体：用独立 DB session 跑实际部署。deploy() 自身管状态/错误落库，
+        这里只负责 session 生命周期与异常兜底（防止后台线程里未捕获异常吞掉状态）。"""
+        with SessionLocal() as db:
+            try:
+                self.deploy(db, component_id)
+            except Exception as exc:  # noqa: BLE001 - 后台任务不得静默失败
+                row = db.get(DependencyComponent, component_id)
+                if row is not None:
+                    row.deploy_status = "failed"
+                    row.deploy_error = f"{type(exc).__name__}: {exc}"[:500]
+                    db.commit()
 
 
 # --------------------------------------------------------------------- 拨测实现
@@ -974,27 +1152,33 @@ def _probe_sqlalchemy(conn: dict[str, Any]) -> ProbeResult:
 
 def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
     """两步拨测：/health 探通，再打带版本前缀的 REST 探鉴权（复用既有 AirflowClient 逻辑）。"""
-    from app.connectors.airflow import AirflowClient, AirflowError
+    from app.connectors.airflow import AirflowClient, AirflowError, explain_ping_failure
 
     endpoint = (conn.get("endpoint") or "").strip()
     if not endpoint:
         return ProbeResult(False, "缺少 endpoint")
+    api_version = conn.get("api_version") or "v1"
     client = AirflowClient(
         endpoint,
         username=conn.get("username"),
         password=conn.get("password"),
         token=conn.get("token"),
-        api_version=conn.get("api_version") or "v1",
+        api_version=api_version,
     )
     start = time.perf_counter()
     try:
         client.health()
-        client.ping_api()
-        return ProbeResult(True, "连接成功", int((time.perf_counter() - start) * 1000))
     except AirflowError as exc:
         return ProbeResult(False, str(exc)[:300])
+    try:
+        client.ping_api()
+    except AirflowError as exc:
+        # /health 通、REST 不通：按 401/403（鉴权）与 404/405（版本，自动探测应改成哪个）补充下一步。
+        return ProbeResult(False, explain_ping_failure(client, api_version, exc)[:300])
     except Exception as exc:  # noqa: BLE001
         return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
+    else:
+        return ProbeResult(True, "连接成功", int((time.perf_counter() - start) * 1000))
     finally:
         client.close()
 
@@ -1025,9 +1209,8 @@ _PROBES: dict[str, Any] = {
     "seatunnel": lambda c: _probe_http(f"{(c.get('rest_endpoint') or '').rstrip('/')}/api/v1/info"),
     "warehouse": _probe_sqlalchemy,
     "sync_runner": _probe_sync_runner,
-    "cube": lambda c: _probe_http(f"{(c.get('api_url') or '').rstrip('/')}/livez"),
+    "cube": lambda c: _probe_http(f"{(c.get('api_url') or '').rstrip('/')}/"),
     "postgres": _probe_sqlalchemy,
-    "bigtop": lambda c: _probe_http(c.get("api_url", "")),
 }
 
 
@@ -1036,13 +1219,17 @@ _PROBES: dict[str, Any] = {
 import subprocess  # noqa: E402
 
 
-def _run(cmd: list[str], timeout: float = 120) -> tuple[int, str, str]:
-    """跑一条命令，返回 (returncode, stdout, stderr)。超时则杀。"""
+def _run(cmd: list[str], timeout: float = 120, log: list[str] | None = None) -> tuple[int, str, str]:
+    """跑一条命令，返回 (returncode, stdout, stderr)。超时则杀。``log``：部署日志收集器。"""
+    if log is not None:
+        log.append("$ " + " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if log is not None and proc.returncode != 0:
+        log.append(f"! rc={proc.returncode}：{(proc.stderr or proc.stdout or '').strip()[-300:]}")
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def _deploy_docker(key: str, spec: dict[str, Any]) -> dict[str, Any]:
+def _deploy_docker(key: str, spec: dict[str, Any], log: list[str] | None = None) -> dict[str, Any]:
     """docker compose up + docker compose port 回收映射端口 → 拼 connection。
 
     需 deploy_spec: compose_file（仓库内路径）、service（compose 服务名）、container_port。
@@ -1054,14 +1241,14 @@ def _deploy_docker(key: str, spec: dict[str, Any]) -> dict[str, Any]:
     if not container_port:
         # 各组件默认容器端口
         defaults = {"datahub": 8080, "airflow": 8080, "seatunnel": 5801, "cube": 4000,
-                    "sync_runner": 8098, "postgres": 5432, "bigtop": 18080}
+                    "sync_runner": 8098, "postgres": 5432}
         container_port = defaults.get(key)
     if not container_port:
         raise ValueError("docker 部署需指定 container_port")
-    rc, _, err = _run(["docker", "compose", "-f", compose_file, "up", "-d"], timeout=180)
+    rc, _, err = _run(["docker", "compose", "-f", compose_file, "up", "-d"], timeout=180, log=log)
     if rc != 0:
         raise RuntimeError(f"docker compose up 失败: {err or '未知错误'}（compose_file={compose_file}）")
-    rc, out, err = _run(["docker", "compose", "-f", compose_file, "port", service, str(container_port)])
+    rc, out, err = _run(["docker", "compose", "-f", compose_file, "port", service, str(container_port)], log=log)
     if rc != 0:
         raise RuntimeError(f"docker compose port 失败: {err}（service={service}, port={container_port}）")
     # out 形如 "0.0.0.0:8080" 或 ":::8080"
@@ -1080,7 +1267,7 @@ def _fill_port(spec: dict[str, Any], key: str, port: int) -> None:
     port_fields = {
         "datahub": "gms_port", "airflow": "port", "seatunnel": "port",
         "warehouse": "port", "sync_runner": "port", "cube": "port",
-        "postgres": "port", "bigtop": "port", "llm": "port",
+        "postgres": "port", "llm": "port",
     }
     f = port_fields.get(key)
     if f:
@@ -1093,7 +1280,7 @@ def _teardown_docker(key: str, spec: dict[str, Any]) -> str | None:
     return None if rc == 0 else f"docker compose down 失败: {err}"
 
 
-def _deploy_k8s(key: str, spec: dict[str, Any]) -> dict[str, Any]:
+def _deploy_k8s(key: str, spec: dict[str, Any], log: list[str] | None = None) -> dict[str, Any]:
     """kubectl apply + kubectl get svc 回收端点 → 拼 connection。
 
     需 deploy_spec: manifest（YAML 文本，多文档）或其内含一个名为 <key> 的 Service。
@@ -1107,19 +1294,21 @@ def _deploy_k8s(key: str, spec: dict[str, Any]) -> dict[str, Any]:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(manifest)
         path = f.name
-    rc, _, err = _run(["kubectl", "apply", "-n", namespace, "-f", path], timeout=180)
+    rc, _, err = _run(["kubectl", "apply", "-n", namespace, "-f", path], timeout=180, log=log)
     if rc != 0:
         raise RuntimeError(f"kubectl apply 失败: {err}")
     # 取同名 Service 的端口
     rc, out, err = _run(
-        ["kubectl", "get", "svc", key, "-n", namespace, "-o", "jsonpath={.spec.ports[0].nodePort}"]
+        ["kubectl", "get", "svc", key, "-n", namespace, "-o", "jsonpath={.spec.ports[0].nodePort}"],
+        log=log,
     )
     port_str = out.strip() if rc == 0 else ""
     if not port_str or not port_str.isdigit():
         # 试 clusterIP:port
         rc, out, _ = _run(
             ["kubectl", "get", "svc", key, "-n", namespace,
-             "-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}"]
+             "-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}"],
+            log=log,
         )
         if rc == 0 and ":" in out:
             host, p = out.split(":", 1)

@@ -1200,6 +1200,7 @@ class OntologyQueryService:
             name=obj.name,
             display_name=obj.display_name,
             description=obj.description,
+            source_ref=obj.source_ref,
             status=obj.status,
             property_count=property_count,
             relation_count=relation_count,

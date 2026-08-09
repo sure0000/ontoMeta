@@ -21,10 +21,6 @@ const KIND_META: Record<string, { title: string; description: string }> = {
     title: "指标任务",
     description: "基于本体生成指标聚合表。",
   },
-  cluster: {
-    title: "集群拓扑",
-    description: "部署与管理计算集群拓扑（高危，须先看 dry-run 差异）。",
-  },
 };
 
 /**

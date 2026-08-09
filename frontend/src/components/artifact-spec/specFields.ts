@@ -5,7 +5,6 @@
  *   metric     → drafters/metric.py:95-115
  *   transform  → drafters/transform.py:69-79
  *   sync       → drafters/sync.py:84-98
- *   cluster    → drafters/cluster.py:82-89
  *   materialize→ drafters/materialize.py:42-62
  *
  * 校验闸门（backend validation.py）会拦：对象/字段/引擎必须是本体真实值（下拉限定）、
@@ -34,8 +33,7 @@ export type OptionSource =
   | { kind: "engines" }
   | { kind: "dataSources" }
   | { kind: "databases"; dependsOn: string }
-  | { kind: "cleansingRules" }
-  | { kind: "bmServices" };
+  | { kind: "cleansingRules" };
 
 export interface SpecFieldDef {
   key: string;
@@ -58,25 +56,6 @@ export const CLEANSING_RULES: { value: string; label: string }[] = [
   { value: "lowercase", label: "转小写" },
   { value: "normalize_code", label: "编码标准化" },
 ];
-
-/** cluster 可部署组件白名单：后端 BM_MANAGED_SERVICES（cluster.py:22）。 */
-export const BM_MANAGED_SERVICES: { value: string; label: string }[] = [
-  "zookeeper",
-  "hdfs",
-  "yarn",
-  "mapreduce",
-  "hive",
-  "spark",
-  "flink",
-  "tez",
-  "hbase",
-  "kafka",
-  "solr",
-  "mysql",
-  "prometheus",
-  "grafana",
-  "seatunnel",
-].map((s) => ({ value: s, label: s }));
 
 const LOAD_STRATEGY_OPTIONS = [
   { value: "full", label: "全量覆盖" },
@@ -105,6 +84,21 @@ const engineField = (): SpecFieldDef => ({
 });
 
 /**
+ * 目标数据源。**四种任务都要**——执行器一律 `spec.get("target_datasource_id") or
+ * context.get(...)`，缺它时 materialize 连起草都过不去（drafter 的 required_context），
+ * 而 sync/transform/metric 会「成功」但只渲染作业配置/SQL，一行数据都不动。
+ * 只存数据源 id，DSN 由执行侧按 id 取（凭据不进 Spec）。
+ */
+const targetDatasourceField = (note: string): SpecFieldDef => ({
+  key: "target_datasource_id",
+  label: "目标数据源",
+  control: "select",
+  required: true,
+  optionSource: { kind: "dataSources" },
+  help: note,
+});
+
+/**
  * 各 kind 的字段集。metric 是特例：手填只暴露「选一个业务逻辑」+ 少量覆盖，
  * 其余字段由 MetricDrafter 从该 logic 推导（走 context 路径，非 spec 直填）。
  */
@@ -118,6 +112,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       optionSource: { kind: "businessLogics" },
       help: "选一个已定义的业务逻辑，指标口径与绑定的对象/字段由它推导",
     },
+    targetDatasourceField("指标聚合表要建到哪个仓；不选则只生成 DDL+SQL，不落库"),
     engineField(),
     {
       key: "target_layer",
@@ -143,6 +138,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       required: true,
       optionSource: { kind: "objectTypes" },
     },
+    targetDatasourceField("清洗后的表写到哪个仓；不选则只生成 SQL，不执行"),
     engineField(),
     {
       key: "target_layer",
@@ -177,6 +173,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       optionSource: { kind: "objectTypes" },
       help: "选它后由 drafter 自动带出 source/target，无需手填",
     },
+    targetDatasourceField("数据搬到哪个仓；不选则只生成搬运作业配置，不真正搬运"),
     {
       key: "mode",
       label: "装载方式",
@@ -198,47 +195,17 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       control: "text",
       help: "连接别名（=Airflow conn_id），不是凭据本身",
     },
-  ],
-  cluster: [
-    {
-      key: "hosts",
-      label: "主机",
-      control: "stringList",
-      required: true,
-      help: "只填主机别名/地址，禁止填入任何密码或密钥",
-    },
-    {
-      key: "services",
-      label: "服务组件",
-      control: "multiSelect",
-      required: true,
-      optionSource: { kind: "bmServices" },
-      help: "仅支持 Bigtop Manager 托管的组件白名单",
-    },
-    { key: "stack", label: "技术栈", control: "text", default: "bigtop-3.3.0" },
-    {
-      key: "credential_ref",
-      label: "凭据引用",
-      control: "text",
-      default: "cluster_ssh_default",
-      help: "SSH 凭据的引用别名；密钥由执行器按别名从独立存储取",
-    },
+    { key: "database_prefix", label: "库名前缀", control: "text" },
   ],
   materialize: [
-    {
-      key: "target_datasource_id",
-      label: "目标数据源",
-      control: "select",
-      required: true,
-      optionSource: { kind: "dataSources" },
-    },
+    targetDatasourceField("本体要物化到哪个仓。materialize 的 drafter 强制要求此项，缺它无法起草"),
     {
       key: "target_database",
-      label: "目标库",
+      label: "目标数据库",
       control: "select",
       optionSource: { kind: "databases", dependsOn: "target_datasource_id" },
+      help: "留空则各层落到默认库（dim/dwd/dws/ads）",
     },
-    engineField(),
     {
       key: "load_strategy",
       label: "装载方式",
@@ -248,6 +215,13 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
     { key: "refresh_cron", label: "调度频率", control: "cron" },
   ],
 };
+
+/** 表单里标了 required 的字段——向导提交前据此做真校验（不只是画个星号）。 */
+export function requiredSpecKeys(kind: string, skipKeys?: Set<string>): SpecFieldDef[] {
+  return (SPEC_FIELDS[kind] ?? []).filter(
+    (f) => f.required && !(skipKeys?.has(f.key) ?? false),
+  );
+}
 
 /** metric 走 drafter+context 路径（非 spec 直填），其余 kind 走 spec 直填。 */
 export const DRAFTER_CONTEXT_KINDS = new Set(["metric"]);

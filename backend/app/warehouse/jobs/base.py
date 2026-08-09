@@ -35,7 +35,25 @@ def _alias_token(alias: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in alias).strip("_").upper()
 
 
-def _endpoint_env(endpoint: "JobEndpoint") -> dict[str, str]:
+def endpoint_credential_env(alias: str, platform: str) -> dict[str, str]:
+    """一端的凭据环境变量 → Airflow 运行期 Jinja 表达式。
+
+    **对外公开**：Flink 计算任务（transform/metric）与搬运作业用的是同一套占位符约定
+    （``${别名_URL}`` / ``_USER`` / ``_PASSWORD``），两处各写一份迟早对不上——Flink 侧
+    只要占位符名字差一个字，运行期就是「缺少凭据环境变量」。
+    """
+    return _endpoint_env(_EnvEndpoint(alias=alias, platform=platform))
+
+
+@dataclass(frozen=True)
+class _EnvEndpoint:
+    """只为复用 _endpoint_env 的最小端点（Flink 侧没有表名概念）。"""
+
+    alias: str
+    platform: str
+
+
+def _endpoint_env(endpoint) -> dict[str, str]:
     """一端的凭据环境变量 → Airflow 运行期 Jinja 表达式。"""
     token = _alias_token(endpoint.alias)
     conn = f"conn.{endpoint.alias}"

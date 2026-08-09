@@ -96,6 +96,10 @@ def run_flink_sql(
             "execute_mode": "handoff",
             "note": "未配置 Flink SqlRunner JAR（FLINK_SQL_RUNNER_JAR），ontoMeta 只产出 SQL，不执行",
             "sql_files": [t.task_id + ".sql" for t in tasks],
+            # **把 SQL 本身带出来**：此前这里只给了几个从未落盘的文件名，"仅产出"
+            # 产出的是个空回执，人拿不到任何可执行的东西。数据搬运一律走 Flink，
+            # 那这条 Flink SQL 就是这个任务的交付物——配上 JAR 后原样提交的就是它。
+            "sql": {t.task_id: t.sql for t in tasks},
         }
 
     flink = FlinkSubmitConfig(

@@ -94,6 +94,8 @@ export interface ObjectTypeSummary extends FieldProvenance {
   name: string;
   display_name: string;
   description?: string;
+  /** 源表定位（DataHub urn）。为空 = 无法建同步任务（SyncDrafter 会拒）。 */
+  source_ref?: string;
   status: string;
   property_count: number;
   relation_count: number;
@@ -640,7 +642,7 @@ export interface SyncRunnerSecret {
 
 export interface DependencySchemaField {
   name: string;
-  type: "str" | "int" | "bool";
+  type: "str" | "int" | "bool" | "text";
   secret: boolean;
   required: boolean;
   default?: string | number | boolean | null;
@@ -654,6 +656,8 @@ export interface DependencySchema {
   components: DependencyComponentMeta[];
   connection_schemas: Record<string, DependencySchemaField[]>;
   deploy_modes: string[];
+  // 每组件允许的部署方式（未列出=全支持）；前端据此收窄模式选择器。
+  component_deploy_modes?: Record<string, string[]>;
   deploy_spec_schemas: Record<string, DependencySchemaField[]>;
   bare_metal_params: Record<string, DependencySchemaField[]>;
   docker_params: Record<string, DependencySchemaField[]>;
@@ -667,6 +671,7 @@ export interface DependencyComponent {
   deploy_spec: Record<string, unknown>;
   deploy_status: string;
   deploy_error?: string | null;
+  deploy_log?: string | null;
   connection: Record<string, unknown>;
   enabled: boolean;
   is_default: boolean;
@@ -1315,6 +1320,25 @@ export type MaterializationTargetKind =
   | "object_type"
   | "relation_type"
   | "business_logic";
+
+/** 物化任务选择树：某本体下一个可物化实体（业务对象 / 事实·桥表关系）+ 自动表名。 */
+export interface MaterializeTargetEntity {
+  name: string;
+  display_name?: string | null;
+  kind: MaterializationTargetKind;
+  layer: string;
+  table: string;
+}
+export interface MaterializeTargetOntology {
+  ontology_id: string;
+  domain_name: string;
+  version: number;
+  status: string;
+  entities: MaterializeTargetEntity[];
+}
+export interface MaterializeTargetsResult {
+  ontologies: MaterializeTargetOntology[];
+}
 export type MaterializationLayer = "dim" | "dwd" | "dws" | "ads";
 export type MaterializationLoadStrategy = "full" | "incremental" | "cdc";
 export type SyncTool = "seatunnel" | "datax" | "flink";
@@ -1577,7 +1601,7 @@ export interface RolePolicy {
 
 // ---- 治理智能体制品（M5/M6，写侧）----
 
-export type ArtifactKind = "cluster" | "sync" | "transform" | "metric";
+export type ArtifactKind = "sync" | "transform" | "metric";
 export type ArtifactStatus =
   | "drafted"
   | "validated"
@@ -1614,6 +1638,9 @@ export interface GovernanceArtifact {
   is_high_risk: boolean;
   validation_report?: AgentValidationReport | null;
   execution_receipt?: Record<string, unknown> | null;
+  /** Airflow DagRun 实时态（best-effort 回读）。materialize 制品的 status 在提交 DAG 后即 succeeded，
+   * 但 DAG 在 Airflow 里可能还在跑——实时权威在此。读不到即为 null，退回 status。*/
+  live_state?: { live_state: string; terminal: boolean; run_url?: string } | null;
   confirmed_by?: string | null;
   confirmed_at?: string | null;
   executed_at?: string | null;
