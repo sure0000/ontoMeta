@@ -331,7 +331,8 @@ def list_warehouse_sync_tools(
 
     supported, modes_detail = engine_modes(airflow, engine, choice_tool=resolved["resolved"])
     return {
-        "channel": (airflow.sync_channel or "runner").lower(),
+        # 统一执行架构：搬运通道恒为 flink_on_yarn（sync_channel 设置已随 H/J 废除）。
+        "channel": "flink_on_yarn",
         "default": DEFAULT_SYNC_TOOL,
         "modes": supported,
         "modes_detail": modes_detail,

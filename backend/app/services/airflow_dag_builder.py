@@ -104,10 +104,20 @@ def _constraint_list(constraints: dict[str, list[str]] | None) -> list[str]:
 
 @dataclass(frozen=True)
 class FlinkSubmitConfig:
-    """Flink 提交的基础配置（SqlRunner JAR、YARN 队列、checkpoint 目录）。"""
+    """Flink 提交的基础配置（SqlRunner JAR、YARN 队列、checkpoint 目录）。
 
-    sql_runner_jar: str  # SqlRunner JAR 路径（file://… 或 hdfs://…）
-    yarn_queue: str = "default"
+    字段与两处调用方（flink_job_runner / materialization_runner）对齐：
+    runner_jar 是预置的通用 SqlRunner JAR（读 SQL 文件、替换占位符后逐条 executeSql），
+    runner_class 是其 main class，flink_bin 是 flink 命令路径。
+    """
+
+    runner_jar: str  # SqlRunner JAR 路径（file://… 或 hdfs://…）
+    runner_class: str = "com.ontometa.flink.SqlRunner"  # SqlRunner main class
+    flink_bin: str = "flink"  # flink 命令路径
+    deploy_target: str = "yarn-per-job"  # flink run 部署目标
+    parallelism: int = 1  # 默认并行度
+    yarn_queue: str = "default"  # YARN 队列
+    extra_args: tuple[str, ...] = ()  # 透传给 flink run 的额外参数（如 -Dkey=val）
     checkpoint_dir: str = ""  # checkpoint 目录（file://… 或 hdfs://…），增量/CDC 需要
 
 
@@ -117,31 +127,39 @@ class FlinkSqlTask:
 
     task_id: str
     sql: str  # 完整 Flink SQL（INSERT INTO … SELECT …），含 ${} 占位符
-    endpoint_env: dict[str, str] = field(default_factory=dict)  # 端点凭据环境变量
+    env: dict[str, str] = field(default_factory=dict)  # 端点凭据环境变量
     detached: bool = False  # 流式作业（incremental/cdc）需 -d
     checkpoint_dir: str = ""  # 流式作业的 checkpoint 目录
 
 
 def flink_dag_id_for(base: str, suffix: str | None = None) -> str:
-    """Flink DAG ID 生成规则：base[_suffix]_flink。"""
-    parts = [base]
-    if suffix:
-        parts.append(suffix)
-    parts.append("flink")
-    return "_".join(parts)
+    """稳定的 Flink 计算 DAG id：``ontometa_flink_<short>``[__suffix]。
+
+    ``base`` 取制品 id / 本体 id；short 取去横线后前 12 字符，保证 DAG id 稳定、
+    可读、且天然带 flink 作用域前缀（与 transform/metric 的 Flink DAG 同命名空间）。
+    """
+    short = (base or "").replace("-", "")[:12]
+    dag_id = f"ontometa_flink_{short}"
+    return f"{dag_id}__{suffix}" if suffix else dag_id
 
 
 def _flink_run_command(
     task: FlinkSqlTask, config: FlinkSubmitConfig, sql_file: str
-) -> list[str]:
-    """构造 `flink run` 命令（传给 BashOperator）。"""
-    cmd = ["flink", "run"]
-    if config.yarn_queue:
-        cmd.extend(["-yqu", config.yarn_queue])
+) -> str:
+    """拼 `flink run` 命令行（返回字符串，直接进 BashOperator 的 bash_command）。
+
+    SqlRunner 只认 ``--file <path>``（见 tools/flink-sql-runner/SqlRunner.java），
+    故 sql 路径必须走 ``--file``，不能作位置参数。sql_file 通常是运行期解析的
+    Jinja 表达式（xcom_pull 的 sql_dir + 文件名），生成期不写死。
+    """
+    parts = [config.flink_bin, "run", "-t", config.deploy_target, "-p", str(config.parallelism)]
     if task.detached:
-        cmd.append("-d")  # 流式作业 detached 运行
-    cmd.extend(["-c", "com.ontometa.flink.SqlRunner", config.sql_runner_jar, sql_file])
-    return cmd
+        parts.append("-d")  # 流式作业 detached 运行
+    if config.yarn_queue:
+        parts.append(f"-Dyarn.application.queue={config.yarn_queue}")
+    parts.extend(config.extra_args)
+    parts.extend(["-c", config.runner_class, config.runner_jar, "--file", sql_file])
+    return " ".join(parts)
 
 
 def build_flink_sql_dag(
@@ -201,7 +219,7 @@ def build_flink_sql_dag(
                 "task_id": task.task_id,
                 "sql_file": sql_filename,
                 "sql": task.sql,
-                "endpoint_env": task.endpoint_env,
+                "endpoint_env": task.env,
                 "command": _flink_run_command(task, config, f"{{{{ ti.xcom_pull(task_ids='read_spec')['sql_dir'] }}}}/{sql_filename}"),
                 "detached": task.detached,
                 # 血缘：上游用 source_urn（如有），下游用 target URN（如有 builder）。
@@ -229,7 +247,11 @@ def build_flink_sql_dag(
         "tasks": task_specs,
         "swaps": swap_specs,
         "flink_config": {
-            "sql_runner_jar": config.sql_runner_jar,
+            "runner_jar": config.runner_jar,
+            "runner_class": config.runner_class,
+            "flink_bin": config.flink_bin,
+            "deploy_target": config.deploy_target,
+            "parallelism": config.parallelism,
             "yarn_queue": config.yarn_queue,
             "checkpoint_dir": config.checkpoint_dir,
         },
@@ -294,11 +316,11 @@ with DAG(
     tags=["ontometa", "flink", "sync"],
 ) as dag:
 
-    # 1. 读 spec，暴露 sql_dir 给下游（SQL 文件都在这个目录）
+    # 1. 读 spec，暴露 sql_dir 给下游（.sql 落 spec 同级的 jobs/ 子目录）
     def _read_spec(**context):
         return {{{{
             "spec": _SPEC,
-            "sql_dir": str(_SPEC_PATH.parent),
+            "sql_dir": str(_SPEC_PATH.parent / "jobs"),
         }}}}
 
     read_spec = PythonOperator(
@@ -319,8 +341,8 @@ with DAG(
     for task_spec in _SPEC["tasks"]:
         # 端点凭据从 Airflow Connection 读，注入环境变量（$别名_URL / $别名_USER 等）
         env_vars = task_spec.get("endpoint_env", {{}})
-        # 构造 flink run 命令
-        cmd = " ".join(task_spec["command"])
+        # flink run 命令（生成期已拼成字符串，含 --file 的 xcom 路径表达式）
+        cmd = task_spec["command"]
         move_task = BashOperator(
             task_id=task_spec["task_id"],
             bash_command=cmd,

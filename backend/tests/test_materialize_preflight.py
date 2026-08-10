@@ -2,7 +2,10 @@
 
 不起真实 Airflow、不建真实库：用 httpx.MockTransport 伪造 Airflow REST（比照
 test_airflow_connector.py），并把 preflight 依赖的 settings / 契约服务 / sentinel 超时
-这几个seam monkeypatch 掉，专测「每类失败是否在提交前被如实分类、给出可照做的下一步」。
+这几个 seam monkeypatch 掉，专测「每类失败是否在提交前被如实分类、给出可照做的下一步」。
+
+统一执行架构后（D/F 提交）：sync_runner/docker 通道已废除，preflight 只查 Flink 前置
+（flink_jar / flink_checkpoint），movability 独立项已并入 execution_channel 的可搬性预演。
 """
 
 from __future__ import annotations
@@ -26,19 +29,12 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
         token=None,
         api_version="v1",
         dags_dir=str(dags_dir),
-        # 执行通道：生产默认就是 runner，测试基线与之一致（runner 侧由 _FakeRunner 伪造）。
-        sync_channel="runner",
-        sync_runner_endpoint="http://sync-runner:8088",
-        sync_runner_token=None,
         # 编排旋钮现在全在设置行上（不再有环境变量），基线取与库默认一致的值。
         max_tasks_per_dag=50,
         max_active_tasks_per_dag=16,
         dag_parse_timeout=60.0,
         preflight_sentinel_timeout=20.0,
         staging_swap=True,
-        docker_network="bridge",
-        drivers_dir="",
-        sync_tool_images={},
         jobs_dir="",
     )
     available = over.pop("available", None)
@@ -86,30 +82,6 @@ def _make_handler(
     return handler
 
 
-class _FakeRunner:
-    """伪 sync-runner：capabilities / probe 可逐用例定制，不起真实服务。"""
-
-    caps: dict = {}
-    probes: dict = {}
-    raises: Exception | None = None
-
-    def __init__(self, endpoint, **kwargs):
-        self.endpoint = endpoint
-
-    def capabilities(self) -> dict:
-        if type(self).raises is not None:
-            raise type(self).raises
-        return type(self).caps
-
-    def probe(self, alias, **kwargs) -> dict:
-        return type(self).probes.get(
-            alias, {"alias": alias, "reachable": True, "detail": "连接正常"}
-        )
-
-    def close(self) -> None:
-        pass
-
-
 def _install(
     monkeypatch,
     tmp_path,
@@ -121,19 +93,7 @@ def _install(
     runtime_over=None,
     sentinel_timeout=0.3,
     max_tasks=50,
-    runner_caps=None,
-    runner_probes=None,
-    runner_raises=None,
 ):
-    _FakeRunner.caps = runner_caps or {
-        "contract_version": pf.EXPECTED_CONTRACT_VERSION,
-        "sinks": ["doris", "hive"],
-        "drivers": ["mysql", "doris"],
-    }
-    _FakeRunner.probes = runner_probes or {}
-    _FakeRunner.raises = runner_raises
-    monkeypatch.setattr(pf, "SyncRunnerClient", _FakeRunner)
-
     def factory(endpoint, **kwargs):
         kwargs.pop("client", None)
         return AirflowClient(
@@ -158,7 +118,7 @@ def _install(
 
 
 def _fake_job(name: str, *, database: str = "erp_ods", table: str = "tab_a"):
-    """伪搬运作业：带 source 端点——源库连接那项要拿它去验「读不读得到这张表」。"""
+    """伪搬运作业：带 source 端点——execution_channel 的可搬性预演要读它。"""
     return SimpleNamespace(
         name=name,
         source=SimpleNamespace(database=database, table=table, platform="mysql"),
@@ -182,11 +142,8 @@ def test_all_green_is_ok(monkeypatch, tmp_path):
     assert items["warehouse_conn"].status == pf.PASS
     assert items["dag_dir_visible"].status == pf.PASS
     assert items["batch_size"].status == pf.PASS
-    # 执行通道也算进「全绿」：否则会出现 preflight 全绿、点提交才报 runner 不可达。
-    assert items["sync_runner"].status == pf.PASS
-    assert items["sync_runner_sink"].status == pf.PASS
-    assert items["sync_runner_source"].status == pf.PASS
-    assert items["sync_runner_target"].status == pf.PASS
+    # 全绿 = 无 FAIL 项（PASS 项 blocking=True 是「必需检查已通过」，属正常）。
+    assert all(i.status != pf.FAIL for i in report.items)
 
 
 def test_sentinel_file_is_cleaned_up(monkeypatch, tmp_path):
@@ -308,220 +265,68 @@ def test_selected_targets_narrow_batch_count(monkeypatch, tmp_path):
     assert _by_key(report)["batch_size"].status == pf.PASS
 
 
-def test_runner_unreachable_blocks(monkeypatch, tmp_path):
-    """runner 连不上必须在提交前红——否则 preflight 全绿、点提交才报同一件事。"""
-    from app.connectors.sync_runner import SyncRunnerError
-
-    db = _install(
-        monkeypatch,
-        tmp_path,
-        _make_handler(),
-        runner_raises=SyncRunnerError("capabilities", "Connection refused"),
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_runner"]
-    assert item.status == pf.FAIL and item.blocking is True
-    assert "healthz" in item.next_step
-    assert report.ok is False
+# ---------- 统一执行架构：Flink 前置条件（替代已废除的 runner/docker 检查）----------
 
 
-def test_runner_contract_mismatch_blocks(monkeypatch, tmp_path):
-    db = _install(
-        monkeypatch,
-        tmp_path,
-        _make_handler(),
-        runner_caps={"contract_version": "99", "sinks": ["hive"]},
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_runner"]
-    assert item.status == pf.FAIL and item.blocking is True
-    assert "99" in item.detail and pf.EXPECTED_CONTRACT_VERSION in item.detail
-    # 契约不匹配后不再往下探 alias：线格式都对不上，探测结果没有参考价值
-    assert "sync_runner_source" not in _by_key(report)
+def _no_flink_settings(monkeypatch):
+    """钉死 Flink 部署设置：JAR 与 checkpoint 都未配置（与用例无关的环境变量不参与）。"""
+    import app.config as cfg
+
+    monkeypatch.setattr(cfg.settings, "flink_sql_runner_jar", "")
+    monkeypatch.setattr(cfg.settings, "flink_checkpoint_dir", "")
 
 
-def test_runner_missing_endpoint_blocks(monkeypatch, tmp_path):
-    db = _install(
-        monkeypatch, tmp_path, _make_handler(), runtime_over={"sync_runner_endpoint": ""}
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_runner"]
-    assert item.status == pf.FAIL and item.blocking is True
-    assert "SYNC_RUNNER_ENDPOINT" in item.next_step
-
-
-def test_unsupported_sink_fails_without_blocking(monkeypatch, tmp_path):
-    """执行侧没有该引擎的 sink：本次只建表不搬数——必须红着说清，但不拦「只想建表」的人。"""
-    db = _install(
-        monkeypatch,
-        tmp_path,
-        _make_handler(),
-        runner_caps={"contract_version": pf.EXPECTED_CONTRACT_VERSION, "sinks": ["doris"]},
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_runner_sink"]
-    assert item.status == pf.FAIL and item.blocking is False
-    assert "只建表" in item.detail
-    assert report.ok is True  # 非阻断，仍可提交
-
-
-def test_unreachable_alias_blocks_with_secret_hint(monkeypatch, tmp_path):
-    db = _install(
-        monkeypatch,
-        tmp_path,
-        _make_handler(),
-        runner_probes={
-            "erp_readonly": {
-                "alias": "erp_readonly",
-                "reachable": False,
-                "detail": "别名「erp_readonly」在 runner 侧没有配置连接",
-            }
-        },
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    items = _by_key(report)
-    assert items["sync_runner_source"].status == pf.FAIL
-    assert items["sync_runner_source"].blocking is True
-    assert "SYNC_CONN_" in items["sync_runner_source"].next_step
-    # 目标仓那条独立判定，不受源库连不通影响
-    assert items["sync_runner_target"].status == pf.PASS
-    assert report.ok is False
-
-
-def test_source_alias_pointing_at_wrong_database_blocks(monkeypatch, tmp_path):
-    """连得上但读不到源表 = 别名指错了库，搬运任务一定会失败，必须提交前拦。
-
-    真实踩过的一次：``erp_readonly`` 被配成了目标 Postgres 自己，``SELECT 1`` 一路绿灯，
-    DAG 起来后每张表都在 NoSuchTable 上挂掉、重试三次全红。
-    """
-    from app.warehouse.jobs import JobPlan
-
-    plan = JobPlan(jobs=(_fake_job("sync_dim_a", database="erp", table="tabAccount"),))
-    monkeypatch.setattr(pf._job_planner, "build", lambda *a, **k: plan)
-    seen: dict = {}
-
-    class _Probe(_FakeRunner):
-        def probe(self, alias, **kwargs):
-            seen[alias] = kwargs
-            if alias == "erp_readonly":
-                return {
-                    "alias": alias,
-                    "reachable": True,
-                    "can_read_table": False,
-                    "detail": "连上了但读不到表 tabAccount：tabAccount",
-                }
-            return {"alias": alias, "reachable": True, "detail": "连接正常"}
-
+def test_missing_flink_jar_warns_but_not_blocks(monkeypatch, tmp_path):
+    """缺 SqlRunner JAR → 搬运只产出不执行（handoff），WARN 不阻断提交。"""
+    _no_flink_settings(monkeypatch)
     db = _install(monkeypatch, tmp_path, _make_handler())
-    monkeypatch.setattr(pf, "SyncRunnerClient", _Probe)
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_runner_source"]
-    assert item.status == pf.FAIL and item.blocking is True
-    assert "tabAccount" in item.detail
-    assert report.ok is False
-    # 探测时要真的把本次要搬的表带过去，否则只验了 SELECT 1
-    assert seen["erp_readonly"]["table"] == "tabAccount"
-    assert seen["erp_readonly"]["database"] == "erp"
-    # 目标仓不验表：建表任务还没跑，那时候表本来就不该存在
-    assert seen["ontometa_ds_dw"]["table"] is None
-
-
-def test_docker_channel_states_what_cannot_be_checked(monkeypatch, tmp_path):
-    """docker 通道：不假装能查 docker.sock/网络名/驱动，但要如实说明这是残余风险。"""
-    db = _install(
-        monkeypatch, tmp_path, _make_handler(), runtime_over={"sync_channel": "docker"}
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_channel"]
+    item = _by_key(report)["flink_jar"]
     assert item.status == pf.WARN and item.blocking is False
-    assert "docker.sock" in item.next_step
-    assert "sync_runner" not in _by_key(report)  # 不是 runner 通道就不探 runner
+    assert "FLINK_SQL_RUNNER_JAR" in (item.next_step or "")
     assert report.ok is True
 
 
-def test_sync_tool_is_reported_even_though_nobody_picks_it(monkeypatch, tmp_path):
-    """搬运工具已改为自动决策，这一项是那个决策唯一露出来的地方——必须在，且可解释。"""
+def test_incremental_without_checkpoint_blocks(monkeypatch, tmp_path):
+    """本次有增量/CDC 表但未配 checkpoint：流式作业编译期必挂，提交前必须红。"""
+    from app.services.job_planner import JobPlanner
+
+    _no_flink_settings(monkeypatch)
+    plan = SimpleNamespace(
+        jobs=(
+            SimpleNamespace(name="inc_a", mode="incremental",
+                            source=SimpleNamespace(database="erp", table="tabA", platform="mysql")),
+        )
+    )
+    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: plan)
     db = _install(monkeypatch, tmp_path, _make_handler())
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_tool"]
+    item = _by_key(report)["flink_checkpoint"]
+    assert item.status == pf.FAIL and item.blocking is True
+    assert "FLINK_CHECKPOINT_DIR" in (item.next_step or "")
+    assert report.ok is False
+
+
+def test_incremental_with_checkpoint_passes(monkeypatch, tmp_path):
+    """增量/CDC 表配了 checkpoint → PASS。"""
+    from app.services.job_planner import JobPlanner
+
+    import app.config as cfg
+
+    _no_flink_settings(monkeypatch)
+    monkeypatch.setattr(cfg.settings, "flink_checkpoint_dir", "file:///tmp/ckpt")
+    plan = SimpleNamespace(
+        jobs=(
+            SimpleNamespace(name="inc_a", mode="incremental",
+                            source=SimpleNamespace(database="erp", table="tabA", platform="mysql")),
+        )
+    )
+    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: plan)
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["flink_checkpoint"]
     assert item.status == pf.PASS and item.blocking is False
-    assert "逐表自选" in item.detail  # runner 通道：档位由执行侧挑
-
-
-def test_sync_tool_blocks_when_docker_channel_has_no_image(monkeypatch, tmp_path):
-    """docker 通道下选不出工具 = 提交必失败，故这一项阻断，并指向设置页。"""
-    import app.services.sync_tool_resolver as resolver
-
-    monkeypatch.setattr(resolver, "available_sync_tools", lambda overrides=None: [])
-    db = _install(
-        monkeypatch, tmp_path, _make_handler(), runtime_over={"sync_channel": "docker"}
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    item = _by_key(report)["sync_tool"]
-    assert item.status == pf.FAIL and item.blocking is True
-    assert "设置" in (item.next_step or "")
-    assert report.ok is False
-
-
-def test_movability_counts_tables_that_cannot_be_moved(monkeypatch, tmp_path):
-    """把「这次只会搬 1/3 张」从事后回执提到提交之前，并按原因归并。"""
-    from app.warehouse.jobs import JobPlan
-
-    plan = JobPlan(
-        jobs=(_fake_job("sync_dim_a"),),
-        unsupported=[
-            {"target": "dim.b", "reason": "对象无 source_ref，无法定位源表"},
-            {"target": "dim.c", "reason": "对象无 source_ref，无法定位源表"},
-        ],
-    )
-    monkeypatch.setattr(pf._job_planner, "build", lambda *a, **k: plan)
-    db = _install(monkeypatch, tmp_path, _make_handler())
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
-    item = _by_key(report)["movability"]
-    assert item.status == pf.WARN and item.blocking is False
-    assert "3 张表里 1 张能搬" in item.detail
-    assert "（2 张）" in item.detail  # 同一原因归并计数，不逐表刷屏
     assert report.ok is True
-
-
-def test_movability_flags_a_run_that_moves_nothing(monkeypatch, tmp_path):
-    """一张都搬不了 = 只建空表。不阻断（只建表是合法用法），但必须红着说清。"""
-    from app.warehouse.jobs import JobPlan
-
-    plan = JobPlan(
-        jobs=(),
-        unsupported=[{"target": "ads.x", "reason": "ADS 指标表由 MetricSpec 生成，不产搬运作业"}],
-    )
-    monkeypatch.setattr(pf._job_planner, "build", lambda *a, **k: plan)
-    db = _install(monkeypatch, tmp_path, _make_handler())
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
-    item = _by_key(report)["movability"]
-    assert item.status == pf.FAIL and item.blocking is False
-    assert "只建表、不搬任何数据" in item.detail
-    assert report.ok is True
-
-
-def test_movability_failure_does_not_sink_the_whole_preflight(monkeypatch, tmp_path):
-    """预演本身出错时降级为提醒——它是附加信息，不该拖垮其余检查。"""
-    def _boom(*a, **k):
-        raise RuntimeError("逻辑编译炸了")
-
-    monkeypatch.setattr(pf._job_planner, "build", _boom)
-    db = _install(monkeypatch, tmp_path, _make_handler())
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
-    item = _by_key(report)["movability"]
-    assert item.status == pf.WARN and item.blocking is False
-    assert "逻辑编译炸了" in item.detail
-    assert report.ok is True
-
-
-def test_runner_checked_even_when_airflow_down(monkeypatch, tmp_path):
-    """Airflow 挂着也要把执行通道问清楚：一次 preflight 应尽量把能问的都问了。"""
-    db = _install(
-        monkeypatch, tmp_path, _make_handler(), runtime_over={"available": False}
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="doris")
-    assert _by_key(report)["sync_runner"].status == pf.PASS
 
 
 def test_preflight_endpoint_wires_and_serializes(client, admin_headers, monkeypatch):

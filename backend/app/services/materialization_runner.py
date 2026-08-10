@@ -350,10 +350,6 @@ def _run_orchestrated(
 
     # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/（与 flink run --file
     # 路径对齐）；空则退回扁平 jobs_dir。
-    if artifact_id:
-        _jobs_dir = os.path.join(airflow.dags_dir, "ontometa", artifact_id, "jobs")
-    else:
-        _jobs_dir = airflow.jobs_dir
 
     bundles: list[tuple[dict, Any]] = []
     for batch in batches:
@@ -369,7 +365,8 @@ def _run_orchestrated(
         tasks = []
         swaps: dict[str, list[str]] = {}
         for job in batch["jobs"]:
-            exec_job = stage.job(job)  # staging 化的 job（full）或原 job（增量）
+            # staging 化的 job（full 表写 staging）或原 job（增量/未启用 staging）。
+            exec_job = stage.exec_jobs.get(job.name, job)
             try:
                 tasks.append(
                     compile_move_task(
@@ -394,32 +391,49 @@ def _run_orchestrated(
         if not tasks and not ddl:
             continue  # 空批（不该出现，防御）
         bundle = build_flink_sql_dag(
-            base=ontology_id,
-            tasks=tuple(tasks),
-            warehouse_conn_id=warehouse_conn_id,
-            flink=flink_cfg,
-            jobs_dir=_jobs_dir,
-            warehouse_ddl=tuple(ddl),
+            ontology_id=ontology_id,
+            engine=engine,
+            tasks=list(tasks),
+            ddl_statements={f"ddl_{i}": d for i, d in enumerate(ddl)},
+            constraints=batch.get("constraints") or None,
+            swaps=swaps,
+            config=flink_cfg,
             schedule=batch["schedule"],
             dag_id_suffix=batch["suffix"],
+            warehouse_conn_id=warehouse_conn_id,
             max_active_tasks=airflow.max_active_tasks_per_dag,
-            artifact_id=artifact_id,
-            swaps=swaps,
         )
         bundles.append((batch, bundle))
 
     # 先全部落盘：等解析时一次 dag_dir 扫描即可全部认到，避免逐个各等一个解析周期。
+    # DagBundle 是纯数据（F/G 后不再有 write 方法），交给统一的 DagDelivery 投递器
+    # （LocalFsDelivery 默认写本地 FS，子类可做 git sync 等），SQL 作为 job_files 一并投。
+    # 产物按 <dags>/ontometa/<artifact_id>/ 子目录聚合，.sql 落其 jobs/（与 read_spec 的
+    # sql_dir 对齐）；无 artifact_id 时退回扁平 dags_dir。
+    if artifact_id:
+        _out_dir = os.path.join(airflow.dags_dir, "ontometa", artifact_id)
+    else:
+        _out_dir = airflow.dags_dir
+    _jobs_dir = os.path.join(_out_dir, "jobs")
     written_all: dict[str, dict] = {}
     delivery = airflow.build_delivery()
     for _, bundle in bundles:
+        job_files = {t["sql_file"]: t["sql"] for t in bundle.spec["tasks"]}
         try:
-            written_all[bundle.dag_id] = bundle.write(
-                airflow.dags_dir, airflow.jobs_dir, delivery=delivery
+            result = delivery.deliver(
+                dags_dir=_out_dir,
+                jobs_dir=_jobs_dir,
+                dag_filename=bundle.dag_filename,
+                dag_source=bundle.dag_source,
+                spec_filename=bundle.spec_filename,
+                spec=bundle.spec,
+                job_files=job_files,
             )
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
             raise MaterializationError(
                 f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
             ) from exc
+        written_all[bundle.dag_id] = getattr(result, "written", None) or {}
 
     client = AirflowClient(
         airflow.endpoint,

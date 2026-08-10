@@ -404,11 +404,11 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
     assert receipt["sync_tool"] == "flink"
     assert "sync_channel" not in receipt  # 多通道概念已废除
     assert receipt["state"] == "queued"
-    # DAG 是 Flink 通道：BashOperator + flink run，无 Docker/Python 兄弟容器、无凭据明文
+    # DAG 是 Flink 通道：BashOperator + flink run，无 Docker 兄弟容器、无凭据明文。
+    # （read_spec 用一个 PythonOperator 读边车 JSON 暴露 sql_dir，属正常编排，不是搬运容器。）
     dag_py = next(p for p in (tmp_path / "dags").rglob("*.py"))
     source = dag_py.read_text(encoding="utf-8")
     assert "BashOperator" in source and "DockerOperator" not in source
-    assert "PythonOperator" not in source
     assert "password" not in source and "jdbc:" not in source
     # 每个搬运作业一个 .sql 文件（落 <dags>/ontometa/<artifact>/jobs/）
     sql_files = [p for p in (tmp_path / "dags").rglob("jobs/*.sql") if p.is_file()]

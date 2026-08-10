@@ -106,7 +106,11 @@ def run_flink_sql(
         }
 
     flink = FlinkSubmitConfig(
-        sql_runner_jar=runner_jar,
+        runner_jar=runner_jar,
+        runner_class=env_settings.flink_sql_runner_class,
+        flink_bin=env_settings.flink_bin,
+        deploy_target=env_settings.flink_deploy_target,
+        parallelism=env_settings.flink_parallelism,
         yarn_queue=env_settings.flink_yarn_queue.strip() or "default",
         checkpoint_dir=env_settings.flink_checkpoint_dir.strip(),
     )
@@ -138,34 +142,32 @@ def run_flink_sql(
         max_active_tasks=airflow.max_active_tasks_per_dag,
     )
 
-    # 落盘：DagBundle 现在是纯数据，不含 write() 方法，手动写文件
+    # 落盘：DagBundle 是纯数据（F/G 后不含 write 方法），交给统一的 DagDelivery 投递器。
+    # 产物按 <dags>/ontometa/<artifact_id>/ 子目录聚合，.sql 落其 jobs/（与 read_spec 的
+    # sql_dir 对齐）；无 artifact_id 时退回扁平 dags_dir。
+    if artifact_id:
+        _out_dir = os.path.join(airflow.dags_dir, "ontometa", artifact_id)
+    else:
+        _out_dir = airflow.dags_dir
+    _jobs_dir = os.path.join(_out_dir, "jobs")
     delivery = airflow.build_delivery()
     try:
-        import json
-        from pathlib import Path
-
-        dags_dir = Path(airflow.dags_dir)
-        dags_dir.mkdir(parents=True, exist_ok=True)  # 确保目录存在
-
-        # 写 DAG Python 文件
-        dag_file = dags_dir / bundle.dag_filename
-        dag_file.write_text(bundle.dag_source, encoding="utf-8")
-
-        # 写边车 JSON spec
-        spec_file = dags_dir / bundle.spec_filename
-        spec_file.write_text(json.dumps(bundle.spec, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # 写 SQL 文件（每个任务一个 .sql）
-        for task_spec in bundle.spec["tasks"]:
-            sql_file = dags_dir / task_spec["sql_file"]
-            sql_file.write_text(task_spec["sql"], encoding="utf-8")
-
-        written = {
-            "dag_file": str(dag_file),
-            "spec_file": str(spec_file),
-            "sql_files": [str(dags_dir / t["sql_file"]) for t in bundle.spec["tasks"]],
+        job_files = {t["sql_file"]: t["sql"] for t in bundle.spec["tasks"]}
+        result = delivery.deliver(
+            dags_dir=_out_dir,
+            jobs_dir=_jobs_dir,
+            dag_filename=bundle.dag_filename,
+            dag_source=bundle.dag_source,
+            spec_filename=bundle.spec_filename,
+            spec=bundle.spec,
+            job_files=job_files,
+        )
+        written = getattr(result, "written", None) or {
+            "dag_file": os.path.join(_out_dir, bundle.dag_filename),
+            "spec_file": os.path.join(_out_dir, bundle.spec_filename),
+            "sql_files": [os.path.join(_jobs_dir, t["sql_file"]) for t in bundle.spec["tasks"]],
         }
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
         raise FlinkJobError(
             f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
         ) from exc
