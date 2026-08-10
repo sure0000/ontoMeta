@@ -6,9 +6,21 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
 from app.models.data_app import DataSource
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_seeded_sources():
+    """测试隔离：本模块 seed 的 DataSource 留在共享会话库里会污染后续用例的
+    warehouse-first 选源（如 test_column_profiler 取「最可用源」）。用完即清。"""
+    yield
+    with SessionLocal() as db:
+        db.query(DataSource).filter(DataSource.name.like("tgt-%")).delete()
+        db.commit()
 
 
 def _seed(tag: str, dsn: str | None) -> dict:

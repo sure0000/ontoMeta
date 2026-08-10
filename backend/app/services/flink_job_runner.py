@@ -11,6 +11,7 @@ executor 生成（它最懂清洗规则 / 聚合口径），本模块调 flink_s
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -111,17 +112,27 @@ def run_flink_sql(
         yarn_queue=env_settings.flink_yarn_queue.strip() or None,
     )
 
+    # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/；flink run --file
+    # 的路径写死进 command，必须与该落盘目录对齐（worker 上可见）。空则退回扁平 jobs_dir。
+    if artifact_id:
+        _flink_jobs_dir = os.path.join(
+            airflow.dags_dir, "ontometa", artifact_id, "jobs"
+        )
+    else:
+        _flink_jobs_dir = airflow.jobs_dir
+
     # 生成 DAG（.sql 文件 + DAG 源码 + spec.json）
     bundle = build_flink_sql_dag(
         base=base,
         tasks=tasks,
         warehouse_conn_id=warehouse_conn_id,
         flink=flink,
-        jobs_dir=airflow.jobs_dir,
+        jobs_dir=_flink_jobs_dir,
         warehouse_ddl=warehouse_ddl,
         schedule=schedule,
         dag_id_suffix=dag_id_suffix,
         max_active_tasks=airflow.max_active_tasks_per_dag,
+        artifact_id=artifact_id,
     )
 
     # 落盘

@@ -104,6 +104,51 @@ def _dumps(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
+def resolve_domain_data_source(
+    db: Session, target_catalog: str | None = None
+) -> DataSource | None:
+    """统一选源（warehouse-first）。查询侧唯一入口，chat_bi / ontology_ladder 共用。
+
+    StarRocks 多目录架构下，DataSource 分两类：
+    - warehouse 源（catalog_name 为 NULL/"internal"）：数仓投影，本体物化落这里，默认查这里
+    - 源库 catalog 引用（catalog_name="erp"/"crm"/...）：源系统在 StarRocks 里注册的 JDBC
+      catalog，**显式 target_catalog 才查**——查源库成为可审计的显式动作，而非「取最新」碰运气。
+
+    策略：
+    - ``target_catalog`` 指定：精确匹配该 catalog 名的可用源；匹配不到返回 None
+      （run_sql 据此降级为「仅建议 SQL」，不让 agent 悄悄换源）
+    - 未指定：优先 warehouse 源（catalog_name 为空/"internal"）；
+      无显式 warehouse 源时退化为取最新可用的源（兼容存量库无 catalog_name 的过渡期）
+    - 同组多候选时按更新时间取最新（与存量行为一致，避免行序不确定导致的选择漂移）
+    """
+    usable = [
+        s
+        for s in db.query(DataSource).all()
+        if (s.dsn_secret_ref or "").strip() and s.kind != "mock"
+    ]
+    if not usable:
+        return None
+
+    def _latest(candidates: list[DataSource]) -> DataSource | None:
+        if not candidates:
+            return None
+        candidates.sort(key=lambda s: (s.updated_at or s.created_at), reverse=True)
+        return candidates[0]
+
+    if target_catalog and target_catalog != "warehouse":
+        return _latest(
+            [s for s in usable if (s.catalog_name or "") == target_catalog]
+        )
+    # warehouse 源：catalog_name 为空或 "internal"（两种标记等价）
+    warehouse = [s for s in usable if (s.catalog_name or "").strip() in ("", "internal")]
+    if warehouse:
+        return _latest(warehouse)
+    if target_catalog == "warehouse":
+        return None
+    # 退化：存量库全部带 catalog_name 标记时取最新可用（兼容过渡期）
+    return _latest(usable)
+
+
 class DataAppService:
     """数据应用编排：绑定→编译→预览→发布。"""
 
@@ -126,13 +171,14 @@ class DataAppService:
 
     def create_data_source(
         self, db: Session, *, name: str, kind: str, dsn_secret_ref: str | None,
-        mapping: dict | None = None,
+        mapping: dict | None = None, catalog_name: str | None = None,
     ) -> DataSource:
         ds = DataSource(
             name=name,
             kind=kind,
             dsn_secret_ref=dsn_secret_ref,
             mapping_json=_dumps(mapping),
+            catalog_name=catalog_name,
         )
         db.add(ds)
         db.commit()
@@ -204,6 +250,7 @@ class DataAppService:
             "kind": ds.kind,
             "status": ds.status,
             "mapping": _loads(ds.mapping_json, None),
+            "catalog_name": ds.catalog_name,
             "tested_at": ds.tested_at,
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,

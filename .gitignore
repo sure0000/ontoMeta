@@ -39,3 +39,6 @@ backend/_ci_test.db*
 # Flink SqlRunner 构建产物（部署时按 README 自行构建）
 tools/flink-sql-runner/build/
 tools/flink-sql-runner/*.jar
+
+# 测试产物:materialization runner 测试的相对路径 sqlite DSN 连接时被建出
+unused-stubbed

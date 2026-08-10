@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from typing import Any
 
@@ -389,6 +390,16 @@ def _run_orchestrated(
     # 归入 manual 批。无可搬作业但有建表时，这里会新开一个 create_tables-only 的 manual 批。
     _assign_ddl(batches, ddl_items, constraint_items)
 
+    # 有 artifact_id 时产物按 <dags_dir>/ontometa/<artifact_id>/ 聚合；docker 通道的
+    # bind mount 源必须指向该子目录下的 jobs/（与 bundle.write 落盘目录对齐），否则挂载
+    # 源为空、容器内 --config 指向的文件不存在。artifact_id 为空则退回扁平布局。
+    if artifact_id:
+        _jobs_host_dir = os.path.join(
+            airflow.dags_dir, "ontometa", artifact_id, "jobs"
+        )
+    else:
+        _jobs_host_dir = airflow.jobs_dir
+
     bundles: list[tuple[dict, Any]] = []
     for batch in batches:
         bundle = _dag_builder.build(
@@ -405,12 +416,13 @@ def _run_orchestrated(
             engine=engine,
             warehouse_conn_id=_warehouse_conn_id(ds),
             docker_network=airflow.docker_network,
-            jobs_host_dir=airflow.jobs_dir,
+            jobs_host_dir=_jobs_host_dir,
             drivers_host_dir=airflow.drivers_dir,
             image_overrides=airflow.sync_tool_images,
             # 全量装载走 staging + 原子切换（M15）：搬到一半失败时正式表原封不动。
             staging=airflow.staging_swap,
             target_urn_builder=_urn_builder,
+            artifact_id=artifact_id,
         )
         bundles.append((batch, bundle))
 

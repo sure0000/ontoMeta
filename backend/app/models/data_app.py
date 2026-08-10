@@ -24,17 +24,26 @@ def _uuid() -> str:
 
 
 class DataSource(Base):
-    """物理数据源连接（阶段 1 可为空，preview 走 Mock 造数）。"""
+    """物理数据源连接（阶段 1 可为空，preview 走 Mock 造数）。
+
+    统一查询网关重构后，DataSource 语义分为两类：
+    - warehouse 源（catalog_name=NULL/"internal"）：数仓投影，本体物化落这里，agent 默认查这里
+    - 源库 catalog 引用（catalog_name="erp"/"crm"/...）：源系统在 StarRocks 里注册的 JDBC catalog，
+      显式 target 参数才查，实现 warehouse-first 语义
+    """
 
     __tablename__ = "data_sources"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255))
-    kind: Mapped[str] = mapped_column(String(50))  # postgres/mysql/duckdb/http/mock
+    kind: Mapped[str] = mapped_column(String(50))  # postgres/mysql/duckdb/http/mock/starrocks
     # DSN / 密钥仅存引用或加密串，阶段 1 允许为空
     dsn_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 物理映射：{"tables":{ontologyName:physical}, "columns":{...}}，Text(json)
+    # 收敛到 StarRocks 多目录后，物理表名为 catalog.db.table 三段式
     mapping_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # StarRocks 多目录架构：NULL/"internal"=warehouse，其他值=源库 catalog 名（如"erp"/"crm"）
+    catalog_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="untested")
     tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

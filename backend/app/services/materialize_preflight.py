@@ -479,24 +479,26 @@ _DELIVERED_DAG_PROOF_AGE = 900.0
 
 
 def _delivered_dag_ids(dags_dir: str) -> list[tuple[str, float]]:
-    """ontoMeta 已投进 dags 目录的 (dag_id, 文件年龄秒)。sentinel 自己不算数。"""
+    """ontoMeta 已投进 dags 目录的 (dag_id, 文件年龄秒)。sentinel 自己不算数。
+
+    **递归遍历**：产物按 ``<dags_dir>/ontometa/<artifact_id>/`` 子目录聚合后，DAG 文件
+    不再在根目录平铺。这里用 ``os.walk`` 同时认到子目录布局与历史的平铺布局
+    （两者文件名都仍是 ``{dag_id}.py``），否则子目录方案下此对账永远空、退化成只靠 sentinel。
+    """
     out: list[tuple[str, float]] = []
     now = time.time()
-    try:
-        names = os.listdir(dags_dir)
-    except OSError:
-        return out
-    for name in names:
-        if not name.startswith("ontometa_") or not name.endswith(".py"):
-            continue
-        dag_id = name[: -len(".py")]
-        if dag_id.startswith("ontometa_preflight_"):
-            continue
-        try:
-            age = now - os.path.getmtime(os.path.join(dags_dir, name))
-        except OSError:
-            continue
-        out.append((dag_id, age))
+    for root, _dirs, files in os.walk(dags_dir):
+        for name in files:
+            if not name.startswith("ontometa_") or not name.endswith(".py"):
+                continue
+            dag_id = name[: -len(".py")]
+            if dag_id.startswith("ontometa_preflight_"):
+                continue
+            try:
+                age = now - os.path.getmtime(os.path.join(root, name))
+            except OSError:
+                continue
+            out.append((dag_id, age))
     return out
 
 

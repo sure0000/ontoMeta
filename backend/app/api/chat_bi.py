@@ -435,17 +435,22 @@ def chat_bi_suggestions(domain_id: str = Query(...), db: Session = Depends(get_d
 def chat_bi_execute_message(
     message_id: str,
     data: ChatBiExecuteRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """执行该条回答的 suggested_sql，返回真实数据。
 
     数仓表由本体生成后，SQL 里的表名/列名与本体标识符天然一致——
     问数准确性由架构保证，而非靠提示词约束。
+    权限与 run_sql 同一道门：需 publisher 及以上（工具粒度授权）。
     """
     try:
         return chat_bi_service.execute_message_sql(
-            db, message_id, data_source_id=data.data_source_id, limit=data.limit
+            db, message_id, data_source_id=data.data_source_id, limit=data.limit,
+            principal_role=_principal_role(request),
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ExecutionError as exc:
