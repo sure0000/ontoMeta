@@ -31,7 +31,8 @@ def _init_db(client):
     """拉起 session 级 client 以建表（runner 测试直接用 SessionLocal，不走 API）。
 
     ``airflow_settings`` 是单例行，用例改了会漏给后续用例（默认执行方式随之改变），
-    故每个用例结束后复位成「未配置」。
+    故每个用例结束后复位成「未配置」。同时清掉本模块 seed 的 DataSource 行——
+    留在共享会话库会污染后续用例的 warehouse-first 选源（如 test_column_profiler）。
     """
     yield client
     from app.services.settings_service import SettingsService
@@ -40,6 +41,8 @@ def _init_db(client):
         SettingsService().update_airflow_settings(
             db, {"enabled": False}
         )
+        db.query(DataSource).filter(DataSource.name.like("target-%")).delete()
+        db.commit()
 
 
 def _seed(tag: str, *, with_dsn: bool = True, orphan: bool = False) -> dict:

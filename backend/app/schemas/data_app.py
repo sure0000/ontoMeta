@@ -13,9 +13,11 @@ from pydantic import BaseModel, Field
 
 class DataSourceCreate(BaseModel):
     name: str
-    kind: str = "mock"  # postgres/mysql/duckdb/sqlite/http/mock
+    kind: str = "mock"  # postgres/mysql/duckdb/sqlite/http/mock/starrocks
     dsn_secret_ref: str | None = None
     mapping: dict[str, Any] | None = None
+    # StarRocks 多目录：NULL/"internal"=warehouse；其他值=源库 catalog 名
+    catalog_name: str | None = None
 
 
 class DataSourceUpdate(BaseModel):
@@ -23,6 +25,7 @@ class DataSourceUpdate(BaseModel):
     kind: str | None = None
     dsn_secret_ref: str | None = None
     mapping: dict[str, Any] | None = None
+    catalog_name: str | None = None
 
 
 class DataSourceOut(BaseModel):
@@ -34,6 +37,8 @@ class DataSourceOut(BaseModel):
     tested_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # StarRocks 多目录：NULL/"internal"=warehouse，其他值=源库 catalog 名
+    catalog_name: str | None = None
     # 连接的非机密部分，供编辑弹窗回显（密码从不回显，只给 password_set 标志）。
     # dsn 整体仍不下发；这里由后端从存量 DSN 解析出结构化字段。
     dsn_set: bool = False

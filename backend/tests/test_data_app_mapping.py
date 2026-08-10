@@ -53,6 +53,38 @@ def test_empty_mapping_is_identity():
     assert _apply_mapping("SELECT 1 FROM x", {}) == "SELECT 1 FROM x"
 
 
+# ---------------------------------------------- StarRocks 多目录三段式限定名
+
+
+def test_catalog_qualified_table_name():
+    """StarRocks 多目录：物理表名可带 catalog.db 前缀,整体替换,不拆段。"""
+    map3 = {"tables": {"customer": "erp.erp_db.tabCustomer"}}
+    out = _apply_mapping("SELECT * FROM customer", map3)
+    assert out == "SELECT * FROM erp.erp_db.tabCustomer"
+
+
+def test_catalog_qualified_with_join_and_column():
+    """三段式下,对象名作为列的场合依旧不误伤。"""
+    map3 = {
+        "tables": {"sales_order": "erp.erp_db.tabSalesOrder",
+                   "customer": "erp.erp_db.tabCustomer"},
+    }
+    out = _apply_mapping(
+        "SELECT s.name FROM sales_order s JOIN customer c ON s.customer = c.name", map3
+    )
+    assert out == (
+        "SELECT s.name FROM erp.erp_db.tabSalesOrder s "
+        "JOIN erp.erp_db.tabCustomer c ON s.customer = c.name"
+    )
+
+
+def test_catalog_qualified_internal_plain_name():
+    """internal 目录下可以不写前缀(默认目录),二段式照常工作。"""
+    map2 = {"tables": {"customer": "dw.dim_customer"}}
+    out = _apply_mapping("SELECT * FROM customer", map2)
+    assert out == "SELECT * FROM dw.dim_customer"
+
+
 # ------------------------------------------------------- 驱动值的 JSON 安全化
 
 

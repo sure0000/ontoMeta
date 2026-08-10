@@ -50,6 +50,7 @@ def create_data_source(data: DataSourceCreate, db: Session = Depends(get_db)):
         kind=data.kind,
         dsn_secret_ref=data.dsn_secret_ref,
         mapping=data.mapping,
+        catalog_name=data.catalog_name,
     )
     return data_app_service.serialize_data_source(ds)
 
@@ -65,7 +66,6 @@ def update_data_source(
         return data_app_service.serialize_data_source(ds)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
 
 @router.delete("/data-sources/{ds_id}")
 def delete_data_source(ds_id: str, db: Session = Depends(get_db)):
@@ -106,6 +106,17 @@ def list_data_source_tables(
         return {"tables": data_app_service.list_tables(db, ds_id, database)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/data-sources/sync-catalogs")
+def sync_data_source_catalogs(db: Session = Depends(get_db)):
+    """StarRocks 多目录：把 catalog_name 非空的源库同步为 FE 上的外部 JDBC catalog。
+
+    幂等（已存在跳过）；仓库源（kind=starrocks/doris）的连接串即 FE 端点。
+    """
+    from app.services.catalog_sync import sync_all_catalogs
+
+    return sync_all_catalogs(db)
 
 
 # ------------------------------------------------------------------ data apps

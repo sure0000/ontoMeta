@@ -34,7 +34,12 @@ from sqlalchemy import create_engine, inspect as sa_inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchModuleError
 
-from app.warehouse import get_adapter
+from app.warehouse import (
+    UnknownEngineError,
+    engine_driver_hint,
+    engine_for_dsn,
+    get_adapter,
+)
 
 logger = logging.getLogger("ontometa.data_app.executor")
 
@@ -77,25 +82,6 @@ _DESTRUCTIVE_WRITE = re.compile(
 
 _engine_cache: dict[str, Engine] = {}
 
-# DSN scheme 前缀 → 执行器 backend。顺序敏感：长前缀在前。
-# Kyuubi 是 Spark SQL 网关，方言等同 Hive，故复用 hive Adapter。
-_WAREHOUSE_SCHEMES: tuple[tuple[str, str], ...] = (
-    ("kyuubi", "kyuubi"),
-    ("hive", "hive"),
-    ("starrocks", "starrocks"),
-    ("doris", "doris"),
-    ("clickhouse", "clickhouse"),
-)
-
-# 执行器 backend → app/warehouse 的 Adapter 名。
-_WAREHOUSE_BACKENDS: dict[str, str] = {
-    "hive": "hive",
-    "kyuubi": "hive",
-    "doris": "doris",
-    "starrocks": "starrocks",
-    "clickhouse": "clickhouse",
-}
-
 
 class ExecutionError(Exception):
     """执行器可对外暴露的可读错误。"""
@@ -109,31 +95,17 @@ def _get_engine(dsn: str) -> Engine:
     return engine
 
 
-# 数仓/数据库驱动按需自行安装（见 requirements.txt 末尾），未装时提示装哪个包。
-_DRIVER_HINTS: dict[str, str] = {
-    "mysql": "pymysql",
-    "doris": "pymysql",
-    "starrocks": "pymysql",
-    "postgres": "psycopg2-binary",
-    # 不用 pyhive[hive] 这个 extra：它带的 sasl 是 C 扩展，Python≥3.12 编译不过
-    # （longintrepr.h 已移除）。pure-sasl 是纯 Python 实现，thrift-sasl 会自动用它。
-    "hive": "pyhive thrift thrift-sasl pure-sasl",
-    "kyuubi": "pyhive thrift thrift-sasl pure-sasl",
-    "clickhouse": "clickhouse-sqlalchemy",
-    "duckdb": "duckdb-engine",
-}
-
-
 def _engine_or_error(dsn: str) -> Engine:
     """建引擎；驱动缺失是部署问题而非代码错误，给出装哪个包的可执行提示。
 
     ``create_engine`` 会立即导入 DBAPI，故驱动没装时在这里就炸——不接住会以 500
-    暴露 ``ModuleNotFoundError``，用户看不出要装什么。
+    暴露 ``ModuleNotFoundError``，用户看不出要装什么。引擎知识（scheme 识别/驱动
+    提示）在 ``warehouse.registry``，此处只消费。
     """
     try:
         return _get_engine(dsn)
     except (ImportError, NoSuchModuleError) as exc:
-        hint = _DRIVER_HINTS.get(_backend_of(dsn))
+        hint = engine_driver_hint(_backend_of(dsn))
         install = f"；请在后端环境安装：pip install {hint}" if hint else ""
         raise ExecutionError(f"缺少该数据源的数据库驱动（{exc}）{install}") from exc
 
@@ -179,13 +151,10 @@ def _translate_dialect(sql: str, backend: str) -> str:
     """方言翻译。
 
     数仓引擎（hive/kyuubi/doris/…）**委托给 ``app/warehouse`` 的 Dialect Adapter**，
-    不在此另开分支——否则同一引擎会存在两套方言逻辑，迟早分叉。
+    不在此另开分支——否则同一引擎会存在两套方言逻辑，迟早分叉。Adapter 注册表
+    （含 kyuubi→hive 别名）在 ``warehouse.registry``，此处只按 backend 取。
     本函数只保留 Adapter 覆盖不到的分析型本地引擎（SQLite/DuckDB）。
     """
-    engine = _WAREHOUSE_BACKENDS.get(backend)
-    if engine:
-        return get_adapter(engine).translate_sql(sql)
-
     if backend in ("sqlite", "duckdb"):
         # DATE_SUB(CURDATE(), INTERVAL 30 DAY) -> date('now','-30 day')
         sql = re.sub(
@@ -195,7 +164,11 @@ def _translate_dialect(sql: str, backend: str) -> str:
             flags=re.IGNORECASE,
         )
         sql = re.sub(r"CURDATE\(\)", "date('now')", sql, flags=re.IGNORECASE)
-    return sql
+        return sql
+    try:
+        return get_adapter(backend).translate_sql(sql)
+    except UnknownEngineError:
+        return sql  # 未知引擎不翻译,原样交给引擎（失败在引擎侧可见）
 
 
 # 表位置：FROM / JOIN / INTO / UPDATE / TABLE 之后紧跟的那个（或那串逗号分隔的）标识符。
@@ -242,21 +215,18 @@ def _apply_mapping(sql: str, mapping: dict[str, Any] | None) -> str:
 
 
 def _backend_of(dsn: str) -> str:
+    """由 DSN scheme 推断后端名（sqlite/duckdb/postgres/mysql/hive/doris/…）。
+
+    数仓引擎的 scheme 识别在 ``warehouse.registry.engine_for_dsn``（单一真源），
+    此处只兜本地引擎与未知前缀。
+    """
     prefix = dsn.split(":", 1)[0].lower()
     if prefix.startswith("sqlite"):
         return "sqlite"
     if prefix.startswith("duckdb"):
         return "duckdb"
-    if prefix.startswith(("postgres", "postgresql")):
-        return "postgres"
-    # 数仓引擎须在 mysql 之前判定：Doris/StarRocks 走 MySQL 线协议，
-    # 其 DSN 常写成 mysql+pymysql://，但显式 doris:// / starrocks:// 应识别为自身。
-    for scheme, backend in _WAREHOUSE_SCHEMES:
-        if prefix.startswith(scheme):
-            return backend
-    if prefix.startswith("mysql"):
-        return "mysql"
-    return prefix
+    engine = engine_for_dsn(dsn)
+    return engine if engine else prefix
 
 
 def backend_of(dsn: str | None) -> str | None:

@@ -183,3 +183,31 @@ def test_execute_unknown_message_returns_404(client, admin_headers):
         json={"data_source_id": ids["data_source_id"]},
     )
     assert resp.status_code == 404
+
+
+def test_execute_message_requires_publisher_service_gate():
+    """P2 权限门统一：手动执行与 run_sql 同一道工具粒度门。
+
+    端点层已按 required_role 拦 publisher；服务层再加 _may_run_sql 纵深防御，
+    且与 run_sql 的 agent_run_sql_min_role 配置联动（降级配置两处同价）。
+    """
+    from app.services.chat_bi import ChatBiService
+
+    ids = _seed_message("perm", "SELECT 1", dsn="sqlite:///:memory:", kind="sqlite")
+    svc = ChatBiService()
+    with SessionLocal() as db:
+        try:
+            svc.execute_message_sql(
+                db, ids["message_id"], data_source_id=ids["data_source_id"],
+                principal_role="editor",
+            )
+            assert False, "editor 应被拒"
+        except PermissionError as exc:
+            assert "无权执行 SQL" in str(exc)
+    # publisher（admin 等价）放行：走到 SQL 执行才报「消息不存在」之外的错——用合法消息验证放行
+    with SessionLocal() as db:
+        out = svc.execute_message_sql(
+            db, ids["message_id"], data_source_id=ids["data_source_id"],
+            principal_role="publisher",
+        )
+        assert out["row_count"] == 1

@@ -83,6 +83,21 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_catalogs",
+            "description": (
+                "列出当前数据域可查询的数据目录（catalog）。取数前先看这里拿合法 target 值："
+                "warehouse（数仓投影，默认）或各源库 catalog 名（如 erp/crm，实时源数据）。"
+                "run_sql 的 target 参数只收这里返回的名字，别自己编。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_objects",
             "description": (
                 "按关键词检索当前数据域的已发布业务对象。返回 "
@@ -329,12 +344,21 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "在当前数据域的物理数据源上执行**只读 SELECT**，返回列与真实数据行。"
                 "表名/字段名必须使用本体标识符。若无可执行数据源会返回提示，此时改为给出建议 SQL。"
+                "默认查数仓投影（warehouse）；确需查源库时才显式传 target（如 \"erp\"），"
+                "不传时绝不直连源库。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sql": {"type": "string", "description": "单条 SELECT 语句"},
                     "limit": {"type": "integer", "description": f"返回行上限，默认 {_RUN_SQL_LIMIT}"},
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "目标目录：warehouse（默认，查数仓投影）；或显式源库 catalog 名"
+                            "（如 erp/crm，查源系统实时数据）。默认 warehouse，不传不查源库。"
+                        ),
+                    },
                 },
                 "required": ["sql"],
             },

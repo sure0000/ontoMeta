@@ -21,6 +21,8 @@ from app.warehouse.logical_schema import (
 from app.warehouse.registry import (
     DEFAULT_ENGINE,
     UnknownEngineError,
+    engine_driver_hint,
+    engine_for_dsn,
     get_adapter,
     list_adapters,
     list_engines,
@@ -39,6 +41,8 @@ __all__ = [
     "LogicalTable",
     "DEFAULT_ENGINE",
     "UnknownEngineError",
+    "engine_driver_hint",
+    "engine_for_dsn",
     "get_adapter",
     "list_adapters",
     "list_engines",

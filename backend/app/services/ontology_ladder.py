@@ -616,18 +616,13 @@ class OntologyLadderLoader:
             for l in list(merged.values())[:3]
         ]
 
-    # ---- 数据源解析（复用 chat_bi 的策略：域内首个可用数据源） --------------
+    # ---- 数据源解析（统一走 services.data_app 的 warehouse-first 策略） ----------
 
     @staticmethod
     def _resolve_domain_data_source(db: Session):
-        from app.models import DataSource
+        from app.services.data_app import resolve_domain_data_source
 
-        return (
-            db.query(DataSource)
-            .filter(DataSource.dsn_secret_ref.isnot(None))
-            .order_by(DataSource.created_at)
-            .first()
-        )
+        return resolve_domain_data_source(db)
 
 
 # --------------------------------------------------------------------------- 小工具

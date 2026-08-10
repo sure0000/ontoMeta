@@ -903,12 +903,26 @@ class ChatBiService:
 
     # -------------------------------------------------------------- agent loop
 
-    def _resolve_domain_data_source(self, db: Session):
-        """为 run_sql 选一个可执行数据源。
+    def _resolve_domain_data_source(
+        self, db: Session, target_catalog: str | None = None
+    ):
+        """为 run_sql 选执行数据源（warehouse-first）。
 
-        DataSource 目前无数据域绑定（schema 层缺 domain 外键），故策略：
-        唯一可用源直接用；多个可用源取最近更新的一个（P1 实用取舍）；无可用源返回 None
-        （run_sql 据此优雅降级为「仅建议 SQL」）。
+        统一查询网关重构后，选源逻辑收敛到 ``services.data_app.resolve_domain_data_source``
+        一处（chat_bi 与 ontology_ladder 共用）：
+        - 默认查 warehouse 源（catalog_name 为空/"internal"）——数仓投影；
+        - ``target_catalog`` 显式指定（如 "erp"）才精确匹配源库 catalog；
+        - 无可用源返回 None（run_sql 据此优雅降级为「仅建议 SQL」）。
+        """
+        from app.services.data_app import resolve_domain_data_source
+
+        return resolve_domain_data_source(db, target_catalog=target_catalog)
+
+    def _dispatch_list_catalogs(self, db: Session) -> tuple[Any, str, bool]:
+        """list_catalogs 工具：返回可查询目录清单，供 run_sql 的 target 取值。
+
+        warehouse 恒在（有可用源时）；源库 catalog 按 DataSource.catalog_name 列。
+        只列**可执行**的源（有连接串、非 mock），与选源口径一致。
         """
         from app.models import DataSource
 
@@ -917,11 +931,26 @@ class ChatBiService:
             for s in db.query(DataSource).all()
             if (s.dsn_secret_ref or "").strip() and s.kind != "mock"
         ]
-        if not usable:
-            return None
-        if len(usable) > 1:
-            usable.sort(key=lambda s: (s.updated_at or s.created_at), reverse=True)
-        return usable[0]
+        catalogs: list[dict[str, str]] = []
+        if usable:
+            catalogs.append(
+                {"name": "warehouse", "kind": "starrocks",
+                 "description": "数仓投影（默认 target，本体物化落这里）"}
+            )
+        for s in usable:
+            cat = (s.catalog_name or "").strip()
+            if cat and cat != "internal":
+                catalogs.append(
+                    {"name": cat, "kind": s.kind,
+                     "description": f"源库实时数据（{s.name}）"}
+                )
+        if not catalogs:
+            return (
+                {"catalogs": [], "note": "当前数据域未配置可执行数据源，run_sql 只能给建议 SQL"},
+                "无可执行目录",
+                False,
+            )
+        return {"catalogs": catalogs}, f"可查询目录：{', '.join(c['name'] for c in catalogs)}", False
 
     # --- 工具结果 compact 化：只保留 LLM 需要的字段，压住回灌体积 ---
 
@@ -1028,10 +1057,19 @@ class ChatBiService:
         if not ok:
             return {"executed": False, "error": f"仅允许只读 SELECT：{reason}", "sql": sql}, "被只读校验拒绝", True
 
+        # 显式 target（warehouse 默认 / 源库 catalog 名如 erp）→ warehouse-first 选源。
+        # target 参数不在 schema 白名单之外的值不做约束，由选源函数按 catalog_name 精确匹配，
+        # 匹配不到即降级「仅建议 SQL」——不让 agent 悄悄换源。
+        target_catalog = str(args.get("target") or "").strip() or None
+
         # 权限不足时不解析数据源——降级为「仅建议 SQL」，而不是硬报错：
         # 检索类工具对低权角色仍合法，问答体验不掉，只是不代跑数。
         may_run = self._may_run_sql(principal_role)
-        source = self._resolve_domain_data_source(db) if may_run else None
+        source = (
+            self._resolve_domain_data_source(db, target_catalog=target_catalog)
+            if may_run
+            else None
+        )
         mapping = _loads_payload(source.mapping_json) if source is not None else None
 
         # ★ SQL 语义证明（F3）：执行/建议前静态证明语义合法，不过则不放行。
@@ -1055,8 +1093,13 @@ class ChatBiService:
                 False,
             )
         if source is None:
+            reason = (
+                f"目标目录「{target_catalog}」未配置可执行数据源，仅能给出建议 SQL"
+                if target_catalog
+                else "当前数据域未绑定可执行数据源，仅能给出建议 SQL"
+            )
             return (
-                {"executed": False, "reason": "当前数据域未绑定可执行数据源，仅能给出建议 SQL",
+                {"executed": False, "reason": reason,
                  "sql": sql, "proved": proved},
                 "无可执行数据源",
                 False,
@@ -3181,6 +3224,8 @@ class ChatBiService:
                 return self._dispatch_run_sql(
                     db, args=args, ontology_id=ontology_id, principal_role=principal_role
                 )
+            if name == "list_catalogs":
+                return self._dispatch_list_catalogs(db)
             return {"error": f"未知工具：{name}"}, "未知工具", True
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent tool %s failed: %s", name, exc)
@@ -4219,7 +4264,8 @@ class ChatBiService:
     # ---------- M4：把 suggested_sql 真正执行掉 ----------
 
     def execute_message_sql(
-        self, db: Session, message_id: str, *, data_source_id: str, limit: int = 100
+        self, db: Session, message_id: str, *, data_source_id: str, limit: int = 100,
+        principal_role: str | None = None,
     ) -> dict:
         """执行某条回答的 ``suggested_sql``。
 
@@ -4228,11 +4274,16 @@ class ChatBiService:
         ``_LLM`` 那句「必须严格使用本体标识符」从祈使句变成了物理事实。
 
         安全：复用 ``data_app_executor`` 既有的只读校验与强制 LIMIT。
-        注：执行权限应限制为 publisher 角色，但 RBAC 四层角色尚未产品化
-        （见 README「安全模型（阶段性）」），当前仍由共享 Admin Token 兜底。
+        权限：与 run_sql 同一道工具粒度门（``_may_run_sql``，需 publisher 及以上）——
+        手动执行和 agent 代跑暴露同一个库，不能一个 publisher 门一个 Admin Token 兜底。
         """
         from app.models import DataSource
         from app.services import data_app_executor
+
+        if not self._may_run_sql(principal_role):
+            raise PermissionError(
+                f"当前角色无权执行 SQL（需 {env_settings.agent_run_sql_min_role} 及以上）"
+            )
 
         message = db.get(ChatBiMessage, message_id)
         if message is None:

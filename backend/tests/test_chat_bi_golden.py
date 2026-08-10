@@ -241,7 +241,9 @@ async def _run_case(case: GoldenCase, domain_id: str, aliases: dict[str, str]) -
     # 必须显式钉死——`_resolve_domain_data_source` 没有数据域绑定，会捞到**全库任意**
     # 一个 DataSource（服务层已注明的 P1 取舍）。不钉的话，别的测试建了数据源，
     # 这里就会真去执行，基线随测试顺序漂移，就不成其为基线了。
-    svc._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
+    svc._resolve_domain_data_source = (
+        lambda _db, target_catalog=None: None  # type: ignore[assignment]
+    )
     # 取前后差值而不是 reset：累计基线测试要靠全局计数不断累加
     before = agent_telemetry.snapshot()
     try:
@@ -265,7 +267,9 @@ async def _run_case(case: GoldenCase, domain_id: str, aliases: dict[str, str]) -
 def _svc_without_data_source() -> ChatBiService:
     """golden 域不绑数据源的服务实例（理由同 `_run_case` 里的说明）。"""
     svc = ChatBiService()
-    svc._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
+    svc._resolve_domain_data_source = (
+        lambda _db, target_catalog=None: None  # type: ignore[assignment]
+    )
     return svc
 
 
