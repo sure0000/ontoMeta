@@ -31,15 +31,9 @@ function sortWorkspaceDomains(domains: DomainContext[]): DomainContext[] {
 }
 
 export function WorkspacePage() {
-  const { data: domains, loading, error } = useApi<DomainContext[]>(
-    () => api.listDomains(),
-    [],
-  );
+  const { data: domains, loading, error } = useApi<DomainContext[]>(() => api.listDomains(), []);
 
-  const sortedDomains = useMemo(
-    () => (domains ? sortWorkspaceDomains(domains) : []),
-    [domains],
-  );
+  const sortedDomains = useMemo(() => (domains ? sortWorkspaceDomains(domains) : []), [domains]);
 
   if (loading) return <PageSkeleton type="cards" />;
 
@@ -72,16 +66,12 @@ export function WorkspacePage() {
                       </div>
                       <div style={{ minWidth: 0 }}>
                         <div className="entity-card-title">{domain.name}</div>
-                        <div className="entity-card-subtitle">
-                          {domain.owner || "未指定负责人"}
-                        </div>
+                        <div className="entity-card-subtitle">{domain.owner || "未指定负责人"}</div>
                       </div>
                     </div>
                     <StatusBadge status={domain.status} />
                   </div>
-                  <div className="entity-card-desc">
-                    {domain.description || "暂无描述"}
-                  </div>
+                  <div className="entity-card-desc">{domain.description || "暂无描述"}</div>
                   <div className="entity-card-foot">
                     <div className="entity-card-foot-stats">
                       <span className="entity-card-foot-item">

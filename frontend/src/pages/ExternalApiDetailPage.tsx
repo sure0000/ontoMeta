@@ -27,10 +27,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
-import type {
-  ExternalApiFieldDoc,
-  McpToolCallResult,
-} from "../types";
+import type { ExternalApiFieldDoc, McpToolCallResult } from "../types";
 
 const { Text } = Typography;
 
@@ -66,13 +63,7 @@ function copyText(text: string) {
   );
 }
 
-function CodeBlock({
-  children,
-  onCopy,
-}: {
-  children: string;
-  onCopy?: () => void;
-}) {
+function CodeBlock({ children, onCopy }: { children: string; onCopy?: () => void }) {
   return (
     <div className="api-code-block">
       {onCopy && (
@@ -99,20 +90,17 @@ export function ExternalApiDetailPage() {
     data: detailBundle,
     loading,
     error,
-  } = useApi(
-    async () => {
-      if (!apiId) throw new Error("缺少 API ID");
-      const [catalogItem, appList] = await Promise.all([
-        api.getExternalApiCatalogItem(apiId),
-        api.listExternalApps(),
-      ]);
-      return {
-        item: catalogItem,
-        apps: appList.filter((a) => a.status === "active"),
-      };
-    },
-    [apiId],
-  );
+  } = useApi(async () => {
+    if (!apiId) throw new Error("缺少 API ID");
+    const [catalogItem, appList] = await Promise.all([
+      api.getExternalApiCatalogItem(apiId),
+      api.listExternalApps(),
+    ]);
+    return {
+      item: catalogItem,
+      apps: appList.filter((a) => a.status === "active"),
+    };
+  }, [apiId]);
 
   const item = detailBundle?.item ?? null;
   const apps = detailBundle?.apps ?? [];
@@ -140,10 +128,7 @@ export function ExternalApiDetailPage() {
     setTryError(null);
   }, [item?.id]);
 
-  const params = useMemo(
-    () => schemaParams(item?.input_schema),
-    [item],
-  );
+  const params = useMemo(() => schemaParams(item?.input_schema), [item]);
 
   const callArguments = useMemo(() => {
     const out: Record<string, string> = {};
@@ -202,11 +187,7 @@ export function ExternalApiDetailPage() {
     setTryResult(null);
     const started = performance.now();
     try {
-      const result = await api.callMcpTool(
-        item.tool_name,
-        callArguments,
-        apiKey.trim(),
-      );
+      const result = await api.callMcpTool(item.tool_name, callArguments, apiKey.trim());
       setTryResult({
         status: result.status,
         data: result.data,
@@ -215,10 +196,7 @@ export function ExternalApiDetailPage() {
       const payload = result.data as McpToolCallResult | { detail?: string };
       if (result.status >= 400) {
         const detail =
-          typeof payload === "object" &&
-          payload &&
-          "detail" in payload &&
-          payload.detail
+          typeof payload === "object" && payload && "detail" in payload && payload.detail
             ? String(payload.detail)
             : `HTTP ${result.status}`;
         setTryError(detail);
@@ -262,8 +240,7 @@ export function ExternalApiDetailPage() {
       dataIndex: "required",
       key: "required",
       width: 80,
-      render: (v: boolean) =>
-        v ? <Tag color="red">是</Tag> : <Tag>否</Tag>,
+      render: (v: boolean) => (v ? <Tag color="red">是</Tag> : <Tag>否</Tag>),
     },
     {
       title: "说明",
@@ -313,10 +290,7 @@ export function ExternalApiDetailPage() {
           showIcon
           message={error || "MCP 工具不存在"}
           action={
-            <Button
-              size="small"
-              onClick={() => navigate("/external-api/endpoints")}
-            >
+            <Button size="small" onClick={() => navigate("/external-api/endpoints")}>
               返回列表
             </Button>
           }
@@ -343,11 +317,7 @@ export function ExternalApiDetailPage() {
       </SectionCard>
 
       <SectionCard title="inputSchema JSON">
-        <CodeBlock
-          onCopy={() =>
-            copyText(JSON.stringify(item.input_schema, null, 2))
-          }
-        >
+        <CodeBlock onCopy={() => copyText(JSON.stringify(item.input_schema, null, 2))}>
           {JSON.stringify(item.input_schema, null, 2)}
         </CodeBlock>
       </SectionCard>
@@ -364,25 +334,17 @@ export function ExternalApiDetailPage() {
       </SectionCard>
 
       <SectionCard title="返回示例">
-        <CodeBlock
-          onCopy={() =>
-            copyText(JSON.stringify(item.example_result, null, 2))
-          }
-        >
+        <CodeBlock onCopy={() => copyText(JSON.stringify(item.example_result, null, 2))}>
           {JSON.stringify(item.example_result, null, 2)}
         </CodeBlock>
       </SectionCard>
 
       <SectionCard title="Agent 调用示例 (tools/call)">
-        <CodeBlock onCopy={() => copyText(mcpCallExample)}>
-          {mcpCallExample}
-        </CodeBlock>
+        <CodeBlock onCopy={() => copyText(mcpCallExample)}>{mcpCallExample}</CodeBlock>
       </SectionCard>
 
       <SectionCard title="发现工具 (tools/list)">
-        <CodeBlock onCopy={() => copyText(mcpListExample)}>
-          {mcpListExample}
-        </CodeBlock>
+        <CodeBlock onCopy={() => copyText(mcpListExample)}>{mcpListExample}</CodeBlock>
       </SectionCard>
     </div>
   );
@@ -405,11 +367,7 @@ export function ExternalApiDetailPage() {
         <Form.Item label="选择应用">
           <Select
             allowClear
-            placeholder={
-              apps.length === 0
-                ? "暂无启用中的应用，请先创建"
-                : "选择已创建的应用"
-            }
+            placeholder={apps.length === 0 ? "暂无启用中的应用，请先创建" : "选择已创建的应用"}
             value={selectedAppId}
             onChange={(v) => {
               if (!v) {
@@ -489,12 +447,7 @@ export function ExternalApiDetailPage() {
             </Space>
           )}
           {tryError && (
-            <Alert
-              type="error"
-              showIcon
-              message={tryError}
-              style={{ marginBottom: 12 }}
-            />
+            <Alert type="error" showIcon message={tryError} style={{ marginBottom: 12 }} />
           )}
           {tryResult && (
             <CodeBlock
@@ -523,10 +476,7 @@ export function ExternalApiDetailPage() {
         description={item.description}
         icon={<BookOutlined />}
         extra={
-          <Button
-            icon={<ArrowLeftOutlined />}
-            onClick={() => navigate("/external-api/endpoints")}
-          >
+          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/external-api/endpoints")}>
             返回列表
           </Button>
         }
@@ -548,8 +498,7 @@ export function ExternalApiDetailPage() {
           {item.mcp_endpoint}
         </code>
         <span className="api-endpoint-auth">
-          <ApiOutlined />{" "}
-          {item.auth_required ? "需 X-API-Key" : "无需鉴权"}
+          <ApiOutlined /> {item.auth_required ? "需 X-API-Key" : "无需鉴权"}
         </span>
       </div>
 

@@ -56,11 +56,24 @@ const MODE_LABEL: Record<string, string> = {
 // Airflow 编排专有参数（存 deploy_spec.extra）。从 AirflowSettingsPanel 合并而来，
 // 连接字段已归本面板的 connection，sync-runner 连接归 sync_runner 组件，这里只剩编排旋钮。
 const AIRFLOW_EXTRA_FIELDS = [
-  "dag_delivery_method", "dags_dir", "jobs_dir",
-  "git_remote", "git_branch", "git_auto_init", "git_author", "git_email",
-  "sync_channel", "docker_network", "drivers_dir", "sync_tool_images", "sync_tool",
-  "max_tasks_per_dag", "max_active_tasks_per_dag", "dag_parse_timeout",
-  "preflight_sentinel_timeout", "staging_swap",
+  "dag_delivery_method",
+  "dags_dir",
+  "jobs_dir",
+  "git_remote",
+  "git_branch",
+  "git_auto_init",
+  "git_author",
+  "git_email",
+  "sync_channel",
+  "docker_network",
+  "drivers_dir",
+  "sync_tool_images",
+  "sync_tool",
+  "max_tasks_per_dag",
+  "max_active_tasks_per_dag",
+  "dag_parse_timeout",
+  "preflight_sentinel_timeout",
+  "staging_swap",
 ] as const;
 
 const MODE_ICON: Record<string, React.ReactNode> = {
@@ -107,13 +120,9 @@ export function DependencyPanel() {
       fs.forEach((f) => names.push(`conn_${f.name}`)),
     );
     [schema.bare_metal_params, schema.docker_params].forEach((m) =>
-      Object.values(m ?? {}).forEach((fs) =>
-        fs.forEach((f) => names.push(`spec_${f.name}`)),
-      ),
+      Object.values(m ?? {}).forEach((fs) => fs.forEach((f) => names.push(`spec_${f.name}`))),
     );
-    (schema.deploy_spec_schemas?.k8s ?? []).forEach((f) =>
-      names.push(`spec_${f.name}`),
-    );
+    (schema.deploy_spec_schemas?.k8s ?? []).forEach((f) => names.push(`spec_${f.name}`));
     return names;
   }, [schema]);
   const clearDynamicFields = useCallback(() => {
@@ -123,10 +132,7 @@ export function DependencyPanel() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [sch, list] = await Promise.all([
-        api.getDependencySchema(),
-        api.listDependencies(),
-      ]);
+      const [sch, list] = await Promise.all([api.getDependencySchema(), api.listDependencies()]);
       setSchema(sch);
       setRows(list);
     } catch (err) {
@@ -189,11 +195,11 @@ export function DependencyPanel() {
     const deploySpec: Record<string, unknown> = {};
     const specFields =
       mode === "bare_metal"
-        ? schema?.bare_metal_params?.[key] ?? []
+        ? (schema?.bare_metal_params?.[key] ?? [])
         : mode === "docker"
-          ? schema?.docker_params?.[key] ?? []
+          ? (schema?.docker_params?.[key] ?? [])
           : mode === "k8s"
-            ? schema?.deploy_spec_schemas?.["k8s"] ?? []
+            ? (schema?.deploy_spec_schemas?.["k8s"] ?? [])
             : [];
     specFields.forEach((f) => {
       const v = values[`spec_${f.name}`];
@@ -372,11 +378,7 @@ export function DependencyPanel() {
               日志
             </Button>
           ) : null}
-          <Button
-            size="small"
-            onClick={() => void handleProbe(r.id)}
-            loading={probing[r.id]}
-          >
+          <Button size="small" onClick={() => void handleProbe(r.id)} loading={probing[r.id]}>
             拨测
           </Button>
           {r.deploy_mode !== "external" ? (
@@ -458,8 +460,7 @@ export function DependencyPanel() {
                 clearDynamicFields();
                 // 切组件后若当前部署方式不在该组件白名单内，回落到 external，
                 // 避免留下一个后端会拒绝的非法组合（datahub/warehouse/llm 仅 external）。
-                const allowed =
-                  schema?.component_deploy_modes?.[k] ?? schema?.deploy_modes ?? [];
+                const allowed = schema?.component_deploy_modes?.[k] ?? schema?.deploy_modes ?? [];
                 const cur = form.getFieldValue("deploy_mode") as string | undefined;
                 if (!cur || !allowed.includes(cur)) {
                   form.setFieldValue("deploy_mode", allowed[0] ?? "external");
@@ -479,8 +480,8 @@ export function DependencyPanel() {
               const key = getFieldValue("key") as string | undefined;
               // 未列出的组件默认全支持；列出的（datahub/warehouse/llm）只回 external。
               const allowed = key
-                ? schema?.component_deploy_modes?.[key] ?? schema?.deploy_modes ?? []
-                : schema?.deploy_modes ?? [];
+                ? (schema?.component_deploy_modes?.[key] ?? schema?.deploy_modes ?? [])
+                : (schema?.deploy_modes ?? []);
               const onlyExternal = allowed.length === 1 && allowed[0] === "external";
               return (
                 <Form.Item
@@ -542,10 +543,10 @@ export function DependencyPanel() {
               // bare_metal / docker / k8s：部署参数
               const specFields =
                 mode === "bare_metal"
-                  ? schema?.bare_metal_params?.[key] ?? []
+                  ? (schema?.bare_metal_params?.[key] ?? [])
                   : mode === "docker"
-                    ? schema?.docker_params?.[key] ?? []
-                    : schema?.deploy_spec_schemas?.["k8s"] ?? [];
+                    ? (schema?.docker_params?.[key] ?? [])
+                    : (schema?.deploy_spec_schemas?.["k8s"] ?? []);
               // bare_metal 下按认证方式隐藏无关的机密字段：
               //   password 认证 → 隐藏私钥/口令；key 认证 → 隐藏密码。
               const authMethod =
@@ -688,10 +689,18 @@ export function DependencyPanel() {
                                       description="DAG 目录须在一个已配好 remote 的 git 工作副本内，且本服务进程有推送凭据。Airflow 侧用 git-sync sidecar 拉取同一仓库。产物进 git 天然可 diff / review / 回滚。"
                                     />
                                     <Space align="start" wrap>
-                                      <Form.Item label="remote 名称" name="extra_git_remote" extra="默认 origin">
+                                      <Form.Item
+                                        label="remote 名称"
+                                        name="extra_git_remote"
+                                        extra="默认 origin"
+                                      >
                                         <Input placeholder="origin" style={{ width: 160 }} />
                                       </Form.Item>
-                                      <Form.Item label="推送分支" name="extra_git_branch" extra="默认 main">
+                                      <Form.Item
+                                        label="推送分支"
+                                        name="extra_git_branch"
+                                        extra="默认 main"
+                                      >
                                         <Input placeholder="main" style={{ width: 160 }} />
                                       </Form.Item>
                                     </Space>
@@ -704,11 +713,22 @@ export function DependencyPanel() {
                                       <Switch />
                                     </Form.Item>
                                     <Space align="start" wrap>
-                                      <Form.Item label="commit 作者名" name="extra_git_author" extra="留空则用 git 全局配置">
+                                      <Form.Item
+                                        label="commit 作者名"
+                                        name="extra_git_author"
+                                        extra="留空则用 git 全局配置"
+                                      >
                                         <Input placeholder="ontoMeta" style={{ width: 200 }} />
                                       </Form.Item>
-                                      <Form.Item label="commit 邮箱" name="extra_git_email" extra="留空则用 git 全局配置">
-                                        <Input placeholder="ontometa@example.com" style={{ width: 240 }} />
+                                      <Form.Item
+                                        label="commit 邮箱"
+                                        name="extra_git_email"
+                                        extra="留空则用 git 全局配置"
+                                      >
+                                        <Input
+                                          placeholder="ontometa@example.com"
+                                          style={{ width: 240 }}
+                                        />
                                       </Form.Item>
                                     </Space>
                                   </>
@@ -736,7 +756,10 @@ export function DependencyPanel() {
                                 ]}
                               />
                             </Form.Item>
-                            <Text type="secondary" style={{ display: "block", fontSize: 13, marginBottom: 12 }}>
+                            <Text
+                              type="secondary"
+                              style={{ display: "block", fontSize: 13, marginBottom: 12 }}
+                            >
                               sync-runner 的地址/令牌在 sync_runner 组件的连接里配。
                             </Text>
                             <Form.Item
@@ -784,18 +807,34 @@ export function DependencyPanel() {
                         children: (
                           <>
                             <Space align="start" wrap>
-                              <Form.Item label="单 DAG 最大任务数" name="extra_max_tasks_per_dag" extra="超出按此拆成多个 DAG">
+                              <Form.Item
+                                label="单 DAG 最大任务数"
+                                name="extra_max_tasks_per_dag"
+                                extra="超出按此拆成多个 DAG"
+                              >
                                 <InputNumber min={1} max={1000} style={{ width: 160 }} />
                               </Form.Item>
-                              <Form.Item label="单 DAG 并发上限" name="extra_max_active_tasks_per_dag" extra="层内不再一次性全放开">
+                              <Form.Item
+                                label="单 DAG 并发上限"
+                                name="extra_max_active_tasks_per_dag"
+                                extra="层内不再一次性全放开"
+                              >
                                 <InputNumber min={1} max={256} style={{ width: 160 }} />
                               </Form.Item>
                             </Space>
                             <Space align="start" wrap>
-                              <Form.Item label="等 DAG 解析超时（秒）" name="extra_dag_parse_timeout" extra="要大于 Airflow 的 dag_dir_list_interval（默认 300s）">
+                              <Form.Item
+                                label="等 DAG 解析超时（秒）"
+                                name="extra_dag_parse_timeout"
+                                extra="要大于 Airflow 的 dag_dir_list_interval（默认 300s）"
+                              >
                                 <InputNumber min={0} max={3600} style={{ width: 200 }} />
                               </Form.Item>
-                              <Form.Item label="自检探针超时（秒）" name="extra_preflight_sentinel_timeout" extra="提交前自检写一个 sentinel DAG，等它被解析到">
+                              <Form.Item
+                                label="自检探针超时（秒）"
+                                name="extra_preflight_sentinel_timeout"
+                                extra="提交前自检写一个 sentinel DAG，等它被解析到"
+                              >
                                 <InputNumber min={0} max={600} style={{ width: 200 }} />
                               </Form.Item>
                             </Space>

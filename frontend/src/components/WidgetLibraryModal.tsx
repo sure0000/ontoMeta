@@ -54,7 +54,10 @@ export function WidgetLibraryModal({
   useEffect(() => {
     if (!open) return;
     load();
-    api.listDataSources().then(setDataSources).catch(() => setDataSources([]));
+    api
+      .listDataSources()
+      .then(setDataSources)
+      .catch(() => setDataSources([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, q, domainId, crossDomain]);
 
@@ -92,13 +95,7 @@ export function WidgetLibraryModal({
   };
 
   return (
-    <Modal
-      title="面板库"
-      open={open}
-      onCancel={onClose}
-      footer={null}
-      width={720}
-    >
+    <Modal title="面板库" open={open} onCancel={onClose} footer={null} width={720}>
       <Space style={{ width: "100%", marginBottom: 12 }} align="center">
         <Input
           prefix={<SearchOutlined />}
@@ -129,7 +126,9 @@ export function WidgetLibraryModal({
       <List
         loading={loading}
         dataSource={widgets}
-        locale={{ emptyText: <Empty description="面板库为空，点击「新建面板」或在 Data Agent 中生成" /> }}
+        locale={{
+          emptyText: <Empty description="面板库为空，点击「新建面板」或在 Data Agent 中生成" />,
+        }}
         renderItem={(w) => (
           <List.Item
             actions={[

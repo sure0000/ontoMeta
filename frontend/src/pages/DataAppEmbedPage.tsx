@@ -3,11 +3,7 @@ import { useParams } from "react-router-dom";
 import { Card, Empty, Spin } from "antd";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
-import {
-  BarChartRender,
-  DataTableRender,
-  KpiRender,
-} from "../components/DataAppRenderer";
+import { BarChartRender, DataTableRender, KpiRender } from "../components/DataAppRenderer";
 import { DashboardGrid, getSpecPanels, getPanelRefId } from "../components/DashboardGrid";
 import { ScreenCanvas, panelToScreenWidget } from "../components/ScreenCanvas";
 import type { DataAppDetail, DataAppPreviewResult } from "../types";
@@ -18,10 +14,7 @@ export function DataAppEmbedPage() {
   const [previews, setPreviews] = useState<Record<string, DataAppPreviewResult>>({});
   const [widgetPreviews, setWidgetPreviews] = useState<Record<string, DataAppPreviewResult>>({});
 
-  const { data: app, loading } = useApi<DataAppDetail>(
-    async () => api.getDataApp(appId!),
-    [appId],
-  );
+  const { data: app, loading } = useApi<DataAppDetail>(async () => api.getDataApp(appId!), [appId]);
 
   useEffect(() => {
     if (!app || !appId) return;

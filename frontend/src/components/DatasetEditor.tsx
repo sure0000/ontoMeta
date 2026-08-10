@@ -120,10 +120,7 @@ export function DatasetEditor({
       .finally(() => setLoadingProps(false));
   }, [objectId]);
 
-  const propMap = useMemo(
-    () => new Map(properties.map((p) => [p.id, p])),
-    [properties],
-  );
+  const propMap = useMemo(() => new Map(properties.map((p) => [p.id, p])), [properties]);
   const propOptions = properties.map((p) => ({
     label: `${p.display_name}（${p.name}）`,
     value: p.id,
@@ -191,10 +188,7 @@ export function DatasetEditor({
           {loadingObjects ? (
             <Spin size="small" />
           ) : objects.length === 0 ? (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="该数据域暂无已发布对象"
-            />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该数据域暂无已发布对象" />
           ) : (
             <Select
               placeholder="选择业务对象"
@@ -234,9 +228,7 @@ export function DatasetEditor({
                   placeholder="字段"
                   value={m.propId || undefined}
                   onChange={(v) =>
-                    setMeasures((prev) =>
-                      prev.map((x, xi) => (xi === i ? { ...x, propId: v } : x)),
-                    )
+                    setMeasures((prev) => prev.map((x, xi) => (xi === i ? { ...x, propId: v } : x)))
                   }
                   options={propOptions}
                   optionFilterProp="label"
@@ -246,9 +238,7 @@ export function DatasetEditor({
                   style={{ width: 110 }}
                   value={m.agg}
                   onChange={(v) =>
-                    setMeasures((prev) =>
-                      prev.map((x, xi) => (xi === i ? { ...x, agg: v } : x)),
-                    )
+                    setMeasures((prev) => prev.map((x, xi) => (xi === i ? { ...x, agg: v } : x)))
                   }
                   options={AGG_OPTIONS}
                 />

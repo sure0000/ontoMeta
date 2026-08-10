@@ -179,11 +179,7 @@ export function MaterializationContractPanel({ ontologyId, targetKind, targetId 
                   ? `已物化${outcome.at ? `（${new Date(outcome.at).toLocaleString()}）` : ""}`
                   : `上次物化失败${outcome.error ? `：${outcome.error}` : ""}`
             }
-            description={
-              outcome
-                ? undefined
-                : "在本体页点右上角「物化」，选目标存储后执行落库。"
-            }
+            description={outcome ? undefined : "在本体页点右上角「物化」，选目标存储后执行落库。"}
           />
           <Descriptions column={2} size="small" bordered>
             <Descriptions.Item label={<>是否物化 {pinned("materialized")}</>}>

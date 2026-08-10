@@ -9,24 +9,11 @@ import {
 } from "@ant-design/icons";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
-import {
-  BarChartRender,
-  DataTableRender,
-  KpiRender,
-} from "../components/DataAppRenderer";
-import {
-  ParamBar,
-  buildRuntimeFilters,
-  type DrillFilter,
-} from "../components/ParamBar";
+import { BarChartRender, DataTableRender, KpiRender } from "../components/DataAppRenderer";
+import { ParamBar, buildRuntimeFilters, type DrillFilter } from "../components/ParamBar";
 import { DashboardGrid, getSpecPanels, getPanelRefId } from "../components/DashboardGrid";
 import { ScreenCanvas, panelToScreenWidget } from "../components/ScreenCanvas";
-import type {
-  DataAppDetail,
-  DataAppPreviewResult,
-  RuntimeFilter,
-  ScreenParam,
-} from "../types";
+import type { DataAppDetail, DataAppPreviewResult, RuntimeFilter, ScreenParam } from "../types";
 
 /** 顶部实时时钟 */
 function LiveClock() {
@@ -63,10 +50,7 @@ export function DataAppViewPage() {
   const [drills, setDrills] = useState<DrillFilter[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data: app, loading } = useApi<DataAppDetail>(
-    async () => api.getDataApp(appId!),
-    [appId],
-  );
+  const { data: app, loading } = useApi<DataAppDetail>(async () => api.getDataApp(appId!), [appId]);
 
   const params = (app?.spec?.params as ScreenParam[]) ?? [];
 
@@ -174,7 +158,12 @@ export function DataAppViewPage() {
             const next = [...drills.filter((d) => d.column !== col), { column: col, value: val }];
             setDrills(next);
             void api
-              .previewDataAppDataset(appId!, datasetId, 50, buildRuntimeFilters(params, paramValues, next))
+              .previewDataAppDataset(
+                appId!,
+                datasetId,
+                50,
+                buildRuntimeFilters(params, paramValues, next),
+              )
               .then((res) => setPreviews((prev) => ({ ...prev, [datasetId]: res })));
           }}
         />
@@ -298,10 +287,7 @@ export function DataAppViewPage() {
               previews={previewByIndex}
               selectedId={null}
               onDrill={(_w, column, value) => {
-                const next = [
-                  ...drills.filter((d) => d.column !== column),
-                  { column, value },
-                ];
+                const next = [...drills.filter((d) => d.column !== column), { column, value }];
                 setDrills(next);
                 void loadData(buildRuntimeFilters(params, paramValues, next));
               }}
@@ -320,10 +306,7 @@ export function DataAppViewPage() {
             previews={previewByIndex}
             widgetPreviews={widgetPreviews}
             onDrill={(_tile, column, value) => {
-              const next = [
-                ...drills.filter((d) => d.column !== column),
-                { column, value },
-              ];
+              const next = [...drills.filter((d) => d.column !== column), { column, value }];
               setDrills(next);
               // 交叉过滤广播：刷新全部面板
               void loadData(buildRuntimeFilters(params, paramValues, next));

@@ -62,10 +62,7 @@ interface RelationForm {
   target_object_type_id: string;
 }
 
-const STRUCTURE_TYPES_REQUIRING_MAPPING_TABLE = new Set([
-  "bridge_table",
-  "fact_table",
-]);
+const STRUCTURE_TYPES_REQUIRING_MAPPING_TABLE = new Set(["bridge_table", "fact_table"]);
 
 function ObjectTableCard({
   title,
@@ -78,11 +75,7 @@ function ObjectTableCard({
   datahubBase?: string;
   detailPath?: string;
 }) {
-  const url = resolveDataHubDatasetUrl(
-    objectRef?.source_ref,
-    objectRef?.datahub_url,
-    datahubBase,
-  );
+  const url = resolveDataHubDatasetUrl(objectRef?.source_ref, objectRef?.datahub_url, datahubBase);
 
   return (
     <div className="section-card" style={{ height: "100%" }}>
@@ -269,14 +262,10 @@ export function RelationTypeDetailPage() {
         setPeerObjects(peers.items);
         setDatahubBase(
           domainId
-            ? extractDataHubBase(
-                (domainOrConfig as { datahub_url?: string }).datahub_url,
-              )
-            : (
-                (domainOrConfig as { datahub_frontend_url?: string; datahub_gms_url: string })
-                  .datahub_frontend_url ??
-                (domainOrConfig as { datahub_gms_url: string }).datahub_gms_url
-              ),
+            ? extractDataHubBase((domainOrConfig as { datahub_url?: string }).datahub_url)
+            : ((domainOrConfig as { datahub_frontend_url?: string; datahub_gms_url: string })
+                .datahub_frontend_url ??
+                (domainOrConfig as { datahub_gms_url: string }).datahub_gms_url),
         );
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载失败");
@@ -304,9 +293,7 @@ export function RelationTypeDetailPage() {
           });
           setDatasetOptions(result);
         } catch (err) {
-          message.error(
-            err instanceof Error ? err.message : "搜索 DataHub 表失败",
-          );
+          message.error(err instanceof Error ? err.message : "搜索 DataHub 表失败");
         } finally {
           setDatasetSearching(false);
         }
@@ -357,13 +344,9 @@ export function RelationTypeDetailPage() {
             source_confidence: obj.source_confidence,
             updated_at: obj.updated_at,
           };
-          setPeerObjects((prev) =>
-            prev.some((p) => p.id === obj.id) ? prev : [...prev, newPeer],
-          );
+          setPeerObjects((prev) => (prev.some((p) => p.id === obj.id) ? prev : [...prev, newPeer]));
         } catch (err) {
-          message.error(
-            err instanceof Error ? err.message : "创建承载表对象失败",
-          );
+          message.error(err instanceof Error ? err.message : "创建承载表对象失败");
         } finally {
           setEnsuringDataset(false);
         }
@@ -458,11 +441,8 @@ export function RelationTypeDetailPage() {
   const sourceOptions = objectOptions.filter((o) => o.value !== watchedTarget);
   const targetOptions = objectOptions.filter((o) => o.value !== watchedSource);
   const mappingObjectRef = rel.mapping_object;
-  const evidenceType = inferRelationEvidenceType(
-    rel.source_evidence || rel.description,
-  );
-  const canPrePublish =
-    rel.status !== "pre_published" && rel.status !== "published";
+  const evidenceType = inferRelationEvidenceType(rel.source_evidence || rel.description);
+  const canPrePublish = rel.status !== "pre_published" && rel.status !== "published";
   const workspaceBackPath = domainId ? `/workspace/${domainId}` : "/workspace";
 
   return (
@@ -480,10 +460,7 @@ export function RelationTypeDetailPage() {
             <StatusBadge status={rel.status} />
             {rel.mapping_object_type_id && (
               <Tooltip title="把该业务关系物化到目标存储（建表落数，需 publisher 角色）">
-                <Button
-                  icon={<DatabaseOutlined />}
-                  onClick={() => setMaterializeOpen(true)}
-                >
+                <Button icon={<DatabaseOutlined />} onClick={() => setMaterializeOpen(true)}>
                   物化
                 </Button>
               </Tooltip>
@@ -507,13 +484,7 @@ export function RelationTypeDetailPage() {
       />
 
       {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          onClose={() => setError(null)}
-        />
+        <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />
       )}
 
       <Form form={form} layout="vertical">
@@ -540,10 +511,7 @@ export function RelationTypeDetailPage() {
                       name="description"
                       extra="补充该关系的业务背景与依据，可写完整句子"
                     >
-                      <Input.TextArea
-                        rows={4}
-                        placeholder="描述该关系的业务含义"
-                      />
+                      <Input.TextArea rows={4} placeholder="描述该关系的业务含义" />
                     </Form.Item>
                     <Form.Item label="关系类型标识">
                       <Input value={rel.name} disabled />
@@ -566,9 +534,7 @@ export function RelationTypeDetailPage() {
                       <Form.Item
                         label="承载表（DataHub 数据表）"
                         name="mapping_object_type_id"
-                        rules={[
-                          { required: true, message: "请搜索并选择承载该关系的表" },
-                        ]}
+                        rules={[{ required: true, message: "请搜索并选择承载该关系的表" }]}
                         extra={
                           watchedStructureType === "bridge_table"
                             ? "桥表自身作为多对多关系的承载表，从 DataHub 搜索对应的表"
@@ -603,19 +569,12 @@ export function RelationTypeDetailPage() {
                     </Descriptions>
                   </>
                 ) : (
-                  <Descriptions
-                    column={1}
-                    size="small"
-                    labelStyle={{ width: 110 }}
-                  >
+                  <Descriptions column={1} size="small" labelStyle={{ width: 110 }}>
                     <Descriptions.Item label="标识名">{rel.name}</Descriptions.Item>
                     <Descriptions.Item label="关系结构类型">
                       {getRelationStructureLabel(
                         rel.structure_type ||
-                          inferRelationStructureType(
-                            rel.description,
-                            rel.source_evidence,
-                          ),
+                          inferRelationStructureType(rel.description, rel.source_evidence),
                       )}
                     </Descriptions.Item>
                     {rel.mapping_object ? (
@@ -713,11 +672,7 @@ export function RelationTypeDetailPage() {
       </Form>
 
       {graph && (
-        <SectionCard
-          title="关系方向预览"
-          icon={<ArrowRightOutlined />}
-          bodyFlush
-        >
+        <SectionCard title="关系方向预览" icon={<ArrowRightOutlined />} bodyFlush>
           <OntologyGraphView
             graph={graph}
             height={340}

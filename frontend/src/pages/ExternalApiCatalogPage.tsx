@@ -1,9 +1,4 @@
-import {
-  ApiOutlined,
-  BookOutlined,
-  RightOutlined,
-  SearchOutlined,
-} from "@ant-design/icons";
+import { ApiOutlined, BookOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
 import { Alert, Input, Tag } from "antd";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -18,10 +13,7 @@ import type { ExternalApiCatalogItem } from "../types";
 
 export function ExternalApiCatalogPage() {
   const navigate = useNavigate();
-  const { data, loading, error, reload } = useApi(
-    () => api.listExternalApiCatalog(),
-    [],
-  );
+  const { data, loading, error, reload } = useApi(() => api.listExternalApiCatalog(), []);
   const [keyword, setKeyword] = useState("");
 
   const filtered = useMemo(() => {
@@ -82,11 +74,7 @@ export function ExternalApiCatalogPage() {
         />
       )}
 
-      <SectionCard
-        title="可用 MCP Tools"
-        count={filtered.length}
-        icon={<ApiOutlined />}
-      >
+      <SectionCard title="可用 MCP Tools" count={filtered.length} icon={<ApiOutlined />}>
         {filtered.length === 0 ? (
           <EmptyState
             title="未找到工具"

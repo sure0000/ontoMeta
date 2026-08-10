@@ -52,14 +52,12 @@ export function DataAppsPage() {
   const [creating, setCreating] = useState(false);
   const [form] = Form.useForm();
 
-  const { data: domains } = useApi<DomainContext[]>(
-    async () => api.listDomains(),
-    [],
-  );
-  const { data: apps, loading, reload } = useApi<DataAppSummary[]>(
-    async () => api.listDataApps(domainFilter),
-    [domainFilter],
-  );
+  const { data: domains } = useApi<DomainContext[]>(async () => api.listDomains(), []);
+  const {
+    data: apps,
+    loading,
+    reload,
+  } = useApi<DataAppSummary[]>(async () => api.listDataApps(domainFilter), [domainFilter]);
 
   const domainOptions = useMemo(
     () => (domains ?? []).map((d) => ({ label: d.name, value: d.id })),
@@ -105,7 +103,17 @@ export function DataAppsPage() {
       title: "类型",
       dataIndex: "app_type",
       render: (t: string) => (
-        <Tag icon={t === "screen" ? <FundProjectionScreenOutlined /> : t === "dashboard" ? <AppstoreOutlined /> : <TableOutlined />}>
+        <Tag
+          icon={
+            t === "screen" ? (
+              <FundProjectionScreenOutlined />
+            ) : t === "dashboard" ? (
+              <AppstoreOutlined />
+            ) : (
+              <TableOutlined />
+            )
+          }
+        >
           {TYPE_LABEL[t] ?? t}
         </Tag>
       ),
@@ -170,11 +178,7 @@ export function DataAppsPage() {
               value={domainFilter}
               onChange={setDomainFilter}
             />
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => setCreating(true)}
-            >
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
               新建看板
             </Button>
           </Space>

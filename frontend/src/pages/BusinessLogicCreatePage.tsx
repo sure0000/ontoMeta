@@ -56,9 +56,7 @@ export function BusinessLogicCreatePage() {
         <PageHeader
           icon={<FunctionOutlined />}
           title="新建业务逻辑"
-          extra={
-            <Button onClick={() => navigate("/business-logic")}>返回列表</Button>
-          }
+          extra={<Button onClick={() => navigate("/business-logic")}>返回列表</Button>}
         />
         <Alert
           type="info"
@@ -93,11 +91,7 @@ export function BusinessLogicCreatePage() {
     setPreviewing(true);
     setPreviewModalOpen(true);
     try {
-      const res = await formatDraft(
-        draft,
-        values.logic_type,
-        values.description,
-      );
+      const res = await formatDraft(draft, values.logic_type, values.description);
       setPreviewJson(res.expression_json);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "预览失败");
@@ -116,11 +110,7 @@ export function BusinessLogicCreatePage() {
     }
     setSubmitting(true);
     try {
-      const formatted = await formatDraft(
-        draft,
-        values.logic_type,
-        values.description,
-      );
+      const formatted = await formatDraft(draft, values.logic_type, values.description);
       const created = await api.createBusinessLogic({
         domain_id: domainId,
         name: values.name,
@@ -147,9 +137,7 @@ export function BusinessLogicCreatePage() {
         icon={<FunctionOutlined />}
         title="新建业务逻辑"
         description="用自然语言描述计算/规则,用 @ 引用已发布本体的对象与字段。保存时由 LLM 格式化为统一 JSON。"
-        extra={
-          <Button onClick={() => navigate("/business-logic")}>取消</Button>
-        }
+        extra={<Button onClick={() => navigate("/business-logic")}>取消</Button>}
       />
 
       {error && (
@@ -166,11 +154,7 @@ export function BusinessLogicCreatePage() {
       <Spin spinning={submitting}>
         <div className="section-card" style={{ marginTop: 16 }}>
           <div className="section-card-body">
-            <Form
-              form={form}
-              layout="vertical"
-              initialValues={{ logic_type: "metric" }}
-            >
+            <Form form={form} layout="vertical" initialValues={{ logic_type: "metric" }}>
               <Row gutter={[16, 8]}>
                 <Col xs={24} sm={8}>
                   <Form.Item

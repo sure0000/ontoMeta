@@ -22,7 +22,8 @@ const TASK_TYPES: TaskType[] = [
     title: "物化任务",
     icon: <ThunderboltOutlined style={{ fontSize: 32, color: "#1890ff" }} />,
     description: "把本体正向生成物理表结构和数据",
-    example: "适用场景：本体设计完成后，需要在数据仓库中创建实际的表。系统会自动生成 DDL 和数据同步作业。",
+    example:
+      "适用场景：本体设计完成后，需要在数据仓库中创建实际的表。系统会自动生成 DDL 和数据同步作业。",
   },
   {
     key: "sync",

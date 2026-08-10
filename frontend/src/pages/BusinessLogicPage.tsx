@@ -125,10 +125,7 @@ export function BusinessLogicPage() {
 
       <Spin spinning={loading}>
         {categories.length === 0 ? (
-          <Empty
-            description="暂无分类"
-            style={{ marginTop: 80 }}
-          >
+          <Empty description="暂无分类" style={{ marginTop: 80 }}>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
               创建第一个分类
             </Button>
@@ -158,9 +155,7 @@ export function BusinessLogicPage() {
                       }}
                       onCancel={(e) => e?.stopPropagation()}
                     >
-                      <DeleteOutlined
-                        onClick={(e) => e.stopPropagation()}
-                      />
+                      <DeleteOutlined onClick={(e) => e.stopPropagation()} />
                     </Popconfirm>,
                   ]}
                 >

@@ -8,10 +8,7 @@ import { PageHeader } from "../components/PageHeader";
 import { SectionCard } from "../components/SectionCard";
 import { TaskTypeSelector } from "../components/task-create/TaskTypeSelector";
 import { TaskDataRangeSelector } from "../components/task-create/TaskDataRangeSelector";
-import {
-  TaskConfigForm,
-  RANGE_STEP_KEYS,
-} from "../components/task-create/TaskConfigForm";
+import { TaskConfigForm, RANGE_STEP_KEYS } from "../components/task-create/TaskConfigForm";
 import { TaskPreview } from "../components/task-create/TaskPreview";
 import { requiredSpecKeys } from "../components/artifact-spec/specFields";
 import type { OntologySummary, DomainContext } from "../types";
@@ -113,16 +110,22 @@ export function TaskCreatePage() {
       });
   }, [id]);
 
-  const domainName = useCallback((domainContextId: string): string => {
-    const d = domains.find((x) => x.id === domainContextId);
-    return d?.name ?? domainContextId;
-  }, [domains]);
+  const domainName = useCallback(
+    (domainContextId: string): string => {
+      const d = domains.find((x) => x.id === domainContextId);
+      return d?.name ?? domainContextId;
+    },
+    [domains],
+  );
 
-  const ontologyName = useCallback((id: string): string => {
-    const o = ontologies.find((x) => x.id === id);
-    if (!o) return id;
-    return `${domainName(o.domain_context_id)} v${o.version}`;
-  }, [ontologies, domainName]);
+  const ontologyName = useCallback(
+    (id: string): string => {
+      const o = ontologies.find((x) => x.id === id);
+      if (!o) return id;
+      return `${domainName(o.domain_context_id)} v${o.version}`;
+    },
+    [ontologies, domainName],
+  );
 
   const handleNext = () => {
     // 步骤间校验。此前只拦了「没选本体」，实体与必填参数一路放行到提交，
@@ -210,9 +213,7 @@ export function TaskCreatePage() {
       }
       navigate("/tasks");
     } catch (err) {
-      message.error(
-        err instanceof Error ? err.message : isEdit ? "更新失败" : "创建失败",
-      );
+      message.error(err instanceof Error ? err.message : isEdit ? "更新失败" : "创建失败");
     } finally {
       setSubmitting(false);
     }
@@ -248,10 +249,7 @@ export function TaskCreatePage() {
             : "通过向导式流程，分步配置并创建数据作业任务。"
         }
         extra={
-          <Button
-            icon={<ArrowLeftOutlined />}
-            onClick={() => navigate("/tasks")}
-          >
+          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/tasks")}>
             返回任务列表
           </Button>
         }
@@ -263,11 +261,7 @@ export function TaskCreatePage() {
 
           <div style={{ minHeight: 400 }}>
             {currentStep === 0 && (
-              <TaskTypeSelector
-                value={kind}
-                onChange={setKind}
-                disabled={loading || isEdit}
-              />
+              <TaskTypeSelector value={kind} onChange={setKind} disabled={loading || isEdit} />
             )}
 
             {currentStep === 1 && (
@@ -313,20 +307,14 @@ export function TaskCreatePage() {
             </Button>
 
             <Space>
-              <Button onClick={() => navigate("/tasks")}>
-                取消
-              </Button>
+              <Button onClick={() => navigate("/tasks")}>取消</Button>
 
               {currentStep < 3 ? (
                 <Button type="primary" onClick={handleNext}>
                   下一步
                 </Button>
               ) : (
-                <Button
-                  type="primary"
-                  loading={submitting}
-                  onClick={() => void handleSubmit()}
-                >
+                <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
                   {isEdit ? "保存修改" : "创建任务"}
                 </Button>
               )}

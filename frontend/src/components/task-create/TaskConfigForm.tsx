@@ -51,9 +51,7 @@ export function TaskConfigForm({
         <Text type="secondary">根据任务类型配置必要的执行参数</Text>
       </div>
 
-      {KIND_HELP[kind] && (
-        <Alert message={KIND_HELP[kind]} type="info" showIcon closable />
-      )}
+      {KIND_HELP[kind] && <Alert message={KIND_HELP[kind]} type="info" showIcon closable />}
 
       <Form.Item
         label="任务名称"

@@ -20,10 +20,7 @@ export interface ChatBiMessagesProps {
     appType: "data_table" | "screen" | "dashboard",
     payload?: import("../../types").ChatBiAnswer,
   ) => void;
-  onAddToDashboard?: (
-    question: string,
-    payload?: import("../../types").ChatBiAnswer,
-  ) => void;
+  onAddToDashboard?: (question: string, payload?: import("../../types").ChatBiAnswer) => void;
 }
 
 export function ChatBiMessages({
@@ -50,12 +47,10 @@ export function ChatBiMessages({
           <div className="chatbi-welcome-icon">
             <RobotOutlined />
           </div>
-          <div className="chatbi-welcome-title">
-            Data Agent · {activeDomain.name}
-          </div>
+          <div className="chatbi-welcome-title">Data Agent · {activeDomain.name}</div>
           <div className="chatbi-welcome-desc">
-            面向数据工程师、业务、运营与管理者的统一数据入口。用自然语言问数，
-            获取口径解读与可执行 SQL，并可一键把结果沉淀为数据表格或可视化大屏。
+            面向数据工程师、业务、运营与管理者的统一数据入口。用自然语言问数， 获取口径解读与可执行
+            SQL，并可一键把结果沉淀为数据表格或可视化大屏。
           </div>
           <div className="chatbi-welcome-caps">
             <span className="chatbi-welcome-cap">自然语言问数</span>

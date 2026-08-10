@@ -20,11 +20,7 @@ export function PageHeader({
   return (
     <div className={`page-header${withBorder ? " page-header--with-border" : ""}`}>
       <div className="page-header-main">
-        {icon && (
-          <div className={`page-header-icon page-header-icon--${iconTone}`}>
-            {icon}
-          </div>
-        )}
+        {icon && <div className={`page-header-icon page-header-icon--${iconTone}`}>{icon}</div>}
         <div className="page-header-text">
           <div className="page-header-title">{title}</div>
           {description && <div className="page-header-description">{description}</div>}

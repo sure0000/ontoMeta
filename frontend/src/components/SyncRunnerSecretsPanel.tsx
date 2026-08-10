@@ -50,9 +50,7 @@ export function SyncRunnerSecretsPanel() {
         setItems(rows);
         setError(null);
       })
-      .catch((err: unknown) =>
-        setError(err instanceof Error ? err.message : "读取连接配置失败"),
-      )
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "读取连接配置失败"))
       .finally(() => setLoading(false));
   }, []);
 
@@ -111,9 +109,7 @@ export function SyncRunnerSecretsPanel() {
         message="连接配置存在 sync-runner 一侧，ontoMeta 不保存"
         description="这里填的值会直接转给 runner 落进它自己的存储：ontoMeta 不落库、不缓存，也读不回明文。这样凭据只有一个归属地，物化产出的 DAG 里始终只有别名。写入需要 runner 设了 token（在上方 Airflow 配置里填）。"
       />
-      {error && (
-        <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={error} />
-      )}
+      {error && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={error} />}
       <Space style={{ marginBottom: 12 }}>
         <Button icon={<PlusOutlined />} onClick={() => openEditor(null)}>
           新增连接
@@ -167,7 +163,10 @@ export function SyncRunnerSecretsPanel() {
                   <Button type="link" size="small" onClick={() => openEditor(row)}>
                     编辑
                   </Button>
-                  <Popconfirm title={`删除 ${row.alias}？`} onConfirm={() => void remove(row.alias)}>
+                  <Popconfirm
+                    title={`删除 ${row.alias}？`}
+                    onConfirm={() => void remove(row.alias)}
+                  >
                     <Button type="link" size="small" danger icon={<DeleteOutlined />} />
                   </Popconfirm>
                 </Space>
@@ -203,11 +202,7 @@ export function SyncRunnerSecretsPanel() {
             <Form.Item label="账号" name="user">
               <Input style={{ width: 200 }} autoComplete="off" />
             </Form.Item>
-            <Form.Item
-              label="密码"
-              name="password"
-              extra={editing ? "留空 = 保持不变" : undefined}
-            >
+            <Form.Item label="密码" name="password" extra={editing ? "留空 = 保持不变" : undefined}>
               <Input.Password style={{ width: 220 }} autoComplete="new-password" />
             </Form.Item>
           </Space>

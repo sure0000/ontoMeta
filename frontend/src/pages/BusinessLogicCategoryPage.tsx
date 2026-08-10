@@ -1,16 +1,11 @@
-import { EditOutlined, FunctionOutlined, PlusOutlined, ImportOutlined, SearchOutlined } from "@ant-design/icons";
 import {
-  Alert,
-  Button,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Spin,
-  Table,
-  message,
-} from "antd";
+  EditOutlined,
+  FunctionOutlined,
+  PlusOutlined,
+  ImportOutlined,
+  SearchOutlined,
+} from "@ant-design/icons";
+import { Alert, Button, Form, Input, Modal, Select, Space, Spin, Table, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -54,19 +49,17 @@ export function BusinessLogicCategoryPage() {
 
   const category = (categories ?? []).find((c) => c.id === categoryId);
 
-  const { data: domains } = useApi<DomainContext[]>(
-    async () => api.listDomains(),
-    [],
-  );
+  const { data: domains } = useApi<DomainContext[]>(async () => api.listDomains(), []);
 
-  const { data: logics, loading, error } = useApi<BusinessLogic[]>(
-    async () => {
-      if (!categoryId) return [];
-      const page = await api.listBusinessLogics({ categoryId });
-      return page.items;
-    },
-    [categoryId],
-  );
+  const {
+    data: logics,
+    loading,
+    error,
+  } = useApi<BusinessLogic[]>(async () => {
+    if (!categoryId) return [];
+    const page = await api.listBusinessLogics({ categoryId });
+    return page.items;
+  }, [categoryId]);
 
   const domainsWithPublished = (domains ?? []).filter((d) => d.published_count > 0);
 
@@ -197,10 +190,19 @@ export function BusinessLogicCategoryPage() {
               onChange={setStatusFilter}
               options={STATUS_FILTER_OPTIONS}
             />
-            <Button icon={<ImportOutlined />} onClick={openImport} disabled={domainsWithPublished.length === 0}>
+            <Button
+              icon={<ImportOutlined />}
+              onClick={openImport}
+              disabled={domainsWithPublished.length === 0}
+            >
               导入业务逻辑
             </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={domainsWithPublished.length === 0}>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={openCreate}
+              disabled={domainsWithPublished.length === 0}
+            >
               新建业务逻辑
             </Button>
           </Space>
@@ -224,20 +226,26 @@ export function BusinessLogicCategoryPage() {
             description="在此分类下添加业务逻辑。可选择「导入业务逻辑」从代码解析草稿，或「新建业务逻辑」手动创建。"
             action={
               <Space>
-                <Button icon={<ImportOutlined />} onClick={openImport} disabled={domainsWithPublished.length === 0}>
+                <Button
+                  icon={<ImportOutlined />}
+                  onClick={openImport}
+                  disabled={domainsWithPublished.length === 0}
+                >
                   导入业务逻辑
                 </Button>
-                <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={domainsWithPublished.length === 0}>
+                <Button
+                  type="primary"
+                  icon={<PlusOutlined />}
+                  onClick={openCreate}
+                  disabled={domainsWithPublished.length === 0}
+                >
                   新建业务逻辑
                 </Button>
               </Space>
             }
           />
         ) : filteredLogics.length === 0 ? (
-          <EmptyState
-            title="未匹配到业务逻辑"
-            description="尝试调整搜索关键词或状态筛选。"
-          />
+          <EmptyState title="未匹配到业务逻辑" description="尝试调整搜索关键词或状态筛选。" />
         ) : (
           <Table
             className="om-table"

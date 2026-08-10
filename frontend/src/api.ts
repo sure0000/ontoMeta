@@ -155,7 +155,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       };
       if (typeof parsed.detail === "string" && parsed.detail.trim()) {
         detail = parsed.detail;
-      } else if (parsed.detail && typeof parsed.detail === "object" && !Array.isArray(parsed.detail)) {
+      } else if (
+        parsed.detail &&
+        typeof parsed.detail === "object" &&
+        !Array.isArray(parsed.detail)
+      ) {
         const obj = parsed.detail as { message?: string };
         if (obj.message) detail = obj.message;
       } else if (Array.isArray(parsed.detail)) {
@@ -251,10 +255,9 @@ export const api = {
       { method: "POST" },
     ),
   createRevisionDraft: (domainId: string) =>
-    request<{ ontology_id: string; status: string }>(
-      `/api/domains/${domainId}/create-revision`,
-      { method: "POST" },
-    ),
+    request<{ ontology_id: string; status: string }>(`/api/domains/${domainId}/create-revision`, {
+      method: "POST",
+    }),
   setFieldPin: (body: {
     entity_type: string;
     entity_id: string;
@@ -335,13 +338,10 @@ export const api = {
     needs_review?: boolean;
     operator?: string;
   }) =>
-    request<{ updated: number; items: ObjectTypeSummary[] }>(
-      `/api/object-types/batch`,
-      {
-        method: "PATCH",
-        body: JSON.stringify(body),
-      },
-    ),
+    request<{ updated: number; items: ObjectTypeSummary[] }>(`/api/object-types/batch`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
 
   updateProperty: (
     propertyId: string,
@@ -357,19 +357,17 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  createRelationType: (
-    body: {
-      ontology_id: string;
-      display_name: string;
-      source_object_type_id: string;
-      target_object_type_id: string;
-      name?: string;
-      description?: string;
-      cardinality?: string;
-      structure_type?: string;
-      mapping_object_type_id?: string | null;
-    },
-  ) =>
+  createRelationType: (body: {
+    ontology_id: string;
+    display_name: string;
+    source_object_type_id: string;
+    target_object_type_id: string;
+    name?: string;
+    description?: string;
+    cardinality?: string;
+    structure_type?: string;
+    mapping_object_type_id?: string | null;
+  }) =>
     request<RelationType>("/api/relation-types", {
       method: "POST",
       body: JSON.stringify(body),
@@ -460,7 +458,13 @@ export const api = {
     request<FormalValidationResult>(`/api/ontologies/${ontologyId}/formal-validate`),
   getOntologyGraph: (
     id: string,
-    params?: { centerId?: string; depth?: number; full?: boolean; maxNodes?: number; publishedOnly?: boolean },
+    params?: {
+      centerId?: string;
+      depth?: number;
+      full?: boolean;
+      maxNodes?: number;
+      publishedOnly?: boolean;
+    },
   ) =>
     request<OntologyGraph>(
       `/api/ontologies/${id}/graph${buildQuery({
@@ -587,24 +591,23 @@ export const api = {
     logicId: string,
     body: { object_type_id: string; role?: string; operator?: string },
   ) =>
-    request<BusinessLogicObjectBinding>(
-      `/api/business-logics/${logicId}/object-bindings`,
-      { method: "POST", body: JSON.stringify({ ...body, business_logic_id: logicId }) },
-    ),
+    request<BusinessLogicObjectBinding>(`/api/business-logics/${logicId}/object-bindings`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, business_logic_id: logicId }),
+    }),
   unbindObjectFromLogic: (bindingId: string) =>
-    request<{ id: string; deleted: boolean }>(
-      `/api/business-logics/object-bindings/${bindingId}`,
-      { method: "DELETE" },
-    ),
+    request<{ id: string; deleted: boolean }>(`/api/business-logics/object-bindings/${bindingId}`, {
+      method: "DELETE",
+    }),
 
   bindPropertyToLogic: (
     logicId: string,
     body: { property_id: string; role?: string; operator?: string },
   ) =>
-    request<BusinessLogicPropertyBinding>(
-      `/api/business-logics/${logicId}/property-bindings`,
-      { method: "POST", body: JSON.stringify({ ...body, business_logic_id: logicId }) },
-    ),
+    request<BusinessLogicPropertyBinding>(`/api/business-logics/${logicId}/property-bindings`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, business_logic_id: logicId }),
+    }),
   unbindPropertyFromLogic: (bindingId: string) =>
     request<{ id: string; deleted: boolean }>(
       `/api/business-logics/property-bindings/${bindingId}`,
@@ -629,8 +632,7 @@ export const api = {
 
   listLlmServices: () => request<LlmServiceConfig[]>("/api/settings/llm-services"),
 
-  getLlmService: (id: string) =>
-    request<LlmServiceConfig>(`/api/settings/llm-services/${id}`),
+  getLlmService: (id: string) => request<LlmServiceConfig>(`/api/settings/llm-services/${id}`),
 
   createLlmService: (body: {
     name: string;
@@ -707,8 +709,7 @@ export const api = {
 
   getAirflowSettings: () => request<AirflowSettings>("/api/settings/airflow"),
   // 连接配置是**代填**：值发给 runner 就没了，ontoMeta 不落库、也读不回明文。
-  listSyncRunnerSecrets: () =>
-    request<SyncRunnerSecret[]>("/api/settings/sync-runner/secrets"),
+  listSyncRunnerSecrets: () => request<SyncRunnerSecret[]>("/api/settings/sync-runner/secrets"),
   putSyncRunnerSecret: (alias: string, values: Record<string, string>) =>
     request<{ alias: string; ok: boolean }>(
       `/api/settings/sync-runner/secrets/${encodeURIComponent(alias)}`,
@@ -766,12 +767,9 @@ export const api = {
     }),
 
   // ===== 依赖组件统一部署管理 =====
-  getDependencySchema: () =>
-    request<DependencySchema>("/api/settings/dependencies/schema"),
-  listDependencies: () =>
-    request<DependencyComponent[]>("/api/settings/dependencies"),
-  getDependency: (id: string) =>
-    request<DependencyComponent>(`/api/settings/dependencies/${id}`),
+  getDependencySchema: () => request<DependencySchema>("/api/settings/dependencies/schema"),
+  listDependencies: () => request<DependencyComponent[]>("/api/settings/dependencies"),
+  getDependency: (id: string) => request<DependencyComponent>(`/api/settings/dependencies/${id}`),
   createDependency: (body: {
     key: string;
     name?: string;
@@ -801,25 +799,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
   deleteDependency: (id: string) =>
-    request<{ id: string; deleted: boolean }>(
-      `/api/settings/dependencies/${id}`,
-      { method: "DELETE" },
-    ),
+    request<{ id: string; deleted: boolean }>(`/api/settings/dependencies/${id}`, {
+      method: "DELETE",
+    }),
   probeDependency: (id: string) =>
-    request<DependencyProbeResult>(
-      `/api/settings/dependencies/${id}/probe`,
-      { method: "POST" },
-    ),
+    request<DependencyProbeResult>(`/api/settings/dependencies/${id}/probe`, { method: "POST" }),
   deployDependency: (id: string) =>
-    request<DependencyDeployResult>(
-      `/api/settings/dependencies/${id}/deploy`,
-      { method: "POST" },
-    ),
+    request<DependencyDeployResult>(`/api/settings/dependencies/${id}/deploy`, { method: "POST" }),
   teardownDependency: (id: string) =>
-    request<{ status: string }>(
-      `/api/settings/dependencies/${id}/teardown`,
-      { method: "POST" },
-    ),
+    request<{ status: string }>(`/api/settings/dependencies/${id}/teardown`, { method: "POST" }),
 
   askChatBi: (body: {
     domain_id: string;
@@ -887,15 +875,9 @@ export const api = {
   },
 
   chatBiSuggestions: (domainId: string) =>
-    request<ChatBiSuggestions>(
-      `/api/chat-bi/suggestions${buildQuery({ domain_id: domainId })}`,
-    ),
+    request<ChatBiSuggestions>(`/api/chat-bi/suggestions${buildQuery({ domain_id: domainId })}`),
 
-  listChatBiConversations: (
-    domainId: string,
-    q?: string,
-    includeArchived?: boolean,
-  ) =>
+  listChatBiConversations: (domainId: string, q?: string, includeArchived?: boolean) =>
     request<ChatBiConversation[]>(
       `/api/chat-bi/conversations${buildQuery({ domain_id: domainId, q, include_archived: includeArchived ? "true" : undefined })}`,
     ),
@@ -925,10 +907,9 @@ export const api = {
     }),
 
   deleteChatBiConversation: (id: string) =>
-    request<{ id: string; deleted: boolean }>(
-      `/api/chat-bi/conversations/${id}`,
-      { method: "DELETE" },
-    ),
+    request<{ id: string; deleted: boolean }>(`/api/chat-bi/conversations/${id}`, {
+      method: "DELETE",
+    }),
 
   getChatBiMessages: (id: string) =>
     request<ChatBiMessageItem[]>(`/api/chat-bi/conversations/${id}/messages`),
@@ -951,15 +932,9 @@ export const api = {
     ),
 
   listChatBiCategories: (domainId: string) =>
-    request<ChatBiCategoryList>(
-      `/api/chat-bi/categories${buildQuery({ domain_id: domainId })}`,
-    ),
+    request<ChatBiCategoryList>(`/api/chat-bi/categories${buildQuery({ domain_id: domainId })}`),
 
-  renameChatBiCategory: (body: {
-    domain_id: string;
-    old_name: string;
-    new_name: string;
-  }) =>
+  renameChatBiCategory: (body: { domain_id: string; old_name: string; new_name: string }) =>
     request<{ success: boolean }>("/api/chat-bi/categories/rename", {
       method: "POST",
       body: JSON.stringify(body),
@@ -975,8 +950,7 @@ export const api = {
 
   listExternalApps: () => request<ExternalApp[]>("/api/external-apps"),
 
-  listExternalScopes: () =>
-    request<{ scopes: string[] }>("/api/external-apps/scopes"),
+  listExternalScopes: () => request<{ scopes: string[] }>("/api/external-apps/scopes"),
 
   createExternalApp: (body: {
     name: string;
@@ -989,8 +963,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  getExternalApp: (id: string) =>
-    request<ExternalApp>(`/api/external-apps/${id}`),
+  getExternalApp: (id: string) => request<ExternalApp>(`/api/external-apps/${id}`),
 
   updateExternalApp: (
     id: string,
@@ -1018,12 +991,9 @@ export const api = {
     }),
 
   listExternalAppCallLogs: (appId: string, limit = 50) =>
-    request<ExternalApiCallLog[]>(
-      `/api/external-apps/${appId}/call-logs?limit=${limit}`,
-    ),
+    request<ExternalApiCallLog[]>(`/api/external-apps/${appId}/call-logs?limit=${limit}`),
 
-  listExternalApiCatalog: () =>
-    request<ExternalApiCatalogItem[]>("/api/external-api/catalog"),
+  listExternalApiCatalog: () => request<ExternalApiCatalogItem[]>("/api/external-api/catalog"),
 
   getExternalApiCatalogItem: (apiId: string) =>
     request<ExternalApiCatalogItem>(`/api/external-api/catalog/${apiId}`),
@@ -1100,20 +1070,16 @@ export const api = {
       value?: unknown;
     }[],
   ) =>
-    request<DataAppPreviewResult>(
-      `/api/data-apps/${appId}/datasets/${datasetId}/preview`,
-      {
-        method: "POST",
-        body: JSON.stringify({ limit, runtime_filters: runtimeFilters ?? [] }),
-      },
-    ),
+    request<DataAppPreviewResult>(`/api/data-apps/${appId}/datasets/${datasetId}/preview`, {
+      method: "POST",
+      body: JSON.stringify({ limit, runtime_filters: runtimeFilters ?? [] }),
+    }),
   publishDataApp: (id: string, versionComment?: string) =>
     request<DataAppDetail>(`/api/data-apps/${id}/publish`, {
       method: "POST",
       body: JSON.stringify({ version_comment: versionComment }),
     }),
-  listDataAppVersions: (id: string) =>
-    request<DataAppVersion[]>(`/api/data-apps/${id}/versions`),
+  listDataAppVersions: (id: string) => request<DataAppVersion[]>(`/api/data-apps/${id}/versions`),
   generateDataAppFromChat: (body: {
     domain_id: string;
     app_type: string;
@@ -1142,7 +1108,12 @@ export const api = {
     }),
   updateDataSource: (
     id: string,
-    body: { name?: string; kind?: string; dsn_secret_ref?: string; mapping?: Record<string, unknown> },
+    body: {
+      name?: string;
+      kind?: string;
+      dsn_secret_ref?: string;
+      mapping?: Record<string, unknown>;
+    },
   ) =>
     request<DataSource>(`/api/data-sources/${id}`, {
       method: "PATCH",
@@ -1235,8 +1206,7 @@ export const api = {
     }),
 
   // 公开分享
-  getShareStatus: (appId: string) =>
-    request<PublicShareStatus>(`/api/data-apps/${appId}/share`),
+  getShareStatus: (appId: string) => request<PublicShareStatus>(`/api/data-apps/${appId}/share`),
   enableShare: (appId: string, body: { password?: string; expires_in_days?: number }) =>
     request<PublicShareStatus>(`/api/data-apps/${appId}/share`, {
       method: "POST",
@@ -1248,7 +1218,13 @@ export const api = {
     request<{
       app_id: string;
       name: string;
-      nodes: { kind: string; id: string; name: string; object_type_ids: string[]; property_ids: string[] }[];
+      nodes: {
+        kind: string;
+        id: string;
+        name: string;
+        object_type_ids: string[];
+        property_ids: string[];
+      }[];
       object_types: { id: string; name: string; display_name: string }[];
       properties: { id: string; name: string; display_name: string; object_type_id: string }[];
     }>(`/api/data-apps/${appId}/lineage`),
@@ -1266,8 +1242,7 @@ export const api = {
     ),
 
   /** 物化任务选择树：每域一个工作本体 + 其可物化实体（含自动表名），一次请求拿全。 */
-  listMaterializeTargets: () =>
-    request<MaterializeTargetsResult>(`/api/materialize/targets`),
+  listMaterializeTargets: () => request<MaterializeTargetsResult>(`/api/materialize/targets`),
 
   /** 按本体实体重新推导默认值；人工钉住的字段不会被覆盖。 */
   syncMaterializationContracts: (ontologyId: string) =>
@@ -1276,10 +1251,7 @@ export const api = {
       { method: "POST" },
     ),
 
-  updateMaterializationContract: (
-    contractId: string,
-    body: MaterializationContractUpdateInput,
-  ) =>
+  updateMaterializationContract: (contractId: string, body: MaterializationContractUpdateInput) =>
     request<MaterializationContract>(`/api/materialization-contracts/${contractId}`, {
       method: "PATCH",
       body: JSON.stringify(body),
@@ -1291,9 +1263,7 @@ export const api = {
     if (params?.ontologyId) q.set("ontology_id", params.ontologyId);
     if (params?.engine) q.set("engine", params.engine);
     const qs = q.toString();
-    return request<SyncToolPlan>(
-      `/api/warehouse/sync-tools${qs ? `?${qs}` : ""}`,
-    );
+    return request<SyncToolPlan>(`/api/warehouse/sync-tools${qs ? `?${qs}` : ""}`);
   },
   /** 本体一键物化：生成 DDL/ETL 并对目标数据源真正建表落数。需 publisher 角色。 */
   /** 编排物化的运行状态（Airflow DagRun）。仅 orchestrated 回执可查。 */
@@ -1309,20 +1279,17 @@ export const api = {
     ),
   /** M11：本次物化将上报的 源表→目标表 血缘（纯读）。 */
   getMaterializeLineagePlan: (artifactId: string) =>
-    request<LineageEmitResult>(
-      `/api/warehouse/materialize/${artifactId}/lineage-plan`,
-    ),
+    request<LineageEmitResult>(`/api/warehouse/materialize/${artifactId}/lineage-plan`),
   /** M11：兜底上报表级血缘到 DataHub（插件缺位时用，重复幂等）。 */
   emitMaterializeLineage: (artifactId: string) =>
-    request<LineageEmitResult>(
-      `/api/warehouse/materialize/${artifactId}/lineage`,
-      { method: "POST" },
-    ),
+    request<LineageEmitResult>(`/api/warehouse/materialize/${artifactId}/lineage`, {
+      method: "POST",
+    }),
   materializeOntology: (ontologyId: string, body: MaterializeRequestInput) =>
-    request<MaterializationRun>(
-      `/api/ontologies/${ontologyId}/warehouse/materialize`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
+    request<MaterializationRun>(`/api/ontologies/${ontologyId}/warehouse/materialize`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /** M13：物化提交前自检。只读，不落产物、不触发运行，可随便重跑。 */
   materializePreflight: (
@@ -1340,9 +1307,7 @@ export const api = {
 
   /** 本体的历次物化执行记录（含回执），最新在前。 */
   listMaterializationRuns: (ontologyId: string) =>
-    request<MaterializationRun[]>(
-      `/api/ontologies/${ontologyId}/warehouse/materialization-runs`,
-    ),
+    request<MaterializationRun[]>(`/api/ontologies/${ontologyId}/warehouse/materialization-runs`),
 
   // ---- RBAC 主体与角色（M0）----
   listPrincipals: () => request<Principal[]>("/api/principals"),
@@ -1352,10 +1317,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  updatePrincipal: (
-    id: string,
-    body: { name?: string; role?: PrincipalRole; active?: boolean },
-  ) =>
+  updatePrincipal: (id: string, body: { name?: string; role?: PrincipalRole; active?: boolean }) =>
     request<Principal>(`/api/principals/${id}`, {
       method: "PATCH",
       body: JSON.stringify(body),
@@ -1369,8 +1331,7 @@ export const api = {
   listAgentKinds: () => request<AgentKinds>("/api/agents/kinds"),
   listArtifacts: (params?: { kind?: string; status?: string; ontology_id?: string }) =>
     request<GovernanceArtifact[]>(`/api/agents/artifacts${buildQuery(params ?? {})}`),
-  getArtifact: (id: string) =>
-    request<GovernanceArtifact>(`/api/agents/artifacts/${id}`),
+  getArtifact: (id: string) => request<GovernanceArtifact>(`/api/agents/artifacts/${id}`),
 
   // 结构化 Spec 表单的字段下拉数据源
   listWarehouseEngines: () =>
@@ -1473,9 +1434,7 @@ export const api = {
     }),
   getPipeline: (id: string) => request<TaskPipeline>(`/api/agents/pipelines/${id}`),
   listPipelines: (ontologyId?: string) =>
-    request<TaskPipeline[]>(
-      `/api/agents/pipelines${buildQuery({ ontology_id: ontologyId })}`,
-    ),
+    request<TaskPipeline[]>(`/api/agents/pipelines${buildQuery({ ontology_id: ontologyId })}`),
   /** 起草链上的下一步。上游还没跑成功时后端 409，错误里说清卡在哪一步。 */
   advancePipeline: (id: string) =>
     request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance`, {

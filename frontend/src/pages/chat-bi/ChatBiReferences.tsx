@@ -12,7 +12,13 @@ import {
   Tag,
   message,
 } from "antd";
-import { AppstoreAddOutlined, AppstoreOutlined, DashboardOutlined, RobotOutlined, SafetyOutlined } from "@ant-design/icons";
+import {
+  AppstoreAddOutlined,
+  AppstoreOutlined,
+  DashboardOutlined,
+  RobotOutlined,
+  SafetyOutlined,
+} from "@ant-design/icons";
 import cronstrue from "cronstrue/i18n";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -119,7 +125,10 @@ function Line({ raw }: { raw: string }) {
   const orderedMatch = raw.match(/^\s*(\d+)\.\s+(.*)$/);
   if (orderedMatch) {
     return (
-      <div className="chatbi-md-listitem chatbi-md-listitem--ordered" style={{ marginLeft: indentPx }}>
+      <div
+        className="chatbi-md-listitem chatbi-md-listitem--ordered"
+        style={{ marginLeft: indentPx }}
+      >
         <span className="chatbi-md-num">{orderedMatch[1]}</span>
         <span>
           <InlineRender text={orderedMatch[2]} />
@@ -197,27 +206,37 @@ function highlightSql(sql: string) {
       {tokenizeSqlLine(line).map((tok, ti) => {
         if (tok.kind === "comment") {
           return (
-            <span key={ti} className="chatbi-sql-comment">{tok.text}</span>
+            <span key={ti} className="chatbi-sql-comment">
+              {tok.text}
+            </span>
           );
         }
         if (tok.kind === "string") {
           return (
-            <span key={ti} className="chatbi-sql-string">{tok.text}</span>
+            <span key={ti} className="chatbi-sql-string">
+              {tok.text}
+            </span>
           );
         }
         if (tok.kind === "number") {
           return (
-            <span key={ti} className="chatbi-sql-number">{tok.text}</span>
+            <span key={ti} className="chatbi-sql-number">
+              {tok.text}
+            </span>
           );
         }
         if (tok.kind === "punct") {
           return (
-            <span key={ti} className="chatbi-sql-punct">{tok.text}</span>
+            <span key={ti} className="chatbi-sql-punct">
+              {tok.text}
+            </span>
           );
         }
         if (tok.kind === "keyword") {
           return (
-            <span key={ti} className="chatbi-sql-keyword">{tok.text}</span>
+            <span key={ti} className="chatbi-sql-keyword">
+              {tok.text}
+            </span>
           );
         }
         return <span key={ti}>{tok.text}</span>;
@@ -295,11 +314,7 @@ export function ChatBubble({
     !blocks.some((b) => NON_ANALYTIC_BLOCKS.has(b.type)) &&
     Boolean(onGenerateApp && question);
   return (
-    <div
-      className={`chatbi-bubble chatbi-bubble--${
-        isUser ? "user" : "assistant"
-      }`}
-    >
+    <div className={`chatbi-bubble chatbi-bubble--${isUser ? "user" : "assistant"}`}>
       {!isUser && (
         <div className="chatbi-bubble-avatar" aria-hidden>
           <RobotOutlined />
@@ -313,7 +328,9 @@ export function ChatBubble({
               <span />
               <span />
             </div>
-            <span style={{ color: "var(--om-text-tertiary)", fontSize: 13 }}>正在结合本体知识思考…</span>
+            <span style={{ color: "var(--om-text-tertiary)", fontSize: 13 }}>
+              正在结合本体知识思考…
+            </span>
           </div>
         ) : isUser ? (
           <div className="chatbi-answer-wrap">
@@ -397,7 +414,9 @@ function BlockRenderer({
     case "markdown":
       return <MarkdownBlock content={block.content} streaming={streaming} />;
     case "mapping":
-      return <MappingBlock variant={block.variant} items={block.items} references={block.references} />;
+      return (
+        <MappingBlock variant={block.variant} items={block.items} references={block.references} />
+      );
     case "sql":
       return <SqlBlock sql={block.sql} />;
     case "table":
@@ -432,9 +451,7 @@ function BlockRenderer({
     case "action_proposal":
       return <ActionProposalBlock proposal={block.proposal} conversationId={conversationId} />;
     case "pipeline_proposal":
-      return (
-        <PipelineProposalBlock proposal={block.proposal} conversationId={conversationId} />
-      );
+      return <PipelineProposalBlock proposal={block.proposal} conversationId={conversationId} />;
     case "preference_proposal":
       return <PreferenceProposalBlock proposal={block.proposal} />;
     case "task_status":
@@ -472,7 +489,9 @@ function RefusedNotice() {
       <SafetyOutlined className="chatbi-notice-icon" />
       <div className="chatbi-notice-body">
         <span className="chatbi-notice-title">为避免不准确信息，已谨慎拒答</span>
-        <span className="chatbi-notice-desc">回答仅基于已发布本体可证实的内容；无法由本体证明的结论未作答。</span>
+        <span className="chatbi-notice-desc">
+          回答仅基于已发布本体可证实的内容；无法由本体证明的结论未作答。
+        </span>
       </div>
     </div>
   );
@@ -481,7 +500,9 @@ function RefusedNotice() {
 function MockNotice() {
   return (
     <div className="chatbi-mock-hint">
-      <Tag color="warning" style={{ borderRadius: 6 }}>Mock 模式</Tag>
+      <Tag color="warning" style={{ borderRadius: 6 }}>
+        Mock 模式
+      </Tag>
       <span>未接入真实 LLM，已使用规则匹配回答。</span>
     </div>
   );
@@ -501,9 +522,7 @@ function ClarifyBlock({
   return (
     <div className="chatbi-clarify">
       <div className="chatbi-clarify-q">{clarification.question}</div>
-      {clarification.reason && (
-        <div className="chatbi-clarify-why">{clarification.reason}</div>
-      )}
+      {clarification.reason && <div className="chatbi-clarify-why">{clarification.reason}</div>}
       <div className="chatbi-clarify-options">
         {clarification.options.map((opt) => (
           <button
@@ -589,7 +608,13 @@ function FormControl({ field, ...rest }: { field: ChatBiFormField } & Record<str
   const options = field.options ?? [];
   switch (field.type) {
     case "textarea":
-      return <Input.TextArea {...rest} placeholder={field.placeholder} autoSize={{ minRows: 2, maxRows: 6 }} />;
+      return (
+        <Input.TextArea
+          {...rest}
+          placeholder={field.placeholder}
+          autoSize={{ minRows: 2, maxRows: 6 }}
+        />
+      );
     case "number":
       return <InputNumber {...rest} placeholder={field.placeholder} style={{ width: "100%" }} />;
     case "select":
@@ -630,7 +655,9 @@ function FormControl({ field, ...rest }: { field: ChatBiFormField } & Record<str
           options={options}
           placeholder={field.placeholder}
           filterOption={(input, option) =>
-            String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())
+            String(option?.label ?? "")
+              .toLowerCase()
+              .includes(input.toLowerCase())
           }
         />
       );
@@ -728,13 +755,7 @@ function FormBlock({
   );
 }
 
-function RefsRow({
-  objects,
-  logics,
-}: {
-  objects: ChatBiReference[];
-  logics: ChatBiReference[];
-}) {
+function RefsRow({ objects, logics }: { objects: ChatBiReference[]; logics: ChatBiReference[] }) {
   return (
     <div className="chatbi-refs">
       {objects.map((r, i) => (
@@ -779,7 +800,9 @@ function DraftProposalBlock({
   return (
     <div className="chatbi-draft">
       <div className="chatbi-draft-head">
-        <Tag color="gold" bordered={false}>建数提案</Tag>
+        <Tag color="gold" bordered={false}>
+          建数提案
+        </Tag>
         <span>新建{typeLabel}</span>
       </div>
       <div className="chatbi-draft-name">{proposal.display_name}</div>
@@ -844,7 +867,9 @@ function PreferenceProposalBlock({
   return (
     <div className="chatbi-draft">
       <div className="chatbi-draft-head">
-        <Tag color="cyan" bordered={false}>记忆提案</Tag>
+        <Tag color="cyan" bordered={false}>
+          记忆提案
+        </Tag>
         <span>记住本域约定</span>
       </div>
       <div className="chatbi-draft-name">{proposal.text}</div>
@@ -881,7 +906,9 @@ function InsightBlock({
   return (
     <div className="chatbi-insight">
       <div className="chatbi-insight-head">
-        <Tag color="volcano" bordered={false}>结果分析</Tag>
+        <Tag color="volcano" bordered={false}>
+          结果分析
+        </Tag>
         <span className="chatbi-insight-meta">
           {metaBits.join(" · ")}
           {analysis.ordered_by && ` · 按 ${analysis.ordered_by} 排序`}
@@ -894,7 +921,8 @@ function InsightBlock({
             {c.trend && (
               <span className={`chatbi-insight-trend chatbi-insight-trend--${c.trend.direction}`}>
                 {TREND_ICON[c.trend.direction] ?? ""}
-                {c.trend.change_pct != null && ` ${c.trend.change_pct > 0 ? "+" : ""}${c.trend.change_pct}%`}
+                {c.trend.change_pct != null &&
+                  ` ${c.trend.change_pct > 0 ? "+" : ""}${c.trend.change_pct}%`}
               </span>
             )}
           </div>
@@ -947,7 +975,9 @@ function PlanBlock({
   return (
     <div className="chatbi-plan">
       <div className="chatbi-plan-head">
-        <Tag color="purple" bordered={false}>分析计划</Tag>
+        <Tag color="purple" bordered={false}>
+          分析计划
+        </Tag>
         <span className="chatbi-plan-progress">
           {done}/{steps.length}
         </span>
@@ -973,10 +1003,7 @@ function useArtifactDrawer(onClose?: () => void) {
   const [detail, setDetail] = useState<GovernanceArtifact | null>(null);
   const [busy, setBusy] = useState(false);
   const STEP_LABEL: Record<string, string> = { validate: "校验", confirm: "确认", execute: "执行" };
-  const onStep = async (
-    step: "validate" | "confirm" | "execute",
-    artifact: GovernanceArtifact,
-  ) => {
+  const onStep = async (step: "validate" | "confirm" | "execute", artifact: GovernanceArtifact) => {
     setBusy(true);
     try {
       const next =
@@ -1154,10 +1181,7 @@ function ProposalContextForm({
   const schemaKeys = new Set((SPEC_FIELDS[kind] ?? []).map((f) => f.key));
   const extraKeys = Object.keys(context).filter(
     (k) =>
-      !schemaKeys.has(k) &&
-      k !== "ontology_id" &&
-      context[k] !== null &&
-      context[k] !== undefined,
+      !schemaKeys.has(k) && k !== "ontology_id" && context[k] !== null && context[k] !== undefined,
   );
 
   return (
@@ -1217,9 +1241,9 @@ function ActionProposalBlock({
   conversationId?: string;
 }) {
   const [drafting, setDrafting] = useState(false);
-  const [context, setContext] = useState<Record<string, unknown>>(
-    () => ({ ...(proposal.context ?? {}) }),
-  );
+  const [context, setContext] = useState<Record<string, unknown>>(() => ({
+    ...(proposal.context ?? {}),
+  }));
   const { open, node } = useArtifactDrawer();
   const kindLabel = ACTION_KIND_LABEL[proposal.kind] ?? proposal.kind;
   const onConfirm = async () => {
@@ -1253,7 +1277,9 @@ function ActionProposalBlock({
   return (
     <div className="chatbi-draft">
       <div className="chatbi-draft-head">
-        <Tag color="geekblue" bordered={false}>数据任务提案</Tag>
+        <Tag color="geekblue" bordered={false}>
+          数据任务提案
+        </Tag>
         <span>新建{kindLabel}任务</span>
       </div>
       <div className="chatbi-draft-name">{proposal.intent}</div>
@@ -1264,7 +1290,8 @@ function ActionProposalBlock({
         onChange={(key, value) => setContext((prev) => ({ ...prev, [key]: value }))}
       />
       <div className="chatbi-draft-note">
-        点击后创建治理制品，并在弹窗里过「校验 → dry-run 差异 → 人工确认 → 执行」；不会自动执行，也不直接改动数据。
+        点击后创建治理制品，并在弹窗里过「校验 → dry-run 差异 → 人工确认 →
+        执行」；不会自动执行，也不直接改动数据。
       </div>
       <Space>
         <Button type="primary" size="small" loading={drafting} onClick={() => void onConfirm()}>
@@ -1393,10 +1420,14 @@ function PipelineProposalBlock({
   return (
     <div className="chatbi-draft chatbi-pipeline">
       <div className="chatbi-draft-head">
-        <Tag color="geekblue" bordered={false}>任务链提案</Tag>
+        <Tag color="geekblue" bordered={false}>
+          任务链提案
+        </Tag>
         <span>{proposal.name}</span>
         {overall && (
-          <Tag color={overall.color} bordered={false}>{overall.label}</Tag>
+          <Tag color={overall.color} bordered={false}>
+            {overall.label}
+          </Tag>
         )}
       </div>
       {proposal.intent && <div className="chatbi-draft-name">{proposal.intent}</div>}
@@ -1405,10 +1436,10 @@ function PipelineProposalBlock({
         {proposal.steps.map((step, i) => {
           const live = steps?.[i];
           const status = live?.artifact_status
-            ? STEP_STATUS_LABEL[live.artifact_status] ?? {
+            ? (STEP_STATUS_LABEL[live.artifact_status] ?? {
                 label: live.artifact_status,
                 color: "default",
-              }
+              })
             : null;
           const isNext = pipeline?.next_step_index === i;
           return (
@@ -1428,9 +1459,7 @@ function PipelineProposalBlock({
                   context={drafts[i] ?? {}}
                   ontologyId={proposal.ontology_id}
                   onChange={(key, value) =>
-                    setDrafts((prev) =>
-                      prev.map((c, j) => (j === i ? { ...c, [key]: value } : c)),
-                    )
+                    setDrafts((prev) => prev.map((c, j) => (j === i ? { ...c, [key]: value } : c)))
                   }
                 />
               )}
@@ -1467,7 +1496,10 @@ function PipelineProposalBlock({
 
       {/* P2-4：周期任务控件——链走通（status=succeeded）后显示 */}
       {pipeline && pipeline.status === "succeeded" && (
-        <div className="chatbi-pipeline-schedule" style={{ marginTop: 16, padding: "12px 16px", background: "#f5f5f5", borderRadius: 4 }}>
+        <div
+          className="chatbi-pipeline-schedule"
+          style={{ marginTop: 16, padding: "12px 16px", background: "#f5f5f5", borderRadius: 4 }}
+        >
           {!pipeline.compiled_dag_id ? (
             <>
               <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 500 }}>挂成周期任务</div>
@@ -1520,7 +1552,10 @@ function PipelineProposalBlock({
                 DAG ID: <code>{pipeline.compiled_dag_id}</code>
               </div>
               <div style={{ color: "#666", marginBottom: 12, fontSize: 12 }}>
-                调度周期: {pipeline.schedule_cron ? cronstrue.toString(pipeline.schedule_cron, { locale: "zh_CN" }) : "无"}
+                调度周期:{" "}
+                {pipeline.schedule_cron
+                  ? cronstrue.toString(pipeline.schedule_cron, { locale: "zh_CN" })
+                  : "无"}
               </div>
               <Space>
                 <Button
@@ -1600,9 +1635,7 @@ function TaskStatusBlock({
           <span className="chatbi-task-name">
             {ACTION_KIND_LABEL[t.kind] ?? t.kind} · {t.name}
           </span>
-          {t.receipt_summary && (
-            <span className="chatbi-task-receipt">{t.receipt_summary}</span>
-          )}
+          {t.receipt_summary && <span className="chatbi-task-receipt">{t.receipt_summary}</span>}
           <Button
             type="link"
             size="small"
@@ -1702,10 +1735,22 @@ function ChatBiChart({
               return (
                 <g key={i}>
                   <rect x={bx} y={by} width={barW} height={h} rx={4} fill="var(--om-primary)" />
-                  <text x={bx + barW / 2} y={by - 4} textAnchor="middle" fontSize={11} fill="var(--om-text-secondary)">
+                  <text
+                    x={bx + barW / 2}
+                    y={by - 4}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fill="var(--om-text-secondary)"
+                  >
                     {p.value}
                   </text>
-                  <text x={bx + barW / 2} y={H + padT + 18} textAnchor="middle" fontSize={11} fill="var(--om-text-tertiary)">
+                  <text
+                    x={bx + barW / 2}
+                    y={H + padT + 18}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fill="var(--om-text-tertiary)"
+                  >
                     {truncLabel(p.label)}
                   </text>
                 </g>
@@ -1720,7 +1765,13 @@ function ChatBiChart({
               {points.map((p, i) => (
                 <g key={i}>
                   <circle cx={px(i)} cy={py(p.value)} r={3} fill="var(--om-primary)" />
-                  <text x={px(i)} y={H + padT + 18} textAnchor="middle" fontSize={11} fill="var(--om-text-tertiary)">
+                  <text
+                    x={px(i)}
+                    y={H + padT + 18}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fill="var(--om-text-tertiary)"
+                  >
                     {truncLabel(p.label)}
                   </text>
                 </g>
@@ -1846,7 +1897,14 @@ function ChatBiLineage({
             if (!a || !b) return null;
             return (
               <g key={e.id}>
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={edgeColor(e.structure_type)} strokeWidth={1.5} />
+                <line
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke={edgeColor(e.structure_type)}
+                  strokeWidth={1.5}
+                />
                 <title>
                   {e.label}（{LINEAGE_EDGE_LABEL[e.structure_type ?? "other"] ?? "关系"}）
                 </title>
@@ -1890,7 +1948,9 @@ function stepAction(step: ChatBiAgentStep): { icon: string; text: string } {
   const meta = STEP_TOOL_META[step.tool] ?? { icon: "•", verb: step.tool };
   const args = step.arguments as Record<string, unknown> | undefined;
   if (step.tool === "run_sql") {
-    const sql = String(args?.sql ?? "").replace(/\s+/g, " ").trim();
+    const sql = String(args?.sql ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
     return {
       icon: meta.icon,
       text: sql ? `${meta.verb}：${sql.slice(0, 48)}${sql.length > 48 ? "…" : ""}` : meta.verb,
@@ -1904,9 +1964,7 @@ function stepAction(step: ChatBiAgentStep): { icon: string; text: string } {
 function StepTrace({ steps }: { steps: ChatBiAgentStep[] }) {
   const running = steps.some((s) => s.status === "running");
   const hasFailed = steps.some((s) => s.status === "failed");
-  const toolCount = steps.filter(
-    (s) => s.kind !== "thought" && s.kind !== "repair",
-  ).length;
+  const toolCount = steps.filter((s) => s.kind !== "thought" && s.kind !== "repair").length;
   // 进行中/失败自动展开，其余默认折叠；用户手动点击后固定
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen ?? (running || hasFailed);
@@ -1915,11 +1973,7 @@ function StepTrace({ steps }: { steps: ChatBiAgentStep[] }) {
     : `已执行 ${toolCount} 步工具编排${hasFailed ? " · 含失败" : ""}`;
   return (
     <div className="chatbi-steps">
-      <button
-        type="button"
-        className="chatbi-steps-toggle"
-        onClick={() => setManualOpen(!open)}
-      >
+      <button type="button" className="chatbi-steps-toggle" onClick={() => setManualOpen(!open)}>
         <span className={`chatbi-steps-caret${open ? " open" : ""}`}>▸</span>
         {running && <span className="chatbi-steps-spin" />}
         {headText}
@@ -2037,9 +2091,7 @@ function CaliberDecomposition({
             <div className="chatbi-caliber-item-body">
               <div className="chatbi-caliber-item-label">{item.label}</div>
               {item.description && (
-                <div className="chatbi-caliber-item-desc">
-                  {item.description}
-                </div>
+                <div className="chatbi-caliber-item-desc">{item.description}</div>
               )}
             </div>
           </div>
@@ -2115,11 +2167,7 @@ function SqlBlock({ sql }: { sql: string }) {
     <div className="chatbi-sql">
       <div className="chatbi-sql-head">
         <span className="chatbi-sql-head-label">SUGGESTED SQL</span>
-        <button
-          className="chatbi-sql-copy"
-          onClick={() => void handleCopy()}
-          type="button"
-        >
+        <button className="chatbi-sql-copy" onClick={() => void handleCopy()} type="button">
           {copied ? "已复制" : "复制"}
         </button>
       </div>

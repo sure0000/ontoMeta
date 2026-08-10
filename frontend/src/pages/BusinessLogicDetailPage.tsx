@@ -7,7 +7,6 @@ import {
   LinkOutlined,
   SaveOutlined,
   SendOutlined,
-
 } from "@ant-design/icons";
 import {
   Alert,
@@ -37,12 +36,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
 import { StatusBadge } from "../components/StatusBadge";
-import type {
-  BusinessLogicDetail,
-  ExpressionDraft,
-  ExpressionJson,
-} from "../types";
-
+import type { BusinessLogicDetail, ExpressionDraft, ExpressionJson } from "../types";
 
 const OBJECT_ROLE_LABEL: Record<string, string> = {
   subject: "主对象",
@@ -230,16 +224,19 @@ export function BusinessLogicDetailPage() {
   // 合并所有关联对象 (来自 object_bindings / property_bindings / related_object_types)
   const mergedObjects = useMemo(() => {
     if (!logic) return [];
-    const map = new Map<string, {
-      id: string;
-      display_name: string;
-      name: string;
-      description?: string;
-      status: string;
-      roles: Set<string>;
-      sources: Set<string>;
-      propertyCount: number;
-    }>();
+    const map = new Map<
+      string,
+      {
+        id: string;
+        display_name: string;
+        name: string;
+        description?: string;
+        status: string;
+        roles: Set<string>;
+        sources: Set<string>;
+        propertyCount: number;
+      }
+    >();
 
     const addRole = (id: string, role: string) => {
       const entry = map.get(id);
@@ -318,120 +315,48 @@ export function BusinessLogicDetailPage() {
   return (
     <PageContainer full>
       <div className="om-stack">
-      <PageHeader
-        icon={<FunctionOutlined />}
-        title={logic.display_name}
-        description={logic.description || "暂无描述"}
-        extra={
-          <Space wrap>
-            <StatusBadge status={logic.status} />
-            <Button
-              icon={<SendOutlined />}
-              loading={prePublishing}
-              onClick={handlePrePublish}
-            >
-              预发布
-            </Button>
-            <Button type="primary" icon={<SendOutlined />} loading={publishing} onClick={handlePublish}>
-              发布
-            </Button>
-            <Popconfirm
-              title="确认删除该业务逻辑?此操作需要二次确认。"
-              onConfirm={handleDelete}
-              disabled={deleting}
-            >
-              <Button danger icon={<DeleteOutlined />} loading={deleting}>
-                删除
+        <PageHeader
+          icon={<FunctionOutlined />}
+          title={logic.display_name}
+          description={logic.description || "暂无描述"}
+          extra={
+            <Space wrap>
+              <StatusBadge status={logic.status} />
+              <Button icon={<SendOutlined />} loading={prePublishing} onClick={handlePrePublish}>
+                预发布
               </Button>
-            </Popconfirm>
-          </Space>
-        }
-      />
-
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          onClose={() => setError(null)}
+              <Button
+                type="primary"
+                icon={<SendOutlined />}
+                loading={publishing}
+                onClick={handlePublish}
+              >
+                发布
+              </Button>
+              <Popconfirm
+                title="确认删除该业务逻辑?此操作需要二次确认。"
+                onConfirm={handleDelete}
+                disabled={deleting}
+              >
+                <Button danger icon={<DeleteOutlined />} loading={deleting}>
+                  删除
+                </Button>
+              </Popconfirm>
+            </Space>
+          }
         />
-      )}
 
-      <Row gutter={[20, 20]}>
-        <Col xs={24} lg={12}>
-          <SectionCard
-            title="逻辑定义"
-            icon={<FunctionOutlined />}
-            extra={
-              editable ? (
-                <Button
-                  type="primary"
-                  size="small"
-                  icon={<SaveOutlined />}
-                  loading={saving}
-                  onClick={handleSaveBasic}
-                >
-                  保存
-                </Button>
-              ) : (
-                <Button
-                  size="small"
-                  icon={<EditOutlined />}
-                  onClick={() => navigate(`/business-logic/${logicId}?edit=true`, { replace: true })}
-                >
-                  编辑
-                </Button>
-              )
-            }
-          >
-            {editable ? (
-              <Form form={basicForm} layout="vertical">
-                <Form.Item label="显示名" name="display_name" rules={[{ required: true }]}>
-                  <Input />
-                </Form.Item>
-                <Form.Item label="逻辑类型" name="logic_type" rules={[{ required: true }]}>
-                  <Select options={LOGIC_TYPE_OPTIONS} />
-                </Form.Item>
-                <Form.Item label="数据域">
-                  <Input disabled value={logic.domain_name || "-"} />
-                </Form.Item>
-                <Form.Item label="描述" name="description">
-                  <Input.TextArea rows={2} />
-                </Form.Item>
-              </Form>
-            ) : (
-              <Descriptions column={1} size="small" labelStyle={{ width: 96 }}>
-                <Descriptions.Item label="数据域">
-                  {logic.domain_name || "-"}
-                </Descriptions.Item>
-                <Descriptions.Item label="类型">{logic.logic_type}</Descriptions.Item>
-                <Descriptions.Item label="来源类型">
-                  {logic.source_type || "-"}
-                </Descriptions.Item>
-                <Descriptions.Item label="来源引用">
-                  <Text code copyable={!!logic.source_ref}>
-                    {logic.source_ref || "-"}
-                  </Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="置信度">
-                  {logic.source_confidence?.toFixed(2) ?? "-"}
-                </Descriptions.Item>
-              </Descriptions>
-            )}
-          </SectionCard>
-        </Col>
+        {error && (
+          <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />
+        )}
 
-        <Col xs={24} lg={12}>
-          <SectionCard
-            title="计算规则"
-            icon={<CodeOutlined />}
-            extra={
-              editable ? (
-                <Space>
-                  <Button size="small" onClick={handlePreview} loading={previewing}>
-                    JSON 预览
-                  </Button>
+        <Row gutter={[20, 20]}>
+          <Col xs={24} lg={12}>
+            <SectionCard
+              title="逻辑定义"
+              icon={<FunctionOutlined />}
+              extra={
+                editable ? (
                   <Button
                     type="primary"
                     size="small"
@@ -441,130 +366,208 @@ export function BusinessLogicDetailPage() {
                   >
                     保存
                   </Button>
-                </Space>
-              ) : null
-            }
-          >
-            {editable ? (
-              <Form form={basicForm} layout="vertical">
-                <Form.Item
-                  label="表达式"
-                  name="expression_draft"
-                  extra={
-                    <span style={{ fontSize: 12 }}>
-                      用自然语言书写,输入 <code>@</code> 引用对象,紧接 <code>.</code> 引用其字段
-                    </span>
-                  }
-                >
-                  <ExpressionRichEditor
-                    domainId={logic.domain_context_id}
-                    placeholder="例如:统计 SUM(@订单.金额) 万元,其中 @订单.状态 为「已支付」"
-                    minHeight={220}
-                  />
-                </Form.Item>
-              </Form>
-            ) : (
-              <pre className="code-block code-block--bounded">
-                {logic.expression_summary || "暂无规则表达式"}
-              </pre>
-            )}
-          </SectionCard>
-        </Col>
-      </Row>
+                ) : (
+                  <Button
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={() =>
+                      navigate(`/business-logic/${logicId}?edit=true`, { replace: true })
+                    }
+                  >
+                    编辑
+                  </Button>
+                )
+              }
+            >
+              {editable ? (
+                <Form form={basicForm} layout="vertical">
+                  <Form.Item label="显示名" name="display_name" rules={[{ required: true }]}>
+                    <Input />
+                  </Form.Item>
+                  <Form.Item label="逻辑类型" name="logic_type" rules={[{ required: true }]}>
+                    <Select options={LOGIC_TYPE_OPTIONS} />
+                  </Form.Item>
+                  <Form.Item label="数据域">
+                    <Input disabled value={logic.domain_name || "-"} />
+                  </Form.Item>
+                  <Form.Item label="描述" name="description">
+                    <Input.TextArea rows={2} />
+                  </Form.Item>
+                </Form>
+              ) : (
+                <Descriptions column={1} size="small" labelStyle={{ width: 96 }}>
+                  <Descriptions.Item label="数据域">{logic.domain_name || "-"}</Descriptions.Item>
+                  <Descriptions.Item label="类型">{logic.logic_type}</Descriptions.Item>
+                  <Descriptions.Item label="来源类型">{logic.source_type || "-"}</Descriptions.Item>
+                  <Descriptions.Item label="来源引用">
+                    <Text code copyable={!!logic.source_ref}>
+                      {logic.source_ref || "-"}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="置信度">
+                    {logic.source_confidence?.toFixed(2) ?? "-"}
+                  </Descriptions.Item>
+                </Descriptions>
+              )}
+            </SectionCard>
+          </Col>
 
-      <SectionCard title="表达式 JSON" icon={<CodeOutlined />} bodyFlush>
-        <ExpressionJsonPreview
-          json={logic.expression_json}
-          loading={false}
-          emptyHint="暂未保存格式化结果,点击「JSON 预览」可先查看,或直接「保存」生成"
-          embedded
-        />
-      </SectionCard>
+          <Col xs={24} lg={12}>
+            <SectionCard
+              title="计算规则"
+              icon={<CodeOutlined />}
+              extra={
+                editable ? (
+                  <Space>
+                    <Button size="small" onClick={handlePreview} loading={previewing}>
+                      JSON 预览
+                    </Button>
+                    <Button
+                      type="primary"
+                      size="small"
+                      icon={<SaveOutlined />}
+                      loading={saving}
+                      onClick={handleSaveBasic}
+                    >
+                      保存
+                    </Button>
+                  </Space>
+                ) : null
+              }
+            >
+              {editable ? (
+                <Form form={basicForm} layout="vertical">
+                  <Form.Item
+                    label="表达式"
+                    name="expression_draft"
+                    extra={
+                      <span style={{ fontSize: 12 }}>
+                        用自然语言书写,输入 <code>@</code> 引用对象,紧接 <code>.</code> 引用其字段
+                      </span>
+                    }
+                  >
+                    <ExpressionRichEditor
+                      domainId={logic.domain_context_id}
+                      placeholder="例如:统计 SUM(@订单.金额) 万元,其中 @订单.状态 为「已支付」"
+                      minHeight={220}
+                    />
+                  </Form.Item>
+                </Form>
+              ) : (
+                <pre className="code-block code-block--bounded">
+                  {logic.expression_summary || "暂无规则表达式"}
+                </pre>
+              )}
+            </SectionCard>
+          </Col>
+        </Row>
 
-      <SectionCard
-        title="关联对象"
-        count={mergedObjects.length}
-        icon={<ApartmentOutlined />}
-      >
-        {mergedObjects.length === 0 ? (
-          <EmptyState title="暂无关联对象" />
-        ) : (
-          <Row gutter={[12, 12]}>
-            {mergedObjects.map((obj) => {
-              const objLogics = logic.related_object_logics?.[obj.id] ?? [];
-              return (
-              <Col key={obj.id} xs={24} sm={12} md={8} lg={6}>
-                <Link to={`/ontology/${obj.id}`} className="om-card-link">
-                  <div className="entity-card" style={{ padding: 14 }}>
-                    <div className="entity-card-head">
-                      <div style={{ minWidth: 0 }}>
-                        <div className="entity-card-title">{obj.display_name}</div>
-                        <div className="entity-card-subtitle">{obj.name}</div>
-                      </div>
-                      {obj.status && <StatusBadge status={obj.status} />}
-                    </div>
-                    <div className="entity-card-desc">
-                      {obj.description || "暂无描述"}
-                    </div>
-                    {(obj.roles.size > 0 || obj.sources.size > 0 || obj.propertyCount > 0) && (
-                      <div className="entity-card-foot">
-                        {Array.from(obj.roles).map((r) => (
-                          <Tag key={r} color="blue">{OBJECT_ROLE_LABEL[r] || r}</Tag>
-                        ))}
-                        {obj.propertyCount > 0 && (
-                          <span className="entity-card-foot-item">
-                            {obj.propertyCount} 字段
-                          </span>
-                        )}
-                        {Array.from(obj.sources).map((s) => (
-                          <Tag key={s} color={s === "manual" ? "blue" : undefined}>
-                            {s === "manual" ? "人工" : "推断"}
-                          </Tag>
-                        ))}
-                      </div>
-                    )}
-                    {objLogics.length > 0 && (
-                      <div className="entity-card-foot" style={{ marginTop: 6, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 11, color: "var(--om-text-tertiary)", marginRight: 4, lineHeight: "22px" }}>
-                          业务逻辑:
-                        </span>
-                        {objLogics.map((bl) => {
-                          const typeColor =
-                            bl.logic_type === "metric" ? "blue" :
-                            bl.logic_type === "tag" ? "green" : "orange";
-                          return (
-                            <Link
-                              key={bl.id}
-                              to={`/business-logic/${bl.id}`}
-                              onClick={(e) => e.stopPropagation()}
-                              style={{ maxWidth: "100%" }}
-                            >
-                              <Tag
-                                color={typeColor}
-                                style={{ marginBottom: 2, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}
-                              >
-                                {bl.display_name || bl.name}
+        <SectionCard title="表达式 JSON" icon={<CodeOutlined />} bodyFlush>
+          <ExpressionJsonPreview
+            json={logic.expression_json}
+            loading={false}
+            emptyHint="暂未保存格式化结果,点击「JSON 预览」可先查看,或直接「保存」生成"
+            embedded
+          />
+        </SectionCard>
+
+        <SectionCard title="关联对象" count={mergedObjects.length} icon={<ApartmentOutlined />}>
+          {mergedObjects.length === 0 ? (
+            <EmptyState title="暂无关联对象" />
+          ) : (
+            <Row gutter={[12, 12]}>
+              {mergedObjects.map((obj) => {
+                const objLogics = logic.related_object_logics?.[obj.id] ?? [];
+                return (
+                  <Col key={obj.id} xs={24} sm={12} md={8} lg={6}>
+                    <Link to={`/ontology/${obj.id}`} className="om-card-link">
+                      <div className="entity-card" style={{ padding: 14 }}>
+                        <div className="entity-card-head">
+                          <div style={{ minWidth: 0 }}>
+                            <div className="entity-card-title">{obj.display_name}</div>
+                            <div className="entity-card-subtitle">{obj.name}</div>
+                          </div>
+                          {obj.status && <StatusBadge status={obj.status} />}
+                        </div>
+                        <div className="entity-card-desc">{obj.description || "暂无描述"}</div>
+                        {(obj.roles.size > 0 || obj.sources.size > 0 || obj.propertyCount > 0) && (
+                          <div className="entity-card-foot">
+                            {Array.from(obj.roles).map((r) => (
+                              <Tag key={r} color="blue">
+                                {OBJECT_ROLE_LABEL[r] || r}
                               </Tag>
-                            </Link>
-                          );
-                        })}
+                            ))}
+                            {obj.propertyCount > 0 && (
+                              <span className="entity-card-foot-item">
+                                {obj.propertyCount} 字段
+                              </span>
+                            )}
+                            {Array.from(obj.sources).map((s) => (
+                              <Tag key={s} color={s === "manual" ? "blue" : undefined}>
+                                {s === "manual" ? "人工" : "推断"}
+                              </Tag>
+                            ))}
+                          </div>
+                        )}
+                        {objLogics.length > 0 && (
+                          <div
+                            className="entity-card-foot"
+                            style={{ marginTop: 6, flexWrap: "wrap" }}
+                          >
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: "var(--om-text-tertiary)",
+                                marginRight: 4,
+                                lineHeight: "22px",
+                              }}
+                            >
+                              业务逻辑:
+                            </span>
+                            {objLogics.map((bl) => {
+                              const typeColor =
+                                bl.logic_type === "metric"
+                                  ? "blue"
+                                  : bl.logic_type === "tag"
+                                    ? "green"
+                                    : "orange";
+                              return (
+                                <Link
+                                  key={bl.id}
+                                  to={`/business-logic/${bl.id}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{ maxWidth: "100%" }}
+                                >
+                                  <Tag
+                                    color={typeColor}
+                                    style={{
+                                      marginBottom: 2,
+                                      maxWidth: "100%",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                    }}
+                                  >
+                                    {bl.display_name || bl.name}
+                                  </Tag>
+                                </Link>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                </Link>
-              </Col>
-              );
-            })}
-          </Row>
-        )}
+                    </Link>
+                  </Col>
+                );
+              })}
+            </Row>
+          )}
+        </SectionCard>
 
-      </SectionCard>
-
-      <div className="om-detail-footer">
-        <Link to={workspacePath}>
-          <Button icon={<LinkOutlined />}>查看所属数据域</Button>
-        </Link>
-      </div>
+        <div className="om-detail-footer">
+          <Link to={workspacePath}>
+            <Button icon={<LinkOutlined />}>查看所属数据域</Button>
+          </Link>
+        </div>
       </div>
 
       <Modal

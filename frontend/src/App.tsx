@@ -36,14 +36,26 @@ export default function App() {
         <Route path="/workspace/:domainId" element={<DomainDetailPage />} />
         <Route path="/workspace/:domainId/executions" element={<ExecutionRecordsPage />} />
         <Route path="/workspace/:domainId/objects/:objectId" element={<ObjectTypeDetailPage />} />
-        <Route path="/workspace/:domainId/relations/:relationId" element={<RelationTypeDetailPage />} />
-        <Route path="/workspace/:domainId/relation-groups/:displayName" element={<RelationGroupDetailPage />} />
+        <Route
+          path="/workspace/:domainId/relations/:relationId"
+          element={<RelationTypeDetailPage />}
+        />
+        <Route
+          path="/workspace/:domainId/relation-groups/:displayName"
+          element={<RelationGroupDetailPage />}
+        />
         <Route path="/ontology" element={<OntologyPage />} />
         <Route path="/ontology/relations/:relationId" element={<RelationTypeDetailPage />} />
-        <Route path="/ontology/relation-groups/:displayName" element={<RelationGroupDetailPage />} />
+        <Route
+          path="/ontology/relation-groups/:displayName"
+          element={<RelationGroupDetailPage />}
+        />
         <Route path="/ontology/:objectId" element={<ObjectTypeDetailPage />} />
         <Route path="/business-logic" element={<BusinessLogicPage />} />
-        <Route path="/business-logic/category/:categoryId" element={<BusinessLogicCategoryPage />} />
+        <Route
+          path="/business-logic/category/:categoryId"
+          element={<BusinessLogicCategoryPage />}
+        />
         <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
         <Route path="/chat-bi" element={<ChatBiPage />} />

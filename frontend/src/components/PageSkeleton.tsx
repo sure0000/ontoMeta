@@ -53,31 +53,33 @@ export function PageSkeleton({ type = "list", full }: Props) {
         <div className="workspace-domain-grid">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="om-skeleton-card">
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 12,
+                  marginBottom: 10,
+                }}
+              >
+                <Skeleton.Avatar active shape="square" size={36} />
                 <div
-                  style={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 12,
-                    marginBottom: 10,
-                  }}
+                  style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}
                 >
-                  <Skeleton.Avatar active shape="square" size={36} />
-                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
-                    <Skeleton.Input active size="small" style={{ width: "60%" }} />
-                    <Skeleton.Input active size="small" style={{ width: 120 }} />
-                  </div>
-                </div>
-                <Skeleton active paragraph={{ rows: 2, width: "100%" }} title={false} />
-                <div
-                  style={{
-                    marginTop: 14,
-                    paddingTop: 12,
-                    borderTop: "1px dashed var(--om-border, #eef1f6)",
-                  }}
-                >
-                  <Skeleton.Input active size="small" style={{ width: 100 }} />
+                  <Skeleton.Input active size="small" style={{ width: "60%" }} />
+                  <Skeleton.Input active size="small" style={{ width: 120 }} />
                 </div>
               </div>
+              <Skeleton active paragraph={{ rows: 2, width: "100%" }} title={false} />
+              <div
+                style={{
+                  marginTop: 14,
+                  paddingTop: 12,
+                  borderTop: "1px dashed var(--om-border, #eef1f6)",
+                }}
+              >
+                <Skeleton.Input active size="small" style={{ width: 100 }} />
+              </div>
+            </div>
           ))}
         </div>
       </div>

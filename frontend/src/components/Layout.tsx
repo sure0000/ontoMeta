@@ -78,20 +78,14 @@ export function AppLayout() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const { data: domains } = useApi<DomainContext[]>(
-    async () => api.listDomains(),
-    [],
-  );
+  const { data: domains } = useApi<DomainContext[]>(async () => api.listDomains(), []);
 
   const selectedKey = useMemo(
     () => getSelectedKey(location.pathname, location.search),
     [location.pathname, location.search],
   );
 
-  const defaultOpenKeys = useMemo(
-    () => getOpenKeys(location.pathname),
-    [],
-  );
+  const defaultOpenKeys = useMemo(() => getOpenKeys(location.pathname), []);
 
   // Data Agent 等全高度三栏应用：内容区满幅铺满，去掉内边距
   const isFlushPage = location.pathname.startsWith("/chat-bi");
@@ -187,10 +181,7 @@ export function AppLayout() {
               <span className="app-logo-subtitle">企业本体建模系统</span>
             </div>
           )}
-          <Tooltip
-            title={collapsed ? "展开侧栏" : "收起侧栏"}
-            placement="right"
-          >
+          <Tooltip title={collapsed ? "展开侧栏" : "收起侧栏"} placement="right">
             <button
               className="app-sider-toggle"
               onClick={() => setCollapsed((c) => !c)}

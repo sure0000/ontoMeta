@@ -14,24 +14,10 @@ import {
   RobotOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import {
-  Badge,
-  Button,
-  Checkbox,
-  Dropdown,
-  Input,
-  Select,
-  Spin,
-  Tooltip,
-} from "antd";
+import { Badge, Button, Checkbox, Dropdown, Input, Select, Spin, Tooltip } from "antd";
 import { memo } from "react";
 import type { ChatBiConversation, DomainContext } from "../../types";
-import {
-  TIME_GROUP_LABEL,
-  TIME_GROUP_ORDER,
-  relativeTime,
-  type TimeGroup,
-} from "./utils";
+import { TIME_GROUP_LABEL, TIME_GROUP_ORDER, relativeTime, type TimeGroup } from "./utils";
 
 export interface ChatBiSidebarProps {
   domainId: string;
@@ -126,9 +112,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
           <div className="chatbi-sidebar-brand-title">Data Agent</div>
           <div className="chatbi-sidebar-brand-sub">
             {conversations.length} 个对话
-            {archivedConversations.length > 0
-              ? ` · ${archivedConversations.length} 归档`
-              : ""}
+            {archivedConversations.length > 0 ? ` · ${archivedConversations.length} 归档` : ""}
           </div>
         </div>
       </div>
@@ -180,12 +164,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
           }}
           trigger={["hover"]}
         >
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            block
-            className="chatbi-new-chat-btn"
-          >
+          <Button type="primary" icon={<PlusOutlined />} block className="chatbi-new-chat-btn">
             新对话
           </Button>
         </Dropdown>
@@ -194,22 +173,17 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
       <div className="chatbi-sidebar-list">
         {batchMode && (
           <div className="chatbi-batch-toolbar">
-            <div className="chatbi-batch-toolbar-info">
-              已选 {batchSelectedIds.size} 项
-            </div>
+            <div className="chatbi-batch-toolbar-info">已选 {batchSelectedIds.size} 项</div>
             <div className="chatbi-batch-toolbar-actions">
               <Button
                 size="small"
                 type="link"
                 disabled={displayConversations.length === 0}
                 onClick={() =>
-                  onBatchSelectAll(
-                    batchSelectedIds.size < displayConversations.length,
-                  )
+                  onBatchSelectAll(batchSelectedIds.size < displayConversations.length)
                 }
               >
-                {batchSelectedIds.size > 0 &&
-                batchSelectedIds.size === displayConversations.length
+                {batchSelectedIds.size > 0 && batchSelectedIds.size === displayConversations.length
                   ? "取消全选"
                   : "全选"}
               </Button>
@@ -224,11 +198,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
               >
                 删除
               </Button>
-              <Button
-                size="small"
-                type="text"
-                onClick={() => onExitBatchMode()}
-              >
+              <Button size="small" type="text" onClick={() => onExitBatchMode()}>
                 取消
               </Button>
             </div>
@@ -294,12 +264,8 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                       <RightOutlined style={{ fontSize: 10 }} />
                     </span>
                     <FolderOutlined className="chatbi-category-folder-icon" />
-                    <span className="chatbi-category-folder-name">
-                      {catName}
-                    </span>
-                    <span className="chatbi-category-folder-count">
-                      {convs.length}
-                    </span>
+                    <span className="chatbi-category-folder-name">{catName}</span>
+                    <span className="chatbi-category-folder-count">{convs.length}</span>
                     <span
                       className="chatbi-category-folder-menu"
                       onClick={(e) => e.stopPropagation()}
@@ -311,8 +277,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                               key: "rename",
                               label: "重命名",
                               icon: <EditOutlined />,
-                              onClick: () =>
-                                onOpenCategoryDialog("rename", catName),
+                              onClick: () => onOpenCategoryDialog("rename", catName),
                             },
                             {
                               key: "new-conv",
@@ -326,18 +291,13 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
                               label: "删除分类",
                               icon: <DeleteOutlined />,
                               danger: true,
-                              onClick: () =>
-                                onOpenCategoryDialog("delete", catName),
+                              onClick: () => onOpenCategoryDialog("delete", catName),
                             },
                           ],
                         }}
                         trigger={["click"]}
                       >
-                        <Button
-                          size="small"
-                          type="text"
-                          icon={<MoreOutlined />}
-                        />
+                        <Button size="small" type="text" icon={<MoreOutlined />} />
                       </Dropdown>
                     </span>
                   </button>
@@ -372,9 +332,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
               if (convs.length === 0) return null;
               return (
                 <div className="chatbi-time-group" key={group}>
-                  <div className="chatbi-time-group-label">
-                    {TIME_GROUP_LABEL[group]}
-                  </div>
+                  <div className="chatbi-time-group-label">{TIME_GROUP_LABEL[group]}</div>
                   {convs.map((conv) => (
                     <ConversationItem
                       key={conv.id}
@@ -482,16 +440,17 @@ const ConversationItem = memo(function ConversationItem({
   return (
     <div
       className={`chatbi-conv-item${isActive ? " chatbi-conv-item--active" : ""}${batchSelected ? " chatbi-conv-item--batch-selected" : ""}`}
-      onClick={() =>
-        batchMode ? onToggleBatchSelect(conversation.id) : onSelect(conversation.id)
-      }
+      onClick={() => (batchMode ? onToggleBatchSelect(conversation.id) : onSelect(conversation.id))}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
-        if (e.key === "Enter")
-          batchMode
-            ? onToggleBatchSelect(conversation.id)
-            : onSelect(conversation.id);
+        if (e.key === "Enter") {
+          if (batchMode) {
+            onToggleBatchSelect(conversation.id);
+          } else {
+            onSelect(conversation.id);
+          }
+        }
       }}
     >
       {batchMode ? (
@@ -507,75 +466,67 @@ const ConversationItem = memo(function ConversationItem({
         <MessageOutlined className="chatbi-conv-icon" />
       )}
       <div className="chatbi-conv-body">
-        <div className="chatbi-conv-title">
-          {conversation.title || "新对话"}
-        </div>
+        <div className="chatbi-conv-title">{conversation.title || "新对话"}</div>
         <div className="chatbi-conv-meta">
           {conversation.last_message_preview && (
-            <span className="chatbi-conv-preview">
-              {conversation.last_message_preview}
-            </span>
+            <span className="chatbi-conv-preview">{conversation.last_message_preview}</span>
           )}
           {conversation.category && (
-            <span className="chatbi-conv-category-tag">
-              {conversation.category}
-            </span>
+            <span className="chatbi-conv-category-tag">{conversation.category}</span>
           )}
         </div>
       </div>
-      <span className="chatbi-conv-time">
-        {relativeTime(conversation.updated_at)}
-      </span>
+      <span className="chatbi-conv-time">{relativeTime(conversation.updated_at)}</span>
       {!batchMode && (
         <span className="chatbi-conv-menu">
-        <Dropdown
-          menu={{
-            items: [
-              {
-                key: "pin",
-                label: conversation.is_pinned ? "取消置顶" : "置顶",
-                icon: <PushpinOutlined />,
-                onClick: () => onTogglePin(conversation),
-              },
-              {
-                key: "rename",
-                label: "重命名",
-                icon: <EditOutlined />,
-                onClick: () => onRename(conversation),
-              },
-              {
-                key: "move",
-                label: "移动到分类",
-                icon: <FolderOutlined />,
-                children: moveSubmenuItems,
-              },
-              { type: "divider" },
-              {
-                key: "archive",
-                label: conversation.is_archived ? "取消归档" : "归档",
-                icon: conversation.is_archived ? <FolderOpenOutlined /> : <InboxOutlined />,
-                onClick: () => onToggleArchive(conversation),
-              },
-              { type: "divider" },
-              {
-                key: "delete",
-                label: "删除",
-                icon: <DeleteOutlined />,
-                danger: true,
-                onClick: () => onDelete(conversation),
-              },
-            ],
-          }}
-          trigger={["click"]}
-        >
-          <Button
-            size="small"
-            type="text"
-            icon={<MoreOutlined />}
-            onClick={(e) => e.stopPropagation()}
-          />
-        </Dropdown>
-      </span>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: "pin",
+                  label: conversation.is_pinned ? "取消置顶" : "置顶",
+                  icon: <PushpinOutlined />,
+                  onClick: () => onTogglePin(conversation),
+                },
+                {
+                  key: "rename",
+                  label: "重命名",
+                  icon: <EditOutlined />,
+                  onClick: () => onRename(conversation),
+                },
+                {
+                  key: "move",
+                  label: "移动到分类",
+                  icon: <FolderOutlined />,
+                  children: moveSubmenuItems,
+                },
+                { type: "divider" },
+                {
+                  key: "archive",
+                  label: conversation.is_archived ? "取消归档" : "归档",
+                  icon: conversation.is_archived ? <FolderOpenOutlined /> : <InboxOutlined />,
+                  onClick: () => onToggleArchive(conversation),
+                },
+                { type: "divider" },
+                {
+                  key: "delete",
+                  label: "删除",
+                  icon: <DeleteOutlined />,
+                  danger: true,
+                  onClick: () => onDelete(conversation),
+                },
+              ],
+            }}
+            trigger={["click"]}
+          >
+            <Button
+              size="small"
+              type="text"
+              icon={<MoreOutlined />}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </Dropdown>
+        </span>
       )}
     </div>
   );

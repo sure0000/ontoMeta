@@ -40,8 +40,8 @@
   --om-sidebar-collapsed-w: 64px;
   --om-header-h: 56px;
 
-  --om-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Monaco,
-    Consolas, "Courier New", monospace;
+  --om-font-mono:
+    "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Monaco, Consolas, "Courier New", monospace;
 }
 
 * {
@@ -91,4 +91,3 @@ body {
   background: #c2ccd9;
   background-clip: content-box;
 }
-

@@ -75,7 +75,14 @@ interface Props {
  * 与「从 DataHub 预生成」互补——预生成是对**历史/存量数据**做本体治理；人工生成
  * 面向**新业务**，先定义本体，再据此在选定数据源上创建物理表（生成建表 DDL）。
  */
-export function ManualCreateModal({ open, onClose, domainId, ontologyId, objects, onCreated }: Props) {
+export function ManualCreateModal({
+  open,
+  onClose,
+  domainId,
+  ontologyId,
+  objects,
+  onCreated,
+}: Props) {
   const [mode, setMode] = useState<"object" | "relation">("object");
   const [objForm] = Form.useForm<ObjectForm>();
   const [relForm] = Form.useForm<RelationForm>();
@@ -174,7 +181,11 @@ export function ManualCreateModal({ open, onClose, domainId, ontologyId, objects
       />
 
       {mode === "object" ? (
-        <Form form={objForm} layout="vertical" initialValues={{ dialect: "mysql", properties: [{}] }}>
+        <Form
+          form={objForm}
+          layout="vertical"
+          initialValues={{ dialect: "mysql", properties: [{}] }}
+        >
           <Space size={12} style={{ display: "flex" }}>
             <Form.Item
               name="display_name"
@@ -212,7 +223,11 @@ export function ManualCreateModal({ open, onClose, domainId, ontologyId, objects
             {(fields, { add, remove }) => (
               <div style={{ marginTop: 8 }}>
                 {fields.map((field) => (
-                  <Space key={field.key} align="baseline" style={{ display: "flex", marginBottom: 4 }}>
+                  <Space
+                    key={field.key}
+                    align="baseline"
+                    style={{ display: "flex", marginBottom: 4 }}
+                  >
                     <Form.Item
                       {...field}
                       name={[field.name, "name"]}
@@ -224,9 +239,17 @@ export function ManualCreateModal({ open, onClose, domainId, ontologyId, objects
                       <Input placeholder="中文名" style={{ width: 120 }} />
                     </Form.Item>
                     <Form.Item {...field} name={[field.name, "semantic_type"]}>
-                      <Select placeholder="语义类型" options={SEMANTIC_TYPES} style={{ width: 150 }} />
+                      <Select
+                        placeholder="语义类型"
+                        options={SEMANTIC_TYPES}
+                        style={{ width: 150 }}
+                      />
                     </Form.Item>
-                    <Form.Item {...field} name={[field.name, "primary_key"]} valuePropName="checked">
+                    <Form.Item
+                      {...field}
+                      name={[field.name, "primary_key"]}
+                      valuePropName="checked"
+                    >
                       <Checkbox>主键</Checkbox>
                     </Form.Item>
                     <MinusCircleOutlined onClick={() => remove(field.name)} />
@@ -269,7 +292,12 @@ export function ManualCreateModal({ open, onClose, domainId, ontologyId, objects
                   rules={[{ required: true, message: "请选择源对象" }]}
                   style={{ flex: 1 }}
                 >
-                  <Select showSearch optionFilterProp="label" options={objectOptions} placeholder="源对象" />
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    options={objectOptions}
+                    placeholder="源对象"
+                  />
                 </Form.Item>
                 <Form.Item
                   name="display_name"
@@ -285,7 +313,12 @@ export function ManualCreateModal({ open, onClose, domainId, ontologyId, objects
                   rules={[{ required: true, message: "请选择目标对象" }]}
                   style={{ flex: 1 }}
                 >
-                  <Select showSearch optionFilterProp="label" options={objectOptions} placeholder="目标对象" />
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    options={objectOptions}
+                    placeholder="目标对象"
+                  />
                 </Form.Item>
               </Space>
               <Space size={12} style={{ display: "flex" }}>

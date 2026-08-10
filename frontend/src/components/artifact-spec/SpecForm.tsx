@@ -29,9 +29,7 @@ export function SpecForm({
   skipKeys?: Set<string>;
 }) {
   const fields = SPEC_FIELDS[kind] ?? [];
-  const visible = skipKeys
-    ? fields.filter((f) => !skipKeys.has(f.key))
-    : fields;
+  const visible = skipKeys ? fields.filter((f) => !skipKeys.has(f.key)) : fields;
   if (!visible.length) {
     return null;
   }
@@ -67,11 +65,7 @@ function SpecFieldControl({
   onChange: (next: unknown) => void;
   requiredMark: boolean;
 }) {
-  const { options, loading, error } = useSpecOptions(
-    def.optionSource,
-    ontologyId,
-    allValues,
-  );
+  const { options, loading, error } = useSpecOptions(def.optionSource, ontologyId, allValues);
 
   // 选项拉取失败时给出可见提示：空下拉不该被当成「本来就没数据」。
   const help = error ? (
@@ -175,11 +169,7 @@ function renderControl(
       );
     case "cron":
       return (
-        <CronPicker
-          value={(value as string) ?? ""}
-          size="middle"
-          onChange={(v) => onChange(v)}
-        />
+        <CronPicker value={(value as string) ?? ""} size="middle" onChange={(v) => onChange(v)} />
       );
     default:
       return null;

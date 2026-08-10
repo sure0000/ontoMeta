@@ -5,7 +5,20 @@ import {
   SearchOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Input, Pagination, Row, Col, Select, Space, Table, Tabs, Tag, Tooltip } from "antd";
+import {
+  Button,
+  Checkbox,
+  Input,
+  Pagination,
+  Row,
+  Col,
+  Select,
+  Space,
+  Table,
+  Tabs,
+  Tag,
+  Tooltip,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -41,18 +54,9 @@ function normalizeQuery(input: string) {
 
 // 卡片角色斜角标：右上角彩色色带表示角色（悬停出全称+置信度）。
 // 待复核不放角落，改到「标识名」下方以更清晰地显示（见卡片 flags 行）。
-function CardCorner({
-  role,
-  confidence,
-}: {
-  role?: string;
-  confidence?: number;
-}) {
+function CardCorner({ role, confidence }: { role?: string; confidence?: number }) {
   const meta = getRoleMeta(role);
-  const tip = [
-    meta.label,
-    confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null,
-  ]
+  const tip = [meta.label, confidence != null ? `置信度 ${(confidence * 100).toFixed(0)}%` : null]
     .filter(Boolean)
     .join("｜");
   return (
@@ -184,9 +188,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   }, []);
 
   const toggleSelect = useCallback((id: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }, []);
 
   const query = onSearchChange ? (searchQuery ?? "") : localQuery;
@@ -201,11 +203,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const filteredObjects = useMemo(() => {
     // 卡片按显示名称字典序排列（缺显示名时退回标识名），稳定可预期。
     const byDisplayName = (a: ObjectTypeSummary, b: ObjectTypeSummary) =>
-      (a.display_name || a.name || "").localeCompare(
-        b.display_name || b.name || "",
-        undefined,
-        { numeric: true },
-      );
+      (a.display_name || a.name || "").localeCompare(b.display_name || b.name || "", undefined, {
+        numeric: true,
+      });
     // 服务端已按 role_in/needs_review 过滤，本地只处理未受控场景。
     // 防御性角色过滤：对象 Tab 只显示与当前 Tab 角色一致的对象——即便服务端首帧
     // 竞态返回了其它角色(如切换 Tab 触发的 role_in 重查尚未回来)，也不会混入
@@ -218,9 +218,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     }
     return objects
       .filter(
-        (o) =>
-          matchObject(o, normalizedQuery) &&
-          matchObjectFilters(o, typeFilter, needsReview),
+        (o) => matchObject(o, normalizedQuery) && matchObjectFilters(o, typeFilter, needsReview),
       )
       .sort(byDisplayName);
   }, [objects, normalizedQuery, typeFilter, needsReview, serverMode, viewTab]);
@@ -382,8 +380,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         key: "source_confidence",
         width: 90,
         align: "right",
-        render: (value?: number) =>
-          value?.toFixed(2) ?? <span className="om-muted">-</span>,
+        render: (value?: number) => value?.toFixed(2) ?? <span className="om-muted">-</span>,
       },
     ],
     [objectDetailPath, relationDetailPath],
@@ -432,8 +429,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   // 「暂无本体草稿」是整页占位，会连同 Tab/搜索框一起替换掉——因此只在「确实没有草稿」
   // 时展示：一旦有搜索词或类型/复核过滤在生效，空结果应由各 Tab 内部的空态承载，
   // 保留 Tab 与搜索框，否则用户搜到空后连搜索框都消失、无法清空关键词。
-  const hasActiveFilter =
-    Boolean(normalizedQuery) || typeFilter.length > 0 || needsReview;
+  const hasActiveFilter = Boolean(normalizedQuery) || typeFilter.length > 0 || needsReview;
   if (
     !hasActiveFilter &&
     objects.length === 0 &&
@@ -453,7 +449,10 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   const useVirtualTable = effectiveObjectPageSize >= 50 || effectiveRelationPageSize >= 50;
 
-  const OBJECT_TAB_META: Record<Exclude<ViewTab, "relations">, { label: string; icon: React.ReactNode }> = {
+  const OBJECT_TAB_META: Record<
+    Exclude<ViewTab, "relations">,
+    { label: string; icon: React.ReactNode }
+  > = {
     business_object: { label: "业务对象", icon: <AppstoreOutlined /> },
     data_table: { label: "数据表", icon: <DatabaseOutlined /> },
     technical: { label: "技术/系统表", icon: <ToolOutlined /> },
@@ -506,10 +505,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   const needsReviewSwitcher =
     showRoleClassification && isObjectTab ? (
-      <Checkbox
-        checked={needsReview}
-        onChange={(e) => handleNeedsReviewChange(e.target.checked)}
-      >
+      <Checkbox checked={needsReview} onChange={(e) => handleNeedsReviewChange(e.target.checked)}>
         仅看待复核
       </Checkbox>
     ) : null;
@@ -656,10 +652,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                     />
                   )}
                   {showRoleClassification && (
-                    <CardCorner
-                      role={obj.table_role}
-                      confidence={obj.role_confidence}
-                    />
+                    <CardCorner role={obj.table_role} confidence={obj.role_confidence} />
                   )}
                   <div className="entity-card-head">
                     <div className="entity-card-title" title={obj.display_name}>
@@ -670,14 +663,11 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                     {obj.name}
                   </div>
                   <div className="entity-card-flags">
-                    {showRoleClassification &&
-                      (obj.role_reason ?? "").includes("待复核") && (
-                        <Tooltip
-                          title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}
-                        >
-                          <span className="entity-card-review">待复核</span>
-                        </Tooltip>
-                      )}
+                    {showRoleClassification && (obj.role_reason ?? "").includes("待复核") && (
+                      <Tooltip title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}>
+                        <span className="entity-card-review">待复核</span>
+                      </Tooltip>
+                    )}
                   </div>
                   <div className="entity-card-foot">
                     <span className="entity-card-foot-item">

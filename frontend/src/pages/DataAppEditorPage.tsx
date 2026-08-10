@@ -38,11 +38,7 @@ import { PageHeader } from "../components/PageHeader";
 import { DatasetEditor } from "../components/DatasetEditor";
 import { DataSourcesModal } from "../components/DataSourcesModal";
 import { ShareModal } from "../components/ShareModal";
-import {
-  ParamBar,
-  buildRuntimeFilters,
-  type DrillFilter,
-} from "../components/ParamBar";
+import { ParamBar, buildRuntimeFilters, type DrillFilter } from "../components/ParamBar";
 import {
   ScreenCanvas,
   newWidget,
@@ -50,7 +46,13 @@ import {
   applyWidgetToPanel,
   type ScreenWidget,
 } from "../components/ScreenCanvas";
-import { DashboardGrid, newTile, getSpecPanels, getPanelRefId, type DashboardTile } from "../components/DashboardGrid";
+import {
+  DashboardGrid,
+  newTile,
+  getSpecPanels,
+  getPanelRefId,
+  type DashboardTile,
+} from "../components/DashboardGrid";
 import { DASHBOARD_THEME_OPTIONS } from "../components/dashboardThemes";
 import { WidgetLibraryModal } from "../components/WidgetLibraryModal";
 import type {
@@ -76,7 +78,9 @@ export function DataAppEditorPage() {
   const [editingDataset, setEditingDataset] = useState<DataAppDataset | null>(null);
   const [showDataSources, setShowDataSources] = useState(false);
   const [showShare, setShowShare] = useState(false);
-  const [lineage, setLineage] = useState<Awaited<ReturnType<typeof api.getDataAppLineage>> | null>(null);
+  const [lineage, setLineage] = useState<Awaited<ReturnType<typeof api.getDataAppLineage>> | null>(
+    null,
+  );
   const [showLineage, setShowLineage] = useState(false);
   const [selectedWidget, setSelectedWidget] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -86,10 +90,12 @@ export function DataAppEditorPage() {
   const [showWidgetLib, setShowWidgetLib] = useState(false);
   const [widgetPreviews, setWidgetPreviews] = useState<Record<string, DataAppPreviewResult>>({});
 
-  const { data: app, loading, reload, setData } = useApi<DataAppDetail>(
-    async () => api.getDataApp(appId!),
-    [appId],
-  );
+  const {
+    data: app,
+    loading,
+    reload,
+    setData,
+  } = useApi<DataAppDetail>(async () => api.getDataApp(appId!), [appId]);
   const { data: dataSources } = useApi<DataSource[]>(
     async () => api.listDataSources(),
     [showDataSources],
@@ -236,10 +242,7 @@ export function DataAppEditorPage() {
 
   const addWidget = async (type: string) => {
     if (!app) return;
-    const widgets = [
-      ...getSpecPanels(app.spec).map(panelToScreenWidget),
-      newWidget(type),
-    ];
+    const widgets = [...getSpecPanels(app.spec).map(panelToScreenWidget), newWidget(type)];
     widgetsRef.current = widgets;
     const panels = widgets.map((w) => applyWidgetToPanel(w));
     await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined });
@@ -288,9 +291,7 @@ export function DataAppEditorPage() {
   };
   const patchTile = async (id: string, patch: Partial<DashboardTile>) => {
     if (!app) return;
-    const tiles = getSpecPanels(app.spec).map((t) =>
-      t.id === id ? { ...t, ...patch } : t,
-    );
+    const tiles = getSpecPanels(app.spec).map((t) => (t.id === id ? { ...t, ...patch } : t));
     await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
   };
   const removeTile = async (id: string) => {
@@ -349,14 +350,12 @@ export function DataAppEditorPage() {
   }
 
   const tiles = getSpecPanels(app.spec);
-  const isCanvas =
-    (app.spec?.layout as string) === "canvas" || app.app_type === "screen";
-  const canvasCfg =
-    (app.spec?.canvas as { width: number; height: number; bg?: string }) ?? {
-      width: 1920,
-      height: 1080,
-      bg: "#0b1a2e",
-    };
+  const isCanvas = (app.spec?.layout as string) === "canvas" || app.app_type === "screen";
+  const canvasCfg = (app.spec?.canvas as { width: number; height: number; bg?: string }) ?? {
+    width: 1920,
+    height: 1080,
+    bg: "#0b1a2e",
+  };
   const canvasWidgets = tiles.map(panelToScreenWidget);
   widgetsRef.current = canvasWidgets;
   const selected = canvasWidgets.find((w) => w.id === selectedWidget) ?? null;
@@ -404,10 +403,7 @@ export function DataAppEditorPage() {
 
   const addParam = async () => {
     const id = `p${Date.now()}`;
-    const nextParams = [
-      ...params,
-      { id, label: "筛选", column: "", op: "eq" } as ScreenParam,
-    ];
+    const nextParams = [...params, { id, label: "筛选", column: "", op: "eq" } as ScreenParam];
     await updateSpec({ ...(app.spec ?? {}), params: nextParams });
   };
 
@@ -426,7 +422,9 @@ export function DataAppEditorPage() {
   return (
     <PageContainer>
       <PageHeader
-        icon={<ArrowLeftOutlined onClick={() => navigate("/data-apps")} style={{ cursor: "pointer" }} />}
+        icon={
+          <ArrowLeftOutlined onClick={() => navigate("/data-apps")} style={{ cursor: "pointer" }} />
+        }
         title={
           <Space>
             <Input
@@ -436,7 +434,9 @@ export function DataAppEditorPage() {
               onBlur={(e) => handleRename(e.target.value)}
             />
             <Tag color={app.status === "published" ? "success" : "default"}>
-              {app.status === "published" ? `已发布 v${app.published_version}` : `草稿 v${app.current_version}`}
+              {app.status === "published"
+                ? `已发布 v${app.published_version}`
+                : `草稿 v${app.current_version}`}
             </Tag>
             <Tag>数据看板</Tag>
             <Tag color="blue">{isCanvas ? "大屏画布" : "栅格布局"}</Tag>
@@ -474,7 +474,11 @@ export function DataAppEditorPage() {
                 查看已发布
               </Button>
             )}
-            <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => setShowPublish(true)}>
+            <Button
+              type="primary"
+              icon={<CloudUploadOutlined />}
+              onClick={() => setShowPublish(true)}
+            >
               发布
             </Button>
           </Space>
@@ -484,7 +488,12 @@ export function DataAppEditorPage() {
       <Card
         size="small"
         style={{ marginBottom: 16 }}
-        title={<Space><span>数据集</span><Tag>{app.datasets.length}</Tag></Space>}
+        title={
+          <Space>
+            <span>数据集</span>
+            <Tag>{app.datasets.length}</Tag>
+          </Space>
+        }
         extra={
           <Button
             type="primary"
@@ -510,16 +519,16 @@ export function DataAppEditorPage() {
               <div key={ds.id} className="data-app-list-row">
                 <Space>
                   <Text strong>{ds.name}</Text>
-                  {ds.data_source_id ? (
-                    <Tag color="green">已接数据源</Tag>
-                  ) : (
-                    <Tag>Mock</Tag>
-                  )}
+                  {ds.data_source_id ? <Tag color="green">已接数据源</Tag> : <Tag>Mock</Tag>}
                   {ds.compiled_sql ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>已编译</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      已编译
+                    </Text>
                   ) : (
                     <Tooltip title="未能落地到本体，发布将被阻止，请检查数据集绑定">
-                      <Text type="warning" style={{ fontSize: 12 }}>未落地</Text>
+                      <Text type="warning" style={{ fontSize: 12 }}>
+                        未落地
+                      </Text>
                     </Tooltip>
                   )}
                 </Space>
@@ -756,10 +765,7 @@ export function DataAppEditorPage() {
             onTilePatch={patchTile}
             onRemoveTile={removeTile}
             onDrill={(_tile, column, value) => {
-              const nextDrills = [
-                ...drills.filter((d) => d.column !== column),
-                { column, value },
-              ];
+              const nextDrills = [...drills.filter((d) => d.column !== column), { column, value }];
               setDrills(nextDrills);
               // 交叉过滤广播：下钻同时刷新看板内所有面板
               previewAll(buildRuntimeFilters(params, paramValues, nextDrills));
@@ -812,7 +818,9 @@ export function DataAppEditorPage() {
               <Text type="secondary">本体对象</Text>
               <div>
                 {lineage.object_types.map((o) => (
-                  <Tag key={o.id} color="green">{o.display_name || o.name}</Tag>
+                  <Tag key={o.id} color="green">
+                    {o.display_name || o.name}
+                  </Tag>
                 ))}
                 {lineage.object_types.length === 0 && <Text type="secondary"> 无</Text>}
               </div>
@@ -846,7 +854,8 @@ export function DataAppEditorPage() {
         okText="确认发布"
       >
         <Paragraph type="secondary">
-          发布将冻结当前配置与数据集绑定为一个只读版本快照，可在版本记录中回看，并可通过外部 API（scope: dataapps:read）访问。
+          发布将冻结当前配置与数据集绑定为一个只读版本快照，可在版本记录中回看，并可通过外部
+          API（scope: dataapps:read）访问。
         </Paragraph>
         <Input.TextArea
           rows={3}

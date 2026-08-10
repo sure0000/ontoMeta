@@ -64,10 +64,13 @@ export function TaskDataRangeSelector({
   const [cascadeOptions, setCascadeOptions] = useState<CascadeNode[]>([]);
   const [cascadeLoading, setCascadeLoading] = useState(false);
 
-  const domainName = useCallback((domainContextId: string): string => {
-    const d = domains.find((x) => x.id === domainContextId);
-    return d?.name ?? domainContextId;
-  }, [domains]);
+  const domainName = useCallback(
+    (domainContextId: string): string => {
+      const d = domains.find((x) => x.id === domainContextId);
+      return d?.name ?? domainContextId;
+    },
+    [domains],
+  );
 
   const entityConfig = KIND_ENTITY_CONFIG[kind];
 
@@ -243,9 +246,7 @@ export function TaskDataRangeSelector({
         <Text type="secondary">指定任务要处理的本体和实体</Text>
       </div>
 
-      {getHelp() && (
-        <Alert message={getHelp()} type="info" showIcon closable />
-      )}
+      {getHelp() && <Alert message={getHelp()} type="info" showIcon closable />}
 
       <div>
         <div style={{ marginBottom: 8 }}>
@@ -306,9 +307,7 @@ export function TaskDataRangeSelector({
               options={cascadeOptions}
               loadData={(opts) => loadEntities(opts as CascadeNode[])}
               value={
-                ontologyId && selectedEntities.length > 0
-                  ? [ontologyId, selectedEntities[0]]
-                  : []
+                ontologyId && selectedEntities.length > 0 ? [ontologyId, selectedEntities[0]] : []
               }
               onChange={(val) => handleEntitiesChange(val as string[])}
             />

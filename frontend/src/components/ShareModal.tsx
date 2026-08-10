@@ -1,15 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Button,
-  Divider,
-  Input,
-  message,
-  Modal,
-  Space,
-  Switch,
-  Tag,
-  Typography,
-} from "antd";
+import { Button, Divider, Input, message, Modal, Space, Switch, Tag, Typography } from "antd";
 import { CopyOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import type { PublicShareStatus } from "../types";
@@ -34,7 +24,10 @@ export function ShareModal({
 
   useEffect(() => {
     if (!open) return;
-    api.getShareStatus(appId).then(setStatus).catch(() => setStatus(null));
+    api
+      .getShareStatus(appId)
+      .then(setStatus)
+      .catch(() => setStatus(null));
   }, [open, appId]);
 
   const publicUrl = status?.public_token
@@ -77,9 +70,7 @@ export function ShareModal({
 
   return (
     <Modal title="公开分享" open={open} onCancel={onClose} footer={null} width={560}>
-      {!published && (
-        <Paragraph type="warning">请先发布该应用，再开启公开分享。</Paragraph>
-      )}
+      {!published && <Paragraph type="warning">请先发布该应用，再开启公开分享。</Paragraph>}
       <Space align="center" style={{ marginBottom: 12 }}>
         <Switch
           checked={status?.public_enabled ?? false}
@@ -135,7 +126,11 @@ export function ShareModal({
             onChange={(e) => setExpiresDays(e.target.value ? Number(e.target.value) : undefined)}
             disabled={!published}
           />
-          <Button onClick={handleUpdate} disabled={!published || !status?.public_enabled} loading={loading}>
+          <Button
+            onClick={handleUpdate}
+            disabled={!published || !status?.public_enabled}
+            loading={loading}
+          >
             更新设置
           </Button>
         </Space>

@@ -46,22 +46,24 @@ export function ExecutionRecordsPage() {
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
 
-  const { data: bundle, loading, error, reload } = useApi<TasksBundle>(
-    async () => {
-      if (!domainId) return { tasks: [], logsByTask: {} };
-      const items = await api.listTasks(domainId);
-      const entries = await Promise.all(
-        items.map((t) =>
-          api
-            .getTaskLogs(domainId, t.id)
-            .then((logs) => [t.id, logs] as const)
-            .catch(() => [t.id, [] as ChangeLog[]] as const),
-        ),
-      );
-      return { tasks: items, logsByTask: Object.fromEntries(entries) };
-    },
-    [domainId],
-  );
+  const {
+    data: bundle,
+    loading,
+    error,
+    reload,
+  } = useApi<TasksBundle>(async () => {
+    if (!domainId) return { tasks: [], logsByTask: {} };
+    const items = await api.listTasks(domainId);
+    const entries = await Promise.all(
+      items.map((t) =>
+        api
+          .getTaskLogs(domainId, t.id)
+          .then((logs) => [t.id, logs] as const)
+          .catch(() => [t.id, [] as ChangeLog[]] as const),
+      ),
+    );
+    return { tasks: items, logsByTask: Object.fromEntries(entries) };
+  }, [domainId]);
 
   const tasks = bundle?.tasks ?? [];
   const taskLogsMap = bundle?.logsByTask ?? {};
@@ -154,9 +156,7 @@ export function ExecutionRecordsPage() {
       .map((log) => {
         const time = new Date(log.created_at).toLocaleString();
         const summary = log.change_summary?.trim() || "(无摘要)";
-        return log.operator
-          ? `[${time}] ${summary}  — ${log.operator}`
-          : `[${time}] ${summary}`;
+        return log.operator ? `[${time}] ${summary}  — ${log.operator}` : `[${time}] ${summary}`;
       })
       .join("\n");
 
@@ -298,13 +298,7 @@ export function ExecutionRecordsPage() {
         description="查看预处理任务的执行状态与变更日志，跟踪本体草稿生成全过程。"
       />
 
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-        />
-      )}
+      {error && <Alert type="error" message={error} showIcon />}
 
       {tasks.length === 0 ? (
         <EmptyState

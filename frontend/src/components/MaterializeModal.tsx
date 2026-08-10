@@ -55,12 +55,11 @@ const LAYER_LABEL: Record<string, string> = {
 };
 
 // 同步方式：复用后端 LoadStrategy，逐实体选，随 overrides 写回各自的物化契约。
-const LOAD_STRATEGY_OPTIONS: { value: MaterializationLoadStrategy; label: string }[] =
-  [
-    { value: "full", label: "全量覆盖" },
-    { value: "incremental", label: "增量追加" },
-    { value: "cdc", label: "CDC 变更捕获" },
-  ];
+const LOAD_STRATEGY_OPTIONS: { value: MaterializationLoadStrategy; label: string }[] = [
+  { value: "full", label: "全量覆盖" },
+  { value: "incremental", label: "增量追加" },
+  { value: "cdc", label: "CDC 变更捕获" },
+];
 
 // 各同步方式的实际语义（列窄放不下，挂在下拉的 Tooltip 上，尤其 CDC 的限制不能丢）。
 const STRATEGY_HINT: Record<string, string> = {
@@ -144,10 +143,7 @@ function entityNameOf(c: MaterializationContract): string {
  * 各层共处一个目标库，同名风险来自跨层，故推荐「层_实体名」。若目标库里已有同名
  * 或同实体名的表，优先推荐那张——物化是覆盖写，另建一张近义表只会制造两份事实。
  */
-function recommendTableName(
-  c: MaterializationContract,
-  existing: string[],
-): string {
+function recommendTableName(c: MaterializationContract, existing: string[]): string {
   const base = entityNameOf(c);
   const layer = c.target_layer;
   const suggested = base.startsWith(`${layer}_`) ? base : `${layer}_${base}`;
@@ -183,9 +179,7 @@ export function MaterializeModal({
   >([]);
   // 逐实体（契约 id）的存储策略编辑值：分区键 / 同步方式 / 定时策略，默认取契约现值。
   const [rowPk, setRowPk] = useState<Record<string, string>>({});
-  const [rowStrategy, setRowStrategy] = useState<
-    Record<string, MaterializationLoadStrategy>
-  >({});
+  const [rowStrategy, setRowStrategy] = useState<Record<string, MaterializationLoadStrategy>>({});
   const [rowCron, setRowCron] = useState<Record<string, string>>({});
   // 人工指定的表名（契约 id → 表名）。只存「改过的」：未改的跟随推荐值实时变化。
   const [rowTableEdit, setRowTableEdit] = useState<Record<string, string>>({});
@@ -237,8 +231,7 @@ export function MaterializeModal({
     [rowTableEdit, existingTables],
   );
   const tableExists = useCallback(
-    (table: string) =>
-      existingTables.some((t) => t.toLowerCase() === table.toLowerCase()),
+    (table: string) => existingTables.some((t) => t.toLowerCase() === table.toLowerCase()),
     [existingTables],
   );
 
@@ -246,9 +239,7 @@ export function MaterializeModal({
   const seedRowState = (cs: MaterializationContract[]) => {
     setRowPk(Object.fromEntries(cs.map((c) => [c.id, c.partition_key ?? ""])));
     setRowStrategy(
-      Object.fromEntries(
-        cs.map((c) => [c.id, c.load_strategy as MaterializationLoadStrategy]),
-      ),
+      Object.fromEntries(cs.map((c) => [c.id, c.load_strategy as MaterializationLoadStrategy])),
     );
     setRowCron(Object.fromEntries(cs.map((c) => [c.id, c.refresh_cron ?? ""])));
   };
@@ -346,9 +337,7 @@ export function MaterializeModal({
       .catch((err: unknown) => {
         if (stale) return;
         setSyncPlan(null);
-        setSyncPlanError(
-          err instanceof Error ? err.message : "无法读取本次的搬运方式",
-        );
+        setSyncPlanError(err instanceof Error ? err.message : "无法读取本次的搬运方式");
       });
     return () => {
       stale = true;
@@ -369,8 +358,7 @@ export function MaterializeModal({
         if (!stale) setDatabases(r.databases);
       })
       .catch((err: unknown) => {
-        if (!stale)
-          setDbError(err instanceof Error ? err.message : "无法读取该数据源的库列表");
+        if (!stale) setDbError(err instanceof Error ? err.message : "无法读取该数据源的库列表");
       })
       .finally(() => {
         if (!stale) setDbLoading(false);
@@ -397,12 +385,7 @@ export function MaterializeModal({
 
   // 本次要物化的实体名参数（与 submit 同口径）：单实体锁定其名；整体全选传 null（不裁剪）。
   const selectedTargetsArg = useMemo(
-    () =>
-      scoped
-        ? targetKeys
-        : targetKeys.length === allTargets.length
-          ? null
-          : targetKeys,
+    () => (scoped ? targetKeys : targetKeys.length === allTargets.length ? null : targetKeys),
     [scoped, targetKeys, allTargets.length],
   );
 
@@ -504,12 +487,8 @@ export function MaterializeModal({
         engine,
         // 搬运工具不传：由后端决策（设置页可强制指定）。前端传了反而会盖过它。
         // 同步方式逐实体来自各自契约（上面已写回），故不传全局覆盖。
-        ...(Object.keys(databaseOverrides).length
-          ? { database_overrides: databaseOverrides }
-          : {}),
-        ...(Object.keys(tableOverrides).length
-          ? { table_overrides: tableOverrides }
-          : {}),
+        ...(Object.keys(databaseOverrides).length ? { database_overrides: databaseOverrides } : {}),
+        ...(Object.keys(tableOverrides).length ? { table_overrides: tableOverrides } : {}),
         // 单实体锁定其名；整体物化时全选传 null（不裁剪），否则传勾选的实体名。
         selected_targets: scoped
           ? targetKeys
@@ -630,7 +609,8 @@ export function MaterializeModal({
           {preflight ? "重新自检" : "运行提交前自检"}
         </Button>
         <span className="om-muted" style={{ fontSize: 12 }}>
-          提交前查 Airflow 连通 / 鉴权 / 建表连接 / DAG 目录，把「三分钟后才在任务日志里发现」的失败提到点提交之前。
+          提交前查 Airflow 连通 / 鉴权 / 建表连接 / DAG
+          目录，把「三分钟后才在任务日志里发现」的失败提到点提交之前。
         </span>
       </div>
       {preflight && (
@@ -640,9 +620,7 @@ export function MaterializeModal({
             showIcon
             style={{ marginBottom: 8 }}
             message={
-              preflight.ok
-                ? "自检通过，可提交"
-                : `${blockingCount} 项阻断，需先解决后才能提交`
+              preflight.ok ? "自检通过，可提交" : `${blockingCount} 项阻断，需先解决后才能提交`
             }
           />
           <div
@@ -677,9 +655,7 @@ export function MaterializeModal({
                     {it.detail}
                   </div>
                   {it.next_step && it.status !== "pass" && (
-                    <div style={{ fontSize: 12, marginTop: 2 }}>
-                      下一步：{it.next_step}
-                    </div>
+                    <div style={{ fontSize: 12, marginTop: 2 }}>下一步：{it.next_step}</div>
                   )}
                 </div>
               </div>
@@ -711,9 +687,7 @@ export function MaterializeModal({
           title: "实体",
           key: "entity",
           render: (_, r) =>
-            r.contract.target_display_name ??
-            r.contract.target_name ??
-            r.contract.target_id,
+            r.contract.target_display_name ?? r.contract.target_name ?? r.contract.target_id,
         },
         {
           title: "表名",
@@ -786,9 +760,7 @@ export function MaterializeModal({
                 : (syncPlan.resolved ?? "—")
               : "读取中…"}
           </Tag>
-          {syncPlan?.auto === false && (
-            <Tag style={{ marginInlineEnd: 6 }}>设置页已指定</Tag>
-          )}
+          {syncPlan?.auto === false && <Tag style={{ marginInlineEnd: 6 }}>设置页已指定</Tag>}
           {syncPlan?.detail}
           {syncPlan && (
             <div style={{ marginTop: 4 }}>
@@ -860,18 +832,14 @@ export function MaterializeModal({
                 value: d.id,
                 title: `${d.name} ${d.kind}`,
                 label: (
-                  <span
-                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                  >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     {d.name}
                     <Tag style={{ marginInlineEnd: 0 }}>{d.kind}</Tag>
                     <DataSourceStatusTag status={d.status} />
                   </span>
                 ),
               }))}
-              notFoundContent={
-                <Empty description="尚无数据源，请到 系统设置 → 数据源 添加" />
-              }
+              notFoundContent={<Empty description="尚无数据源，请到 系统设置 → 数据源 添加" />}
             />
           </Form.Item>
           {/* 读不到库列表不该拦住物化：落库由 Airflow 侧执行，后端只是「顺带」
@@ -896,9 +864,7 @@ export function MaterializeModal({
                 disabled={!dsId}
                 loading={dbLoading}
                 options={databases.map((d) => ({ value: d, label: d }))}
-                notFoundContent={
-                  dbLoading ? null : <Empty description="该数据源上没有可用的库" />
-                }
+                notFoundContent={dbLoading ? null : <Empty description="该数据源上没有可用的库" />}
               />
             )}
           </Form.Item>
@@ -982,8 +948,7 @@ export function MaterializeModal({
       open={open}
       title={
         <span>
-          <DatabaseOutlined />{" "}
-          {scoped ? `物化实体：${scopeLabel ?? ""}` : "物化本体到目标存储"}
+          <DatabaseOutlined /> {scoped ? `物化实体：${scopeLabel ?? ""}` : "物化本体到目标存储"}
         </span>
       }
       onOk={submit}
@@ -1013,9 +978,7 @@ export function MaterializeModal({
                   danger
                   loading={running}
                   disabled={
-                    targetKeys.length === 0 ||
-                    (scoped && Boolean(scopeError)) ||
-                    !preflight?.ok
+                    targetKeys.length === 0 || (scoped && Boolean(scopeError)) || !preflight?.ok
                   }
                   onClick={submit}
                 >
@@ -1279,8 +1242,7 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
     return {
       type: "info",
       message: "作业已提交给调度器",
-      description:
-        "建表与搬运由 Airflow 执行；本弹窗只回读状态，重试与补数在 Airflow 侧完成。",
+      description: "建表与搬运由 Airflow 执行；本弹窗只回读状态，重试与补数在 Airflow 侧完成。",
     };
   }, [r.error, state, succeeded]);
 
@@ -1297,14 +1259,10 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
           message.success(`血缘已上报 ${res.applied ?? 0} 条（重复上报幂等）`);
         }
       })
-      .catch((err: unknown) =>
-        message.error(err instanceof Error ? err.message : "血缘上报失败"),
-      )
+      .catch((err: unknown) => message.error(err instanceof Error ? err.message : "血缘上报失败"))
       .finally(() => setLineageBusy(false));
   };
-  const failedTasks = (status?.tasks ?? []).filter((t) =>
-    FAILED_STATES.has(t.state ?? ""),
-  );
+  const failedTasks = (status?.tasks ?? []).filter((t) => FAILED_STATES.has(t.state ?? ""));
   return (
     <div className="mtz-receipt">
       <Alert
@@ -1410,21 +1368,12 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
                       <RunStateTag state={b.state} />
                       <code>{b.suffix ?? b.dag_id}</code>
                       <span className="om-muted" style={{ fontSize: 12 }}>
-                        {b.schedule ? (
-                          <code>{b.schedule}</code>
-                        ) : (
-                          "手动"
-                        )}
+                        {b.schedule ? <code>{b.schedule}</code> : "手动"}
                         {b.jobs ? ` · ${b.jobs.length} 表` : ""}
                       </span>
                       {b.error && <span className="mtz-warn">{b.error}</span>}
                       {b.run_url && (
-                        <a
-                          href={b.run_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="om-link"
-                        >
+                        <a href={b.run_url} target="_blank" rel="noreferrer" className="om-link">
                           Airflow
                         </a>
                       )}
@@ -1451,12 +1400,7 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
 
         <dt>血缘</dt>
         <dd>
-          <Button
-            size="small"
-            loading={lineageBusy}
-            disabled={!succeeded}
-            onClick={emitLineage}
-          >
+          <Button size="small" loading={lineageBusy} disabled={!succeeded} onClick={emitLineage}>
             兜底回补血缘
           </Button>
           <div className="om-muted" style={{ fontSize: 12, marginTop: 6 }}>
@@ -1583,9 +1527,7 @@ function TaskResult({
         api
           .getMaterializeTaskResult(artifactId, taskId)
           .then(setData)
-          .catch((err: unknown) =>
-            setError(err instanceof Error ? err.message : "读取失败"),
-          )
+          .catch((err: unknown) => setError(err instanceof Error ? err.message : "读取失败"))
           .finally(() => setBusy(false));
       }}
     >

@@ -1,10 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Card, Empty } from "antd";
-import {
-  BarChartRender,
-  DataTableRender,
-  KpiRender,
-} from "./DataAppRenderer";
+import { BarChartRender, DataTableRender, KpiRender } from "./DataAppRenderer";
 import type { DataAppPreviewResult } from "../types";
 
 export interface ScreenWidget {
@@ -258,7 +254,11 @@ export function applyWidgetToPanel(w: ScreenWidget, base?: CanvasPanelLike): Can
 }
 
 /** 导出行数据为 CSV 并触发下载 */
-export function exportCsv(filename: string, columns: { key: string; title: string }[], rows: Record<string, unknown>[]) {
+export function exportCsv(
+  filename: string,
+  columns: { key: string; title: string }[],
+  rows: Record<string, unknown>[],
+) {
   const esc = (v: unknown) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;

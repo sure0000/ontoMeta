@@ -156,10 +156,7 @@ function segmentsToHtml(segments: ExpressionSegment[], onRemove: () => void): st
 }
 
 function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function domToSegments(root: HTMLElement): ExpressionSegment[] {
@@ -241,8 +238,7 @@ function detectTrigger(): Trigger | null {
     while (i >= 0) {
       const ch = text[i];
       if (ch === "@") {
-        const beforeOk =
-          i === 0 || /\s/.test(text[i - 1]) || /[（(\[,.]/.test(text[i - 1]);
+        const beforeOk = i === 0 || /\s/.test(text[i - 1]) || /[（(\[,.]/.test(text[i - 1]);
         if (beforeOk) {
           const query = text.slice(i + 1, offset);
           if (!/\s/.test(query)) {
@@ -322,8 +318,10 @@ function getCaretRect(): DOMRect | null {
       const style = getComputedStyle(el);
       let lineH = parseFloat(style.lineHeight);
       if (isNaN(lineH)) lineH = parseFloat(style.fontSize) * 1.2;
-      return DOMRect.fromRect?.({ x: br.left, y: br.top, width: 0, height: lineH || 16 }) ??
-        new DOMRect(br.left, br.top, 0, lineH || 16);
+      return (
+        DOMRect.fromRect?.({ x: br.left, y: br.top, width: 0, height: lineH || 16 }) ??
+        new DOMRect(br.left, br.top, 0, lineH || 16)
+      );
     }
   }
   return null;
@@ -469,17 +467,18 @@ export function ExpressionRichEditor({
     const q = popup.query.toLowerCase().trim();
     return props
       .filter(
-        (p) =>
-          !q ||
-          p.name.toLowerCase().includes(q) ||
-          p.display_name.toLowerCase().includes(q),
+        (p) => !q || p.name.toLowerCase().includes(q) || p.display_name.toLowerCase().includes(q),
       )
       .slice(0, 8);
   }, [popup, propCache]);
 
   useEffect(() => {
     setHighlight(0);
-  }, [popup?.kind, popup?.query, popup && popup.kind === "property" ? popup.objectTypeId : undefined]);
+  }, [
+    popup?.kind,
+    popup?.query,
+    popup && popup.kind === "property" ? popup.objectTypeId : undefined,
+  ]);
 
   const closePopup = () => {
     triggerRef.current = null;
@@ -615,10 +614,7 @@ export function ExpressionRichEditor({
     }, 200);
   };
 
-  const writeSegmentsToClipboard = (
-    e: React.ClipboardEvent,
-    segments: ExpressionSegment[],
-  ) => {
+  const writeSegmentsToClipboard = (e: React.ClipboardEvent, segments: ExpressionSegment[]) => {
     e.clipboardData.setData(EXPRESSION_CLIPBOARD_TYPE, JSON.stringify(segments));
     e.clipboardData.setData(
       "text/plain",
@@ -693,10 +689,7 @@ export function ExpressionRichEditor({
     sel.removeAllRanges();
     sel.addRange(range);
 
-    refCounterRef.current = Math.max(
-      refCounterRef.current,
-      countExistingRefs(el) + 1,
-    );
+    refCounterRef.current = Math.max(refCounterRef.current, countExistingRefs(el) + 1);
     syncToParent();
   };
 
@@ -732,8 +725,7 @@ export function ExpressionRichEditor({
   const showObjectPopup = popup?.kind === "object" && filteredObjects.length > 0;
   const showPropertyPopup = popup?.kind === "property";
   const showPropertyItems = showPropertyPopup && filteredProperties.length > 0;
-  const showPropsLoading =
-    showPropertyPopup && propsLoading && filteredProperties.length === 0;
+  const showPropsLoading = showPropertyPopup && propsLoading && filteredProperties.length === 0;
 
   return (
     <div className="expression-editor expression-editor--rich">
@@ -782,9 +774,7 @@ export function ExpressionRichEditor({
                 </span>
                 <span className="expr-popup__item-main">
                   <span className="expr-popup__item-name">{o.display_name}</span>
-                  {o.description && (
-                    <span className="expr-popup__item-desc">{o.description}</span>
-                  )}
+                  {o.description && <span className="expr-popup__item-desc">{o.description}</span>}
                 </span>
                 <span className="expr-popup__item-tail">
                   {o.domain_name && (
@@ -834,9 +824,7 @@ export function ExpressionRichEditor({
                     )}
                   </span>
                   <span className="expr-popup__item-tail">
-                    {p.data_type && (
-                      <span className="expr-popup__item-type">{p.data_type}</span>
-                    )}
+                    {p.data_type && <span className="expr-popup__item-type">{p.data_type}</span>}
                     <span className="expr-popup__item-sub">{p.name}</span>
                   </span>
                 </button>
@@ -852,9 +840,7 @@ export function ExpressionRichEditor({
       {!showObjectPopup && !showPropertyPopup && popup && (
         <div className="expression-editor__hint">
           <span className="om-muted">
-            {popup.kind === "object"
-              ? "未找到匹配的对象"
-              : "未找到匹配的字段,或该对象尚未加载属性"}
+            {popup.kind === "object" ? "未找到匹配的对象" : "未找到匹配的字段,或该对象尚未加载属性"}
           </span>
         </div>
       )}

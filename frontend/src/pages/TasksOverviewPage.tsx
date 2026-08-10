@@ -101,16 +101,22 @@ export function TasksOverviewPage() {
       });
   }, []);
 
-  const domainName = useCallback((domainContextId: string): string => {
-    const d = domains.find((x) => x.id === domainContextId);
-    return d?.name ?? domainContextId;
-  }, [domains]);
+  const domainName = useCallback(
+    (domainContextId: string): string => {
+      const d = domains.find((x) => x.id === domainContextId);
+      return d?.name ?? domainContextId;
+    },
+    [domains],
+  );
 
-  const ontologyName = useCallback((ontologyId: string): string => {
-    const o = ontologies.find((x) => x.id === ontologyId);
-    if (!o) return ontologyId;
-    return `${domainName(o.domain_context_id)} v${o.version}`;
-  }, [ontologies, domainName]);
+  const ontologyName = useCallback(
+    (ontologyId: string): string => {
+      const o = ontologies.find((x) => x.id === ontologyId);
+      if (!o) return ontologyId;
+      return `${domainName(o.domain_context_id)} v${o.version}`;
+    },
+    [ontologies, domainName],
+  );
 
   // 客户端筛选
   const filteredRows = useMemo(() => {
@@ -173,9 +179,7 @@ export function TasksOverviewPage() {
       dataIndex: "kind",
       key: "kind",
       width: 100,
-      render: (k: string) => (
-        <Tag color="blue">{KIND_LABEL[k] ?? k}</Tag>
-      ),
+      render: (k: string) => <Tag color="blue">{KIND_LABEL[k] ?? k}</Tag>,
     },
     {
       title: "任务名称",
@@ -189,7 +193,7 @@ export function TasksOverviewPage() {
       key: "ontology_id",
       width: 180,
       ellipsis: true,
-      render: (id: string | null) => id ? ontologyName(id) : "—",
+      render: (id: string | null) => (id ? ontologyName(id) : "—"),
     },
     {
       title: "状态",
@@ -200,9 +204,7 @@ export function TasksOverviewPage() {
         const isLive = row.live_state?.live_state && !row.live_state?.terminal;
         return (
           <Space size={4}>
-            <Tag color={STATUS_COLOR[status] ?? "default"}>
-              {STATUS_LABEL[status] ?? status}
-            </Tag>
+            <Tag color={STATUS_COLOR[status] ?? "default"}>{STATUS_LABEL[status] ?? status}</Tag>
             {isLive && <Tag color="blue">运行中</Tag>}
             {row.is_high_risk && <Tag color="volcano">高危</Tag>}
           </Space>
@@ -214,12 +216,13 @@ export function TasksOverviewPage() {
       dataIndex: "created_at",
       key: "created_at",
       width: 160,
-      render: (v: string) => new Date(v).toLocaleString("zh-CN", {
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
+      render: (v: string) =>
+        new Date(v).toLocaleString("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
     },
     {
       title: "操作",
@@ -281,11 +284,7 @@ export function TasksOverviewPage() {
         }
       >
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Tabs
-            activeKey={activeKind}
-            items={tabItems}
-            onChange={handleTabChange}
-          />
+          <Tabs activeKey={activeKind} items={tabItems} onChange={handleTabChange} />
 
           <Space wrap>
             <Search

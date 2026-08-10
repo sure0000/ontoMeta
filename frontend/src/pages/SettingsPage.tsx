@@ -68,11 +68,11 @@ export function SettingsPage() {
 
   const isAuthError = Boolean(
     error &&
-      (error.includes("鉴权") ||
-        error.includes("Token") ||
-        error.includes("token") ||
-        error.includes("401") ||
-        error.includes("503")),
+    (error.includes("鉴权") ||
+      error.includes("Token") ||
+      error.includes("token") ||
+      error.includes("401") ||
+      error.includes("503")),
   );
 
   const draftGenerationSettings = bundle?.draftGenerationSettings ?? null;
@@ -105,9 +105,7 @@ export function SettingsPage() {
         object_chunk_concurrency: values.object_chunk_concurrency,
         relation_chunk_concurrency: values.relation_chunk_concurrency,
       });
-      setBundle((prev) =>
-        prev ? { ...prev, draftGenerationSettings: updated } : prev,
-      );
+      setBundle((prev) => (prev ? { ...prev, draftGenerationSettings: updated } : prev));
       message.success("草稿生成并发配置已保存，下次生成即生效");
     } catch (err) {
       message.error(err instanceof Error ? err.message : "保存失败");
@@ -209,14 +207,11 @@ export function SettingsPage() {
                   >
                     数据域表数较多时，草稿生成会把业务对象命名与业务关系命名分别拆成多个批次并发调用
                     LLM。这里的并发度决定同一时刻最多有多少个批次在同时请求；调大可缩短大域的生成耗时，
-                    但也会提高对 LLM 服务的瞬时并发压力，请结合服务端承载能力设置。修改后立即生效，无需
-                    重启服务。LLM 服务本身的连接配置在「基础设施」中管理。
+                    但也会提高对 LLM
+                    服务的瞬时并发压力，请结合服务端承载能力设置。修改后立即生效，无需 重启服务。LLM
+                    服务本身的连接配置在「基础设施」中管理。
                   </Text>
-                  <Form
-                    form={draftGenerationForm}
-                    layout="vertical"
-                    style={{ maxWidth: 480 }}
-                  >
+                  <Form form={draftGenerationForm} layout="vertical" style={{ maxWidth: 480 }}>
                     <Form.Item
                       label="业务对象命名并发度"
                       name="object_chunk_concurrency"
@@ -258,12 +253,10 @@ export function SettingsPage() {
             ),
             children: (
               <SectionCard title="数据源管理" icon={<DatabaseOutlined />}>
-                <Text
-                  type="secondary"
-                  style={{ display: "block", marginBottom: 16, fontSize: 13 }}
-                >
-                  这里登记的是「可写连接凭据」（SQLAlchemy 连接串），用于本体物化落库与数据应用取数。
-                  DataHub 等依赖组件的连接配置已移至「基础设施」统一管理；此处只管目标仓/源库的可写凭据。
+                <Text type="secondary" style={{ display: "block", marginBottom: 16, fontSize: 13 }}>
+                  这里登记的是「可写连接凭据」（SQLAlchemy
+                  连接串），用于本体物化落库与数据应用取数。 DataHub
+                  等依赖组件的连接配置已移至「基础设施」统一管理；此处只管目标仓/源库的可写凭据。
                   物化弹窗里也能对未绑定平台就地补录一次凭据，登记后即可在此统一管理与测试。
                 </Text>
                 <DataSourcesPanel />

@@ -43,8 +43,7 @@ function matchScore(prop: Property, peer: ObjectTypeSummary): number {
   if (hasCjk(objDisp) && objDisp.length >= 2 && hasCjk(colDisp)) {
     if (colDisp === objDisp) score = Math.max(score, 5);
     else if (colDisp.includes(objDisp)) score = Math.max(score, 3);
-    else if (objDisp.includes(colDisp) && colDisp.length >= 2)
-      score = Math.max(score, 1);
+    else if (objDisp.includes(colDisp) && colDisp.length >= 2) score = Math.max(score, 1);
   }
 
   // 英文/拼音：列名去尾缀后的词元与对象名词元的词干重合。
@@ -54,8 +53,7 @@ function matchScore(prop: Property, peer: ObjectTypeSummary): number {
     const objStr = objTokens.join("_");
     const colStr = colTokens.join("_");
     if (colStr === objStr) score = Math.max(score, 5);
-    else if (colStr.endsWith(objStr) || colStr.includes(objStr))
-      score = Math.max(score, 3);
+    else if (colStr.endsWith(objStr) || colStr.includes(objStr)) score = Math.max(score, 3);
   }
 
   // 明确的引用键列（xxx_id / xxx编号）额外加权，优先浮上来。
@@ -92,7 +90,5 @@ export function suggestEndpoints(
       }
     }
   }
-  return [...best.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit);
 }

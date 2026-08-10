@@ -7,11 +7,7 @@ interface Props {
   action?: ReactNode;
 }
 
-export function EmptyState({
-  title = "暂无数据",
-  description,
-  action,
-}: Props) {
+export function EmptyState({ title = "暂无数据", description, action }: Props) {
   return (
     <div className="empty-state">
       <div className="empty-state-icon">

@@ -84,12 +84,7 @@ export function ParamBar({
         </Button>
       )}
       {drills.map((d, i) => (
-        <Tag
-          key={`${d.column}-${i}`}
-          color="blue"
-          closable
-          onClose={() => onClearDrill(i)}
-        >
+        <Tag key={`${d.column}-${i}`} color="blue" closable onClose={() => onClearDrill(i)}>
           下钻：{d.column} = {d.value}
         </Tag>
       ))}

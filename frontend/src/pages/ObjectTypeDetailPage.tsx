@@ -111,25 +111,15 @@ function DecisionEvidencePanel({ obj }: { obj: ObjectTypeDetail }) {
   const hasSignals = evidence.items.length > 0;
   return (
     <>
-      <Descriptions
-        column={{ xs: 1, md: 3 }}
-        size="small"
-        style={{ marginBottom: 12 }}
-      >
+      <Descriptions column={{ xs: 1, md: 3 }} size="small" style={{ marginBottom: 12 }}>
         <Descriptions.Item label="对象角色">
           <Tag color={meta.color}>{meta.label}</Tag>
         </Descriptions.Item>
         <Descriptions.Item label="角色置信度">
-          {obj.role_confidence != null
-            ? `${(obj.role_confidence * 100).toFixed(0)}%`
-            : "-"}
+          {obj.role_confidence != null ? `${(obj.role_confidence * 100).toFixed(0)}%` : "-"}
         </Descriptions.Item>
         <Descriptions.Item label="复核状态">
-          {needsReview ? (
-            <Tag color="gold">待复核</Tag>
-          ) : (
-            <Tag color="green">已确认</Tag>
-          )}
+          {needsReview ? <Tag color="gold">待复核</Tag> : <Tag color="green">已确认</Tag>}
         </Descriptions.Item>
       </Descriptions>
 
@@ -137,10 +127,7 @@ function DecisionEvidencePanel({ obj }: { obj: ObjectTypeDetail }) {
         <div style={{ marginBottom: 12 }}>
           <Text type="secondary">综合得分 </Text>
           <Text strong>{evidence.score.toFixed(1)}</Text>
-          <Text type="secondary">
-            {" "}
-            （≥ {ROLE_SCORE_THRESHOLD.toFixed(1)} 判为业务对象）
-          </Text>
+          <Text type="secondary"> （≥ {ROLE_SCORE_THRESHOLD.toFixed(1)} 判为业务对象）</Text>
         </div>
       )}
 
@@ -158,9 +145,7 @@ function DecisionEvidencePanel({ obj }: { obj: ObjectTypeDetail }) {
       {clauses.length > 0 && (
         <div style={{ marginTop: hasSignals ? 14 : 0 }}>
           <Text type="secondary">判定说明</Text>
-          <ul
-            style={{ margin: "4px 0 0", paddingInlineStart: 18, lineHeight: 1.8 }}
-          >
+          <ul style={{ margin: "4px 0 0", paddingInlineStart: 18, lineHeight: 1.8 }}>
             {clauses.map((c, i) => (
               <li key={i}>{c}</li>
             ))}
@@ -169,9 +154,7 @@ function DecisionEvidencePanel({ obj }: { obj: ObjectTypeDetail }) {
       )}
 
       {!hasSignals && clauses.length === 0 && (
-        <Text type="secondary">
-          暂无判定证据（下次重新生成后可见结构化信号）。
-        </Text>
+        <Text type="secondary">暂无判定证据（下次重新生成后可见结构化信号）。</Text>
       )}
     </>
   );
@@ -261,7 +244,8 @@ export function ObjectTypeDetailPage() {
   const inWorkspace = Boolean(domainId);
 
   const watchedStructureType = Form.useWatch("structure_type", relationForm) as string | undefined;
-  const needsMappingTable = watchedStructureType === "bridge_table" || watchedStructureType === "fact_table";
+  const needsMappingTable =
+    watchedStructureType === "bridge_table" || watchedStructureType === "fact_table";
 
   const loadObject = async () => {
     if (!objectId) return;
@@ -291,9 +275,7 @@ export function ObjectTypeDetailPage() {
           setDatahubBase(extractDataHubBase(domain.datahub_url));
         } else {
           const config = await api.getConfig();
-          setDatahubBase(
-            config.datahub_frontend_url ?? config.datahub_gms_url,
-          );
+          setDatahubBase(config.datahub_frontend_url ?? config.datahub_gms_url);
         }
         if (detail?.ontology_id) {
           try {
@@ -379,7 +361,8 @@ export function ObjectTypeDetailPage() {
   const searchDatasets = useDebouncedCallback((keyword: string) => {
     if (!obj?.ontology_id) return;
     setDatasetSearching(true);
-    api.searchDatahubDatasets({ query: keyword, ontologyId: obj.ontology_id })
+    api
+      .searchDatahubDatasets({ query: keyword, ontologyId: obj.ontology_id })
       .then(setDatasetOptions)
       .catch((err) => message.error(err instanceof Error ? err.message : "搜索 DataHub 表失败"))
       .finally(() => setDatasetSearching(false));
@@ -407,7 +390,11 @@ export function ObjectTypeDetailPage() {
           setDatasetOptions((prev) =>
             prev.map((item) =>
               item.urn === option.urn
-                ? { ...item, object_type_id: newObj.id, object_type_display_name: newObj.display_name }
+                ? {
+                    ...item,
+                    object_type_id: newObj.id,
+                    object_type_display_name: newObj.display_name,
+                  }
                 : item,
             ),
           );
@@ -442,8 +429,7 @@ export function ObjectTypeDetailPage() {
       description: rel.description,
       cardinality: normalizeCardinality(rel.cardinality),
       structure_type:
-        rel.structure_type ||
-        inferRelationStructureType(rel.description, rel.source_evidence),
+        rel.structure_type || inferRelationStructureType(rel.description, rel.source_evidence),
       source_object_type_id: rel.source_object_type_id,
       target_object_type_id: rel.target_object_type_id,
       mapping_object_type_id: rel.mapping_object_type_id ?? undefined,
@@ -653,15 +639,12 @@ export function ObjectTypeDetailPage() {
     );
   }
 
-  const canPrePublish =
-    obj.status !== "pre_published" && obj.status !== "published";
+  const canPrePublish = obj.status !== "pre_published" && obj.status !== "published";
   // 关系表(bridge)实现(mapping)的业务关系并入计数/列表/图谱：桥表本身非端点，
   // 这些才是它连接的业务对象（供应商→科目 等），否则其关系列表/图谱恒为空。
   const implementedRelations = obj.implemented_relations ?? [];
   const relationCount =
-    obj.outgoing_relations.length +
-    obj.incoming_relations.length +
-    implementedRelations.length;
+    obj.outgoing_relations.length + obj.incoming_relations.length + implementedRelations.length;
 
   const relationColumns: ColumnsType<RelationType> = [
     {
@@ -669,12 +652,10 @@ export function ObjectTypeDetailPage() {
       key: "source",
       width: 160,
       render: (_, record) => {
-        const path = objectDetailPath?.(record.source_object_type_id) ?? `/ontology/${record.source_object_type_id}`;
-        return (
-          <Link to={path}>
-            {record.source_object_name || record.source_object_type_id}
-          </Link>
-        );
+        const path =
+          objectDetailPath?.(record.source_object_type_id) ??
+          `/ontology/${record.source_object_type_id}`;
+        return <Link to={path}>{record.source_object_name || record.source_object_type_id}</Link>;
       },
     },
     {
@@ -682,21 +663,17 @@ export function ObjectTypeDetailPage() {
       dataIndex: "display_name",
       key: "display_name",
       width: 120,
-      render: (_, record) => (
-        <Link to={relationDetailPath(record.id)}>{record.display_name}</Link>
-      ),
+      render: (_, record) => <Link to={relationDetailPath(record.id)}>{record.display_name}</Link>,
     },
     {
       title: "目标表",
       key: "target",
       width: 160,
       render: (_, record) => {
-        const path = objectDetailPath?.(record.target_object_type_id) ?? `/ontology/${record.target_object_type_id}`;
-        return (
-          <Link to={path}>
-            {record.target_object_name || record.target_object_type_id}
-          </Link>
-        );
+        const path =
+          objectDetailPath?.(record.target_object_type_id) ??
+          `/ontology/${record.target_object_type_id}`;
+        return <Link to={path}>{record.target_object_name || record.target_object_type_id}</Link>;
       },
     },
     {
@@ -751,9 +728,7 @@ export function ObjectTypeDetailPage() {
       title: "逻辑名称",
       dataIndex: "display_name",
       key: "display_name",
-      render: (_, record) => (
-        <Link to={`/business-logic/${record.id}`}>{record.display_name}</Link>
-      ),
+      render: (_, record) => <Link to={`/business-logic/${record.id}`}>{record.display_name}</Link>,
     },
     {
       title: "类型",
@@ -825,508 +800,515 @@ export function ObjectTypeDetailPage() {
   return (
     <PageContainer full>
       <div className="om-stack">
-      <PageHeader
-        icon={<ApartmentOutlined />}
-        title={obj.display_name}
-        description={inWorkspace ? "编辑对象类型" : obj.description || "暂无描述"}
-        extra={
-          <Space>
-            <StatusBadge status={obj.status} />
-            <ProvenanceBadge provenance={obj} />
-            {obj.table_role === "business_object" && (
-              <Tooltip title="把该业务对象物化到目标存储（建表落数，需 publisher 角色）">
-                <Button
-                  icon={<DatabaseOutlined />}
-                  onClick={() => setMaterializeOpen(true)}
-                >
-                  物化
-                </Button>
-              </Tooltip>
-            )}
-            {inWorkspace ? (
-              <EntityEditToolbar
-                saving={saving}
-                prePublishing={prePublishing}
-                canPrePublish={canPrePublish}
-                onSave={handleSave}
-                onPrePublish={handlePrePublish}
-              />
-            ) : obj.domain_context_id ? (
-              <Link to={`/workspace/${obj.domain_context_id}/objects/${obj.id}`}>
-                <Button>前往工作区编辑</Button>
-              </Link>
-            ) : null}
-          </Space>
-        }
-      />
-
-      {obj.table_role === "business_object" && obj.ontology_id && (
-        <MaterializeModal
-          open={materializeOpen}
-          onClose={() => setMaterializeOpen(false)}
-          ontologyId={obj.ontology_id}
-          // 单实体物化：以该对象自身的发布状态给出草稿警示，
-          // 不能用 inWorkspace 一刀切当草稿——工作区里的对象也可能已发布。
-          ontologyStatus={obj.status}
-          scopeTargetId={obj.id}
-          scopeLabel={obj.display_name}
-        />
-      )}
-
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          onClose={() => setError(null)}
-        />
-      )}
-
-      <section className="section-card">
-        <Tabs
-          className="om-tabs om-tabs--inset"
-          activeKey={activeTab}
-          onChange={setActiveTab}
-          items={[
-            {
-              key: "basic",
-              label: (
-                <span>
-                  <ApartmentOutlined style={{ marginRight: 6 }} />
-                  基本信息
-                </span>
-              ),
-              children: (
-                <>
-                  <div className="om-tab-toolbar">
-                    <DataHubSourceLink
-                      sourceRef={obj.source_ref}
-                      datahubUrl={obj.datahub_url}
-                      datahubBase={datahubBase}
-                    />
-                  </div>
-                  <div className="om-tab-body">
-                  {inWorkspace ? (
-                    <Form form={form} layout="vertical">
-                      <Row gutter={20}>
-                        <Col xs={24} md={8}>
-                          <Form.Item
-                            label="显示名称"
-                            name="display_name"
-                            rules={[{ required: true, message: "请输入显示名称" }]}
-                          >
-                            <Input />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item
-                            label="标识名"
-                            name="name"
-                            rules={[{ required: true, message: "请输入标识名" }]}
-                          >
-                            <Input />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item label="命名置信度">
-                            <Input value={obj.source_confidence?.toFixed(2) ?? "-"} disabled />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-                      <Form.Item label="描述" name="description" style={{ marginBottom: 16 }}>
-                        <Input.TextArea rows={2} />
-                      </Form.Item>
-                      <Row gutter={20}>
-                        <Col xs={24} md={8}>
-                          <Form.Item label="对象类型" name="table_role">
-                            <Select
-                              options={ROLE_OPTIONS}
-                              onChange={() => form.setFieldValue("needs_review", false)}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item
-                            label="复核状态"
-                            name="needs_review"
-                            extra="改判对象类型后将自动置为已确认"
-                            style={{ marginBottom: 0 }}
-                          >
-                            <Select
-                              options={[
-                                { label: "已确认", value: false },
-                                { label: "待复核", value: true },
-                              ]}
-                            />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-                    </Form>
-                  ) : (
-                    <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
-                      <Descriptions.Item label="数据域">
-                        {obj.domain_name || "-"}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
-                      <Descriptions.Item label="命名置信度">
-                        {obj.source_confidence?.toFixed(2) ?? "-"}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="描述" span={4}>
-                        {obj.description || "暂无描述"}
-                      </Descriptions.Item>
-                    </Descriptions>
-                  )}
-                  </div>
-                </>
-              ),
-            },
-            ...(inWorkspace || obj.role_reason || obj.role_signals
-              ? [
-                  {
-                    key: "evidence",
-                    label: (
-                      <span>
-                        <AuditOutlined style={{ marginRight: 6 }} />
-                        判定依据
-                      </span>
-                    ),
-                    children: (
-                      <>
-                        {inWorkspace && canPrePublish && (
-                          <div className="om-tab-toolbar">
-                            <Button icon={<ShareAltOutlined />} onClick={openConvertModal}>
-                              转为业务关系
-                            </Button>
-                          </div>
-                        )}
-                        <div className="om-tab-body">
-                          <DecisionEvidencePanel obj={obj} />
-                        </div>
-                      </>
-                    ),
-                  },
-                ]
-              : []),
-            {
-              key: "properties",
-              label: (
-                <span>
-                  <AppstoreOutlined style={{ marginRight: 6 }} />
-                  属性{properties.length > 0 ? ` (${properties.length})` : ""}
-                </span>
-              ),
-              children: (
-                <Table
-                  className="om-table"
-                  rowKey="id"
-                  size="small"
-                  columns={inWorkspace ? editablePropertyColumns : readOnlyPropertyColumns}
-                  dataSource={properties}
-                  pagination={false}
+        <PageHeader
+          icon={<ApartmentOutlined />}
+          title={obj.display_name}
+          description={inWorkspace ? "编辑对象类型" : obj.description || "暂无描述"}
+          extra={
+            <Space>
+              <StatusBadge status={obj.status} />
+              <ProvenanceBadge provenance={obj} />
+              {obj.table_role === "business_object" && (
+                <Tooltip title="把该业务对象物化到目标存储（建表落数，需 publisher 角色）">
+                  <Button icon={<DatabaseOutlined />} onClick={() => setMaterializeOpen(true)}>
+                    物化
+                  </Button>
+                </Tooltip>
+              )}
+              {inWorkspace ? (
+                <EntityEditToolbar
+                  saving={saving}
+                  prePublishing={prePublishing}
+                  canPrePublish={canPrePublish}
+                  onSave={handleSave}
+                  onPrePublish={handlePrePublish}
                 />
-              ),
-            },
-            {
-              key: "relations",
-              label: (
-                <span>
-                  <ShareAltOutlined style={{ marginRight: 6 }} />
-                  关系列表{relationCount > 0 ? ` (${relationCount})` : ""}
-                </span>
-              ),
-              children: (
-                <>
-                  {inWorkspace && (
+              ) : obj.domain_context_id ? (
+                <Link to={`/workspace/${obj.domain_context_id}/objects/${obj.id}`}>
+                  <Button>前往工作区编辑</Button>
+                </Link>
+              ) : null}
+            </Space>
+          }
+        />
+
+        {obj.table_role === "business_object" && obj.ontology_id && (
+          <MaterializeModal
+            open={materializeOpen}
+            onClose={() => setMaterializeOpen(false)}
+            ontologyId={obj.ontology_id}
+            // 单实体物化：以该对象自身的发布状态给出草稿警示，
+            // 不能用 inWorkspace 一刀切当草稿——工作区里的对象也可能已发布。
+            ontologyStatus={obj.status}
+            scopeTargetId={obj.id}
+            scopeLabel={obj.display_name}
+          />
+        )}
+
+        {error && (
+          <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />
+        )}
+
+        <section className="section-card">
+          <Tabs
+            className="om-tabs om-tabs--inset"
+            activeKey={activeTab}
+            onChange={setActiveTab}
+            items={[
+              {
+                key: "basic",
+                label: (
+                  <span>
+                    <ApartmentOutlined style={{ marginRight: 6 }} />
+                    基本信息
+                  </span>
+                ),
+                children: (
+                  <>
                     <div className="om-tab-toolbar">
-                      <Button type="primary" icon={<PlusOutlined />} onClick={openAddRelationModal}>
-                        新增关系
-                      </Button>
+                      <DataHubSourceLink
+                        sourceRef={obj.source_ref}
+                        datahubUrl={obj.datahub_url}
+                        datahubBase={datahubBase}
+                      />
                     </div>
-                  )}
-                  <div className="om-tab-body">
-                  {relationCount === 0 ? (
-                    <EmptyState title="暂无关系" description={inWorkspace ? "点击「新增关系」按钮创建关系" : "该对象尚未建立与其他对象的关系。"} />
+                    <div className="om-tab-body">
+                      {inWorkspace ? (
+                        <Form form={form} layout="vertical">
+                          <Row gutter={20}>
+                            <Col xs={24} md={8}>
+                              <Form.Item
+                                label="显示名称"
+                                name="display_name"
+                                rules={[{ required: true, message: "请输入显示名称" }]}
+                              >
+                                <Input />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} md={8}>
+                              <Form.Item
+                                label="标识名"
+                                name="name"
+                                rules={[{ required: true, message: "请输入标识名" }]}
+                              >
+                                <Input />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} md={8}>
+                              <Form.Item label="命名置信度">
+                                <Input value={obj.source_confidence?.toFixed(2) ?? "-"} disabled />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                          <Form.Item label="描述" name="description" style={{ marginBottom: 16 }}>
+                            <Input.TextArea rows={2} />
+                          </Form.Item>
+                          <Row gutter={20}>
+                            <Col xs={24} md={8}>
+                              <Form.Item label="对象类型" name="table_role">
+                                <Select
+                                  options={ROLE_OPTIONS}
+                                  onChange={() => form.setFieldValue("needs_review", false)}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} md={8}>
+                              <Form.Item
+                                label="复核状态"
+                                name="needs_review"
+                                extra="改判对象类型后将自动置为已确认"
+                                style={{ marginBottom: 0 }}
+                              >
+                                <Select
+                                  options={[
+                                    { label: "已确认", value: false },
+                                    { label: "待复核", value: true },
+                                  ]}
+                                />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        </Form>
+                      ) : (
+                        <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+                          <Descriptions.Item label="数据域">
+                            {obj.domain_name || "-"}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
+                          <Descriptions.Item label="命名置信度">
+                            {obj.source_confidence?.toFixed(2) ?? "-"}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="描述" span={4}>
+                            {obj.description || "暂无描述"}
+                          </Descriptions.Item>
+                        </Descriptions>
+                      )}
+                    </div>
+                  </>
+                ),
+              },
+              ...(inWorkspace || obj.role_reason || obj.role_signals
+                ? [
+                    {
+                      key: "evidence",
+                      label: (
+                        <span>
+                          <AuditOutlined style={{ marginRight: 6 }} />
+                          判定依据
+                        </span>
+                      ),
+                      children: (
+                        <>
+                          {inWorkspace && canPrePublish && (
+                            <div className="om-tab-toolbar">
+                              <Button icon={<ShareAltOutlined />} onClick={openConvertModal}>
+                                转为业务关系
+                              </Button>
+                            </div>
+                          )}
+                          <div className="om-tab-body">
+                            <DecisionEvidencePanel obj={obj} />
+                          </div>
+                        </>
+                      ),
+                    },
+                  ]
+                : []),
+              {
+                key: "properties",
+                label: (
+                  <span>
+                    <AppstoreOutlined style={{ marginRight: 6 }} />
+                    属性{properties.length > 0 ? ` (${properties.length})` : ""}
+                  </span>
+                ),
+                children: (
+                  <Table
+                    className="om-table"
+                    rowKey="id"
+                    size="small"
+                    columns={inWorkspace ? editablePropertyColumns : readOnlyPropertyColumns}
+                    dataSource={properties}
+                    pagination={false}
+                  />
+                ),
+              },
+              {
+                key: "relations",
+                label: (
+                  <span>
+                    <ShareAltOutlined style={{ marginRight: 6 }} />
+                    关系列表{relationCount > 0 ? ` (${relationCount})` : ""}
+                  </span>
+                ),
+                children: (
+                  <>
+                    {inWorkspace && (
+                      <div className="om-tab-toolbar">
+                        <Button
+                          type="primary"
+                          icon={<PlusOutlined />}
+                          onClick={openAddRelationModal}
+                        >
+                          新增关系
+                        </Button>
+                      </div>
+                    )}
+                    <div className="om-tab-body">
+                      {relationCount === 0 ? (
+                        <EmptyState
+                          title="暂无关系"
+                          description={
+                            inWorkspace
+                              ? "点击「新增关系」按钮创建关系"
+                              : "该对象尚未建立与其他对象的关系。"
+                          }
+                        />
+                      ) : (
+                        <Table
+                          className="om-table"
+                          rowKey="id"
+                          size="small"
+                          columns={relationColumns}
+                          dataSource={allRelations}
+                          scroll={{ x: "max-content" }}
+                          pagination={false}
+                        />
+                      )}
+                    </div>
+                  </>
+                ),
+              },
+              {
+                key: "graph",
+                label: (
+                  <span>
+                    <NodeIndexOutlined style={{ marginRight: 6 }} />
+                    关系图谱
+                  </span>
+                ),
+                children:
+                  relationCount === 0 ? (
+                    <EmptyState
+                      title="暂无关系图谱"
+                      description="该对象尚未建立与其他对象的关系。"
+                    />
+                  ) : (
+                    <ObjectRelationGraph
+                      obj={obj}
+                      objectDetailPath={objectDetailPath}
+                      relationDetailPath={relationDetailPath}
+                      height={640}
+                      embedded
+                    />
+                  ),
+              },
+              {
+                key: "logic",
+                label: (
+                  <span>
+                    <FunctionOutlined style={{ marginRight: 6 }} />
+                    业务逻辑
+                    {obj.business_logics.length > 0 ? ` (${obj.business_logics.length})` : ""}
+                  </span>
+                ),
+                children:
+                  obj.business_logics.length === 0 ? (
+                    <EmptyState title="暂无关联业务逻辑" />
                   ) : (
                     <Table
                       className="om-table"
                       rowKey="id"
                       size="small"
-                      columns={relationColumns}
-                      dataSource={allRelations}
-                      scroll={{ x: "max-content" }}
+                      columns={logicColumns}
+                      dataSource={obj.business_logics}
                       pagination={false}
                     />
-                  )}
-                  </div>
-                </>
-              ),
-            },
-            {
-              key: "graph",
-              label: (
-                <span>
-                  <NodeIndexOutlined style={{ marginRight: 6 }} />
-                  关系图谱
-                </span>
-              ),
-              children: (
-                relationCount === 0 ? (
-                  <EmptyState title="暂无关系图谱" description="该对象尚未建立与其他对象的关系。" />
-                ) : (
-                  <ObjectRelationGraph
-                    obj={obj}
-                    objectDetailPath={objectDetailPath}
-                    relationDetailPath={relationDetailPath}
-                    height={640}
-                    embedded
-                  />
-                )
-              ),
-            },
-            {
-              key: "logic",
-              label: (
-                <span>
-                  <FunctionOutlined style={{ marginRight: 6 }} />
-                  业务逻辑{obj.business_logics.length > 0 ? ` (${obj.business_logics.length})` : ""}
-                </span>
-              ),
-              children: (
-                obj.business_logics.length === 0 ? (
-                  <EmptyState title="暂无关联业务逻辑" />
-                ) : (
-                  <Table
-                    className="om-table"
-                    rowKey="id"
-                    size="small"
-                    columns={logicColumns}
-                    dataSource={obj.business_logics}
-                    pagination={false}
-                  />
-                )
-              ),
-            },
-            ...(!inWorkspace && versionRecords.length > 0
-              ? [
-                  {
-                    key: "versions",
-                    label: (
-                      <span>
-                        <HistoryOutlined style={{ marginRight: 6 }} />
-                        版本记录 ({versionRecords.length})
-                      </span>
-                    ),
-                    children: (
-                      <Table
-                        className="om-table"
-                        rowKey="id"
-                        size="small"
-                        columns={versionColumns}
-                        dataSource={versionRecords}
-                        pagination={false}
-                      />
-                    ),
-                  },
-                ]
-              : []),
-          ]}
-        />
-      </section>
+                  ),
+              },
+              ...(!inWorkspace && versionRecords.length > 0
+                ? [
+                    {
+                      key: "versions",
+                      label: (
+                        <span>
+                          <HistoryOutlined style={{ marginRight: 6 }} />
+                          版本记录 ({versionRecords.length})
+                        </span>
+                      ),
+                      children: (
+                        <Table
+                          className="om-table"
+                          rowKey="id"
+                          size="small"
+                          columns={versionColumns}
+                          dataSource={versionRecords}
+                          pagination={false}
+                        />
+                      ),
+                    },
+                  ]
+                : []),
+            ]}
+          />
+        </section>
 
-      <Modal
-        title={editingRelation ? "编辑关系" : "新增关系"}
-        open={relationModalOpen}
-        onOk={handleRelationSave}
-        okText={editingRelation ? "保存" : "创建"}
-        cancelText="取消"
-        confirmLoading={relationSaving}
-        onCancel={() => setRelationModalOpen(false)}
-        width={600}
-        destroyOnClose
-      >
-        <Form form={relationForm} layout="vertical">
-          <Form.Item
-            label="关系语义词"
-            name="display_name"
-            rules={[...RELATION_TERM_RULES]}
-            extra="填写 2-8 字动词或动宾短语，如「属于」「包含」「下单」"
-          >
-            <Input placeholder="如：属于" maxLength={RELATION_TERM_MAX_LENGTH} showCount />
-          </Form.Item>
-          <Form.Item label="语义描述" name="description">
-            <Input.TextArea rows={3} placeholder="描述该关系的业务含义" />
-          </Form.Item>
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                label="源对象"
-                name="source_object_type_id"
-                rules={[{ required: true, message: "请选择源对象" }]}
-              >
-                <Select
-                  options={peerObjects.map((o) => ({ label: o.display_name, value: o.id }))}
-                  placeholder="关系的起点对象"
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                label="目标对象"
-                name="target_object_type_id"
-                rules={[{ required: true, message: "请选择目标对象" }]}
-              >
-                <Select
-                  options={peerObjects.map((o) => ({ label: o.display_name, value: o.id }))}
-                  placeholder="关系的终点对象"
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item
-            label="关系结构类型"
-            name="structure_type"
-            rules={[{ required: true, message: "请选择关系结构类型" }]}
-          >
-            <Select
-              options={RELATION_STRUCTURE_OPTIONS.map((o) => ({ label: o.label, value: o.value }))}
-              placeholder="选择关系结构类型"
-            />
-          </Form.Item>
-          {needsMappingTable && (
+        <Modal
+          title={editingRelation ? "编辑关系" : "新增关系"}
+          open={relationModalOpen}
+          onOk={handleRelationSave}
+          okText={editingRelation ? "保存" : "创建"}
+          cancelText="取消"
+          confirmLoading={relationSaving}
+          onCancel={() => setRelationModalOpen(false)}
+          width={600}
+          destroyOnClose
+        >
+          <Form form={relationForm} layout="vertical">
             <Form.Item
-              label="映射表（承载表）"
-              name="mapping_object_type_id"
-              rules={[{ required: true, message: "请搜索并选择承载该关系的表" }]}
-              extra={
-                watchedStructureType === "bridge_table"
-                  ? "桥表自身作为多对多关系的承载表"
-                  : "事实表承载多个对象之间的关联"
-              }
+              label="关系语义词"
+              name="display_name"
+              rules={[...RELATION_TERM_RULES]}
+              extra="填写 2-8 字动词或动宾短语，如「属于」「包含」「下单」"
             >
-              <MappingDatasetSelect
-                options={datasetOptions}
-                searching={datasetSearching}
-                ensuring={ensuringDataset}
-                onSearch={searchDatasets}
-                onSelectUnmapped={(ds) => void handleDatasetSelect(ds)}
+              <Input placeholder="如：属于" maxLength={RELATION_TERM_MAX_LENGTH} showCount />
+            </Form.Item>
+            <Form.Item label="语义描述" name="description">
+              <Input.TextArea rows={3} placeholder="描述该关系的业务含义" />
+            </Form.Item>
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item
+                  label="源对象"
+                  name="source_object_type_id"
+                  rules={[{ required: true, message: "请选择源对象" }]}
+                >
+                  <Select
+                    options={peerObjects.map((o) => ({ label: o.display_name, value: o.id }))}
+                    placeholder="关系的起点对象"
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item
+                  label="目标对象"
+                  name="target_object_type_id"
+                  rules={[{ required: true, message: "请选择目标对象" }]}
+                >
+                  <Select
+                    options={peerObjects.map((o) => ({ label: o.display_name, value: o.id }))}
+                    placeholder="关系的终点对象"
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item
+              label="关系结构类型"
+              name="structure_type"
+              rules={[{ required: true, message: "请选择关系结构类型" }]}
+            >
+              <Select
+                options={RELATION_STRUCTURE_OPTIONS.map((o) => ({
+                  label: o.label,
+                  value: o.value,
+                }))}
+                placeholder="选择关系结构类型"
               />
             </Form.Item>
-          )}
-          <Form.Item label="基数" name="cardinality">
-            <Select
-              allowClear
-              options={CARDINALITY_OPTIONS.map((o) => ({ label: o.label, value: o.value }))}
-              placeholder="选择关系基数"
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      <Modal
-        title="转为业务关系"
-        open={convertModalOpen}
-        onOk={handleConvert}
-        okText="转换"
-        cancelText="取消"
-        confirmLoading={convertSaving}
-        onCancel={() => setConvertModalOpen(false)}
-        width={600}
-        destroyOnClose
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message="这张表是一次业务事实，不是一个业务对象"
-          description={
-            <>
-              「{obj.display_name}」的每行是一次业务动作/事实（如维修、清算、交易），真正的
-              业务对象是它引用的键。转换后：以本表为<b>实现表</b>在下面两个端点对象间建立一条
-              业务关系，本对象降级为「关系表」离开业务对象集（可逆）。端点若不是业务对象将被
-              自动提升。
-            </>
-          }
-        />
-        {properties.length > 0 && (
-          <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
-            本表字段（供识别端点键）：
-            {properties
-              .slice(0, 12)
-              .map((p) => p.display_name || p.name)
-              .join("、")}
-            {properties.length > 12 ? " …" : ""}
-          </Typography.Paragraph>
-        )}
-        <Form form={convertForm} layout="vertical">
-          <Form.Item
-            label="关系语义词"
-            name="display_name"
-            rules={[...RELATION_TERM_RULES]}
-            extra="读成「源对象 [关系词] 目标对象」，如「维修」「清算」；默认由表名推得"
-          >
-            <Input placeholder="如：维修" maxLength={RELATION_TERM_MAX_LENGTH} showCount />
-          </Form.Item>
-          {endpointSuggestions.length > 0 && (
-            <Form.Item label="建议端点键" extra="据本表列名匹配本体对象推断，点选填入下方端点">
-              <Space size={[6, 6]} wrap>
-                {endpointSuggestions.map((s) => (
-                  <Tag
-                    key={s.object.id}
-                    color="blue"
-                    style={{ cursor: "pointer", marginInlineEnd: 0 }}
-                    onClick={() => applyEndpointSuggestion(s.object.id)}
-                    title={`命中列：${s.matchedColumn}`}
-                  >
-                    {s.object.display_name}
-                  </Tag>
-                ))}
-              </Space>
+            {needsMappingTable && (
+              <Form.Item
+                label="映射表（承载表）"
+                name="mapping_object_type_id"
+                rules={[{ required: true, message: "请搜索并选择承载该关系的表" }]}
+                extra={
+                  watchedStructureType === "bridge_table"
+                    ? "桥表自身作为多对多关系的承载表"
+                    : "事实表承载多个对象之间的关联"
+                }
+              >
+                <MappingDatasetSelect
+                  options={datasetOptions}
+                  searching={datasetSearching}
+                  ensuring={ensuringDataset}
+                  onSearch={searchDatasets}
+                  onSelectUnmapped={(ds) => void handleDatasetSelect(ds)}
+                />
+              </Form.Item>
+            )}
+            <Form.Item label="基数" name="cardinality">
+              <Select
+                allowClear
+                options={CARDINALITY_OPTIONS.map((o) => ({ label: o.label, value: o.value }))}
+                placeholder="选择关系基数"
+              />
             </Form.Item>
+          </Form>
+        </Modal>
+
+        <Modal
+          title="转为业务关系"
+          open={convertModalOpen}
+          onOk={handleConvert}
+          okText="转换"
+          cancelText="取消"
+          confirmLoading={convertSaving}
+          onCancel={() => setConvertModalOpen(false)}
+          width={600}
+          destroyOnClose
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="这张表是一次业务事实，不是一个业务对象"
+            description={
+              <>
+                「{obj.display_name}」的每行是一次业务动作/事实（如维修、清算、交易），真正的
+                业务对象是它引用的键。转换后：以本表为<b>实现表</b>在下面两个端点对象间建立一条
+                业务关系，本对象降级为「关系表」离开业务对象集（可逆）。端点若不是业务对象将被
+                自动提升。
+              </>
+            }
+          />
+          {properties.length > 0 && (
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+              本表字段（供识别端点键）：
+              {properties
+                .slice(0, 12)
+                .map((p) => p.display_name || p.name)
+                .join("、")}
+              {properties.length > 12 ? " …" : ""}
+            </Typography.Paragraph>
           )}
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item
-                label="源端点对象"
-                name="source_object_type_id"
-                rules={[{ required: true, message: "请选择源端点对象" }]}
-                extra="本表引用的一个键，如「设备」"
-              >
-                <Select
-                  showSearch
-                  optionFilterProp="label"
-                  options={endpointOptions}
-                  placeholder="关系的起点对象"
-                  notFoundContent="本体内暂无其它对象可作端点"
-                />
+          <Form form={convertForm} layout="vertical">
+            <Form.Item
+              label="关系语义词"
+              name="display_name"
+              rules={[...RELATION_TERM_RULES]}
+              extra="读成「源对象 [关系词] 目标对象」，如「维修」「清算」；默认由表名推得"
+            >
+              <Input placeholder="如：维修" maxLength={RELATION_TERM_MAX_LENGTH} showCount />
+            </Form.Item>
+            {endpointSuggestions.length > 0 && (
+              <Form.Item label="建议端点键" extra="据本表列名匹配本体对象推断，点选填入下方端点">
+                <Space size={[6, 6]} wrap>
+                  {endpointSuggestions.map((s) => (
+                    <Tag
+                      key={s.object.id}
+                      color="blue"
+                      style={{ cursor: "pointer", marginInlineEnd: 0 }}
+                      onClick={() => applyEndpointSuggestion(s.object.id)}
+                      title={`命中列：${s.matchedColumn}`}
+                    >
+                      {s.object.display_name}
+                    </Tag>
+                  ))}
+                </Space>
               </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                label="目标端点对象"
-                name="target_object_type_id"
-                rules={[{ required: true, message: "请选择目标端点对象" }]}
-                extra="本表引用的另一个键，如「维修工」"
-              >
-                <Select
-                  showSearch
-                  optionFilterProp="label"
-                  options={endpointOptions}
-                  placeholder="关系的终点对象"
-                  notFoundContent="本体内暂无其它对象可作端点"
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item label="关系结构类型" name="structure_type">
-            <Select
-              options={RELATION_STRUCTURE_OPTIONS.filter((o) =>
-                ["fact_table", "bridge_table"].includes(o.value),
-              ).map((o) => ({ label: o.label, value: o.value }))}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
+            )}
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item
+                  label="源端点对象"
+                  name="source_object_type_id"
+                  rules={[{ required: true, message: "请选择源端点对象" }]}
+                  extra="本表引用的一个键，如「设备」"
+                >
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    options={endpointOptions}
+                    placeholder="关系的起点对象"
+                    notFoundContent="本体内暂无其它对象可作端点"
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item
+                  label="目标端点对象"
+                  name="target_object_type_id"
+                  rules={[{ required: true, message: "请选择目标端点对象" }]}
+                  extra="本表引用的另一个键，如「维修工」"
+                >
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    options={endpointOptions}
+                    placeholder="关系的终点对象"
+                    notFoundContent="本体内暂无其它对象可作端点"
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item label="关系结构类型" name="structure_type">
+              <Select
+                options={RELATION_STRUCTURE_OPTIONS.filter((o) =>
+                  ["fact_table", "bridge_table"].includes(o.value),
+                ).map((o) => ({ label: o.label, value: o.value }))}
+              />
+            </Form.Item>
+          </Form>
+        </Modal>
       </div>
     </PageContainer>
   );

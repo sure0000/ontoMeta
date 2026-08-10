@@ -41,7 +41,8 @@ export function buildDetailData(graph: OntologyGraph, centerNodeId?: string): Gr
     } satisfies OntologyNodeDatum,
   }));
 
-  const pairKey = (edge: OntologyGraph["edges"][number]) => [edge.source, edge.target].sort().join("::");
+  const pairKey = (edge: OntologyGraph["edges"][number]) =>
+    [edge.source, edge.target].sort().join("::");
   const groups = new Map<string, OntologyGraph["edges"]>();
   graph.edges.forEach((edge) => {
     const key = pairKey(edge);
@@ -58,7 +59,10 @@ export function buildDetailData(graph: OntologyGraph, centerNodeId?: string): Gr
 
     const reverse = groups
       .get(pairKey(edge))
-      ?.find((other) => other.id !== edge.id && other.source === edge.target && other.target === edge.source);
+      ?.find(
+        (other) =>
+          other.id !== edge.id && other.source === edge.target && other.target === edge.source,
+      );
     if (reverse) consumed.add(reverse.id);
 
     const label = reverse
@@ -111,7 +115,8 @@ export function computeClusterCenters(
   for (const cluster of foldIsolatedIntoCluster(groupedGraph).clusters) {
     centers.set(
       cluster.id,
-      scaled(cluster.layout) ?? (cluster.id === ISOLATED_CLUSTER_ID ? isolatedCenter : { x: 0, y: 0 }),
+      scaled(cluster.layout) ??
+        (cluster.id === ISOLATED_CLUSTER_ID ? isolatedCenter : { x: 0, y: 0 }),
     );
   }
   return centers;
@@ -167,7 +172,8 @@ export function buildOverviewData(
   const centers = computeClusterCenters(groupedGraph);
   const folded = foldIsolatedIntoCluster(groupedGraph);
   const centerOf = (id: string) => centers.get(id) ?? { x: 0, y: 0 };
-  const isOpen = (cluster: GraphCluster) => openClusterIds.has(cluster.id) && cluster.nodes.length > 0;
+  const isOpen = (cluster: GraphCluster) =>
+    openClusterIds.has(cluster.id) && cluster.nodes.length > 0;
 
   const combos: ComboData[] = folded.clusters.map((cluster, index) => {
     const center = centerOf(cluster.id);

@@ -218,9 +218,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
 
 /** 表单里标了 required 的字段——向导提交前据此做真校验（不只是画个星号）。 */
 export function requiredSpecKeys(kind: string, skipKeys?: Set<string>): SpecFieldDef[] {
-  return (SPEC_FIELDS[kind] ?? []).filter(
-    (f) => f.required && !(skipKeys?.has(f.key) ?? false),
-  );
+  return (SPEC_FIELDS[kind] ?? []).filter((f) => f.required && !(skipKeys?.has(f.key) ?? false));
 }
 
 /** metric 走 drafter+context 路径（非 spec 直填），其余 kind 走 spec 直填。 */

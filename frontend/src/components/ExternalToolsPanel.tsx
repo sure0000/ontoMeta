@@ -127,7 +127,9 @@ export function ExternalToolsPanel() {
       render: (_, r) => (
         <Space size={4}>
           <Tag>{r.method}</Tag>
-          <Text type="secondary" style={{ fontSize: 12 }}>{r.url}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {r.url}
+          </Text>
           {r.has_auth && <Tag color="gold">带鉴权</Tag>}
         </Space>
       ),
@@ -135,7 +137,8 @@ export function ExternalToolsPanel() {
     {
       title: "作用域",
       key: "domain",
-      render: (_, r) => (r.domain_id ? <Tag>域 {r.domain_id.slice(0, 8)}</Tag> : <Tag color="blue">全局</Tag>),
+      render: (_, r) =>
+        r.domain_id ? <Tag>域 {r.domain_id.slice(0, 8)}</Tag> : <Tag color="blue">全局</Tag>,
     },
     {
       title: "启用",
@@ -163,7 +166,12 @@ export function ExternalToolsPanel() {
       extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => void load()} />
-          <Button type="primary" icon={<PlusOutlined />} disabled={forbidden} onClick={() => setCreateOpen(true)}>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            disabled={forbidden}
+            onClick={() => setCreateOpen(true)}
+          >
             注册工具
           </Button>
         </Space>
@@ -185,7 +193,14 @@ export function ExternalToolsPanel() {
             description="仅 http(s)；结果封顶；机密（鉴权头）写入后不回显。每个数据域最多注入 8 个。"
           />
         )}
-        <Table rowKey="id" size="small" loading={loading} columns={columns} dataSource={rows} pagination={false} />
+        <Table
+          rowKey="id"
+          size="small"
+          loading={loading}
+          columns={columns}
+          dataSource={rows}
+          pagination={false}
+        />
       </Space>
 
       {createOpen && (
@@ -205,28 +220,49 @@ function ExternalToolForm({
   onCancel: () => void;
 }) {
   return (
-    <div style={{ marginTop: 12, padding: 16, border: "1px solid rgba(0,0,0,0.08)", borderRadius: 8 }}>
-      <Form form={form} layout="vertical" initialValues={{ method: "POST", result_max_chars: 4000 }}>
+    <div
+      style={{ marginTop: 12, padding: 16, border: "1px solid rgba(0,0,0,0.08)", borderRadius: 8 }}
+    >
+      <Form
+        form={form}
+        layout="vertical"
+        initialValues={{ method: "POST", result_max_chars: 4000 }}
+      >
         <Form.Item
           name="name"
           label="工具名（snake_case，不得与原生工具同名）"
-          rules={[{ required: true }, { pattern: /^[a-z][a-z0-9_]{1,63}$/, message: "小写字母开头的 snake_case" }]}
+          rules={[
+            { required: true },
+            { pattern: /^[a-z][a-z0-9_]{1,63}$/, message: "小写字母开头的 snake_case" },
+          ]}
         >
           <Input placeholder="如 dq_check / ticket_create" />
         </Form.Item>
-        <Form.Item name="description" label="描述（模型据此判断何时调用）" rules={[{ required: true }]}>
+        <Form.Item
+          name="description"
+          label="描述（模型据此判断何时调用）"
+          rules={[{ required: true }]}
+        >
           <Input.TextArea rows={2} placeholder="如：对给定表运行数据质量检查，返回评分与问题清单" />
         </Form.Item>
         <Space>
           <Form.Item name="method" label="方法">
             <Select style={{ width: 100 }} options={[{ value: "POST" }, { value: "GET" }]} />
           </Form.Item>
-          <Form.Item name="url" label="端点 URL（http/https）" rules={[{ required: true }]} style={{ flex: 1, minWidth: 360 }}>
+          <Form.Item
+            name="url"
+            label="端点 URL（http/https）"
+            rules={[{ required: true }]}
+            style={{ flex: 1, minWidth: 360 }}
+          >
             <Input placeholder="https://internal.example.com/tools/dq-check" />
           </Form.Item>
         </Space>
         <Form.Item name="parameters" label="入参 JSON-Schema（可选）">
-          <Input.TextArea rows={3} placeholder='{"type":"object","properties":{"table":{"type":"string"}}}' />
+          <Input.TextArea
+            rows={3}
+            placeholder='{"type":"object","properties":{"table":{"type":"string"}}}'
+          />
         </Form.Item>
         <Space>
           <Form.Item name="auth_header" label="鉴权头（机密，可选）">
@@ -240,7 +276,9 @@ function ExternalToolForm({
           </Form.Item>
         </Space>
         <Space>
-          <Button type="primary" onClick={onOk}>注册</Button>
+          <Button type="primary" onClick={onOk}>
+            注册
+          </Button>
           <Button onClick={onCancel}>取消</Button>
         </Space>
       </Form>

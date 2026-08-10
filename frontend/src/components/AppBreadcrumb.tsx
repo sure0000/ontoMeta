@@ -33,29 +33,17 @@ async function resolveBreadcrumbs(
     const domainPath = `/workspace/${params.domainId}`;
 
     if (pathname.endsWith("/executions")) {
-      return [
-        ...crumbs,
-        { label: domain.name, path: domainPath },
-        { label: "执行记录" },
-      ];
+      return [...crumbs, { label: domain.name, path: domainPath }, { label: "执行记录" }];
     }
 
     if (params.relationId && pathname.includes("/relations/")) {
       const rel = await api.getRelationType(params.relationId);
-      return [
-        ...crumbs,
-        { label: domain.name, path: domainPath },
-        { label: rel.display_name },
-      ];
+      return [...crumbs, { label: domain.name, path: domainPath }, { label: rel.display_name }];
     }
 
     if (params.objectId && pathname.includes("/objects/")) {
       const obj = await api.getObjectType(params.objectId);
-      return [
-        ...crumbs,
-        { label: domain.name, path: domainPath },
-        { label: obj.display_name },
-      ];
+      return [...crumbs, { label: domain.name, path: domainPath }, { label: obj.display_name }];
     }
 
     return [...crumbs, { label: domain.name }];
@@ -148,17 +136,11 @@ async function resolveBreadcrumbs(
   }
 
   if (pathname === "/external-api/apps" || pathname === "/external-api") {
-    return [
-      { label: "外部API", path: "/external-api/apps" },
-      { label: "应用创建" },
-    ];
+    return [{ label: "外部API", path: "/external-api/apps" }, { label: "应用创建" }];
   }
 
   if (pathname === "/external-api/endpoints") {
-    return [
-      { label: "外部API", path: "/external-api/endpoints" },
-      { label: "MCP接口" },
-    ];
+    return [{ label: "外部API", path: "/external-api/endpoints" }, { label: "MCP接口" }];
   }
 
   if (pathname.startsWith("/external-api/endpoints/")) {
@@ -219,7 +201,14 @@ export function AppBreadcrumb() {
     return () => {
       cancelled = true;
     };
-  }, [location.pathname, location.search, params.domainId, params.objectId, params.logicId, params.relationId]);
+  }, [
+    location.pathname,
+    location.search,
+    params.domainId,
+    params.objectId,
+    params.logicId,
+    params.relationId,
+  ]);
 
   if (loading && items.length === 0) {
     return null;

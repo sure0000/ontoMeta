@@ -137,13 +137,7 @@ export function DataSourceStatusTag({ status }: { status: string }) {
   );
 }
 
-export function DataSourcesModal({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
+export function DataSourcesModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
     <Modal
       title="数据源管理"
@@ -242,9 +236,7 @@ export function DataSourcesPanel() {
         return;
       }
     }
-    const dsn = rawMode
-      ? values.raw_dsn?.trim() || undefined
-      : buildConnDsn(values.kind, values);
+    const dsn = rawMode ? values.raw_dsn?.trim() || undefined : buildConnDsn(values.kind, values);
     if (!editingId && values.kind !== "mock" && !dsn) {
       message.error("请填写连接信息");
       return;
@@ -356,11 +348,7 @@ export function DataSourcesPanel() {
         <Form.Item
           name="password"
           label="密码"
-          extra={
-            editingId && editingPwSet
-              ? "已配置密码，留空则保持原密码不变"
-              : undefined
-          }
+          extra={editingId && editingPwSet ? "已配置密码，留空则保持原密码不变" : undefined}
         >
           <Input.Password
             placeholder={editingId && editingPwSet ? "留空＝不修改密码" : "数据库密码"}

@@ -41,7 +41,9 @@ export function SectionCard({
         </div>
         {extra && <div>{extra}</div>}
       </header>
-      <div className={bodyFlush ? "section-card-body section-card-body--flush" : "section-card-body"}>
+      <div
+        className={bodyFlush ? "section-card-body section-card-body--flush" : "section-card-body"}
+      >
         {children}
       </div>
     </section>

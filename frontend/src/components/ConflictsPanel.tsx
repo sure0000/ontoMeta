@@ -58,7 +58,15 @@ function fmt(v: unknown): string {
 const rowKeyOf = (item: ConflictItem) => `${item.entity_id}:${item.field}`;
 
 /** 展示单个「基线 / 你的值 / 上游值」，超长自动省略并以 Tooltip 显示全文。 */
-function ValueCell({ label, value, variant }: { label: string; value: unknown; variant: "base" | "ours" | "theirs" }) {
+function ValueCell({
+  label,
+  value,
+  variant,
+}: {
+  label: string;
+  value: unknown;
+  variant: "base" | "ours" | "theirs";
+}) {
   const text = fmt(value);
   const inner =
     variant === "ours" ? (
@@ -70,7 +78,14 @@ function ValueCell({ label, value, variant }: { label: string; value: unknown; v
     );
   return (
     <Tooltip title={`${label}：${text}`} placement="topLeft">
-      <div style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <div
+        style={{
+          maxWidth: 180,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
         {inner}
       </div>
     </Tooltip>
@@ -253,7 +268,11 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
         const key = rowKeyOf(it);
         return (
           <Space size={4}>
-            <Button size="small" loading={busy === key} onClick={() => resolve(it, "accept_theirs")}>
+            <Button
+              size="small"
+              loading={busy === key}
+              onClick={() => resolve(it, "accept_theirs")}
+            >
               采纳上游
             </Button>
             <Button
@@ -289,12 +308,7 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
           的独立 Badge 计数条，永不被裁剪、也不遮挡按钮本身。 */}
       <Button icon={<WarningOutlined />} onClick={() => setOpen(true)}>
         字段冲突复核
-        <Badge
-          count={total}
-          overflowCount={999}
-          color="red"
-          style={{ marginInlineStart: 8 }}
-        />
+        <Badge count={total} overflowCount={999} color="red" style={{ marginInlineStart: 8 }} />
       </Button>
 
       <Drawer
@@ -352,7 +366,11 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
         {selectedKeys.length > 0 && (
           <Space style={{ marginBottom: 12 }}>
             <Typography.Text type="secondary">已选 {selectedKeys.length} 项：</Typography.Text>
-            <Button size="small" loading={batchBusy} onClick={() => resolveSelected("accept_theirs")}>
+            <Button
+              size="small"
+              loading={batchBusy}
+              onClick={() => resolveSelected("accept_theirs")}
+            >
               采纳上游
             </Button>
             <Button

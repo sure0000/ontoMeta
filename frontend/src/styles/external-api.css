@@ -1,4 +1,3 @@
-
 /* ---------- External API ---------- */
 
 .api-catalog-list {
@@ -24,7 +23,10 @@
   border-radius: var(--om-radius);
   background: var(--om-surface);
   cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    background 0.15s;
 }
 
 .api-catalog-item:hover {

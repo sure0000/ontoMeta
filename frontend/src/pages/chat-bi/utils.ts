@@ -55,10 +55,7 @@ function caliberHits(
  * 与后端 `answer_to_blocks` 规则一致——改一处记得同步另一处。
  * `content` 用于流式：此时 payload.answer 仍为空，正文取实时流式的 content。
  */
-export function answerToBlocks(
-  payload: ChatBiAnswer | undefined,
-  content?: string,
-): ChatBiBlock[] {
+export function answerToBlocks(payload: ChatBiAnswer | undefined, content?: string): ChatBiBlock[] {
   const blocks: ChatBiBlock[] = [];
   let n = 0;
   const id = () => `b${n++}`;
@@ -117,13 +114,7 @@ export function answerToBlocks(
   return blocks;
 }
 
-export type TimeGroup =
-  | "pinned"
-  | "today"
-  | "yesterday"
-  | "thisWeek"
-  | "thisMonth"
-  | "older";
+export type TimeGroup = "pinned" | "today" | "yesterday" | "thisWeek" | "thisMonth" | "older";
 
 export function getTimeGroup(conv: ChatBiConversation): TimeGroup {
   if (conv.is_pinned) return "pinned";
@@ -173,25 +164,81 @@ export function relativeTime(iso: string): string {
 export const EMPTY_DEPS: unknown[] = [];
 
 const SQL_KEYWORDS = new Set([
-  "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING",
-  "LIMIT", "OFFSET", "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN",
-  "OUTER JOIN", "FULL JOIN", "ON", "AS", "AND", "OR", "NOT",
-  "IN", "NOT IN", "EXISTS", "BETWEEN", "LIKE", "IS NULL", "IS NOT NULL",
-  "DISTINCT", "UNION", "UNION ALL", "INSERT INTO", "VALUES",
-  "UPDATE", "SET", "DELETE", "CASE", "WHEN", "THEN", "ELSE", "END",
-  "WITH", "OVER", "PARTITION BY", "DATE_SUB", "DATE_ADD",
-  "CURDATE", "NOW", "CURRENT_DATE", "CURRENT_TIMESTAMP",
-  "INTERVAL", "DAY", "MONTH", "YEAR",
-  "COUNT", "SUM", "AVG", "MIN", "MAX",
-  "ASC", "DESC", "TRUE", "FALSE", "NULL",
+  "SELECT",
+  "FROM",
+  "WHERE",
+  "GROUP BY",
+  "ORDER BY",
+  "HAVING",
+  "LIMIT",
+  "OFFSET",
+  "JOIN",
+  "LEFT JOIN",
+  "RIGHT JOIN",
+  "INNER JOIN",
+  "OUTER JOIN",
+  "FULL JOIN",
+  "ON",
+  "AS",
+  "AND",
+  "OR",
+  "NOT",
+  "IN",
+  "NOT IN",
+  "EXISTS",
+  "BETWEEN",
+  "LIKE",
+  "IS NULL",
+  "IS NOT NULL",
+  "DISTINCT",
+  "UNION",
+  "UNION ALL",
+  "INSERT INTO",
+  "VALUES",
+  "UPDATE",
+  "SET",
+  "DELETE",
+  "CASE",
+  "WHEN",
+  "THEN",
+  "ELSE",
+  "END",
+  "WITH",
+  "OVER",
+  "PARTITION BY",
+  "DATE_SUB",
+  "DATE_ADD",
+  "CURDATE",
+  "NOW",
+  "CURRENT_DATE",
+  "CURRENT_TIMESTAMP",
+  "INTERVAL",
+  "DAY",
+  "MONTH",
+  "YEAR",
+  "COUNT",
+  "SUM",
+  "AVG",
+  "MIN",
+  "MAX",
+  "ASC",
+  "DESC",
+  "TRUE",
+  "FALSE",
+  "NULL",
 ]);
 
 function isSqlKeyword(token: string): boolean {
   return SQL_KEYWORDS.has(token.toUpperCase());
 }
 
-export function tokenizeSqlLine(line: string): Array<{ text: string; kind: "comment" | "string" | "number" | "punct" | "keyword" | "plain" }> {
-  const tokens: Array<{ text: string; kind: "comment" | "string" | "number" | "punct" | "keyword" | "plain" }> = [];
+export function tokenizeSqlLine(
+  line: string,
+): Array<{ text: string; kind: "comment" | "string" | "number" | "punct" | "keyword" | "plain" }> {
+  const tokens: Array<{
+    text: string;
+    kind: "comment" | "string" | "number" | "punct" | "keyword" | "plain";
+  }> = [];
   const rest = line;
   const tokenRegex =
     /(--[^\n]*|'[^']*'|"[^"]*"|\b\d+(?:\.\d+)?\b|[(),.;]|\b[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:BY|JOIN|ALL|INTO|NOT|NULL))?\b)/g;
@@ -258,11 +305,11 @@ export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
     const prev = blocks[blocks.length - 1];
     if (b.type === "hr") {
       // 相邻 hr 合并；hr 紧跟空行/空行紧跟 hr 也跳过。
-      if (prev && (prev.type === "hr")) return;
+      if (prev && prev.type === "hr") return;
     }
     if (b.type === "line" && b.raw.trim() === "") {
       // 连续空行只保留一条；hr 后不接空行。
-      if (prev && (prev.type === "line" && prev.raw.trim() === "" || prev?.type === "hr")) return;
+      if (prev && ((prev.type === "line" && prev.raw.trim() === "") || prev?.type === "hr")) return;
     }
     blocks.push(b);
   };
@@ -290,11 +337,7 @@ export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
     // GFM 表格：当前行是 | 开头的表头，紧接一行分隔线 |---|---|
-    if (
-      line.trim().startsWith("|") &&
-      i + 1 < lines.length &&
-      isTableSeparator(lines[i + 1])
-    ) {
+    if (line.trim().startsWith("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
       const header = parseTableRow(line);
       i += 2;
       const rows: string[][] = [];
@@ -309,17 +352,28 @@ export function splitMarkdownBlocks(content: string): MarkdownBlock[] {
     i++;
   }
   // 去掉首尾空行块，避免气泡上下出现多余间距。
-  while (blocks.length && blocks[0].type === "line" && (blocks[0] as { raw: string }).raw.trim() === "") {
+  while (
+    blocks.length &&
+    blocks[0].type === "line" &&
+    (blocks[0] as { raw: string }).raw.trim() === ""
+  ) {
     blocks.shift();
   }
-  while (blocks.length && blocks[blocks.length - 1].type === "line" && (blocks[blocks.length - 1] as { raw: string }).raw.trim() === "") {
+  while (
+    blocks.length &&
+    blocks[blocks.length - 1].type === "line" &&
+    (blocks[blocks.length - 1] as { raw: string }).raw.trim() === ""
+  ) {
     blocks.pop();
   }
   return blocks;
 }
 
-export function splitInlineTokens(text: string): Array<{ type: "text" | "bold" | "code" | "link"; value: string; href?: string }> {
-  const parts: Array<{ type: "text" | "bold" | "code" | "link"; value: string; href?: string }> = [];
+export function splitInlineTokens(
+  text: string,
+): Array<{ type: "text" | "bold" | "code" | "link"; value: string; href?: string }> {
+  const parts: Array<{ type: "text" | "bold" | "code" | "link"; value: string; href?: string }> =
+    [];
   const regex = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^\s)]+\))/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;

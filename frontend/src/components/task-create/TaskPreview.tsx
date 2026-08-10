@@ -94,13 +94,9 @@ export function TaskPreview({
 }: Props) {
   const hasEntities = selectedEntities.length > 0;
   // 参数步骤真正渲染过的字段（范围步骤接管的那几个不在这里重复展示）。
-  const configFields = (SPEC_FIELDS[kind] ?? []).filter(
-    (f) => !RANGE_STEP_KEYS.has(f.key),
-  );
+  const configFields = (SPEC_FIELDS[kind] ?? []).filter((f) => !RANGE_STEP_KEYS.has(f.key));
   const shownFields = configFields.filter((f) => filled(specData, f.key));
-  const missingRequired = configFields.filter(
-    (f) => f.required && !filled(specData, f.key),
-  );
+  const missingRequired = configFields.filter((f) => f.required && !filled(specData, f.key));
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -114,9 +110,7 @@ export function TaskPreview({
           type="error"
           showIcon
           message="必填项未填写"
-          description={`请返回「配置参数」补齐：${missingRequired
-            .map((f) => f.label)
-            .join("、")}`}
+          description={`请返回「配置参数」补齐：${missingRequired.map((f) => f.label).join("、")}`}
         />
       ) : (
         <Alert
@@ -135,28 +129,17 @@ export function TaskPreview({
         <Descriptions.Item label="任务名称">
           {taskName.trim() || ontologyName || "（自动生成）"}
         </Descriptions.Item>
-        <Descriptions.Item label="本体">
-          {ontologyName || "未选择"}
-        </Descriptions.Item>
-        <Descriptions.Item label="执行操作">
-          {KIND_ACTION[kind]}
-        </Descriptions.Item>
+        <Descriptions.Item label="本体">{ontologyName || "未选择"}</Descriptions.Item>
+        <Descriptions.Item label="执行操作">{KIND_ACTION[kind]}</Descriptions.Item>
       </Descriptions>
 
       <Divider />
 
-      <Descriptions
-        title={KIND_SECTION[kind] ?? "任务配置"}
-        bordered
-        size="small"
-        column={1}
-      >
+      <Descriptions title={KIND_SECTION[kind] ?? "任务配置"} bordered size="small" column={1}>
         <Descriptions.Item label={ENTITY_LABEL[kind] ?? "作用范围"}>
           {hasEntities ? (
             <Space direction="vertical" size={4}>
-              {kind === "materialize" && (
-                <Text>已选择 {selectedEntities.length} 个实体</Text>
-              )}
+              {kind === "materialize" && <Text>已选择 {selectedEntities.length} 个实体</Text>}
               <div style={{ maxHeight: 120, overflow: "auto" }}>
                 {selectedEntities.map((e) => (
                   <Tag key={e}>{e}</Tag>

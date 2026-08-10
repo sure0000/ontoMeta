@@ -34,7 +34,9 @@ export function ExpressionJsonPreview({
   };
 
   return (
-    <div className={`expression-json-preview${embedded ? " expression-json-preview--embedded" : ""}`}>
+    <div
+      className={`expression-json-preview${embedded ? " expression-json-preview--embedded" : ""}`}
+    >
       {!embedded && (
         <div className="expression-json-preview__head">
           <span className="expression-json-preview__title">
@@ -42,12 +44,7 @@ export function ExpressionJsonPreview({
           </span>
           {json && (
             <Tooltip title={copied ? "已复制" : "复制 JSON"}>
-              <Button
-                size="small"
-                type="text"
-                icon={<CopyOutlined />}
-                onClick={handleCopy}
-              />
+              <Button size="small" type="text" icon={<CopyOutlined />} onClick={handleCopy} />
             </Tooltip>
           )}
         </div>
@@ -56,12 +53,7 @@ export function ExpressionJsonPreview({
         {embedded && json && (
           <div className="expression-json-preview__toolbar">
             <Tooltip title={copied ? "已复制" : "复制 JSON"}>
-              <Button
-                size="small"
-                type="text"
-                icon={<CopyOutlined />}
-                onClick={handleCopy}
-              />
+              <Button size="small" type="text" icon={<CopyOutlined />} onClick={handleCopy} />
             </Tooltip>
           </div>
         )}
@@ -70,7 +62,9 @@ export function ExpressionJsonPreview({
             <Spin size="small" /> <span className="om-muted">LLM 格式化中…</span>
           </div>
         ) : json ? (
-          <pre className="code-block code-block--light code-block--bounded">{JSON.stringify(json, null, 2)}</pre>
+          <pre className="code-block code-block--light code-block--bounded">
+            {JSON.stringify(json, null, 2)}
+          </pre>
         ) : (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}

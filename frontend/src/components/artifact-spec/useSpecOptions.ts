@@ -24,11 +24,8 @@ export function useSpecOptions(
   const [error, setError] = useState(false);
 
   // databases 依赖的字段当前值（仅当来源是 databases 时有意义）
-  const dependsKey =
-    optionSource?.kind === "databases" ? optionSource.dependsOn : undefined;
-  const dependsValue = dependsKey
-    ? (allValues[dependsKey] as string | undefined)
-    : undefined;
+  const dependsKey = optionSource?.kind === "databases" ? optionSource.dependsOn : undefined;
+  const dependsValue = dependsKey ? (allValues[dependsKey] as string | undefined) : undefined;
 
   useEffect(() => {
     if (!optionSource) {

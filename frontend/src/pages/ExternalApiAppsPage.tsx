@@ -112,12 +112,7 @@ function KeyRevealModal({
 }
 
 export function ExternalApiAppsPage() {
-  const {
-    data: appsData,
-    loading,
-    error,
-    reload: load,
-  } = useApi(() => api.listExternalApps(), []);
+  const { data: appsData, loading, error, reload: load } = useApi(() => api.listExternalApps(), []);
   const apps = appsData ?? [];
 
   const { data: scopesBundle } = useApi(() => api.listExternalScopes(), []);
@@ -234,11 +229,7 @@ export function ExternalApiAppsPage() {
       key: "description",
       ellipsis: true,
       render: (desc?: string | null) =>
-        desc ? (
-          <Text type="secondary">{desc}</Text>
-        ) : (
-          <Text type="secondary">—</Text>
-        ),
+        desc ? <Text type="secondary">{desc}</Text> : <Text type="secondary">—</Text>,
     },
     {
       title: "权限 Scope",
@@ -292,9 +283,7 @@ export function ExternalApiAppsPage() {
       dataIndex: "created_at",
       key: "created_at",
       width: 140,
-      render: (v: string) => (
-        <Text type="secondary">{formatDateTime(v) ?? "—"}</Text>
-      ),
+      render: (v: string) => <Text type="secondary">{formatDateTime(v) ?? "—"}</Text>,
     },
     {
       title: "操作",
@@ -303,12 +292,7 @@ export function ExternalApiAppsPage() {
       fixed: "right",
       render: (_, row) => (
         <Space size={0} style={{ whiteSpace: "nowrap" }}>
-          <Button
-            type="link"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => openEdit(row)}
-          >
+          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
             编辑
           </Button>
           <Popconfirm
@@ -374,12 +358,7 @@ export function ExternalApiAppsPage() {
         />
       )}
 
-      <SectionCard
-        title="已接入应用"
-        count={apps.length}
-        icon={<ApiOutlined />}
-        bodyFlush
-      >
+      <SectionCard title="已接入应用" count={apps.length} icon={<ApiOutlined />} bodyFlush>
         {apps.length === 0 ? (
           <EmptyState
             title="暂无外部应用"
@@ -420,11 +399,7 @@ export function ExternalApiAppsPage() {
             <Input placeholder="例如：数据分析平台" maxLength={100} />
           </Form.Item>
           <Form.Item name="description" label="描述">
-            <Input.TextArea
-              placeholder="用途说明（可选）"
-              rows={3}
-              maxLength={500}
-            />
+            <Input.TextArea placeholder="用途说明（可选）" rows={3} maxLength={500} />
           </Form.Item>
           <Form.Item
             name="scopes"

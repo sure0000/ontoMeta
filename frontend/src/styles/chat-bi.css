@@ -1,4 +1,3 @@
-
 /* ============================================================
  * ChatBI · Data Agent — Modern ChatGPT-inspired design
  * ============================================================ */
@@ -25,7 +24,9 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+  transition:
+    width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.2s ease;
 }
 
 .chatbi-sidebar-brand {
@@ -596,7 +597,11 @@
   font-size: 13px;
   color: var(--om-text);
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    transform 0.15s,
+    box-shadow 0.15s;
   line-height: 1.4;
 }
 
@@ -623,8 +628,14 @@
 }
 
 @keyframes chatbi-fade-in {
-  from { opacity: 0; transform: translateY(10px) scale(0.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* 用户消息：右对齐气泡，柔和底色。 */
@@ -707,20 +718,40 @@
   animation: chatbi-dot-bounce 1.4s infinite ease-in-out both;
 }
 
-.chatbi-typing-dots span:nth-child(1) { animation-delay: -0.32s; }
-.chatbi-typing-dots span:nth-child(2) { animation-delay: -0.16s; }
-.chatbi-typing-dots span:nth-child(3) { animation-delay: 0s; }
+.chatbi-typing-dots span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+.chatbi-typing-dots span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+.chatbi-typing-dots span:nth-child(3) {
+  animation-delay: 0s;
+}
 
 @keyframes chatbi-dot-bounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
+  0%,
+  80%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 /* 回答内每个渲染块依次浮入：流式拼装时给出“逐块到位”的节奏感。
    delay 由内联 style 按 index 阶梯给出（见 ChatBubble），这里只定义动画。 */
 @keyframes chatbi-block-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .chatbi-block-in {
   animation: chatbi-block-in 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) both;
@@ -776,8 +807,15 @@
   padding-bottom: 5px;
   border-bottom: 1px solid var(--om-border, #eef2f7);
 }
-.chatbi-md-h3 { font-size: 15px; margin: 10px 0 2px; }
-.chatbi-md-h4 { font-size: 14px; margin: 8px 0 2px; color: var(--om-text-secondary); }
+.chatbi-md-h3 {
+  font-size: 15px;
+  margin: 10px 0 2px;
+}
+.chatbi-md-h4 {
+  font-size: 14px;
+  margin: 8px 0 2px;
+  color: var(--om-text-secondary);
+}
 
 .chatbi-md-listitem {
   display: flex;
@@ -934,7 +972,9 @@
   border: 1px solid var(--om-border-strong);
   border-radius: 14px;
   padding: 6px 6px 6px 16px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
 
 .chatbi-composer-inner:focus-within {
@@ -1464,7 +1504,11 @@
   color: var(--om-text);
   text-decoration: none;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    transform 0.15s,
+    box-shadow 0.15s;
 }
 
 .chatbi-caliber-chip:hover {
@@ -1780,7 +1824,11 @@
 }
 
 /* Data Agent · P2 实时步骤（spinner + 状态图标 + 人话动作） */
-@keyframes chatbi-spin { to { transform: rotate(360deg); } }
+@keyframes chatbi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .chatbi-steps-spin,
 .chatbi-step-spin {
   display: inline-block;
@@ -1851,7 +1899,9 @@
   animation: chatbi-caret-blink 1s steps(2, start) infinite;
 }
 @keyframes chatbi-caret-blink {
-  to { opacity: 0; }
+  to {
+    opacity: 0;
+  }
 }
 
 /* 澄清反问（P4.1）：候选项做成可点击追问，用户一步接上而不必重打一遍 */

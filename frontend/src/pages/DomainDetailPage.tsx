@@ -8,7 +8,18 @@ import {
   HistoryOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Dropdown, Modal, Progress, Space, Spin, Table, Tooltip, message } from "antd";
+import {
+  Alert,
+  Button,
+  Dropdown,
+  Modal,
+  Progress,
+  Space,
+  Spin,
+  Table,
+  Tooltip,
+  message,
+} from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
@@ -142,20 +153,17 @@ export function DomainDetailPage() {
     error: loadError,
     setData: setBundle,
     reload: reloadBundle,
-  } = useApi<DomainBundle>(
-    async () => {
-      if (!domainId) throw new Error("缺少数据域 ID");
-      return fetchDomainBundle(domainId, {
-        objectPage,
-        relationPage,
-        pageSize,
-        q: debouncedQ,
-        roleIn: typeFilter.length ? typeFilter : undefined,
-        needsReview: needsReviewOnly || undefined,
-      });
-    },
-    [domainId, objectPage, relationPage, pageSize, debouncedQ, typeFilter, needsReviewOnly],
-  );
+  } = useApi<DomainBundle>(async () => {
+    if (!domainId) throw new Error("缺少数据域 ID");
+    return fetchDomainBundle(domainId, {
+      objectPage,
+      relationPage,
+      pageSize,
+      q: debouncedQ,
+      roleIn: typeFilter.length ? typeFilter : undefined,
+      needsReview: needsReviewOnly || undefined,
+    });
+  }, [domainId, objectPage, relationPage, pageSize, debouncedQ, typeFilter, needsReviewOnly]);
 
   const domain = bundle?.domain ?? null;
   const objects = bundle?.objects ?? [];
@@ -243,10 +251,7 @@ export function DomainDetailPage() {
             stopPolling(scope);
             setGenerating((prev) => ({ ...prev, [scope]: false }));
 
-            if (
-              (p.status === "succeeded" || p.status === "completed") &&
-              p.ontology_id
-            ) {
+            if ((p.status === "succeeded" || p.status === "completed") && p.ontology_id) {
               const updated = await api.getDomain(domainId!);
               setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
               await loadOntology(p.ontology_id);
@@ -272,10 +277,7 @@ export function DomainDetailPage() {
     [domainId, loadOntology, setBundle, stopPolling],
   );
 
-  useEffect(
-    () => () => GENERATION_SCOPES.forEach((scope) => stopPolling(scope)),
-    [stopPolling],
-  );
+  useEffect(() => () => GENERATION_SCOPES.forEach((scope) => stopPolling(scope)), [stopPolling]);
 
   const handleGenerate = (scope: DraftGenerationScope) => {
     if (!domainId) return;
@@ -296,7 +298,8 @@ export function DomainDetailPage() {
       },
       relations: {
         title: "确认生成业务关系",
-        content: "将根据 DataHub 元数据重新生成业务关系，不影响已有的业务对象；需已先生成业务对象。",
+        content:
+          "将根据 DataHub 元数据重新生成业务关系，不影响已有的业务对象；需已先生成业务对象。",
         run: () => api.generateRelations(domainId),
       },
     };
@@ -362,7 +365,10 @@ export function DomainDetailPage() {
             .catch(() => null);
           if (formal && formal.enforcement === "error" && !formal.ok) {
             const errs = formal.issues.filter((i) => i.severity === "error");
-            const top = errs.slice(0, 3).map((i) => i.message).join("；");
+            const top = errs
+              .slice(0, 3)
+              .map((i) => i.message)
+              .join("；");
             const extra = errs.length > 3 ? ` 等 ${errs.length} 项` : "";
             const msg = `本体未通过形式化校验，无法发布：${top}${extra}`;
             setActionError(msg);
@@ -391,7 +397,10 @@ export function DomainDetailPage() {
           if (issues.length || formalWarnings.length) {
             const parts: string[] = [];
             if (issues.length) {
-              const top = issues.slice(0, 2).map((i) => i.message).join("；");
+              const top = issues
+                .slice(0, 2)
+                .map((i) => i.message)
+                .join("；");
               parts.push(
                 `${issues.length} 处待复核/冲突保持原状：${top}${issues.length > 2 ? " 等" : ""}`,
               );
@@ -449,8 +458,7 @@ export function DomainDetailPage() {
     );
   }
 
-  const objectDetailPath = (objectId: string) =>
-    `/workspace/${domainId}/objects/${objectId}`;
+  const objectDetailPath = (objectId: string) => `/workspace/${domainId}/objects/${objectId}`;
   const relationDetailPath = (relationId: string) =>
     `/workspace/${domainId}/relations/${relationId}`;
   const relationGroupDetailPath = (displayName: string) =>
@@ -545,8 +553,7 @@ export function DomainDetailPage() {
               <ConflictsPanel
                 ontologyId={domain.latest_ontology_id}
                 onChanged={() =>
-                  domain.latest_ontology_id &&
-                  void loadOntology(domain.latest_ontology_id)
+                  domain.latest_ontology_id && void loadOntology(domain.latest_ontology_id)
                 }
               />
             )}
@@ -583,9 +590,7 @@ export function DomainDetailPage() {
                 borderRadius: 8,
               }}
             >
-              <div style={{ marginBottom: 4, fontWeight: 500 }}>
-                {SCOPE_LABEL[scope]}生成中
-              </div>
+              <div style={{ marginBottom: 4, fontWeight: 500 }}>{SCOPE_LABEL[scope]}生成中</div>
               <Progress
                 percent={progress.progress}
                 status={progress.status === "failed" ? "exception" : "active"}
@@ -630,43 +635,43 @@ export function DomainDetailPage() {
         ) : (
           <>
             <OntologyWorkspaceView
-            objects={objects}
-            relations={relations}
-            objectDetailPath={objectDetailPath}
-            relationDetailPath={relationDetailPath}
-            relationScope={{ ontologyId: domain.latest_ontology_id ?? undefined }}
-            relationGroupDetailPath={relationGroupDetailPath}
-            workspaceMode
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            objectTypeFilter={typeFilter}
-            onObjectTypeFilterChange={setTypeFilter}
-            needsReviewOnly={needsReviewOnly}
-            onNeedsReviewOnlyChange={setNeedsReviewOnly}
-            onBatchUpdateObjects={async (ids, patch) => {
-              const res = await api.batchUpdateObjectTypes({ ids, ...patch });
-              message.success(`已更新 ${res.updated} 个对象`);
-              reloadBundle();
-            }}
-            objectPaging={{
-              total: objectTotal,
-              page: objectPage,
-              pageSize,
-              onChange: (page, size) => {
-                setObjectPage(page);
-                setPageSize(size);
-              },
-            }}
-            relationPaging={{
-              total: relationTotal,
-              page: relationPage,
-              pageSize,
-              onChange: (page, size) => {
-                setRelationPage(page);
-                setPageSize(size);
-              },
-            }}
-          />
+              objects={objects}
+              relations={relations}
+              objectDetailPath={objectDetailPath}
+              relationDetailPath={relationDetailPath}
+              relationScope={{ ontologyId: domain.latest_ontology_id ?? undefined }}
+              relationGroupDetailPath={relationGroupDetailPath}
+              workspaceMode
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              objectTypeFilter={typeFilter}
+              onObjectTypeFilterChange={setTypeFilter}
+              needsReviewOnly={needsReviewOnly}
+              onNeedsReviewOnlyChange={setNeedsReviewOnly}
+              onBatchUpdateObjects={async (ids, patch) => {
+                const res = await api.batchUpdateObjectTypes({ ids, ...patch });
+                message.success(`已更新 ${res.updated} 个对象`);
+                reloadBundle();
+              }}
+              objectPaging={{
+                total: objectTotal,
+                page: objectPage,
+                pageSize,
+                onChange: (page, size) => {
+                  setObjectPage(page);
+                  setPageSize(size);
+                },
+              }}
+              relationPaging={{
+                total: relationTotal,
+                page: relationPage,
+                pageSize,
+                onChange: (page, size) => {
+                  setRelationPage(page);
+                  setPageSize(size);
+                },
+              }}
+            />
           </>
         )}
       </Spin>
@@ -723,17 +728,35 @@ export function DomainDetailPage() {
                 message={selectedDiff.diff_summary || `v${selectedDiff.version} 差异`}
                 description={
                   <div style={{ fontSize: 13 }}>
-                    <div>对象 新增 {selectedDiff.object_types.added.length} / 修改 {selectedDiff.object_types.modified.length} / 删除 {selectedDiff.object_types.removed.length}</div>
-                    <div>关系 新增 {selectedDiff.relation_types.added.length} / 修改 {selectedDiff.relation_types.modified.length} / 删除 {selectedDiff.relation_types.removed.length}</div>
-                    <div>逻辑 新增 {selectedDiff.business_logics.added.length} / 修改 {selectedDiff.business_logics.modified.length} / 删除 {selectedDiff.business_logics.removed.length}</div>
+                    <div>
+                      对象 新增 {selectedDiff.object_types.added.length} / 修改{" "}
+                      {selectedDiff.object_types.modified.length} / 删除{" "}
+                      {selectedDiff.object_types.removed.length}
+                    </div>
+                    <div>
+                      关系 新增 {selectedDiff.relation_types.added.length} / 修改{" "}
+                      {selectedDiff.relation_types.modified.length} / 删除{" "}
+                      {selectedDiff.relation_types.removed.length}
+                    </div>
+                    <div>
+                      逻辑 新增 {selectedDiff.business_logics.added.length} / 修改{" "}
+                      {selectedDiff.business_logics.modified.length} / 删除{" "}
+                      {selectedDiff.business_logics.removed.length}
+                    </div>
                     {selectedDiff.object_types.added.length > 0 && (
                       <div style={{ marginTop: 8 }}>
-                        新增对象：{selectedDiff.object_types.added.map((i) => i.display_name || i.name).join("、")}
+                        新增对象：
+                        {selectedDiff.object_types.added
+                          .map((i) => i.display_name || i.name)
+                          .join("、")}
                       </div>
                     )}
                     {selectedDiff.relation_types.added.length > 0 && (
                       <div>
-                        新增关系：{selectedDiff.relation_types.added.map((i) => i.display_name || i.name).join("、")}
+                        新增关系：
+                        {selectedDiff.relation_types.added
+                          .map((i) => i.display_name || i.name)
+                          .join("、")}
                       </div>
                     )}
                   </div>

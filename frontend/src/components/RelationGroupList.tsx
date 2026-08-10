@@ -132,11 +132,15 @@ export function RelationGroupList({ scope, query, detailPath, objectDetailPath }
           const inner = (
             <span>
               {o.display_name || o.name}
-              <Tag color="purple" style={{ marginInlineStart: 8 }}>关系表</Tag>
+              <Tag color="purple" style={{ marginInlineStart: 8 }}>
+                关系表
+              </Tag>
             </span>
           );
           return objectDetailPath ? (
-            <Link to={objectDetailPath(o.id)} className="id-link">{inner}</Link>
+            <Link to={objectDetailPath(o.id)} className="id-link">
+              {inner}
+            </Link>
           ) : (
             <span className="id-link">{inner}</span>
           );
@@ -191,7 +195,7 @@ export function RelationGroupList({ scope, query, detailPath, objectDetailPath }
         render: (_, row) =>
           row.kind === "group"
             ? renderConfidence(row.group.confidence_min, row.group.confidence_max)
-            : row.obj.role_confidence?.toFixed(2) ?? <span className="om-muted">-</span>,
+            : (row.obj.role_confidence?.toFixed(2) ?? <span className="om-muted">-</span>),
       },
       {
         title: "复核状态",
@@ -200,7 +204,11 @@ export function RelationGroupList({ scope, query, detailPath, objectDetailPath }
         render: (_, row) => {
           if (row.kind === "bridge") {
             const pending = (row.obj.role_reason || "").includes("待复核");
-            return pending ? <Tag color="orange">待复核</Tag> : <StatusBadge status={row.obj.status} />;
+            return pending ? (
+              <Tag color="orange">待复核</Tag>
+            ) : (
+              <StatusBadge status={row.obj.status} />
+            );
           }
           const st = row.group.statuses;
           if (st.length === 1) return <StatusBadge status={st[0]} />;

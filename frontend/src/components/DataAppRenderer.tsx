@@ -105,9 +105,7 @@ export function KpiRender({ columns, rows }: RenderRows) {
   const key = columns.length ? columns[columns.length - 1].key : null;
   const title = columns.length ? columns[columns.length - 1].title : "指标";
   const value =
-    key && rows.length
-      ? rows.reduce((acc, r) => acc + (Number(r[key] ?? 0) || 0), 0)
-      : 0;
+    key && rows.length ? rows.reduce((acc, r) => acc + (Number(r[key] ?? 0) || 0), 0) : 0;
   return (
     <div style={{ textAlign: "center", padding: "24px 0" }}>
       <div style={{ fontSize: 40, fontWeight: 700, color: "var(--om-primary)" }}>

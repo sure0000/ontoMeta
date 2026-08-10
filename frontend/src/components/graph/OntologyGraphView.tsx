@@ -520,7 +520,12 @@ function OntologyGraphViewInner({
           {!isOverview && layoutButtons}
           {isOverview && (
             <AntTooltip title="适应画布">
-              <Button size="small" type="text" icon={<CompressOutlined />} onClick={handleFitView} />
+              <Button
+                size="small"
+                type="text"
+                icon={<CompressOutlined />}
+                onClick={handleFitView}
+              />
             </AntTooltip>
           )}
           <span className="toolbar-divider" />

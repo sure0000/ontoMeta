@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Button, Card, Empty, Input, Result, Space, Spin, Typography } from "antd";
-import {
-  BarChartRender,
-  DataTableRender,
-  KpiRender,
-} from "../components/DataAppRenderer";
+import { BarChartRender, DataTableRender, KpiRender } from "../components/DataAppRenderer";
 import { DashboardGrid, getSpecPanels } from "../components/DashboardGrid";
 import { ScreenCanvas, panelToScreenWidget } from "../components/ScreenCanvas";
 import type { DataAppColumn } from "../types";
@@ -102,7 +98,11 @@ export function DataAppPublicPage() {
             访问
           </Button>
         </Space.Compact>
-        {error && <Text type="danger" style={{ display: "block", marginTop: 8 }}>{error}</Text>}
+        {error && (
+          <Text type="danger" style={{ display: "block", marginTop: 8 }}>
+            {error}
+          </Text>
+        )}
       </div>
     );
   }

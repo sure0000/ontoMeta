@@ -1,26 +1,6 @@
-import {
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-} from "@ant-design/icons";
-import {
-  Alert,
-  Button,
-  Input,
-  message,
-  Modal,
-  Select,
-  Spin,
-  Tag,
-  Tooltip,
-} from "antd";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { MenuFoldOutlined, MenuUnfoldOutlined } from "@ant-design/icons";
+import { Alert, Button, Input, message, Modal, Select, Spin, Tag, Tooltip } from "antd";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { PageContainer } from "../../components/PageContainer";
@@ -38,12 +18,7 @@ import type {
 import { ChatBiComposer } from "./ChatBiComposer";
 import { ChatBiMessages } from "./ChatBiMessages";
 import { ChatBiSidebar } from "./ChatBiSidebar";
-import {
-  EMPTY_DEPS,
-  getTimeGroup,
-  type ChatMessage,
-  type TimeGroup,
-} from "./utils";
+import { EMPTY_DEPS, getTimeGroup, type ChatMessage, type TimeGroup } from "./utils";
 
 export function ChatBiPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -78,15 +53,12 @@ export function ChatBiPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
 
-  const patchConversation = useCallback(
-    (id: string, patch: Partial<ChatBiConversation>) => {
-      const apply = (list: ChatBiConversation[]) =>
-        list.map((c) => (c.id === id ? { ...c, ...patch } : c));
-      setConversations(apply);
-      setArchivedConversations(apply);
-    },
-    [],
-  );
+  const patchConversation = useCallback((id: string, patch: Partial<ChatBiConversation>) => {
+    const apply = (list: ChatBiConversation[]) =>
+      list.map((c) => (c.id === id ? { ...c, ...patch } : c));
+    setConversations(apply);
+    setArchivedConversations(apply);
+  }, []);
 
   const removeConversationFromLists = useCallback((id: string) => {
     setConversations((prev) => prev.filter((c) => c.id !== id));
@@ -99,9 +71,7 @@ export function ChatBiPage() {
         prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev],
       );
     } else {
-      setConversations((prev) =>
-        prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev],
-      );
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]));
     }
   }, []);
 
@@ -329,11 +299,14 @@ export function ChatBiPage() {
         let failed = 0;
         await Promise.all(
           ids.map((id) =>
-            api.deleteChatBiConversation(id).then(() => {
-              removeConversationFromLists(id);
-            }).catch(() => {
-              failed++;
-            }),
+            api
+              .deleteChatBiConversation(id)
+              .then(() => {
+                removeConversationFromLists(id);
+              })
+              .catch(() => {
+                failed++;
+              }),
           ),
         );
         setBatchDeleting(false);
@@ -352,11 +325,7 @@ export function ChatBiPage() {
   }, [batchSelectedIds, activeConversationId, removeConversationFromLists]);
 
   const openCategoryDialog = useCallback(
-    (
-      mode: "create" | "rename" | "delete",
-      name?: string,
-      moveConv?: ChatBiConversation | null,
-    ) => {
+    (mode: "create" | "rename" | "delete", name?: string, moveConv?: ChatBiConversation | null) => {
       setCatDialogMode(mode);
       setCatDialogName(name || "");
       setCatDialogNewName("");
@@ -389,9 +358,7 @@ export function ChatBiPage() {
           setActiveConversationId(conv.id);
         }
         setCategories((prev) =>
-          prev.some((c) => c.name === name)
-            ? prev
-            : [...prev, { name, conversation_count: 1 }],
+          prev.some((c) => c.name === name) ? prev : [...prev, { name, conversation_count: 1 }],
         );
         setExpandedCategories((prev) => new Set(prev).add(name));
         setCatDialogOpen(false);
@@ -404,15 +371,11 @@ export function ChatBiPage() {
           new_name: newName,
         });
         const renameCategory = (list: ChatBiConversation[]) =>
-          list.map((c) =>
-            c.category === catDialogName ? { ...c, category: newName } : c,
-          );
+          list.map((c) => (c.category === catDialogName ? { ...c, category: newName } : c));
         setConversations(renameCategory);
         setArchivedConversations(renameCategory);
         setCategories((prev) =>
-          prev.map((c) =>
-            c.name === catDialogName ? { ...c, name: newName } : c,
-          ),
+          prev.map((c) => (c.name === catDialogName ? { ...c, name: newName } : c)),
         );
         setExpandedCategories((prev) => {
           const next = new Set(prev);
@@ -430,9 +393,7 @@ export function ChatBiPage() {
           name: catDialogName,
         });
         const clearCategory = (list: ChatBiConversation[]) =>
-          list.map((c) =>
-            c.category === catDialogName ? { ...c, category: null } : c,
-          );
+          list.map((c) => (c.category === catDialogName ? { ...c, category: null } : c));
         setConversations(clearCategory);
         setArchivedConversations(clearCategory);
         setCategories((prev) => prev.filter((c) => c.name !== catDialogName));
@@ -461,19 +422,22 @@ export function ChatBiPage() {
     [openCategoryDialog],
   );
 
-  const handleCreateConvInCategory = useCallback(async (catName: string) => {
-    if (!domainId) return;
-    try {
-      const conv = await api.createChatBiConversation({
-        domain_id: domainId,
-        category: catName,
-      });
-      prependConversation(conv);
-      setActiveConversationId(conv.id);
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "创建对话失败");
-    }
-  }, [domainId, prependConversation]);
+  const handleCreateConvInCategory = useCallback(
+    async (catName: string) => {
+      if (!domainId) return;
+      try {
+        const conv = await api.createChatBiConversation({
+          domain_id: domainId,
+          category: catName,
+        });
+        prependConversation(conv);
+        setActiveConversationId(conv.id);
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "创建对话失败");
+      }
+    },
+    [domainId, prependConversation],
+  );
 
   const handleConversationActivity = useCallback(
     (update: {
@@ -689,9 +653,7 @@ export function ChatBiPage() {
         {catDialogMode === "rename" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div>
-              <span style={{ color: "var(--om-text-tertiary)", fontSize: 12 }}>
-                当前名称
-              </span>
+              <span style={{ color: "var(--om-text-tertiary)", fontSize: 12 }}>当前名称</span>
               <div style={{ fontWeight: 500, marginTop: 4 }}>{catDialogName}</div>
             </div>
             <Input
@@ -704,9 +666,7 @@ export function ChatBiPage() {
           </div>
         )}
         {catDialogMode === "delete" && (
-          <div>
-            确定删除分类「{catDialogName}」吗？分类下的所有对话将被移至「未分类」。
-          </div>
+          <div>确定删除分类「{catDialogName}」吗？分类下的所有对话将被移至「未分类」。</div>
         )}
       </Modal>
     </PageContainer>
@@ -761,8 +721,8 @@ const ChatBiMain = memo(function ChatBiMain({
         appType === "screen"
           ? "正在生成大屏…"
           : appType === "dashboard"
-          ? "正在生成看板…"
-          : "正在生成表格…",
+            ? "正在生成看板…"
+            : "正在生成表格…",
         0,
       );
       try {
@@ -790,7 +750,9 @@ const ChatBiMain = memo(function ChatBiMain({
   const [addDashTarget, setAddDashTarget] = useState<string | undefined>();
   const [addingDash, setAddingDash] = useState(false);
   const [dashboards, setDashboards] = useState<DataAppSummary[]>([]);
-  const [pendingAdd, setPendingAdd] = useState<{ question: string; payload?: ChatBiAnswer } | null>(null);
+  const [pendingAdd, setPendingAdd] = useState<{ question: string; payload?: ChatBiAnswer } | null>(
+    null,
+  );
 
   const openAddToDashboard = useCallback(
     (question: string, payload?: ChatBiAnswer) => {
@@ -844,7 +806,8 @@ const ChatBiMain = memo(function ChatBiMain({
   useEffect(() => {
     if (!domainId) return;
     setLoadingSuggestions(true);
-    api.chatBiSuggestions(domainId)
+    api
+      .chatBiSuggestions(domainId)
       .then((res) => setSuggestions(res.suggestions))
       .catch(() => setSuggestions([]))
       .finally(() => setLoadingSuggestions(false));
@@ -872,22 +835,17 @@ const ChatBiMain = memo(function ChatBiMain({
       try {
         const data = await api.getChatBiMessages(conversationId);
         if (cancelled || loadingConversationRef.current !== conversationId) return;
-        const chatMessages: ChatMessage[] = data.map(
-          (m: ChatBiMessageItem) => ({
-            role: m.role as "user" | "assistant",
-            content: m.content,
-            payload: m.payload
-              ? ({
-                  ...m.payload,
-                  domain_id:
-                    (m.payload.domain_id as string | undefined) || domainId,
-                  domain_name:
-                    (m.payload.domain_name as string | undefined) ||
-                    activeDomain.name,
-                } as ChatBiAnswer)
-              : undefined,
-          }),
-        );
+        const chatMessages: ChatMessage[] = data.map((m: ChatBiMessageItem) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          payload: m.payload
+            ? ({
+                ...m.payload,
+                domain_id: (m.payload.domain_id as string | undefined) || domainId,
+                domain_name: (m.payload.domain_name as string | undefined) || activeDomain.name,
+              } as ChatBiAnswer)
+            : undefined,
+        }));
         setMessages(chatMessages);
       } catch {
         if (!cancelled && loadingConversationRef.current === conversationId) {
@@ -912,9 +870,10 @@ const ChatBiMain = memo(function ChatBiMain({
 
   const activeConversation = useMemo(() => {
     if (!activeConversationId) return null;
-    return [...conversations, ...archivedConversations].find(
-      (c) => c.id === activeConversationId,
-    ) ?? null;
+    return (
+      [...conversations, ...archivedConversations].find((c) => c.id === activeConversationId) ??
+      null
+    );
   }, [activeConversationId, conversations, archivedConversations]);
 
   const submit = useCallback(
@@ -993,9 +952,7 @@ const ChatBiMain = memo(function ChatBiMain({
                   break;
                 case "step_done":
                   payload.steps = (payload.steps ?? []).map((s) =>
-                    s.index === ev.index
-                      ? { ...s, status: ev.status, summary: ev.summary }
-                      : s,
+                    s.index === ev.index ? { ...s, status: ev.status, summary: ev.summary } : s,
                   );
                   cur.payload = payload;
                   break;
@@ -1028,8 +985,7 @@ const ChatBiMain = memo(function ChatBiMain({
                   cur.payload = payload;
                   break;
                 case "token":
-                  cur.content =
-                    (cur.content === "思考中…" ? "" : cur.content) + ev.delta;
+                  cur.content = (cur.content === "思考中…" ? "" : cur.content) + ev.delta;
                   cur.streaming = true;
                   cur.payload = payload;
                   break;
@@ -1078,12 +1034,12 @@ const ChatBiMain = memo(function ChatBiMain({
           />
         </Tooltip>
         {activeConversation && (
-          <div className="chatbi-shell-topbar-title">
-            {activeConversation.title}
-          </div>
+          <div className="chatbi-shell-topbar-title">{activeConversation.title}</div>
         )}
         <div className="chatbi-shell-domain">
-          <Tag color="blue" style={{ borderRadius: 6 }}>{activeDomain.name}</Tag>
+          <Tag color="blue" style={{ borderRadius: 6 }}>
+            {activeDomain.name}
+          </Tag>
         </div>
       </div>
 

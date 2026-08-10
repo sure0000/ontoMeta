@@ -62,12 +62,7 @@
   flex: 1;
   min-height: 0;
   min-width: 0;
-  background: radial-gradient(
-      circle at 1px 1px,
-      #e2e8f0 1px,
-      transparent 0
-    )
-    0 0 / 20px 20px;
+  background: radial-gradient(circle at 1px 1px, #e2e8f0 1px, transparent 0) 0 0 / 20px 20px;
 }
 .ontology-graph-canvas canvas {
   cursor: default;

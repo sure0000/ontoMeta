@@ -54,7 +54,10 @@
   color: var(--om-text-secondary);
   flex-shrink: 0;
   font-size: 15px;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s,
+    background 0.15s;
 }
 .app-logo--collapsed .app-sider-toggle {
   margin-left: 0;
@@ -359,7 +362,10 @@
   display: flex;
   align-items: center;
   gap: 14px;
-  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    transform 0.15s;
 }
 .stat-card:hover {
   border-color: var(--om-border-strong);
@@ -424,7 +430,10 @@
   border-radius: var(--om-radius-md);
   padding: 10px 12px;
   position: relative;
-  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+  transition:
+    border-color 0.18s,
+    box-shadow 0.18s,
+    transform 0.18s;
   color: inherit;
 }
 .entity-card::before {
@@ -882,7 +891,9 @@
   display: none !important;
 }
 .om-table .ant-table-tbody > tr > td {
-  transition: background 0.12s, border-color 0.12s;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
   border-bottom: 1px solid var(--om-border);
 }
 .om-table .ant-table-tbody > tr:hover > td {
@@ -1149,7 +1160,6 @@
 .om-card-link:hover {
   color: inherit;
 }
-
 
 /* ---------- Skeleton ---------- */
 .om-skeleton-card {

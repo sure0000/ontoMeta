@@ -29,10 +29,7 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { SectionCard } from "./SectionCard";
 import { SpecForm } from "./artifact-spec/SpecForm";
-import {
-  CLEANSING_RULES,
-  SPEC_FIELDS,
-} from "./artifact-spec/specFields";
+import { CLEANSING_RULES, SPEC_FIELDS } from "./artifact-spec/specFields";
 import { useSpecOptions } from "./artifact-spec/useSpecOptions";
 import type {
   AgentKinds,
@@ -176,21 +173,15 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
   const [cascadeOptions, setCascadeOptions] = useState<MaterializeCascadeNode[]>([]);
   const [cascadeValue, setCascadeValue] = useState<string[][]>([]);
   // 实体元数据：ontologyId → 实体名 → {自动生成的表名}。用于预览将建的表。
-  const [entityTable, setEntityTable] = useState<
-    Record<string, Record<string, string>>
-  >({});
+  const [entityTable, setEntityTable] = useState<Record<string, Record<string, string>>>({});
   // 目标数据库级联：数据源 → 库（库层懒加载）。value = [datasourceId, database]。
-  const [dbCascadeOptions, setDbCascadeOptions] = useState<MaterializeCascadeNode[]>(
-    [],
-  );
+  const [dbCascadeOptions, setDbCascadeOptions] = useState<MaterializeCascadeNode[]>([]);
   const [dbCascadeValue, setDbCascadeValue] = useState<string[]>([]);
   const [cascadeLoading, setCascadeLoading] = useState(false);
 
   // 非物化 kind 的本体→实体级联（sync/transform/metric）。第 1 层=本体，第 2 层=对象/
   // 业务逻辑（懒加载）。value=[ontologyId, entityValue]，单选。
-  const [entityCascadeOptions, setEntityCascadeOptions] = useState<
-    MaterializeCascadeNode[]
-  >([]);
+  const [entityCascadeOptions, setEntityCascadeOptions] = useState<MaterializeCascadeNode[]>([]);
   const [entityCascadeValue, setEntityCascadeValue] = useState<string[]>([]);
 
   const effectiveKind = kind ?? draftKind;
@@ -426,7 +417,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
       const onts = Array.from(new Set(paths.map((p) => p[0])));
       const nextOnt =
         draftOntologyId && onts.includes(draftOntologyId)
-          ? onts.find((o) => o !== draftOntologyId) ?? draftOntologyId
+          ? (onts.find((o) => o !== draftOntologyId) ?? draftOntologyId)
           : onts[onts.length - 1];
       const kept = paths.filter((p) => p[0] === nextOnt);
       const targets = kept.filter((p) => p.length > 1).map((p) => p[1]);
@@ -446,9 +437,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
       if (!f.required) continue;
       const v = specDraft[f.key];
       const empty =
-        v == null ||
-        (typeof v === "string" && !v.trim()) ||
-        (Array.isArray(v) && v.length === 0);
+        v == null || (typeof v === "string" && !v.trim()) || (Array.isArray(v) && v.length === 0);
       if (empty) return f.label;
     }
     return null;
@@ -476,9 +465,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
     setSubmitting(true);
     try {
       // 名称直接用本体名称（数据域名 + 版本），不再让用户手填。
-      const derivedName = draftOntologyId
-        ? ontologyName(draftOntologyId)
-        : undefined;
+      const derivedName = draftOntologyId ? ontologyName(draftOntologyId) : undefined;
       // 所有类型统一走 context+drafter 派生路径：表单收的是 drafter 输入（对象名/业务
       // 逻辑/目标源），真正落库的 spec（sync 的 source/target、transform 的结构化清洗规则、
       // materialize/transform 的 ontology_id 等）由 drafter 派生补全。此前 sync/transform/
@@ -568,9 +555,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
         const isLive = row.live_state?.live_state && !row.live_state?.terminal;
         return (
           <Space size={4}>
-            <Tag color={STATUS_COLOR[status] ?? "default"}>
-              {STATUS_LABEL[status] ?? status}
-            </Tag>
+            <Tag color={STATUS_COLOR[status] ?? "default"}>{STATUS_LABEL[status] ?? status}</Tag>
             {isLive && <Tag color="blue">运行中</Tag>}
             {row.is_high_risk && <Tag color="volcano">高危</Tag>}
           </Space>
@@ -612,12 +597,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
       extra={
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => void load()} />
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            disabled={forbidden}
-            onClick={openCreate}
-          >
+          <Button type="primary" icon={<PlusOutlined />} disabled={forbidden} onClick={openCreate}>
             新建任务
           </Button>
         </Space>
@@ -674,9 +654,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
                 }
                 // 切到非物化 kind 且本体列表已就绪时，构建实体级联第 1 层
                 if (KIND_ENTITY_CASCADE[v] && ontologies.length) {
-                  setEntityCascadeOptions(
-                    buildOntologyCascadeNodes(ontologies, domains),
-                  );
+                  setEntityCascadeOptions(buildOntologyCascadeNodes(ontologies, domains));
                 }
               }}
               options={(kinds?.all_kinds ?? Object.keys(KIND_LABEL)).map((k) => ({
@@ -718,13 +696,9 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
                 expandTrigger="hover"
                 placeholder="先选本体，再选要绑定的对象/业务逻辑（可搜索）"
                 options={entityCascadeOptions}
-                loadData={(opts) =>
-                  loadEntityCascadeData(opts as MaterializeCascadeNode[])
-                }
+                loadData={(opts) => loadEntityCascadeData(opts as MaterializeCascadeNode[])}
                 value={entityCascadeValue}
-                onChange={(v) =>
-                  onEntityCascadeChange((v as string[]) ?? [])
-                }
+                onChange={(v) => onEntityCascadeChange((v as string[]) ?? [])}
               />
             </div>
           ) : (
@@ -783,9 +757,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
             mode="manual"
             value={specDraft}
             ontologyId={draftOntologyId}
-            onChange={(k, v) =>
-              setSpecDraft((prev) => ({ ...prev, [k]: v }))
-            }
+            onChange={(k, v) => setSpecDraft((prev) => ({ ...prev, [k]: v }))}
             skipKeys={
               KIND_ENTITY_CASCADE[effectiveKind]
                 ? new Set([KIND_ENTITY_CASCADE[effectiveKind].fieldKey])
@@ -1001,14 +973,15 @@ function ExecutionReceiptDetail({
         <div>
           {batches.length <= 1 ? (
             <Space align="center" wrap>
-              <Tag
-                color={STATUS_COLOR[displayState ?? ""] ?? "default"}
-                style={{ margin: 0 }}
-              >
+              <Tag color={STATUS_COLOR[displayState ?? ""] ?? "default"} style={{ margin: 0 }}>
                 {STATUS_LABEL[displayState ?? ""] ?? displayState ?? "—"}
               </Tag>
               {isRunning && <Tag color="processing">运行中</Tag>}
-              {topDagId && <Text code style={{ fontSize: 12 }}>{topDagId}</Text>}
+              {topDagId && (
+                <Text code style={{ fontSize: 12 }}>
+                  {topDagId}
+                </Text>
+              )}
               {displayUrl && (
                 <Button
                   size="small"
@@ -1040,13 +1013,12 @@ function ExecutionReceiptDetail({
                     }}
                   >
                     <Space align="center" wrap>
-                      <Tag
-                        color={STATUS_COLOR[bstate ?? ""] ?? "default"}
-                        style={{ margin: 0 }}
-                      >
+                      <Tag color={STATUS_COLOR[bstate ?? ""] ?? "default"} style={{ margin: 0 }}>
                         {STATUS_LABEL[bstate ?? ""] ?? bstate ?? "—"}
                       </Tag>
-                      <Text code style={{ fontSize: 12 }}>{bid}</Text>
+                      <Text code style={{ fontSize: 12 }}>
+                        {bid}
+                      </Text>
                       {brun && (
                         <Text type="secondary" style={{ fontSize: 11 }}>
                           {brun}
@@ -1101,45 +1073,55 @@ function ExecutionReceiptDetail({
           ghost
           items={[
             ...(tables.length > 0
-              ? [{
-                  key: "tables",
-                  label: `建表 ${tables.length} 张`,
-                  children: (
-                    <Space wrap size={4}>
-                      {tables.map((t) => (
-                        <Tag key={t} style={{ marginBottom: 2 }}>{t}</Tag>
-                      ))}
-                    </Space>
-                  ),
-                }]
+              ? [
+                  {
+                    key: "tables",
+                    label: `建表 ${tables.length} 张`,
+                    children: (
+                      <Space wrap size={4}>
+                        {tables.map((t) => (
+                          <Tag key={t} style={{ marginBottom: 2 }}>
+                            {t}
+                          </Tag>
+                        ))}
+                      </Space>
+                    ),
+                  },
+                ]
               : []),
             ...(jobs.length > 0
-              ? [{
-                  key: "jobs",
-                  label: `搬运作业 ${jobs.length} 个`,
-                  children: (
-                    <Space wrap size={4}>
-                      {jobs.map((j) => (
-                        <Tag key={j} style={{ marginBottom: 2 }}>{j}</Tag>
-                      ))}
-                    </Space>
-                  ),
-                }]
+              ? [
+                  {
+                    key: "jobs",
+                    label: `搬运作业 ${jobs.length} 个`,
+                    children: (
+                      <Space wrap size={4}>
+                        {jobs.map((j) => (
+                          <Tag key={j} style={{ marginBottom: 2 }}>
+                            {j}
+                          </Tag>
+                        ))}
+                      </Space>
+                    ),
+                  },
+                ]
               : []),
             ...(unsupported.length > 0
-              ? [{
-                  key: "unsupported",
-                  label: `未支持 ${unsupported.length} 项`,
-                  children: (
-                    <Space direction="vertical" size={2}>
-                      {unsupported.map((u, i) => (
-                        <Text key={i} type="secondary" style={{ fontSize: 12 }}>
-                          {u.target as string}: {u.reason as string}
-                        </Text>
-                      ))}
-                    </Space>
-                  ),
-                }]
+              ? [
+                  {
+                    key: "unsupported",
+                    label: `未支持 ${unsupported.length} 项`,
+                    children: (
+                      <Space direction="vertical" size={2}>
+                        {unsupported.map((u, i) => (
+                          <Text key={i} type="secondary" style={{ fontSize: 12 }}>
+                            {u.target as string}: {u.reason as string}
+                          </Text>
+                        ))}
+                      </Space>
+                    ),
+                  },
+                ]
               : []),
           ]}
         />
@@ -1155,9 +1137,7 @@ function ExecutionReceiptDetail({
  * 又被默认折叠的「问题列表」挡住——「Airflow 尚未解析到 DAG」明明校验时就查出来了，
  * 人却要等执行失败才看见。故单独提到面板顶部。
  */
-function preflightIssues(
-  issues: AgentValidationIssue[] | undefined,
-): AgentValidationIssue[] {
+function preflightIssues(issues: AgentValidationIssue[] | undefined): AgentValidationIssue[] {
   return (issues ?? []).filter((i) => i.code.startsWith("preflight"));
 }
 
@@ -1170,9 +1150,7 @@ function PreflightAlert({ issues }: { issues: AgentValidationIssue[] }) {
       showIcon
       style={{ marginBottom: 8 }}
       message={
-        blocked
-          ? "提交前自检发现阻断项，执行大概率失败"
-          : "提交前自检有提醒项，执行可能失败"
+        blocked ? "提交前自检发现阻断项，执行大概率失败" : "提交前自检有提醒项，执行可能失败"
       }
       description={
         <Space direction="vertical" size={4} style={{ width: "100%" }}>
@@ -1214,10 +1192,7 @@ export function ArtifactDetail({
   artifact: GovernanceArtifact | null;
   busy: boolean;
   onClose: () => void;
-  onStep: (
-    step: "validate" | "confirm" | "execute",
-    artifact: GovernanceArtifact,
-  ) => void;
+  onStep: (step: "validate" | "confirm" | "execute", artifact: GovernanceArtifact) => void;
   /** 编辑入口：drafted/validated/failed 态可点，交给父组件跳编辑向导。不传则不显示。 */
   onEdit?: (artifact: GovernanceArtifact) => void;
   /** 本体 ID → 展示名（数据域名 + 版本）。不传则退回原始 UUID。 */
@@ -1238,20 +1213,14 @@ export function ArtifactDetail({
       title={
         <Space>
           {KIND_LABEL[artifact.kind] ?? artifact.kind}
-          <Tag color={STATUS_COLOR[status] ?? "default"}>
-            {STATUS_LABEL[status] ?? status}
-          </Tag>
+          <Tag color={STATUS_COLOR[status] ?? "default"}>{STATUS_LABEL[status] ?? status}</Tag>
           {artifact.is_high_risk && <Tag color="volcano">高危</Tag>}
         </Space>
       }
       extra={
         <Space>
           {onEdit && ["drafted", "validated", "failed"].includes(status) && (
-            <Button
-              icon={<EditOutlined />}
-              disabled={busy}
-              onClick={() => onEdit(artifact)}
-            >
+            <Button icon={<EditOutlined />} disabled={busy} onClick={() => onEdit(artifact)}>
               编辑
             </Button>
           )}
@@ -1298,12 +1267,7 @@ export function ArtifactDetail({
                 cancelText="取消"
                 onConfirm={() => onStep("execute", artifact)}
               >
-                <Button
-                  type="primary"
-                  danger
-                  icon={<ThunderboltOutlined />}
-                  loading={busy}
-                >
+                <Button type="primary" danger icon={<ThunderboltOutlined />} loading={busy}>
                   执行
                 </Button>
               </Popconfirm>
@@ -1378,13 +1342,13 @@ export function ArtifactDetail({
                   children: <IssueList issues={report.issues ?? []} />,
                 },
                 ...(report.dry_run
-                  ? [{
-                      key: "dry_run",
-                      label: "执行计划预览",
-                      children: (
-                        <pre style={PRE_STYLE}>{prettyJson(report.dry_run)}</pre>
-                      ),
-                    }]
+                  ? [
+                      {
+                        key: "dry_run",
+                        label: "执行计划预览",
+                        children: <pre style={PRE_STYLE}>{prettyJson(report.dry_run)}</pre>,
+                      },
+                    ]
                   : []),
               ]}
             />
@@ -1403,17 +1367,10 @@ export function ArtifactDetail({
             ) : (
               /* 有 live_state 但还没回执（DAG 已触发但回执未落盘的窗口期） */
               <Space align="center">
-                <Tag
-                  color={
-                    STATUS_COLOR[artifact.live_state!.live_state] ?? "default"
-                  }
-                >
-                  {STATUS_LABEL[artifact.live_state!.live_state] ??
-                    artifact.live_state!.live_state}
+                <Tag color={STATUS_COLOR[artifact.live_state!.live_state] ?? "default"}>
+                  {STATUS_LABEL[artifact.live_state!.live_state] ?? artifact.live_state!.live_state}
                 </Tag>
-                {!artifact.live_state!.terminal && (
-                  <Tag color="processing">运行中</Tag>
-                )}
+                {!artifact.live_state!.terminal && <Tag color="processing">运行中</Tag>}
                 {artifact.live_state!.run_url && (
                   <Button
                     size="small"
@@ -1437,15 +1394,15 @@ export function ArtifactDetail({
             ghost
             items={[
               ...(hasReceipt
-                ? [{
-                    key: "raw_receipt",
-                    label: "原始回执 JSON",
-                    children: (
-                      <pre style={PRE_STYLE}>
-                        {prettyJson(artifact.execution_receipt)}
-                      </pre>
-                    ),
-                  }]
+                ? [
+                    {
+                      key: "raw_receipt",
+                      label: "原始回执 JSON",
+                      children: (
+                        <pre style={PRE_STYLE}>{prettyJson(artifact.execution_receipt)}</pre>
+                      ),
+                    },
+                  ]
                 : []),
             ]}
           />

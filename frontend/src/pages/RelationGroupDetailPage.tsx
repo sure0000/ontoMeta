@@ -204,7 +204,13 @@ export function RelationGroupDetailPage() {
         <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />
       )}
 
-      <SectionCard title="关系三元组" count={total} countPrimary icon={<BranchesOutlined />} bodyFlush>
+      <SectionCard
+        title="关系三元组"
+        count={total}
+        countPrimary
+        icon={<BranchesOutlined />}
+        bodyFlush
+      >
         <Table<RelationType>
           className="om-table"
           rowKey="id"

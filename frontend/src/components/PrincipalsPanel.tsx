@@ -125,11 +125,7 @@ export function PrincipalsPanel() {
       dataIndex: "active",
       key: "active",
       render: (active: boolean, row) => (
-        <Switch
-          size="small"
-          checked={active}
-          onChange={(v) => patch(row.id, { active: v })}
-        />
+        <Switch size="small" checked={active} onChange={(v) => patch(row.id, { active: v })} />
       ),
     },
     {
@@ -144,10 +140,7 @@ export function PrincipalsPanel() {
       key: "actions",
       render: (_, row) => (
         <Space>
-          <Popconfirm
-            title="轮换后旧 Token 立即失效"
-            onConfirm={() => rotate(row.id)}
-          >
+          <Popconfirm title="轮换后旧 Token 立即失效" onConfirm={() => rotate(row.id)}>
             <Button size="small" icon={<ReloadOutlined />}>
               轮换
             </Button>
@@ -198,11 +191,7 @@ export function PrincipalsPanel() {
         okText="创建"
       >
         <Form form={form} layout="vertical" initialValues={{ role: "reader" }}>
-          <Form.Item
-            name="name"
-            label="名称"
-            rules={[{ required: true, message: "请输入名称" }]}
-          >
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="如：数据组-张三 / CI 流水线" />
           </Form.Item>
           <Form.Item name="role" label="角色">
@@ -235,8 +224,7 @@ export function PrincipalsPanel() {
         </Paragraph>
         {issued && (
           <Text type="secondary">
-            主体「{issued.name}」·{" "}
-            <Tag color={ROLE_COLOR[issued.role]}>{issued.role}</Tag>
+            主体「{issued.name}」· <Tag color={ROLE_COLOR[issued.role]}>{issued.role}</Tag>
           </Text>
         )}
       </Modal>

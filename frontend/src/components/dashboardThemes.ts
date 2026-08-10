@@ -93,9 +93,7 @@ export const DASHBOARD_THEME_OPTIONS = Object.entries(DASHBOARD_THEME_PRESETS).m
 );
 
 /** 合并主题预设与用户覆盖项，得到可直接渲染的解析结果。 */
-export function resolveDashboardTheme(
-  theme?: DashboardThemeSpec | null,
-): ResolvedDashboardTheme {
+export function resolveDashboardTheme(theme?: DashboardThemeSpec | null): ResolvedDashboardTheme {
   const presetKey = theme?.preset && DASHBOARD_THEME_PRESETS[theme.preset] ? theme.preset : "light";
   const base = DASHBOARD_THEME_PRESETS[presetKey];
   return {
@@ -112,9 +110,7 @@ export function resolveDashboardTheme(
 }
 
 /** 把解析后的主题转成 CSS 变量对象（作为容器 inline style 下发给面板与图表）。 */
-export function dashboardThemeVars(
-  t: ResolvedDashboardTheme,
-): Record<string, string> {
+export function dashboardThemeVars(t: ResolvedDashboardTheme): Record<string, string> {
   return {
     background: t.bg,
     "--om-primary": t.accent,

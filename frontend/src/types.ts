@@ -726,11 +726,7 @@ export interface ChatBiReference {
   display_name?: string | null;
 }
 
-export type ChatBiCaliberKind =
-  | "object_type"
-  | "property"
-  | "relation_type"
-  | "business_logic";
+export type ChatBiCaliberKind = "object_type" | "property" | "relation_type" | "business_logic";
 
 export interface ChatBiCaliberReference {
   kind: ChatBiCaliberKind;
@@ -1024,7 +1020,8 @@ export interface ChatBiExternalTool {
 }
 
 export type ChatBiStreamEvent =
-  | { type: "meta"; conversation_id: string; conversation_title?: string | null }  | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
+  | { type: "meta"; conversation_id: string; conversation_title?: string | null }
+  | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
   | { type: "step_done"; index: number; status: "succeeded" | "failed"; summary?: string | null }
   | { type: "thought"; index: number; text: string }
   /** 答案未过可靠性校验，正在让模型重写一次（P4.3 自愈回环）。 */
@@ -1316,10 +1313,7 @@ export interface PublicShareStatus {
 // ---- 物化契约（M1）----
 // 本体是一级源数据、物理表是二级投影；契约补齐本体不承载的落地配置。
 
-export type MaterializationTargetKind =
-  | "object_type"
-  | "relation_type"
-  | "business_logic";
+export type MaterializationTargetKind = "object_type" | "relation_type" | "business_logic";
 
 /** 物化任务选择树：某本体下一个可物化实体（业务对象 / 事实·桥表关系）+ 自动表名。 */
 export interface MaterializeTargetEntity {
@@ -1603,12 +1597,7 @@ export interface RolePolicy {
 
 export type ArtifactKind = "sync" | "transform" | "metric";
 export type ArtifactStatus =
-  | "drafted"
-  | "validated"
-  | "confirmed"
-  | "executing"
-  | "succeeded"
-  | "failed";
+  "drafted" | "validated" | "confirmed" | "executing" | "succeeded" | "failed";
 
 export interface AgentValidationIssue {
   code: string;

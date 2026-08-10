@@ -56,11 +56,7 @@ export function MappingDatasetSelect({
           return (
             <Space size={6}>
               <Text strong>{ds.display_name || ds.name}</Text>
-              {ds.object_type_id ? (
-                <Tag color="green">已映射</Tag>
-              ) : (
-                <Tag color="blue">将创建</Tag>
-              )}
+              {ds.object_type_id ? <Tag color="green">已映射</Tag> : <Tag color="blue">将创建</Tag>}
             </Space>
           );
         }
@@ -69,11 +65,7 @@ export function MappingDatasetSelect({
             <Space size={6}>
               <Text strong>{ds.display_name || ds.name}</Text>
               {ds.platform ? <Tag>{ds.platform}</Tag> : null}
-              {ds.object_type_id ? (
-                <Tag color="green">已映射</Tag>
-              ) : (
-                <Tag color="blue">将创建</Tag>
-              )}
+              {ds.object_type_id ? <Tag color="green">已映射</Tag> : <Tag color="blue">将创建</Tag>}
             </Space>
             {ds.description ? (
               <Text type="secondary" style={{ fontSize: 12 }}>

@@ -9,12 +9,7 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { useApi } from "../hooks/useApi";
-import type {
-  DomainContext,
-  DomainContextDetail,
-  ObjectTypeSummary,
-  RelationType,
-} from "../types";
+import type { DomainContext, DomainContextDetail, ObjectTypeSummary, RelationType } from "../types";
 
 const DEFAULT_PAGE_SIZE = 20;
 
@@ -52,76 +47,77 @@ export function OntologyPage() {
     setObjectPage(1);
   }, [roleFilter]);
 
-  const { data: bundle, loading, error } = useApi<OntologyBundle>(
-    async () => {
-      const domains = await api.listDomains();
-      if (domains.length === 0) {
-        return {
-          domains,
-          domain: null,
-          objects: [],
-          objectTotal: 0,
-          relations: [],
-          relationTotal: 0,
-          publishedOntologyId: null,
-        };
-      }
-      const targetDomainId = domainId ?? domains[0]?.id;
-      if (!targetDomainId) {
-        return {
-          domains,
-          domain: null,
-          objects: [],
-          objectTotal: 0,
-          relations: [],
-          relationTotal: 0,
-          publishedOntologyId: null,
-        };
-      }
-      const domain = await api.getDomain(targetDomainId);
-      const ontologyId = domain.published_ontology_id;
-      if (!ontologyId) {
-        return {
-          domains,
-          domain,
-          objects: [],
-          objectTotal: 0,
-          relations: [],
-          relationTotal: 0,
-          publishedOntologyId: null,
-        };
-      }
-      const objectOffset = (objectPage - 1) * pageSize;
-      const relationOffset = (relationPage - 1) * pageSize;
-      const [objectsPage, relationsPage] = await Promise.all([
-        api.listObjectTypes({
-          ontologyId,
-          publishedOnly: true,
-          q: debouncedQ || undefined,
-          roleIn: roleFilter.length ? roleFilter : undefined,
-          limit: pageSize,
-          offset: objectOffset,
-        }),
-        api.listRelationTypes({
-          ontologyId,
-          publishedOnly: true,
-          q: debouncedQ || undefined,
-          limit: pageSize,
-          offset: relationOffset,
-        }),
-      ]);
+  const {
+    data: bundle,
+    loading,
+    error,
+  } = useApi<OntologyBundle>(async () => {
+    const domains = await api.listDomains();
+    if (domains.length === 0) {
+      return {
+        domains,
+        domain: null,
+        objects: [],
+        objectTotal: 0,
+        relations: [],
+        relationTotal: 0,
+        publishedOntologyId: null,
+      };
+    }
+    const targetDomainId = domainId ?? domains[0]?.id;
+    if (!targetDomainId) {
+      return {
+        domains,
+        domain: null,
+        objects: [],
+        objectTotal: 0,
+        relations: [],
+        relationTotal: 0,
+        publishedOntologyId: null,
+      };
+    }
+    const domain = await api.getDomain(targetDomainId);
+    const ontologyId = domain.published_ontology_id;
+    if (!ontologyId) {
       return {
         domains,
         domain,
-        objects: objectsPage.items,
-        objectTotal: objectsPage.total,
-        relations: relationsPage.items,
-        relationTotal: relationsPage.total,
-        publishedOntologyId: ontologyId,
+        objects: [],
+        objectTotal: 0,
+        relations: [],
+        relationTotal: 0,
+        publishedOntologyId: null,
       };
-    },
-    [domainId, objectPage, relationPage, pageSize, debouncedQ, roleFilter],
-  );
+    }
+    const objectOffset = (objectPage - 1) * pageSize;
+    const relationOffset = (relationPage - 1) * pageSize;
+    const [objectsPage, relationsPage] = await Promise.all([
+      api.listObjectTypes({
+        ontologyId,
+        publishedOnly: true,
+        q: debouncedQ || undefined,
+        roleIn: roleFilter.length ? roleFilter : undefined,
+        limit: pageSize,
+        offset: objectOffset,
+      }),
+      api.listRelationTypes({
+        ontologyId,
+        publishedOnly: true,
+        q: debouncedQ || undefined,
+        limit: pageSize,
+        offset: relationOffset,
+      }),
+    ]);
+    return {
+      domains,
+      domain,
+      objects: objectsPage.items,
+      objectTotal: objectsPage.total,
+      relations: relationsPage.items,
+      relationTotal: relationsPage.total,
+      publishedOntologyId: ontologyId,
+    };
+  }, [domainId, objectPage, relationPage, pageSize, debouncedQ, roleFilter]);
 
   const domains = bundle?.domains ?? [];
   const domain = bundle?.domain ?? null;
@@ -157,18 +153,9 @@ export function OntologyPage() {
 
   return (
     <PageContainer full>
-      <PageHeader
-        icon={<ApartmentOutlined />}
-        title={domain?.name ?? "本体浏览"}
-      />
+      <PageHeader icon={<ApartmentOutlined />} title={domain?.name ?? "本体浏览"} />
 
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-        />
-      )}
+      {error && <Alert type="error" message={error} showIcon />}
 
       <Spin spinning={loading}>
         {!publishedOntologyId ? (

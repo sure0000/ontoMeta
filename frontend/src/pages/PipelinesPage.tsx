@@ -47,10 +47,7 @@ function PipelineDrawer({
   };
 
   // 管理页只做只读追踪；校验/确认/执行仍在类型页或对话里发起。此处走一遍步骤后刷新详情。
-  const runStep = async (
-    step: "validate" | "confirm" | "execute",
-    target: GovernanceArtifact,
-  ) => {
+  const runStep = async (step: "validate" | "confirm" | "execute", target: GovernanceArtifact) => {
     setBusy(true);
     try {
       const next =
@@ -108,9 +105,7 @@ function PipelineDrawer({
       title={
         <Space>
           {pipeline.name}
-          <Tag color={PIPELINE_STATUS_COLOR[pipeline.status] ?? "default"}>
-            {pipeline.status}
-          </Tag>
+          <Tag color={PIPELINE_STATUS_COLOR[pipeline.status] ?? "default"}>{pipeline.status}</Tag>
         </Space>
       }
     >

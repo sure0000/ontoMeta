@@ -163,9 +163,7 @@ export function describeSignals(rs?: RoleSignals | null): DecisionEvidence {
     });
   }
   if (has("connected") || has("isolated")) {
-    const connected = has("connected")
-      ? Boolean(s.connected)
-      : !s.isolated;
+    const connected = has("connected") ? Boolean(s.connected) : !s.isolated;
     items.push({
       key: "connected",
       label: "图连通性",

@@ -101,7 +101,8 @@ export function ClusterMatrixView({ detail, onRelationClick }: ClusterMatrixView
     <div>
       <Space size={16} style={{ marginBottom: 8, flexWrap: "wrap" }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          行 = 关系源 · 列 = 关系目标 · 共 {detail.node_count} 个成员、{detail.edges.length} 条簇内关系
+          行 = 关系源 · 列 = 关系目标 · 共 {detail.node_count} 个成员、{detail.edges.length}{" "}
+          条簇内关系
         </Text>
         {typesPresent.map((t) => (
           <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -128,13 +129,7 @@ export function ClusterMatrixView({ detail, onRelationClick }: ClusterMatrixView
       <div style={{ overflow: "auto", maxHeight: "70vh", border: "1px solid var(--om-border)" }}>
         <svg width={width} height={height} style={{ display: "block" }}>
           {/* 网格背景 */}
-          <rect
-            x={labelCol}
-            y={labelRow}
-            width={gridW}
-            height={gridH}
-            fill="var(--om-surface)"
-          />
+          <rect x={labelCol} y={labelRow} width={gridW} height={gridH} fill="var(--om-surface)" />
           {gridLines}
           {/* 对角线（自身），淡色占位，帮助读者定位 */}
           {nodes.map((_, i) => (
