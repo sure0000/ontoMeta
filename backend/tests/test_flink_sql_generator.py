@@ -12,7 +12,9 @@ import pytest
 
 from app.services.flink_sql_generator import (
     FlinkEndpoint,
+    build_identity_select,
     generate_flink_sql,
+    generate_move_sql,
     render_create_table,
 )
 from app.warehouse import LogicalColumn, LogicalTable
@@ -231,6 +233,165 @@ def test_flink_type_falls_back_to_physical_for_foreign_sources():
     assert _flink_type(LogicalColumn("c", "BIGINT(20)"), "mariadb") == "BIGINT"
     assert _flink_type(LogicalColumn("c", "DATETIME(6)"), "mariadb") == "TIMESTAMP(3)"
     assert _flink_type(LogicalColumn("c", "DECIMAL(21, 9)"), "mariadb") == "DECIMAL(38, 18)"
+
+
+# ---------- 搬运（sync/materialize）：恒等投影 ----------
+
+
+def test_identity_select_maps_and_aliases_columns():
+    """搬运的恒等体：每个目标列 = 源列 AS 目标列，FROM 引用源裸表名。"""
+    body = build_identity_select(_source(), _target(), "hive")
+    assert body.startswith("SELECT")
+    assert "`customer_id` AS `customer_id`" in body
+    assert "`customer_name` AS `customer_name`" in body
+    assert body.rstrip().endswith("FROM `customer`")
+
+
+def test_identity_select_casts_on_type_mismatch():
+    """源物理类型与目标引擎类型不同 → 显式 CAST（否则 Flink 提交期拒绝）。"""
+    # 源列 docstatus 物理是 TINYINT(4)（驱动返回 Integer→INT），目标语义 category→STRING
+    source = LogicalTable(
+        name="doc", database="erp_ods", layer="ods",
+        columns=(LogicalColumn("docstatus", "TINYINT(4)", "category"),),
+    )
+    target = LogicalTable(
+        name="dim_doc", database="dim_erp", layer="dim",
+        columns=(LogicalColumn("docstatus", "TINYINT(4)", "category"),),
+    )
+    body = build_identity_select(source, target, "postgres")
+    assert "CAST(`docstatus` AS STRING) AS `docstatus`" in body
+
+
+def test_identity_select_honors_column_map():
+    """目标列名 ≠ 源物理列名时，按 column_map 取源列名。"""
+    source = LogicalTable(
+        name="src_c", database=None, layer="ods",
+        columns=(LogicalColumn("cust_nm", "string", "name"),),
+    )
+    target = LogicalTable(
+        name="dim_customer", database="dim_erp", layer="dim",
+        columns=(LogicalColumn("customer_name", "string", "name"),),
+    )
+    body = build_identity_select(
+        source, target, "hive", column_map={"customer_name": "cust_nm"}
+    )
+    assert "`cust_nm` AS `customer_name`" in body
+
+
+def test_generate_move_sql_full_is_batch_insert():
+    """全量搬运 = batch 模式 + 恒等 INSERT，源/目标都声明，凭据只走占位符。"""
+    sql = generate_move_sql(
+        source_table=_source(),
+        target_table=_target(),
+        source=_hive("erp_readonly"),
+        target=_hive("dw"),
+        target_engine="hive",
+        mode="full",
+    )
+    assert "SET 'execution.runtime-mode' = 'batch';" in sql
+    assert "CREATE TABLE `customer`" in sql
+    assert "CREATE TABLE `dim_customer`" in sql
+    assert "INSERT INTO `dim_customer`" in sql
+    assert "FROM `customer`" in sql
+    assert "${ERP_READONLY_URL}" in sql
+    # 无真实值凭据
+    for value in re.findall(r"'(?:url|username|password)' = '([^']*)'", sql):
+        assert value.startswith("${")
+
+
+def test_generate_move_sql_is_idempotent():
+    kwargs = dict(
+        source_table=_source(), target_table=_target(),
+        source=_hive("erp"), target=_hive("dw"), target_engine="hive", mode="full",
+    )
+    assert generate_move_sql(**kwargs) == generate_move_sql(**kwargs)
+
+
+def _pg(alias: str) -> FlinkEndpoint:
+    return FlinkEndpoint(alias=alias, platform="postgres")
+
+
+def test_generate_move_sql_cdc_is_streaming_with_cdc_connector_and_checkpoint():
+    """CDC 搬运 = streaming + postgres-cdc 源连接器 + checkpoint SET。"""
+    sql = generate_move_sql(
+        source_table=_source(),
+        target_table=_target(),
+        source=_pg("erp_src"),
+        target=_pg("dw"),
+        target_engine="postgres",
+        mode="cdc",
+        source_physical="erp_db.public.customer",
+        checkpoint_dir="file:///tmp/ckpt",
+    )
+    assert "SET 'execution.runtime-mode' = 'streaming';" in sql
+    # CDC 源连接器（拆开的 hostname/port，不是 JDBC url）
+    assert "'connector' = 'postgres-cdc'" in sql
+    assert "'hostname' = '${ERP_SRC_HOSTNAME}'" in sql
+    assert "'port' = '${ERP_SRC_PORT}'" in sql
+    assert "'database-name' = '${ERP_SRC_DATABASE}'" in sql
+    assert "'schema-name' = 'public'" in sql
+    assert "'table-name' = 'customer'" in sql
+    # checkpoint 走本地文件（standalone/YARN 通用）
+    assert "SET 'state.backend' = 'filesystem';" in sql
+    assert "SET 'state.checkpoints.dir' = 'file:///tmp/ckpt';" in sql
+
+
+def test_generate_move_sql_incremental_uses_cdc_connector():
+    """incremental 与 cdc 同走 streaming CDC（位点靠 checkpoint 续）。"""
+    sql = generate_move_sql(
+        source_table=_source(), target_table=_target(),
+        source=FlinkEndpoint("erp_src", "mysql"), target=_hive("dw"),
+        target_engine="hive", mode="incremental",
+        source_physical="erp_db.customer", checkpoint_dir="file:///tmp/ckpt",
+    )
+    assert "'connector' = 'mysql-cdc'" in sql
+    assert "'database-name' = '${ERP_SRC_DATABASE}'" in sql
+    assert "'table-name' = 'customer'" in sql
+    # mysql-cdc 不需要 schema-name / slot.name
+    assert "schema-name" not in sql
+    assert "slot.name" not in sql
+
+
+def test_generate_move_sql_cdc_requires_checkpoint_dir():
+    """CDC 不给 checkpoint_dir → 报错（否则重启从头重搬，违背增量语义）。"""
+    with pytest.raises(ValueError, match="checkpoint"):
+        generate_move_sql(
+            source_table=_source(), target_table=_target(),
+            source=_pg("erp_src"), target=_pg("dw"),
+            target_engine="postgres", mode="cdc",
+        )
+
+
+def test_generate_move_sql_cdc_rejects_source_without_cdc_connector():
+    """源平台无 CDC 连接器（如 hive）→ 报错，不静默退回全量。"""
+    with pytest.raises(ValueError, match="CDC"):
+        generate_move_sql(
+            source_table=_source(), target_table=_target(),
+            source=_hive("erp"), target=_hive("dw"),
+            target_engine="hive", mode="cdc", checkpoint_dir="file:///tmp/ckpt",
+        )
+
+
+def test_generate_move_sql_full_has_no_checkpoint_or_cdc():
+    """全量是批作业：无 checkpoint SET、源用 JDBC 而非 CDC。"""
+    sql = generate_move_sql(
+        source_table=_source(), target_table=_target(),
+        source=_pg("erp_src"), target=_pg("dw"),
+        target_engine="postgres", mode="full",
+    )
+    assert "streaming" not in sql
+    assert "state.backend" not in sql
+    assert "-cdc" not in sql
+    assert "'connector' = 'jdbc'" in sql
+
+
+def test_generate_move_sql_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        generate_move_sql(
+            source_table=_source(), target_table=_target(),
+            source=_hive("erp"), target=_hive("dw"),
+            target_engine="hive", mode="bogus",
+        )
 
 
 def test_jdbc_table_name_depends_on_platform():

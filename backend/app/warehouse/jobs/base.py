@@ -60,6 +60,14 @@ def _endpoint_env(endpoint) -> dict[str, str]:
     env = {
         f"{token}_USER": f"{{{{ {conn}.login }}}}",
         f"{token}_PASSWORD": f"{{{{ {conn}.password }}}}",
+        # host/port 拆开的占位符：Flink CDC 源连接器（mysql-cdc/postgres-cdc）不吃 JDBC url，
+        # 要 hostname/port 分开的字段。**只新增、不改上面的 _URL**——JDBC 系（transform/metric
+        # 的 sink、全量搬运）仍用 _URL，两套并存，互不影响。值同样是运行期 Jinja 表达式。
+        f"{token}_HOSTNAME": f"{{{{ {conn}.host }}}}",
+        f"{token}_PORT": f"{{{{ {conn}.port }}}}",
+        # CDC 源要单独的库名（database-name）与库内 schema（postgres 的 schema-name），
+        # 从 Connection 的 schema 段取。mysql-cdc 只用 database-name，postgres-cdc 两者都用。
+        f"{token}_DATABASE": f"{{{{ {conn}.schema }}}}",
     }
     scheme = _JDBC_URL_SCHEMES.get((endpoint.platform or "").lower())
     if scheme:
