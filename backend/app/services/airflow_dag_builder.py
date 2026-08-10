@@ -52,6 +52,16 @@ class DagBundle:
     # {文件名: 作业配置}。dict 值落成 JSON（搬运作业配置）；str 值原样落成文本
     # （Flink SQL 脚本 .sql）。两类都落到 jobs 目录供任务读取。
     job_files: dict[str, dict | str] = field(default_factory=dict)
+    # artifact_id（制品 id）用于生成 <dags_root>/ontometa/<artifact_id>/ 子目录。
+    # None 时产物平铺在 dags_dir 根，向后兼容无 artifact_id 的旧测试/调用。
+    artifact_id: str | None = None
+
+    def task_subdir(self, base_dir: str) -> str:
+        """计算该 bundle 的子目录路径。有 artifact_id 则按约定拼子目录，否则返回 base 本身。"""
+        import os
+        if self.artifact_id:
+            return os.path.join(base_dir, "ontometa", self.artifact_id)
+        return base_dir
 
     def write(self, dags_dir: str, jobs_dir: str, delivery=None) -> dict[str, str]:
         """投递产物，返回 {用途: 绝对路径}。
@@ -59,15 +69,27 @@ class DagBundle:
         ``delivery`` 为 DagDelivery 实例，默认 None 时用 LocalFsDelivery（直接写本地
         文件系统，与原行为完全一致）。跨机部署可传入 GitSyncDelivery，写完自动
         commit + push——产物仍先落盘，方案 A 的「可 diff/review/回滚」全保留。
+
+        有 artifact_id 时自动计算子目录：DAG/spec 落 <dags_dir>/ontometa/<artifact_id>/，
+        jobs 落该子目录下的 jobs/。调用方传 base 目录即可。
         """
+        import os
         from app.services.dag_delivery import DagDeliveryError, LocalFsDelivery
+
+        # 自动计算子目录（有 artifact_id 时）。artifact_id 为空时保持原行为：
+        # DAG/spec 落 dags_dir 根，jobs 落独立的 jobs_dir（向后兼容）。
+        actual_dags_dir = self.task_subdir(dags_dir)
+        if self.artifact_id:
+            actual_jobs_dir = os.path.join(actual_dags_dir, "jobs")
+        else:
+            actual_jobs_dir = jobs_dir
 
         if delivery is None:
             delivery = LocalFsDelivery()
         try:
             result = delivery.deliver(
-                dags_dir=dags_dir,
-                jobs_dir=jobs_dir,
+                dags_dir=actual_dags_dir,
+                jobs_dir=actual_jobs_dir,
                 dag_filename=self.dag_filename,
                 dag_source=self.dag_source,
                 spec_filename=self.spec_filename,
@@ -214,6 +236,7 @@ class AirflowDagBuilder:
         image_overrides: dict[str, str] | None = None,
         staging: bool = True,
         target_urn_builder=None,
+        artifact_id: str | None = None,
     ) -> DagBundle:
         """产出 DAG 包。
 
@@ -250,6 +273,7 @@ class AirflowDagBuilder:
                 max_active_tasks=max_active_tasks,
                 stage=stage,
                 target_urn_builder=target_urn_builder,
+                artifact_id=artifact_id,
             )
         adapter = get_job_adapter(tool)
         # 先解析镜像：拿不到就在这里失败，落盘与触发都还没发生。
@@ -334,6 +358,7 @@ class AirflowDagBuilder:
             spec_filename=f"{dag_id}.json",
             spec=spec,
             job_files=job_files,
+            artifact_id=artifact_id,
         )
 
     def _build_runner(
@@ -351,6 +376,7 @@ class AirflowDagBuilder:
         max_active_tasks: int = 16,
         stage: _Staging,
         target_urn_builder,
+        artifact_id: str | None = None,
     ) -> DagBundle:
         """runner 通道的 DAG 包。
 
@@ -408,6 +434,7 @@ class AirflowDagBuilder:
             spec_filename=f"{dag_id}.json",
             spec=spec,
             job_files={},
+            artifact_id=artifact_id,
         )
 
 
@@ -826,6 +853,7 @@ def build_flink_sql_dag(
     schedule: str | None = None,
     dag_id_suffix: str | None = None,
     max_active_tasks: int = 16,
+    artifact_id: str | None = None,
 ) -> DagBundle:
     """把一批 Flink SQL 计算任务编译成一条 Airflow DAG。
 
@@ -882,6 +910,7 @@ def build_flink_sql_dag(
         spec_filename=f"{dag_id}.json",
         spec=spec,
         job_files=job_files,
+        artifact_id=artifact_id,
     )
 
 

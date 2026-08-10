@@ -97,8 +97,10 @@ def test_with_runner_jar_writes_and_triggers(db_mock, tmp_path):
     assert receipt["state"] == "queued"
     assert receipt["run_url"] == "http://airflow/dags/x/grid?dag_run_id=y"
     assert "artifacts" in receipt
-    # 落盘了 .sql 文件
-    sql_file = tmp_path / "jobs" / f"{receipt['dag_id']}__clean_customer.sql"
+    # 落盘了 .sql 文件（按 <dags>/ontometa/<artifact_id>/jobs/ 子目录聚合）
+    sql_file = next(
+        (tmp_path / "dags").rglob(f"{receipt['dag_id']}__clean_customer.sql")
+    )
     assert sql_file.exists()
     assert "INSERT INTO t SELECT 1;" in sql_file.read_text()
 

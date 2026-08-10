@@ -185,12 +185,13 @@ def test_compile_succeeds_and_writes_dag(airflow_dir):
     assert result["schedule_cron"] == "0 2 * * *"
     # 两步各一个 dag
     assert len(result["steps"]) == 2
-    # DAG 文件落盘且是合法 Python
-    dag_path = airflow_dir / "dags" / f"{result['compiled_dag_id']}.py"
+    # DAG 文件落盘且是合法 Python（按 <dags>/ontometa/<id>/ 子目录聚合）
+    out_dir = airflow_dir / "dags" / "ontometa" / result["compiled_dag_id"]
+    dag_path = out_dir / f"{result['compiled_dag_id']}.py"
     assert dag_path.exists()
     ast.parse(dag_path.read_text())
     # spec.json 也落盘
-    assert (airflow_dir / "dags" / f"{result['compiled_dag_id']}.json").exists()
+    assert (out_dir / f"{result['compiled_dag_id']}.json").exists()
 
     # 链的 compiled 字段已更新
     with SessionLocal() as db:

@@ -215,7 +215,9 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
     # 建表 DDL 落盘到 DAG spec，重命名后的表名在其中
     import json as _json
 
-    spec_path = next((tmp_path / "dags").glob("*.json"))
+    spec_path = next(
+        p for p in (tmp_path / "dags").rglob("*.json") if p.parent.name != "jobs"
+    )
     spec = _json.loads(spec_path.read_text(encoding="utf-8"))
     assert any("warehouse_prod" in s and "dim_customer" in s for s in spec["ddl"])
 
@@ -389,9 +391,10 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     assert len(receipt["batches"]) == 1
     assert receipt["batches"][0]["dag_id"].endswith("__manual")
 
-    # 产物真的落盘了：DAG + 边车 JSON + 每个作业一个配置
-    dags = sorted(p.name for p in (tmp_path / "dags").iterdir())
-    jobs = sorted(p.name for p in (tmp_path / "jobs").iterdir())
+    # 产物真的落盘了：DAG + 边车 JSON + 每个作业一个配置。
+    # 按 <dags>/ontometa/<artifact_id>/ 子目录聚合，jobs 落该子目录下的 jobs/。
+    dags = sorted(p.name for p in (tmp_path / "dags").rglob("*") if p.is_file())
+    jobs = sorted(p.name for p in (tmp_path / "dags").rglob("jobs/*") if p.is_file())
     assert any(n.endswith(".py") for n in dags) and any(n.endswith(".json") for n in dags)
     assert len(jobs) == len(receipt["jobs"]) >= 1
 
@@ -416,12 +419,13 @@ def test_runner_channel_writes_pythonoperator_dag_and_records_channel(tmp_path, 
     assert receipt["sync_channel"] == "runner"
     assert receipt["state"] == "queued"
     # DAG 落盘且是 runner 通道：PythonOperator、无凭据、无作业配置文件
-    dag_py = next(p for p in (tmp_path / "dags").iterdir() if p.name.endswith(".py"))
+    dag_py = next(p for p in (tmp_path / "dags").rglob("*.py"))
     source = dag_py.read_text(encoding="utf-8")
     assert "PythonOperator" in source and "DockerOperator" not in source
     assert "password" not in source and "jdbc:" not in source
-    jobs_dir = tmp_path / "jobs"
-    assert not jobs_dir.exists() or list(jobs_dir.iterdir()) == []
+    # runner 通道无作业配置文件：子目录下的 jobs/ 不应有内容
+    job_files = [p for p in (tmp_path / "dags").rglob("jobs/*") if p.is_file()]
+    assert job_files == []
 
 
 def test_runner_channel_requires_endpoint(tmp_path, monkeypatch):
@@ -598,7 +602,9 @@ def test_tables_without_sync_jobs_still_get_ddl(tmp_path, monkeypatch):
         )
 
     built: set[str] = set()
-    for spec_path in sorted((tmp_path / "dags").glob("*.json")):
+    for spec_path in sorted((tmp_path / "dags").rglob("*.json")):
+        if spec_path.parent.name == "jobs":  # 跳过作业配置 JSON，只读 DAG 边车 spec
+            continue
         built.update(_json.loads(spec_path.read_text(encoding="utf-8"))["ddl_targets"])
 
     # 回执说要物化的每张表，都真的有某个 DAG 会建它
