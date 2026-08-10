@@ -106,12 +106,9 @@ def run_flink_sql(
         }
 
     flink = FlinkSubmitConfig(
-        runner_jar=runner_jar,
-        runner_class=env_settings.flink_sql_runner_class,
-        flink_bin=env_settings.flink_bin,
-        deploy_target=env_settings.flink_deploy_target,
-        parallelism=env_settings.flink_parallelism,
-        yarn_queue=env_settings.flink_yarn_queue.strip() or None,
+        sql_runner_jar=runner_jar,
+        yarn_queue=env_settings.flink_yarn_queue.strip() or "default",
+        checkpoint_dir=env_settings.flink_checkpoint_dir.strip(),
     )
 
     # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/；flink run --file
@@ -124,24 +121,50 @@ def run_flink_sql(
         _flink_jobs_dir = airflow.jobs_dir
 
     # 生成 DAG（.sql 文件 + DAG 源码 + spec.json）
+    # build_flink_sql_dag 的新签名：ontology_id + engine + ddl_statements。
+    # 本 runner 是通用接口（transform/metric/搬运共用），用 base 当 ontology_id，
+    # engine 固定 hive（数仓默认引擎），warehouse_ddl 是 DDL 语句列表（不是 dict）。
     bundle = build_flink_sql_dag(
-        base=base,
-        tasks=tasks,
-        warehouse_conn_id=warehouse_conn_id,
-        flink=flink,
-        jobs_dir=_flink_jobs_dir,
-        warehouse_ddl=warehouse_ddl,
+        ontology_id=base,
+        engine="hive",  # 数仓默认引擎（transform/metric sink 表默认建在 hive）
+        tasks=list(tasks),
+        ddl_statements={f"ddl_{i}": ddl for i, ddl in enumerate(warehouse_ddl)},
+        constraints=None,
+        swaps=swaps,
+        config=flink,
         schedule=schedule,
         dag_id_suffix=dag_id_suffix,
+        warehouse_conn_id=warehouse_conn_id,
         max_active_tasks=airflow.max_active_tasks_per_dag,
-        artifact_id=artifact_id,
-        swaps=swaps,
     )
 
-    # 落盘
+    # 落盘：DagBundle 现在是纯数据，不含 write() 方法，手动写文件
     delivery = airflow.build_delivery()
     try:
-        written = bundle.write(airflow.dags_dir, airflow.jobs_dir, delivery=delivery)
+        import json
+        from pathlib import Path
+
+        dags_dir = Path(airflow.dags_dir)
+        dags_dir.mkdir(parents=True, exist_ok=True)  # 确保目录存在
+
+        # 写 DAG Python 文件
+        dag_file = dags_dir / bundle.dag_filename
+        dag_file.write_text(bundle.dag_source, encoding="utf-8")
+
+        # 写边车 JSON spec
+        spec_file = dags_dir / bundle.spec_filename
+        spec_file.write_text(json.dumps(bundle.spec, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 写 SQL 文件（每个任务一个 .sql）
+        for task_spec in bundle.spec["tasks"]:
+            sql_file = dags_dir / task_spec["sql_file"]
+            sql_file.write_text(task_spec["sql"], encoding="utf-8")
+
+        written = {
+            "dag_file": str(dag_file),
+            "spec_file": str(spec_file),
+            "sql_files": [str(dags_dir / t["sql_file"]) for t in bundle.spec["tasks"]],
+        }
     except OSError as exc:
         raise FlinkJobError(
             f"DAG 投递失败（{airflow.dags_dir}）：{exc}"

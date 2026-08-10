@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import hashlib
 import json as _json
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from app.warehouse.jobs import JobSpec
 from app.warehouse.logical_schema import LogicalTable
+from app.warehouse.registry import get_adapter
 
 DEFAULT_WAREHOUSE_CONN_ID = "warehouse_default"
 # 层的执行顺序；未列出的层排在最后（顺序稳定，保证幂等）。
@@ -37,6 +38,49 @@ class DagBundle:
     dag_source: str
     spec_filename: str
     spec: dict
+
+
+@dataclass
+class _Staging:
+    """全量装载的 staging 计划（staging DDL + swap 语句 + 改写后的搬运作业）。"""
+
+    ddl: list[str] = field(default_factory=list)  # staging 表 DDL
+    swaps: dict[str, list[str]] = field(default_factory=dict)  # 任务 ID → swap SQL
+    exec_jobs: dict[str, JobSpec] = field(default_factory=dict)  # 改写后的作业（写 staging）
+
+
+def _plan_staging(plan, *, engine: str, token: str, enabled: bool) -> _Staging:
+    """全量装载改走 staging + 原子切换（M15）。
+
+    **只作用于 full**：增量是往正式表追加，搬进 staging 再整表切换会把存量数据换没。
+
+    staging 名里的 token 用**批次后缀**而非 run_id：同一个 DAG 的 ``max_active_runs=1``
+    保证两次运行不重叠，而一张表只属于一个批次，故这个名字已经不会撞；用 run_id 反而会
+    让每次失败的运行留下一张不会被回收的 staging 表，且 DAG 产物里要塞 Jinja 表达式。
+    """
+    from dataclasses import replace
+
+    staging = _Staging()
+    if not enabled:
+        return staging
+    adapter = get_adapter(engine)
+    for job in plan.jobs:
+        if job.mode != "full":
+            continue
+        table = LogicalTable(name=job.target.table, database=job.target.database)
+        staging.ddl.append(
+            _as_single_statement(adapter.render_create_staging(table, token))
+        )
+        staging.swaps[job.name] = [
+            _as_single_statement(s) for s in adapter.render_swap(table, token)
+        ]
+        staging.exec_jobs[job.name] = replace(
+            job,
+            target=replace(
+                job.target, table=adapter.staging_table_name(table, token)
+            ),
+        )
+    return staging
 
 
 def _as_single_statement(sql: str) -> str:
@@ -73,7 +117,7 @@ class FlinkSqlTask:
 
     task_id: str
     sql: str  # 完整 Flink SQL（INSERT INTO … SELECT …），含 ${} 占位符
-    endpoint_env: dict[str, str]  # 端点凭据环境变量（$别名_URL / $别名_USER 等）
+    endpoint_env: dict[str, str] = field(default_factory=dict)  # 端点凭据环境变量
     detached: bool = False  # 流式作业（incremental/cdc）需 -d
     checkpoint_dir: str = ""  # 流式作业的 checkpoint 目录
 
