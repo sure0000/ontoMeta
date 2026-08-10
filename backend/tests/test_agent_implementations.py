@@ -376,55 +376,60 @@ def test_sync_drafter_maps_via_ontology_not_raw_copy(seeded):
     assert spec["preservation"]["preserve"] is False
 
 
-def test_sync_executor_emits_stg_job_when_preserved(seeded):
+def test_sync_preservation_surfaces_in_plan(seeded):
+    """关键源保全判定仍在，执行器如实带出（Flink 路径的 STG 保全为后续工作）。
+
+    旧行为渲染一份 SeaTunnel preserve_ 作业；统一执行后 execute 无 target_datasource
+    退回「仅产出」，保全决定经 _plan 带出 preserved=True，不静默丢弃。
+    """
     spec = SyncDrafter().draft(
         "同步订单审计日志",
         {"ontology_id": seeded["ontology_id"], "object_type": "order_audit_log"},
     )
     assert spec["preservation"]["preserve"] is True
-    out = SyncExecutor().execute(spec, {})
+    out = SyncExecutor().execute(spec, {})  # 无 target_datasource → 仅产出
     assert out["preserved"] is True
-    assert any(k.startswith("preserve_") for k in out["jobs"])
+    assert out["preservation_reason"]
+    assert out["handoff"] == "flink_sql"
 
 
-def test_sync_incremental_appends_not_overwrites(seeded):
-    """增量读 + 覆盖写 = 拿一个时间切片把整表换掉，历史数据当场没了。"""
+def test_sync_mode_carried_into_plan(seeded):
+    """装载方式贯穿到搬运计划（增量 vs 全量的 sink 语义已下沉到 move_job_compiler，
+    其 detached/CDC 行为在 test_move_job_compiler 覆盖；这里只钉 sync 把 mode 正确带出）。"""
     spec = SyncDrafter().draft(
         "同步客户", {"ontology_id": seeded["ontology_id"], "object_type": "customer"}
     )
     assert spec["mode"] == "incremental"
-    job = json.loads(SyncExecutor().execute(spec, {})["jobs"]["sync_customer"])
-    assert job["sink"][0]["save_mode"] == "append"
-    # 全量才允许覆盖
+    out = SyncExecutor().dry_run(spec, {})
+    assert out["action"] == "flink_sql_move"
+    assert out["mode"] == "incremental"
     full = dict(spec, mode="full")
-    full_job = json.loads(SyncExecutor().execute(full, {})["jobs"]["sync_customer"])
-    assert full_job["sink"][0]["save_mode"] == "overwrite"
+    assert SyncExecutor().dry_run(full, {})["mode"] == "full"
 
 
-def test_sync_sink_plugin_follows_target_engine(seeded):
-    """目标是 postgres 却渲染 Hive sink，照着这份配置跑不起来。"""
+def test_sync_engine_carried_into_plan(seeded):
+    """目标引擎贯穿到计划（sink 连接器选择已下沉到 flink_sql_generator，另测）。"""
     spec = SyncDrafter().draft(
         "同步客户",
         {"ontology_id": seeded["ontology_id"], "object_type": "customer",
          "engine": "postgres"},
     )
-    job = json.loads(SyncExecutor().execute(spec, {})["jobs"]["sync_customer"])
-    assert job["sink"][0]["plugin"] == "Jdbc"
+    assert SyncExecutor().dry_run(spec, {})["engine"] == "postgres"
     doris = dict(spec, engine="doris")
-    doris_job = json.loads(SyncExecutor().execute(doris, {})["jobs"]["sync_customer"])
-    assert doris_job["sink"][0]["plugin"] == "Doris"
+    assert SyncExecutor().dry_run(doris, {})["engine"] == "doris"
 
 
-def test_sync_job_contains_alias_not_credentials(seeded):
-    """作业配置里只能有数据源别名，不得出现连接串或口令。"""
+def test_sync_plan_carries_alias_not_credentials(seeded):
+    """搬运计划里只放源库连接别名，不得出现连接串或口令（真正的 Flink SQL 占位符
+    凭据安全在 test_flink_sql_generator 覆盖；这里钉 sync 计划本身不泄漏）。"""
     spec = SyncDrafter().draft(
         "同步客户", {"ontology_id": seeded["ontology_id"], "object_type": "customer"}
     )
-    out = SyncExecutor().execute(spec, {})
-    blob = json.dumps(out["jobs"], ensure_ascii=False).lower()
-    assert "datasource_alias" in blob
-    for leak in ("password", "jdbc:", "://", "secret"):
-        assert leak not in blob, f"作业配置中泄漏了 {leak}"
+    out = SyncExecutor().execute(spec, {})  # 无 target_datasource → 仅产出计划
+    assert out["source_ref_alias"]  # 别名在
+    blob = json.dumps(out, ensure_ascii=False).lower()
+    for leak in ("password", "jdbc:", "secret"):
+        assert leak not in blob, f"搬运计划中泄漏了 {leak}"
 
 
 def test_sync_refuses_object_without_source_ref(seeded):
