@@ -1,3 +1,11 @@
+> **⚠️ 本文档已过时**：描述的是旧架构（runner/docker 多通道 + SeaTunnel/DataX 多工具选择），已于 2025-01 统一执行架构重构中废弃。
+>
+> **当前架构**：搬运 = Flink SQL on YARN（与 transform/metric 同一执行路径），不再有多通道/多工具选择。详见 [`UNIFIED_EXECUTION_ARCHITECTURE.md`](./UNIFIED_EXECUTION_ARCHITECTURE.md)
+>
+> **保留原因**：记录架构演进历史。下文内容不反映当前实现。
+
+---
+
 # 物化执行改造方案：同步工具 + Airflow 编排 + DataHub 血缘自动注册
 
 > **执行通道部分已被修订**：M10 落地后在真实实例上暴露的一类失败（「每表一个一次性
