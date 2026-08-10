@@ -78,6 +78,16 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
             pass
 
     monkeypatch.setattr(materialization_runner, "AirflowClient", _FakeClient)
+    # 统一执行架构：搬运走 Flink SQL on YARN。给 JAR 走真实 DAG 路径（非 handoff）；给
+    # checkpoint 目录以支持含 timestamp 分区键的表默认的 incremental→CDC。
+    monkeypatch.setattr(
+        materialization_runner.env_settings, "flink_sql_runner_jar", "/opt/sql-runner.jar"
+    )
+    monkeypatch.setattr(
+        materialization_runner.env_settings,
+        "flink_checkpoint_dir",
+        "file:///tmp/ontometa-ckpt",
+    )
 
     # 提交前 preflight（P2 强制闸门）会真连 Airflow 核实可达性/连接；本用例只替身了
     # runner 通道的客户端，preflight 自有一套 AirflowClient。这里桩掉 preflight 直接放行——
@@ -97,8 +107,6 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
             "enabled": True,
             "dags_dir": str(tmp_path / "dags"),
             "jobs_dir": str(tmp_path / "jobs"),
-            # 这条端到端用例走 docker 通道（M14 前的既有行为）；runner 通道另有专测。
-            "sync_channel": "docker",
         },
     )
     try:
@@ -110,8 +118,8 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["artifact_id"]
-        # 编排回执：execute_mode=orchestrated，带 DagRun 信息，记录了目标数据源
-        assert body["receipt"]["execute_mode"] == "orchestrated"
+        # 编排回执：execute_mode=flink_on_yarn（搬运走 Flink），带 DagRun 信息与目标数据源
+        assert body["receipt"]["execute_mode"] == "flink_on_yarn"
         assert body["receipt"]["dag_id"]
         assert body["receipt"]["target_datasource"]["id"] == ids["datasource_id"]
 

@@ -64,18 +64,20 @@ def run_flink_sql(
     schedule: str | None = None,
     dag_id_suffix: str | None = None,
     artifact_id: str | None = None,
+    swaps: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """为一批 Flink SQL 计算任务生成 DAG、落盘、触发，返回回执。
+    """为一批 Flink SQL 任务生成 DAG、落盘、触发，返回回执。
 
     Args:
         db: 数据库会话（读 Airflow 设置）
         base: DAG id 的基（制品 id / 本体 id）
-        tasks: 一个或多个 Flink SQL 任务（transform 清洗 / metric 聚合）
-        warehouse_conn_id: 数仓连接（建 sink 表用，Airflow Connection id）
-        warehouse_ddl: 建 sink 表的数仓 DDL（空则不建，transform 目标表多数已由物化建好）
+        tasks: 一个或多个 Flink SQL 任务（搬运 / transform 清洗 / metric 聚合）
+        warehouse_conn_id: 数仓连接（建 sink 表 / 跑 swap 用，Airflow Connection id）
+        warehouse_ddl: 建 sink / staging 表的数仓 DDL（空则不建）
         schedule: cron（空 = 只手动触发）
         dag_id_suffix: 批次 / cron 分组后缀
         artifact_id: 制品 id（作 dag_run_id，重复提交幂等）
+        swaps: ``{task_id: [swap SQL]}``，全量搬运 staging→正式表原子切换（见 build_flink_sql_dag）
 
     Returns:
         回执 dict：dag_id / dag_run_id / state / run_url / artifacts（落盘路径）/ error（若有）
@@ -109,7 +111,8 @@ def run_flink_sql(
         flink_bin=env_settings.flink_bin,
         deploy_target=env_settings.flink_deploy_target,
         parallelism=env_settings.flink_parallelism,
-        yarn_queue=env_settings.flink_yarn_queue.strip() or None,
+        yarn_queue=env_settings.flink_yarn_queue.strip() or "default",
+        checkpoint_dir=env_settings.flink_checkpoint_dir.strip(),
     )
 
     # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/；flink run --file
@@ -122,24 +125,49 @@ def run_flink_sql(
         _flink_jobs_dir = airflow.jobs_dir
 
     # 生成 DAG（.sql 文件 + DAG 源码 + spec.json）
+    # build_flink_sql_dag 的新签名：ontology_id + engine + ddl_statements。
+    # 本 runner 是通用接口（transform/metric/搬运共用），用 base 当 ontology_id，
+    # engine 固定 hive（数仓默认引擎），warehouse_ddl 是 DDL 语句列表（不是 dict）。
     bundle = build_flink_sql_dag(
-        base=base,
-        tasks=tasks,
-        warehouse_conn_id=warehouse_conn_id,
-        flink=flink,
-        jobs_dir=_flink_jobs_dir,
-        warehouse_ddl=warehouse_ddl,
+        ontology_id=base,
+        engine="hive",  # 数仓默认引擎（transform/metric sink 表默认建在 hive）
+        tasks=list(tasks),
+        ddl_statements={f"ddl_{i}": ddl for i, ddl in enumerate(warehouse_ddl)},
+        constraints=None,
+        swaps=swaps,
+        config=flink,
         schedule=schedule,
         dag_id_suffix=dag_id_suffix,
+        warehouse_conn_id=warehouse_conn_id,
         max_active_tasks=airflow.max_active_tasks_per_dag,
-        artifact_id=artifact_id,
     )
 
-    # 落盘
+    # 落盘：DagBundle 是纯数据（F/G 后不含 write 方法），交给统一的 DagDelivery 投递器。
+    # 产物按 <dags>/ontometa/<artifact_id>/ 子目录聚合，.sql 落其 jobs/（与 read_spec 的
+    # sql_dir 对齐）；无 artifact_id 时退回扁平 dags_dir。
+    if artifact_id:
+        _out_dir = os.path.join(airflow.dags_dir, "ontometa", artifact_id)
+    else:
+        _out_dir = airflow.dags_dir
+    _jobs_dir = os.path.join(_out_dir, "jobs")
     delivery = airflow.build_delivery()
     try:
-        written = bundle.write(airflow.dags_dir, airflow.jobs_dir, delivery=delivery)
-    except OSError as exc:
+        job_files = {t["sql_file"]: t["sql"] for t in bundle.spec["tasks"]}
+        result = delivery.deliver(
+            dags_dir=_out_dir,
+            jobs_dir=_jobs_dir,
+            dag_filename=bundle.dag_filename,
+            dag_source=bundle.dag_source,
+            spec_filename=bundle.spec_filename,
+            spec=bundle.spec,
+            job_files=job_files,
+        )
+        written = getattr(result, "written", None) or {
+            "dag_file": os.path.join(_out_dir, bundle.dag_filename),
+            "spec_file": os.path.join(_out_dir, bundle.spec_filename),
+            "sql_files": [os.path.join(_jobs_dir, t["sql_file"]) for t in bundle.spec["tasks"]],
+        }
+    except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
         raise FlinkJobError(
             f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
         ) from exc

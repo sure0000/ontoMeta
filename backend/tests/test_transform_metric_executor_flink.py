@@ -110,6 +110,7 @@ def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
         env.flink_deploy_target = "yarn-per-job"
         env.flink_parallelism = 1
         env.flink_yarn_queue = ""
+        env.flink_checkpoint_dir = ""
         with patch("app.services.flink_job_runner._settings") as settings:
             airflow = MagicMock(
                 available=True,

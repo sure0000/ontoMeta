@@ -21,36 +21,30 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings as env_settings
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
-from app.connectors.sync_runner import (
-    EXPECTED_CONTRACT_VERSION,
-    SyncRunnerClient,
-    SyncRunnerError,
-)
 from app.models.data_app import DataSource
-from app.services.airflow_dag_builder import AirflowDagBuilder
+from app.services.airflow_dag_builder import (
+    FlinkSubmitConfig,
+    _plan_staging,
+    build_flink_sql_dag,
+)
 from app.services.job_planner import JobPlanner
 from app.services.materialization_contract import MaterializationContractService
+from app.services.move_job_compiler import compile_move_task
 from app.services.settings_service import SettingsService
-from app.services.sync_tool_resolver import (
-    SyncToolResolutionError,
-    required_modes,
-    resolve_sync_tool,
-)
 from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse import DEFAULT_ENGINE, list_engines
-from app.warehouse.jobs import (
-    JobPlan,
-    SyncImageUnavailableError,
-    get_job_adapter,
-    resolve_docker_image,
-)
+from app.warehouse.jobs import JobPlan
+
+# 统一执行架构：搬运一律走 Flink SQL on YARN（与 transform/metric 同一执行路径），
+# 不再有 seatunnel/datax/docker/runner 多通道。工具恒为 flink。
+_SYNC_TOOL = "flink"
 
 _contract_service = MaterializationContractService()
 _generator = WarehouseGenerator()
 _job_planner = JobPlanner()
-_dag_builder = AirflowDagBuilder()
 _settings = SettingsService()
 
 
@@ -308,136 +302,138 @@ def _run_orchestrated(
     artifact_id: str | None,
     load_strategy: str | None = None,
 ) -> dict[str, Any]:
-    """产出 DAG 与搬运作业 → 投递 → 触发一次运行。**不在本进程里落库**。"""
-    # 执行通道（M14）：runner 走常驻服务，docker 走旧的兄弟容器通道。
-    # 用什么搬由 resolver 定（弹窗不再逐次选）：runner 通道下不指定工具、由执行侧逐表
-    # 自选；docker 通道按「装载方式 ∩ 镜像可用」挑，选不出来在这里就失败——晚一步就是
-    # 一个注定 pull 失败的 DAG。
-    try:
-        choice = resolve_sync_tool(
-            airflow,
-            modes=required_modes(
-                _contract_service.list_selected(db, ontology_id, selected_targets)
-            ),
-            forced=sync_tool,
-        )
-    except SyncToolResolutionError as exc:
-        raise MaterializationError(str(exc)) from exc
-    sync_tool = choice.tool
+    """产出建表 DDL + Flink SQL 搬运作业 + DAG → 投递 → 触发一次运行。**不在本进程里落库**。
 
-    channel = (airflow.sync_channel or "runner").lower()
-    runner_caps: dict | None = None
-    if channel == "runner":
-        # runner 通道的前置条件在提交前问清楚，别产出一个连不上 runner 的 DAG。
-        if not airflow.sync_runner_endpoint:
-            raise MaterializationError(
-                "sync_channel=runner 但未配置 sync-runner 地址"
-                "（设 SYNC_RUNNER_ENDPOINT），无法物化"
-            )
-        client = SyncRunnerClient(
-            airflow.sync_runner_endpoint, token=airflow.sync_runner_token
-        )
-        try:
-            runner_caps = client.capabilities()
-        except SyncRunnerError as exc:
-            raise MaterializationError(
-                f"sync-runner 不可达（{airflow.sync_runner_endpoint}）：{exc}"
-            ) from exc
-        finally:
-            client.close()
-        # 契约版本不匹配即拒绝，而不是发过去再看会不会炸（§3.5）。
-        got = runner_caps.get("contract_version")
-        if got != EXPECTED_CONTRACT_VERSION:
-            raise MaterializationError(
-                f"sync-runner 契约版本不匹配（runner={got}，"
-                f"ontoMeta 认识 {EXPECTED_CONTRACT_VERSION}），请升级对应一侧"
-            )
-    else:
-        # docker 通道：镜像可用性先于一切，拿不到镜像就不生成 DAG、不触发。
-        # resolver 已验过一遍（强制指定的工具也在那里解析镜像），这里是最后一道。
-        try:
-            resolve_docker_image(get_job_adapter(sync_tool), airflow.sync_tool_images)
-        except SyncImageUnavailableError as exc:
-            raise MaterializationError(str(exc)) from exc
-
+    统一执行架构：搬运一律编译成 Flink SQL、经 Airflow BashOperator ``flink run`` 提交到
+    YARN（与 transform/metric 同一路径）。不再有 seatunnel/datax/docker/runner 多通道。
+    """
+    # 搬运工具恒为 flink。planner 用 FlinkAdapter 判可搬性（full/incremental/cdc 均支持），
+    # runner_capabilities 传 None（那套是 sync-runner 通道的遗留，已废）。
     plan = _job_planner.build(
         db,
         ontology_id,
         engine=engine,
-        tool=sync_tool,
+        tool=_SYNC_TOOL,
         target_alias=_warehouse_conn_id(ds),
         database_prefix=database_prefix,
         database_overrides=database_overrides,
         table_overrides=table_overrides,
         selected_targets=selected_targets,
-        # runner 通道按执行侧 capabilities 判可搬性，替代硬编码的工具平台表。
-        runner_capabilities=runner_caps,
+        runner_capabilities=None,
         # 本次运行的装载方式覆盖（Spec 里选的「全量/增量」），缺省 None = 逐表按契约。
         load_strategy=load_strategy,
     )
-    # 目标表 URN 的 fabric 取自 DataHub 设置页（默认 PROD），与兜底 emitter 同一来源。
-    fabric = _settings.get_datahub_runtime(db).fabric
 
-    def _urn_builder(job):
-        return build_dataset_urn(job.target.platform, job.target.qualified, fabric)
+    # Flink on YARN 提交参数（部署基础设施，来自 env）。缺 SqlRunner JAR → 退「仅产出」。
+    runner_jar = env_settings.flink_sql_runner_jar.strip()
+    if not runner_jar:
+        return _handoff_receipt(
+            ontology_id, ds, engine, plan, ddl_items,
+            database_prefix, database_overrides, table_overrides,
+        )
+    flink_cfg = FlinkSubmitConfig(
+        runner_jar=runner_jar,
+        runner_class=env_settings.flink_sql_runner_class,
+        flink_bin=env_settings.flink_bin,
+        deploy_target=env_settings.flink_deploy_target,
+        parallelism=env_settings.flink_parallelism,
+        yarn_queue=env_settings.flink_yarn_queue.strip() or None,
+    )
+    checkpoint_dir = env_settings.flink_checkpoint_dir.strip() or None
+    warehouse_conn_id = _warehouse_conn_id(ds)
 
     # 按 cron 分组 + 按上限分批：一个 cron 一个 DAG、少数派不再被众数吞掉，超上限再拆（M16）。
     cron_map = _cron_by_entity(db, ontology_id)
-    batches = _plan_batches(
-        plan.jobs, cron_map, airflow.max_tasks_per_dag
-    )
-    # 建表分配：有作业的表跟着自己那批，无作业的表（ADS/缺 source_ref/不支持的装载方式）
-    # 归入 manual 批。无可搬作业但有建表时，这里会新开一个 create_tables-only 的 manual 批。
+    batches = _plan_batches(plan.jobs, cron_map, airflow.max_tasks_per_dag)
+    # 建表分配：有作业的表跟着自己那批，无作业的表（ADS/缺 source_ref）归入 manual 批。
     _assign_ddl(batches, ddl_items, constraint_items)
 
-    # 有 artifact_id 时产物按 <dags_dir>/ontometa/<artifact_id>/ 聚合；docker 通道的
-    # bind mount 源必须指向该子目录下的 jobs/（与 bundle.write 落盘目录对齐），否则挂载
-    # 源为空、容器内 --config 指向的文件不存在。artifact_id 为空则退回扁平布局。
-    if artifact_id:
-        _jobs_host_dir = os.path.join(
-            airflow.dags_dir, "ontometa", artifact_id, "jobs"
-        )
-    else:
-        _jobs_host_dir = airflow.jobs_dir
+    # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/（与 flink run --file
+    # 路径对齐）；空则退回扁平 jobs_dir。
 
     bundles: list[tuple[dict, Any]] = []
     for batch in batches:
-        bundle = _dag_builder.build(
-            ontology_id=ontology_id,
-            plan=JobPlan(jobs=batch["jobs"]),
-            ddl_statements=batch["ddl"],
-            constraint_statements=batch.get("constraints") or {},
-            schedule=batch["schedule"],
-            channel=channel,
-            runner_endpoint=airflow.sync_runner_endpoint,
-            dag_id_suffix=batch["suffix"],
-            max_active_tasks=airflow.max_active_tasks_per_dag,
-            tool=sync_tool,
+        # 全量走 staging + 原子切换（M15）：搬到一半失败时正式表原封不动。_plan_staging 把
+        # full 作业的 target.table 改写成 staging 名（保留 target_table），并给出建 staging
+        # 表的 DDL 与切换语句。compile_move_task 跑改写后的 job → INSERT 自然进 staging 表。
+        stage = _plan_staging(
+            JobPlan(jobs=batch["jobs"]),
             engine=engine,
-            warehouse_conn_id=_warehouse_conn_id(ds),
-            docker_network=airflow.docker_network,
-            jobs_host_dir=_jobs_host_dir,
-            drivers_host_dir=airflow.drivers_dir,
-            image_overrides=airflow.sync_tool_images,
-            # 全量装载走 staging + 原子切换（M15）：搬到一半失败时正式表原封不动。
-            staging=airflow.staging_swap,
-            target_urn_builder=_urn_builder,
-            artifact_id=artifact_id,
+            token=batch["suffix"],
+            enabled=airflow.staging_swap,
+        )
+        tasks = []
+        swaps: dict[str, list[str]] = {}
+        for job in batch["jobs"]:
+            # staging 化的 job（full 表写 staging）或原 job（增量/未启用 staging）。
+            exec_job = stage.exec_jobs.get(job.name, job)
+            try:
+                tasks.append(
+                    compile_move_task(
+                        exec_job, engine=engine, checkpoint_dir=checkpoint_dir
+                    )
+                )
+            except ValueError as exc:
+                # 编译期的搬运约束（如增量/CDC 缺 checkpoint_dir、源无 CDC 连接器）转成
+                # 用户可读的物化错误，而不是让原始 ValueError 逃逸成 500。
+                raise MaterializationError(
+                    f"作业「{job.name}」无法编译成 Flink 搬运：{exc}"
+                ) from exc
+            if stage.swaps.get(job.name):
+                swaps[job.name] = stage.swaps[job.name]
+
+        # 建表 DDL = 正式表 + 外键约束 + staging 表（staging 建在正式表之后，CREATE LIKE 依赖它）。
+        ddl: list[str] = list(batch["ddl"].values())
+        for stmts in (batch.get("constraints") or {}).values():
+            ddl.extend(stmts)
+        ddl.extend(stage.ddl)
+
+        if not tasks and not ddl:
+            continue  # 空批（不该出现，防御）
+        bundle = build_flink_sql_dag(
+            ontology_id=ontology_id,
+            engine=engine,
+            tasks=list(tasks),
+            ddl_statements={f"ddl_{i}": d for i, d in enumerate(ddl)},
+            constraints=batch.get("constraints") or None,
+            swaps=swaps,
+            config=flink_cfg,
+            schedule=batch["schedule"],
+            dag_id_suffix=batch["suffix"],
+            warehouse_conn_id=warehouse_conn_id,
+            max_active_tasks=airflow.max_active_tasks_per_dag,
         )
         bundles.append((batch, bundle))
 
     # 先全部落盘：等解析时一次 dag_dir 扫描即可全部认到，避免逐个各等一个解析周期。
+    # DagBundle 是纯数据（F/G 后不再有 write 方法），交给统一的 DagDelivery 投递器
+    # （LocalFsDelivery 默认写本地 FS，子类可做 git sync 等），SQL 作为 job_files 一并投。
+    # 产物按 <dags>/ontometa/<artifact_id>/ 子目录聚合，.sql 落其 jobs/（与 read_spec 的
+    # sql_dir 对齐）；无 artifact_id 时退回扁平 dags_dir。
+    if artifact_id:
+        _out_dir = os.path.join(airflow.dags_dir, "ontometa", artifact_id)
+    else:
+        _out_dir = airflow.dags_dir
+    _jobs_dir = os.path.join(_out_dir, "jobs")
     written_all: dict[str, dict] = {}
     delivery = airflow.build_delivery()
     for _, bundle in bundles:
+        job_files = {t["sql_file"]: t["sql"] for t in bundle.spec["tasks"]}
         try:
-            written_all[bundle.dag_id] = bundle.write(
-                airflow.dags_dir, airflow.jobs_dir, delivery=delivery
+            result = delivery.deliver(
+                dags_dir=_out_dir,
+                jobs_dir=_jobs_dir,
+                dag_filename=bundle.dag_filename,
+                dag_source=bundle.dag_source,
+                spec_filename=bundle.spec_filename,
+                spec=bundle.spec,
+                job_files=job_files,
             )
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
             raise MaterializationError(
                 f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
             ) from exc
+        written_all[bundle.dag_id] = getattr(result, "written", None) or {}
 
     client = AirflowClient(
         airflow.endpoint,
@@ -495,12 +491,9 @@ def _run_orchestrated(
     first_error = next((b["error"] for b in batch_results if b["error"]), None)
     return {
         "ontology_id": ontology_id,
-        "execute_mode": "orchestrated",
-        "sync_channel": channel,
-        # 用什么搬 + 为什么是它。工具已不再由人逐次选，回执必须留下这句可解释的话，
-        # 否则「为什么这批表没搬」在事后无从对账。
-        "sync_tool": choice.label,
-        "sync_tool_detail": choice.detail,
+        "execute_mode": "flink_on_yarn",
+        # 搬运一律走 Flink SQL on YARN（统一执行架构），不再有多通道选择。
+        "sync_tool": _SYNC_TOOL,
         "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
         "engine": engine,
         "database_prefix": database_prefix,
@@ -521,6 +514,43 @@ def _run_orchestrated(
         "error": first_error,
         # 提交成功即 ok；真正的成败要看各 DagRun 状态，由前端轮询 status 端点。
         "ok": first_error is None,
+    }
+
+
+def _handoff_receipt(
+    ontology_id: str,
+    ds: DataSource,
+    engine: str,
+    plan: JobPlan,
+    ddl_items: list[tuple[str, str]],
+    database_prefix: str | None,
+    database_overrides: dict[str, str] | None,
+    table_overrides: dict[str, str] | None,
+) -> dict[str, Any]:
+    """未配 Flink SqlRunner JAR 时的「仅产出」回执：不投递、不触发，只报会做什么。
+
+    与 flink_job_runner 的 handoff 同义——数据搬运一律走 Flink，缺 JAR 就执行不了，
+    如实说明而不是假装成功（见记忆 receipt-failure-vs-artifact-status）。
+    """
+    return {
+        "ontology_id": ontology_id,
+        "execute_mode": "handoff",
+        "sync_tool": _SYNC_TOOL,
+        "note": (
+            "未配置 Flink SqlRunner JAR（FLINK_SQL_RUNNER_JAR），ontoMeta 只产出建表 DDL "
+            "与搬运计划，不执行；配上 JAR 后重跑即提交到 YARN。"
+        ),
+        "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
+        "engine": engine,
+        "database_prefix": database_prefix,
+        "database_overrides": dict(database_overrides or {}),
+        "table_overrides": dict(table_overrides or {}),
+        "tables": [q for q, _ in ddl_items],
+        "jobs": [job.name for job in plan.jobs],
+        "unsupported": plan.unsupported,
+        "schema_notes": plan.schema_notes,
+        "error": None,
+        "ok": True,
     }
 
 

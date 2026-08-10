@@ -71,25 +71,26 @@ def test_password_is_masked_and_preserved(client, admin_headers):
 
 
 def test_sync_tool_defaults_to_auto_and_rejects_unknown_names(client, admin_headers):
-    """搬运工具的**唯一**人工入口（物化弹窗已不再逐次选）。空 = 自动。"""
+    """统一执行架构：搬运工具恒为 flink，拒绝其他值。空 = 自动（兼容旧配置）。"""
     body = client.get("/api/settings/airflow", headers=admin_headers).json()
     assert body["sync_tool"] == ""
 
+    # 统一架构：只接受 "flink" 或空（自动）
+    r = client.put(
+        "/api/settings/airflow",
+        json={"endpoint": "http://airflow:8080", "sync_tool": "flink"},
+        headers=admin_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["sync_tool"] == "flink"
+
+    # 名字写错要在这里就挡掉：统一架构下 SeaTunnel/DataX 已废弃。
     r = client.put(
         "/api/settings/airflow",
         json={"endpoint": "http://airflow:8080", "sync_tool": "SeaTunnel"},
         headers=admin_headers,
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["sync_tool"] == "seatunnel"  # 归一化，免得大小写造出两个事实
-
-    # 名字写错要在这里就挡掉：否则物化会在提交时才报「未知搬运工具」。
-    r = client.put(
-        "/api/settings/airflow",
-        json={"endpoint": "http://airflow:8080", "sync_tool": "nosuchtool"},
-        headers=admin_headers,
-    )
-    assert r.status_code == 422
+    assert r.status_code == 422  # 拒绝非 flink 的工具名
 
 
 def test_status_rejects_receipt_without_dagrun(client, admin_headers):

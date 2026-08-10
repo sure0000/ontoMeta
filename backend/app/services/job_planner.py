@@ -210,6 +210,9 @@ class JobPlanner:
                     layer=table.layer,
                     source_urn=urn,
                     entity_name=entity,
+                    # 带类型目标表：Flink SQL 编译要列类型，planner 此刻正持有它，顺手带上
+                    # （避免下游 build_flink_etl_input 逐实体重建 schema，见统一执行重构 B）。
+                    target_table=table,
                 )
             )
 

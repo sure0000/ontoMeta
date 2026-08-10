@@ -75,6 +75,15 @@ _JDBC_DRIVERS = {
     "clickhouse": "com.clickhouse.jdbc.ClickHouseDriver",
 }
 
+# 源平台 → Flink CDC 源连接器。CDC 作业的 source 用它（不吃 JDBC url，要 hostname/port
+# 拆开）；未列出的平台不支持 CDC，由调用方（generate_move_sql）拦下。
+_CDC_CONNECTORS = {
+    "mysql": "mysql-cdc",
+    "mariadb": "mysql-cdc",  # MariaDB 走 MySQL 协议与 binlog
+    "postgres": "postgres-cdc",
+    "postgresql": "postgres-cdc",
+}
+
 
 def quote_identifier(name: str) -> str:
     """Flink SQL 的标识符引用规则：反引号。
@@ -201,8 +210,46 @@ def _jdbc_table_name(platform: str, physical: str) -> str:
     return physical
 
 
+def _cdc_source_props(
+    endpoint: FlinkEndpoint, physical: str
+) -> dict[str, str]:
+    """CDC 源表的 WITH (...)。用 mysql-cdc / postgres-cdc 连接器：hostname/port 拆开
+    （不吃 JDBC url），凭据走 host/port/database 占位符（见 base.py 新增的键）。
+
+    ``physical`` 是源库真实 ``库.表``。mysql-cdc 要 database-name + table-name（裸表名）；
+    postgres-cdc 额外要 schema-name（postgres 的库内 schema），故 ``库.schema.表`` 与
+    ``库.表`` 两种形状都要认。库名不从 physical 取而用 Connection 的 schema 占位符——
+    连的是哪个库属部署事实（与 JDBC 系一致）。
+    """
+    platform = endpoint.platform.lower()
+    connector = _CDC_CONNECTORS[platform]
+    alias = endpoint.alias
+    table_name = physical.rsplit(".", 1)[-1]  # 裸表名
+    props = {
+        "connector": connector,
+        "hostname": _placeholder(alias, "HOSTNAME"),
+        "port": _placeholder(alias, "PORT"),
+        "username": _placeholder(alias, "USER"),
+        "password": _placeholder(alias, "PASSWORD"),
+        "database-name": _placeholder(alias, "DATABASE"),
+        "table-name": table_name,
+    }
+    if connector == "postgres-cdc":
+        # postgres 的库内 schema：physical 形如 库.schema.表 时取中段，否则默认 public。
+        segs = physical.split(".")
+        schema = segs[-2] if len(segs) >= 2 else "public"
+        props["schema-name"] = schema
+        # postgres-cdc 需要一个逻辑复制槽名；按表稳定生成，避免多作业抢同一个槽。
+        props["slot.name"] = "ontometa_" + re.sub(r"[^a-z0-9_]", "_", table_name.lower())
+    return props
+
+
 def _connector_props(
-    table: LogicalTable, endpoint: FlinkEndpoint, physical_name: str | None = None
+    table: LogicalTable,
+    endpoint: FlinkEndpoint,
+    physical_name: str | None = None,
+    *,
+    cdc: bool = False,
 ) -> dict[str, str]:
     """按平台产 WITH (...) 的连接属性。凭据一律占位符。
 
@@ -210,12 +257,22 @@ def _connector_props(
     Doris ``table.identifier``。与 Flink 逻辑表名（``table.name``，CREATE TABLE 用）分开：
     transform 里源实体与目标表常同名，Flink 逻辑名靠前缀区开，而物理名各指各的库。
     不给则回退 ``table.qualified_name``。
+
+    ``cdc=True`` 时源表用 CDC 连接器（mysql-cdc/postgres-cdc）——仅对 CDC/增量作业的**源端**。
     """
     platform = endpoint.platform.lower()
-    connector = _CONNECTORS.get(platform, "jdbc")
     alias = endpoint.alias
     physical = physical_name or table.qualified_name
 
+    if cdc:
+        if platform not in _CDC_CONNECTORS:
+            raise ValueError(
+                f"平台 {platform!r} 无 Flink CDC 连接器（支持："
+                f"{', '.join(sorted(_CDC_CONNECTORS))}）"
+            )
+        return _cdc_source_props(endpoint, physical)
+
+    connector = _CONNECTORS.get(platform, "jdbc")
     if connector == "doris":
         return {
             "connector": "doris",
@@ -257,6 +314,7 @@ def render_create_table(
     physical_name: str | None = None,
     watermark: tuple[str, str] | None = None,
     is_target: bool = False,
+    cdc: bool = False,
 ) -> str:
     """渲染一张表的 Flink SQL ``CREATE TABLE ... WITH (...)``。
 
@@ -265,6 +323,7 @@ def render_create_table(
         endpoint: 物理端点（别名 + 平台）
         physical_name: 数仓真实库表名（JDBC table-name），缺省用 ``table.qualified_name``
         watermark: streaming 源表的 ``(列名, 策略)``
+        cdc: 源端用 CDC 连接器（mysql-cdc/postgres-cdc），仅 CDC/增量作业的源表
     """
     col_lines = [
         f"  `{c.name}` {_flink_type(c, endpoint.platform if is_target else None)}"
@@ -275,9 +334,132 @@ def render_create_table(
         col_lines.append(f"  WATERMARK FOR `{watermark[0]}` AS {watermark[1]}")
     cols = ",\n".join(col_lines)
 
-    props = _connector_props(table, endpoint, physical_name)
+    props = _connector_props(table, endpoint, physical_name, cdc=cdc)
     props_str = ",\n  ".join(f"'{k}' = '{v}'" for k, v in props.items())
     return f"CREATE TABLE `{table.name}` (\n{cols}\n) WITH (\n  {props_str}\n);"
+
+
+def build_identity_select(
+    source_table: LogicalTable,
+    target_table: LogicalTable,
+    target_engine: str,
+    *,
+    column_map: dict[str, str] | None = None,
+) -> str:
+    """搬运（无清洗/无聚合）的恒等 SELECT 体：源列 → 目标列，类型不同则 CAST。
+
+    这是「搬运 = 恒等投影的 transform」在生成器层的落地：transform 会在这个 body 上再叠
+    清洗规则，metric 叠聚合，而搬运（sync/materialize）就用它本身。
+
+    **类型不同必须 CAST**（与 ``build_flink_etl_input`` 同口径）：源列类型由源库物理类型决定，
+    目标列类型由本体语义经 Adapter 决定，两者本就允许不同——不 CAST 时 Flink 会在提交期拒绝
+    （Column types of query result and sink do not match）或运行期 ClassCastException。
+
+    ``column_map``：目标列名 → 源物理列名。缺省或某列未列出时，按同名映射（源列名 = 目标列名）。
+    FROM 引用 ``source_table.name``（Flink 逻辑裸表名），与 :func:`generate_flink_sql` 的约定一致。
+    """
+    column_map = column_map or {}
+    lines = []
+    for tgt_col in target_table.columns:
+        src_name = column_map.get(tgt_col.name) or tgt_col.name
+        # 源端按物理类型、目标端按引擎 Adapter，各算各的（见 source/target_flink_type 说明）。
+        src_type = source_flink_type(source_table.column(src_name) or tgt_col)
+        tgt_type = target_flink_type(tgt_col, target_engine)
+        expr = quote_identifier(src_name)
+        if src_type != tgt_type:
+            expr = f"CAST({expr} AS {tgt_type})"
+        lines.append(f"  {expr} AS {quote_identifier(tgt_col.name)}")
+    return "SELECT\n" + ",\n".join(lines) + f"\nFROM {quote_identifier(source_table.name)}"
+
+
+def generate_move_sql(
+    *,
+    source_table: LogicalTable,
+    target_table: LogicalTable,
+    source: FlinkEndpoint,
+    target: FlinkEndpoint,
+    target_engine: str,
+    mode: str = "full",
+    column_map: dict[str, str] | None = None,
+    source_physical: str | None = None,
+    target_physical: str | None = None,
+    checkpoint_dir: str | None = None,
+) -> str:
+    """搬运作业（sync/materialize）的完整 Flink SQL——不含清洗/聚合，只把一张表从源搬到目标。
+
+    统一执行架构的落地点：sync/materialize 与 transform/metric 走同一个生成器，差别只在
+    这里用**恒等** SELECT 体（:func:`build_identity_select`），transform/metric 用带清洗/聚合的体。
+
+    Args:
+        mode: ``full`` → batch INSERT（有界，跑完即退）；
+            ``incremental`` / ``cdc`` → streaming CDC 作业（mysql-cdc/postgres-cdc 源连接器，
+            读位点靠 checkpoint 续）。二者都用**恒等**体，差别只在源连接器与执行模式。
+        checkpoint_dir: CDC 作业的 checkpoint 目录（``file://…``）。CDC 必给——读位点存这里，
+            重启从最近 checkpoint 续，不重搬也不漏。全量忽略。
+
+    与 :func:`generate_flink_sql` 的关系：本函数负责「搬运语义」（恒等体 + 全量/CDC 选择），
+    组装仍委托给 generate_flink_sql，不重复 CREATE TABLE / SET 模式那套。
+    """
+    if mode not in ("full", "incremental", "cdc"):
+        raise ValueError(f"未知装载方式 {mode!r}，可选：full / incremental / cdc")
+
+    select_body = build_identity_select(
+        source_table, target_table, target_engine, column_map=column_map
+    )
+
+    if mode == "full":
+        return generate_flink_sql(
+            source_table=source_table,
+            target_table=target_table,
+            source=source,
+            target=target,
+            select_body=select_body,
+            execution_mode="batch",
+            source_physical=source_physical,
+            target_physical=target_physical,
+        )
+
+    # incremental / cdc：streaming + CDC 源连接器。二者在搬运语义上一致（都读变更流、
+    # 位点靠 checkpoint 续）——incremental 只是"从头快照后转 binlog"，cdc 同理，故合并处理。
+    if source.platform.lower() not in _CDC_CONNECTORS:
+        raise ValueError(
+            f"源平台 {source.platform!r} 无 Flink CDC 连接器，无法做 {mode} 搬运"
+            f"（支持：{', '.join(sorted(_CDC_CONNECTORS))}）"
+        )
+    if not checkpoint_dir:
+        # 不给 checkpoint 就没有读位点续存，重启即从头快照——违背增量语义，直接拦下。
+        raise ValueError(
+            f"{mode} 搬运是 streaming CDC 作业，必须给 checkpoint_dir（file://…）"
+            "以持久化读位点；否则重启会重搬。"
+        )
+    return generate_flink_sql(
+        source_table=source_table,
+        target_table=target_table,
+        source=source,
+        target=target,
+        select_body=select_body,
+        execution_mode="streaming",
+        source_physical=source_physical,
+        target_physical=target_physical,
+        source_cdc=True,
+        checkpoint_dir=checkpoint_dir,
+    )
+
+
+#: streaming 作业的 checkpoint 配置。SqlRunner 把非 CREATE/INSERT 的 SET 全塞进
+#: ``tableEnv.getConfig().getConfiguration()``（见 SqlRunner.java），故这些 key 由它落地，
+#: **Java 侧零改动**。1.13 的 key 名：state.backend=filesystem、state.checkpoints.dir 收 file://。
+_CHECKPOINT_INTERVAL_MS = 10000  # 10s；CDC 作业读位点靠 checkpoint 续，间隔即最大重放窗口。
+
+
+def _checkpoint_sets(checkpoint_dir: str) -> list[str]:
+    """streaming/CDC 作业的 checkpoint SET 语句。``checkpoint_dir`` 形如 ``file:///var/…``
+    （本地文件存储，standalone 与 YARN 通用；YARN 只改提交目标，不影响这些运行期配置）。"""
+    return [
+        f"SET 'execution.checkpointing.interval' = '{_CHECKPOINT_INTERVAL_MS}';",
+        "SET 'state.backend' = 'filesystem';",
+        f"SET 'state.checkpoints.dir' = '{checkpoint_dir}';",
+    ]
 
 
 def generate_flink_sql(
@@ -291,6 +473,8 @@ def generate_flink_sql(
     source_physical: str | None = None,
     target_physical: str | None = None,
     source_watermark: tuple[str, str] | None = None,
+    source_cdc: bool = False,
+    checkpoint_dir: str | None = None,
 ) -> str:
     """把「源表 + 目标表 + SELECT 体」组装成完整 Flink SQL 计算作业。
 
@@ -305,6 +489,8 @@ def generate_flink_sql(
         source_physical: 源表在数仓的真实库表名（JDBC table-name），缺省用 qualified_name
         target_physical: 目标表真实库表名，同上
         source_watermark: streaming 下源表的 ``(列名, 策略)``；batch 忽略
+        source_cdc: 源表用 CDC 连接器（mysql-cdc/postgres-cdc）；仅 CDC/增量搬运
+        checkpoint_dir: streaming 作业的 checkpoint 目录（``file://…``）；给了就注入 checkpoint SET
 
     Returns:
         完整 Flink SQL 脚本（幂等）
@@ -312,12 +498,16 @@ def generate_flink_sql(
     mode = "streaming" if execution_mode == "streaming" else "batch"
     watermark = source_watermark if mode == "streaming" else None
 
-    parts = [
-        f"SET 'execution.runtime-mode' = '{mode}';",
+    parts = [f"SET 'execution.runtime-mode' = '{mode}';"]
+    # checkpoint 只对 streaming 有意义（批作业跑完即退，无状态可存）。
+    if mode == "streaming" and checkpoint_dir:
+        parts += _checkpoint_sets(checkpoint_dir)
+    parts += [
         "",
         "-- 源表",
         render_create_table(
-            source_table, source, physical_name=source_physical, watermark=watermark
+            source_table, source, physical_name=source_physical,
+            watermark=watermark, cdc=source_cdc,
         ),
         "",
         "-- 目标表",

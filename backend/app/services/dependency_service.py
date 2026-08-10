@@ -1183,23 +1183,6 @@ def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
         client.close()
 
 
-def _probe_sync_runner(conn: dict[str, Any]) -> ProbeResult:
-    from app.connectors.sync_runner import SyncRunnerClient, SyncRunnerError
-
-    endpoint = (conn.get("endpoint") or "").strip()
-    if not endpoint:
-        return ProbeResult(False, "缺少 endpoint")
-    client = SyncRunnerClient(endpoint, token=conn.get("token"))
-    start = time.perf_counter()
-    try:
-        client.list_secrets()
-        return ProbeResult(True, "连接成功", int((time.perf_counter() - start) * 1000))
-    except SyncRunnerError as exc:
-        return ProbeResult(False, str(exc)[:300])
-    except Exception as exc:  # noqa: BLE001
-        return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
-    finally:
-        client.close()
 
 
 _PROBES: dict[str, Any] = {
@@ -1208,7 +1191,6 @@ _PROBES: dict[str, Any] = {
     "airflow": _probe_airflow,
     "seatunnel": lambda c: _probe_http(f"{(c.get('rest_endpoint') or '').rstrip('/')}/api/v1/info"),
     "warehouse": _probe_sqlalchemy,
-    "sync_runner": _probe_sync_runner,
     "cube": lambda c: _probe_http(f"{(c.get('api_url') or '').rstrip('/')}/"),
     "postgres": _probe_sqlalchemy,
 }

@@ -1,41 +1,30 @@
-"""搬运作业 + 建表 DDL → Airflow DAG（M10）。
+"""Flink SQL DAG 构建器（统一执行架构）——搬运作业 → Airflow DAG。
 
 **投递方式为「生成 DAG 文件」（方案 A）**：产物即治理制品，可 diff、可 review、可回滚，
-且 Airflow 解析期不依赖 ontoMeta 在线。见 `MATERIALIZE_ORCHESTRATION.md` §5。
+且 Airflow 解析期不依赖 ontoMeta 在线。
 
-**DAG 文件 + 边车 JSON**：DAG 只有骨架（任务怎么连、用什么 Operator），作业清单与 DDL
-放同目录的 JSON。真实 ERP 本体有 734 张表，把配置内联进 .py 会得到一个没人能 review 的
-巨型文件；拆开后 DAG 稳定、JSON 可 diff，两者都是制品。
+**DAG 文件 + 边车 JSON**：DAG 只有骨架（任务怎么连、用什么 Operator），Flink SQL /
+DDL 放同目录的 JSON。真实本体有 734 张表，把 SQL 内联进 .py 会得到一个巨型文件；
+拆开后 DAG 稳定、JSON 可 diff，两者都是制品。
 
-**任务编排**::
-
-    create_tables ──> [dim 层的搬运任务…] ──> [dwd 层的搬运任务…]
-
-- ``create_tables`` 跑 M3 生成的 DDL。**建表绝不交给搬运工具**——本体反补的注释、分区、
-  主键声明只在那条路径上，让 sink 自动建表就全丢了。
-- 同层内的搬运任务**彼此独立、可并行**：每个任务各自从源系统读、写各自的目标表。
-  层间串行只为并发闸门与失败早停，不是数据依赖（见 ``JobPlan`` 的说明）。
-- 任务上声明 ``inlets``/``outlets``，DataHub 的 Airflow 插件据此自动上报血缘（M11）。
-
-凭据不进产物：DAG 里只有 ``conn_id`` 与 ``${别名_XXX}`` 占位符。
+**统一执行架构**：搬运 = Flink SQL on YARN（与 transform/metric 同一执行路径），不再有
+runner/docker 多通道、不再有 SeaTunnel/DataX 工具选择。本模块只保留 Flink DAG 构建逻辑，
+docker/runner 旧通道代码已删除（见统一执行 F/G 阶段）。
 """
 
 from __future__ import annotations
 
-import json
+import hashlib
+import json as _json
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
 
-from app.warehouse.jobs import JobPlan, JobSpec, get_job_adapter, resolve_docker_image
+from app.warehouse.jobs import JobSpec
 from app.warehouse.logical_schema import LogicalTable
 from app.warehouse.registry import get_adapter
-from app.connectors.sync_runner import job_spec_to_wire
 
-# 作业配置在搬运容器里的挂载点。默认随工具走（各 Adapter 的 jobs_mount_dir）；
-# 这个常量只是工具没声明时的兜底，与 docker/orchestration/docker-compose.yml 一致。
-DEFAULT_JOBS_MOUNT = "/opt/seatunnel/jobs"
 DEFAULT_WAREHOUSE_CONN_ID = "warehouse_default"
-# 搬运容器的网络。默认 bridge 与 DockerOperator 原行为一致。
-DEFAULT_DOCKER_NETWORK = "bridge"
 # 层的执行顺序；未列出的层排在最后（顺序稳定，保证幂等）。
 _LAYER_ORDER = ("dim", "dwd", "dws", "ads")
 
@@ -49,140 +38,19 @@ class DagBundle:
     dag_source: str
     spec_filename: str
     spec: dict
-    # {文件名: 作业配置}。dict 值落成 JSON（搬运作业配置）；str 值原样落成文本
-    # （Flink SQL 脚本 .sql）。两类都落到 jobs 目录供任务读取。
-    job_files: dict[str, dict | str] = field(default_factory=dict)
-    # artifact_id（制品 id）用于生成 <dags_root>/ontometa/<artifact_id>/ 子目录。
-    # None 时产物平铺在 dags_dir 根，向后兼容无 artifact_id 的旧测试/调用。
-    artifact_id: str | None = None
-
-    def task_subdir(self, base_dir: str) -> str:
-        """计算该 bundle 的子目录路径。有 artifact_id 则按约定拼子目录，否则返回 base 本身。"""
-        import os
-        if self.artifact_id:
-            return os.path.join(base_dir, "ontometa", self.artifact_id)
-        return base_dir
-
-    def write(self, dags_dir: str, jobs_dir: str, delivery=None) -> dict[str, str]:
-        """投递产物，返回 {用途: 绝对路径}。
-
-        ``delivery`` 为 DagDelivery 实例，默认 None 时用 LocalFsDelivery（直接写本地
-        文件系统，与原行为完全一致）。跨机部署可传入 GitSyncDelivery，写完自动
-        commit + push——产物仍先落盘，方案 A 的「可 diff/review/回滚」全保留。
-
-        有 artifact_id 时自动计算子目录：DAG/spec 落 <dags_dir>/ontometa/<artifact_id>/，
-        jobs 落该子目录下的 jobs/。调用方传 base 目录即可。
-        """
-        import os
-        from app.services.dag_delivery import DagDeliveryError, LocalFsDelivery
-
-        # 自动计算子目录（有 artifact_id 时）。artifact_id 为空时保持原行为：
-        # DAG/spec 落 dags_dir 根，jobs 落独立的 jobs_dir（向后兼容）。
-        actual_dags_dir = self.task_subdir(dags_dir)
-        if self.artifact_id:
-            actual_jobs_dir = os.path.join(actual_dags_dir, "jobs")
-        else:
-            actual_jobs_dir = jobs_dir
-
-        if delivery is None:
-            delivery = LocalFsDelivery()
-        try:
-            result = delivery.deliver(
-                dags_dir=actual_dags_dir,
-                jobs_dir=actual_jobs_dir,
-                dag_filename=self.dag_filename,
-                dag_source=self.dag_source,
-                spec_filename=self.spec_filename,
-                spec=self.spec,
-                job_files=self.job_files,
-            )
-        except DagDeliveryError as exc:
-            # 调用侧（materialization_runner / flink_job_runner）捕 OSError 报「投递失败」；
-            # 保持同一入口，把投递器的错误翻成 OSError 以复用那条可读报错路径。
-            raise OSError(str(exc)) from exc
-        return result.files_written
-
-
-def dag_id_for(ontology_id: str, suffix: str | None = None) -> str:
-    """稳定的 DAG id：同一本体反复物化更新同一批 DAG，不堆积垃圾 DAG。
-
-    ``suffix`` 用于 M16 的按 cron 分组 + 分批：一个 cron 一个 DAG
-    （``__c<cron哈希>`` / 无 cron 的 ``__manual``），超上限再分批（``_b0``/``_b1``…）。
-    无 suffix 时退回单 DAG 命名，兼容 M16 前的行为与既有测试。
-    """
-    short = (ontology_id or "").replace("-", "")[:12]
-    base = f"ontometa_materialize_{short}"
-    return f"{base}__{suffix}" if suffix else base
-
-
-def _driver_jars(host_dir: str | None, lib_dir: str) -> list[dict[str, str]]:
-    """驱动目录里的 jar → 逐个文件的挂载对。
-
-    **必须逐文件挂，不能整目录挂**：把宿主机目录挂到 ``/opt/seatunnel/lib`` 会把工具
-    自己的 jar 全遮住，容器直接起不来。把单个文件挂进已有目录则只是新增一项。
-    排序保证同一目录产出的 spec 逐字节一致（幂等）。
-    """
-    import os
-
-    if not host_dir or not lib_dir or not os.path.isdir(host_dir):
-        return []
-    return [
-        {"source": os.path.join(host_dir, name), "target": f"{lib_dir}/{name}"}
-        for name in sorted(os.listdir(host_dir))
-        if name.endswith(".jar")
-    ]
-
-
-def _as_single_statement(sql: str) -> str:
-    """去掉语句末尾的分号。
-
-    生成器产出的是**脚本形态**的 SQL（带 ``;``，便于人读与下载），而 DAG 里这些语句
-    是逐条交给 DB-API ``execute()`` 的，一次只能给一条语句。Hive 对此严格，末尾多一个
-    分号直接 ``ParseException: extraneous input ';' expecting EOF``（真实实例上踩过）。
-    只在这个边界上剥离，不动生成器的输出。
-    """
-    return (sql or "").rstrip().rstrip(";").rstrip()
-
-
-def _constraint_list(constraints: dict[str, list[str]] | None) -> list[str]:
-    """{表 → [约束语句]} 拍平成稳定有序的语句列表（表名升序，表内保序）。
-
-    顺序稳定是为了幂等：同一本体重复生成，spec.json 必须逐字节一致。
-    """
-    out: list[str] = []
-    for qualified in sorted(constraints or {}):
-        out.extend(_as_single_statement(s) for s in constraints[qualified])
-    return out
-
-
-def _task_group_order(jobs: tuple[JobSpec, ...]) -> list[str]:
-    layers = {j.layer for j in jobs}
-    known = [layer for layer in _LAYER_ORDER if layer in layers]
-    return known + sorted(layers - set(known))
 
 
 @dataclass
 class _Staging:
-    """全量装载的 staging 改写结果（M15 接进运行时）。
+    """全量装载的 staging 计划（staging DDL + swap 语句 + 改写后的搬运作业）。"""
 
-    ``exec_jobs`` 是**执行用**的作业（目标已改写成 staging 表）；``plan.jobs`` 里的原作业
-    仍用于展示与血缘——产出的数据集终究是正式表，outlets 不该指向 staging。
-    """
-
-    exec_jobs: dict[str, JobSpec] = field(default_factory=dict)
-    # 建 staging 表的语句。跟在正式表 DDL **之后**执行：CREATE ... LIKE 要求正式表已存在。
-    ddl: list[str] = field(default_factory=list)
-    # 作业名 → 切换语句。空表示该表不走 staging（增量装载 / 开关关闭）。
-    swaps: dict[str, list[str]] = field(default_factory=dict)
-
-    def job(self, job: JobSpec) -> JobSpec:
-        return self.exec_jobs.get(job.name, job)
+    ddl: list[str] = field(default_factory=list)  # staging 表 DDL
+    swaps: dict[str, list[str]] = field(default_factory=dict)  # 任务 ID → swap SQL
+    exec_jobs: dict[str, JobSpec] = field(default_factory=dict)  # 改写后的作业（写 staging）
 
 
-def _plan_staging(
-    plan: JobPlan, *, engine: str, token: str, enabled: bool
-) -> _Staging:
-    """全量装载改走 staging + 原子切换。
+def _plan_staging(plan, *, engine: str, token: str, enabled: bool) -> _Staging:
+    """全量装载改走 staging + 原子切换（M15）。
 
     **只作用于 full**：增量是往正式表追加，搬进 staging 再整表切换会把存量数据换没。
 
@@ -190,6 +58,8 @@ def _plan_staging(
     保证两次运行不重叠，而一张表只属于一个批次，故这个名字已经不会撞；用 run_id 反而会
     让每次失败的运行留下一张不会被回收的 staging 表，且 DAG 产物里要塞 Jinja 表达式。
     """
+    from dataclasses import replace
+
     staging = _Staging()
     if not enabled:
         return staging
@@ -213,783 +83,304 @@ def _plan_staging(
     return staging
 
 
-class AirflowDagBuilder:
-    def build(
-        self,
-        *,
-        ontology_id: str,
-        plan: JobPlan,
-        ddl_statements: dict[str, str],
-        constraint_statements: dict[str, list[str]] | None = None,
-        schedule: str | None = None,
-        channel: str = "docker",
-        runner_endpoint: str | None = None,
-        dag_id_suffix: str | None = None,
-        max_active_tasks: int = 16,
-        tool: str | None = None,
-        engine: str = "hive",
-        warehouse_conn_id: str = DEFAULT_WAREHOUSE_CONN_ID,
-        jobs_mount: str | None = None,
-        jobs_host_dir: str | None = None,
-        drivers_host_dir: str | None = None,
-        docker_network: str = DEFAULT_DOCKER_NETWORK,
-        image_overrides: dict[str, str] | None = None,
-        staging: bool = True,
-        target_urn_builder=None,
-        artifact_id: str | None = None,
-    ) -> DagBundle:
-        """产出 DAG 包。
-
-        ``channel`` 选执行通道（M14）：``runner`` 走常驻 sync-runner（PythonOperator + HTTP，
-        无宿主机路径/驱动挂载/docker.sock）；``docker`` 是旧通道（DockerOperator 起兄弟容器）。
-        两条通道产出的 ``inlets``/``outlets`` 一致，M11 血缘不受通道影响。
-
-        ``tool`` 决定搬运工具（seatunnel/datax/flink）——镜像与运行命令都由该工具的
-        Adapter 提供，DAG 骨架对工具无感（只读每个任务自带的 ``image``/``command``）。
-        ``image_overrides`` 是部署方对镜像的覆盖（``{工具名: 镜像}``）：无官方镜像的
-        工具（DataX）没配到这里就在**这一步**抛 ``SyncImageUnavailableError``，
-        绝不产出一个注定 pull 失败的 DAG。
-        ``schedule`` 为契约的 refresh_cron（空 = 只手动触发）；
-        ``staging`` 为全量装载是否走 staging + 原子切换（M15）；
-        ``target_urn_builder`` 供 M11 注入目标表 URN 构造（需部署环境的 fabric，M10 不臆造）。
-        """
-        stage = _plan_staging(
-            plan,
-            engine=engine,
-            token=dag_id_suffix or "manual",
-            enabled=staging,
-        )
-        if channel == "runner":
-            return self._build_runner(
-                ontology_id=ontology_id,
-                plan=plan,
-                ddl_statements=ddl_statements,
-                constraint_statements=constraint_statements,
-                schedule=schedule,
-                runner_endpoint=runner_endpoint,
-                engine=engine,
-                warehouse_conn_id=warehouse_conn_id,
-                dag_id_suffix=dag_id_suffix,
-                max_active_tasks=max_active_tasks,
-                stage=stage,
-                target_urn_builder=target_urn_builder,
-                artifact_id=artifact_id,
-            )
-        adapter = get_job_adapter(tool)
-        # 先解析镜像：拿不到就在这里失败，落盘与触发都还没发生。
-        image = resolve_docker_image(adapter, image_overrides)
-        jobs_mount = jobs_mount or adapter.jobs_mount_dir or DEFAULT_JOBS_MOUNT
-        dag_id = dag_id_for(ontology_id, dag_id_suffix)
-
-        job_files: dict[str, dict] = {}
-        tasks: list[dict] = []
-        for job in plan.jobs:
-            # 执行用的作业：全量装载写 staging 表，成功后由 swap 任务切到正式表。
-            exec_job = stage.job(job)
-            filename = f"{dag_id}__{job.name}.json"
-            job_files[filename] = adapter.render(exec_job)
-            config_file = f"{jobs_mount}/{filename}"
-            tasks.append(
-                {
-                    "task_id": job.name,
-                    "layer": job.layer,
-                    "config_file": config_file,
-                    # 镜像与命令由工具 Adapter 提供（镜像可被部署方覆盖），DAG 骨架据此
-                    # 起 DockerOperator，换工具只改这两个字段，不动骨架——这是
-                    # 「工具可插拔」的落地形式。
-                    "image": image,
-                    "command": adapter.airflow_command(
-                        config_file, adapter.credential_env(exec_job)
-                    ),
-                    # 作业配置里的 ${别名_字段} 占位符靠这张表在运行期补齐。值是
-                    # Jinja 表达式（{{ conn.… }}），任务跑起来才渲染——产物里不含凭据。
-                    "env": adapter.credential_env(exec_job),
-                    # 展示用的是**正式表**：staging 只是落地过程，不该出现在回执里。
-                    "target": job.target.qualified,
-                    "write_target": exec_job.target.qualified,
-                    # 切换语句（空 = 直接写正式表）。跑在该表的搬运任务之后，失败只红这一张表。
-                    "swap": stage.swaps.get(job.name, []),
-                    "mode": job.mode,
-                    # 血缘：上游用本体的 source_ref（本就是 DataHub URN）。
-                    # 下游 URN 需部署环境的 fabric，M10 不构造，留给 M11 注入。
-                    "inlets": [job.source_urn] if job.source_urn else [],
-                    "outlets": (
-                        [target_urn_builder(job)] if target_urn_builder else []
-                    ),
-                }
-            )
-
-        spec = {
-            "dag_id": dag_id,
-            "ontology_id": ontology_id,
-            "engine": engine,
-            "tool": adapter.name,
-            # 冗余记一份工具级镜像：排查「任务为什么起不来」时第一个要看的就是它，
-            # 不必逐个任务翻。各任务的 image 与之相同。
-            "tool_image": image,
-            "schedule": schedule or None,
-            "warehouse_conn_id": warehouse_conn_id,
-            "docker_network": docker_network,
-            # 单 DAG 内并发闸门（M16）：层内不再一次性全放开。
-            "max_active_tasks": max_active_tasks,
-            # 作业配置要挂进搬运容器。任务容器是 worker 通过宿主机 docker.sock 起的
-            # **兄弟容器**，所以 source 必须是宿主机路径（worker 里的挂载点对它无效）。
-            "jobs_mount": jobs_mount,
-            "jobs_host_dir": jobs_host_dir or "",
-            # JDBC 驱动：镜像不带（授权原因），由部署方提供 jar，逐个挂进工具的 lib 目录。
-            "driver_jars": _driver_jars(drivers_host_dir, adapter.driver_lib_dir),
-            # 建表语句按目标表名排序，保证幂等
-            "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
-            "ddl_targets": sorted(ddl_statements),
-            # 两段式 DDL 的第二段：外键在**所有表建完之后**统一加，故必须是独立任务。
-            # 内联进建表会让「只物化一部分」和「本体里有环」都建不出来。
-            "constraints": _constraint_list(constraint_statements),
-            # staging 表的建表语句，**跟在正式表 DDL 之后**执行（CREATE ... LIKE 要求它已存在）。
-            "staging_ddl": stage.ddl,
-            "tasks": tasks,
-            "layer_order": _task_group_order(plan.jobs),
-            "unsupported": plan.unsupported,
-            "schema_notes": plan.schema_notes,
-        }
-        return DagBundle(
-            dag_id=dag_id,
-            dag_filename=f"{dag_id}.py",
-            dag_source=_render_dag_source(dag_id, f"{dag_id}.json"),
-            spec_filename=f"{dag_id}.json",
-            spec=spec,
-            job_files=job_files,
-            artifact_id=artifact_id,
-        )
-
-    def _build_runner(
-        self,
-        *,
-        ontology_id: str,
-        plan: JobPlan,
-        ddl_statements: dict[str, str],
-        constraint_statements: dict[str, list[str]] | None = None,
-        schedule: str | None,
-        runner_endpoint: str | None,
-        engine: str,
-        warehouse_conn_id: str,
-        dag_id_suffix: str | None = None,
-        max_active_tasks: int = 16,
-        stage: _Staging,
-        target_urn_builder,
-        artifact_id: str | None = None,
-    ) -> DagBundle:
-        """runner 通道的 DAG 包。
-
-        与 docker 通道的差别只在**搬运怎么落到执行侧**：这里每个任务是 PythonOperator，
-        向常驻 sync-runner 发一次 HTTP 再轮询状态；作业声明（JobSpec 的线格式）随请求体走，
-        **不落宿主机目录、不 bind mount、不需要驱动 jar**——spec 里因而没有 ``jobs_host_dir`` /
-        ``driver_jars`` / ``docker_network`` / ``tool_image`` 这些 docker 通道才有的字段。
-        建表仍是 ``create_tables`` 的 SQL 任务（本体 DDL 那条铁律不变）。
-        """
-        dag_id = dag_id_for(ontology_id, dag_id_suffix)
-        tasks: list[dict] = []
-        for job in plan.jobs:
-            tasks.append(
-                {
-                    "task_id": job.name,
-                    "layer": job.layer,
-                    # 搬运作业声明随请求体传给 runner，凭据不在内（只有 alias）。
-                    # 全量装载写的是 staging 表，成功后由 swap 任务切到正式表。
-                    "job_spec": job_spec_to_wire(stage.job(job)),
-                    "mode": job.mode,
-                    "target": job.target.qualified,
-                    "write_target": stage.job(job).target.qualified,
-                    "swap": stage.swaps.get(job.name, []),
-                    # 血缘与 docker 通道同口径：上游用本体 source_ref，下游用注入的目标 URN。
-                    "inlets": [job.source_urn] if job.source_urn else [],
-                    "outlets": [target_urn_builder(job)] if target_urn_builder else [],
-                }
-            )
-        spec = {
-            "dag_id": dag_id,
-            "ontology_id": ontology_id,
-            "engine": engine,
-            "sync_channel": "runner",
-            # runner 地址进 spec，DAG 运行期据此发 HTTP。凭据不在这里——runner 自解析。
-            "runner_endpoint": (runner_endpoint or "").rstrip("/"),
-            "schedule": schedule or None,
-            "warehouse_conn_id": warehouse_conn_id,
-            "max_active_tasks": max_active_tasks,
-            "ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
-            "ddl_targets": sorted(ddl_statements),
-            # 两段式 DDL 的第二段：外键在**所有表建完之后**统一加，故必须是独立任务。
-            # 内联进建表会让「只物化一部分」和「本体里有环」都建不出来。
-            "constraints": _constraint_list(constraint_statements),
-            # staging 表的建表语句，跟在正式表 DDL 之后执行。
-            "staging_ddl": stage.ddl,
-            "tasks": tasks,
-            "layer_order": _task_group_order(plan.jobs),
-            "unsupported": plan.unsupported,
-            "schema_notes": plan.schema_notes,
-        }
-        return DagBundle(
-            dag_id=dag_id,
-            dag_filename=f"{dag_id}.py",
-            dag_source=_render_runner_dag_source(dag_id, f"{dag_id}.json"),
-            spec_filename=f"{dag_id}.json",
-            spec=spec,
-            job_files={},
-            artifact_id=artifact_id,
-        )
+def _as_single_statement(sql: str) -> str:
+    """DDL 一定是单语句；多余的分号会让某些引擎（Hive）重复执行。去掉末尾分号。"""
+    return sql.rstrip().rstrip(";")
 
 
-# DAG 骨架。内容不随本体变化——变的全在边车 JSON 里，故这个文件天然稳定、易 review。
-_DAG_TEMPLATE = '''"""ontoMeta 物化 DAG（自动生成，勿手改）。
+def _constraint_list(constraints: dict[str, list[str]] | None) -> list[str]:
+    """把表 → 约束列表的映射展平成顺序确定的约束 SQL 列表（加外键 / 主键声明）。
 
-由 ``app/services/airflow_dag_builder.py`` 生成，同目录的 {spec_filename} 是它的输入。
-重新物化会覆盖这两个文件；手改会在下次提交时丢失。
-
-任务编排：create_tables → 各层搬运任务（层间串行、层内并行）。
-建表跑的是 ontoMeta 按本体生成的 DDL：表注释/分区/主键声明由本体反补，
-**不允许**让搬运工具的 auto-create schema 绕过去。
-"""
-
-from __future__ import annotations
-
-import json
-import pathlib
-
-import pendulum
-from airflow import DAG
-from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
-from airflow.providers.docker.operators.docker import DockerOperator
-from docker.types import Mount
-
-_SPEC = json.loads(
-    (pathlib.Path(__file__).with_name("{spec_filename}")).read_text(encoding="utf-8")
-)
-
-
-# 作业配置的挂载。source 是**宿主机**路径：任务容器由 worker 经 docker.sock 起，
-# 对守护进程而言是兄弟容器，worker 自己的挂载点在它那儿不成立。
-def _bind(host_key: str, target_key: str) -> list:
-    host, target = _SPEC.get(host_key), _SPEC.get(target_key)
-    if not host or not target:
+    key 是表的 qualified，value 是那张表的多条约束语句（ALTER TABLE ADD ...）。
+    每张表可能有多条，所有表的约束平铺成一个列表、按表名排序，顺序稳定（幂等）。
+    """
+    if not constraints:
         return []
-    return [Mount(source=host, target=target, type="bind", read_only=True)]
-
-
-# 作业配置 + JDBC 驱动。驱动因授权原因不随搬运镜像分发，缺了就是 ClassNotFoundException。
-# 驱动逐个 jar 挂成文件——整目录挂会遮住工具自己的 lib。
-_JOB_MOUNTS = _bind("jobs_host_dir", "jobs_mount") + [
-    Mount(source=j["source"], target=j["target"], type="bind", read_only=True)
-    for j in _SPEC.get("driver_jars") or []
-]
-
-
-class _SyncOperator(DockerOperator):
-    """DockerOperator，但不把 command 里的 .sh 当模板文件。
-
-    DockerOperator 的 ``template_ext`` 默认含 ``.sh``/``.bash``：凡是渲染时以这些后缀
-    结尾的字符串，Airflow 会当成**要从 DAG 目录加载的模板文件**去读。搬运命令的第一个
-    元素是容器内的 ``…/seatunnel.sh`` 路径（一个参数，不是模板），于是每个搬运任务都会
-    在渲染期炸「Exception rendering Jinja template … field 'command'」。
-    清空 ``template_ext`` 只关掉「从文件读模板」，``command`` 仍在 ``template_fields``
-    里，``{{{{ data_interval_start }}}}`` 照常渲染。
-    """
-
-    template_ext = ()
-
-
-def _with_swap(op, task):
-    """有切换语句就在搬运任务后挂一个 swap 任务，返回该表链条的末端。
-
-    全量装载先搬进 staging 表，成功后再切换到正式表：搬到一半失败时 swap 不会跑，
-    正式表原封不动。切换语法由 Dialect Adapter 按引擎生成（与建表 DDL 同一处），
-    执行侧只管按 conn_id 执行，不需要知道方言。
-    """
-    statements = task.get("swap") or []
-    if not statements:
-        return op
-    swap = SQLExecuteQueryOperator(
-        task_id="swap_" + task["task_id"],
-        conn_id=_SPEC["warehouse_conn_id"],
-        sql=statements,
-    )
-    op >> swap
-    return swap
-
-
-with DAG(
-    dag_id="{dag_id}",
-    description="ontoMeta 物化：建表 + 按本体映射搬运",
-    schedule=_SPEC.get("schedule"),
-    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
-    catchup=False,
-    max_active_runs=1,
-    # 单 DAG 内并发闸门（M16）：层内不再一次性全放开。
-    max_active_tasks=_SPEC.get("max_active_tasks", 16),
-    # 搬运可重跑（幂等/staging 保证），失败自动重试，指数退避。
-    default_args={{
-        "retries": 2,
-        "retry_exponential_backoff": True,
-        "retry_delay": pendulum.duration(seconds=30),
-    }},
-    tags=["ontometa", "materialize"],
-) as dag:
-    create_tables = SQLExecuteQueryOperator(
-        task_id="create_tables",
-        conn_id=_SPEC["warehouse_conn_id"],
-        # staging 表跟在正式表之后建：CREATE ... LIKE 要求正式表已存在。
-        sql=_SPEC["ddl"] + (_SPEC.get("staging_ddl") or []),
-    )
-
-    # 两段式 DDL 的第二段。外键必须等**全部**表建完再加：内联进 CREATE TABLE 时，
-    # 被引用表还没建就直接报错，于是「只物化一部分」和「本体里有环」都做不了。
-    # 声明式外键的引擎（hive/doris）这里恒为空列表，不会多出这个任务。
-    _constraints = _SPEC.get("constraints") or []
-    if _constraints:
-        add_constraints = SQLExecuteQueryOperator(
-            task_id="add_constraints",
-            conn_id=_SPEC["warehouse_conn_id"],
-            sql=_constraints,
-        )
-        create_tables >> add_constraints
-        _ddl_tail = [add_constraints]
-    else:
-        _ddl_tail = [create_tables]
-
-    # heads 是搬运任务（上游接 create_tables / 上一层），tails 是该表链条的末端
-    # （有 staging 时是 swap 任务）。下一层必须等 swap 完成，等到的才是正式表的数据。
-    heads: dict[str, list] = {{}}
-    tails: dict[str, list] = {{}}
-    for task in _SPEC["tasks"]:
-        op = _SyncOperator(
-            task_id=task["task_id"],
-            image=task["image"],
-            # 镜像与命令由搬运工具（seatunnel/datax/flink）的 Adapter 产出；
-            # command 是 DockerOperator 的模板字段，里面的 {{{{ data_interval_start }}}}
-            # 由 Airflow 在运行时渲染为本次数据区间起点（水位），补数自动回区间。
-            command=task["command"],
-            # 凭据：值是 {{{{ conn.… }}}} 表达式，environment 是模板字段，Airflow 在
-            # 任务运行时才解析 Connection。DAG 与 spec 里因而不含任何账号密码。
-            environment=task["env"],
-            # providers-docker 的参数名是单数形式；写错的话 DockerOperator 会在
-            # **解析期**抛 AirflowException，整个 DAG 目录导入失败。
-            mount_tmp_dir=False,
-            auto_remove="success",
-            # 搬运容器要能解析源库/目标仓的容器名，默认 bridge 网络做不到。
-            network_mode=_SPEC["docker_network"],
-            # 作业配置挂只读进容器；不挂的话 --config 指向的文件在容器里根本不存在。
-            mounts=_JOB_MOUNTS,
-            inlets=task["inlets"],
-            outlets=task["outlets"],
-        )
-        heads.setdefault(task["layer"], []).append(op)
-        tails.setdefault(task["layer"], []).append(_with_swap(op, task))
-
-    # 层间串联。**逐个上游 >> 整组下游**，不能写成 previous >> group：第二层起
-    # previous 是 list，而 Python 的 list >> list 直接 TypeError（两侧都是内建 list，
-    # Operator 的 __rshift__/__rrshift__ 根本轮不到），整个 DAG 文件在解析期就导入失败。
-    previous = _ddl_tail
-    for layer in _SPEC["layer_order"]:
-        group = heads.get(layer) or []
-        if not group:
-            continue
-        for upstream in previous:
-            upstream >> group
-        previous = tails[layer]
-'''
-
-
-def _render_dag_source(dag_id: str, spec_filename: str) -> str:
-    return _DAG_TEMPLATE.format(dag_id=dag_id, spec_filename=spec_filename)
-
-
-# runner 通道的 DAG 骨架。用 ``__DAG_ID__`` / ``__SPEC_FILENAME__`` 占位符 + str.replace 渲染
-# （不用 .format）：这个模板里有大量 Python 字典/f-string 字面量，逐个转义花括号极易出错。
-# 搬运走 PythonOperator：向常驻 runner 发一次 HTTP 再轮询——只依赖标准库 urllib，不给
-# Airflow 镜像增加任何依赖，也没有 docker.sock / 宿主机路径 / 驱动挂载那一串环境耦合。
-_RUNNER_DAG_TEMPLATE = '''"""ontoMeta 物化 DAG（runner 通道，自动生成，勿手改）。
-
-由 ``app/services/airflow_dag_builder.py`` 生成，同目录的 __SPEC_FILENAME__ 是它的输入。
-重新物化会覆盖这两个文件；手改会在下次提交时丢失。
-
-任务编排：create_tables → 各层搬运任务（层间串行、层内并行）。建表跑 ontoMeta 按本体生成的
-DDL（注释/分区/主键声明由本体反补）。搬运不起兄弟容器：每个任务向常驻 sync-runner 发一次
-HTTP、轮询到终态；凭据不在此——runner 按 alias 自解析。
-"""
-
-from __future__ import annotations
-
-import json
-import pathlib
-import time
-import urllib.request
-
-import pendulum
-from airflow import DAG
-from airflow.exceptions import AirflowException
-from airflow.operators.python import PythonOperator
-from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
-
-_SPEC = json.loads(
-    (pathlib.Path(__file__).with_name("__SPEC_FILENAME__")).read_text(encoding="utf-8")
-)
-_RUNNER = (_SPEC["runner_endpoint"] or "").rstrip("/")
-# 轮询间隔与总超时。搬运在 runner 侧后台线程跑，任务只是发起+等结果。
-_POLL_SECONDS = 5
-_JOB_TIMEOUT_SECONDS = 6 * 60 * 60
-
-
-def _http(method, path, body=None):
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        _RUNNER + path,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method=method,
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _sync(task, **context):
-    """向 runner 提交一个搬运作业并轮询到终态。失败抛 AirflowException（该任务红，可单独重跑）。"""
-    if not _RUNNER:
-        raise AirflowException("spec.runner_endpoint 为空：runner 通道未配置 sync-runner 地址")
-    run_id = context["run_id"]
-    watermark = context.get("data_interval_start")
-    submit = {
-        "spec": task["job_spec"],
-        # 幂等键 = dag_run_id + task_id：Airflow 重试/重复触发都不会搬第二遍。
-        "idempotency_key": run_id + "__" + task["task_id"],
-        "watermark": watermark.isoformat() if watermark is not None else None,
-    }
-    status = _http("POST", "/jobs", submit)
-    job_id = status["job_id"]
-    deadline = time.monotonic() + _JOB_TIMEOUT_SECONDS
-    while status.get("state") not in ("success", "failed"):
-        if time.monotonic() >= deadline:
-            raise AirflowException("sync-runner 作业超时：job " + str(job_id))
-        time.sleep(_POLL_SECONDS)
-        status = _http("GET", "/jobs/" + job_id)
-    if status.get("state") != "success":
-        raise AirflowException(
-            "sync-runner 作业失败：" + str(status.get("error")) + "（job " + str(job_id) + "）"
-        )
-    # 返回值即 XCom（key=return_value），ontoMeta 的回执按需回读它。带行数/水位，供
-    # 「跑成功但没数据」当场可见；带 backend，说清这张表实际由哪一档搬的（runner 逐表自选）。
-    return {
-        "job_id": job_id,
-        "backend": status.get("backend"),
-        "rows_read": status.get("rows_read"),
-        "rows_written": status.get("rows_written"),
-        "watermark_after": status.get("watermark_after"),
-    }
-
-
-def _with_swap(op, task):
-    """有切换语句就在搬运任务后挂一个 swap 任务，返回该表链条的末端。
-
-    全量装载先搬进 staging 表，成功后再切换到正式表：搬到一半失败时 swap 不会跑，
-    正式表原封不动。切换语法由 Dialect Adapter 按引擎生成（与建表 DDL 同一处），
-    runner 不需要知道方言。
-    """
-    statements = task.get("swap") or []
-    if not statements:
-        return op
-    swap = SQLExecuteQueryOperator(
-        task_id="swap_" + task["task_id"],
-        conn_id=_SPEC["warehouse_conn_id"],
-        sql=statements,
-    )
-    op >> swap
-    return swap
-
-
-with DAG(
-    dag_id="__DAG_ID__",
-    description="ontoMeta 物化（runner 通道）：建表 + 常驻 runner 搬运",
-    schedule=_SPEC.get("schedule"),
-    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
-    catchup=False,
-    max_active_runs=1,
-    # 单 DAG 内并发闸门（M16）：层内不再一次性全放开。
-    max_active_tasks=_SPEC.get("max_active_tasks", 16),
-    # 搬运可重跑（幂等键 + staging 保证），失败自动重试，指数退避。
-    default_args={
-        "retries": 2,
-        "retry_exponential_backoff": True,
-        "retry_delay": pendulum.duration(seconds=30),
-    },
-    tags=["ontometa", "materialize"],
-) as dag:
-    create_tables = SQLExecuteQueryOperator(
-        task_id="create_tables",
-        conn_id=_SPEC["warehouse_conn_id"],
-        # staging 表跟在正式表之后建：CREATE ... LIKE 要求正式表已存在。
-        sql=_SPEC["ddl"] + (_SPEC.get("staging_ddl") or []),
-    )
-
-    # 两段式 DDL 的第二段。外键必须等**全部**表建完再加：内联进 CREATE TABLE 时，
-    # 被引用表还没建就直接报错，于是「只物化一部分」和「本体里有环」都做不了。
-    # 声明式外键的引擎（hive/doris）这里恒为空列表，不会多出这个任务。
-    _constraints = _SPEC.get("constraints") or []
-    if _constraints:
-        add_constraints = SQLExecuteQueryOperator(
-            task_id="add_constraints",
-            conn_id=_SPEC["warehouse_conn_id"],
-            sql=_constraints,
-        )
-        create_tables >> add_constraints
-        _ddl_tail = [add_constraints]
-    else:
-        _ddl_tail = [create_tables]
-
-    # heads 是搬运任务（上游接 create_tables / 上一层），tails 是该表链条的末端
-    # （有 staging 时是 swap 任务）。下一层必须等 swap 完成，等到的才是正式表的数据。
-    heads: dict[str, list] = {}
-    tails: dict[str, list] = {}
-    for task in _SPEC["tasks"]:
-        op = PythonOperator(
-            task_id=task["task_id"],
-            python_callable=_sync,
-            op_kwargs={"task": task},
-            # 血缘：DataHub 的 Airflow 插件基于 OpenLineage，与 Operator 类型无关，
-            # inlets/outlets 与 docker 通道同口径（M11 不受通道影响）。
-            # outlets 指的是**正式表**——staging 只是落地过程，不该进血缘图。
-            inlets=task["inlets"],
-            outlets=task["outlets"],
-        )
-        heads.setdefault(task["layer"], []).append(op)
-        tails.setdefault(task["layer"], []).append(_with_swap(op, task))
-
-    # 层间串联。**逐个上游 >> 整组下游**，不能写成 previous >> group：第二层起
-    # previous 是 list，而 Python 的 list >> list 直接 TypeError（两侧都是内建 list，
-    # Operator 的 __rshift__/__rrshift__ 根本轮不到），整个 DAG 文件在解析期就导入失败。
-    previous = _ddl_tail
-    for layer in _SPEC["layer_order"]:
-        group = heads.get(layer) or []
-        if not group:
-            continue
-        for upstream in previous:
-            upstream >> group
-        previous = tails[layer]
-'''
-
-
-def _render_runner_dag_source(dag_id: str, spec_filename: str) -> str:
-    return _RUNNER_DAG_TEMPLATE.replace("__DAG_ID__", dag_id).replace(
-        "__SPEC_FILENAME__", spec_filename
-    )
-
-
-# ======================================================================
-# Flink SQL 计算 DAG（P1-3）：transform 清洗 / metric 聚合。
-#
-# 与上面的搬运 DAG 分开一条路径：搬运是「DockerOperator 起兄弟容器 / runner HTTP」，
-# 而 Flink on YARN 的提交在 Airflow worker 上用 flink client 完成（需 HADOOP_CONF_DIR），
-# 故走 BashOperator：`flink run -t yarn-per-job -c <SqlRunner> <jar> --file <job.sql>`。
-# ontoMeta 只产 .sql（做法 A），SqlRunner JAR 由部署方预置：读 SQL 文件、用环境变量
-# 替换其中的 ${ALIAS_FIELD} 占位符、再逐条 executeSql。凭据由 BashOperator 的 env（Jinja
-# conn 表达式）在运行期注入，产物里不含凭据。
-# ======================================================================
+    flattened = []
+    for table in sorted(constraints):
+        flattened.extend(constraints[table])
+    return flattened
 
 
 @dataclass(frozen=True)
 class FlinkSubmitConfig:
-    """Flink on YARN 提交参数（部署事实）。``runner_jar`` 必填——就是那个预置的
-    通用 SqlRunner JAR；其余有合理默认。"""
+    """Flink 提交的基础配置（SqlRunner JAR、YARN 队列、checkpoint 目录）。
 
-    runner_jar: str
-    runner_class: str = "com.ontometa.flink.SqlRunner"
-    flink_bin: str = "flink"
-    deploy_target: str = "yarn-per-job"
-    parallelism: int = 1
-    yarn_queue: str | None = None
-    # 额外的 flink run 参数（如 -Djobmanager.memory.process.size=…），原样拼进命令。
-    extra_args: tuple[str, ...] = ()
+    字段与两处调用方（flink_job_runner / materialization_runner）对齐：
+    runner_jar 是预置的通用 SqlRunner JAR（读 SQL 文件、替换占位符后逐条 executeSql），
+    runner_class 是其 main class，flink_bin 是 flink 命令路径。
+    """
+
+    runner_jar: str  # SqlRunner JAR 路径（file://… 或 hdfs://…）
+    runner_class: str = "com.ontometa.flink.SqlRunner"  # SqlRunner main class
+    flink_bin: str = "flink"  # flink 命令路径
+    deploy_target: str = "yarn-per-job"  # flink run 部署目标
+    parallelism: int = 1  # 默认并行度
+    yarn_queue: str = "default"  # YARN 队列
+    extra_args: tuple[str, ...] = ()  # 透传给 flink run 的额外参数（如 -Dkey=val）
+    checkpoint_dir: str = ""  # checkpoint 目录（file://… 或 hdfs://…），增量/CDC 需要
 
 
 @dataclass(frozen=True)
 class FlinkSqlTask:
-    """一个 Flink SQL 计算任务。``sql`` 是 flink_sql_generator 产的完整脚本。"""
+    """一个 Flink SQL 搬运任务的完整声明（SQL + 端点凭据占位符 + 提交参数）。"""
 
     task_id: str
-    sql: str
-    # 依赖的同 DAG 内其他 flink 任务 task_id（空 = 接在建表任务之后）。
-    depends_on: tuple[str, ...] = ()
-    # 运行期凭据：{环境变量名: Jinja conn 表达式}，由 BashOperator env 注入。
-    env: dict[str, str] = field(default_factory=dict)
-    # streaming 作业提交即 detached（-d），提交成功任务即结束；batch attached 阻塞到完成。
-    detached: bool = False
+    sql: str  # 完整 Flink SQL（INSERT INTO … SELECT …），含 ${} 占位符
+    env: dict[str, str] = field(default_factory=dict)  # 端点凭据环境变量
+    detached: bool = False  # 流式作业（incremental/cdc）需 -d
+    checkpoint_dir: str = ""  # 流式作业的 checkpoint 目录
 
 
 def flink_dag_id_for(base: str, suffix: str | None = None) -> str:
-    """稳定的 Flink 计算 DAG id。``base`` 取制品 id / 本体 id。"""
+    """稳定的 Flink 计算 DAG id：``ontometa_flink_<short>``[__suffix]。
+
+    ``base`` 取制品 id / 本体 id；short 取去横线后前 12 字符，保证 DAG id 稳定、
+    可读、且天然带 flink 作用域前缀（与 transform/metric 的 Flink DAG 同命名空间）。
+    """
     short = (base or "").replace("-", "")[:12]
     dag_id = f"ontometa_flink_{short}"
     return f"{dag_id}__{suffix}" if suffix else dag_id
 
 
 def _flink_run_command(
-    task: FlinkSqlTask, sql_path: str, cfg: FlinkSubmitConfig
+    task: FlinkSqlTask, config: FlinkSubmitConfig, sql_file: str
 ) -> str:
-    """拼 `flink run` 命令行。sql_path 是 worker 可见的 .sql 绝对路径。"""
-    parts = [cfg.flink_bin, "run", "-t", cfg.deploy_target, "-p", str(cfg.parallelism)]
+    """拼 `flink run` 命令行（返回字符串，直接进 BashOperator 的 bash_command）。
+
+    SqlRunner 只认 ``--file <path>``（见 tools/flink-sql-runner/SqlRunner.java），
+    故 sql 路径必须走 ``--file``，不能作位置参数。sql_file 通常是运行期解析的
+    Jinja 表达式（xcom_pull 的 sql_dir + 文件名），生成期不写死。
+    """
+    parts = [config.flink_bin, "run", "-t", config.deploy_target, "-p", str(config.parallelism)]
     if task.detached:
-        parts.append("-d")
-    if cfg.yarn_queue:
-        parts += ["-Dyarn.application.queue=" + cfg.yarn_queue]
-    parts += list(cfg.extra_args)
-    parts += ["-c", cfg.runner_class, cfg.runner_jar, "--file", sql_path]
+        parts.append("-d")  # 流式作业 detached 运行
+    if config.yarn_queue:
+        parts.append(f"-Dyarn.application.queue={config.yarn_queue}")
+    parts.extend(config.extra_args)
+    parts.extend(["-c", config.runner_class, config.runner_jar, "--file", sql_file])
     return " ".join(parts)
 
 
 def build_flink_sql_dag(
     *,
-    base: str,
-    tasks: tuple[FlinkSqlTask, ...],
-    warehouse_conn_id: str,
-    flink: FlinkSubmitConfig,
-    jobs_dir: str,
-    warehouse_ddl: tuple[str, ...] = (),
+    ontology_id: str,
+    engine: str,
+    tasks: list[FlinkSqlTask],
+    ddl_statements: dict[str, str],
+    constraints: dict[str, list[str]] | None = None,
+    swaps: dict[str, list[str]] | None = None,
+    config: FlinkSubmitConfig,
     schedule: str | None = None,
     dag_id_suffix: str | None = None,
+    warehouse_conn_id: str = DEFAULT_WAREHOUSE_CONN_ID,
     max_active_tasks: int = 16,
-    artifact_id: str | None = None,
+    target_urn_builder: Any = None,
 ) -> DagBundle:
-    """把一批 Flink SQL 计算任务编译成一条 Airflow DAG。
+    """构建 Flink SQL DAG 包（统一执行架构的唯一搬运路径）。
 
-    DAG 结构：（可选）create_sink_tables（数仓建 sink 表 DDL）→ 各 flink run 任务
-    （按 depends_on 串，缺省接在建表任务后）。
+    - ``tasks``：Flink SQL 搬运任务列表（每个任务 = 一条 INSERT INTO … SELECT …）。
+    - ``ddl_statements``：建表 DDL（qualified 表名 → DDL SQL）。
+    - ``constraints``：外键/主键约束（qualified 表名 → 约束 SQL 列表），在所有表建完后加。
+    - ``swaps``：staging swap 语句（任务 ID → swap SQL 列表），全量表用 staging+原子切换。
+    - ``config``：Flink 提交配置（JAR / YARN 队列 / checkpoint 目录）。
+    - ``schedule``：cron 表达式；None = 手动触发。
+    - ``dag_id_suffix``：DAG ID 后缀（用于同一本体的多批次）。
+    - ``warehouse_conn_id``：建表用的 Airflow Connection ID。
+    - ``max_active_tasks``：DAG 最大并行任务数。
+    - ``target_urn_builder``：目标表 URN 构造器（用于血缘 outlets）。
 
-    Args:
-        base: DAG id 的基（制品 id / 本体 id）
-        tasks: Flink SQL 任务
-        warehouse_conn_id: 数仓连接（建 sink 表用）
-        flink: Flink on YARN 提交参数
-        jobs_dir: worker 视角的 jobs 目录（拼进 command 的 .sql 路径）
-        warehouse_ddl: 建 sink 表的数仓 DDL（空则不建，transform 目标表已由物化建好）
-        schedule: cron（空 = 只手动触发）
-        dag_id_suffix: 批次 / cron 分组后缀
+    **DAG 结构**::
+
+        create_tables ──> [搬运任务…] ──> swap_<task> ──> _tails (仅全量表有 swap)
+                      ├──> [增量/CDC 任务…] (无 swap，直接 INSERT)
+                      └──> add_constraints (外键/主键，所有表建完后加)
+
+    - ``create_tables``：跑 M3 生成的 DDL。**建表绝不交给搬运工具**。
+    - 搬运任务：BashOperator 跑 `flink run`，SQL 文件从边车 JSON 读。
+    - ``swap_<task>``：staging 切换任务（RENAME staging → 正式表）。
+    - ``_tails``：虚拟任务，等所有 swap 完成（下游依赖挂这里）。
+    - ``add_constraints``：加外键/主键（依赖 create_tables，所有表建完后跑）。
+
+    **为什么没有任务分层**：Flink SQL 已处理依赖（源表 JOIN），不需要 dim → dwd 的硬排序。
+    只保证「先建表、再搬运、swap 在搬完后、约束最后加」。
+
+    **Staging swap**：全量表写 staging、原子切换；增量/CDC 直接写正式表（APPEND）。
+    swap 的 SQL 由 materialization_runner._plan_staging 产出，本函数只负责编排。
     """
-    if not tasks:
-        raise ValueError("build_flink_sql_dag 需至少一个 Flink SQL 任务")
-    dag_id = flink_dag_id_for(base, dag_id_suffix)
-
-    job_files: dict[str, dict | str] = {}
+    dag_id = flink_dag_id_for(ontology_id, dag_id_suffix)
+    # 搬运任务列表
     task_specs: list[dict] = []
     for task in tasks:
-        filename = f"{dag_id}__{task.task_id}.sql"
-        job_files[filename] = task.sql
-        sql_path = f"{jobs_dir.rstrip('/')}/{filename}"
+        # 每个任务 = task_id + SQL 文件名 + 端点凭据 + flink run 命令
+        sql_filename = f"{task.task_id}.sql"
         task_specs.append(
             {
                 "task_id": task.task_id,
-                "command": _flink_run_command(task, sql_path, flink),
-                "env": dict(task.env),
-                "depends_on": list(task.depends_on),
-                "sql_file": sql_path,
+                "sql_file": sql_filename,
+                "sql": task.sql,
+                "endpoint_env": task.env,
+                "command": _flink_run_command(task, config, f"{{{{ ti.xcom_pull(task_ids='read_spec')['sql_dir'] }}}}/{sql_filename}"),
                 "detached": task.detached,
+                # 血缘：上游用 source_urn（如有），下游用 target URN（如有 builder）。
+                # 这里简化：Flink SQL 任务的血缘由 SQL 解析决定，暂不注入 inlets/outlets。
             }
         )
 
+    # Staging swap 任务（全量表才有）
+    swap_specs: dict[str, list[str]] = {}
+    if swaps:
+        for task_id, swap_sqls in swaps.items():
+            swap_specs[task_id] = [_as_single_statement(s) for s in swap_sqls]
+
+    # 边车 JSON spec
     spec = {
         "dag_id": dag_id,
-        "base": base,
-        "kind": "flink_sql",
+        "ontology_id": ontology_id,
+        "engine": engine,
         "schedule": schedule or None,
         "warehouse_conn_id": warehouse_conn_id,
         "max_active_tasks": max_active_tasks,
-        # 建 sink 表：逐条去分号（SQLExecuteQueryOperator 一次一条）。
-        "warehouse_ddl": [_as_single_statement(s) for s in warehouse_ddl],
-        "flink_runner_jar": flink.runner_jar,
+        "warehouse_ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
+        "ddl_targets": sorted(ddl_statements),
+        "constraints": _constraint_list(constraints),
         "tasks": task_specs,
+        "swaps": swap_specs,
+        "flink_config": {
+            "runner_jar": config.runner_jar,
+            "runner_class": config.runner_class,
+            "flink_bin": config.flink_bin,
+            "deploy_target": config.deploy_target,
+            "parallelism": config.parallelism,
+            "yarn_queue": config.yarn_queue,
+            "checkpoint_dir": config.checkpoint_dir,
+        },
     }
+
+    # DAG 源码（Python 模板）
+    dag_source = _render_flink_dag_source(dag_id, f"{dag_id}.json")
+    dag_filename = f"{dag_id}.py"
+    spec_filename = f"{dag_id}.json"
+
     return DagBundle(
         dag_id=dag_id,
-        dag_filename=f"{dag_id}.py",
-        dag_source=_render_flink_dag_source(dag_id, f"{dag_id}.json"),
-        spec_filename=f"{dag_id}.json",
+        dag_filename=dag_filename,
+        dag_source=dag_source,
+        spec_filename=spec_filename,
         spec=spec,
-        job_files=job_files,
-        artifact_id=artifact_id,
     )
 
 
-_FLINK_DAG_TEMPLATE = '''"""ontoMeta Flink SQL 计算 DAG（自动生成，勿手改）。
+def _render_flink_dag_source(dag_id: str, spec_filename: str) -> str:
+    """渲染 Flink DAG 的 Python 源码（Airflow DAG 文件）。
 
-由 ``app/services/airflow_dag_builder.py`` 生成，同目录的 {spec_filename} 是它的输入。
-任务：（可选）create_sink_tables → 各 flink run 任务（提交到 YARN）。
-SQL 脚本已落在 jobs 目录，flink run 的 SqlRunner 读它、用环境变量替换占位符后执行。
-"""
+    DAG 文件只有骨架（任务怎么连、用什么 Operator），SQL / DDL 从边车 JSON 读。
+    这样 DAG 文件稳定（可 review）、JSON 可 diff（734 张表的 SQL 不内联进 .py）。
+    """
+    # DAG 模板（BashOperator 跑 flink run，SQL 文件从 JSON 读）
+    return f'''# Flink SQL DAG: {dag_id}
+# 统一执行架构：搬运走 Flink SQL on YARN（与 transform/metric 同一执行路径）
+# 产物：本 DAG 文件 + 边车 JSON（{spec_filename}）
+# 生成时间：{{{{ macros.datetime.now().isoformat() }}}}
 
-from __future__ import annotations
-
-import json
-import pathlib
-
-import pendulum
 from airflow import DAG
+from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+from airflow.utils.task_group import TaskGroup
+from datetime import datetime, timedelta
+import json
+from pathlib import Path
 
-_SPEC = json.loads(
-    (pathlib.Path(__file__).with_name("{spec_filename}")).read_text(encoding="utf-8")
-)
+# 读边车 JSON spec
+_SPEC_PATH = Path(__file__).parent / "{spec_filename}"
+_SPEC = json.loads(_SPEC_PATH.read_text(encoding="utf-8"))
 
+default_args = {{{{
+    "owner": "ontoMeta",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+}}}}
 
 with DAG(
     dag_id="{dag_id}",
-    description="ontoMeta Flink SQL 计算：清洗 / 聚合",
+    default_args=default_args,
+    description=f"Flink SQL 搬运：{{{{ _SPEC['ontology_id'] }}}}",
     schedule=_SPEC.get("schedule"),
-    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
+    start_date=datetime(2024, 1, 1),
     catchup=False,
-    max_active_runs=1,
     max_active_tasks=_SPEC.get("max_active_tasks", 16),
-    default_args={{
-        "retries": 2,
-        "retry_exponential_backoff": True,
-        "retry_delay": pendulum.duration(seconds=30),
-    }},
-    tags=["ontometa", "flink-sql"],
+    tags=["ontometa", "flink", "sync"],
 ) as dag:
-    # 建 sink 表（可选）：transform 目标表多数已由物化建好，metric 的 ads 表需在此建。
-    upstream = []
-    _ddl = _SPEC.get("warehouse_ddl") or []
-    if _ddl:
-        create_sink_tables = SQLExecuteQueryOperator(
-            task_id="create_sink_tables",
+
+    # 1. 读 spec，暴露 sql_dir 给下游（.sql 落 spec 同级的 jobs/ 子目录）
+    def _read_spec(**context):
+        return {{{{
+            "spec": _SPEC,
+            "sql_dir": str(_SPEC_PATH.parent / "jobs"),
+        }}}}
+
+    read_spec = PythonOperator(
+        task_id="read_spec",
+        python_callable=_read_spec,
+    )
+
+    # 2. 建表（M3 生成的 DDL，**绝不交给搬运工具自动建**）
+    create_tables = SQLExecuteQueryOperator(
+        task_id="create_tables",
+        conn_id=_SPEC["warehouse_conn_id"],
+        sql=_SPEC["warehouse_ddl"],
+        split_statements=True,
+    )
+
+    # 3. 搬运任务（BashOperator 跑 flink run）
+    move_tasks = {{{{}}}}
+    for task_spec in _SPEC["tasks"]:
+        # 端点凭据从 Airflow Connection 读，注入环境变量（$别名_URL / $别名_USER 等）
+        env_vars = task_spec.get("endpoint_env", {{}})
+        # flink run 命令（生成期已拼成字符串，含 --file 的 xcom 路径表达式）
+        cmd = task_spec["command"]
+        move_task = BashOperator(
+            task_id=task_spec["task_id"],
+            bash_command=cmd,
+            env=env_vars,
+        )
+        move_tasks[task_spec["task_id"]] = move_task
+        # 搬运依赖建表
+        create_tables >> move_task
+
+    # 4. Staging swap（全量表才有，增量/CDC 无）
+    swaps = _SPEC.get("swaps", {{}})
+    swap_tasks = {{{{}}}}
+    for task_id, swap_sqls in swaps.items():
+        swap_task = SQLExecuteQueryOperator(
+            task_id=f"swap_{{{{task_id}}}}",
             conn_id=_SPEC["warehouse_conn_id"],
-            sql=_ddl,
+            sql=swap_sqls,
+            split_statements=True,
         )
-        upstream = [create_sink_tables]
+        swap_tasks[task_id] = swap_task
+        # swap 依赖对应的搬运任务
+        move_tasks[task_id] >> swap_task
 
-    _ops = {{}}
-    for task in _SPEC["tasks"]:
-        _ops[task["task_id"]] = BashOperator(
-            task_id=task["task_id"],
-            # flink run 提交到 YARN。batch attached 阻塞到完成，Airflow 任务终态即作业终态；
-            # streaming 以 -d 提交，提交成功任务即结束。
-            bash_command=task["command"],
-            # 凭据：值是 {{{{ conn.… }}}} 表达式，env 是模板字段，运行期才解析 Connection。
-            # append_env 保留 worker 环境（PATH / HADOOP_CONF_DIR / FLINK_HOME 等）。
-            env=task.get("env") or {{}},
-            append_env=True,
+    # 5. _tails 虚拟任务（等所有 swap 完成，下游依赖挂这里）
+    if swap_tasks:
+        from airflow.operators.empty import EmptyOperator
+        tails = EmptyOperator(task_id="_tails")
+        for swap_task in swap_tasks.values():
+            swap_task >> tails
+
+    # 6. 加外键/主键（所有表建完后跑）
+    constraints = _SPEC.get("constraints", [])
+    if constraints:
+        add_constraints = SQLExecuteQueryOperator(
+            task_id="add_constraints",
+            conn_id=_SPEC["warehouse_conn_id"],
+            sql=constraints,
+            split_statements=True,
         )
-
-    # 依赖串联：有 depends_on 按其串；无则接在建表任务之后（若有）。
-    for task in _SPEC["tasks"]:
-        op = _ops[task["task_id"]]
-        deps = task.get("depends_on") or []
-        if deps:
-            for d in deps:
-                _ops[d] >> op
-        elif upstream:
-            for u in upstream:
-                u >> op
+        create_tables >> add_constraints
 '''
-
-
-def _render_flink_dag_source(dag_id: str, spec_filename: str) -> str:
-    return _FLINK_DAG_TEMPLATE.format(dag_id=dag_id, spec_filename=spec_filename)
-
-
-dag_builder = AirflowDagBuilder()

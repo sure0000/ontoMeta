@@ -22,7 +22,8 @@ def test_sync_without_target_datasource_fallback_handoff():
     }
     receipt = executor.execute(spec, context={})
     assert "handoff" in receipt
-    assert "SeaTunnel" in receipt["handoff"]
+    # 统一执行架构：退回「仅产出」走 Flink 路径，不再是 SeaTunnel
+    assert receipt["handoff"] == "flink_sql"
     assert "未配置" in receipt["note"]
 
 
