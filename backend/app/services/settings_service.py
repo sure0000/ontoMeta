@@ -128,17 +128,11 @@ class AirflowRuntimeConfig:
     docker_network: str
     # JDBC 驱动目录（宿主机路径），挂进搬运容器的 lib 目录。
     drivers_dir: str
-    # 搬运工具的镜像覆盖 ``{工具名: 镜像}``（见 config.sync_tool_images）。
-    # 无官方镜像的工具（DataX）只有在这里配了才可选。
+    # 搬运工具的镜像覆盖 ``{工具名: 镜像}``（已废弃：统一执行架构下不走 docker 镜像）。
+    # 为兼容保留字段（前端可能仍发送），但不再实际使用。
     sync_tool_images: dict[str, str]
-    # 强制指定搬运工具，空 = 自动（见 services/sync_tool_resolver）。物化弹窗不再逐次选。
+    # 强制指定搬运工具（已废弃：统一执行架构下恒为 flink）。为兼容保留字段。
     sync_tool: str
-    # 搬运执行通道与 runner 地址（M14）。channel=runner 时向常驻 runner 发 HTTP，
-    # docker_network/drivers_dir/sync_tool_images 这三项只服务 docker 旧通道。
-    sync_channel: str
-    sync_runner_endpoint: str
-    # 调 runner 的 Bearer token（runner 侧设了才需要）。
-    sync_runner_token: str | None
     # DAG 形状与时序。dag_parse_timeout 要大于 Airflow 的 dag_dir_list_interval，
     # 否则首次提交必然报「尚未解析到」。
     max_tasks_per_dag: int
@@ -299,9 +293,6 @@ class SettingsService:
             drivers_dir=a.get("drivers_dir") or "",
             sync_tool_images=parse_tool_images(a.get("sync_tool_images")),
             sync_tool=(a.get("sync_tool") or "").strip().lower(),
-            sync_channel=a.get("sync_channel") or "runner",
-            sync_runner_endpoint=a.get("sync_runner_endpoint") or "",
-            sync_runner_token=a.get("sync_runner_token") or None,
             max_tasks_per_dag=a.get("max_tasks_per_dag") or 50,
             max_active_tasks_per_dag=a.get("max_active_tasks_per_dag") or 16,
             dag_parse_timeout=a.get("dag_parse_timeout") or 60.0,
@@ -457,8 +448,6 @@ class SettingsService:
                     id="default",
                     dags_dir=_default_dags_dir(),
                     jobs_dir=_default_jobs_dir(),
-                    sync_channel=env_settings.sync_channel or "runner",
-                    sync_runner_endpoint=env_settings.sync_runner_endpoint,
                     docker_network=env_settings.airflow_docker_network,
                     drivers_dir=env_settings.airflow_sync_drivers_dir,
                     sync_tool_images=env_settings.sync_tool_images,
