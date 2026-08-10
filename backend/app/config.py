@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     flink_deploy_target: str = "yarn-per-job"
     flink_parallelism: int = 1
     flink_yarn_queue: str = ""
+    # 增量/CDC 搬运是常驻流式作业，读位点靠 checkpoint 续存（重启从最近 checkpoint 恢复，
+    # 不重搬不漏）。这是它落哪儿的根目录（``file://…`` 本地，或 ``hdfs://…`` 集群），
+    # 属部署基础设施。空 = 未配；有增量/CDC 表时编译会报错要求配上，全量搬运不需要它。
+    flink_checkpoint_dir: str = ""
 
     @property
     def sync_tool_image_map(self) -> dict[str, str]:

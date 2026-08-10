@@ -212,14 +212,16 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
 
     # 勾选按实体名，改名后仍要命中（不能因为改名把自己裁掉）
     assert receipt["tables"] == ["warehouse_prod.dim_customer"]
-    # 建表 DDL 落盘到 DAG spec，重命名后的表名在其中
+    # 建表 DDL 落盘到 Flink DAG spec 的 warehouse_ddl，重命名后的表名在其中
     import json as _json
 
     spec_path = next(
         p for p in (tmp_path / "dags").rglob("*.json") if p.parent.name != "jobs"
     )
     spec = _json.loads(spec_path.read_text(encoding="utf-8"))
-    assert any("warehouse_prod" in s and "dim_customer" in s for s in spec["ddl"])
+    assert any(
+        "warehouse_prod" in s and "dim_customer" in s for s in spec["warehouse_ddl"]
+    )
 
 
 def test_batch_refresh_cron_expands_to_selected_contracts(tmp_path, monkeypatch):
@@ -288,13 +290,12 @@ def _set_airflow(**fields):
         SettingsService().update_airflow_settings(db, fields)
 
 
-def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict, channel: str = "docker", capabilities: dict | None = None):
-    """把 Airflow 配成可用，并把 REST 调用换成记录器（不需要真实 Airflow）。
+def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
+    """把 Airflow 配成可用，把 REST 调用换成记录器，并配上 Flink SqlRunner JAR。
 
-    **编排配置全在设置行里**（不再有环境变量），故这里直接写设置行——测试因此走的是
-    生产同一条读取路径，而不是绕过它去 patch 一个已经不参与决策的 env 对象。
-    ``channel`` 选执行通道：``docker`` 走旧兄弟容器通道；``runner`` 额外把 SyncRunnerClient
-    换成返回给定 capabilities 的替身（不需要真实 runner）。
+    统一执行架构：搬运一律走 Flink SQL on YARN（无 seatunnel/docker/runner 多通道）。
+    JAR 路径经 env 读（部署基础设施），测试里 monkeypatch 成一个非空值以走真实 DAG 路径
+    （不落地执行，只产 DAG + .sql + 触发替身）。缺 JAR 会走 handoff（仅产出）。
     """
     from app.services.settings_service import SettingsService
 
@@ -306,36 +307,18 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict, channel: str = "d
                 "enabled": True,
                 "dags_dir": str(tmp_path / "dags"),
                 "jobs_dir": str(tmp_path / "jobs"),
-                "sync_channel": channel,
-                "sync_runner_endpoint": "http://sync-runner:8088",
             },
         )
-
-    if channel == "runner":
-        from app.connectors.sync_runner import EXPECTED_CONTRACT_VERSION
-
-        caps = capabilities or {
-            # 跟着常量走：契约 bump 时这里不该变成又一处要手改的地方。
-            "contract_version": EXPECTED_CONTRACT_VERSION,
-            "backends": ["native", "seatunnel"],
-            "sources": ["mysql", "mariadb"],
-            "sinks": ["hive", "doris"],
-            "modes": ["full", "incremental"],
-            # Hive 只做全量（seatunnel 档回读不了 Hive 水位），与真 runner 一致。
-            "sink_modes": {"hive": ["full"], "doris": ["full", "incremental"]},
-        }
-
-        class _FakeRunner:
-            def __init__(self, *a, **kw):
-                pass
-
-            def capabilities(self):
-                return caps
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(materialization_runner, "SyncRunnerClient", _FakeRunner)
+    # Flink 提交参数从 env 读；给个非空 JAR 路径，走真实 DAG 生成而非 handoff。
+    monkeypatch.setattr(
+        materialization_runner.env_settings, "flink_sql_runner_jar", "/opt/sql-runner.jar"
+    )
+    # 这是个支持增量的部署：给出 checkpoint 目录，含 timestamp 分区键的表默认走 incremental
+    # → CDC 流式作业需要它。缺它只在专门的 test_incremental_without_checkpoint_dir_errors
+    # 里验证（那用例会把它清回空）。
+    monkeypatch.setattr(
+        materialization_runner.env_settings, "flink_checkpoint_dir", "file:///tmp/ontometa-ckpt"
+    )
 
     class _FakeClient:
         def __init__(self, *a, **kw):
@@ -380,7 +363,7 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
 
     # 关键：没有任何直连写库
     assert rec.calls == []
-    assert receipt["execute_mode"] == "orchestrated"
+    assert receipt["execute_mode"] == "flink_on_yarn"
     assert receipt["ok"] is True
     assert receipt["state"] == "queued"
     # run_id = 制品 id + 批次后缀（无 cron → manual）：每个 DAG 一个确定性 run_id，重复提交幂等
@@ -399,12 +382,13 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     assert len(jobs) == len(receipt["jobs"]) >= 1
 
 
-def test_runner_channel_writes_pythonoperator_dag_and_records_channel(tmp_path, monkeypatch):
-    """runner 通道：产出 PythonOperator DAG（无作业配置文件），回执记 sync_channel=runner。"""
-    ids = _seed("runnerok")
+def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypatch):
+    """统一执行：产出 Flink SQL DAG（BashOperator flink run），每个搬运作业一个 .sql 文件，
+    产物无凭据明文。"""
+    ids = _seed("flinkok")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     triggered: dict = {}
-    _enable_airflow(tmp_path, monkeypatch, triggered=triggered, channel="runner")
+    _enable_airflow(tmp_path, monkeypatch, triggered=triggered)
 
     with SessionLocal() as db:
         receipt = materialization_runner.run(
@@ -416,79 +400,42 @@ def test_runner_channel_writes_pythonoperator_dag_and_records_channel(tmp_path, 
         )
 
     assert receipt["ok"] is True
-    assert receipt["sync_channel"] == "runner"
+    assert receipt["execute_mode"] == "flink_on_yarn"
+    assert receipt["sync_tool"] == "flink"
+    assert "sync_channel" not in receipt  # 多通道概念已废除
     assert receipt["state"] == "queued"
-    # DAG 落盘且是 runner 通道：PythonOperator、无凭据、无作业配置文件
+    # DAG 是 Flink 通道：BashOperator + flink run，无 Docker/Python 兄弟容器、无凭据明文
     dag_py = next(p for p in (tmp_path / "dags").rglob("*.py"))
     source = dag_py.read_text(encoding="utf-8")
-    assert "PythonOperator" in source and "DockerOperator" not in source
+    assert "BashOperator" in source and "DockerOperator" not in source
+    assert "PythonOperator" not in source
     assert "password" not in source and "jdbc:" not in source
-    # runner 通道无作业配置文件：子目录下的 jobs/ 不应有内容
-    job_files = [p for p in (tmp_path / "dags").rglob("jobs/*") if p.is_file()]
-    assert job_files == []
+    # 每个搬运作业一个 .sql 文件（落 <dags>/ontometa/<artifact>/jobs/）
+    sql_files = [p for p in (tmp_path / "dags").rglob("jobs/*.sql") if p.is_file()]
+    assert len(sql_files) == len(receipt["jobs"]) >= 1
+    # .sql 里是恒等搬运（INSERT + flink 占位符凭据，无明文）
+    body = sql_files[0].read_text(encoding="utf-8")
+    assert "INSERT INTO" in body and "${" in body
 
 
-def test_runner_channel_requires_endpoint(tmp_path, monkeypatch):
-    """runner 通道但没配 runner 地址 → 提交前报错，不产出连不上 runner 的 DAG。"""
-
-    ids = _seed("runnernoep")
+def test_incremental_without_checkpoint_dir_errors(tmp_path, monkeypatch):
+    """增量/CDC 是流式作业需 checkpoint_dir；未配 → 用户可读的物化错误，而非 500。"""
+    ids = _seed("incrnockpt")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
-    _enable_airflow(tmp_path, monkeypatch, triggered={}, channel="runner")
-    _set_airflow(sync_runner_endpoint="")
-
-    with SessionLocal() as db:
-        with pytest.raises(materialization_runner.MaterializationError, match="sync-runner"):
-            materialization_runner.run(
-                db, ids["ontology_id"], target_datasource_id=ids["datasource_id"], engine="hive"
-            )
-
-
-def test_runner_channel_unreachable_errors(tmp_path, monkeypatch):
-    """runner 不可达 → 报错（提交前问清，而不是发个 DAG 过去再炸）。"""
-    ids = _seed("runnerdown")
-    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
-    _enable_airflow(tmp_path, monkeypatch, triggered={}, channel="runner")
-
-    class _Dead:
-        def __init__(self, *a, **kw):
-            pass
-
-        def capabilities(self):
-            raise materialization_runner.SyncRunnerError("capabilities", "connection refused")
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(materialization_runner, "SyncRunnerClient", _Dead)
-
-    with SessionLocal() as db:
-        with pytest.raises(materialization_runner.MaterializationError, match="不可达"):
-            materialization_runner.run(
-                db, ids["ontology_id"], target_datasource_id=ids["datasource_id"], engine="hive"
-            )
-
-
-def test_runner_channel_contract_mismatch_errors(tmp_path, monkeypatch):
-    """契约版本不匹配即拒绝提交，不发过去再看会不会炸（§3.5）。"""
-    ids = _seed("runnerver")
-    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
-    _enable_airflow(
-        tmp_path,
-        monkeypatch,
-        triggered={},
-        channel="runner",
-        capabilities={
-            "contract_version": "999",
-            "modes": ["full"],
-            "sources": ["mysql"],
-            "sinks": ["hive"],
-        },
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    monkeypatch.setattr(
+        materialization_runner.env_settings, "flink_checkpoint_dir", ""
     )
-
+    # customer 源平台 mysql 有 CDC 连接器；全局 load_strategy=incremental 触发 CDC 路径
     with SessionLocal() as db:
-        with pytest.raises(materialization_runner.MaterializationError, match="契约版本"):
+        with pytest.raises(materialization_runner.MaterializationError, match="checkpoint"):
             materialization_runner.run(
-                db, ids["ontology_id"], target_datasource_id=ids["datasource_id"], engine="hive"
+                db,
+                ids["ontology_id"],
+                target_datasource_id=ids["datasource_id"],
+                engine="doris",  # doris 支持 incremental（hive 只全量）
+                load_strategy="incremental",
+                selected_targets=["customer"],
             )
 
 
@@ -601,15 +548,20 @@ def test_tables_without_sync_jobs_still_get_ddl(tmp_path, monkeypatch):
             artifact_id="a-orphan",
         )
 
-    built: set[str] = set()
+    # 汇总所有 DAG 的建表 DDL 文本（Flink spec 用 warehouse_ddl，一批一段列表）。
+    all_ddl: list[str] = []
     for spec_path in sorted((tmp_path / "dags").rglob("*.json")):
         if spec_path.parent.name == "jobs":  # 跳过作业配置 JSON，只读 DAG 边车 spec
             continue
-        built.update(_json.loads(spec_path.read_text(encoding="utf-8"))["ddl_targets"])
+        all_ddl.extend(_json.loads(spec_path.read_text(encoding="utf-8"))["warehouse_ddl"])
+    # 去方言引用：hive/doris 用反引号 `dim`.`customer`，postgres 用双引号——都归一成
+    # 裸的 dim.customer 再比对，否则 qualified 名永远命中不了带引号的 DDL。
+    blob = "\n".join(all_ddl).replace("`", "").replace('"', "")
 
-    # 回执说要物化的每张表，都真的有某个 DAG 会建它
-    assert set(receipt["tables"]) == built
-    assert any(t.endswith(".manual_dim") for t in built)
+    # 回执说要物化的每张表，都真的有某条建表 DDL 会建它（含无搬运作业的孤儿表）
+    for table in receipt["tables"]:
+        assert table in blob, f"{table} 未出现在任何 DAG 的建表 DDL 中"
+    assert "manual_dim" in blob
     # 孤儿归 manual 批（无 cron），不挂到定时 DAG 上重复建
     manual = next(b for b in receipt["batches"] if b["schedule"] is None)
     assert any(t.endswith(".manual_dim") for t in manual["tables"])

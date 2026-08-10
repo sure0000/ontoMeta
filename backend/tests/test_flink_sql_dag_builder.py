@@ -117,3 +117,55 @@ def test_build_is_idempotent():
     assert a.dag_source == b.dag_source
     assert a.spec == b.spec
     assert a.job_files == b.job_files
+
+
+# ---------- staging / swap（统一执行 B2）----------
+
+
+def test_swap_statements_land_in_task_spec():
+    """全量搬运的 staging→正式表切换语句进任务 spec（逐条去分号）。"""
+    b = _build(
+        tasks=(FlinkSqlTask(task_id="mv_customer", sql="INSERT INTO stg SELECT 1;"),),
+        swaps={"mv_customer": ["ALTER TABLE dim REPLACE WITH TABLE stg;"]},
+    )
+    spec_task = b.spec["tasks"][0]
+    assert spec_task["swap"] == ["ALTER TABLE dim REPLACE WITH TABLE stg"]
+
+
+def test_no_swap_yields_empty_swap_list():
+    b = _build(tasks=(FlinkSqlTask(task_id="mv", sql="INSERT INTO t SELECT 1;"),))
+    assert b.spec["tasks"][0]["swap"] == []
+
+
+def test_swap_operator_wired_downstream_in_dag_source():
+    """有 swap 的任务，DAG 源码里挂一个下游 swap_<task> SQLExecuteQueryOperator。"""
+    b = _build(
+        tasks=(FlinkSqlTask(task_id="mv_customer", sql="INSERT INTO stg SELECT 1;"),),
+        swaps={"mv_customer": ["ALTER TABLE dim REPLACE WITH TABLE stg;"]},
+    )
+    ast.parse(b.dag_source)  # 合法
+    assert "swap_" in b.dag_source
+    assert "SQLExecuteQueryOperator" in b.dag_source
+
+
+def test_downstream_depends_on_swap_tail_not_raw_move():
+    """下游任务依赖上游的末端（swap），确保等到的是切换后的正式表。"""
+    b = _build(
+        tasks=(
+            FlinkSqlTask(task_id="a", sql="INSERT INTO stg_a SELECT 1;"),
+            FlinkSqlTask(task_id="b", sql="INSERT INTO u SELECT 2;", depends_on=("a",)),
+        ),
+        swaps={"a": ["ALTER TABLE ta REPLACE WITH TABLE stg_a;"]},
+    )
+    ast.parse(b.dag_source)
+    # _tails 机制：b 依赖 a 的末端。源码里应出现 _tails 引用。
+    assert "_tails" in b.dag_source
+
+
+def test_staging_dag_source_is_valid_python():
+    b = _build(
+        tasks=(FlinkSqlTask(task_id="mv", sql="INSERT INTO stg SELECT 1;"),),
+        warehouse_ddl=("CREATE TABLE dim (x int);", "CREATE TABLE stg LIKE dim;"),
+        swaps={"mv": ["ALTER TABLE dim REPLACE WITH TABLE stg;"]},
+    )
+    ast.parse(b.dag_source)

@@ -854,25 +854,31 @@ def build_flink_sql_dag(
     dag_id_suffix: str | None = None,
     max_active_tasks: int = 16,
     artifact_id: str | None = None,
+    swaps: dict[str, list[str] | tuple[str, ...]] | None = None,
 ) -> DagBundle:
-    """把一批 Flink SQL 计算任务编译成一条 Airflow DAG。
+    """把一批 Flink SQL 任务编译成一条 Airflow DAG。
 
-    DAG 结构：（可选）create_sink_tables（数仓建 sink 表 DDL）→ 各 flink run 任务
-    （按 depends_on 串，缺省接在建表任务后）。
+    DAG 结构：（可选）create_sink_tables（数仓建 sink / staging 表 DDL）→ 各 flink run 任务
+    （按 depends_on 串，缺省接在建表任务后）→（可选）swap_<task>（staging→正式表原子切换）。
 
     Args:
         base: DAG id 的基（制品 id / 本体 id）
         tasks: Flink SQL 任务
-        warehouse_conn_id: 数仓连接（建 sink 表用）
+        warehouse_conn_id: 数仓连接（建 sink 表 / 跑 swap 用）
         flink: Flink on YARN 提交参数
         jobs_dir: worker 视角的 jobs 目录（拼进 command 的 .sql 路径）
-        warehouse_ddl: 建 sink 表的数仓 DDL（空则不建，transform 目标表已由物化建好）
+        warehouse_ddl: 建 sink / staging 表的数仓 DDL（空则不建）
         schedule: cron（空 = 只手动触发）
         dag_id_suffix: 批次 / cron 分组后缀
+        swaps: ``{task_id: [swap SQL, …]}``。全量搬运走 staging + 原子切换时，搬运任务写
+            staging 表（由调用方在生成 SQL 时把 INSERT 目标指向 staging），本参数给出把
+            staging 换到正式表的语句；DAG 在该 flink 任务**下游**挂一个 swap 任务跑它们。
+            搬到一半失败时 swap 不跑，正式表原封不动（与 docker/runner 通道同语义）。
     """
-    if not tasks:
-        raise ValueError("build_flink_sql_dag 需至少一个 Flink SQL 任务")
+    if not tasks and not warehouse_ddl:
+        raise ValueError("build_flink_sql_dag 需至少一个 Flink SQL 任务或建表 DDL")
     dag_id = flink_dag_id_for(base, dag_id_suffix)
+    swaps = swaps or {}
 
     job_files: dict[str, dict | str] = {}
     task_specs: list[dict] = []
@@ -888,6 +894,8 @@ def build_flink_sql_dag(
                 "depends_on": list(task.depends_on),
                 "sql_file": sql_path,
                 "detached": task.detached,
+                # staging→正式表切换语句（逐条去分号，SQLExecuteQueryOperator 一次一条）。
+                "swap": [_as_single_statement(s) for s in (swaps.get(task.task_id) or [])],
             }
         )
 
@@ -898,7 +906,7 @@ def build_flink_sql_dag(
         "schedule": schedule or None,
         "warehouse_conn_id": warehouse_conn_id,
         "max_active_tasks": max_active_tasks,
-        # 建 sink 表：逐条去分号（SQLExecuteQueryOperator 一次一条）。
+        # 建 sink / staging 表：逐条去分号（SQLExecuteQueryOperator 一次一条）。
         "warehouse_ddl": [_as_single_statement(s) for s in warehouse_ddl],
         "flink_runner_jar": flink.runner_jar,
         "tasks": task_specs,
@@ -963,8 +971,9 @@ with DAG(
         upstream = [create_sink_tables]
 
     _ops = {{}}
+    _tails = {{}}   # task_id → 该任务链末端（有 swap 时是 swap 任务，供下游依赖）
     for task in _SPEC["tasks"]:
-        _ops[task["task_id"]] = BashOperator(
+        op = BashOperator(
             task_id=task["task_id"],
             # flink run 提交到 YARN。batch attached 阻塞到完成，Airflow 任务终态即作业终态；
             # streaming 以 -d 提交，提交成功任务即结束。
@@ -974,14 +983,29 @@ with DAG(
             env=task.get("env") or {{}},
             append_env=True,
         )
+        _ops[task["task_id"]] = op
+        # 全量 staging：搬运写 staging 表，成功后 swap 到正式表。搬到一半失败 swap 不跑，
+        # 正式表原封不动。swap 挂在 flink 任务下游，作为该表链条的末端供后续依赖。
+        _swap_sql = task.get("swap") or []
+        if _swap_sql:
+            swap_op = SQLExecuteQueryOperator(
+                task_id="swap_" + task["task_id"],
+                conn_id=_SPEC["warehouse_conn_id"],
+                sql=_swap_sql,
+            )
+            op >> swap_op
+            _tails[task["task_id"]] = swap_op
+        else:
+            _tails[task["task_id"]] = op
 
-    # 依赖串联：有 depends_on 按其串；无则接在建表任务之后（若有）。
+    # 依赖串联：有 depends_on 按其串（依赖上游的**末端**=swap，等到的才是正式表数据）；
+    # 无则接在建表任务之后（若有）。
     for task in _SPEC["tasks"]:
         op = _ops[task["task_id"]]
         deps = task.get("depends_on") or []
         if deps:
             for d in deps:
-                _ops[d] >> op
+                _tails[d] >> op
         elif upstream:
             for u in upstream:
                 u >> op

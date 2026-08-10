@@ -64,18 +64,20 @@ def run_flink_sql(
     schedule: str | None = None,
     dag_id_suffix: str | None = None,
     artifact_id: str | None = None,
+    swaps: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """为一批 Flink SQL 计算任务生成 DAG、落盘、触发，返回回执。
+    """为一批 Flink SQL 任务生成 DAG、落盘、触发，返回回执。
 
     Args:
         db: 数据库会话（读 Airflow 设置）
         base: DAG id 的基（制品 id / 本体 id）
-        tasks: 一个或多个 Flink SQL 任务（transform 清洗 / metric 聚合）
-        warehouse_conn_id: 数仓连接（建 sink 表用，Airflow Connection id）
-        warehouse_ddl: 建 sink 表的数仓 DDL（空则不建，transform 目标表多数已由物化建好）
+        tasks: 一个或多个 Flink SQL 任务（搬运 / transform 清洗 / metric 聚合）
+        warehouse_conn_id: 数仓连接（建 sink 表 / 跑 swap 用，Airflow Connection id）
+        warehouse_ddl: 建 sink / staging 表的数仓 DDL（空则不建）
         schedule: cron（空 = 只手动触发）
         dag_id_suffix: 批次 / cron 分组后缀
         artifact_id: 制品 id（作 dag_run_id，重复提交幂等）
+        swaps: ``{task_id: [swap SQL]}``，全量搬运 staging→正式表原子切换（见 build_flink_sql_dag）
 
     Returns:
         回执 dict：dag_id / dag_run_id / state / run_url / artifacts（落盘路径）/ error（若有）
@@ -133,6 +135,7 @@ def run_flink_sql(
         dag_id_suffix=dag_id_suffix,
         max_active_tasks=airflow.max_active_tasks_per_dag,
         artifact_id=artifact_id,
+        swaps=swaps,
     )
 
     # 落盘

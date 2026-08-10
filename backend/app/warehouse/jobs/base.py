@@ -17,6 +17,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from app.warehouse.logical_schema import LogicalTable
+
 # 装载方式，取值与 ``MaterializationContract.load_strategy`` 一致。
 LOAD_MODES = ("full", "incremental", "cdc")
 
@@ -143,6 +145,11 @@ class JobSpec:
     # 承载该表的本体实体技术名（= LogicalTable.source_name）。物理表名可被弹窗改写，
     # 而按 refresh_cron 分组要回查契约，须用实体名而非物理表名。空 = 与源表名同。
     entity_name: str | None = None
+    # 目标表的**带类型**逻辑表（列的 data_type/semantic_type）。统一执行架构把搬运编译成
+    # Flink SQL 需要列类型（源端物理类型、目标端引擎类型都从这里算，见 flink_sql_generator），
+    # 而 ``columns`` 只有名字映射。planner 建计划时本就持有它（build_logical_schema 的产物），
+    # 顺手带上，避免下游再全量重建一次 schema。旧的 docker/runner 渲染不读它，故可选、默认 None。
+    target_table: LogicalTable | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in LOAD_MODES:
