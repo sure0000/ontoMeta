@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+import json
 import uuid
 
 from app.database import Base
@@ -16,8 +17,12 @@ class ChatBiConversation(Base):
     __tablename__ = "chat_bi_conversations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    domain_id: Mapped[str] = mapped_column(
-        ForeignKey("domain_contexts.id"), index=True
+    # 多域会话：domain_ids 为会话作用的数据域集合（JSON 数组字符串）。
+    #   非空 = 跨域会话（如 ["A","B"]）；空/NULL = 不选域（全域通盘）。
+    # 保留旧 domain_id 列做兼容与锚点（旧数据迁移后 domain_ids=[domain_id]）。
+    domain_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    domain_id: Mapped[str | None] = mapped_column(
+        ForeignKey("domain_contexts.id"), index=True, nullable=True
     )
     title: Mapped[str] = mapped_column(String(255), default="新对话")
     category: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
@@ -33,6 +38,27 @@ class ChatBiConversation(Base):
         cascade="all, delete-orphan",
         order_by="ChatBiMessage.created_at",
     )
+
+    # ---- 多域作用域读写 ----
+    # domain_ids 的语义：None/空 = 不选域（全域通盘）；非空 = 显式选定的域集合。
+    # 旧会话只有 domain_id：effective_domain_ids 兜底为 [domain_id]。
+    @property
+    def domain_ids(self) -> list[str]:
+        if self.domain_ids_json:
+            try:
+                ids = json.loads(self.domain_ids_json)
+                if isinstance(ids, list):
+                    return [str(x) for x in ids if x]
+            except (TypeError, ValueError):
+                pass
+        return [self.domain_id] if self.domain_id else []
+
+    def set_domain_ids(self, ids: list[str] | None) -> None:
+        """设置作用域。None 或空列表 = 不选域（全域通盘），存空数组以区别于旧 NULL。"""
+        cleaned = [str(x) for x in (ids or []) if x]
+        self.domain_ids_json = json.dumps(cleaned)
+        # 同步锚点 domain_id：取首个，便于旧查询/记忆锚定；空则置空。
+        self.domain_id = cleaned[0] if cleaned else None
 
 
 class ChatBiMessage(Base):
@@ -104,39 +130,3 @@ class ChatBiDomainMemory(Base):
     last_used_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
-
-class ChatBiExternalTool(Base):
-    """配置驱动的外部工具（P4：免改代码扩展 Data Agent 能力）。
-
-    运维在此注册一个外部 HTTP 工具（名称 + 描述 + JSON-Schema 入参 + 端点 + 可选鉴权头），
-    **启用**即等于把它交给 Data Agent——启用的工具会被投影成 OpenAI 函数 schema 注入 agent
-    工具集（curated：按域过滤 + 数量封顶，避免全量目录撑爆 prompt），模型据描述自主调用，
-    结果经通用 HTTP executor 取回并封顶字符数。
-
-    作用域：``domain_id`` 为空=全局可用，否则仅该域。``name`` 全局唯一且不得与原生工具同名。
-    ``auth_header`` 是机密：写入后接口不回显（只给 has_auth），遵循设置页机密回显约定。
-    """
-
-    __tablename__ = "chat_bi_external_tools"
-    __table_args__ = (
-        UniqueConstraint("name", name="uq_chat_bi_external_tools_name"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(64), index=True)
-    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
-    description: Mapped[str] = mapped_column(Text)
-    # OpenAI function `parameters`（JSON-Schema 对象）序列化文本
-    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
-    method: Mapped[str] = mapped_column(String(10), default="POST")
-    url: Mapped[str] = mapped_column(Text)
-    # 机密：整串作为一个请求头值（如 "Bearer xxx"），接口不回显
-    auth_header: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    # 为空=全局；否则仅该数据域可见
-    domain_id: Mapped[str | None] = mapped_column(String(36), nullable=True, default=None, index=True)
-    result_max_chars: Mapped[int] = mapped_column(Integer, default=4000)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    )

@@ -238,7 +238,7 @@ def test_tool_requires_same_role_as_run_sql(client, tmp_path):
 
     with SessionLocal() as db:
         low, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=domain_id, ontology_id=onto_id, name="profile_values",
+            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="profile_values",
             args={"object_id": "order", "property": "status"}, principal_role="editor",
         )
     assert is_error is False, "越权是降级不是报错"
@@ -252,7 +252,7 @@ def test_tool_returns_real_values_for_publisher(client, tmp_path):
 
     with SessionLocal() as db:
         result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=domain_id, ontology_id=onto_id, name="profile_values",
+            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="profile_values",
             args={"object_id": "order", "property": "status"}, principal_role="publisher",
         )
     assert is_error is False, result
@@ -268,7 +268,7 @@ def test_tool_rejects_unknown_property_with_candidates(client, tmp_path):
 
     with SessionLocal() as db:
         result, _, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=domain_id, ontology_id=onto_id, name="profile_values",
+            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="profile_values",
             args={"object_id": "order", "property": "state"}, principal_role="publisher",
         )
     assert is_error is True

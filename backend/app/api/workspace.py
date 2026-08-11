@@ -1,5 +1,6 @@
 import asyncio
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -37,9 +38,27 @@ async def search_datahub_datasets(
     """
     from app.connectors.datahub import DataHubConnector
 
-    connector = DataHubConnector(settings_service.get_datahub_runtime(db))
+    runtime = settings_service.get_datahub_runtime(db)
+    if not runtime.gms_url:
+        raise HTTPException(
+            status_code=503,
+            detail="未配置 DataHub GMS 地址，请在「设置 → DataHub」中填写后重试。",
+        )
+    connector = DataHubConnector(runtime)
     try:
         datasets = await connector.search_datasets(query)
+    except httpx.ConnectError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"DataHub 不可达（{runtime.gms_url}）：{exc}。请检查 GMS 地址是否可从后端访问。",
+        ) from exc
+    except httpx.TransportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"DataHub 连接异常（{runtime.gms_url}）：{exc}",
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"DataHub 查询失败：{exc}") from exc
     finally:
         await connector.aclose()
 
@@ -90,6 +109,13 @@ async def ensure_object_type_from_dataset(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.ConnectError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"DataHub 不可达：{exc}。请检查设置中的 GMS 地址是否可从后端访问。",
+        ) from exc
+    except httpx.TransportError as exc:
+        raise HTTPException(status_code=503, detail=f"DataHub 连接异常：{exc}") from exc
 
 
 @router.get("/domains", response_model=list[DomainContextSummary])

@@ -16,6 +16,7 @@ Session、不重建 schema，故可脱离 DB 单元测试。
 from __future__ import annotations
 
 from app.services.flink_sql_generator import FlinkEndpoint, generate_move_sql
+from app.services.flink_sql_lineage import task_lineage_urns
 from app.warehouse.jobs.base import JobSpec, endpoint_credential_env
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
 
@@ -99,7 +100,33 @@ def compile_move_task(
         **endpoint_credential_env(job.source.alias, job.source.platform),
         **endpoint_credential_env(job.target.alias, job.target.platform),
     }
+    # L1 血缘：**优先用 job.source_urn**（本体的 ObjectType.source_ref，本就是 DataHub
+    # URN，M11 血缘上报也用它）——比从物理名构造更准（物理名可能被弹窗改写）。
+    # 没有 source_urn 时退回从物理名构造。目标侧物理名是确定的（job.target.qualified），
+    # 直接转 URN；fabric 是部署事实，此处用默认 PROD（调用方如知 fabric 可覆盖）。
+    if job.source_urn:
+        source_urns = (job.source_urn,)
+    else:
+        source_urns, _ = task_lineage_urns(
+            source_tables=[job.source.qualified],
+            target_table=None,
+            source_platform=job.source.platform or "hive",
+            target_platform=engine,
+        )
+    _, target_urn = task_lineage_urns(
+        source_tables=[],
+        target_table=job.target.qualified,
+        source_platform=job.source.platform or "hive",
+        target_platform=engine,
+    )
     # 全量是有界批作业（跑完即退，SqlRunner await 到结束）；增量/cdc 是常驻流式，
     # 提交即 detach（-d），否则 Airflow 任务会永远阻塞在一个不会结束的流作业上。
     detached = job.mode in ("incremental", "cdc")
-    return FlinkSqlTask(task_id=job.name, sql=sql, env=env, detached=detached)
+    return FlinkSqlTask(
+        task_id=job.name,
+        sql=sql,
+        env=env,
+        detached=detached,
+        source_urns=source_urns,
+        target_urn=target_urn,
+    )

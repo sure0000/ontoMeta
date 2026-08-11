@@ -51,8 +51,6 @@ class MaterializeDrafter(Drafter):
             "database_overrides": _database_overrides(context),
             "table_overrides": dict(context.get("table_overrides") or {}),
             "load_strategy": context.get("load_strategy"),
-            # 搬运工具（seatunnel/datax/flink）；空 = 默认 seatunnel。
-            "sync_tool": context.get("sync_tool"),
             "selected_targets": list(context.get("selected_targets") or []) or None,
             "overrides": dict(context.get("overrides") or {}),
             # 整批调度：弹窗是逐实体配 cron（写进各自契约的 refresh_cron），要求调用方先知道

@@ -4,7 +4,6 @@ from app.models.chat_bi import (
     ChatBiConversation,
     ChatBiConversationTask,
     ChatBiDomainMemory,
-    ChatBiExternalTool,
     ChatBiMessage,
 )
 from app.models.data_app import (
@@ -94,7 +93,6 @@ __all__ = [
     "ChatBiConversation",
     "ChatBiConversationTask",
     "ChatBiDomainMemory",
-    "ChatBiExternalTool",
     "ChatBiMessage",
     "DataSource",
     "DataApp",

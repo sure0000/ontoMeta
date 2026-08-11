@@ -104,7 +104,6 @@ class MaterializeExecutor(Executor):
                 engine=materialization_runner.resolve_engine(
                     db, spec.get("target_datasource_id"), spec.get("engine")
                 ),
-                sync_tool=spec.get("sync_tool"),
                 database_prefix=spec.get("database_prefix"),
                 database_overrides=spec.get("database_overrides"),
                 table_overrides=spec.get("table_overrides"),

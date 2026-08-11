@@ -209,6 +209,17 @@ def run_flink_sql(
         "schedule": schedule,
         "flink_runner_jar": flink.runner_jar,
         "tasks": [{"task_id": t.task_id, "sql_file": f"{bundle.dag_id}__{t.task_id}.sql"} for t in tasks],
+        # L4 血缘：把每个任务的 inlets/outlets URN 一并带出，供任务状态块展示
+        # 「本次启动了哪些任务 + 谁依赖谁」。空（未解析到）则不带。
+        "lineage": [
+            {
+                "task_id": t.task_id,
+                "source_urns": list(t.source_urns),
+                "target_urn": t.target_urn,
+            }
+            for t in tasks
+            if t.source_urns or t.target_urn
+        ],
         "artifacts": written,
         "error": error,
     }

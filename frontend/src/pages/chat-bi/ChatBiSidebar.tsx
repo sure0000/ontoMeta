@@ -20,7 +20,7 @@ import type { ChatBiConversation, DomainContext } from "../../types";
 import { TIME_GROUP_LABEL, TIME_GROUP_ORDER, relativeTime, type TimeGroup } from "./utils";
 
 export interface ChatBiSidebarProps {
-  domainId: string;
+  domainIds: string[];
   domainList: DomainContext[];
   conversations: ChatBiConversation[];
   archivedConversations: ChatBiConversation[];
@@ -64,7 +64,7 @@ export interface ChatBiSidebarProps {
 }
 
 export const ChatBiSidebar = memo(function ChatBiSidebar({
-  domainId,
+  domainIds,
   domainList,
   conversations,
   archivedConversations,
@@ -118,10 +118,17 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
       </div>
       <div className="chatbi-sidebar-header">
         <Select
+          mode="multiple"
+          allowClear
+          maxTagCount="responsive"
           style={{ width: "100%" }}
-          placeholder="选择数据域"
-          value={domainId}
-          onChange={(value) => onSetSearchParams({ domain: value })}
+          placeholder="选择数据域（不选 = 全域通盘）"
+          value={domainIds}
+          onChange={(value) =>
+            onSetSearchParams(
+              (value as string[]).length ? { domains: (value as string[]).join(",") } : {},
+            )
+          }
           options={domainList.map((d) => ({
             value: d.id,
             label: d.name,

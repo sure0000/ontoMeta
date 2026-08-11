@@ -228,7 +228,7 @@ def test_tool_augments_ilike_with_semantic(client, monkeypatch):
 
     with SessionLocal() as db:
         result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=did, ontology_id=oid, name="search_objects",
+            db, domain_ids=[did], ontology_ids=[oid], name="search_objects",
             args={"keyword": "往来单位"},
         )
     assert not is_error, result
@@ -248,7 +248,7 @@ def test_tool_degrades_silently_without_index(client, monkeypatch):
     )
     with SessionLocal() as db:
         result, _summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=did, ontology_id=oid, name="search_objects",
+            db, domain_ids=[did], ontology_ids=[oid], name="search_objects",
             args={"keyword": "往来单位"},
         )
     assert not is_error

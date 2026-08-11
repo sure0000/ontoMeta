@@ -1406,6 +1406,36 @@ function PipelineProposalBlock({
     }
   };
 
+  // C2：一键起草全部步骤（血缘驱动，起草阶段不阻塞）。所有制品先落地，
+  // 人再逐个校验/确认/执行；执行顺序由血缘决定。「未确认不得执行」不变。
+  const draftAll = async () => {
+    if (!pipeline) return;
+    setBusy(true);
+    try {
+      const result = await api.draftAllPipeline(pipeline.id);
+      setPipeline(result.pipeline);
+      if (conversationId) {
+        for (const artifact of result.artifacts) {
+          void api
+            .linkChatBiTask(conversationId, {
+              artifact_id: artifact.id,
+              kind: artifact.kind,
+              intent: artifact.intent ?? undefined,
+            })
+            .catch(() => {});
+        }
+      }
+      // 打开第一个制品的抽屉（其余在链态里逐个查看）
+      if (result.artifacts.length > 0) open(result.artifacts[0]);
+      message.success(`已起草全部 ${result.artifacts.length} 步，请逐个校验/确认/执行`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "一键起草失败");
+      void refresh(pipeline.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const openStep = async (artifactId: string) => {
     try {
       open(await api.getArtifact(artifactId));
@@ -1431,6 +1461,24 @@ function PipelineProposalBlock({
         )}
       </div>
       {proposal.intent && <div className="chatbi-draft-name">{proposal.intent}</div>}
+
+      {/* C2：一键起草全部步骤（血缘驱动，起草阶段不阻塞）。链创建后、尚未全部起草时显示。 */}
+      {pipeline && pipeline.next_step_index !== null && pipeline.next_step_index !== undefined && (
+        <div style={{ margin: "8px 0 4px" }}>
+          <Button
+            size="small"
+            type="primary"
+            ghost
+            loading={busy}
+            onClick={() => void draftAll()}
+          >
+            一键起草全部步骤
+          </Button>
+          <span style={{ marginLeft: 8, fontSize: 12, color: "#999" }}>
+            所有步骤一次起草，逐个校验/确认/执行（顺序由血缘决定）
+          </span>
+        </div>
+      )}
 
       <div className="chatbi-pipeline-steps">
         {proposal.steps.map((step, i) => {
@@ -1614,6 +1662,9 @@ function TaskStatusBlock({
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const { open, node } = useArtifactDrawer();
   const tasks = status.tasks ?? [];
+  // L4 血缘：status.lineage = { tasks, dependencies }（谁产出谁消费）。
+  // dependencies: [{ upstream: task_id, downstream: task_id }]
+  const lineageDeps = status.lineage?.dependencies ?? [];
   const onView = async (id: string) => {
     setLoadingId(id);
     try {
@@ -1646,6 +1697,26 @@ function TaskStatusBlock({
           </Button>
         </div>
       ))}
+      {/* L4 血缘：任务间依赖（上游产出 → 下游消费）。有边才画。 */}
+      {lineageDeps.length > 0 && (
+        <div className="chatbi-task-lineage">
+          {lineageDeps.map((dep, i) => {
+            const up = tasks.find((t) => t.id === dep.upstream);
+            const down = tasks.find((t) => t.id === dep.downstream);
+            return (
+              <div key={i} className="chatbi-task-lineage-edge">
+                <span className="chatbi-task-lineage-node">
+                  {up ? (ACTION_KIND_LABEL[up.kind] ?? "") + " · " + up.name : dep.upstream}
+                </span>
+                <span className="chatbi-task-lineage-arrow">→</span>
+                <span className="chatbi-task-lineage-node">
+                  {down ? (ACTION_KIND_LABEL[down.kind] ?? "") + " · " + down.name : dep.downstream}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {node}
     </div>
   );

@@ -1,9 +1,8 @@
 import { SendOutlined } from "@ant-design/icons";
 import { Spin } from "antd";
-import type { DomainContext } from "../../types";
 
 export interface ChatBiComposerProps {
-  activeDomain: DomainContext;
+  scopeLabel: string;
   input: string;
   submitting: boolean;
   onInputChange: (value: string) => void;
@@ -11,7 +10,7 @@ export interface ChatBiComposerProps {
 }
 
 export function ChatBiComposer({
-  activeDomain,
+  scopeLabel,
   input,
   submitting,
   onInputChange,
@@ -22,7 +21,7 @@ export function ChatBiComposer({
       <div className="chatbi-composer-inner">
         <textarea
           className="chatbi-input"
-          placeholder={`向「${activeDomain.name}」提问… (Enter 发送，Shift+Enter 换行)`}
+          placeholder={`向「${scopeLabel}」提问… (Enter 发送，Shift+Enter 换行)`}
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={(e) => {

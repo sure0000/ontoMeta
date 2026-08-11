@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.models import DomainContext, ObjectType, Ontology, Property
 from app.models.ontology import EntityStatus, OntologyStatus
+from app.services.edit import _assert_object_name_free
 
 # 语义类型 → 各数据源方言的物理列类型映射。仅覆盖常见方言，未知方言退回 ANSI。
 _TYPE_BY_DIALECT: dict[str, dict[str, str]] = {
@@ -192,6 +193,7 @@ class ManualCreationService:
             raise ValueError("对象标识名不能为空")
 
         ontology = self._get_or_create_draft_ontology(db, domain)
+        _assert_object_name_free(db, ontology.id, ident)
 
         obj = ObjectType(
             ontology_id=ontology.id,

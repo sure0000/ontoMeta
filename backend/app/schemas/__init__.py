@@ -17,9 +17,6 @@ from app.schemas.chat_bi import (
     ChatBiConversationUpdate,
     ChatBiMessageOut,
     ChatBiTaskLinkRequest,
-    ChatBiExternalToolCreate,
-    ChatBiExternalToolUpdate,
-    ChatBiExternalToolOut,
     ChatBiPreferenceRequest,
     ChatBiReference,
     ChatBiSuggestions,
@@ -202,6 +199,7 @@ from app.schemas.agent import (
     PipelineStepInput,
     PipelineStepOut,
     TaskPipelineAdvanceOut,
+    TaskPipelineDraftAllOut,
     TaskPipelineCreateRequest,
     TaskPipelineOut,
 )
@@ -346,9 +344,6 @@ __all__ = [
     "ChatBiConversationCreate",
     "ChatBiConversationUpdate",
     "ChatBiTaskLinkRequest",
-    "ChatBiExternalToolCreate",
-    "ChatBiExternalToolUpdate",
-    "ChatBiExternalToolOut",
     "ChatBiPreferenceRequest",
     "ChatBiMessageOut",
     "ChatBiCategoryItem",
@@ -424,6 +419,7 @@ __all__ = [
     "TaskPipelineCreateRequest",
     "TaskPipelineOut",
     "TaskPipelineAdvanceOut",
+    "TaskPipelineDraftAllOut",
 ]
 
 

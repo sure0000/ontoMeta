@@ -69,7 +69,7 @@ def _seed(name: str, *, n_linked_pairs: int, n_isolated: int) -> tuple[str, str]
 def _overview(did: str, oid: str) -> tuple[dict, str]:
     with SessionLocal() as db:
         result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=did, ontology_id=oid, name="get_domain_overview", args={}
+            db, domain_ids=[did], ontology_ids=[oid], name="get_domain_overview", args={}
         )
     assert not is_error, result
     return result, summary
@@ -147,7 +147,7 @@ def test_search_reports_true_total_not_page_size(client):
     did, oid = _seed("检索域", n_linked_pairs=20, n_isolated=0)
     with SessionLocal() as db:
         result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=did, ontology_id=oid, name="search_relations",
+            db, domain_ids=[did], ontology_ids=[oid], name="search_relations",
             args={"keyword": "关联关系"},
         )
     assert not is_error, result
@@ -167,7 +167,7 @@ def test_search_uses_items_when_complete(client):
     did, oid = _seed("完整检索域", n_linked_pairs=3, n_isolated=0)
     with SessionLocal() as db:
         result, summary, _ = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=did, ontology_id=oid, name="search_relations",
+            db, domain_ids=[did], ontology_ids=[oid], name="search_relations",
             args={"keyword": "关联关系"},
         )
     assert result["total_matched"] == 3
@@ -181,7 +181,7 @@ def test_search_envelope_still_feeds_ledger(client):
     did, oid = _seed("接地检索域", n_linked_pairs=3, n_isolated=0)
     with SessionLocal() as db:
         result, _, _ = ChatBiService()._dispatch_agent_tool(
-            db, domain_id=did, ontology_id=oid, name="search_relations",
+            db, domain_ids=[did], ontology_ids=[oid], name="search_relations",
             args={"keyword": "关联关系"},
         )
     ledger = FactLedger()

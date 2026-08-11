@@ -1,8 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
-from pydantic_core import PydanticCustomError
+from pydantic import BaseModel, Field
 
 class LlmModelOption(BaseModel):
     id: str
@@ -136,15 +135,6 @@ class AirflowSettingsOut(BaseModel):
     git_auto_init: bool = False
     git_author: str = ""
     git_email: str = ""
-    # ---- 执行通道 ----
-    sync_channel: str = "runner"
-    sync_runner_endpoint: str = ""
-    sync_runner_token_set: bool = False
-    docker_network: str = "bridge"
-    drivers_dir: str = ""
-    sync_tool_images: str = ""
-    # 空 = 自动选搬运工具（物化弹窗不再逐次选，见 services/sync_tool_resolver）。
-    sync_tool: str = ""
     # ---- DAG 形状与时序 ----
     max_tasks_per_dag: int = 50
     max_active_tasks_per_dag: int = 16
@@ -172,40 +162,12 @@ class AirflowSettingsUpdate(BaseModel):
     git_auto_init: bool = False
     git_author: str = ""
     git_email: str = ""
-    # runner：Airflow 任务向常驻 sync-runner 发 HTTP；docker：经 docker.sock 起搬运容器。
-    sync_channel: str = Field(default="runner", pattern="^(runner|docker)$")
-    sync_runner_endpoint: str = ""
-    sync_runner_token: str | None = None  # 不传 = 保留原值
-    docker_network: str = "bridge"
-    drivers_dir: str = ""
-    sync_tool_images: str = ""
-    # 强制指定搬运工具；空 = 自动。取值必须是注册表里真有的工具，写错一个名字会让物化
-    # 在提交时才报「未知搬运工具」，故在这里就挡掉。
-    sync_tool: str = ""
     max_tasks_per_dag: int = Field(default=50, ge=1, le=1000)
     max_active_tasks_per_dag: int = Field(default=16, ge=1, le=256)
     # 要大于 Airflow 的 dag_dir_list_interval，否则首次提交必报「尚未解析到」。
     dag_parse_timeout: float = Field(default=60.0, ge=0, le=3600)
     preflight_sentinel_timeout: float = Field(default=20.0, ge=0, le=600)
     staging_swap: bool = True
-
-    @field_validator("sync_tool")
-    @classmethod
-    def _known_tool(cls, v: str) -> str:
-        # 校验依据取自注册表本身：新增工具时这里自动跟上，不必再改一处枚举。
-        from app.warehouse.jobs import list_sync_tools
-
-        name = (v or "").strip().lower()
-        known = list_sync_tools()
-        if name and name not in known:
-            # PydanticCustomError 而非裸 ValueError：后者会把异常对象塞进 422 的 ctx，
-            # FastAPI 序列化响应时直接炸成 500，报错反而看不见了。
-            raise PydanticCustomError(
-                "unknown_sync_tool",
-                "未知搬运工具 {value}，可选：{options}（留空 = 自动）",
-                {"value": v, "options": ", ".join(known)},
-            )
-        return name
 
 
 class CubeSettingsUpdate(BaseModel):

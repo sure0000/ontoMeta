@@ -405,7 +405,7 @@ class DependencyComponentService:
             name=data.get("name") or COMPONENT_CATALOG[key][0],
             deploy_mode=mode,
             deploy_spec_json=_dumps(data.get("deploy_spec") or {}),
-            deploy_status="connected" if mode == "external" and conn else "not_deployed",
+            deploy_status="not_deployed",
             connection_json=_dumps(conn),
             enabled=data.get("enabled", True),
             is_default=data.get("is_default", False),
@@ -449,8 +449,10 @@ class DependencyComponentService:
             conn = self._merge_connection(row, data["connection"])
             # 非 external 模式连接可为空（部署时自动拼），只在 external 模式强校验
             row.connection_json = _dumps(_validate_connection(row.key, conn, require=(row.deploy_mode == "external")))
-            if row.deploy_mode == "external":
-                row.deploy_status = "connected"
+            # 保存连接≠连接可用：连接信息变了就把状态退回未拨测，避免"填完地址就显示已连接"
+            # 的假绿灯。真正的 connected 只由拨测/部署成功回写（见 probe/deploy）。
+            row.deploy_status = "not_deployed"
+            row.deploy_error = None
         db.commit()
         db.refresh(row)
         return row
@@ -500,17 +502,18 @@ class DependencyComponentService:
     ) -> DependencyComponent:
         row = self._get_singleton(db, key)
         validated = _validate_connection(key, conn)
+        # 保存/迁移连接≠连接可用：一律置未拨测，避免假绿灯。connected 只由拨测成功回写。
         if row:
             row.connection_json = _dumps(validated)
             row.name = name
             row.enabled = enabled
-            row.deploy_status = "connected"
+            row.deploy_status = "not_deployed"
         else:
             row = DependencyComponent(
                 key=key,
                 name=name,
                 deploy_mode="external",
-                deploy_status="connected",
+                deploy_status="not_deployed",
                 connection_json=_dumps(validated),
                 enabled=enabled,
             )
@@ -596,7 +599,7 @@ class DependencyComponentService:
             key="llm",
             name=data.get("name", "LLM"),
             deploy_mode="external",
-            deploy_status="connected",
+            deploy_status="not_deployed",
             connection_json=_dumps(_validate_connection("llm", {
                 "provider": data.get("provider", "deepseek"),
                 "api_base_url": data.get("api_base_url", ""),
@@ -675,7 +678,7 @@ class DependencyComponentService:
         ).scalars().first():
             for svc in db.query(LlmServiceConfig).all():
                 row = DependencyComponent(
-                    key="llm", name=svc.name, deploy_mode="external", deploy_status="connected",
+                    key="llm", name=svc.name, deploy_mode="external", deploy_status="not_deployed",
                     connection_json=_dumps(_validate_connection("llm", {
                         "provider": svc.provider, "api_base_url": svc.api_base_url,
                         "api_key": svc.api_key, "model": svc.model,
@@ -751,11 +754,12 @@ class DependencyComponentService:
         if af_row:
             af_row.connection_json = _dumps(af_conn)
             af_row.enabled = data.get("enabled", af_row.enabled)
-            af_row.deploy_status = "connected" if af_conn.get("endpoint") else "not_deployed"
+            # 保存连接≠连接可用：置未拨测，connected 只由拨测成功回写。
+            af_row.deploy_status = "not_deployed"
         else:
             af_row = DependencyComponent(
                 key="airflow", name="Airflow 调度", deploy_mode="external",
-                deploy_status="connected" if af_conn.get("endpoint") else "not_deployed",
+                deploy_status="not_deployed",
                 connection_json=_dumps(af_conn), enabled=data.get("enabled", True),
             )
             db.add(af_row)

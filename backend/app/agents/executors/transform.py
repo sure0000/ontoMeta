@@ -311,6 +311,18 @@ class TransformExecutor(Executor):
                 target_physical=flink_input["target_physical"],
             )
 
+            # L1 血缘：源物理名 + 目标物理名 → inlets/outlets URN。
+            # 优先用 executor 已算好的物理名（最准）；A1 SQL 解析作回退。
+            from app.services.flink_sql_lineage import task_lineage_urns
+
+            source_urns, target_urn = task_lineage_urns(
+                sql=flink_sql,
+                source_tables=[flink_input["source_physical"]],
+                target_table=flink_input["target_physical"],
+                source_platform=flink_input["source_platform"],
+                target_platform=flink_input["target_platform"],
+            )
+
             # 提交 Flink 作业（落盘 + 触发 Airflow + 回读 DagRun）
             receipt = run_flink_sql(
                 db,
@@ -331,6 +343,9 @@ class TransformExecutor(Executor):
                                 warehouse_conn_id, flink_input["target_platform"]
                             ),
                         },
+                        # L1 血缘：inlets/outlets
+                        source_urns=source_urns,
+                        target_urn=target_urn,
                     ),
                 ),
                 warehouse_conn_id=warehouse_conn_id,

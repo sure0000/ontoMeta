@@ -255,54 +255,16 @@ def list_warehouse_sync_tools(
 ):
     """本次物化**会用什么搬**，以及目标引擎实际支持哪些装载方式。
 
-    这个端点原来是「给弹窗列出可选工具」。工具已改为自动决策
-    （见 ``services/sync_tool_resolver``：runner 通道由执行侧逐表自选，docker 通道按
-    「装载方式 ∩ 镜像可用」挑），故这里改为**告知结果**：``resolved`` 是这次会用的工具，
-    ``detail`` 是那句可解释的理由。
-
-    ``modes`` 是目标引擎在**执行侧**真正支持的装载方式，供弹窗置灰「同步方式」。
-    runner 通道下取自 runner 的 ``sink_modes``——这才是真约束：seatunnel 档写 Hive 只做
-    全量、native 档能做增量却写不了 Hive，按工具适配器的 modes 置灰是错的。
-    问不到（runner 不可达/未配）时返回 null，此时**不置灰**，别凭猜锁死选项。
-
-    ``tools`` 保留作诊断与设置页的强制指定用：镜像拿不到的工具标 ``available=false``
-    并给出 ``reason``，**不从列表里删掉**——「有这个工具但没配」与「没有这个工具」是
-    两回事，后者会让人以为要改代码。
+    统一执行架构下搬运恒为 Flink SQL on YARN，不再有工具选择。本端点只**告知恒定结果**：
+    ``resolved`` 恒为 flink，``modes`` 恒为 full/incremental/cdc 全集（供弹窗置灰「同步方式」，
+    当前不过滤）。保留作弹窗初始化读取。
     """
     from app.services.sync_tool_resolver import (
-        SyncToolResolutionError,
         engine_modes,
         required_modes,
         resolve_sync_tool,
     )
-    from app.warehouse.jobs import get_job_adapter
-    from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL, list_sync_tools
-
-    airflow = settings_service.get_airflow_runtime(db)
-    # 镜像覆盖来自设置页那一行（不再读环境变量），与物化提交时用的是同一个来源。
-    overrides = airflow.sync_tool_images
-    tools = []
-    for name in list_sync_tools():
-        a = get_job_adapter(name)
-        override = overrides.get(a.name)
-        available = bool(a.has_official_image or override)
-        tools.append(
-            {
-                "name": a.name,
-                "image": override or a.docker_image,
-                "modes": [m for m in ("full", "incremental", "cdc") if a.supports(m)],
-                "cdc": a.supports("cdc"),
-                "available": available,
-                "reason": (
-                    None
-                    if available
-                    else (
-                        f"{a.docker_image} 无官方发行版，需自建镜像后在设置页的"
-                        f"「搬运工具镜像」里填 {a.name}=<你的镜像>"
-                    )
-                ),
-            }
-        )
+    from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL
 
     # 与提交时同一个决策函数、同一批装载方式：这里显示什么，那边就会用什么。
     modes_wanted = (
@@ -310,33 +272,22 @@ def list_warehouse_sync_tools(
         if ontology_id
         else ()
     )
-    try:
-        choice = resolve_sync_tool(airflow, modes=modes_wanted)
-        resolved = {
-            "resolved": choice.label,
-            "auto": choice.auto,
-            "detail": choice.detail,
-            "uncovered_modes": list(choice.uncovered_modes),
-            "error": None,
-        }
-    except SyncToolResolutionError as exc:
-        # 选不出来不是 500：它是一个要在弹窗里说清、并由 preflight 阻断的部署问题。
-        resolved = {
-            "resolved": None,
-            "auto": True,
-            "detail": str(exc),
-            "uncovered_modes": [],
-            "error": str(exc),
-        }
+    choice = resolve_sync_tool(None, modes=modes_wanted)
+    resolved = {
+        "resolved": choice.label,
+        "auto": choice.auto,
+        "detail": choice.detail,
+        "uncovered_modes": list(choice.uncovered_modes),
+        "error": None,
+    }
 
-    supported, modes_detail = engine_modes(airflow, engine, choice_tool=resolved["resolved"])
+    supported, modes_detail = engine_modes(None, engine, choice_tool=resolved["resolved"])
     return {
-        # 统一执行架构：搬运通道恒为 flink_on_yarn（sync_channel 设置已随 H/J 废除）。
+        # 统一执行架构：搬运通道恒为 flink_on_yarn。
         "channel": "flink_on_yarn",
         "default": DEFAULT_SYNC_TOOL,
         "modes": supported,
         "modes_detail": modes_detail,
-        "tools": tools,
         **resolved,
     }
 
@@ -544,7 +495,6 @@ def materialize_ontology(
         "database_overrides": payload.database_overrides,
         "table_overrides": payload.table_overrides,
         "load_strategy": payload.load_strategy,
-        "sync_tool": payload.sync_tool,
         "selected_targets": payload.selected_targets,
         "overrides": payload.overrides,
     }

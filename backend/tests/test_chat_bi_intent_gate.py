@@ -125,7 +125,7 @@ def _ask(service: ChatBiService, domain_id: str, question: str) -> dict:
     try:
         with SessionLocal() as db:
             return asyncio.run(
-                service.ask(db, domain_id=domain_id, question=question, principal_role="publisher")
+                service.ask(db, domain_ids=[domain_id], question=question, principal_role="publisher")
             )
     finally:
         c.AsyncOpenAI = orig  # type: ignore[assignment]
@@ -143,7 +143,7 @@ def test_structural_question_hard_rejects_run_sql(client):
     order_id = aliases["@order"]
     called = {"run_sql": False}
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」1 字段", False)
         if name == "run_sql":
@@ -178,7 +178,7 @@ def test_structural_prose_sql_fence_not_promoted(client):
     domain_id, _onto, aliases = _seed_golden_domain()
     order_id = aliases["@order"]
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」1 字段", False)
         return ({"error": f"unexpected {name}"}, "", True)
@@ -201,7 +201,7 @@ def test_analytical_prose_sql_fence_still_promoted(client):
     domain_id, _onto, aliases = _seed_golden_domain()
     order_id = aliases["@order"]
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」1 字段", False)
         return ({"error": f"unexpected {name}"}, "", True)
@@ -223,7 +223,7 @@ def test_escalation_via_query_skill_reenables_sql(client):
     """升级阀：结构性问题下模型显式 select_skill('query') 后，run_sql 重新可执行。"""
     domain_id, _onto, aliases = _seed_golden_domain()
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         if name == "run_sql":
             return (
                 {"executed": True, "sql": args.get("sql"),
@@ -250,7 +250,7 @@ def test_general_question_not_refused_without_tool_hit(client):
     """一般/元问题（产品 how-to）：模型不调任何工具直接作答，也不被接地判定拦成拒答。"""
     domain_id, _onto, aliases = _seed_golden_domain()
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         return ({"error": f"unexpected {name}"}, "", True)  # 一般问题不该调任何工具
 
     script = [FinalTurn("在「数据任务」页点击新建，选择来源与目标即可创建同步/转换任务。")]
@@ -262,3 +262,66 @@ def test_general_question_not_refused_without_tool_hit(client):
     assert not payload.get("grounding_refused"), "产品 how-to 一般问题不应被判为未接地拒答"
     assert "无法基于" not in payload.get("answer", "")
     assert "数据任务" in payload.get("answer", "")
+
+
+# --------------------------------------------------------------------------- 收口 general 豁免
+
+
+def test_names_published_entity_detection():
+    """强判据单元测：问句含已发布实体的完整显示名（≥2 字）才算「点名本域业务」。"""
+    fn = ChatBiService._question_names_published_entity
+    objs = [SimpleNamespace(display_name="客户", name="customer")]
+    logics = [SimpleNamespace(display_name="订单总额", name="order_total")]
+    # 完整显示名入问句 → True
+    assert fn("客户为什么会流失", objs, logics) is True
+    assert fn("订单总额最近怎么样", objs, logics) is True
+    # 英文标识入问句 → True
+    assert fn("customer 表能查吗", objs, logics) is True
+    # 只是碰巧共享单字（客≠客户）、或未点名任何实体 → False（不误触发接地）
+    assert fn("客服电话是多少", objs, logics) is False
+    assert fn("你能做什么", objs, logics) is False
+    assert fn("怎么创建数据任务", objs, logics) is False
+    # 无候选 → False
+    assert fn("客户为什么会流失", [], []) is False
+
+
+def test_general_but_names_entity_requires_grounding(client):
+    """收口缺口：general 但**点名了已发布实体**的问题（「客户为什么会流失」），
+    模型不查本体、纯散文常识作答 → 应被接地判定拦成拒答，不再吃 general 豁免。"""
+    domain_id, _onto, aliases = _seed_golden_domain()
+
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+        return ({"error": f"unexpected {name}"}, "", True)  # 模型没调任何工具
+
+    # 纯散文常识作答：不含任何标记具名实体/带单位数值，F4 拦不住——正是要靠接地闸拦的一类
+    script = [FinalTurn("客户通常会因为服务质量下降或价格因素而流失，建议加强关怀。")]
+    service = _make_service(_StubCompletions(script, aliases))
+    service._dispatch_agent_tool = fake_dispatch  # type: ignore[assignment]
+
+    payload = _ask(service, domain_id, "客户为什么会流失")
+
+    assert payload.get("grounding_refused"), "点名本域实体却零接地的常识作答应被拒答"
+
+
+def test_general_names_entity_but_tool_hit_not_refused(client):
+    """对照：同样点名实体，但模型**真去查了本体**（命中 get_object）→ 已接地，不拒答。
+
+    证明收口收的是「没查就凭常识答」，不是「凡点名实体一律拦」。"""
+    domain_id, _onto, aliases = _seed_golden_domain()
+    order_id = aliases["@order"]
+
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+        if name == "get_object":
+            return (_obj_detail(order_id), "对象「订单」", False)
+        return ({"error": f"unexpected {name}"}, "", True)
+
+    script = [
+        ToolTurn([("get_object", {"object_id": "@order"})]),
+        FinalTurn("「订单」对象包含金额、状态等字段。"),
+    ]
+    service = _make_service(_StubCompletions(script, aliases))
+    service._dispatch_agent_tool = fake_dispatch  # type: ignore[assignment]
+
+    payload = _ask(service, domain_id, "订单是干什么的")
+
+    assert not payload.get("grounding_refused"), "点名实体且已查本体不应被拒答"

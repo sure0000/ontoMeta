@@ -705,3 +705,52 @@ def test_transform_flink_declares_source_and_target_separately(seeded, monkeypat
     # 两侧平台各归各的：源是源库的平台，目标是数仓引擎
     assert source.platform == "mysql"
     assert target.platform == "postgres"
+
+
+def test_transform_flink_task_carries_lineage_urns(seeded, monkeypatch):
+    """L1：transform 提交的 FlinkSqlTask 带 inlets/outlets URN（血缘）。
+
+    源 = 源库物理表（erp_readonly 的源平台 mysql），目标 = 数仓物理表。
+    URN 由 task_lineage_urns 从 executor 算好的物理名构造。
+    """
+    from app.models import DataSource
+
+    with SessionLocal() as db:
+        db.add(DataSource(id="ds-flink2", name="pg-flink2", kind="postgres",
+                          dsn_secret_ref="postgresql://x/y"))
+        db.commit()
+    captured: dict = {}
+
+    def _spy(**kwargs):
+        return "-- flink sql --"
+
+    def _capture_run_flink_sql(*args, **kwargs):
+        captured["tasks"] = kwargs.get("tasks")
+        return {"execute_mode": "handoff"}
+
+    import app.agents.executors.transform as mod
+
+    monkeypatch.setattr(mod, "generate_flink_sql", _spy)
+    import app.services.flink_job_runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "run_flink_sql", _capture_run_flink_sql)
+    try:
+        spec = TransformDrafter().draft(
+            "客户表去重",
+            {"ontology_id": seeded["ontology_id"], "target_table": "customer",
+             "target_datasource_id": "ds-flink2"},
+        )
+        TransformExecutor().execute(spec, {})
+    finally:
+        with SessionLocal() as db:
+            db.query(DataSource).filter(DataSource.id == "ds-flink2").delete()
+            db.commit()
+
+    task = captured["tasks"][0]
+    assert task.source_urns, "transform 任务应有源 URN（inlets）"
+    assert task.target_urn, "transform 任务应有目标 URN（outlets）"
+    # 源 URN 指向源库平台（mysql 源表），目标指向数仓
+    assert "dataPlatform:mysql" in task.source_urns[0]
+    assert "dataPlatform:postgres" in task.target_urn
+    # 物理表名含在 URN 里（库.表 或表名）
+    assert "customer" in task.target_urn

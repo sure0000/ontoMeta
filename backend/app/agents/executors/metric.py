@@ -310,6 +310,17 @@ class MetricExecutor(Executor):
                 target_physical=target_table.qualified_name,
             )
 
+            # L1 血缘：源 = 主对象物化表，目标 = ads 结果表 → inlets/outlets URN。
+            from app.services.flink_sql_lineage import task_lineage_urns
+
+            source_urns, target_urn = task_lineage_urns(
+                sql=flink_sql,
+                source_tables=[source_physical],
+                target_table=target_table.qualified_name,
+                source_platform=engine,
+                target_platform=engine,
+            )
+
             # 提交 Flink 作业（ads 表 DDL 先在数仓建，再执行聚合）
             receipt = run_flink_sql(
                 db,
@@ -321,6 +332,9 @@ class MetricExecutor(Executor):
                         # 见 transform 同处：占位符的运行期取值表。metric 两端同为数仓，
                         # 但仍要显式给——不给就没有任何凭据注入。
                         env=endpoint_credential_env(warehouse_conn_id, engine),
+                        # L1 血缘：inlets/outlets
+                        source_urns=source_urns,
+                        target_urn=target_urn,
                     ),
                 ),
                 warehouse_conn_id=warehouse_conn_id,

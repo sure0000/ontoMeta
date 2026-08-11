@@ -623,6 +623,12 @@ _PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
                                 "description": "物化 materialize / 同步 sync / 清洗加工 transform / 聚合 metric",
                             },
                             "intent": {"type": "string", "description": "这一步做什么，一句话"},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "血缘依赖：这一步依赖的上游步序（从 0 起）。"
+                                "默认空 = 依赖上一步；如「清洗依赖同步」则第 1 步 depends_on=[0]。"
+                            },
                             "context": {
                                 "type": "object",
                                 "description": (

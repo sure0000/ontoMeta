@@ -45,7 +45,8 @@ class ChatBiDataResult(BaseModel):
 
 
 class ChatBiAskRequest(BaseModel):
-    domain_id: str
+    # 多域问答：domain_ids 非空 = 跨域接地；空 = 不选域（全域通盘）。
+    domain_ids: list[str] = Field(default_factory=list)
     question: str
     history: list[dict[str, Any]] | None = None
     conversation_id: str | None = None
@@ -133,8 +134,11 @@ class ChatBiBlock(BaseModel):
 
 
 class ChatBiAnswer(BaseModel):
-    domain_id: str
-    domain_name: str
+    # 多域：domain_ids 为本次接地的域集合（空=全域通盘）；domain_id/domain_name 保留首域作锚点兼容。
+    domain_ids: list[str] = Field(default_factory=list)
+    domain_names: list[str] = Field(default_factory=list)
+    domain_id: str | None = None
+    domain_name: str = ""
     ontology_id: str | None = None
     answer: str
     suggested_sql: str | None = None
@@ -160,7 +164,7 @@ class ChatBiAnswer(BaseModel):
 
 
 class ChatBiSuggestions(BaseModel):
-    domain_id: str
+    domain_ids: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
 
 
@@ -169,7 +173,8 @@ class ChatBiSuggestions(BaseModel):
 
 class ChatBiConversationSummary(BaseModel):
     id: str
-    domain_id: str
+    domain_ids: list[str] = Field(default_factory=list)
+    domain_id: str | None = None
     title: str
     category: str | None = None
     is_pinned: bool = False
@@ -183,7 +188,8 @@ class ChatBiConversationSummary(BaseModel):
 
 
 class ChatBiConversationCreate(BaseModel):
-    domain_id: str
+    # domain_ids 空 = 不选域（全域通盘）会话
+    domain_ids: list[str] = Field(default_factory=list)
     title: str | None = None
     category: str | None = None
 
@@ -207,46 +213,11 @@ class ChatBiTaskLinkRequest(BaseModel):
     intent: str | None = None
 
 
-class ChatBiExternalToolCreate(BaseModel):
-    """P4：注册一个配置驱动的外部工具（HTTP）。"""
-
-    name: str  # 小写 snake_case，全局唯一，不得与原生工具同名
-    description: str
-    url: str
-    parameters: dict[str, Any] | None = None  # OpenAI function 的 JSON-Schema 入参
-    method: str = "POST"
-    auth_header: str | None = None  # 机密：整串作请求头值（如 "Bearer xxx"），不回显
-    domain_id: str | None = None  # 空=全局
-    display_name: str | None = None
-    result_max_chars: int = 4000
-
-
-class ChatBiExternalToolUpdate(BaseModel):
-    enabled: bool
-
-
 class ChatBiPreferenceRequest(BaseModel):
     """P3.1：把用户确认的约定落库为本域记忆。"""
 
     domain_id: str
     text: str
-
-
-class ChatBiExternalToolOut(BaseModel):
-    id: str
-    name: str
-    display_name: str | None = None
-    description: str
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    method: str
-    url: str
-    has_auth: bool = False  # 机密不回显，仅标识是否配置了鉴权头
-    enabled: bool
-    domain_id: str | None = None
-    result_max_chars: int
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
 class ChatBiMessageOut(BaseModel):
@@ -273,13 +244,14 @@ class ChatBiCategoryList(BaseModel):
 
 
 class ChatBiCategoryRenameRequest(BaseModel):
-    domain_id: str
+    # 多域：对所选域集合下的同名分类统一重命名。空 = 全域。
+    domain_ids: list[str] = Field(default_factory=list)
     old_name: str
     new_name: str
 
 
 class ChatBiCategoryDeleteRequest(BaseModel):
-    domain_id: str
+    domain_ids: list[str] = Field(default_factory=list)
     name: str
 
 

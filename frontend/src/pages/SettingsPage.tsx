@@ -1,7 +1,6 @@
 import {
   ApiOutlined,
   DatabaseOutlined,
-  ToolOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
   ThunderboltOutlined,
@@ -24,7 +23,6 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PrincipalsPanel } from "../components/PrincipalsPanel";
-import { ExternalToolsPanel } from "../components/ExternalToolsPanel";
 import { DependencyPanel } from "../components/DependencyPanel";
 import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
@@ -173,7 +171,7 @@ export function SettingsPage() {
             ),
             children: (
               <div className="om-tab-stack">
-                <SectionCard title="依赖组件部署管理" icon={<ApiOutlined />} flush>
+                <SectionCard title="依赖组件部署管理" icon={<ApiOutlined />} bodyFlush>
                   <DependencyPanel />
                 </SectionCard>
               </div>
@@ -262,16 +260,6 @@ export function SettingsPage() {
                 <DataSourcesPanel />
               </SectionCard>
             ),
-          },
-          {
-            key: "external-tools",
-            label: (
-              <span>
-                <ToolOutlined style={{ marginRight: 6 }} />
-                外部工具
-              </span>
-            ),
-            children: <ExternalToolsPanel />,
           },
           {
             key: "security",

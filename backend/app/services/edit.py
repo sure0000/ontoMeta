@@ -37,6 +37,27 @@ _ALLOWED_TABLE_ROLES = {"business_object", "data_table", "bridge", "technical"}
 _REVIEW_MARK = "[待复核]"
 
 
+def _assert_object_name_free(
+    db: Session, ontology_id: str, name: str, *, exclude_id: str | None = None
+) -> None:
+    """对象标识名在本体内必须唯一（对应 ``uq_object_type_ontology_name``）。
+
+    库层有唯一约束兜底，但那只会抛 IntegrityError（→ 500）。在这里先查一次，
+    让用户拿到「叫什么、跟谁撞了」的可行动提示，而不是一句约束违反。
+    """
+    query = db.query(ObjectType).filter(
+        ObjectType.ontology_id == ontology_id,
+        ObjectType.name == name,
+    )
+    if exclude_id is not None:
+        query = query.filter(ObjectType.id != exclude_id)
+    clash = query.first()
+    if clash is not None:
+        raise ValueError(
+            f"对象标识名「{name}」在本体内已被「{clash.display_name}」占用，请换一个"
+        )
+
+
 def _formal_enforced() -> bool:
     """当前是否强制形式化枚举校验（formal_enforcement=error）。warn/off 不阻断编辑。"""
     from app.config import settings
@@ -142,6 +163,8 @@ class EditService:
 
         changed: list[str] = []
         if name is not None:
+            if name != obj.name:
+                _assert_object_name_free(db, obj.ontology_id, name, exclude_id=obj.id)
             obj.name = name
             changed.append("name")
         if display_name is not None:

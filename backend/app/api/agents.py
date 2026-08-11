@@ -27,6 +27,7 @@ from app.schemas import (
     PipelineScheduleRequest,
     TaskPipelineAdvanceOut,
     TaskPipelineCreateRequest,
+    TaskPipelineDraftAllOut,
     TaskPipelineOut,
 )
 from app.services.agent_pipeline import PipelineError
@@ -319,6 +320,23 @@ def advance_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
     return TaskPipelineAdvanceOut(
         pipeline=TaskPipelineOut(**task_pipeline.detail(db, pipeline_id)),
         artifact=_to_out(artifact),
+    )
+
+
+@router.post(
+    "/agents/pipelines/{pipeline_id}/draft-all", response_model=TaskPipelineDraftAllOut
+)
+def draft_all_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
+    """C2：一键起草**全部**步骤，返回各步制品。**只起草**。
+
+    与 advance 的区别：不再要求上游执行成功才起草下一步——血缘驱动的依赖
+    由各步骤的 depends_on 表达，起草阶段不阻塞（所有制品先落地，人再逐个
+    校验/确认/执行；执行顺序由血缘决定）。「未确认不得执行」不变量不变。
+    """
+    artifacts = _guard(lambda: task_pipeline.draft_all(db, pipeline_id))
+    return TaskPipelineDraftAllOut(
+        pipeline=TaskPipelineOut(**task_pipeline.detail(db, pipeline_id)),
+        artifacts=[_to_out(a) for a in artifacts],
     )
 
 

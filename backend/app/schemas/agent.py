@@ -73,6 +73,8 @@ class PipelineStepInput(BaseModel):
     kind: str = Field(description="materialize / sync / transform / metric")
     intent: str
     context: dict[str, Any] = Field(default_factory=dict)
+    # C2：血缘依赖（上游步序列表）。agent 从血缘/意图推导；空 = 线性默认（依赖上一步）。
+    depends_on: list[int] = Field(default_factory=list)
 
 
 class TaskPipelineCreateRequest(BaseModel):
@@ -92,6 +94,8 @@ class PipelineStepOut(BaseModel):
     #: 还没起草的步骤没有制品，状态如实为 null——不拿 "drafted" 冒充。
     artifact_status: str | None = None
     artifact_name: str | None = None
+    # C2：血缘依赖（上游步序列表）。
+    depends_on: list[int] = Field(default_factory=list)
 
 
 class TaskPipelineOut(BaseModel):
@@ -119,6 +123,13 @@ class TaskPipelineAdvanceOut(BaseModel):
 
     pipeline: TaskPipelineOut
     artifact: GovernanceArtifactOut
+
+
+class TaskPipelineDraftAllOut(BaseModel):
+    """C2：一键起草全部步骤的结果：新起草的制品列表 + 链态。"""
+
+    pipeline: TaskPipelineOut
+    artifacts: list[GovernanceArtifactOut]
 
 
 class PipelineScheduleRequest(BaseModel):

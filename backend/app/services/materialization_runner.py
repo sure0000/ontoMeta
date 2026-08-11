@@ -291,7 +291,6 @@ def _run_orchestrated(
     *,
     ds: DataSource,
     engine: str,
-    sync_tool: str | None,
     airflow,
     ddl_items: list[tuple[str, str]],
     constraint_items: dict[str, list[str]],
@@ -560,7 +559,6 @@ def run(
     *,
     target_datasource_id: str,
     engine: str,
-    sync_tool: str | None = None,
     database_prefix: str | None = None,
     database_overrides: dict[str, str] | None = None,
     table_overrides: dict[str, str] | None = None,
@@ -578,9 +576,8 @@ def run(
     直连落库（direct）回退：直连的 INSERT…SELECT 要求源表在目标数仓里可见，
     真实拓扑下不成立（见 `MATERIALIZE_ORCHESTRATION.md` §1）。
 
-    ``sync_tool`` 通常**不传**：用什么搬由 ``services/sync_tool_resolver`` 决策（设置页
-    可强制指定），传了则盖过它。同步策略逐实体来自物化弹窗，随 ``overrides`` 写回契约，
-    ``JobPlanner`` 据契约逐表决定装载方式。
+    搬运工具恒为 flink（统一执行架构，见 ``services/sync_tool_resolver``）。同步策略逐实体
+    来自物化弹窗，随 ``overrides`` 写回契约，``JobPlanner`` 据契约逐表决定装载方式。
 
     ``load_strategy``：**本次运行的全局覆盖**（Spec 里选的「全量/增量」），缺省 None
     = 逐表按契约。它此前只是个签名上的摆设——收下就丢，于是 Spec 上写着 full、
@@ -642,7 +639,6 @@ def run(
         ontology_id,
         ds=ds,
         engine=engine,
-        sync_tool=sync_tool,
         airflow=airflow,
         ddl_items=ddl_items,
         constraint_items=constraint_items,

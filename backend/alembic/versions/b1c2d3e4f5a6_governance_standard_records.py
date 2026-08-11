@@ -1,7 +1,7 @@
 """governance_standard_records: 治理规约的发布记录（G3 建表补迁移）
 
 Revision ID: b1c2d3e4f5a6
-Revises: a3b4c5d6e7f8
+Revises: f2a3b4c5d6e7
 Create Date: 2026-08-05
 
 ``GovernanceStandardRecord`` 模型随 G3 加入，但**当时漏了迁移**：测试库靠
@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b1c2d3e4f5a6"
-down_revision: Union[str, Sequence[str], None] = "a3b4c5d6e7f8"
+down_revision: Union[str, Sequence[str], None] = "f2a3b4c5d6e7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -113,15 +113,6 @@ class ObjectType(Base, ProvenanceMixin):
     # 重算并直接覆盖，非用户可编辑，不参与三方合并（比照 role_confidence）。
     role_signals: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
-    # 字段级溯源与三方合并元数据。
-    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
-    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
-    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
-    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -136,6 +127,18 @@ class ObjectType(Base, ProvenanceMixin):
     incoming_relations: Mapped[list["RelationType"]] = relationship(
         back_populates="target_object_type",
         foreign_keys="RelationType.target_object_type_id",
+    )
+
+    # 对象标识名在本体内唯一。``name`` 是 Agent 写 SQL 用的标识符，也是投影
+    # （ontology_projection）按归一小写建索引的键——重名会让 ``object_of`` 静默
+    # 只解析到其中一个，SQL 打到哪张表全看入库顺序。此前只在发布期由
+    # ``validate_ontology`` 判「对象标识重复」，从入库到发布之间的窗口无人把关。
+    #
+    # 注：软删除（``deleted_by_user=True``）的行仍占用名字。这是刻意的——被人工
+    # 删除的对象不会被机器复活（见 ontology_merge），名字留着可避免同名对象在
+    # 「删了又生成」之间反复横跳。
+    __table_args__ = (
+        UniqueConstraint("ontology_id", "name", name="uq_object_type_ontology_name"),
     )
 
 

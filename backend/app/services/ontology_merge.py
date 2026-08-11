@@ -35,7 +35,7 @@ from app.schemas import (
     DraftRelationType,
     OntologyDraftOutput,
 )
-from app.services.object_naming import dedupe_object_names
+from app.services.object_naming import dedupe_object_names, table_name_from_ref
 
 # 各实体的可合并字段（与 alembic c1d2e3f4a5b6 回填保持一致）
 OBJECT_FIELDS = ["name", "display_name", "description", "table_role", "role_reason"]
@@ -187,18 +187,41 @@ def resolve_duplicate_object_names(
     objs = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
     mapping = dedupe_object_names([(o.id, o.name, o.source_ref) for o in objs])
     changes: list[tuple[str, str, str]] = []
-    for obj in objs:
-        new_name = mapping.get(obj.id, obj.name)
-        if new_name == obj.name:
-            continue
-        if "name" in set(_loads(obj.overridden_fields, [])):
-            continue  # 人工命名，保留
+    pinned = {o.id for o in objs if "name" in set(_loads(o.overridden_fields, []))}
+
+    def _rename(obj: ObjectType, new_name: str) -> None:
         old_name = obj.name
         obj.name = new_name
         baseline = _loads(obj.machine_baseline, {})
         baseline["name"] = new_name
         obj.machine_baseline = _dumps(baseline)
         changes.append((obj.id, old_name, new_name))
+
+    for obj in objs:
+        new_name = mapping.get(obj.id, obj.name)
+        if new_name == obj.name or obj.id in pinned:
+            continue  # 人工命名，保留
+        _rename(obj, new_name)
+
+    # 残留撞名：一组里**全是**人工命名时上面无人退让，重名会一路活到库层唯一约束
+    # （uq_object_type_ontology_name）炸成 IntegrityError，整次合并回滚。而重名本身
+    # 比丢一个手写名字更糟——投影按名字建索引，重名等于 SQL 打到哪张表全看入库顺序。
+    # 故最后强制让出：组内保留第一个，其余按源表名 + 数字后缀消歧。
+    by_name: dict[str, list[ObjectType]] = {}
+    for obj in objs:
+        by_name.setdefault(obj.name, []).append(obj)
+    used = set(by_name)
+    for name, members in by_name.items():
+        if len(members) < 2:
+            continue
+        for obj in members[1:]:
+            base = table_name_from_ref(obj.source_ref) or name
+            final, suffix = base, 2
+            while final in used:
+                final = f"{base}_{suffix}"
+                suffix += 1
+            used.add(final)
+            _rename(obj, final)
     return changes
 
 
@@ -228,6 +251,25 @@ class OntologyMergeService:
         )
         existing_by_ref = {o.source_ref: o for o in existing_objs if o.source_ref}
 
+        # 库层唯一约束 uq_object_type_ontology_name 在 **flush 时**就拦，等不到本方法
+        # 末尾的兜底 sweep。故新建/改名前就地占名——规则与
+        # :func:`resolve_duplicate_object_names` 一致（撞名改用源表名 snake，仍撞则
+        # 追加数字后缀），末尾 sweep 因此退化为对存量重名的兜底。
+        used_names = {o.name for o in existing_objs}
+
+        def _allocate(desired: str, source_ref: str | None) -> str:
+            """在本体内取一个未被占用的标识名。调用方需先释放该对象的旧名。"""
+            if desired not in used_names:
+                used_names.add(desired)
+                return desired
+            base = table_name_from_ref(source_ref) or desired
+            final, suffix = base, 2
+            while final in used_names:
+                final = f"{base}_{suffix}"
+                suffix += 1
+            used_names.add(final)
+            return final
+
         object_ref_to_id: dict[str, str] = {}
         object_id_by_name: dict[str, str] = {}
         seen_object_ids: set[str] = set()
@@ -242,9 +284,12 @@ class OntologyMergeService:
                 "role_reason": item.role_reason,
             }
             if existing is None:
+                # 占名后回写 incoming，让 machine_baseline 记的是**实际落库的名字**：
+                # 否则下次重跑会把「机器还叫原名」当成机器改动，又改回撞名的那个。
+                incoming["name"] = _allocate(item.name, item.source_ref)
                 obj = ObjectType(
                     ontology_id=ontology_id,
-                    name=item.name,
+                    name=incoming["name"],
                     display_name=item.display_name,
                     description=item.description,
                     source_ref=item.source_ref,
@@ -276,9 +321,17 @@ class OntologyMergeService:
                         "object_types", "skip_user", obj.id, obj.name, obj.display_name
                     )
                 else:
+                    previous_name = obj.name
                     outcome, changed, conflicts = _merge_entity_fields(
                         obj, incoming, OBJECT_FIELDS
                     )
+                    # 三方合并可能把机器名回填到 obj.name，撞上别的对象照样 flush 报错。
+                    if obj.name != previous_name:
+                        used_names.discard(previous_name)
+                        obj.name = _allocate(obj.name, obj.source_ref)
+                        baseline = _loads(obj.machine_baseline, {})
+                        baseline["name"] = obj.name
+                        obj.machine_baseline = _dumps(baseline)
                     obj.source_confidence = item.confidence
                     obj.role_confidence = item.role_confidence
                     # 机器证据每次重算直接覆盖（非用户可编辑、不进冲突流程）；

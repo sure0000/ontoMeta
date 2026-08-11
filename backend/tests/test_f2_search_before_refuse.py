@@ -42,7 +42,7 @@ def _run(script, question, aliases, domain_id):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                svc.ask(db, domain_id=domain_id, question=question, principal_role="editor")
+                svc.ask(db, domain_ids=[domain_id], question=question, principal_role="editor")
             )
     finally:
         chat_bi_mod.AsyncOpenAI = orig_cls  # type: ignore[assignment]

@@ -170,7 +170,7 @@ def test_skill_and_chart_flow_end_to_end(client):
     )
     service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         # 只需喂 run_sql 一份可执行结果，让 render_chart 有真实列可作图。
         if name == "run_sql":
             return (
@@ -189,7 +189,7 @@ def test_skill_and_chart_flow_end_to_end(client):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="各区域销售额", principal_role="publisher")
+                service.ask(db, domain_ids=[domain_id], question="各区域销售额", principal_role="publisher")
             )
     finally:
         c.AsyncOpenAI = orig  # type: ignore[assignment]
@@ -252,7 +252,7 @@ def test_lineage_skill_flow_end_to_end(client):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="订单的血缘", principal_role="publisher")
+                service.ask(db, domain_ids=[domain_id], question="订单的血缘", principal_role="publisher")
             )
     finally:
         c.AsyncOpenAI = orig  # type: ignore[assignment]
@@ -353,7 +353,7 @@ def test_create_skill_flow_stays_read_only(client):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="建个复购率指标", principal_role="publisher")
+                service.ask(db, domain_ids=[domain_id], question="建个复购率指标", principal_role="publisher")
             )
     finally:
         c.AsyncOpenAI = orig  # type: ignore[assignment]
@@ -537,7 +537,7 @@ def test_task_skill_flow_stays_read_only(client):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="把客户主数据物化落库",
+                service.ask(db, domain_ids=[domain_id], question="把客户主数据物化落库",
                             principal_role="publisher")
             )
     finally:
@@ -693,7 +693,7 @@ def test_link_conversation_task_is_idempotent(client):
 
     domain_id, onto_id, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
-        conv = svc.create_conversation(db, domain_id=domain_id, title="t")
+        conv = svc.create_conversation(db, domain_ids=[domain_id], title="t")
         cid = conv["id"]
         a = GovernanceArtifact(
             kind="materialize", name="物化客户", ontology_id=onto_id,
@@ -716,7 +716,7 @@ def test_get_task_status_prefers_conversation_scope(client):
 
     domain_id, onto_id, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
-        conv = svc.create_conversation(db, domain_id=domain_id, title="t")
+        conv = svc.create_conversation(db, domain_ids=[domain_id], title="t")
         cid = conv["id"]
         mine = GovernanceArtifact(
             kind="materialize", name="本会话的物化", ontology_id=onto_id,
@@ -752,7 +752,7 @@ def test_link_task_endpoint(client, admin_headers):
 
     domain_id, onto_id, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
-        conv = svc.create_conversation(db, domain_id=domain_id, title="t")
+        conv = svc.create_conversation(db, domain_ids=[domain_id], title="t")
         cid = conv["id"]
         a = GovernanceArtifact(
             kind="sync", name="同步任务", ontology_id=onto_id,
@@ -840,7 +840,7 @@ def test_plan_flow_end_to_end(client):
 
     real_dispatch = service._dispatch_agent_tool
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         if name == "run_sql":
             return (
                 {"executed": True, "sql": args.get("sql"),
@@ -849,16 +849,13 @@ def test_plan_flow_end_to_end(client):
                 "返回 2 行", False,
             )
         # update_plan 无需 db/上下文，走真实 dispatch
-        return real_dispatch(
-            db, domain_id=domain_id, ontology_id=ontology_id, name=name,
-            args=args, principal_role=principal_role,
-        )
+        return real_dispatch(db, domain_ids=domain_ids, ontology_ids=ontology_ids, name=name, args=args, principal_role=principal_role)
 
     service._dispatch_agent_tool = fake_dispatch  # type: ignore[assignment]
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="探索各区域销售额有没有异常",
+                service.ask(db, domain_ids=[domain_id], question="探索各区域销售额有没有异常",
                             principal_role="publisher")
             )
     finally:
@@ -887,16 +884,14 @@ def test_record_domain_memory_accumulates_and_gates(client):
         "referenced_logics": [{"id": "l1", "display_name": "成交额"}],
     }
     with SessionLocal() as db:
-        svc.record_domain_memory(db, domain_id, hit)
-        svc.record_domain_memory(db, domain_id, hit)  # 再命中一次 → 累加
+        svc.record_domain_memory(db, [domain_id], hit)
+        svc.record_domain_memory(db, [domain_id], hit)  # 再命中一次 → 累加
         # 拒答不记
-        svc.record_domain_memory(
-            db, domain_id,
+        svc.record_domain_memory(db, [domain_id],
             {"grounding_refused": True, "referenced_objects": [{"id": "o2", "display_name": "X"}]},
         )
         # mock 不记
-        svc.record_domain_memory(
-            db, domain_id,
+        svc.record_domain_memory(db, [domain_id],
             {"used_mock": True, "referenced_objects": [{"id": "o3", "display_name": "Y"}]},
         )
         rows = db.query(ChatBiDomainMemory).filter_by(domain_id=domain_id).all()
@@ -911,12 +906,12 @@ def test_build_domain_memory_card_top_n_and_empty(client):
     domain_id, _onto, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
         for _ in range(3):
-            svc.record_domain_memory(db, domain_id, {"referenced_objects": [{"id": "hot", "display_name": "订单"}]})
-        svc.record_domain_memory(db, domain_id, {"referenced_objects": [{"id": "cold", "display_name": "冷门对象"}]})
-        svc.record_domain_memory(db, domain_id, {"referenced_logics": [{"id": "m", "display_name": "成交额"}]})
-        card = svc.build_domain_memory_card(db, domain_id, limit=8)
-        empty = svc.build_domain_memory_card(db, "no-such-domain")
-    assert "本域高频" in card
+            svc.record_domain_memory(db, [domain_id], {"referenced_objects": [{"id": "hot", "display_name": "订单"}]})
+        svc.record_domain_memory(db, [domain_id], {"referenced_objects": [{"id": "cold", "display_name": "冷门对象"}]})
+        svc.record_domain_memory(db, [domain_id], {"referenced_logics": [{"id": "m", "display_name": "成交额"}]})
+        card = svc.build_domain_memory_card(db, [domain_id], limit=8)
+        empty = svc.build_domain_memory_card(db, ["no-such-domain"])
+    assert "高频" in card
     assert "常用对象" in card and "订单" in card
     assert "常用口径" in card and "成交额" in card
     assert empty == ""  # 无记忆返回空串（不污染提示）
@@ -927,7 +922,7 @@ def test_domain_memory_injected_into_system_prompt(client):
     domain_id, _onto, aliases = _seed_golden_domain()
     with SessionLocal() as db:
         for _ in range(2):
-            svc.record_domain_memory(db, domain_id, {"referenced_objects": [{"id": "o1", "display_name": "客户档案"}]})
+            svc.record_domain_memory(db, [domain_id], {"referenced_objects": [{"id": "o1", "display_name": "客户档案"}]})
 
     script = [FinalTurn("已了解。")]
     completions = _StubCompletions(script, aliases)
@@ -951,11 +946,11 @@ def test_domain_memory_injected_into_system_prompt(client):
     service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
     try:
         with SessionLocal() as db:
-            asyncio.run(service.ask(db, domain_id=domain_id, question="随便问问", principal_role="publisher"))
+            asyncio.run(service.ask(db, domain_ids=[domain_id], question="随便问问", principal_role="publisher"))
     finally:
         c.AsyncOpenAI = orig  # type: ignore[assignment]
 
-    assert "本域高频" in seen.get("system", "")
+    assert "高频" in seen.get("system", "")
     assert "客户档案" in seen["system"]
 
 
@@ -1015,7 +1010,7 @@ def test_analyze_flow_end_to_end(client):
     )
     service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
 
-    def fake_dispatch(db, *, domain_id, ontology_id, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
         if name == "run_sql":
             return (
                 {"executed": True, "sql": args.get("sql"),
@@ -1029,7 +1024,7 @@ def test_analyze_flow_end_to_end(client):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="各区域金额有没有异常",
+                service.ask(db, domain_ids=[domain_id], question="各区域金额有没有异常",
                             principal_role="publisher")
             )
     finally:
@@ -1121,9 +1116,9 @@ def test_record_domain_preference_and_card(client):
         svc.record_domain_preference(db, domain_id, "华东含上海")
         from app.models.chat_bi import ChatBiDomainMemory
         n = db.query(ChatBiDomainMemory).filter_by(domain_id=domain_id, ref_kind="preference").count()
-        card = svc.build_domain_memory_card(db, domain_id)
+        card = svc.build_domain_memory_card(db, [domain_id])
     assert n == 2  # 幂等：重复文本不新增
-    assert "本域约定" in card and "成交额默认含税口径" in card and "华东含上海" in card
+    assert "约定" in card and "成交额默认含税口径" in card and "华东含上海" in card
 
 
 def test_preference_flow_stays_read_only(client):
@@ -1155,7 +1150,7 @@ def test_preference_flow_stays_read_only(client):
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                service.ask(db, domain_id=domain_id, question="以后成交额都按含税口径", principal_role="publisher")
+                service.ask(db, domain_ids=[domain_id], question="以后成交额都按含税口径", principal_role="publisher")
             )
     finally:
         c.AsyncOpenAI = orig  # type: ignore[assignment]

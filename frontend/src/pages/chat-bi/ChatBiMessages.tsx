@@ -1,7 +1,6 @@
 import { RobotOutlined } from "@ant-design/icons";
 import { Spin } from "antd";
 import type { RefObject } from "react";
-import type { DomainContext } from "../../types";
 import { ChatBubble } from "./ChatBiReferences";
 import type { ChatMessage } from "./utils";
 
@@ -10,7 +9,7 @@ export interface ChatBiMessagesProps {
   loadingMessages: boolean;
   messages: ChatMessage[];
   activeConversationId: string | null;
-  activeDomain: DomainContext;
+  scopeLabel: string;
   loadingSuggestions: boolean;
   suggestions: string[];
   submitting: boolean;
@@ -28,7 +27,7 @@ export function ChatBiMessages({
   loadingMessages,
   messages,
   activeConversationId,
-  activeDomain,
+  scopeLabel,
   loadingSuggestions,
   suggestions,
   submitting,
@@ -47,7 +46,7 @@ export function ChatBiMessages({
           <div className="chatbi-welcome-icon">
             <RobotOutlined />
           </div>
-          <div className="chatbi-welcome-title">Data Agent · {activeDomain.name}</div>
+          <div className="chatbi-welcome-title">Data Agent · {scopeLabel}</div>
           <div className="chatbi-welcome-desc">
             面向数据工程师、业务、运营与管理者的统一数据入口。用自然语言问数， 获取口径解读与可执行
             SQL，并可一键把结果沉淀为数据表格或可视化大屏。

@@ -362,7 +362,50 @@ def _parse_lineages_from_entities(
     return lineages
 
 
-def _parse_query_logic_evidences(dataset: DatasetInput, queries: list[dict]) -> list[LogicEvidenceInput]:
+def _parse_lineage_edges_from_entities(entities: list[dict]) -> list[LineageInput]:
+    """从单个/少量 dataset 实体里提取全部血缘边（**不受 domain 过滤**）。
+
+    与 :func:`_parse_lineages_from_entities` 的区别：后者只保留两端都在目标域内的边
+    （建模时收敛到域边界）；本函数返回查询到的**全部**边——L2 的用途是看某个表
+    的上下游（包括跨域/外部表），故不过滤。
+
+    边方向与 DataHub 一致：downstreamLineage = 本表 → 下游表（本表被下游消费），
+    upstreamLineage = 上游表 → 本表（本表消费上游）。
+    """
+    seen: set[tuple[str, str]] = set()
+    edges: list[LineageInput] = []
+    for entity in entities:
+        current_urn = entity.get("urn")
+        if not current_urn:
+            continue
+
+        downstream = entity.get("downstreamLineage") or {}
+        for rel in downstream.get("relationships") or []:
+            target_entity = rel.get("entity") or {}
+            target_urn = target_entity.get("urn")
+            if not target_urn or target_entity.get("type") != "DATASET":
+                continue
+            key = (current_urn, target_urn)
+            if key not in seen:
+                seen.add(key)
+                edges.append(
+                    LineageInput(source_urn=current_urn, target_urn=target_urn)
+                )
+
+        upstream = entity.get("upstreamLineage") or {}
+        for rel in upstream.get("relationships") or []:
+            upstream_entity = rel.get("entity") or {}
+            upstream_urn = upstream_entity.get("urn")
+            if not upstream_urn or upstream_entity.get("type") != "DATASET":
+                continue
+            key = (upstream_urn, current_urn)
+            if key not in seen:
+                seen.add(key)
+                edges.append(
+                    LineageInput(source_urn=upstream_urn, target_urn=current_urn)
+                )
+
+    return edges
     source_ref = f"{dataset.container}.{dataset.name}" if dataset.container else dataset.name
     evidences: list[LogicEvidenceInput] = []
     for query in queries:
@@ -454,6 +497,87 @@ class DataHubConnector:
             raise ValueError(f"DataHub dataset not found: {dataset_urn}")
         return _parse_dataset_entity(entities[0])
 
+    async def get_lineage_around(
+        self,
+        dataset_urn: str,
+        *,
+        direction: str = "BOTH",
+        depth: int = 1,
+        count: int = 50,
+    ) -> dict:
+        """L2：实时查单个数据集的血缘（上游/下游），返回邻域边。
+
+        **DataHub 是血缘的唯一权威**——本方法直接查 DataHub，不做本地推导。
+        与建模期的 :meth:`fetch_domain_bundle` 不同，这里只查一个 URN 的邻域，
+        且**不过滤 domain**：要看的是某个表的全部上下游（含跨域/外部表）。
+
+        Args:
+            dataset_urn: 中心数据集 URN。
+            direction: UPSTREAM / DOWNSTREAM / BOTH。
+            depth: 展开深度（1 = 直接上下游；>1 逐层展开）。
+            count: 每层最多返回的关系数。
+
+        Returns:
+            ``{"center_urn", "edges": [LineageInput...], "nodes": [ {urn, name, platform}... ]}``
+            查不到或网络失败时 edges 为空（**不抛错**——血缘是增强，缺失不该阻断调用方）。
+        """
+        if direction not in ("UPSTREAM", "DOWNSTREAM", "BOTH"):
+            raise ValueError(f"direction 须为 UPSTREAM/DOWNSTREAM/BOTH，收到「{direction}」")
+
+        query = """
+        fragment DatasetLineageFragment on Dataset {
+          urn
+          name
+          platform { name }
+          downstreamLineage: lineage(input: { direction: DOWNSTREAM, start: 0, count: $count }) {
+            relationships {
+              entity { urn type ... on Dataset { name platform { name } } }
+            }
+          }
+          upstreamLineage: lineage(input: { direction: UPSTREAM, start: 0, count: $count }) {
+            relationships {
+              entity { urn type ... on Dataset { name platform { name } } }
+            }
+          }
+        }
+        query getLineageAround($urn: String!, $count: Int!) {
+          dataset(urn: $urn) {
+            ...DatasetLineageFragment
+          }
+        }
+        """
+        try:
+            data = await self._graphql(query, {"urn": dataset_urn, "count": count})
+        except Exception as exc:  # noqa: BLE001 —— 血缘是增强，读不到不炸调用方
+            logger.warning(
+                "datahub get_lineage_around(%s) failed: %s", dataset_urn, exc
+            )
+            return {"center_urn": dataset_urn, "edges": [], "nodes": []}
+
+        dataset = data.get("dataset")
+        if not dataset:
+            return {"center_urn": dataset_urn, "edges": [], "nodes": []}
+
+        edges = _parse_lineage_edges_from_entities([dataset])
+
+        # 按方向过滤（GraphQL 已按方向查，这里兜底双保险）
+        if direction == "UPSTREAM":
+            edges = [e for e in edges if e.target_urn == dataset_urn]
+        elif direction == "DOWNSTREAM":
+            edges = [e for e in edges if e.source_urn == dataset_urn]
+
+        # 邻域节点（中心 + 边端点），去重保序
+        nodes: dict[str, dict] = {dataset_urn: {"urn": dataset_urn}}
+        for e in edges:
+            nodes.setdefault(e.source_urn, {"urn": e.source_urn})
+            nodes.setdefault(e.target_urn, {"urn": e.target_urn})
+
+        return {
+            "center_urn": dataset_urn,
+            "edges": [e.model_dump() for e in edges],
+            "nodes": list(nodes.values()),
+        }
+
     def get_domain_url(self, datahub_domain_id: str) -> str:
         return f"{self.frontend_url}/domain/{datahub_domain_id}"
 
@@ -469,6 +593,10 @@ class DataHubConnector:
         return await self._search_datasets_from_api(query)
 
     async def _search_datasets_from_api(self, query: str) -> list[DatasetInput]:
+        # DataHub 会对 search 默认套上 schemaField→dataset 的分组 searchFlags；一旦
+        # query 为空串，Elasticsearch 侧会因空查询 + 分组而 500（"Search query failed"）。
+        # "*" 是 DataHub 规范的“全量匹配”写法，既能列全部数据集又避开这条坏路径。
+        keyword = query.strip() or "*"
         graphql_query = """
         query searchDatasets($keyword: String!) {
           search(input: { type: DATASET, query: $keyword, start: 0, count: 50 }) {
@@ -485,7 +613,7 @@ class DataHubConnector:
           }
         }
         """
-        data = await self._graphql(graphql_query, {"keyword": query})
+        data = await self._graphql(graphql_query, {"keyword": keyword})
         results = data.get("search", {}).get("searchResults", [])
         return [_parse_search_dataset(item) for item in results]
 

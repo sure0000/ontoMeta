@@ -70,29 +70,6 @@ def test_password_is_masked_and_preserved(client, admin_headers):
     assert client.get("/api/settings/airflow", headers=admin_headers).json()["password_set"]
 
 
-def test_sync_tool_defaults_to_auto_and_rejects_unknown_names(client, admin_headers):
-    """统一执行架构：搬运工具恒为 flink，拒绝其他值。空 = 自动（兼容旧配置）。"""
-    body = client.get("/api/settings/airflow", headers=admin_headers).json()
-    assert body["sync_tool"] == ""
-
-    # 统一架构：只接受 "flink" 或空（自动）
-    r = client.put(
-        "/api/settings/airflow",
-        json={"endpoint": "http://airflow:8080", "sync_tool": "flink"},
-        headers=admin_headers,
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["sync_tool"] == "flink"
-
-    # 名字写错要在这里就挡掉：统一架构下 SeaTunnel/DataX 已废弃。
-    r = client.put(
-        "/api/settings/airflow",
-        json={"endpoint": "http://airflow:8080", "sync_tool": "SeaTunnel"},
-        headers=admin_headers,
-    )
-    assert r.status_code == 422  # 拒绝非 flink 的工具名
-
-
 def test_status_rejects_receipt_without_dagrun(client, admin_headers):
     """回执里没 DagRun 信息（如旧的直连回执/提交未成功）——明确报错，不返回空状态糊弄前端。"""
     with SessionLocal() as db:

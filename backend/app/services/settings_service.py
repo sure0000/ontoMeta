@@ -39,21 +39,6 @@ def _default_jobs_dir() -> str:
     )
 
 
-def parse_tool_images(raw: str | None) -> dict[str, str]:
-    """``工具名=镜像,工具名=镜像`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。
-
-    设置页存的是这串原文（一个输入框比一张动态表格好填），解析放在读取侧。
-    """
-    mapping: dict[str, str] = {}
-    for item in (raw or "").split(","):
-        name, sep, image = item.partition("=")
-        if not sep:
-            continue
-        name, image = name.strip().lower(), image.strip()
-        if name and image:
-            mapping[name] = image
-    return mapping
-
 
 DEEPSEEK_MODELS = [
     {
@@ -124,15 +109,6 @@ class AirflowRuntimeConfig:
     git_auto_init: bool
     git_author: str
     git_email: str
-    # 搬运容器接的 Docker 网络，同属部署基础设施（见 config.airflow_docker_network）。
-    docker_network: str
-    # JDBC 驱动目录（宿主机路径），挂进搬运容器的 lib 目录。
-    drivers_dir: str
-    # 搬运工具的镜像覆盖 ``{工具名: 镜像}``（已废弃：统一执行架构下不走 docker 镜像）。
-    # 为兼容保留字段（前端可能仍发送），但不再实际使用。
-    sync_tool_images: dict[str, str]
-    # 强制指定搬运工具（已废弃：统一执行架构下恒为 flink）。为兼容保留字段。
-    sync_tool: str
     # DAG 形状与时序。dag_parse_timeout 要大于 Airflow 的 dag_dir_list_interval，
     # 否则首次提交必然报「尚未解析到」。
     max_tasks_per_dag: int
@@ -289,10 +265,6 @@ class SettingsService:
             git_auto_init=bool(a.get("git_auto_init")),
             git_author=a.get("git_author") or "",
             git_email=a.get("git_email") or "",
-            docker_network=a.get("docker_network") or "bridge",
-            drivers_dir=a.get("drivers_dir") or "",
-            sync_tool_images=parse_tool_images(a.get("sync_tool_images")),
-            sync_tool=(a.get("sync_tool") or "").strip().lower(),
             max_tasks_per_dag=a.get("max_tasks_per_dag") or 50,
             max_active_tasks_per_dag=a.get("max_active_tasks_per_dag") or 16,
             dag_parse_timeout=a.get("dag_parse_timeout") or 60.0,
@@ -450,9 +422,6 @@ class SettingsService:
                     id="default",
                     dags_dir=_default_dags_dir(),
                     jobs_dir=_default_jobs_dir(),
-                    docker_network=env_settings.airflow_docker_network,
-                    drivers_dir=env_settings.airflow_sync_drivers_dir,
-                    sync_tool_images=env_settings.sync_tool_images,
                     max_tasks_per_dag=env_settings.ontometa_max_tasks_per_dag,
                     max_active_tasks_per_dag=env_settings.ontometa_max_active_tasks_per_dag,
                     dag_parse_timeout=env_settings.ontometa_dag_parse_timeout,

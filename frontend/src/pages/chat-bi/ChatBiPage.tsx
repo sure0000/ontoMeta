@@ -22,7 +22,7 @@ import { EMPTY_DEPS, getTimeGroup, type ChatMessage, type TimeGroup } from "./ut
 
 export function ChatBiPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const domainIdParam = searchParams.get("domain") || undefined;
+  const domainsParam = searchParams.get("domains") || "";
 
   const { data: domains, loading: loadingDomains } = useApi<DomainContext[]>(
     async () => api.listDomains(),
@@ -30,18 +30,37 @@ export function ChatBiPage() {
   );
 
   const domainList = domains ?? [];
-  const domainId = useMemo(() => {
-    if (domainIdParam) return domainIdParam;
-    return domainList[0]?.id;
-  }, [domainIdParam, domainList]);
+  // 不选域 = 全域通盘（domainIds 为空数组，合法状态）；仅系统一个域都没有时才算未接入。
+  // 记忆依赖必须是 domainsParam 字符串（而非每次渲染都新建的数组），否则 domainIds 每帧都是新引用，
+  // 会让下游依赖 [domainIds] 的 effect 无限重跑——表现为右侧消息区/推荐永远 loading。
+  const domainIds = useMemo(() => {
+    const requested = domainsParam
+      ? domainsParam.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    // 过滤掉已不存在的域 id
+    return requested.filter((id) => domainList.some((d) => d.id === id));
+  }, [domainsParam, domainList]);
 
   useEffect(() => {
-    if (!domainIdParam && domainId) {
-      setSearchParams({ domain: domainId }, { replace: true });
+    // 同步 URL：去空白/空段归一化 domains 参数。空选 = 去掉参数（全域）。
+    if (!domainsParam) return;
+    const next = domainsParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(",");
+    if (next !== domainsParam) {
+      if (next) setSearchParams({ domains: next }, { replace: true });
+      else setSearchParams({}, { replace: true });
     }
-  }, [domainIdParam, domainId, setSearchParams]);
+  }, [domainsParam, setSearchParams]);
 
-  const activeDomain = domainList.find((d) => d.id === domainId);
+  const activeDomains = domainIds
+    .map((id) => domainList.find((d) => d.id === id))
+    .filter((d): d is DomainContext => Boolean(d));
+  const scopeLabel = activeDomains.length
+    ? activeDomains.map((d) => d.name).join("、")
+    : "全域";
 
   const [conversations, setConversations] = useState<ChatBiConversation[]>([]);
   const [archivedConversations, setArchivedConversations] = useState<ChatBiConversation[]>([]);
@@ -97,26 +116,19 @@ export function ChatBiPage() {
     setBatchMode(false);
     setBatchSelectedIds(new Set());
     hasConversationDataRef.current = false;
-  }, [domainId]);
+  }, [domainIds.join(",")]);
 
   useEffect(() => {
-    if (!domainId) {
-      setConversations([]);
-      setArchivedConversations([]);
-      setCategories([]);
-      setLoadingConversations(false);
-      hasConversationDataRef.current = false;
-      return;
-    }
+    // 全域通盘（空选）也是合法作用域，照常拉取全部会话。
     const showLoading = !hasConversationDataRef.current;
     if (showLoading) setLoadingConversations(true);
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
       try {
         const [active, archived, cats] = await Promise.all([
-          api.listChatBiConversations(domainId, searchQuery || undefined, false),
-          api.listChatBiConversations(domainId, searchQuery || undefined, true),
-          api.listChatBiCategories(domainId),
+          api.listChatBiConversations(domainIds, searchQuery || undefined, false),
+          api.listChatBiConversations(domainIds, searchQuery || undefined, true),
+          api.listChatBiCategories(domainIds),
         ]);
         const archivedOnly = archived.filter((c) => c.is_archived);
         setConversations(active.filter((c) => !c.is_archived));
@@ -132,7 +144,7 @@ export function ChatBiPage() {
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [domainId, searchQuery]);
+  }, [domainIds, searchQuery]);
 
   const handleSelectConversation = useCallback((id: string) => {
     setActiveConversationId(id);
@@ -140,16 +152,15 @@ export function ChatBiPage() {
   }, []);
 
   const handleNewConversation = useCallback(async () => {
-    if (!domainId) return;
     setShowArchived(false);
     try {
-      const conv = await api.createChatBiConversation({ domain_id: domainId });
+      const conv = await api.createChatBiConversation({ domain_ids: domainIds });
       prependConversation(conv);
       setActiveConversationId(conv.id);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "创建对话失败");
     }
-  }, [domainId, prependConversation]);
+  }, [domainIds, prependConversation]);
 
   const handleOpenRename = useCallback((conv: ChatBiConversation) => {
     setRenameTarget(conv);
@@ -336,7 +347,6 @@ export function ChatBiPage() {
   );
 
   const handleCategoryDialogConfirm = useCallback(async () => {
-    if (!domainId) return;
     try {
       if (catDialogMode === "create") {
         const name = catDialogName.trim();
@@ -351,7 +361,7 @@ export function ChatBiPage() {
           });
         } else {
           const conv = await api.createChatBiConversation({
-            domain_id: domainId,
+            domain_ids: domainIds,
             category: name,
           });
           prependConversation(conv);
@@ -366,7 +376,7 @@ export function ChatBiPage() {
         if (!catDialogNewName.trim() || !catDialogName) return;
         const newName = catDialogNewName.trim();
         await api.renameChatBiCategory({
-          domain_id: domainId,
+          domain_ids: domainIds,
           old_name: catDialogName,
           new_name: newName,
         });
@@ -389,7 +399,7 @@ export function ChatBiPage() {
       } else if (catDialogMode === "delete") {
         if (!catDialogName) return;
         await api.deleteChatBiCategory({
-          domain_id: domainId,
+          domain_ids: domainIds,
           name: catDialogName,
         });
         const clearCategory = (list: ChatBiConversation[]) =>
@@ -408,7 +418,7 @@ export function ChatBiPage() {
       message.error(err instanceof Error ? err.message : "操作失败");
     }
   }, [
-    domainId,
+    domainIds,
     catDialogMode,
     catDialogName,
     catDialogNewName,
@@ -424,10 +434,9 @@ export function ChatBiPage() {
 
   const handleCreateConvInCategory = useCallback(
     async (catName: string) => {
-      if (!domainId) return;
       try {
         const conv = await api.createChatBiConversation({
-          domain_id: domainId,
+          domain_ids: domainIds,
           category: catName,
         });
         prependConversation(conv);
@@ -436,7 +445,7 @@ export function ChatBiPage() {
         message.error(err instanceof Error ? err.message : "创建对话失败");
       }
     },
-    [domainId, prependConversation],
+    [domainIds, prependConversation],
   );
 
   const handleConversationActivity = useCallback(
@@ -450,7 +459,8 @@ export function ChatBiPage() {
       if (update.isNew) {
         prependConversation({
           id: update.id,
-          domain_id: domainId!,
+          domain_ids: domainIds,
+          domain_id: domainIds[0] ?? null,
           title: update.title || "新对话",
           is_pinned: false,
           is_archived: false,
@@ -470,7 +480,7 @@ export function ChatBiPage() {
         updated_at: now,
       });
     },
-    [domainId, patchConversation, prependConversation],
+    [domainIds, patchConversation, prependConversation],
   );
 
   const handleToggleCategory = useCallback((name: string) => {
@@ -531,7 +541,7 @@ export function ChatBiPage() {
 
   return (
     <PageContainer full>
-      {!domainId ? (
+      {domainList.length === 0 ? (
         loadingDomains || domains === null ? (
           <div style={{ display: "grid", placeItems: "center", height: "100%" }}>
             <Spin size="large" />
@@ -539,20 +549,16 @@ export function ChatBiPage() {
         ) : (
           <Alert
             type="info"
-            message="请先选择数据域"
+            message="尚未接入任何数据域"
             description="尚未从 DataHub 同步到任何数据域，请在「本体建模」页确认接入配置。"
             showIcon
           />
         )
-      ) : !activeDomain ? (
-        <div style={{ display: "grid", placeItems: "center", height: "100%" }}>
-          <Spin size="large" />
-        </div>
       ) : (
         <div className="chatbi-layout">
           {sidebarVisible && (
             <ChatBiSidebar
-              domainId={domainId}
+              domainIds={domainIds}
               domainList={domainList}
               conversations={conversations}
               archivedConversations={archivedConversations}
@@ -592,8 +598,8 @@ export function ChatBiPage() {
             />
           )}
           <ChatBiMain
-            domainId={domainId}
-            activeDomain={activeDomain}
+            domainIds={domainIds}
+            scopeLabel={scopeLabel}
             activeConversationId={activeConversationId}
             conversations={conversations}
             archivedConversations={archivedConversations}
@@ -674,8 +680,8 @@ export function ChatBiPage() {
 }
 
 interface ChatBiMainProps {
-  domainId: string;
-  activeDomain: DomainContext;
+  domainIds: string[];
+  scopeLabel: string;
   activeConversationId: string | null;
   conversations: ChatBiConversation[];
   archivedConversations: ChatBiConversation[];
@@ -690,8 +696,8 @@ interface ChatBiMainProps {
 }
 
 const ChatBiMain = memo(function ChatBiMain({
-  domainId,
-  activeDomain,
+  domainIds,
+  scopeLabel,
   activeConversationId,
   conversations,
   archivedConversations,
@@ -716,7 +722,11 @@ const ChatBiMain = memo(function ChatBiMain({
       appType: "data_table" | "screen" | "dashboard",
       payload?: ChatBiAnswer,
     ) => {
-      if (!domainId || !question.trim()) return;
+      const anchorDomainId = domainIds[0];
+      if (!anchorDomainId || !question.trim()) {
+        message.warning("请先选择至少一个数据域再生成数据应用");
+        return;
+      }
       const hide = message.loading(
         appType === "screen"
           ? "正在生成大屏…"
@@ -727,7 +737,7 @@ const ChatBiMain = memo(function ChatBiMain({
       );
       try {
         const app = await api.generateDataAppFromChat({
-          domain_id: domainId,
+          domain_id: anchorDomainId,
           app_type: appType,
           question,
           conversation_id: activeConversationId ?? undefined,
@@ -743,7 +753,7 @@ const ChatBiMain = memo(function ChatBiMain({
         message.error(err instanceof Error ? err.message : "生成失败");
       }
     },
-    [domainId, navigate, activeConversationId],
+    [domainIds, navigate, activeConversationId],
   );
 
   const [addDashOpen, setAddDashOpen] = useState(false);
@@ -756,36 +766,41 @@ const ChatBiMain = memo(function ChatBiMain({
 
   const openAddToDashboard = useCallback(
     (question: string, payload?: ChatBiAnswer) => {
-      if (!domainId) return;
+      const anchorDomainId = domainIds[0];
+      if (!anchorDomainId) {
+        message.warning("请先选择至少一个数据域再加入看板");
+        return;
+      }
       setPendingAdd({ question, payload });
       setAddDashTarget("__new__");
       setAddDashOpen(true);
       void api
-        .listDataApps(domainId, "dashboard")
+        .listDataApps(anchorDomainId, "dashboard")
         .then((list) => {
           setDashboards(list);
           if (list.length > 0) setAddDashTarget(list[0].id);
         })
         .catch(() => setDashboards([]));
     },
-    [domainId],
+    [domainIds],
   );
 
   const confirmAddToDashboard = useCallback(async () => {
-    if (!domainId || !pendingAdd) return;
+    const anchorDomainId = domainIds[0];
+    if (!anchorDomainId || !pendingAdd) return;
     setAddingDash(true);
     try {
       let dashboardId = addDashTarget;
       if (!dashboardId || dashboardId === "__new__") {
         const created = await api.createDataApp({
-          domain_id: domainId,
+          domain_id: anchorDomainId,
           app_type: "dashboard",
           name: pendingAdd.question.slice(0, 20) || "新看板",
         });
         dashboardId = created.id;
       }
       await api.generateWidgetFromChat({
-        domain_id: domainId,
+        domain_id: anchorDomainId,
         question: pendingAdd.question,
         widget_type: "bar",
         caliber_decomposition: pendingAdd.payload?.caliber_decomposition,
@@ -801,17 +816,16 @@ const ChatBiMain = memo(function ChatBiMain({
     } finally {
       setAddingDash(false);
     }
-  }, [domainId, pendingAdd, addDashTarget, navigate]);
+  }, [domainIds, pendingAdd, addDashTarget, navigate]);
 
   useEffect(() => {
-    if (!domainId) return;
     setLoadingSuggestions(true);
     api
-      .chatBiSuggestions(domainId)
+      .chatBiSuggestions(domainIds)
       .then((res) => setSuggestions(res.suggestions))
       .catch(() => setSuggestions([]))
       .finally(() => setLoadingSuggestions(false));
-  }, [domainId]);
+  }, [domainIds]);
 
   useEffect(() => {
     if (!activeConversationId) {
@@ -841,8 +855,9 @@ const ChatBiMain = memo(function ChatBiMain({
           payload: m.payload
             ? ({
                 ...m.payload,
-                domain_id: (m.payload.domain_id as string | undefined) || domainId,
-                domain_name: (m.payload.domain_name as string | undefined) || activeDomain.name,
+                domain_ids: (m.payload.domain_ids as string[] | undefined) || domainIds,
+                domain_id: (m.payload.domain_id as string | undefined) || domainIds[0],
+                domain_name: (m.payload.domain_name as string | undefined) || scopeLabel,
               } as ChatBiAnswer)
             : undefined,
         }));
@@ -860,7 +875,7 @@ const ChatBiMain = memo(function ChatBiMain({
     return () => {
       cancelled = true;
     };
-  }, [activeConversationId, domainId, activeDomain.name]);
+  }, [activeConversationId, domainIds, scopeLabel]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -879,7 +894,7 @@ const ChatBiMain = memo(function ChatBiMain({
   const submit = useCallback(
     async (question: string) => {
       const trimmed = question.trim();
-      if (!trimmed || !domainId || submitting) return;
+      if (!trimmed || submitting) return;
       setInput("");
 
       const userMsg: ChatMessage = { role: "user", content: trimmed };
@@ -898,7 +913,7 @@ const ChatBiMain = memo(function ChatBiMain({
       try {
         await api.askChatBiStream(
           {
-            domain_id: domainId,
+            domain_ids: domainIds,
             question: trimmed,
             history,
             conversation_id: activeConversationId ?? undefined,
@@ -930,8 +945,9 @@ const ChatBiMain = memo(function ChatBiMain({
               // 收到任一事件即退出纯 pending（typing dots）态，转为实时展示步骤/答案
               cur.pending = false;
               const payload: ChatBiAnswer = {
-                domain_id: domainId,
-                domain_name: "",
+                domain_ids: domainIds,
+                domain_id: domainIds[0],
+                domain_name: scopeLabel,
                 answer: "",
                 used_mock: false,
                 ...(cur.payload ?? {}),
@@ -1020,7 +1036,7 @@ const ChatBiMain = memo(function ChatBiMain({
         setSubmitting(false);
       }
     },
-    [domainId, activeConversationId, messages, submitting, onConversationActivity],
+    [domainIds, scopeLabel, activeConversationId, messages, submitting, onConversationActivity],
   );
 
   return (
@@ -1038,7 +1054,7 @@ const ChatBiMain = memo(function ChatBiMain({
         )}
         <div className="chatbi-shell-domain">
           <Tag color="blue" style={{ borderRadius: 6 }}>
-            {activeDomain.name}
+            {scopeLabel}
           </Tag>
         </div>
       </div>
@@ -1048,7 +1064,7 @@ const ChatBiMain = memo(function ChatBiMain({
         loadingMessages={loadingMessages}
         messages={messages}
         activeConversationId={activeConversationId}
-        activeDomain={activeDomain}
+        scopeLabel={scopeLabel}
         loadingSuggestions={loadingSuggestions}
         suggestions={suggestions}
         submitting={submitting}
@@ -1058,7 +1074,7 @@ const ChatBiMain = memo(function ChatBiMain({
       />
 
       <ChatBiComposer
-        activeDomain={activeDomain}
+        scopeLabel={scopeLabel}
         input={input}
         submitting={submitting}
         onInputChange={setInput}

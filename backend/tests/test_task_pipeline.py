@@ -19,6 +19,19 @@ from app.services.task_pipeline import TaskPipelineService
 from tests.test_chat_bi_golden import _seed_golden_domain
 
 
+def _logic_id(db, onto_id: str) -> str:
+    """golden 种子里已发布的业务逻辑 id（order_total）。"""
+    from app.models import BusinessLogic
+
+    logic = (
+        db.query(BusinessLogic)
+        .filter(BusinessLogic.ontology_id == onto_id, BusinessLogic.status == "published")
+        .first()
+    )
+    assert logic is not None, "golden 种子应有已发布业务逻辑"
+    return logic.id
+
+
 def _chain(db, onto_id: str, *, datasource_id: str = "ds-chain"):
     """物化 → 清洗 → 聚合 的三步链。"""
     return TaskPipelineService().create(
@@ -194,10 +207,12 @@ def test_service_offers_no_way_to_execute_a_whole_chain():
     """链上没有「一键跑完」的入口。
 
     这不是遗漏而是设计：一键跑完必然绕过逐制品的人工确认，而「未确认不得执行」是这条
-    流水线的硬不变量。这条用例存在的意义就是让后来者删它之前先看见这句话。
+    流水线的硬不变量。C2 新增的 ``draft_all`` 是「一键**起草**全部」（所有制品先落地，
+    人再逐个校验/确认/执行），**仍不执行**——它不违反这条不变量。
     """
     api = {n for n in dir(TaskPipelineService) if not n.startswith("_")}
-    assert api == {"create", "advance", "detail", "require", "list_pipelines"}
+    # C2：draft_all 只起草不执行，与 advance 并列；仍无 execute/confirm 入口。
+    assert api == {"create", "advance", "draft_all", "detail", "require", "list_pipelines"}
 
 
 # ---------------- Data Agent 侧：propose_pipeline ----------------
@@ -299,3 +314,112 @@ def test_pipeline_proposal_projects_to_block():
         "pipeline_proposals": [{"kind": "pipeline", "name": "链", "create_payload": {}}],
     })
     assert [b["type"] for b in blocks].count("pipeline_proposal") == 1
+
+
+# ---------------- C2：draft_all 一键起草全部 + 血缘 depends_on ----------------
+
+
+def _two_step_chain(db, onto_id: str):
+    """物化 → 清洗 的两步链（不含 metric——metric 起草需要已定义的业务逻辑）。"""
+    return TaskPipelineService().create(
+        db, name="两步链", intent=None, ontology_id=onto_id,
+        steps=[
+            {"kind": "materialize", "intent": "物化到数仓",
+             "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
+            {"kind": "transform", "intent": "去重清洗", "context": {"target_table": "customer"}},
+        ],
+    )
+
+
+def test_draft_all_drafts_every_step_without_upstream_success(domain):
+    """C2：draft_all 一步起草全部步骤，不要求上游执行成功。"""
+    db, onto_id = domain
+    svc = TaskPipelineService()
+    pipeline = _two_step_chain(db, onto_id)
+    artifacts = svc.draft_all(db, pipeline.id)
+    assert len(artifacts) == 2
+    detail = svc.detail(db, pipeline.id)
+    assert all(s["artifact_id"] for s in detail["steps"])
+
+
+def test_draft_all_is_idempotent(domain):
+    """C2：已起草的步骤跳过（幂等）。"""
+    db, onto_id = domain
+    svc = TaskPipelineService()
+    pipeline = _two_step_chain(db, onto_id)
+    first = svc.draft_all(db, pipeline.id)
+    second = svc.draft_all(db, pipeline.id)
+    assert len(second) == 0  # 全部已起草
+    assert len(first) == 2
+
+
+def test_draft_all_inherits_upstream_context(domain):
+    """C2：draft_all 仍沿链继承上游落点（数据源/库），下游不必重报。"""
+    db, onto_id = domain
+    svc = TaskPipelineService()
+    pipeline = _two_step_chain(db, onto_id)
+    svc.draft_all(db, pipeline.id)
+    detail = svc.detail(db, pipeline.id)
+    # 第 2 步（transform）应继承到第 1 步的 target_datasource_id
+    transform_spec = db.get(GovernanceArtifact, detail["steps"][1]["artifact_id"])
+    import json
+
+    spec = json.loads(transform_spec.spec_json or "{}")
+    assert spec.get("target_datasource_id") == "ds-chain"
+
+
+def test_create_accepts_depends_on_lineage(domain):
+    """C2：建链可带显式 depends_on（血缘依赖），落成 depends_on_json。"""
+    db, onto_id = domain
+    pipeline = TaskPipelineService().create(
+        db, name="血缘链", intent=None, ontology_id=onto_id,
+        steps=[
+            {"kind": "materialize", "intent": "物化",
+             "context": {"target_datasource_id": "ds-chain"}},
+            {"kind": "transform", "intent": "清洗", "depends_on": [0]},
+            {"kind": "metric", "intent": "聚合", "depends_on": [0, 1]},
+        ],
+    )
+    detail = TaskPipelineService().detail(db, pipeline.id)
+    assert detail["steps"][1]["depends_on"] == [0]
+    assert detail["steps"][2]["depends_on"] == [0, 1]
+
+
+def test_advance_uses_lineage_depends_on_not_linear(domain):
+    """C2：advance 按血缘 depends_on 判断，不再要求「前面所有步」成功。
+
+    步骤 2 依赖步骤 0（血缘），步骤 1 未起草/失败不影响步骤 2 起草。
+    """
+    db, onto_id = domain
+    svc = TaskPipelineService()
+    pipeline = svc.create(
+        db, name="血缘链", intent=None, ontology_id=onto_id,
+        steps=[
+            {"kind": "materialize", "intent": "物化",
+             "context": {"target_datasource_id": "ds-chain"}},
+            {"kind": "metric", "intent": "聚合（跳过清洗）", "depends_on": [0],
+             "context": {"business_logic_id": _logic_id(db, onto_id)}},
+        ],
+    )
+    svc.advance(db, pipeline.id)  # 起草步骤 0
+    # 步骤 1 依赖 0（已起草但未执行成功——advance 只要求上游**执行成功**）
+    with pytest.raises(PipelineError, match="尚未执行成功"):
+        svc.advance(db, pipeline.id)
+    # 标记步骤 0 执行成功
+    detail = svc.detail(db, pipeline.id)
+    a0 = db.get(GovernanceArtifact, detail["steps"][0]["artifact_id"])
+    a0.status = ArtifactStatus.SUCCEEDED.value
+    db.commit()
+    svc.advance(db, pipeline.id)  # 现在步骤 1 可起草（尽管步骤 0 是唯一上游）
+
+
+def test_advance_rejects_self_dependency(domain):
+    db, onto_id = domain
+    with pytest.raises(PipelineError, match="不能依赖自己"):
+        TaskPipelineService().create(
+            db, name="自依赖链", intent=None, ontology_id=onto_id,
+            steps=[
+                {"kind": "materialize", "intent": "物化",
+                 "context": {"target_datasource_id": "ds-chain"}, "depends_on": [0]},
+            ],
+        )

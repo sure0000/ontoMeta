@@ -31,7 +31,7 @@ def _seed(name: str, *, kind: str, dsn: str | None, catalog_name: str | None = N
 def _list_catalogs():
     with SessionLocal() as db:
         result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_id="d", ontology_id="o", name="list_catalogs", args={},
+            db, domain_ids=["d"], ontology_ids=["o"], name="list_catalogs", args={},
             principal_role="publisher",
         )
     return result, summary, is_error

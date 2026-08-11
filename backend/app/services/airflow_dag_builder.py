@@ -123,13 +123,22 @@ class FlinkSubmitConfig:
 
 @dataclass(frozen=True)
 class FlinkSqlTask:
-    """一个 Flink SQL 搬运任务的完整声明（SQL + 端点凭据占位符 + 提交参数）。"""
+    """一个 Flink SQL 搬运任务的完整声明（SQL + 端点凭据占位符 + 提交参数）。
+
+    L1（血缘）：``source_urns`` / ``target_urn`` 是 Dataset URN（``库.表`` 经
+    ``datahub.build_dataset_urn`` 构造）。由调用方（executor / move_job_compiler）
+    填充——可从 SQL 解析（A1，见 ``flink_sql_lineage``）或直接用已算好的物理名。
+    Airflow DataHub 插件据此自动上报任务级血缘（inlets/outlets）。
+    """
 
     task_id: str
     sql: str  # 完整 Flink SQL（INSERT INTO … SELECT …），含 ${} 占位符
     env: dict[str, str] = field(default_factory=dict)  # 端点凭据环境变量
     detached: bool = False  # 流式作业（incremental/cdc）需 -d
     checkpoint_dir: str = ""  # 流式作业的 checkpoint 目录
+    # ---- L1 新增：血缘（inlets / outlets）----
+    source_urns: tuple[str, ...] = ()  # 源表 URN（inlets）
+    target_urn: str = ""  # 目标表 URN（outlets）
 
 
 def flink_dag_id_for(base: str, suffix: str | None = None) -> str:
@@ -176,6 +185,7 @@ def build_flink_sql_dag(
     warehouse_conn_id: str = DEFAULT_WAREHOUSE_CONN_ID,
     max_active_tasks: int = 16,
     target_urn_builder: Any = None,
+    task_dependencies: list[tuple[FlinkSqlTask, FlinkSqlTask]] | None = None,
 ) -> DagBundle:
     """构建 Flink SQL DAG 包（统一执行架构的唯一搬运路径）。
 
@@ -189,6 +199,10 @@ def build_flink_sql_dag(
     - ``warehouse_conn_id``：建表用的 Airflow Connection ID。
     - ``max_active_tasks``：DAG 最大并行任务数。
     - ``target_urn_builder``：目标表 URN 构造器（用于血缘 outlets）。
+    - ``task_dependencies``：**L3 血缘驱动的任务间依赖**（(上游, 下游) 边列表）。
+      非空时 DAG 里按这些边串 ``上游 >> 下游``（Airflow 默认 all_success——
+      上游失败时下游不执行）。所有任务仍依赖 create_tables（建表前置不变）。
+      空 = 现有行为（全部任务只依赖 create_tables，彼此无依赖）。
 
     **DAG 结构**::
 
@@ -222,8 +236,11 @@ def build_flink_sql_dag(
                 "endpoint_env": task.env,
                 "command": _flink_run_command(task, config, f"{{{{ ti.xcom_pull(task_ids='read_spec')['sql_dir'] }}}}/{sql_filename}"),
                 "detached": task.detached,
-                # 血缘：上游用 source_urn（如有），下游用 target URN（如有 builder）。
-                # 这里简化：Flink SQL 任务的血缘由 SQL 解析决定，暂不注入 inlets/outlets。
+                # L1 血缘：inlets = 源表 URN（source_urns），outlets = 目标表 URN。
+                # Airflow DataHub 插件据此自动上报任务级血缘（DataFlow/DataJob/Dataset）。
+                # 空则不上报（血缘是增强，缺失不阻断执行）。
+                "inlets": list(task.source_urns),
+                "outlets": [task.target_urn] if task.target_urn else [],
             }
         )
 
@@ -234,6 +251,19 @@ def build_flink_sql_dag(
             swap_specs[task_id] = [_as_single_statement(s) for s in swap_sqls]
 
     # 边车 JSON spec
+    # L3 血缘驱动的任务间依赖：task_dependencies 是 (上游, 下游) 边列表，
+    # 按 task_id 落成字符串对，模板里 ``上游 >> 下游``。
+    dep_pairs = []
+    if task_dependencies:
+        ids = {t.task_id for t in tasks}
+        for up, down in task_dependencies:
+            if up.task_id not in ids or down.task_id not in ids:
+                raise ValueError(
+                    f"task_dependencies 引用了不在 tasks 里的任务："
+                    f"{up.task_id} -> {down.task_id}"
+                )
+            dep_pairs.append((up.task_id, down.task_id))
+
     spec = {
         "dag_id": dag_id,
         "ontology_id": ontology_id,
@@ -246,6 +276,8 @@ def build_flink_sql_dag(
         "constraints": _constraint_list(constraints),
         "tasks": task_specs,
         "swaps": swap_specs,
+        # L3：血缘驱动的任务间依赖（task_id 对）
+        "task_dependencies": dep_pairs,
         "flink_config": {
             "runner_jar": config.runner_jar,
             "runner_class": config.runner_class,
@@ -347,10 +379,19 @@ with DAG(
             task_id=task_spec["task_id"],
             bash_command=cmd,
             env=env_vars,
+            # L1 血缘：inlets/outlets 让 DataHub 插件自动上报任务级血缘。
+            # 空列表（未解析到）时 Airflow 忽略，不阻断。
+            inlets=task_spec.get("inlets", []),
+            outlets=task_spec.get("outlets", []),
         )
         move_tasks[task_spec["task_id"]] = move_task
         # 搬运依赖建表
         create_tables >> move_task
+
+    # 3.5 L3 血缘驱动的任务间依赖：上游产出表 → 下游消费表（Airflow all_success，
+    # 上游失败时下游不执行）。task_dependencies 是 (上游task_id, 下游task_id) 对。
+    for up_id, down_id in _SPEC.get("task_dependencies", []):
+        move_tasks[up_id] >> move_tasks[down_id]
 
     # 4. Staging swap（全量表才有，增量/CDC 无）
     swaps = _SPEC.get("swaps", {{}})

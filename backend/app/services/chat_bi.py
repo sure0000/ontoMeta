@@ -56,7 +56,6 @@ from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
 from app.services.domain_semantic_card import build_card
 from app.services.ontology_ladder import OntologyLadderLoader
-from app.services import chat_bi_external_tools as external_tools
 from app.services.chat_bi_skills import SKILLS, Skill
 from app.services.tool_result_compaction import compact_tool_result
 
@@ -150,30 +149,85 @@ class ChatBiService:
         self.query_service = OntologyQueryService()
         self.settings_service = SettingsService()
 
+    # ----------------------------------------------------------- 多域作用域
+
+    def _resolve_scope(
+        self, db: Session, domain_ids: list[str]
+    ) -> tuple[list[DomainContext], list[Ontology]]:
+        """把 domain_ids 解析成 (domains, ontologies) 并行列表。
+
+        - domain_ids 空 = 不选域（全域通盘）：取全部域。
+        - 每个域取其已发布本体；无已发布本体的域跳过（不阻断，由调用方按 ontologies 判空）。
+        - 去重、保持稳定顺序（按 domain.name）。
+        """
+        if domain_ids:
+            domains = [
+                d for d in (
+                    db.get(DomainContext, did) for did in dict.fromkeys(domain_ids)
+                ) if d is not None
+            ]
+        else:
+            domains = (
+                db.query(DomainContext).order_by(DomainContext.name.asc()).all()
+            )
+        # 去重（按 id）
+        seen: set[str] = set()
+        uniq: list[DomainContext] = []
+        for d in domains:
+            if d.id in seen:
+                continue
+            seen.add(d.id)
+            uniq.append(d)
+        domains = uniq
+        ontologies: list[Ontology] = []
+        for d in domains:
+            ont = self.query_service.get_published_ontology(db, d.id)
+            if ont is not None:
+                ontologies.append(ont)
+        return domains, ontologies
+
+    def _load_merged_knowledge(
+        self, db: Session, ontology_ids: list[str]
+    ) -> tuple[list[_ObjectSnapshot], list[RelationType], list[BusinessLogic]]:
+        """合并多个本体的对象/关系/口径为一个虚拟知识包（决策 2-X）。"""
+        snapshots: list[_ObjectSnapshot] = []
+        relations: list[RelationType] = []
+        logics: list[BusinessLogic] = []
+        for oid in ontology_ids:
+            snapshots.extend(self._load_ontology_snapshot(db, oid))
+            relations.extend(self._load_relations(db, oid))
+            logics.extend(self._load_logics(db, oid))
+        return snapshots, relations, logics
+
     # ------------------------------------------------------------------ public
 
     async def ask(
         self,
         db: Session,
         *,
-        domain_id: str,
+        domain_ids: list[str],
         question: str,
         history: list[dict] | None = None,
         principal_role: str | None = None,
         conversation_id: str | None = None,
     ) -> dict:
-        domain = db.get(DomainContext, domain_id)
-        if not domain:
+        domains, ontologies = self._resolve_scope(db, domain_ids)
+        if not domains:
             raise ValueError("数据域不存在")
+        domain_ids_eff = [d.id for d in domains]
+        domain_names = [d.name for d in domains]
+        anchor_domain = domains[0]
 
-        ontology = self.query_service.get_published_ontology(db, domain_id)
-        if not ontology:
+        if not ontologies:
+            scope = "、".join(domain_names) if domain_names else "全域"
             return {
-                "domain_id": domain_id,
-                "domain_name": domain.name,
+                "domain_ids": domain_ids_eff,
+                "domain_names": domain_names,
+                "domain_id": anchor_domain.id,
+                "domain_name": anchor_domain.name,
                 "ontology_id": None,
                 "answer": (
-                    f"「{domain.name}」当前还没有已发布的本体。"
+                    f"「{scope}」当前还没有已发布的本体。"
                     "请先在「本体建模」中完成草稿编辑并发布，"
                     "Data Agent 会基于已发布本体的对象、字段、关系与业务逻辑进行解读。"
                 ),
@@ -182,10 +236,10 @@ class ChatBiService:
                 "referenced_logics": [],
                 "used_mock": True,
             }
+        ontology_ids = [o.id for o in ontologies]
+        anchor_ontology = ontologies[0]
 
-        snapshots = self._load_ontology_snapshot(db, ontology.id)
-        relations = self._load_relations(db, ontology.id)
-        logics = self._load_logics(db, ontology.id)
+        snapshots, relations, logics = self._load_merged_knowledge(db, ontology_ids)
 
         # 关键词命中：用于 Mock 兜底的接地判定，也作为 Agent 的检索种子提示
         grounded_objects = self._match_objects(question, snapshots)
@@ -194,7 +248,7 @@ class ChatBiService:
         runtime = self.settings_service.get_llm_runtime(db)
         use_mock = not runtime.api_key
 
-        # 名称 -> 实体 索引用全量本体：把 LLM/工具输出的名称/伪 id 归一到真实 id 供前端跳转
+        # 名称 -> 实体 素引用全量本体：把 LLM/工具输出的名称/伪 id 归一到真实 id 供前端跳转
         resolver = _ReferenceResolver(
             objects=snapshots, relations=relations, logics=logics
         )
@@ -202,9 +256,9 @@ class ChatBiService:
         if use_mock:
             # 未配置 LLM：不再用规则模板伪造回答，直接提示去接入模型。
             return self._llm_not_configured(
-                domain_id=domain_id,
-                domain_name=domain.name,
-                ontology_id=ontology.id,
+                domain_ids=domain_ids_eff,
+                domain_names=domain_names,
+                ontology_id=anchor_ontology.id,
             )
         else:
             # Agent 路径：LLM 自主多步调用工具检索/跑数；refs/sql/data_result 从工具轨迹收割。
@@ -214,8 +268,8 @@ class ChatBiService:
                 payload = await self._run_agent_loop(
                     db,
                     runtime=runtime,
-                    domain=domain,
-                    ontology=ontology,
+                    domains=domains,
+                    ontologies=ontologies,
                     question=question,
                     history=history or [],
                     resolver=resolver,
@@ -233,7 +287,7 @@ class ChatBiService:
                 ) from exc
             payload = resolver.resolve_payload(payload)
             # Agent 接地判定：只要 Agent 真正命中过本体数据（检索有结果 / 读到对象逻辑 /
-            # 概览 / 跑出数据）就视为接地，即便未产出具体引用（如“有哪些对象”这类概览问题）。
+            # 概览 / 跑出数据）就视为接地，即便未产出具体引用（如"有哪些对象"这类概览问题）。
             # F4：校验失败（_unverified 非空）优先拒答，不被 referenced_* 兜底覆盖。
             unverified = payload.get("_unverified") or []
             # 拒答时保留已产生的工具轨迹，供用户查看「做了什么才拒答」——
@@ -244,9 +298,9 @@ class ChatBiService:
                 tel.refuse("unverified")
                 agent_telemetry.record(tel)
                 refusal = self._ungrounded_refusal(
-                    domain_id=domain_id,
-                    domain_name=domain.name,
-                    ontology_id=ontology.id,
+                    domain_ids=domain_ids_eff,
+                    domain_names=domain_names,
+                    ontology_id=anchor_ontology.id,
                     question=question,
                     reasons=unverified,
                 )
@@ -262,9 +316,9 @@ class ChatBiService:
                 tel.refuse("ungrounded")
                 agent_telemetry.record(tel)
                 refusal = self._ungrounded_refusal(
-                    domain_id=domain_id,
-                    domain_name=domain.name,
-                    ontology_id=ontology.id,
+                    domain_ids=domain_ids_eff,
+                    domain_names=domain_names,
+                    ontology_id=anchor_ontology.id,
                     question=question,
                 )
                 refusal["steps"] = _prev_steps
@@ -276,9 +330,11 @@ class ChatBiService:
 
         payload.update(
             {
-                "domain_id": domain_id,
-                "domain_name": domain.name,
-                "ontology_id": ontology.id,
+                "domain_ids": domain_ids_eff,
+                "domain_names": domain_names,
+                "domain_id": anchor_domain.id,
+                "domain_name": anchor_domain.name,
+                "ontology_id": anchor_ontology.id,
                 "used_mock": use_mock,
             }
         )
@@ -288,7 +344,7 @@ class ChatBiService:
         self,
         db: Session,
         *,
-        domain_id: str,
+        domain_ids: list[str],
         question: str,
         history: list[dict] | None = None,
         principal_role: str | None = None,
@@ -299,20 +355,25 @@ class ChatBiService:
         done.payload 与 ask() 返回结构一致；透传工具步骤与逐字答案，供 SSE 端点包装。
         Mock / 无本体 / 未接地等无过程可流的情况直接产出终态 done。
         """
-        domain = db.get(DomainContext, domain_id)
-        if not domain:
+        domains, ontologies = self._resolve_scope(db, domain_ids)
+        if not domains:
             raise ValueError("数据域不存在")
+        domain_ids_eff = [d.id for d in domains]
+        domain_names = [d.name for d in domains]
+        anchor_domain = domains[0]
 
-        ontology = self.query_service.get_published_ontology(db, domain_id)
-        if not ontology:
+        if not ontologies:
+            scope = "、".join(domain_names) if domain_names else "全域"
             yield {
                 "type": "done",
                 "payload": {
-                    "domain_id": domain_id,
-                    "domain_name": domain.name,
+                    "domain_ids": domain_ids_eff,
+                    "domain_names": domain_names,
+                    "domain_id": anchor_domain.id,
+                    "domain_name": anchor_domain.name,
                     "ontology_id": None,
                     "answer": (
-                        f"「{domain.name}」当前还没有已发布的本体。"
+                        f"「{scope}」当前还没有已发布的本体。"
                         "请先在「本体建模」中完成草稿编辑并发布，"
                         "Data Agent 会基于已发布本体的对象、字段、关系与业务逻辑进行解读。"
                     ),
@@ -323,10 +384,10 @@ class ChatBiService:
                 },
             }
             return
+        ontology_ids = [o.id for o in ontologies]
+        anchor_ontology = ontologies[0]
 
-        snapshots = self._load_ontology_snapshot(db, ontology.id)
-        relations = self._load_relations(db, ontology.id)
-        logics = self._load_logics(db, ontology.id)
+        snapshots, relations, logics = self._load_merged_knowledge(db, ontology_ids)
         grounded_objects = self._match_objects(question, snapshots)
         grounded_logics = self._match_logics(question, logics)
         runtime = self.settings_service.get_llm_runtime(db)
@@ -336,7 +397,7 @@ class ChatBiService:
         if use_mock:
             # 未配置 LLM：直接产出提示去接入模型的终态，不再伪造规则回答。
             yield {"type": "done", "payload": self._llm_not_configured(
-                domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id)}
+                domain_ids=domain_ids_eff, domain_names=domain_names, ontology_id=anchor_ontology.id)}
             return
 
         # Agent 流式路径：透传事件流，done 事件走与 ask() 相同的后处理
@@ -344,7 +405,7 @@ class ChatBiService:
         tel = RunTelemetry()
         try:
             async for ev in self._stream_agent_events(
-                db, runtime=runtime, domain=domain, ontology=ontology,
+                db, runtime=runtime, domains=domains, ontologies=ontologies,
                 question=question, history=history or [],
                 seed_objects=grounded_objects, seed_logics=grounded_logics,
                 principal_role=principal_role, telemetry=tel,
@@ -369,7 +430,7 @@ class ChatBiService:
         if unverified:
             tel.refuse("unverified")
             payload = self._ungrounded_refusal(
-                domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id,
+                domain_ids=domain_ids_eff, domain_names=domain_names, ontology_id=anchor_ontology.id,
                 question=question, reasons=unverified)
             payload["steps"] = _prev_steps
         else:
@@ -382,13 +443,14 @@ class ChatBiService:
             if not grounded:
                 tel.refuse("ungrounded")
                 payload = self._ungrounded_refusal(
-                    domain_id=domain_id, domain_name=domain.name, ontology_id=ontology.id, question=question)
+                    domain_ids=domain_ids_eff, domain_names=domain_names, ontology_id=anchor_ontology.id, question=question)
                 payload["steps"] = _prev_steps
         agent_telemetry.record(tel)
         if payload.get("suggested_sql"):
             payload["suggested_sql"] = _format_sql(payload["suggested_sql"])
-        payload.update({"domain_id": domain_id, "domain_name": domain.name,
-                        "ontology_id": ontology.id, "used_mock": use_mock})
+        payload.update({"domain_ids": domain_ids_eff, "domain_names": domain_names,
+                        "domain_id": anchor_domain.id, "domain_name": anchor_domain.name,
+                        "ontology_id": anchor_ontology.id, "used_mock": use_mock})
         # 关键：只有在接地校验通过、确定不拒答后，才逐字流式吐出答案，
         # 避免"先流式给出内容、后又被拒答撤回"的观感。
         if not payload.get("grounding_refused"):
@@ -396,17 +458,16 @@ class ChatBiService:
                 yield ev
         yield {"type": "done", "payload": payload}
 
-    def suggest_questions(self, db: Session, domain_id: str) -> list[str]:
-        """基于已发布本体生成若干示例提问，供前端首屏展示。"""
-        ontology = self.query_service.get_published_ontology(db, domain_id)
-        if not ontology:
+    def suggest_questions(self, db: Session, domain_ids: list[str]) -> list[str]:
+        """基于已发布本体生成若干示例提问，供前端首屏展示。多域：合并各域本体。"""
+        domains, ontologies = self._resolve_scope(db, domain_ids)
+        if not ontologies:
             return [
-                "当前数据域有哪些业务对象？",
+                "当前有哪些业务对象？",
                 "近 7 天的订单量趋势如何？",
                 "请帮我梳理支付与退款之间的业务关系。",
             ]
-        snapshots = self._load_ontology_snapshot(db, ontology.id)
-        logics = self._load_logics(db, ontology.id)
+        snapshots, _relations, logics = self._load_merged_knowledge(db, [o.id for o in ontologies])
 
         suggestions: list[str] = []
         if snapshots:
@@ -424,7 +485,7 @@ class ChatBiService:
         for logic in logics[:2]:
             suggestions.append(f"请解释业务逻辑「{logic.display_name}」的口径。")
         if not suggestions:
-            suggestions = ["当前数据域有哪些业务对象？"]
+            suggestions = ["当前有哪些业务对象？"]
         return suggestions[:5]
 
     # ---------------------------------------------------------------- conversation
@@ -432,13 +493,15 @@ class ChatBiService:
     def list_conversations(
         self,
         db: Session,
-        domain_id: str,
+        domain_ids: list[str],
         query: str | None = None,
         include_archived: bool = False,
     ) -> list[dict]:
-        q = db.query(ChatBiConversation).filter(
-            ChatBiConversation.domain_id == domain_id
-        )
+        # 多域作用域过滤：
+        #   - domain_ids 空 = 全域视图，展示全部会话；
+        #   - domain_ids 非空 = 展示作用域与所选域相交的会话，以及不选域（全域通盘）的会话。
+        selected = set(domain_ids or [])
+        q = db.query(ChatBiConversation)
         if not include_archived:
             q = q.filter(ChatBiConversation.is_archived == False)  # noqa: E712
         if query:
@@ -447,7 +510,14 @@ class ChatBiService:
             desc(ChatBiConversation.is_pinned),
             desc(ChatBiConversation.updated_at),
         )
-        conversations = q.all()
+        all_convs = q.all()
+        if selected:
+            conversations = [
+                c for c in all_convs
+                if (not c.domain_ids) or (selected & set(c.domain_ids))
+            ]
+        else:
+            conversations = all_convs
 
         # Bulk-fetch message counts
         conv_ids = [c.id for c in conversations]
@@ -485,6 +555,7 @@ class ChatBiService:
         return [
             {
                 "id": c.id,
+                "domain_ids": c.domain_ids,
                 "domain_id": c.domain_id,
                 "title": c.title,
                 "category": c.category,
@@ -501,20 +572,18 @@ class ChatBiService:
     def create_conversation(
         self,
         db: Session,
-        domain_id: str,
+        domain_ids: list[str],
         title: str | None = None,
         category: str | None = None,
     ) -> dict:
-        conv = ChatBiConversation(
-            domain_id=domain_id,
-            title=title or "新对话",
-            category=category,
-        )
+        conv = ChatBiConversation(title=title or "新对话", category=category)
+        conv.set_domain_ids(domain_ids)
         db.add(conv)
         db.commit()
         db.refresh(conv)
         return {
             "id": conv.id,
+            "domain_ids": conv.domain_ids,
             "domain_id": conv.domain_id,
             "title": conv.title,
             "category": conv.category,
@@ -558,6 +627,7 @@ class ChatBiService:
         db.refresh(conv)
         return {
             "id": conv.id,
+            "domain_ids": conv.domain_ids,
             "domain_id": conv.domain_id,
             "title": conv.title,
             "category": conv.category,
@@ -579,51 +649,42 @@ class ChatBiService:
 
     # ---------------------------------------------------------------- categories
 
-    def list_categories(self, db: Session, domain_id: str) -> list[dict]:
-        rows = (
-            db.query(
-                ChatBiConversation.category,
-                func.count(ChatBiConversation.id),
-            )
-            .filter(ChatBiConversation.domain_id == domain_id)
-            .group_by(ChatBiConversation.category)
-            .all()
-        )
-        result: list[dict] = []
-        for row in rows:
-            cat_name = row[0] or "__uncategorized__"
-            result.append({"name": cat_name, "conversation_count": row[1]})
+    def _scope_conversations(
+        self, db: Session, domain_ids: list[str], category: str | None = _UNSET
+    ) -> list[ChatBiConversation]:
+        """按多域作用域取会话（与 list_conversations 同语义）。category 给定则额外按分类过滤。"""
+        selected = set(domain_ids or [])
+        q = db.query(ChatBiConversation)
+        if category is not self._UNSET:
+            q = q.filter(ChatBiConversation.category == category)
+        all_convs = q.all()
+        if selected:
+            return [c for c in all_convs if (not c.domain_ids) or (selected & set(c.domain_ids))]
+        return all_convs
+
+    def list_categories(self, db: Session, domain_ids: list[str]) -> list[dict]:
+        convs = self._scope_conversations(db, domain_ids)
+        counter: Counter = Counter()
+        for c in convs:
+            counter[c.category or "__uncategorized__"] += 1
+        result = [{"name": name, "conversation_count": cnt} for name, cnt in counter.items()]
         # Sort: uncategorized first, then alphabetically
         result.sort(key=lambda x: ("" if x["name"] == "__uncategorized__" else x["name"]))
         return result
 
     def rename_category(
-        self, db: Session, domain_id: str, old_name: str, new_name: str
+        self, db: Session, domain_ids: list[str], old_name: str, new_name: str
     ) -> None:
         new_name = new_name.strip()
         if not new_name:
             raise ValueError("分类名称不能为空")
-        convs = (
-            db.query(ChatBiConversation)
-            .filter(
-                ChatBiConversation.domain_id == domain_id,
-                ChatBiConversation.category == old_name,
-            )
-            .all()
-        )
+        convs = self._scope_conversations(db, domain_ids, category=old_name)
         for conv in convs:
             conv.category = new_name
         db.commit()
 
-    def delete_category(self, db: Session, domain_id: str, name: str) -> None:
-        convs = (
-            db.query(ChatBiConversation)
-            .filter(
-                ChatBiConversation.domain_id == domain_id,
-                ChatBiConversation.category == name,
-            )
-            .all()
-        )
+    def delete_category(self, db: Session, domain_ids: list[str], name: str) -> None:
+        convs = self._scope_conversations(db, domain_ids, category=name)
         for conv in convs:
             conv.category = None
         db.commit()
@@ -723,13 +784,16 @@ class ChatBiService:
 
     # ---- P3：跨会话记忆（按域沉淀高频使用，注入系统提示做软召回） ----
 
-    def record_domain_memory(self, db: Session, domain_id: str, payload: dict) -> None:
+    def record_domain_memory(self, db: Session, domain_ids: list[str], payload: dict) -> None:
         """把本次**已接地**回答命中的对象/口径按 (域, 实体) 累加使用度。
 
+        多域：命中的实体记到**每个**涉及域下（保持单域记忆画像不退化）。
         best-effort：拒答/mock 不记；记忆失败绝不影响回答（吞异常并 rollback）。由 API 层在
         存完消息后调用（与 save_message 同类的会话侧持久化，ask() 本身保持只读）。
         """
         if payload.get("grounding_refused") or payload.get("used_mock"):
+            return
+        if not domain_ids:
             return
         refs: list[tuple[str, str, str | None]] = []
         for o in payload.get("referenced_objects") or []:
@@ -744,47 +808,56 @@ class ChatBiService:
             return
         try:
             now = datetime.now(timezone.utc)
-            for ref_kind, ref_id, label in refs:
-                row = (
-                    db.query(ChatBiDomainMemory)
-                    .filter_by(domain_id=domain_id, ref_kind=ref_kind, ref_id=ref_id)
-                    .first()
-                )
-                if row:
-                    row.hit_count += 1
-                    row.last_used_at = now
-                    if label:
-                        row.label = label
-                else:
-                    db.add(ChatBiDomainMemory(
-                        domain_id=domain_id, ref_kind=ref_kind, ref_id=ref_id,
-                        label=label, hit_count=1, last_used_at=now,
-                    ))
+            for domain_id in domain_ids:
+                for ref_kind, ref_id, label in refs:
+                    row = (
+                        db.query(ChatBiDomainMemory)
+                        .filter_by(domain_id=domain_id, ref_kind=ref_kind, ref_id=ref_id)
+                        .first()
+                    )
+                    if row:
+                        row.hit_count += 1
+                        row.last_used_at = now
+                        if label:
+                            row.label = label
+                    else:
+                        db.add(ChatBiDomainMemory(
+                            domain_id=domain_id, ref_kind=ref_kind, ref_id=ref_id,
+                            label=label, hit_count=1, last_used_at=now,
+                        ))
             db.commit()
         except Exception as exc:  # noqa: BLE001 — 记忆是增强，失败不该影响主流程
             db.rollback()
             logger.info("record_domain_memory failed: %s", exc)
 
-    def build_domain_memory_card(self, db: Session, domain_id: str, *, limit: int = 8) -> str:
-        """本域高频对象/口径 + 显式约定的**软提示**文本。空则返回空串。
+    def build_domain_memory_card(self, db: Session, domain_ids: list[str], *, limit: int = 8) -> str:
+        """高频对象/口径 + 显式约定的**软提示**文本。空则返回空串。
 
-        与静态语义卡互补：语义卡按结构重要性，本卡按真实使用度 + 用户立的约定（P3.1）。
-        仅作提示、以检索为准——故标注「历史使用」，不作为权威。
+        多域：domain_ids 空 = 不选域（全域通盘），聚合**所有**域的记忆；
+        非空 = 聚合所选域的记忆。与静态语义卡互补，仅作提示、以检索为准。
         """
         try:
+            q = db.query(ChatBiDomainMemory)
+            if domain_ids:
+                q = q.filter(ChatBiDomainMemory.domain_id.in_(domain_ids))
             rows = (
-                db.query(ChatBiDomainMemory)
-                .filter(ChatBiDomainMemory.domain_id == domain_id)
-                .order_by(desc(ChatBiDomainMemory.hit_count), desc(ChatBiDomainMemory.last_used_at))
-                .limit(60)
+                q.order_by(desc(ChatBiDomainMemory.hit_count), desc(ChatBiDomainMemory.last_used_at))
+                .limit(120)
                 .all()
             )
         except Exception as exc:  # noqa: BLE001
             logger.info("build_domain_memory_card failed: %s", exc)
             return ""
-        objs = [r.label for r in rows if r.ref_kind == "object_type" and r.label][:limit]
-        logs = [r.label for r in rows if r.ref_kind == "business_logic" and r.label][:limit]
-        prefs = [r.label for r in rows if r.ref_kind == "preference" and r.label][:limit]
+        # 多域可能同名标签重复，去重保序
+        def _dedup(items: list[str | None]) -> list[str]:
+            seen: set[str] = set(); out: list[str] = []
+            for it in items:
+                if it and it not in seen:
+                    seen.add(it); out.append(it)
+            return out
+        objs = _dedup([r.label for r in rows if r.ref_kind == "object_type"])[:limit]
+        logs = _dedup([r.label for r in rows if r.ref_kind == "business_logic"])[:limit]
+        prefs = _dedup([r.label for r in rows if r.ref_kind == "preference"])[:limit]
         if not objs and not logs and not prefs:
             return ""
         out = ""
@@ -794,10 +867,10 @@ class ChatBiService:
         if logs:
             parts.append("常用口径：" + "、".join(logs))
         if parts:
-            out += "\n\n【本域高频（历史使用，以检索为准）】" + "；".join(parts) + "。"
+            out += "\n\n【高频（历史使用，以检索为准）】" + "；".join(parts) + "。"
         if prefs:
             # 用户立的约定优先级更高：单独一段，作为回答口径/范围时的默认取向。
-            out += "\n\n【本域约定（用户已确认，遵循）】" + "；".join(prefs) + "。"
+            out += "\n\n【约定（用户已确认，遵循）】" + "；".join(prefs) + "。"
         return out
 
     def record_domain_preference(self, db: Session, domain_id: str, text: str) -> dict:
@@ -1039,7 +1112,7 @@ class ChatBiService:
         db: Session,
         *,
         args: dict,
-        ontology_id: str | None = None,
+        ontology_ids: list[str] | None = None,
         principal_role: str | None = None,
     ) -> tuple[Any, str, bool]:
         from app.services import data_app_executor
@@ -1074,7 +1147,7 @@ class ChatBiService:
 
         # ★ SQL 语义证明（F3）：执行/建议前静态证明语义合法，不过则不放行。
         #   即便无可执行数据源（仅建议 SQL），也要证明——臆造字段/JOIN 与是否落库无关。
-        rejection, proved = self._prove_sql_or_reject(db, sql, ontology_id, source, mapping)
+        rejection, proved = self._prove_sql_or_reject(db, sql, ontology_ids, source, mapping)
         if rejection is not None:
             return rejection
 
@@ -1138,11 +1211,38 @@ class ChatBiService:
             False,
         )
 
+    def _build_merged_projection(
+        self, db: Session, ontology_ids: list[str], mapping: dict | None
+    ) -> OntologyProjection:
+        """合并多个本体的投影为一个虚拟投影（决策 2-X），供跨域 SQL 语义证明。
+
+        表/列名跨域冲突时后者覆盖前者（同名校罕见；以检索为准，证明仅放行已知表列）。"""
+        from app.services.ontology_projection import OntologyProjection
+
+        objects: dict[str, Any] = {}
+        relations_by_pair: dict[frozenset[str], list[Any]] = {}
+        mapping_tables: dict[str, str] = {}
+        mapping_columns: dict[str, str] = {}
+        for oid in ontology_ids:
+            proj = build_projection(db, oid, mapping)
+            objects.update(proj.objects)
+            for k, v in proj.relations_by_pair.items():
+                relations_by_pair.setdefault(k, []).extend(v)
+            mapping_tables.update(proj.mapping_tables)
+            mapping_columns.update(proj.mapping_columns)
+        return OntologyProjection(
+            objects=objects,
+            relations_by_pair=relations_by_pair,
+            mapping_tables=mapping_tables,
+            mapping_columns=mapping_columns,
+        )
+
     def _prove_sql_or_reject(
-        self, db: Session, sql: str, ontology_id: str | None, source, mapping
+        self, db: Session, sql: str, ontology_ids: list[str] | None, source, mapping
     ) -> tuple[tuple[Any, str, bool] | None, dict]:
         """SQL 语义证明门（F3）。返回 (拒绝三元组或 None, 证书摘要)。
 
+        多域：合并所有涉及本体的投影后统一证明，跨域 SQL（JOIN 不同域的表）一次过。
         受 ``settings.agent_soundness`` 开关：off=跳过；warn=只记日志不拦；on=拒绝执行。
         证明本身出错（解析器异常等）绝不误伤正常查询——降级为放行并记日志。
 
@@ -1155,10 +1255,10 @@ class ChatBiService:
         from app.services import data_app_executor
 
         mode = (getattr(env_settings, "agent_soundness", "on") or "on").lower()
-        if mode == "off" or not ontology_id:
+        if mode == "off" or not ontology_ids:
             return None, {}
         try:
-            proj = build_projection(db, ontology_id, mapping)
+            proj = self._build_merged_projection(db, ontology_ids, mapping)
             dialect = (
                 data_app_executor.backend_of(source.dsn_secret_ref)
                 if source is not None
@@ -1749,7 +1849,7 @@ class ChatBiService:
                 intent=intent,
                 domain_id=domain_id,
                 ontology_id=ontology_id,
-                dispatch=self._dispatch_agent_tool,
+                dispatch=self._subagent_dispatch,
                 tool_schemas=_AGENT_TOOL_SCHEMAS,
                 to_thread=asyncio.to_thread,
             )
@@ -1798,7 +1898,7 @@ class ChatBiService:
                 intent=intent,
                 domain_id=domain_id,
                 ontology_id=ontology_id,
-                dispatch=self._dispatch_agent_tool,
+                dispatch=self._subagent_dispatch,
                 tool_schemas=_AGENT_TOOL_SCHEMAS,
                 to_thread=asyncio.to_thread,
             )
@@ -2645,7 +2745,28 @@ class ChatBiService:
                     True,
                 )
             available |= {k for k, v in context.items() if v}
-            steps.append({"kind": kind, "intent": step_intent, "context": context})
+            # C2：血缘依赖（depends_on 步序列表）。agent 可从 DataHub 血缘/意图推导；
+            # 未给则沿用线性默认（依赖上一步），编译期再按血缘边收敛。
+            raw_depends = raw.get("depends_on")
+            depends: list[int] = []
+            if isinstance(raw_depends, list):
+                for d in raw_depends:
+                    try:
+                        depends.append(int(d))
+                    except (TypeError, ValueError):
+                        return (
+                            {"error": f"第 {i + 1} 步的 depends_on 必须是步序数字列表"},
+                            "任务链步骤依赖非法",
+                            True,
+                        )
+                if i in depends:
+                    return (
+                        {"error": f"第 {i + 1} 步不能依赖自己"},
+                        "任务链步骤自依赖",
+                        True,
+                    )
+            steps.append({"kind": kind, "intent": step_intent, "context": context,
+                          "depends_on": depends})
 
         intent = str(args.get("intent") or "").strip()
         chain = " → ".join(_ACTION_KIND_LABEL.get(s["kind"], s["kind"]) for s in steps)
@@ -3101,8 +3222,12 @@ class ChatBiService:
             linked = [a for aid in linked_ids if (a := agent_pipeline.get(db, aid)) is not None]
             if linked:
                 tasks = [_project(a) for a in linked[:limit]]
+                # L4：会话内任务的血缘（谁依赖谁）。从各任务回执的 lineage 字段
+                # （run_flink_sql 已把 inlets/outlets URN 带进回执）汇总后推导依赖边。
+                lineage = self._conversation_lineage(linked)
                 return (
-                    {"tasks": tasks, "total": len(linked), "scope": "conversation"},
+                    {"tasks": tasks, "total": len(linked), "scope": "conversation",
+                     "lineage": lineage},
                     f"本会话的 {len(tasks)} 个数据任务",
                     False,
                 )
@@ -3118,31 +3243,111 @@ class ChatBiService:
             False,
         )
 
+    def _conversation_lineage(self, artifacts: list[Any]) -> dict:
+        """L4：会话内任务的血缘汇总（谁依赖谁）。
+
+        从各任务回执的 ``lineage`` 字段（run_flink_sql 已把 inlets/outlets URN 带进回执）
+        提取 URN，再用 ``lineage_scheduler.derive_dependencies`` 推导依赖边。
+        无血缘信息的任务不参与（空）。**纯读、不抛错**——血缘是增强。
+        """
+        from app.services.lineage_scheduler import (
+            ScheduledTask,
+            describe_lineage,
+        )
+
+        scheduled: list[Any] = []
+        for a in artifacts:
+            try:
+                receipt = json.loads(a.execution_receipt_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(receipt, dict):
+                continue
+            for item in receipt.get("lineage") or []:
+                if not isinstance(item, dict):
+                    continue
+                task_id = str(item.get("task_id") or a.id)
+                source_urns = tuple(item.get("source_urns") or [])
+                target_urn = str(item.get("target_urn") or "")
+                if not source_urns and not target_urn:
+                    continue
+                scheduled.append(
+                    ScheduledTask(
+                        task=None,  # type: ignore[arg-type]  # 只用于 URN 推导，不需要完整 FlinkSqlTask
+                        task_id=task_id,
+                        label=a.name or task_id,
+                        artifact_id=a.id,
+                        source_urns=source_urns,
+                        target_urn=target_urn,
+                    )
+                )
+
+        if not scheduled:
+            return {"tasks": [], "dependencies": []}
+        # describe_lineage 内部会做环检测；血缘是增强，推导失败不炸会话。
+        try:
+            return describe_lineage(scheduled)
+        except Exception:  # noqa: BLE001 —— 血缘是增强，推导失败不炸
+            return {"tasks": [], "dependencies": []}
+
+    def _subagent_dispatch(
+        self, db: Session, *, domain_id: str, ontology_id: str, name: str, args: dict,
+        principal_role: str | None = None,
+    ) -> tuple[Any, str, bool]:
+        """子 agent 仍以单域接口调用主 dispatch；这里包一层转成多域列表。"""
+        return self._dispatch_agent_tool(
+            db, domain_ids=[domain_id] if domain_id else [],
+            ontology_ids=[ontology_id] if ontology_id else [],
+            name=name, args=args, principal_role=principal_role,
+        )
+
     def _dispatch_agent_tool(
         self,
         db: Session,
         *,
-        domain_id: str,
-        ontology_id: str,
+        domain_ids: list[str],
+        ontology_ids: list[str],
         name: str,
         args: dict,
         principal_role: str | None = None,
     ) -> tuple[Any, str, bool]:
-        """执行一个工具调用，返回 (结果对象, 人类可读摘要, 是否错误)。同步，供 to_thread 调用。"""
+        """执行一个工具调用，返回 (结果对象, 人类可读摘要, 是否错误)。同步，供 to_thread 调用。
+
+        多域（决策 2-X）：检索类工具跨所有 domain_ids 合并；run_sql 用合并投影；
+        其余本体作用域工具取锚点（首个）本体——检索已覆盖跨域发现，概览/血缘等以锚点为限。
+        """
         qs = self.query_service
+        anchor_domain = domain_ids[0] if domain_ids else None
+        anchor_ontology = ontology_ids[0] if ontology_ids else None
         try:
             if name == "search_objects":
                 kw = str(args.get("keyword") or "").strip() or None
-                page = qs.list_object_types(
-                    db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
-                )
-                items = [self._compact_object_summary(o) for o in page.items]
-                items, extra = self._augment_semantic(
-                    db, ontology_id=ontology_id, keyword=kw, kind="object_type",
-                    items=items, loader=self._load_object_summaries,
-                )
+                items: list[dict] = []
+                total = 0
+                for did in domain_ids:
+                    page = qs.list_object_types(
+                        db, domain_context_id=did, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                    )
+                    items.extend(self._compact_object_summary(o) for o in page.items)
+                    total += page.total
+                # 去重（按 id）
+                seen: set[str] = set(); dedup: list[dict] = []
+                for it in items:
+                    kid = it.get("id") or it.get("name")
+                    if kid and kid in seen:
+                        continue
+                    if kid:
+                        seen.add(kid)
+                    dedup.append(it)
+                items = dedup[:_SEARCH_LIMIT]
+                for oid in ontology_ids:
+                    items, extra = self._augment_semantic(
+                        db, ontology_id=oid, keyword=kw, kind="object_type",
+                        items=items, loader=self._load_object_summaries,
+                    )
+                    total += extra
                 return self._search_envelope(
-                    items, page.total + extra, "对象", facet_key="table_role"
+                    items, total, "对象", facet_key="table_role"
                 )
             if name == "get_object":
                 detail = qs.get_object_type(db, str(args.get("object_id") or ""))
@@ -3151,23 +3356,51 @@ class ChatBiService:
                 return self._compact_object_detail(detail), f"对象「{detail.display_name}」{len(detail.properties)} 字段", False
             if name == "search_relations":
                 kw = str(args.get("keyword") or "").strip() or None
-                page = qs.list_relation_types(
-                    db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
-                )
-                items = [self._compact_relation(r) for r in page.items]
-                return self._search_envelope(items, page.total, "关系", facet_key="cardinality")
+                items = []
+                total = 0
+                for did in domain_ids:
+                    page = qs.list_relation_types(
+                        db, domain_context_id=did, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                    )
+                    items.extend(self._compact_relation(r) for r in page.items)
+                    total += page.total
+                seen = set(); dedup = []
+                for it in items:
+                    kid = it.get("id") or it.get("name")
+                    if kid and kid in seen:
+                        continue
+                    if kid:
+                        seen.add(kid)
+                    dedup.append(it)
+                items = dedup[:_SEARCH_LIMIT]
+                return self._search_envelope(items, total, "关系", facet_key="cardinality")
             if name == "search_logics":
                 kw = str(args.get("keyword") or "").strip() or None
-                page = qs.list_business_logics(
-                    db, domain_context_id=domain_id, published_only=True, q=kw, limit=_SEARCH_LIMIT
-                )
-                items = [self._compact_logic_summary(l) for l in page.items]
-                items, extra = self._augment_semantic(
-                    db, ontology_id=ontology_id, keyword=kw, kind="business_logic",
-                    items=items, loader=self._load_logic_summaries,
-                )
+                items = []
+                total = 0
+                for did in domain_ids:
+                    page = qs.list_business_logics(
+                        db, domain_context_id=did, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                    )
+                    items.extend(self._compact_logic_summary(l) for l in page.items)
+                    total += page.total
+                seen = set(); dedup = []
+                for it in items:
+                    kid = it.get("id") or it.get("name")
+                    if kid and kid in seen:
+                        continue
+                    if kid:
+                        seen.add(kid)
+                    dedup.append(it)
+                items = dedup[:_SEARCH_LIMIT]
+                for oid in ontology_ids:
+                    items, extra = self._augment_semantic(
+                        db, ontology_id=oid, keyword=kw, kind="business_logic",
+                        items=items, loader=self._load_logic_summaries,
+                    )
+                    total += extra
                 return self._search_envelope(
-                    items, page.total + extra, "口径", facet_key="logic_type"
+                    items, total, "口径", facet_key="logic_type"
                 )
             if name == "get_logic":
                 detail = qs.get_business_logic(db, str(args.get("logic_id") or ""))
@@ -3175,39 +3408,39 @@ class ChatBiService:
                     return {"error": "业务逻辑不存在或未发布"}, "口径未命中", True
                 return self._compact_logic_detail(detail), f"口径「{detail.display_name}」", False
             if name == "get_domain_overview":
-                return self._dispatch_domain_overview(db, ontology_id=ontology_id)
+                return self._dispatch_domain_overview(db, ontology_id=anchor_ontology)
             if name == "find_join_path":
-                return self._dispatch_join_path(db, ontology_id=ontology_id, args=args)
+                return self._dispatch_join_path(db, ontology_id=anchor_ontology, args=args)
             if name == "profile_values":
                 return self._dispatch_profile_values(
-                    db, ontology_id=ontology_id, args=args, principal_role=principal_role
+                    db, ontology_id=anchor_ontology, args=args, principal_role=principal_role
                 )
             if name == "compile_metric":
                 return self._dispatch_compile_metric(db, args=args)
             if name == "get_lineage":
-                return self._dispatch_get_lineage(db, ontology_id=ontology_id, args=args)
+                return self._dispatch_get_lineage(db, ontology_id=anchor_ontology, args=args)
             if name == "propose_draft":
-                return self._dispatch_propose_draft(domain_id=domain_id, args=args)
+                return self._dispatch_propose_draft(domain_id=anchor_domain, args=args)
             if name == "lint_against_standard":
                 return self._dispatch_lint(db, args=args)
             if name == "get_task_options":
                 return self._dispatch_get_task_options(
-                    db, ontology_id=ontology_id, args=args
+                    db, ontology_id=anchor_ontology, args=args
                 )
             if name == "propose_action":
                 return self._dispatch_propose_action(
-                    db, ontology_id=ontology_id, domain_id=domain_id, args=args
+                    db, ontology_id=anchor_ontology, domain_id=anchor_domain, args=args
                 )
             if name == "propose_pipeline":
                 return self._dispatch_propose_pipeline(
-                    db, ontology_id=ontology_id, args=args
+                    db, ontology_id=anchor_ontology, args=args
                 )
             if name == "propose_preference":
-                return self._dispatch_propose_preference(domain_id=domain_id, args=args)
+                return self._dispatch_propose_preference(domain_id=anchor_domain, args=args)
             if name == "update_plan":
                 return self._dispatch_update_plan(args)
             if name == "request_form":
-                return self._dispatch_request_form(db, ontology_id=ontology_id, args=args)
+                return self._dispatch_request_form(db, ontology_id=anchor_ontology, args=args)
             # get_task_status 在 agent 循环里特判（需注入 conversation_id 做跨轮解析），不走此处。
             if name == "ask_clarification":
                 q = str(args.get("question") or "").strip()
@@ -3222,7 +3455,7 @@ class ChatBiService:
                 )
             if name == "run_sql":
                 return self._dispatch_run_sql(
-                    db, args=args, ontology_id=ontology_id, principal_role=principal_role
+                    db, args=args, ontology_ids=ontology_ids, principal_role=principal_role
                 )
             if name == "list_catalogs":
                 return self._dispatch_list_catalogs(db)
@@ -3301,6 +3534,34 @@ class ChatBiService:
         if any(m in q for m in _STRUCTURAL_MARKERS):
             return "structural"
         return "general"
+
+    @staticmethod
+    def _question_names_published_entity(
+        question: str,
+        seed_objects: list["_ObjectSnapshot"],
+        seed_logics: list[BusinessLogic],
+    ) -> bool:
+        """问题是否**点名**了某个已发布业务对象/口径（完整显示名或标识作连续子串）。
+
+        用途：给 `general` 意图的接地豁免打一个补丁。默认 general 自由作答是刻意的
+        （打招呼 / 问能力 / 产品 how-to 无需接地）——但那条豁免同时放过了「用大白话问
+        本域业务、却不含任何取数/结构关键词」的问题（如「客户为什么会流失」），模型据此
+        凭常识编答，F4 又拦不住无标记的散文推理（见 test_f4_prose_fabrication_gap）。
+
+        判据**刻意取强**以免误伤真正的一般问题：只有用户把某个已发布实体的名字（≥2 字）
+        原样打进问题，才算「在问本域业务」。`_match_objects` 的单字子串计分太噪，不能直接用；
+        这里对它给出的候选再加一道「完整名包含」过滤，噪声候选（仅个别字碰巧命中）被滤掉。
+        名字取显示名与标识两者：中文问题命中显示名，英文标识问题命中 name。
+        """
+        q = (question or "").lower()
+        if not q:
+            return False
+        for ent in (*seed_objects, *seed_logics):
+            for nm in (getattr(ent, "display_name", ""), getattr(ent, "name", "")):
+                nm = (nm or "").strip().lower()
+                if len(nm) >= 2 and nm in q:
+                    return True
+        return False
 
     # V5 F2：拒答譍气——用于判「首轮未搜就拒答」。宁可少逗也不乱逗：只当正文确
     # 实在表达“找不到/无法回答/未检索到”时才算（已经给出实体内容的正常答案不命中）。
@@ -3402,8 +3663,8 @@ class ChatBiService:
         db: Session,
         *,
         runtime: Any,
-        domain: DomainContext,
-        ontology: Ontology,
+        domains: list[DomainContext],
+        ontologies: list[Ontology],
         question: str,
         history: list[dict],
         seed_objects: list[_ObjectSnapshot],
@@ -3450,28 +3711,32 @@ class ChatBiService:
         ladder_note = ""
         ladder_names: list[str] = []
         try:
-            ladder = OntologyLadderLoader(self.query_service).load(
-                db,
-                domain_id=domain.id,
-                ontology_id=ontology.id,
-                question=question,
-                principal_role=principal_role,
-                want=2,
-                # 结构性/概览类无需真实取数样例；取数意图才拉画像（真实数据、成本高）。
-                with_profiles=self._classify_intent(question) == "analytical",
-            )
-            if ladder.objects:
+            loader = OntologyLadderLoader(self.query_service)
+            with_profiles = self._classify_intent(question) == "analytical"
+            merged_pkgs: list[dict] = []
+            for d, o in zip(domains, ontologies):
+                ladder = loader.load(
+                    db,
+                    domain_id=d.id,
+                    ontology_id=o.id,
+                    question=question,
+                    principal_role=principal_role,
+                    want=2,
+                    with_profiles=with_profiles,
+                )
+                if ladder.objects:
+                    merged_pkgs.extend(p.to_dict() for p in ladder.objects)
+            if merged_pkgs:
                 import json as _json
 
-                pkgs = [o.to_dict() for o in ladder.objects]
+                # 多域合并后限制总体规模，避免上下文爆炸
+                pkgs = merged_pkgs[:4]
                 ladder_note = (
                     "\n\n【已深加载的相关本体】以下是系统为本次问题精确锁定并**完整加载**的"
                     "业务对象（含字段、关系、绑定口径、取值样例/统计、物化引擎），已是当前问题"
                     "最相关的实体，可直接据此作答或写取数 SQL；如需其它实体再调 search_*：\n"
                     + _json.dumps(pkgs, ensure_ascii=False)
                 )
-                # 深加载出的对象/字段名是服务端从已发布本体算出的可信事实，登记进账本，
-                # 否则模型引用它们会被 F4 当成幻觉而误拒答。
                 for pkg in pkgs:
                     if pkg.get("display_name"):
                         ladder_names.append(pkg["display_name"])
@@ -3486,17 +3751,24 @@ class ChatBiService:
 
         # P2.1：域语义卡常驻 system——模型开口前就知道域的骨架，
         # 不必先花一步调 get_domain_overview，也不必靠 prompt 铁律约束概览类问题。
+        # 多域：拼接各域语义卡。
         card = None
+        cards: list = []
+        card_text = ""
         try:
-            card = build_card(db, ontology, domain.name)
-            card_text = "\n\n" + card.render()
+            parts: list[str] = []
+            for d, o in zip(domains, ontologies):
+                c = build_card(db, o, d.name)
+                cards.append(c)
+                parts.append(c.render())
+            card_text = "\n\n" + "\n\n".join(parts)
         except Exception as exc:  # noqa: BLE001 — 卡是增强，算不出就退回原样
             logger.info("domain semantic card unavailable: %s", exc)
-            card_text = f"\n\n当前数据域：{domain.name}"
+            card_text = f"\n\n当前数据域：{'、'.join(d.name for d in domains)}"
 
-        # P3：跨会话记忆软提示——本域历史高频对象/口径，帮复现问题少绕检索、少重复澄清。
+        # P3：跨会话记忆软提示——多域历史高频对象/口径（不选域=全域通盘），帮复现问题少绕检索。
         try:
-            memory_text = self.build_domain_memory_card(db, domain.id)
+            memory_text = self.build_domain_memory_card(db, [d.id for d in domains])
         except Exception as exc:  # noqa: BLE001 — 记忆是增强，算不出退空
             logger.info("domain memory card unavailable: %s", exc)
             memory_text = ""
@@ -3531,7 +3803,7 @@ class ChatBiService:
         answer = ""
         ledger = FactLedger()  # F4：断言级凭证账本（只登记工具真实返回的事实）
         # 植入当前数据域名作为可信上下文，允许答案引用「数据域/本体名」而不被误判为幻觉
-        ledger.add_context_name(domain.name)
+        ledger.add_context_name(*[d.name for d in domains])
         # 工具名是内部机制、非业务实体：若模型在正文提到工具名（如 get_domain_overview），
         # 不得被 answer_verifier 当成本体幻觉实体而拒答。
         ledger.add_context_name(
@@ -3541,12 +3813,13 @@ class ChatBiService:
         # 语义卡上的名字是**服务端从已发布本体算出来的**，与 get_domain_overview 同源同可信。
         # 不入账的话，模型引用卡上看到的核心对象/指标名会被 F4 当成幻觉——
         # 我们把事实塞进它的上下文，又因为它用了而拒答，说不过去。
-        if card is not None:
-            ledger.add_context_name(
-                *[n for n, _ in card.core_objects],
-                *[n for n, _ in card.clusters],
-                *card.metrics,
-            )
+        if cards:
+            for card in cards:
+                ledger.add_context_name(
+                    *[n for n, _ in card.core_objects],
+                    *[n for n, _ in card.clusters],
+                    *card.metrics,
+                )
         # 阶梯深加载出的对象/字段名同样是服务端算出的可信事实，入账免被 F4 误判幻觉。
         if ladder_names:
             ledger.add_context_name(*ladder_names)
@@ -3580,20 +3853,12 @@ class ChatBiService:
         # 选中技能后就地重建 messages[0] = base_system + overlay（重复选取以最后一次为准）。
         base_system = messages[0]["content"]
         active_skill: Skill | None = None
-        # P4：本域启用的外部工具（配置驱动，curated + 数量封顶）——注入工具集、按名分发。
-        try:
-            external_schemas = external_tools.tool_schemas_for_domain(db, domain.id)
-            external_names = {s["function"]["name"] for s in external_schemas}
-        except Exception as exc:  # noqa: BLE001 — 外部工具是增强，取不到就当没有
-            logger.info("external tools unavailable: %s", exc)
-            external_schemas, external_names = [], set()
-
         # V4 O3 渐进披露：read_result 不进基础工具集——它只在有 run_sql 结果可翻时才有意义。
         # 首轮不暴露（省首轮 prefill）；首次 run_sql 取到数后再解锁。
         read_result_unlocked = False
 
         def _compose_tools(skill: "Skill | None") -> list[dict]:
-            tools = [*_tools_for_skill(skill, sql_allowed=sql_allowed), *external_schemas]
+            tools = [*_tools_for_skill(skill, sql_allowed=sql_allowed)]
             if read_result_unlocked:
                 tools.append(_READ_RESULT_TOOL)
             return tools
@@ -3767,7 +4032,7 @@ class ChatBiService:
                     # 只有结论回到主上下文；试错过程一个字符都不进来。
                     result, summary, is_error = await self._dispatch_locate_entities(
                         db, client=client, model=runtime.model,
-                        domain_id=domain.id, ontology_id=ontology.id,
+                        domain_id=domains[0].id, ontology_id=ontologies[0].id,
                         args=call_args, telemetry=tel,
                     )
                 elif tool_name == "scout_query":
@@ -3775,7 +4040,7 @@ class ChatBiService:
                     # 只把候选 SQL 带回。子 agent 不执行；真取数仍由下方 run_sql 过只读校验+证明。
                     result, summary, is_error = await self._dispatch_scout_query(
                         db, client=client, model=runtime.model,
-                        domain_id=domain.id, ontology_id=ontology.id,
+                        domain_id=domains[0].id, ontology_id=ontologies[0].id,
                         args=call_args, telemetry=tel,
                     )
                 elif tool_name == "get_task_status":
@@ -3783,25 +4048,16 @@ class ChatBiService:
                     result, summary, is_error = await asyncio.to_thread(
                         self._dispatch_get_task_status,
                         db,
-                        ontology_id=ontology.id,
+                        ontology_id=ontologies[0].id,
                         args=call_args,
                         conversation_id=conversation_id,
-                    )
-                elif tool_name in external_names:
-                    # P4：配置驱动的外部工具——通用 HTTP executor 取回，结果封顶；从不抛异常进循环。
-                    result, summary, is_error = await asyncio.to_thread(
-                        external_tools.call_external_tool,
-                        db,
-                        tool_name=tool_name,
-                        domain_id=domain.id,
-                        args=call_args,
                     )
                 else:
                     result, summary, is_error = await asyncio.to_thread(
                         self._dispatch_agent_tool,
                         db,
-                        domain_id=domain.id,
-                        ontology_id=ontology.id,
+                        domain_ids=[d.id for d in domains],
+                        ontology_ids=[o.id for o in ontologies],
                         name=tool_name,
                         args=call_args,
                         principal_role=principal_role,
@@ -3858,8 +4114,6 @@ class ChatBiService:
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
                     # P5：结果分析成功=基于真实数据的统计，算接地。
                     or (tool_name == "analyze_result" and isinstance(result, dict) and result.get("analysis"))
-                    # P4：外部工具成功=拿到真实数据，算接地（否则纯外部工具答案会被误判未接地拒答）。
-                    or (tool_name in external_names)
                 ):
                     grounded_hit = True
                 if isinstance(result, dict):
@@ -4037,7 +4291,16 @@ class ChatBiService:
         # 直接作答即可，豁免 grounded_hit。拒答是少数精准场景的例外，不是常态。
         # 但仍**保留** verify_ok（F4）：万一 general 混进真本体问题、模型据此编造具名实体/数值，
         # 断言校验照样拦下。所以 general 只放开「没查本体」，不放开「乱说本体」。
-        grounded = (grounded_hit or intent == "general") and verify_ok
+        #
+        # 补丁（收口 general 豁免）：general 但**点名了某已发布业务对象/口径**的问题，
+        # 是在用大白话问本域业务（「客户为什么会流失」），并非真正的一般问题——它同样要接地，
+        # 不能靠 F4 兜（F4 拦不住无标记的散文推理）。判据取强（完整实体名入问句），
+        # 只收窄这一类，打招呼/问能力/how-to 因不点名实体仍走 general 豁免。
+        names_entity = self._question_names_published_entity(
+            question, seed_objects, seed_logics
+        )
+        general_waives = intent == "general" and not names_entity
+        grounded = (grounded_hit or general_waives) and verify_ok
 
         # V4 O6.2 / V5 F1：路由结果——选了技能却没用上它解锁的任何工具 = misroute（白加一轮）。
         # 但若本轮**拒答且真搜索过**（search_*/locate_entities），则是「路对了但域里没这个实体」，
@@ -4055,7 +4318,8 @@ class ChatBiService:
         # V4 O6.1：运行轨迹落 JSONL（对齐 pi session，默认关闭；开关开才写文件）。
         agent_trace.write_trace({
             "conversation_id": conversation_id,
-            "domain_id": domain.id,
+            "domain_id": domains[0].id if domains else None,
+            "domain_ids": [d.id for d in domains],
             "question": question,
             "intent": intent,
             "skill": active_skill.name if active_skill else None,
@@ -4111,8 +4375,8 @@ class ChatBiService:
         db: Session,
         *,
         runtime: Any,
-        domain: DomainContext,
-        ontology: Ontology,
+        domains: list[DomainContext],
+        ontologies: list[Ontology],
         question: str,
         history: list[dict],
         resolver: "_ReferenceResolver",
@@ -4127,8 +4391,8 @@ class ChatBiService:
         async for ev in self._stream_agent_events(
             db,
             runtime=runtime,
-            domain=domain,
-            ontology=ontology,
+            domains=domains,
+            ontologies=ontologies,
             question=question,
             history=history,
             seed_objects=seed_objects,
@@ -4188,17 +4452,22 @@ class ChatBiService:
     @staticmethod
     def _llm_not_configured(
         *,
-        domain_id: str,
-        domain_name: str,
-        ontology_id: str,
+        domain_ids: list[str],
+        domain_names: list[str],
+        ontology_id: str | None,
     ) -> dict:
         """未配置 LLM API Key 时的提示回答。直接引导去设置，不伪造答案。"""
+        scope = "、".join(domain_names) if domain_names else "全域"
+        anchor = domain_ids[0] if domain_ids else None
+        anchor_name = domain_names[0] if domain_names else ""
         return {
-            "domain_id": domain_id,
-            "domain_name": domain_name,
+            "domain_ids": list(domain_ids),
+            "domain_names": list(domain_names),
+            "domain_id": anchor,
+            "domain_name": anchor_name,
             "ontology_id": ontology_id,
             "answer": (
-                f"💡 「{domain_name}」的智能问答需要接入大语言模型。\n\n"
+                f"💡 「{scope}」的智能问答需要接入大语言模型。\n\n"
                 "请前往 **设置 → LLM 服务** 配置 API Key（支持 OpenAI、智谱、通义千问等兼容接口）。\n"
                 "配置完成后，即可进行本体问答、多步推理、自动取数分析。"
             ),
@@ -4213,19 +4482,22 @@ class ChatBiService:
     @staticmethod
     def _ungrounded_refusal(
         *,
-        domain_id: str,
-        domain_name: str,
-        ontology_id: str,
+        domain_ids: list[str],
+        domain_names: list[str],
+        ontology_id: str | None,
         question: str,
         reasons: list[str] | None = None,
     ) -> dict:
+        scope = "、".join(domain_names) if domain_names else "全域"
+        anchor = domain_ids[0] if domain_ids else None
+        anchor_name = domain_names[0] if domain_names else ""
         q = (question or "").strip()
         preview = q if len(q) <= 80 else q[:80] + "…"
         if reasons:
             # F4：校验不通——拒答并逐条说明「哪句不可证」，而非笼统「无法回答」。
             bullet = "\n".join(f"  · {r}" for r in reasons)
             answer = (
-                f"为避免给出不准确信息，未能基于「{domain_name}」已发布本体可靠回答该问题"
+                f"为避免给出不准确信息，未能基于「{scope}」已发布本体可靠回答该问题"
                 + (f"（{preview}）" if preview else "")
                 + "：以下结论无法由本体证实：\n"
                 + bullet
@@ -4233,14 +4505,16 @@ class ChatBiService:
             )
         else:
             answer = (
-                f"无法基于「{domain_name}」已发布本体回答该问题"
+                f"无法基于「{scope}」已发布本体回答该问题"
                 + (f"（{preview}）" if preview else "")
                 + "：未检索到匹配的对象类型或业务逻辑。"
                 "请换用本体中已有实体的名称提问，或先补充/发布相关建模。"
             )
         return {
-            "domain_id": domain_id,
-            "domain_name": domain_name,
+            "domain_ids": list(domain_ids),
+            "domain_names": list(domain_names),
+            "domain_id": anchor,
+            "domain_name": anchor_name,
             "ontology_id": ontology_id,
             "answer": answer,
             "suggested_sql": None,

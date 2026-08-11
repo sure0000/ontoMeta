@@ -88,7 +88,7 @@ def _run(env, script, intent="找出与销售订单相关的对象"):
             locate_entities(
                 db, client=client, model="stub", intent=intent,
                 domain_id=env.domain_id, ontology_id=env.ontology_id,
-                dispatch=svc._dispatch_agent_tool,
+                dispatch=svc._subagent_dispatch,
                 tool_schemas=_AGENT_TOOL_SCHEMAS,
                 to_thread=_direct,
             )

@@ -32,8 +32,7 @@ def large(client):
 def _tool(env, name: str, args: dict) -> tuple[dict, str, bool]:
     with SessionLocal() as db:
         return ChatBiService()._dispatch_agent_tool(
-            db, domain_id=env.domain_id, ontology_id=env.ontology_id,
-            name=name, args=args, principal_role="publisher",
+            db, domain_ids=[env.domain_id], ontology_ids=[env.ontology_id], name=name, args=args, principal_role="publisher",
         )
 
 

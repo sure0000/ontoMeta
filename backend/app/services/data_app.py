@@ -1310,7 +1310,7 @@ class DataAppService:
         refs = referenced_objects or []
         if not caliber and not refs:
             # 未携带载荷（如直接调 API）：回退到重新问数
-            answer = await ChatBiService().ask(db, domain_id=domain_id, question=question)
+            answer = await ChatBiService().ask(db, domain_ids=[domain_id] if domain_id else [], question=question)
             if answer.get("grounding_refused") or (
                 not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
             ):
@@ -1568,7 +1568,7 @@ class DataAppService:
         caliber = caliber_decomposition or []
         refs = referenced_objects or []
         if not caliber and not refs:
-            answer = await ChatBiService().ask(db, domain_id=domain_id, question=question)
+            answer = await ChatBiService().ask(db, domain_ids=[domain_id] if domain_id else [], question=question)
             if answer.get("grounding_refused") or (
                 not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
             ):

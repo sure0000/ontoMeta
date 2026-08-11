@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.api.deps import chat_bi_service
 from app.database import get_db
 from app.services import agent_telemetry
-from app.services import chat_bi_external_tools as external_tools
 from app.services.chat_bi_blocks import answer_to_blocks
 from app.services.data_app_executor import ExecutionError
 from app.schemas import (
@@ -25,9 +24,6 @@ from app.schemas import (
     ChatBiMessageOut,
     ChatBiSuggestions,
     ChatBiTaskLinkRequest,
-    ChatBiExternalToolCreate,
-    ChatBiExternalToolUpdate,
-    ChatBiExternalToolOut,
     ChatBiPreferenceRequest,
 )
 
@@ -38,13 +34,13 @@ logger = logging.getLogger("ontometa.chat_bi_api")
     "/chat-bi/conversations", response_model=list[ChatBiConversationSummary]
 )
 def chat_bi_list_conversations(
-    domain_id: str = Query(...),
+    domain_ids: list[str] = Query(default_factory=list),
     q: str | None = Query(None),
     include_archived: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     return chat_bi_service.list_conversations(
-        db, domain_id, query=q, include_archived=include_archived
+        db, domain_ids, query=q, include_archived=include_archived
     )
 
 
@@ -56,7 +52,7 @@ def chat_bi_create_conversation(
     db: Session = Depends(get_db),
 ):
     return chat_bi_service.create_conversation(
-        db, domain_id=data.domain_id, title=data.title, category=data.category
+        db, domain_ids=data.domain_ids, title=data.title, category=data.category
     )
 
 
@@ -117,80 +113,6 @@ def chat_bi_link_conversation_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-# --- P4：配置驱动的外部工具（免改代码扩展 Data Agent 能力）。写操作走全局管理鉴权。 ---
-
-
-def _external_tool_out(t) -> ChatBiExternalToolOut:
-    try:
-        params = json.loads(t.parameters_json) if t.parameters_json else {}
-    except (TypeError, json.JSONDecodeError):
-        params = {}
-    return ChatBiExternalToolOut(
-        id=t.id,
-        name=t.name,
-        display_name=t.display_name,
-        description=t.description,
-        parameters=params if isinstance(params, dict) else {},
-        method=t.method,
-        url=t.url,
-        has_auth=bool(t.auth_header),  # 机密不回显
-        enabled=t.enabled,
-        domain_id=t.domain_id,
-        result_max_chars=t.result_max_chars,
-        created_at=t.created_at,
-    )
-
-
-@router.get("/chat-bi/external-tools", response_model=list[ChatBiExternalToolOut])
-def chat_bi_list_external_tools(
-    domain_id: str | None = Query(None),
-    db: Session = Depends(get_db),
-):
-    return [_external_tool_out(t) for t in external_tools.list_tools(db, domain_id=domain_id)]
-
-
-@router.post("/chat-bi/external-tools", response_model=ChatBiExternalToolOut)
-def chat_bi_register_external_tool(
-    data: ChatBiExternalToolCreate,
-    db: Session = Depends(get_db),
-):
-    try:
-        row = external_tools.register_tool(
-            db,
-            name=data.name,
-            description=data.description,
-            url=data.url,
-            parameters=data.parameters,
-            method=data.method,
-            auth_header=data.auth_header,
-            domain_id=data.domain_id,
-            display_name=data.display_name,
-            result_max_chars=data.result_max_chars,
-        )
-    except external_tools.ExternalToolError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _external_tool_out(row)
-
-
-@router.patch("/chat-bi/external-tools/{tool_id}", response_model=ChatBiExternalToolOut)
-def chat_bi_toggle_external_tool(
-    tool_id: str,
-    data: ChatBiExternalToolUpdate,
-    db: Session = Depends(get_db),
-):
-    row = external_tools.set_enabled(db, tool_id, data.enabled)
-    if row is None:
-        raise HTTPException(status_code=404, detail="外部工具不存在")
-    return _external_tool_out(row)
-
-
-@router.delete("/chat-bi/external-tools/{tool_id}")
-def chat_bi_delete_external_tool(tool_id: str, db: Session = Depends(get_db)):
-    if not external_tools.delete_tool(db, tool_id):
-        raise HTTPException(status_code=404, detail="外部工具不存在")
-    return {"id": tool_id, "deleted": True}
-
-
 @router.post("/chat-bi/domain-memory/preferences")
 def chat_bi_remember_preference(
     data: ChatBiPreferenceRequest,
@@ -205,10 +127,10 @@ def chat_bi_remember_preference(
 
 @router.get("/chat-bi/categories", response_model=ChatBiCategoryList)
 def chat_bi_list_categories(
-    domain_id: str = Query(...),
+    domain_ids: list[str] = Query(default_factory=list),
     db: Session = Depends(get_db),
 ):
-    categories = chat_bi_service.list_categories(db, domain_id)
+    categories = chat_bi_service.list_categories(db, domain_ids)
     return ChatBiCategoryList(categories=categories)
 
 
@@ -219,7 +141,7 @@ def chat_bi_rename_category(
 ):
     try:
         chat_bi_service.rename_category(
-            db, domain_id=data.domain_id, old_name=data.old_name, new_name=data.new_name
+            db, domain_ids=data.domain_ids, old_name=data.old_name, new_name=data.new_name
         )
         return {"success": True}
     except ValueError as exc:
@@ -231,7 +153,7 @@ def chat_bi_delete_category(
     data: ChatBiCategoryDeleteRequest,
     db: Session = Depends(get_db),
 ):
-    chat_bi_service.delete_category(db, domain_id=data.domain_id, name=data.name)
+    chat_bi_service.delete_category(db, domain_ids=data.domain_ids, name=data.name)
     return {"success": True}
 
 
@@ -272,15 +194,15 @@ async def chat_bi_ask(
             conv = chat_bi_service.get_conversation(db, conversation_id)
             if not conv:
                 raise HTTPException(status_code=404, detail="对话不存在")
-            if conv.domain_id != data.domain_id:
+            if set(conv.domain_ids) != set(data.domain_ids):
                 raise HTTPException(
                     status_code=400,
-                    detail="会话不属于当前数据域，请切换到正确数据域或新建会话",
+                    detail="会话不属于当前数据域作用域，请切换到正确作用域或新建会话",
                 )
             conversation_title = conv.title
         else:
             conv_dict = chat_bi_service.create_conversation(
-                db, domain_id=data.domain_id, title=data.question[:50]
+                db, domain_ids=data.domain_ids, title=data.question[:50]
             )
             conversation_id = conv_dict["id"]
             conversation_title = conv_dict["title"]
@@ -291,7 +213,7 @@ async def chat_bi_ask(
 
         payload = await chat_bi_service.ask(
             db,
-            domain_id=data.domain_id,
+            domain_ids=data.domain_ids,
             question=data.question,
             history=data.history,
             principal_role=_principal_role(request),
@@ -309,12 +231,12 @@ async def chat_bi_ask(
             payload={
                 k: v
                 for k, v in payload.items()
-                if k not in ("domain_id", "domain_name")
+                if k not in ("domain_id", "domain_name", "domain_ids", "domain_names")
             },
         )
 
-        # P3：跨会话记忆——把本次已接地命中的对象/口径按域累加使用度（best-effort）。
-        chat_bi_service.record_domain_memory(db, data.domain_id, payload)
+        # P3：跨会话记忆——把本次已接地命中的对象/口径按各涉及域累加使用度（best-effort）。
+        chat_bi_service.record_domain_memory(db, data.domain_ids, payload)
 
         payload["conversation_id"] = conversation_id
         payload["conversation_title"] = conversation_title
@@ -339,15 +261,15 @@ async def chat_bi_ask_stream(
         conv = chat_bi_service.get_conversation(db, conversation_id)
         if not conv:
             raise HTTPException(status_code=404, detail="对话不存在")
-        if conv.domain_id != data.domain_id:
+        if set(conv.domain_ids) != set(data.domain_ids):
             raise HTTPException(
                 status_code=400,
-                detail="会话不属于当前数据域，请切换到正确数据域或新建会话",
+                detail="会话不属于当前数据域作用域，请切换到正确作用域或新建会话",
             )
         conversation_title = conv.title
     else:
         conv_dict = chat_bi_service.create_conversation(
-            db, domain_id=data.domain_id, title=data.question[:50]
+            db, domain_ids=data.domain_ids, title=data.question[:50]
         )
         conversation_id = conv_dict["id"]
         conversation_title = conv_dict["title"]
@@ -366,7 +288,7 @@ async def chat_bi_ask_stream(
         try:
             async for ev in chat_bi_service.ask_stream(
                 db,
-                domain_id=data.domain_id,
+                domain_ids=data.domain_ids,
                 question=data.question,
                 history=data.history,
                 principal_role=_principal_role(request),
@@ -386,11 +308,11 @@ async def chat_bi_ask_stream(
                         payload.get("answer", ""),
                         payload={
                             k: v for k, v in payload.items()
-                            if k not in ("domain_id", "domain_name")
+                            if k not in ("domain_id", "domain_name", "domain_ids", "domain_names")
                         },
                     )
-                    # P3：跨会话记忆——本次已接地命中的对象/口径按域累加使用度（best-effort）。
-                    chat_bi_service.record_domain_memory(db, data.domain_id, payload)
+                    # P3：跨会话记忆——本次已接地命中的对象/口径按各涉及域累加使用度（best-effort）。
+                    chat_bi_service.record_domain_memory(db, data.domain_ids, payload)
                 else:
                     yield sse(ev)
         except ValueError as exc:
@@ -421,10 +343,12 @@ def chat_bi_telemetry():
 
 
 @router.get("/chat-bi/suggestions", response_model=ChatBiSuggestions)
-def chat_bi_suggestions(domain_id: str = Query(...), db: Session = Depends(get_db)):
+def chat_bi_suggestions(
+    domain_ids: list[str] = Query(default_factory=list), db: Session = Depends(get_db)
+):
     try:
-        suggestions = chat_bi_service.suggest_questions(db, domain_id)
-        return ChatBiSuggestions(domain_id=domain_id, suggestions=suggestions)
+        suggestions = chat_bi_service.suggest_questions(db, domain_ids)
+        return ChatBiSuggestions(domain_ids=domain_ids, suggestions=suggestions)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

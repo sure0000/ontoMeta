@@ -172,7 +172,7 @@ class _FakeAsyncOpenAIDSML:
 async def _collect(svc: ChatBiService, domain_id: str, question: str) -> list[dict]:
     out: list[dict] = []
     with SessionLocal() as db:
-        async for ev in svc.ask_stream(db, domain_id=domain_id, question=question):
+        async for ev in svc.ask_stream(db, domain_ids=[domain_id], question=question):
             out.append(ev)
     return out
 

@@ -66,8 +66,8 @@ import type {
   GovernanceArtifact,
   TaskPipeline,
   TaskPipelineAdvanceResult,
+  TaskPipelineDraftAllResult,
   PipelineCompileResult,
-  ChatBiExternalTool,
   LlmConnectionTestResult,
   ObjectTypeDetail,
   ObjectTypeSummary,
@@ -730,14 +730,6 @@ export const api = {
     // 编排配置全部在设置页管理，不再需要配置文件。
     dags_dir?: string;
     jobs_dir?: string;
-    sync_channel?: string;
-    sync_runner_endpoint?: string;
-    sync_runner_token?: string;
-    docker_network?: string;
-    drivers_dir?: string;
-    sync_tool_images?: string;
-    /** "" = 自动选搬运工具；填了则物化一律用它。 */
-    sync_tool?: string;
     max_tasks_per_dag?: number;
     max_active_tasks_per_dag?: number;
     dag_parse_timeout?: number;
@@ -810,7 +802,7 @@ export const api = {
     request<{ status: string }>(`/api/settings/dependencies/${id}/teardown`, { method: "POST" }),
 
   askChatBi: (body: {
-    domain_id: string;
+    domain_ids: string[];
     question: string;
     history?: ChatBiHistoryItem[];
     conversation_id?: string;
@@ -823,7 +815,7 @@ export const api = {
   /** SSE 流式问答：逐事件回调（meta/step_start/step_done/token/done/error）。 */
   askChatBiStream: async (
     body: {
-      domain_id: string;
+      domain_ids: string[];
       question: string;
       history?: ChatBiHistoryItem[];
       conversation_id?: string;
@@ -874,16 +866,16 @@ export const api = {
     }
   },
 
-  chatBiSuggestions: (domainId: string) =>
-    request<ChatBiSuggestions>(`/api/chat-bi/suggestions${buildQuery({ domain_id: domainId })}`),
+  chatBiSuggestions: (domainIds: string[]) =>
+    request<ChatBiSuggestions>(`/api/chat-bi/suggestions${buildQuery({ domain_ids: domainIds })}`),
 
-  listChatBiConversations: (domainId: string, q?: string, includeArchived?: boolean) =>
+  listChatBiConversations: (domainIds: string[], q?: string, includeArchived?: boolean) =>
     request<ChatBiConversation[]>(
-      `/api/chat-bi/conversations${buildQuery({ domain_id: domainId, q, include_archived: includeArchived ? "true" : undefined })}`,
+      `/api/chat-bi/conversations${buildQuery({ domain_ids: domainIds, q, include_archived: includeArchived ? "true" : undefined })}`,
     ),
 
   createChatBiConversation: (body: {
-    domain_id: string;
+    domain_ids: string[];
     title?: string;
     category?: string | null;
   }) =>
@@ -931,16 +923,16 @@ export const api = {
       { method: "POST", body: JSON.stringify({ domain_id: domainId, text }) },
     ),
 
-  listChatBiCategories: (domainId: string) =>
-    request<ChatBiCategoryList>(`/api/chat-bi/categories${buildQuery({ domain_id: domainId })}`),
+  listChatBiCategories: (domainIds: string[]) =>
+    request<ChatBiCategoryList>(`/api/chat-bi/categories${buildQuery({ domain_ids: domainIds })}`),
 
-  renameChatBiCategory: (body: { domain_id: string; old_name: string; new_name: string }) =>
+  renameChatBiCategory: (body: { domain_ids: string[]; old_name: string; new_name: string }) =>
     request<{ success: boolean }>("/api/chat-bi/categories/rename", {
       method: "POST",
       body: JSON.stringify(body),
     }),
 
-  deleteChatBiCategory: (body: { domain_id: string; name: string }) =>
+  deleteChatBiCategory: (body: { domain_ids: string[]; name: string }) =>
     request<{ success: boolean }>("/api/chat-bi/categories/delete", {
       method: "POST",
       body: JSON.stringify(body),
@@ -1343,35 +1335,6 @@ export const api = {
       `/api/ontologies/${ontologyId}/properties`,
     ),
 
-  // P4：配置驱动的外部工具（Data Agent 免改代码扩能力）
-  listExternalTools: (domainId?: string) =>
-    request<ChatBiExternalTool[]>(
-      `/api/chat-bi/external-tools${buildQuery({ domain_id: domainId })}`,
-    ),
-  registerExternalTool: (body: {
-    name: string;
-    description: string;
-    url: string;
-    parameters?: Record<string, unknown>;
-    method?: string;
-    auth_header?: string;
-    domain_id?: string | null;
-    display_name?: string;
-    result_max_chars?: number;
-  }) =>
-    request<ChatBiExternalTool>("/api/chat-bi/external-tools", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  toggleExternalTool: (id: string, enabled: boolean) =>
-    request<ChatBiExternalTool>(`/api/chat-bi/external-tools/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ enabled }),
-    }),
-  deleteExternalTool: (id: string) =>
-    request<{ id: string; deleted: boolean }>(`/api/chat-bi/external-tools/${id}`, {
-      method: "DELETE",
-    }),
   draftArtifact: (body: {
     kind: string;
     intent?: string | null;
@@ -1438,6 +1401,11 @@ export const api = {
   /** 起草链上的下一步。上游还没跑成功时后端 409，错误里说清卡在哪一步。 */
   advancePipeline: (id: string) =>
     request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance`, {
+      method: "POST",
+    }),
+  /** C2：一键起草全部步骤（血缘驱动，起草阶段不阻塞）。只起草不执行。 */
+  draftAllPipeline: (id: string) =>
+    request<TaskPipelineDraftAllResult>(`/api/agents/pipelines/${id}/draft-all`, {
       method: "POST",
     }),
   /** 给链设置周期 cron（不触发编译；编译是显式的第二步）。 */

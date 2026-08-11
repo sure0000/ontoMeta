@@ -219,7 +219,7 @@ def test_chat_bi_no_hit_refuses_fiction(client, admin_headers):
         "/api/chat-bi/ask",
         headers=admin_headers,
         json={
-            "domain_id": domain_id,
+            "domain_ids": [domain_id],
             "question": "火星上的独角兽库存怎么算",
         },
     )
@@ -252,7 +252,7 @@ def test_chat_bi_session_domain_binding(client, admin_headers):
     created = client.post(
         "/api/chat-bi/conversations",
         headers=admin_headers,
-        json={"domain_id": domain_a, "title": "会话A"},
+        json={"domain_ids": [domain_a], "title": "会话A"},
     )
     assert created.status_code == 200
     conv_id = created.json()["id"]
@@ -261,7 +261,7 @@ def test_chat_bi_session_domain_binding(client, admin_headers):
         "/api/chat-bi/ask",
         headers=admin_headers,
         json={
-            "domain_id": domain_b,
+            "domain_ids": [domain_b],
             "conversation_id": conv_id,
             "question": "订单数量",
         },

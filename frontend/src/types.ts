@@ -611,17 +611,6 @@ export interface AirflowSettings {
   git_auto_init: boolean;
   git_author: string;
   git_email: string;
-  /** runner：向常驻 sync-runner 发 HTTP；docker：经 docker.sock 起搬运容器。 */
-  sync_channel: string;
-  sync_runner_endpoint: string;
-  /** 调 runner 的 token 是否已设（明文不回传）。 */
-  sync_runner_token_set: boolean;
-  /** 下面三项只服务 docker 通道。 */
-  docker_network: string;
-  drivers_dir: string;
-  sync_tool_images: string;
-  /** 强制指定搬运工具；"" = 自动（物化弹窗不再逐次选）。 */
-  sync_tool: string;
   max_tasks_per_dag: number;
   max_active_tasks_per_dag: number;
   dag_parse_timeout: number;
@@ -691,7 +680,8 @@ export interface DependencyDeployResult {
 
 export interface ChatBiConversation {
   id: string;
-  domain_id: string;
+  domain_ids: string[];
+  domain_id?: string | null;
   title: string;
   category?: string | null;
   is_pinned: boolean;
@@ -966,6 +956,17 @@ export type ChatBiBlock =
           receipt_summary?: string | null;
         }>;
         total?: number;
+        /** L4 血缘：会话内任务间依赖（谁产出谁消费）。 */
+        lineage?: {
+          tasks: Array<{
+            task_id: string;
+            label?: string;
+            artifact_id?: string;
+            source_urns?: string[];
+            target_urn?: string;
+          }>;
+          dependencies: Array<{ upstream: string; downstream: string }>;
+        };
       };
     }
   | {
@@ -978,8 +979,10 @@ export type ChatBiBlock =
   | { id: string; type: "form"; form: ChatBiFormRequest };
 
 export interface ChatBiAnswer {
-  domain_id: string;
-  domain_name: string;
+  domain_ids?: string[];
+  domain_names?: string[];
+  domain_id?: string | null;
+  domain_name?: string;
   ontology_id?: string | null;
   answer: string;
   suggested_sql?: string | null;
@@ -1003,22 +1006,6 @@ export interface ChatBiAnswer {
   conversation_title?: string | null;
 }
 
-/** P4：配置驱动的外部工具（Data Agent 免改代码扩能力）。auth_header 机密不回显。 */
-export interface ChatBiExternalTool {
-  id: string;
-  name: string;
-  display_name?: string | null;
-  description: string;
-  parameters: Record<string, unknown>;
-  method: string;
-  url: string;
-  has_auth: boolean;
-  enabled: boolean;
-  domain_id?: string | null;
-  result_max_chars: number;
-  created_at: string;
-}
-
 export type ChatBiStreamEvent =
   | { type: "meta"; conversation_id: string; conversation_title?: string | null }
   | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
@@ -1031,7 +1018,8 @@ export type ChatBiStreamEvent =
   | { type: "error"; message: string };
 
 export interface ChatBiSuggestions {
-  domain_id: string;
+  domain_ids?: string[];
+  domain_id?: string;
   suggestions: string[];
 }
 
@@ -1335,46 +1323,32 @@ export interface MaterializeTargetsResult {
 }
 export type MaterializationLayer = "dim" | "dwd" | "dws" | "ads";
 export type MaterializationLoadStrategy = "full" | "incremental" | "cdc";
-export type SyncTool = "seatunnel" | "datax" | "flink";
-
-/** 一个搬运工具及其能力。诊断与设置页的强制指定用；物化弹窗不再据此让人选。 */
-export interface SyncToolInfo {
-  name: SyncTool;
-  image: string;
-  modes: MaterializationLoadStrategy[];
-  cdc: boolean;
-  /** 该工具的镜像在本部署里拿不拿得到。false 时不可选（否则任务会在 Airflow 侧 pull 失败）。 */
-  available: boolean;
-  /** 不可用的原因与修法；available 时为 null。 */
-  reason: string | null;
-}
+export type SyncTool = "flink";
 
 /** 本次物化**会用什么搬**（GET /warehouse/sync-tools）。
  *
- * 工具已改为自动决策：runner 通道由执行侧逐表自选档位，docker 通道按「装载方式 ∩ 镜像
- * 可用」挑。故这里是「告知结果」，不是「给你挑」。
+ * 统一执行架构下搬运恒为 Flink SQL on YARN，不再有工具选择。这里是恒定结果的告知。
  */
 export interface SyncToolPlan {
-  channel: "runner" | "docker";
-  /** 本次会用的工具；"auto" = 不由 ontoMeta 指定（runner 自选）。选不出来时为 null。 */
+  channel: "flink_on_yarn";
+  /** 本次会用的工具；统一架构下恒为 flink。 */
   resolved: string | null;
-  /** 是否为自动决策。false = 设置页强制指定了工具。 */
+  /** 是否为自动决策。统一架构下恒为 true。 */
   auto: boolean;
   /** 一句可解释的理由，直接展示。 */
   detail: string;
-  /** 选中的工具覆盖不了的装载方式（这些表不会产搬运作业）。 */
+  /** 选中的工具覆盖不了的装载方式（统一架构下恒为空）。 */
   uncovered_modes: MaterializationLoadStrategy[];
   /** 选不出工具时的原因；正常为 null。 */
   error: string | null;
   /**
-   * 目标引擎在**执行侧**真正支持的装载方式。null = 问不到（runner 不可达/未配），
-   * 此时不置灰任何选项——凭猜锁死比不锁更糟。
+   * 目标引擎在执行侧真正支持的装载方式。统一架构下恒为 full/incremental/cdc 全集
+   * （Flink SQL 支持所有引擎），供弹窗置灰「同步方式」。
    */
   modes: MaterializationLoadStrategy[] | null;
-  /** modes 的来源或问不到的原因。 */
+  /** modes 的来源说明。 */
   modes_detail: string;
   default: SyncTool;
-  tools: SyncToolInfo[];
 }
 export type MaterializationScdType = "none" | "scd1" | "scd2";
 
@@ -1544,11 +1518,6 @@ export interface MaterializeRequestInput {
   /** 契约 id → 物理表名；缺省用实体技术名。 */
   table_overrides?: Record<string, string>;
   load_strategy?: MaterializationLoadStrategy | null;
-  /**
-   * 搬运工具。**前端不再传**：由后端 sync_tool_resolver 决策（设置页可强制指定）。
-   * 保留字段仅为兼容既有调用方，传了会盖过自动决策。
-   */
-  sync_tool?: SyncTool | null;
   selected_targets?: string[] | null;
   overrides?: Record<string, MaterializationContractUpdateInput>;
   intent?: string;
@@ -1653,6 +1622,8 @@ export interface TaskPipelineStep {
   artifact_id?: string | null;
   artifact_status?: string | null;
   artifact_name?: string | null;
+  /** C2：血缘依赖（上游步序列表）。空 = 线性默认（依赖上一步）。 */
+  depends_on?: number[];
 }
 
 /**
@@ -1684,6 +1655,11 @@ export interface TaskPipeline {
 export interface TaskPipelineAdvanceResult {
   pipeline: TaskPipeline;
   artifact: GovernanceArtifact;
+}
+
+export interface TaskPipelineDraftAllResult {
+  pipeline: TaskPipeline;
+  artifacts: GovernanceArtifact[];
 }
 
 /** 编译成周期 DAG 的结果（P2）。 */

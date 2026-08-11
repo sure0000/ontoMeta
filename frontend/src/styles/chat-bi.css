@@ -1397,6 +1397,39 @@
   color: var(--om-text-tertiary);
 }
 
+/* L4 血缘：任务间依赖（上游产出 → 下游消费） */
+.chatbi-task-lineage {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface-muted, rgba(0, 0, 0, 0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.chatbi-task-lineage-edge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chatbi-task-lineage-node {
+  color: var(--om-text-primary);
+  font-weight: 500;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatbi-task-lineage-arrow {
+  color: var(--om-text-tertiary);
+  font-weight: 600;
+}
+
 .chatbi-caliber-title {
   font-size: 12px;
   font-weight: 650;

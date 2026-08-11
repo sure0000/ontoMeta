@@ -76,7 +76,7 @@ def test_run_sql_result_offloaded_and_read_result_pages():
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                svc.ask(db, domain_id=domain_id, question="计算订单金额明细", principal_role="publisher")
+                svc.ask(db, domain_ids=[domain_id], question="计算订单金额明细", principal_role="publisher")
             )
     finally:
         chat_bi_mod.AsyncOpenAI = original_client_cls  # type: ignore[assignment]

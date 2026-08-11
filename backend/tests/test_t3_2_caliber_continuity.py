@@ -124,9 +124,7 @@ def test_t3_2_followup_reuses_caliber_not_refuse():
     try:
         with SessionLocal() as db:
             payload = asyncio.run(
-                svc.ask(
-                    db,
-                    domain_id=domain_id,
+                svc.ask(db, domain_ids=[domain_id],
                     question="把刚才的 GMV 口径按月拆开",
                     history=hist,
                     principal_role="publisher",

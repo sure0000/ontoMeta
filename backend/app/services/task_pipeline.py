@@ -95,10 +95,26 @@ class TaskPipelineService:
             if not step_intent:
                 raise PipelineError(f"第 {i + 1} 步（{kind}）缺少 intent")
             context = raw.get("context")
+            # C2：血缘依赖（depends_on 步序列表）。agent 从血缘/意图推导，
+            # 落成 depends_on_json；空则沿用线性默认（依赖上一步）。
+            raw_depends = raw.get("depends_on")
+            depends: list[int] = []
+            if isinstance(raw_depends, list):
+                for d in raw_depends:
+                    try:
+                        depends.append(int(d))
+                    except (TypeError, ValueError):
+                        raise PipelineError(
+                            f"第 {i + 1} 步的 depends_on 必须是步序数字列表"
+                        ) from None
+                # 防自依赖/越界/重复：交给编译期环检测兜底，这里只拦明显非法。
+                if i in depends:
+                    raise PipelineError(f"第 {i + 1} 步不能依赖自己")
             normalized.append({
                 "kind": kind,
                 "intent": step_intent,
                 "context": context if isinstance(context, dict) else {},
+                "depends_on": depends,
             })
 
         pipeline = GovernanceTaskPipeline(
@@ -116,6 +132,9 @@ class TaskPipelineService:
                     kind=item["kind"],
                     intent=item["intent"],
                     context_json=_dumps(item["context"]),
+                    depends_on_json=_dumps(item["depends_on"])
+                    if item["depends_on"]
+                    else None,
                 )
             )
         db.commit()
@@ -129,6 +148,10 @@ class TaskPipelineService:
 
         拒绝的两种情形都如实说清楚，因为它们对用户意味着完全不同的下一步动作：
         上游还没跑完 → 去把上游走完；链已经到头 → 没有下一步了。
+
+        C2：线性「等上一步成功」放宽为「等血缘上游成功」——步骤若声明了
+        ``depends_on``（血缘推导的显式上游步序），只要求这些上游成功，
+        不再要求「前面所有步」都成功；未声明则沿用线性默认（依赖上一步）。
         """
         pipeline = self.require(db, pipeline_id)
         steps = self._steps(db, pipeline_id)
@@ -138,15 +161,22 @@ class TaskPipelineService:
         if pending is None:
             raise PipelineError("任务链已全部起草，没有下一步了")
 
-        # 线性链：前面每一步都必须**执行成功**，下一步才有起草的依据。
-        for upstream in steps:
-            if upstream.step_index >= pending.step_index:
-                break
+        # C2：血缘依赖（depends_on 步序列表）优先；未声明才回落线性上一步。
+        depends = _loads(pending.depends_on_json, []) or []
+        if not depends and pending.step_index > 0:
+            depends = [pending.step_index - 1]
+
+        for up_idx in depends:
+            upstream = next((s for s in steps if s.step_index == up_idx), None)
+            if upstream is None:
+                raise PipelineError(
+                    f"第 {pending.step_index + 1} 步依赖的上游步序 {up_idx} 不存在"
+                )
             artifact = artifacts.get(upstream.artifact_id or "")
             status = artifact.status if artifact else None
             if status != ArtifactStatus.SUCCEEDED.value:
                 raise PipelineError(
-                    f"第 {upstream.step_index + 1} 步（{upstream.kind}）尚未执行成功"
+                    f"第 {up_idx + 1} 步（{upstream.kind}）尚未执行成功"
                     f"（当前 {status or '未起草'}），第 {pending.step_index + 1} 步不能起草"
                 )
 
@@ -168,6 +198,43 @@ class TaskPipelineService:
         pending.artifact_id = artifact.id
         db.commit()
         return artifact
+
+    def draft_all(self, db: Session, pipeline_id: str) -> list[GovernanceArtifact]:
+        """C2：一键起草**全部**步骤，返回各步制品（按 step_index 序）。
+
+        与 :meth:`advance` 不同：不再要求上游执行成功才起草下一步——血缘驱动的
+        依赖由各步骤的 ``depends_on`` 表达，起草阶段不阻塞（所有制品先落地，
+        人再逐个校验/确认/执行；执行顺序由血缘决定）。
+
+        **只起草，不确认、不执行**——「未确认不得执行」不变量不变。
+
+        已起草的步骤跳过（幂等）；全部起草完返回空列表。
+        """
+        pipeline = self.require(db, pipeline_id)
+        steps = self._steps(db, pipeline_id)
+        artifacts: list[GovernanceArtifact] = []
+        for pending in steps:
+            if pending.artifact_id:
+                continue  # 已起草，跳过
+            # 血缘依赖（depends_on）参与继承：上游已起草的制品 spec 仍是
+            # 事实来源；未起草的步骤没有制品，其 context 不参与继承。
+            context = {
+                **self._inherited(steps, self._artifact_map(db, steps), before=pending.step_index),
+                **(_loads(pending.context_json, {}) or {}),
+            }
+            context.setdefault("ontology_id", pipeline.ontology_id)
+            context = {k: v for k, v in context.items() if v is not None}
+            artifact = self._artifacts.draft(
+                db,
+                kind=pending.kind,
+                intent=pending.intent,
+                context=context,
+                ontology_id=pipeline.ontology_id,
+            )
+            pending.artifact_id = artifact.id
+            artifacts.append(artifact)
+        db.commit()
+        return artifacts
 
     def _inherited(
         self,

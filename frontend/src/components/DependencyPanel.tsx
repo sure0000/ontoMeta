@@ -349,11 +349,17 @@ export function DependencyPanel() {
       title: "状态",
       dataIndex: "deploy_status",
       width: 100,
-      render: (s: string, r) => (
-        <Tooltip title={r.deploy_error}>
-          <Tag color={STATUS_COLOR[s] ?? "default"}>{STATUS_LABEL[s] ?? s}</Tag>
-        </Tooltip>
-      ),
+      render: (s: string, r) => {
+        // external 模式的 not_deployed 显示"未拨测"而非"未部署"
+        const label = s === "not_deployed" && r.deploy_mode === "external"
+          ? "未拨测"
+          : (STATUS_LABEL[s] ?? s);
+        return (
+          <Tooltip title={r.deploy_error}>
+            <Tag color={STATUS_COLOR[s] ?? "default"}>{label}</Tag>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "操作",

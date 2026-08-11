@@ -248,9 +248,7 @@ async def _run_case(case: GoldenCase, domain_id: str, aliases: dict[str, str]) -
     before = agent_telemetry.snapshot()
     try:
         with SessionLocal() as db:
-            payload = await svc.ask(
-                db,
-                domain_id=domain_id,
+            payload = await svc.ask(db, domain_ids=[domain_id],
                 question=case.question,
                 principal_role=case.principal_role,
             )
@@ -369,9 +367,7 @@ def test_golden_run_sql_contract(case: GoldenCase, golden_domain):
 
     with SessionLocal() as db:
         result, summary, is_error = _svc_without_data_source()._dispatch_agent_tool(
-            db,
-            domain_id=domain_id,
-            ontology_id=onto_id,
+            db, domain_ids=[domain_id], ontology_ids=[onto_id],
             name="run_sql",
             args={"sql": sql},
             principal_role=case.principal_role,
@@ -402,11 +398,11 @@ def test_permission_denied_is_degradation_not_error(golden_domain):
     with SessionLocal() as db:
         svc = _svc_without_data_source()
         low, low_summary, low_err = svc._dispatch_agent_tool(
-            db, domain_id=domain_id, ontology_id=onto_id, name="run_sql",
+            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="run_sql",
             args={"sql": sql}, principal_role="editor",
         )
         high, _, high_err = svc._dispatch_agent_tool(
-            db, domain_id=domain_id, ontology_id=onto_id, name="run_sql",
+            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="run_sql",
             args={"sql": sql}, principal_role="publisher",
         )
 

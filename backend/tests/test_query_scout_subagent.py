@@ -95,7 +95,7 @@ def test_generic_runner_rejects_disallowed_tools_without_counting_step(env):
         run = asyncio.run(run_subagent(
             db, client=client, model="stub", spec=spec, user_prompt="go",
             domain_id=env.domain_id, ontology_id=env.ontology_id,
-            dispatch=svc._dispatch_agent_tool, tool_schemas=_AGENT_TOOL_SCHEMAS,
+            dispatch=svc._subagent_dispatch, tool_schemas=_AGENT_TOOL_SCHEMAS,
             to_thread=_direct,
         ))
     assert run.steps == 0
@@ -117,7 +117,7 @@ def test_generic_runner_budget_exhaustion_forces_conclusion(env):
         run = asyncio.run(run_subagent(
             db, client=client, model="stub", spec=spec, user_prompt="go",
             domain_id=env.domain_id, ontology_id=env.ontology_id,
-            dispatch=svc._dispatch_agent_tool, tool_schemas=_AGENT_TOOL_SCHEMAS,
+            dispatch=svc._subagent_dispatch, tool_schemas=_AGENT_TOOL_SCHEMAS,
             to_thread=_direct,
         ))
     assert run.llm_calls == 3  # 2 轮工具 + 1 轮强制收尾
@@ -135,7 +135,7 @@ def _run_scout(env, script, intent="统计各客户的销售总额"):
         res = asyncio.run(scout_query(
             db, client=client, model="stub", intent=intent,
             domain_id=env.domain_id, ontology_id=env.ontology_id,
-            dispatch=svc._dispatch_agent_tool, tool_schemas=_AGENT_TOOL_SCHEMAS,
+            dispatch=svc._subagent_dispatch, tool_schemas=_AGENT_TOOL_SCHEMAS,
             to_thread=_direct,
         ))
     return res, client

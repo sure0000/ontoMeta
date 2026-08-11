@@ -276,3 +276,186 @@ def test_f5_clause_rule_does_not_swallow_real_entity_names():
         v = verify_answer(f"「{token}」是核心指标。", led, strict_numbers=False)
         assert not v.ok, token
         assert any(token in u for u in v.unverified)
+
+
+# ---------------------------------------------------------------------------
+# 口径断言接地（收口缺口 C）：散文里「<指标> 定义为/计算为/口径为/口径是 …」
+# 若指标名不在账本 → 编造口径，即便**没加任何标记**也要拦。
+# 反向：账本内指标、指代主语、非指标语境的「口径/等于」不得误伤。
+# ---------------------------------------------------------------------------
+
+
+def test_caliber_prose_definition_of_offledger_metric_flagged():
+    """无标记的「毛利率定义为…」——毛利率不在账本，判编造口径。"""
+    led = _ledger_with_order()
+    v = verify_answer(
+        "毛利率定义为毛利除以营业收入，是衡量盈利能力的核心口径。",
+        led, strict_numbers=False,
+    )
+    assert not v.ok
+    assert any("毛利率" in u for u in v.unverified)
+
+
+def test_caliber_prose_various_verbs_flagged():
+    """定义为 / 计算为 / 口径为 / 口径是 四种定义式动词都要生效。"""
+    led = _ledger_with_order()
+    for sent in (
+        "客单价计算为销售额除以订单数。",
+        "复购率口径为复购用户数占总用户数的比例。",
+        "留存率口径是次月仍活跃的用户占比。",
+    ):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert not v.ok, sent
+
+
+def test_caliber_subject_strips_de_prefix():
+    """「订单的毛利率定义为…」被定义的是毛利率（账本外）而非订单，须剥前缀后核。"""
+    led = _ledger_with_order()
+    v = verify_answer("订单的毛利率定义为毛利除以营收。", led, strict_numbers=False)
+    assert not v.ok
+    assert any("毛利率" in u for u in v.unverified)
+
+
+def test_caliber_grounded_metric_not_flagged():
+    """账本内指标的口径定义（哪怕未加标记）不误伤——毛利率此处在账本。"""
+    led = _ledger_with_order()
+    led.add_metric_summary({"id": "m1", "name": "gross_margin", "display_name": "毛利率"})
+    v = verify_answer("毛利率定义为毛利除以营业收入。", led, strict_numbers=False)
+    assert v.ok, v.unverified
+
+
+def test_caliber_marked_metric_reported_once():
+    """加了书名号的账本外口径名仍被拦，但只报一次（不因口径通道重复计数）。"""
+    led = _ledger_with_order()
+    v = verify_answer("「毛利率」定义为毛利除以营业收入。", led, strict_numbers=False)
+    assert not v.ok
+    assert sum("毛利率" in u for u in v.unverified) == 1
+
+
+def test_caliber_pronoun_subject_not_flagged():
+    """指代/泛称主语（该指标/该口径）不是具名断言，不核。"""
+    led = _ledger_with_order()
+    for sent in (
+        "该指标定义为毛利除以营收。",
+        "其口径为按自然月汇总。",
+        "上述口径是以本体为准。",
+    ):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert v.ok, (sent, v.unverified)
+
+
+def test_caliber_non_definition_context_not_flagged():
+    """裸「口径」「等于」不触发：'统计口径以本体为准'、'总数等于…' 非指标定义。"""
+    led = _ledger_with_order()
+    for sent in (
+        "口径以已发布本体为准，请勿自行重写。",
+        "统计口径需与业务方确认。",
+        "请注意各系统口径可能不一致。",
+    ):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert v.ok, (sent, v.unverified)
+
+
+def test_caliber_definition_echoing_question_not_flagged():
+    """用户问句里就写了这个口径名 → 复述不算模型编造。"""
+    led = _ledger_with_order()
+    v = verify_answer(
+        "你问的动销率，通常定义为动销 SKU 数占比。",
+        led, strict_numbers=False, question="动销率是怎么定义的？",
+    )
+    assert v.ok, v.unverified
+
+
+# ---------------------------------------------------------------------------
+# 关联键断言接地（收口缺口 A 的高危子类）：散文里「通过 X 关联」「外键为 X」
+# 若 X 长得像键名却不在账本 → 编造连接键（会诱导用户写出错 SQL），即便无标记也拦。
+# 反向：真键、泛称键词、动词、对象名级关系不得误伤。
+# ---------------------------------------------------------------------------
+
+
+def test_joinkey_fabricated_key_in_prose_flagged():
+    """「通过客户编号进行关联」——客户编号不在账本（真字段是 customer_id）→ 拦。"""
+    led = _ledger_with_order()
+    v = verify_answer("订单表和客户表可以通过客户编号进行关联查询。", led, strict_numbers=False)
+    assert not v.ok
+    assert any("客户编号" in u for u in v.unverified)
+
+
+def test_joinkey_explicit_declaration_flagged():
+    """显式「外键为 X / 关联键是 X」形式同样生效。"""
+    led = _ledger_with_order()
+    for sent in ("两表的外键为 buyer_id。", "关联键是 cust_code。"):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert not v.ok, sent
+
+
+def test_joinkey_real_key_not_flagged():
+    """账本内的真连接键（未加标记）不误伤——customer_id 在账本。"""
+    led = _ledger_with_order()
+    led.add_object_detail({
+        "id": "o1", "name": "order", "display_name": "订单",
+        "properties": [{"name": "customer_id", "display_name": "客户ID",
+                        "semantic_type": "identifier"}],
+        "relations": [],
+    })
+    v = verify_answer("订单表通过 customer_id 关联客户表。", led, strict_numbers=False)
+    assert v.ok, v.unverified
+
+
+def test_joinkey_generic_keyword_not_flagged():
+    """泛称键词（外键/主键/关联键）不是具体字段名，不核。"""
+    led = _ledger_with_order()
+    for sent in ("两张表通过外键关联。", "它们的关联键是主键。"):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert v.ok, (sent, v.unverified)
+
+
+def test_joinkey_verb_after_tongguo_not_flagged():
+    """「通过分析/计算/对比 … 关联」里的动词不长得像键名 → 不误当连接键。"""
+    led = _ledger_with_order()
+    for sent in (
+        "通过分析可以关联出用户偏好。",
+        "通过计算得到各维度的关联度。",
+        "通过对比不同渠道来匹配最优方案。",
+    ):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert v.ok, (sent, v.unverified)
+
+
+# ---------------------------------------------------------------------------
+# 百分比/倍数数值接地（收口缺口 D 的低噪子类）：%/‰/倍/百分点是结论统计量，
+# 无 run_sql 凭证即编造。反向：来自单元格的百分比、问句复述的比例不误伤。
+# ---------------------------------------------------------------------------
+
+
+def test_pct_fabricated_percentage_flagged():
+    led = _ledger_with_order()  # 无 cells
+    v = verify_answer("订单的退款率约为 18%。", led, strict_numbers=True)
+    assert not v.ok
+    assert any("18" in u for u in v.unverified)
+
+
+def test_pct_fabricated_multiple_flagged():
+    led = _ledger_with_order()
+    v = verify_answer("今年销量增长了 3 倍。", led, strict_numbers=True)
+    assert not v.ok
+    assert any("3" in u for u in v.unverified)
+
+
+def test_pct_percentage_from_cells_passes():
+    led = _ledger_with_order()
+    led.add_cells(["rate"], [{"rate": 18}])
+    v = verify_answer("退款率为 18%。", led, strict_numbers=True)
+    assert v.ok, v.unverified
+
+
+def test_pct_echoed_from_question_not_flagged():
+    """用户问句里给定的比例阈值（复述）不要求凭证。"""
+    led = _ledger_with_order()
+    v = verify_answer(
+        "已按你说的 20% 阈值筛选。", led, strict_numbers=True,
+        question="退款率超过 20% 的订单有哪些？",
+    )
+    assert v.ok, v.unverified
+
+
