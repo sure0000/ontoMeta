@@ -29,10 +29,10 @@ COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
     "llm": ("LLM / 嵌入服务", True),
     "datahub": ("DataHub（GMS + 前端）", False),
     "airflow": ("Airflow 调度", False),
-    "seatunnel": ("SeaTunnel 搬运", False),
     "warehouse": ("目标数仓（Doris/Hive/MySQL/…）", True),
     # 已移除：
     # - sync_runner: 新架构统一走 Flink SQL，不再需要独立搬运服务
+    # - seatunnel: 已被 Flink 完全替代，不再作为独立组件
     # - cube: 语义层可选，不是核心依赖，配置生成接口保留供手动部署
     # - postgres: ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
 }
@@ -63,9 +63,6 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("password", "str", True, False, None),
         ("token", "str", True, False, None),
         ("api_version", "str", False, False, "v1"),
-    ],
-    "seatunnel": [
-        ("rest_endpoint", "str", False, True, "http://localhost:5801"),
     ],
     "warehouse": [
         ("sqlalchemy_url", "str", True, True, None),
@@ -133,7 +130,6 @@ _BARE_METAL_INSTALL_PARAMS: dict[str, list[ConnectionField]] = {
         ("admin_username", "str", False, False, "admin"),
         ("admin_password", "str", True, False, None),  # 留空则自动生成并回收
     ],
-    "seatunnel": [("port", "int", False, False, 5801)],
     "warehouse": [
         ("port", "int", False, False, 9030),
         ("dialect", "str", False, True, "doris"),
@@ -178,8 +174,6 @@ def build_bare_metal_connection(key: str, spec: dict[str, Any]) -> dict[str, Any
         return {"endpoint": f"http://{h}:{spec.get('port', 8081)}",
                 "username": spec.get("username"), "password": spec.get("password"),
                 "token": spec.get("token"), "api_version": spec.get("api_version", "v1")}
-    if key == "seatunnel":
-        return {"rest_endpoint": f"http://{h}:{spec.get('port', 5801)}"}
     if key == "warehouse":
         dialect = spec.get("dialect", "doris")
         user = spec.get("username", "root")
@@ -1106,7 +1100,6 @@ _PROBES: dict[str, Any] = {
     "llm": _probe_llm,
     "datahub": lambda c: _probe_http(f"{(c.get('gms_url') or '').rstrip('/')}/config"),
     "airflow": _probe_airflow,
-    "seatunnel": lambda c: _probe_http(f"{(c.get('rest_endpoint') or '').rstrip('/')}/api/v1/info"),
     "warehouse": _probe_sqlalchemy,
     "cube": lambda c: _probe_http(f"{(c.get('api_url') or '').rstrip('/')}/"),
     "postgres": _probe_sqlalchemy,
@@ -1139,8 +1132,7 @@ def _deploy_docker(key: str, spec: dict[str, Any], log: list[str] | None = None)
     container_port = spec.get("container_port")
     if not container_port:
         # 各组件默认容器端口
-        defaults = {"datahub": 8080, "airflow": 8080, "seatunnel": 5801, "cube": 4000,
-                    "sync_runner": 8098, "postgres": 5432}
+        defaults = {"datahub": 8080, "airflow": 8080}
         container_port = defaults.get(key)
     if not container_port:
         raise ValueError("docker 部署需指定 container_port")
@@ -1164,9 +1156,8 @@ def _deploy_docker(key: str, spec: dict[str, Any], log: list[str] | None = None)
 def _fill_port(spec: dict[str, Any], key: str, port: int) -> None:
     """把回收到的端口填进 bare_metal 参数里该组件的端口字段。"""
     port_fields = {
-        "datahub": "gms_port", "airflow": "port", "seatunnel": "port",
-        "warehouse": "port", "sync_runner": "port", "cube": "port",
-        "postgres": "port", "llm": "port",
+        "datahub": "gms_port", "airflow": "port",
+        "warehouse": "port", "llm": "port",
     }
     f = port_fields.get(key)
     if f:

@@ -668,7 +668,7 @@ export function DependencyPanel() {
                               name="extra_jobs_dir"
                               extra="docker 通道的搬运作业配置落在这里并挂进搬运容器；runner 通道不用"
                             >
-                              <Input placeholder="…/seatunnel/jobs" />
+                              <Input placeholder="…/flink/jobs" />
                             </Form.Item>
                             <Form.Item
                               noStyle
@@ -766,7 +766,7 @@ export function DependencyPanel() {
                               name="extra_drivers_dir"
                               extra="仅 docker 通道：驱动因授权不随镜像分发，逐个 jar 挂进搬运容器"
                             >
-                              <Input placeholder="…/seatunnel/drivers" />
+                              <Input placeholder="…/flink/drivers" />
                             </Form.Item>
                             <Form.Item
                               label="搬运工具镜像覆盖"
@@ -784,9 +784,8 @@ export function DependencyPanel() {
                                 style={{ width: 260 }}
                                 options={[
                                   { value: "", label: "自动（推荐）" },
-                                  { value: "seatunnel", label: "seatunnel" },
-                                  { value: "datax", label: "datax（需先配镜像）" },
                                   { value: "flink", label: "flink" },
+                                  { value: "datax", label: "datax（需先配镜像）" },
                                 ]}
                               />
                             </Form.Item>
