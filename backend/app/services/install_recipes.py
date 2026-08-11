@@ -14,7 +14,7 @@
 无法在本仓库环境实测。故按 tier 区分：
 - ``REAL``：安装路径明确、依赖单一，实现为可跑的真配方（airflow），
   平台差异由平台层收敛。
-- ``BEST_EFFORT``：重组件（datahub/warehouse-doris/llm），装法随发行版/集群
+- ``BEST_EFFORT``：重组件（datahub/llm），装法随发行版/集群
   差异极大，这里给出「探测前置条件 → 缺失即明确报错」的骨架，不假装一键装好。
   真实落地需按目标环境补脚本；失败信息会回显到部署错误里，可见可改。
 """
@@ -199,7 +199,6 @@ def _teardown_airflow(ssh: SSHSession, spec: dict[str, Any]) -> str | None:
 INSTALL_RECIPES: dict[str, Recipe] = {
     "airflow": Recipe(REAL, _install_airflow, _teardown_airflow),
     "datahub": Recipe(BEST_EFFORT, _best_effort_unsupported("DataHub"), _noop_teardown),
-    "warehouse": Recipe(BEST_EFFORT, _best_effort_unsupported("目标数仓（Doris/Hive/…）"), _noop_teardown),
     "llm": Recipe(BEST_EFFORT, _best_effort_unsupported("LLM 推理服务"), _noop_teardown),
 }
 

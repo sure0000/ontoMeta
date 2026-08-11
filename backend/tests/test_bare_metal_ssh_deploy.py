@@ -198,9 +198,9 @@ def test_run_install_dispatches_to_recipe():
     fake_recipe = ir.Recipe(ir.REAL, lambda ssh, spec: sentinel, ir._noop_teardown)
     fake_session = MagicMock()
     fake_session.__enter__.return_value = fake_session
-    with patch.dict(ir.INSTALL_RECIPES, {"postgres": fake_recipe}), \
+    with patch.dict(ir.INSTALL_RECIPES, {"airflow": fake_recipe}), \
          patch.object(ir, "SSHSession", return_value=fake_session):
-        conn = ir.run_install("postgres", {"ssh_host": "h", "ssh_user": "root", "ssh_password": "p"})
+        conn = ir.run_install("airflow", {"ssh_host": "h", "ssh_user": "root", "ssh_password": "p"})
     assert conn == sentinel
 
 
@@ -335,7 +335,7 @@ def test_home_dir_windows_uses_userprofile():
 def test_deploy_bare_metal_failure_records_deploy_log(svc, db):
     """部署失败 → deploy_log 落库（含失败行），前端可据此定位。"""
     row = _insert_bare_metal_row(
-        db, "sync_runner",
+        db, "airflow",
         {"ssh_host": "1.2.3.4", "ssh_user": "ubuntu", "ssh_password": "pw"},
     )
 
@@ -347,7 +347,7 @@ def test_deploy_bare_metal_failure_records_deploy_log(svc, db):
         result = svc.deploy(db, row.id)
     assert result["ok"] is False
     db.refresh(row)
-    assert "== sync_runner 部署开始" in (row.deploy_log or "")
+    assert "== airflow 部署开始" in (row.deploy_log or "")
     assert "$ python3 -c 'probe'" in (row.deploy_log or "")
     assert "安装失败" in (row.deploy_log or "")
     svc.delete_component(db, row.id)
@@ -355,9 +355,9 @@ def test_deploy_bare_metal_failure_records_deploy_log(svc, db):
 
 # --------------------------------------------------------------------- start_deploy
 
-# 用多实例组件 llm（而非单例 cube）：会话级共享 DB 里其他用例已建过单例组件，
+# 用多实例组件 llm（而非单例）：会话级共享 DB 里其他用例已建过单例组件，
 # 单例 create 会以「已存在」失败。多实例每次 create 都成功，cleanup 只删本用例自己的行，
-# 不影响别的测试。llm 也不触发 warehouse 的数据源联动副作用。
+# 不影响别的测试。
 def test_start_deploy_external_is_synchronous(svc, db):
     row = svc.create_component(db, {
         "key": "llm", "deploy_mode": "external",
@@ -370,7 +370,7 @@ def test_start_deploy_external_is_synchronous(svc, db):
     svc.delete_component(db, row.id)
 
 
-# bare_metal 用例不能走 create_component：多实例组件（llm/warehouse）现已收窄为 external-only，
+# bare_metal 用例不能走 create_component：多实例组件（llm）现已收窄为 external-only，
 # 会被白名单拒；单例组件（airflow 等）又会撞会话级共享 DB 里别的用例建的行。故直接插模型行，
 # 绕开单例守卫与白名单——这两条不是本用例要测的，本用例测的是 deploy 机制本身。
 def _insert_bare_metal_row(db, key: str, spec: dict) -> ds.DependencyComponent:
@@ -423,10 +423,10 @@ def test_deploy_bare_metal_recovers_connection_and_probes(svc, db):
 # --------------------------------------------------------------------- 部署方式白名单
 
 def test_allowed_deploy_modes_restricts_external_only_components():
-    """datahub / warehouse / llm 只允许 external；其余组件全支持。"""
-    for k in ("datahub", "warehouse", "llm"):
+    """datahub / llm 只允许 external；其余组件全支持。"""
+    for k in ("datahub", "llm"):
         assert ds.allowed_deploy_modes(k) == ["external"]
-    for k in ("airflow", "postgres", "cube"):
+    for k in ("airflow",):
         assert set(ds.allowed_deploy_modes(k)) == set(ds.DEPLOY_MODES)
 
 

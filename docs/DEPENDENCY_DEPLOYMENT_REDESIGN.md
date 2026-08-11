@@ -1,10 +1,18 @@
 # 依赖组件统一部署管理 · 重新设计
 
 > 状态：**设计**。本文重新设计 ontoMeta 对「除自身前后端外所有依赖组件」的部署与连接管理，
-> 统一收进设置页，与现有设置（LLM / DataHub / Airflow / Cube / 数据源）一并考虑。
+> 统一收进设置页，与现有设置（LLM / DataHub / Airflow / 数据源）一并考虑。
 >
 > 目标一句话：**每个依赖组件在设置页选一种部署方式（物理机 / Docker / K8s / 已有外部服务），
 > 选「部署」则由 ontoMeta 拉起并自动回收连接信息，选「已有」则手填连接信息——之后对上层功能而言无差别。**
+>
+> **现状更新（2026-08）**：本设计落地后经架构演进裁剪，以下组件已从基础设施面板移除，由其他机制替代：
+> - `sync_runner` / `seatunnel`：搬运统一走 Flink SQL on YARN（见统一执行重构），不再作为独立组件
+> - `cube`：非核心依赖，Cube 模型生成接口保留，配置需手动部署
+> - `postgres`：ontoMeta 自身数据库由环境变量配置，不属于「依赖组件」
+> - `warehouse` / `source_db`：目标数仓/源库连接由「数据源」标签页（DataSourcesPanel）统一管理，完整 CRUD + 测试
+>
+> 当前实际保留的组件：`llm` / `datahub` / `airflow`。下表及后文仍保留全量设计作为历史参考。
 
 ---
 
@@ -289,7 +297,7 @@ GET    /api/settings/dependencies/schema          # 返回 CONNECTION_SCHEMAS + 
 - 「LLM 与生成」→ LLM 行迁到基础设施；草稿并发度保留在此 Tab。
 - 「数据连接」→ DataHub + 数据源迁到基础设施；本 Tab 删除或仅留说明。
 - 「调度与语义」→ Airflow + Cube + SeaTunnel + sync-runner 迁到基础设施；本 Tab 删除。
-- 「治理智能体 / 外部工具 / 安全与鉴权」不动（不是部署型依赖）。
+- 「治理智能体 / 安全与鉴权」不动（不是部署型依赖）。
 
 ---
 

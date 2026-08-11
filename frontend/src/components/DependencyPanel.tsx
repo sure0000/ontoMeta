@@ -64,11 +64,6 @@ const AIRFLOW_EXTRA_FIELDS = [
   "git_auto_init",
   "git_author",
   "git_email",
-  "sync_channel",
-  "docker_network",
-  "drivers_dir",
-  "sync_tool_images",
-  "sync_tool",
   "max_tasks_per_dag",
   "max_active_tasks_per_dag",
   "dag_parse_timeout",
@@ -337,13 +332,6 @@ export function DependencyPanel() {
         <Space size={4}>
           {n}
           {r.is_default ? <Tag color="blue">默认</Tag> : null}
-          {r.key === "warehouse" && r.deploy_spec?._datasource_id ? (
-            <Tooltip title="已自动创建数据源，可作为物化目标">
-              <Tag color="green" style={{ fontSize: 11 }}>
-                ✓ 数据源已链
-              </Tag>
-            </Tooltip>
-          ) : null}
         </Space>
       ),
     },
@@ -462,7 +450,7 @@ export function DependencyPanel() {
                 // 切组件类型：清掉上一组 conn_*/spec_*，避免同名字段残留上次填的值。
                 clearDynamicFields();
                 // 切组件后若当前部署方式不在该组件白名单内，回落到 external，
-                // 避免留下一个后端会拒绝的非法组合（datahub/warehouse/llm 仅 external）。
+                // 避免留下一个后端会拒绝的非法组合（datahub/llm 仅 external）。
                 const allowed = schema?.component_deploy_modes?.[k] ?? schema?.deploy_modes ?? [];
                 const cur = form.getFieldValue("deploy_mode") as string | undefined;
                 if (!cur || !allowed.includes(cur)) {
@@ -481,7 +469,7 @@ export function DependencyPanel() {
           <Form.Item noStyle shouldUpdate>
             {({ getFieldValue }) => {
               const key = getFieldValue("key") as string | undefined;
-              // 未列出的组件默认全支持；列出的（datahub/warehouse/llm）只回 external。
+              // 未列出的组件默认全支持；列出的（datahub/llm）只回 external。
               const allowed = key
                 ? (schema?.component_deploy_modes?.[key] ?? schema?.deploy_modes ?? [])
                 : (schema?.deploy_modes ?? []);
@@ -732,62 +720,6 @@ export function DependencyPanel() {
                                   </>
                                 ) : null
                               }
-                            </Form.Item>
-                          </>
-                        ),
-                      },
-                      {
-                        key: "channel",
-                        label: "执行通道",
-                        children: (
-                          <>
-                            <Form.Item
-                              label="通道"
-                              name="extra_sync_channel"
-                              extra="runner：Airflow 任务向 Flink 提交作业（推荐）；docker：经 docker.sock 起搬运容器（已废弃）"
-                            >
-                              <Radio.Group
-                                optionType="button"
-                                options={[
-                                  { label: "runner（常驻服务）", value: "runner" },
-                                  { label: "docker（兄弟容器）", value: "docker" },
-                                ]}
-                              />
-                            </Form.Item>
-                            <Form.Item
-                              label="搬运容器网络"
-                              name="extra_docker_network"
-                              extra="仅 docker 通道：搬运容器要能解析源库/数仓的容器名"
-                            >
-                              <Input placeholder="bridge" style={{ width: 260 }} />
-                            </Form.Item>
-                            <Form.Item
-                              label="JDBC 驱动目录"
-                              name="extra_drivers_dir"
-                              extra="仅 docker 通道：驱动因授权不随镜像分发，逐个 jar 挂进搬运容器"
-                            >
-                              <Input placeholder="…/flink/drivers" />
-                            </Form.Item>
-                            <Form.Item
-                              label="搬运工具镜像覆盖"
-                              name="extra_sync_tool_images"
-                              extra="仅 docker 通道：工具名=镜像，逗号分隔"
-                            >
-                              <Input placeholder="datax=registry.internal/datax:3.0" />
-                            </Form.Item>
-                            <Form.Item
-                              label="搬运工具"
-                              name="extra_sync_tool"
-                              extra="留空 = 自动；指定后物化一律用它"
-                            >
-                              <Select
-                                style={{ width: 260 }}
-                                options={[
-                                  { value: "", label: "自动（推荐）" },
-                                  { value: "flink", label: "flink" },
-                                  { value: "datax", label: "datax（需先配镜像）" },
-                                ]}
-                              />
                             </Form.Item>
                           </>
                         ),

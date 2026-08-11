@@ -29,12 +29,12 @@ COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
     "llm": ("LLM / 嵌入服务", True),
     "datahub": ("DataHub（GMS + 前端）", False),
     "airflow": ("Airflow 调度", False),
-    "warehouse": ("目标数仓（Doris/Hive/MySQL/…）", True),
     # 已移除：
     # - sync_runner: 新架构统一走 Flink SQL，不再需要独立搬运服务
     # - seatunnel: 已被 Flink 完全替代，不再作为独立组件
     # - cube: 语义层可选，不是核心依赖，配置生成接口保留供手动部署
     # - postgres: ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
+    # - warehouse: 目标数仓连接由「数据源」标签页统一管理（DataSourcesPanel 完整 CRUD+测试）
 }
 
 SINGLETON_KEYS = {k for k, (_, multi) in COMPONENT_CATALOG.items() if not multi}
@@ -64,10 +64,6 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("token", "str", True, False, None),
         ("api_version", "str", False, False, "v1"),
     ],
-    "warehouse": [
-        ("sqlalchemy_url", "str", True, True, None),
-        ("dialect", "str", False, True, "doris"),
-    ],
 }
 
 # 部署参数 schema：按 mode（跨组件通用）。
@@ -75,11 +71,10 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
 DEPLOY_MODES = ["external", "docker", "k8s", "bare_metal"]
 
 # 每组件允许的部署方式白名单：未列出的组件默认支持全部 DEPLOY_MODES。
-# datahub / warehouse(Doris) / llm 的裸机安装随发行版/集群差异极大，无自动化价值，
+# datahub / llm 的裸机安装随发行版/集群差异极大，无自动化价值，
 # 只支持 external（登记已有服务）——前端据此收窄模式选择器，后端据此校验拦非法组合。
 COMPONENT_DEPLOY_MODES: dict[str, list[str]] = {
     "datahub": ["external"],
-    "warehouse": ["external"],
     "llm": ["external"],
 }
 
@@ -130,13 +125,6 @@ _BARE_METAL_INSTALL_PARAMS: dict[str, list[ConnectionField]] = {
         ("admin_username", "str", False, False, "admin"),
         ("admin_password", "str", True, False, None),  # 留空则自动生成并回收
     ],
-    "warehouse": [
-        ("port", "int", False, False, 9030),
-        ("dialect", "str", False, True, "doris"),
-        ("username", "str", False, True, "root"),
-        ("db_password", "str", True, False, None),
-        ("database", "str", False, False, ""),
-    ],
     "llm": [
         ("port", "int", False, True, None),
         ("path", "str", False, False, "/v1"),
@@ -174,15 +162,6 @@ def build_bare_metal_connection(key: str, spec: dict[str, Any]) -> dict[str, Any
         return {"endpoint": f"http://{h}:{spec.get('port', 8081)}",
                 "username": spec.get("username"), "password": spec.get("password"),
                 "token": spec.get("token"), "api_version": spec.get("api_version", "v1")}
-    if key == "warehouse":
-        dialect = spec.get("dialect", "doris")
-        user = spec.get("username", "root")
-        pwd = spec.get("db_password") or ""
-        port = spec.get("port", 9030)
-        db = spec.get("database", "")
-        # 数仓走 pymysql（MySQL 线协议）
-        driver = "+pymysql"
-        return {"sqlalchemy_url": f"{dialect}{driver}://{user}:{pwd}@{h}:{port}/{db}", "dialect": dialect}
     if key == "llm":
         return {"provider": spec.get("provider", "openai-compatible"),
                 "api_base_url": f"http://{h}:{spec.get('port')}{spec.get('path', '/v1')}",
@@ -436,8 +415,6 @@ class DependencyComponentService:
         db.add(row)
         db.commit()
         db.refresh(row)
-        if row.key == "warehouse":
-            self._link_warehouse_datasource(db, row)
         return row
 
     def update_component(
@@ -476,8 +453,6 @@ class DependencyComponentService:
                 row.deploy_status = "connected"
         db.commit()
         db.refresh(row)
-        if row.key == "warehouse":
-            self._link_warehouse_datasource(db, row)
         return row
 
     def _merge_connection(self, row: DependencyComponent, incoming: dict[str, Any]) -> dict[str, Any]:
@@ -512,43 +487,6 @@ class DependencyComponentService:
             )
         ).scalars().all():
             r.is_default = False
-
-    def _link_warehouse_datasource(self, db: Session, warehouse_row: DependencyComponent) -> None:
-        """注册表 warehouse 组件 → 自动创建/更新对应的 DataSource，使其立刻可作为物化目标使用。
-
-        warehouse connection 有 sqlalchemy_url 时，导出为 DataSource（kind 从 dialect 推）。
-        DataSource.id 回写到 warehouse 的 deploy_spec._datasource_id 以便双向索引。
-        """
-        from app.models.data_app import DataSource
-
-        conn = _loads(warehouse_row.connection_json)
-        dsn = (conn.get("sqlalchemy_url") or "").strip()
-        if not dsn:
-            return  # 连接未配，跳过
-        dialect = (conn.get("dialect") or "doris").strip().lower()
-        # 方言 → DataSource kind
-        kind_map = {"doris": "doris", "mysql": "mysql", "postgresql": "postgres",
-                    "hive": "hive", "clickhouse": "clickhouse", "starrocks": "doris"}
-        kind = kind_map.get(dialect, dialect)
-        # 回收已存在的链接
-        spec = _loads(warehouse_row.deploy_spec_json)
-        existing_ds_id = spec.get("_datasource_id")
-        ds = db.get(DataSource, existing_ds_id) if existing_ds_id else None
-        if ds:
-            ds.name = warehouse_row.name
-            ds.kind = kind
-            ds.dsn_secret_ref = dsn
-            ds.status = "connected" if warehouse_row.deploy_status == "connected" else "untested"
-        else:
-            ds = DataSource(
-                name=warehouse_row.name, kind=kind, dsn_secret_ref=dsn,
-                status="connected" if warehouse_row.deploy_status == "connected" else "untested",
-            )
-            db.add(ds)
-            db.flush()
-            spec["_datasource_id"] = ds.id
-            warehouse_row.deploy_spec_json = _dumps(spec)
-        db.commit()
 
     # ---- Phase 1：投影读/写（供 SettingsService 委托，保持既有返回结构）----
 
@@ -772,8 +710,8 @@ class DependencyComponentService:
 
     # -- Airflow（连接 + 编排参数 extra，投影为单一 dict）--
     _AIRFLOW_EXTRA_FIELDS = (
-        "dags_dir", "jobs_dir", "sync_channel", "docker_network", "drivers_dir",
-        "sync_tool_images", "sync_tool", "max_tasks_per_dag", "max_active_tasks_per_dag",
+        "dags_dir", "jobs_dir",
+        "max_tasks_per_dag", "max_active_tasks_per_dag",
         "dag_parse_timeout", "preflight_sentinel_timeout", "staging_swap",
         # DAG 投递方式（local 默认 / git-sync）与 git 参数。跨机部署时 git-sync 把产物
         # push 到远程仓，Airflow 侧拉取——全部在设置页填，不进配置文件。
@@ -792,9 +730,6 @@ class DependencyComponentService:
             "token": af_conn.get("token"),
             "api_version": af_conn.get("api_version", "v1"),
             "enabled": af.enabled if af else False,
-            # 保留字段用于 API 兼容性，但不再实际使用（新架构统一走 Flink）
-            "sync_runner_endpoint": "",
-            "sync_runner_token": None,
         }
         for f in self._AIRFLOW_EXTRA_FIELDS:
             out[f] = extra.get(f)
@@ -832,7 +767,6 @@ class DependencyComponentService:
                 extra[f] = data[f]
         spec["extra"] = extra
         af_row.deploy_spec_json = _dumps(spec)
-        # sync_runner_endpoint/token 字段忽略（向后兼容，但不再实际操作）
         db.commit()
         return self.get_airflow(db)
 
@@ -897,8 +831,6 @@ class DependencyComponentService:
                 row.deploy_spec_json = _dumps(spec)
                 row.deploy_log = "\n".join(log)
                 db.commit()
-                if row.key == "warehouse":
-                    self._link_warehouse_datasource(db, row)
                 result = self.probe(db, component_id)
                 log.append(f"拨测：{'连接成功' if result.ok else result.message}")
                 row.deploy_log = "\n".join(log)
@@ -911,8 +843,6 @@ class DependencyComponentService:
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
                 row.deploy_log = "\n".join(log)
                 db.commit()
-                if row.key == "warehouse":
-                    self._link_warehouse_datasource(db, row)
                 result = self.probe(db, component_id)
                 log.append(f"拨测：{'连接成功' if result.ok else result.message}")
                 row.deploy_log = "\n".join(log)
@@ -925,8 +855,6 @@ class DependencyComponentService:
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
                 row.deploy_log = "\n".join(log)
                 db.commit()
-                if row.key == "warehouse":
-                    self._link_warehouse_datasource(db, row)
                 result = self.probe(db, component_id)
                 log.append(f"拨测：{'连接成功' if result.ok else result.message}")
                 row.deploy_log = "\n".join(log)
@@ -1044,23 +972,6 @@ def _probe_llm(conn: dict[str, Any]) -> ProbeResult:
         return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
 
 
-def _probe_sqlalchemy(conn: dict[str, Any]) -> ProbeResult:
-    from sqlalchemy import create_engine, text
-
-    url = (conn.get("sqlalchemy_url") or "").strip()
-    if not url:
-        return ProbeResult(False, "缺少 sqlalchemy_url")
-    start = time.perf_counter()
-    try:
-        eng = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
-        with eng.connect() as c:
-            c.execute(text("SELECT 1"))
-        eng.dispose()
-        return ProbeResult(True, "连接成功", int((time.perf_counter() - start) * 1000))
-    except Exception as exc:  # noqa: BLE001
-        return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
-
-
 def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
     """两步拨测：/health 探通，再打带版本前缀的 REST 探鉴权（复用既有 AirflowClient 逻辑）。"""
     from app.connectors.airflow import AirflowClient, AirflowError, explain_ping_failure
@@ -1100,9 +1011,6 @@ _PROBES: dict[str, Any] = {
     "llm": _probe_llm,
     "datahub": lambda c: _probe_http(f"{(c.get('gms_url') or '').rstrip('/')}/config"),
     "airflow": _probe_airflow,
-    "warehouse": _probe_sqlalchemy,
-    "cube": lambda c: _probe_http(f"{(c.get('api_url') or '').rstrip('/')}/"),
-    "postgres": _probe_sqlalchemy,
 }
 
 
@@ -1157,7 +1065,7 @@ def _fill_port(spec: dict[str, Any], key: str, port: int) -> None:
     """把回收到的端口填进 bare_metal 参数里该组件的端口字段。"""
     port_fields = {
         "datahub": "gms_port", "airflow": "port",
-        "warehouse": "port", "llm": "port",
+        "llm": "port",
     }
     f = port_fields.get(key)
     if f:
