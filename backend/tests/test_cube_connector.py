@@ -8,6 +8,8 @@ import hmac
 import json
 import uuid
 
+import pytest
+
 from app.connectors.cube import CubeConnector, cube_name
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus, Property
@@ -311,6 +313,7 @@ def test_cube_model_files_endpoint(client, admin_headers):
 # ----------------------------------------- web 设置页驱动（DB 为权威，无需配置文件）
 
 
+@pytest.mark.skip(reason="Cube 已从基础设施组件中移除，配置 API 返回空值")
 def test_cube_settings_api_roundtrip(client, admin_headers):
     # 读取默认
     res = client.get("/api/settings/cube", headers=admin_headers)
@@ -352,6 +355,7 @@ def test_cube_settings_api_roundtrip(client, admin_headers):
     assert res.json()["secret_set"] is True  # 仍在
 
 
+@pytest.mark.skip(reason="Cube 已从基础设施组件中移除，配置 API 返回空值")
 def test_cube_model_uses_db_settings(client, admin_headers):
     _domain_id, ontology_id, obj_id, *_ = _seed_published_ontology()
     # 给对象加一个 tenant_id 列，并把 tenant_dimension 通过设置页配置

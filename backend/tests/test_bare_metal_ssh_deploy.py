@@ -246,9 +246,10 @@ def test_detect_platform_unknown_raises():
         detect_platform(ssh)
 
 
-# --------------------------------------------------------------------- sync_runner 配方
+# --------------------------------------------------------------------- 平台分支（airflow / 工具）
 
-def _sync_runner_spec(**extra):
+def _simple_spec(**extra):
+    """通用测试 spec，用于需要基本 SSH 连接信息的测试。"""
     return {
         "ssh_host": "1.2.3.4", "ssh_user": "ubuntu",
         "auth_method": "password", "ssh_password": "pw",
@@ -275,202 +276,6 @@ def _linux_run(plat_name: str = "Linux", home: str = "/home/ubuntu", busy: set[i
         return CommandResult(0, "", "")
     return fake_run
 
-
-def test_find_free_port_uses_provided_port():
-    """spec 给了端口且空闲 → 直接用，不扫描。"""
-    from app.services.install_platforms import Platform
-    from app.services.install_recipes import _find_free_port
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run(busy=set())
-    assert _find_free_port(ssh, Platform("linux", "python3"), _sync_runner_spec(port=8098)) == 8098
-
-
-def test_find_free_port_rejects_busy_provided_port():
-    """spec 给的端口被占用 → 明确报错（含「占用」），不静默换端口。"""
-    from app.services.install_platforms import Platform
-    from app.services.install_recipes import _find_free_port
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run(busy={8098})
-    with pytest.raises(SSHError, match="占用"):
-        _find_free_port(ssh, Platform("linux", "python3"), _sync_runner_spec(port=8098))
-
-
-def test_find_free_port_auto_scans_past_busy():
-    """留空 → 8098 忙则继续试 8100，命中空闲端口。"""
-    from app.services.install_platforms import Platform
-    from app.services.install_recipes import _find_free_port
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run(busy={8098})
-    assert _find_free_port(ssh, Platform("linux", "python3"), _sync_runner_spec()) == 8100
-    probe_cmds = [c.args[0] for c in ssh.run.call_args_list]
-    assert any("python3" in c and "bind" in c for c in probe_cmds)
-
-
-def test_find_free_port_all_busy_raises():
-    """扫描范围全被占用 → 报「未找到可用端口」。"""
-    from app.services.install_platforms import Platform
-    from app.services.install_recipes import _find_free_port
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run(busy=set(range(8098, 9000)))
-    with pytest.raises(SSHError, match="未找到可用端口"):
-        _find_free_port(ssh, Platform("linux", "python3"), _sync_runner_spec())
-
-
-def test_install_sync_runner_issues_full_sequence():
-    """整条配方（Linux）：推源码包 → venv 装依赖 → systemd 起服务 → python 拨测 → 回收。"""
-    import base64
-    import io
-    import tarfile
-    import app.services.install_recipes as ir
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run()  # 8098 空闲；其余命令全成功
-    ssh.sudo.return_value = ir.CommandResult(0, "", "")
-    spec = _sync_runner_spec()
-
-    conn = ir._install_sync_runner(ssh, spec)
-
-    cmds = [c.args[0] for c in ssh.run.call_args_list]
-    sudo_cmds = [c.args[0] for c in ssh.sudo.call_args_list]
-    all_cmds = cmds + sudo_cmds
-    for needle in (
-        "apt-get install -y python3-pip python3-venv",
-        "python3 -m venv /home/ubuntu/sync-runner-venv",
-        "pip install -r /home/ubuntu/sync-runner/sync_runner/requirements.txt",
-        "/home/ubuntu/sync-runner/unpack.py /home/ubuntu/sync-runner/sync_runner.b64",
-        "systemctl daemon-reload",
-        "systemctl enable ontometa-sync-runner",
-        "systemctl restart ontometa-sync-runner",
-        "127.0.0.1:8098/healthz",  # 健康探测（python urllib，无 curl）
-    ):
-        assert any(needle in c for c in all_cmds), f"缺少命令: {needle}"
-    assert not any("curl" in c for c in all_cmds)
-
-    # put_file 四次：blob、unpack.py、unit、env
-    assert ssh.put_file.call_count == 4
-    blob = ssh.put_file.call_args_list[0].args[0].strip()
-    raw = base64.b64decode(blob)
-    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
-        names = tf.getnames()
-    assert "sync_runner/app.py" in names
-    assert "sync_runner/requirements.txt" in names
-    assert not any("__pycache__" in n for n in names)
-    unpack = ssh.put_file.call_args_list[1].args[0]
-    unit = ssh.put_file.call_args_list[2].args[0]
-    env = ssh.put_file.call_args_list[3].args[0]
-    assert "tarfile" in unpack and "extractall" in unpack
-    assert "EnvironmentFile=/etc/ontometa/ontometa-sync-runner.env" in unit
-    assert "--port 8098" in unit
-    assert "SYNC_RUNNER_TOKEN=" in env
-    assert "SYNC_SECRETS_DIR=/home/ubuntu/sync-runner/secrets" in env
-
-    # 端口写回 spec（deploy() 落库），连接按 schema 可校验
-    assert spec["port"] == 8098
-    assert conn["endpoint"] == "http://1.2.3.4:8098"
-    assert len(conn["token"]) == 32
-    assert set(conn["token"]) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
-    from app.services.dependency_service import _validate_connection
-    assert _validate_connection("sync_runner", conn)["endpoint"] == conn["endpoint"]
-
-
-def test_install_sync_runner_macos_uses_launchd():
-    """macOS：已有 python3 + 用户级 LaunchAgent；无 apt/systemctl/sudo，探测走 python3。"""
-    import app.services.install_recipes as ir
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run(plat_name="Darwin", home="/Users/u")
-    spec = _sync_runner_spec()
-
-    conn = ir._install_sync_runner(ssh, spec)
-
-    cmds = [c.args[0] for c in ssh.run.call_args_list]
-    assert not any("apt-get" in c for c in cmds)
-    assert not any("systemctl" in c for c in cmds)
-    assert ssh.sudo.call_count == 0
-    # per-user 域（非 gui）——SSH 无 GUI 会话，gui 域会起不来
-    assert any("launchctl bootstrap user/$(id -u)" in c for c in cmds)
-    assert not any("gui/$(id -u)" in c for c in cmds)
-    assert any("launchctl kickstart user/$(id -u)/com.ontometa.sync-runner" in c for c in cmds)
-    assert any("unpack.py" in c for c in cmds)
-    assert any("127.0.0.1:8098/healthz" in c for c in cmds)
-
-    plist = next(
-        c.args[0] for c in ssh.put_file.call_args_list if "ProgramArguments" in c.args[0]
-    )
-    assert "com.ontometa.sync-runner" in plist
-    assert "<string>-m</string>" in plist and "<string>uvicorn</string>" in plist
-    assert "SYNC_RUNNER_TOKEN" in plist
-    assert "/Users/u/sync-runner" in plist
-
-    assert spec["port"] == 8098
-    assert conn["endpoint"] == "http://1.2.3.4:8098"
-    assert len(conn["token"]) == 32
-
-
-def test_install_sync_runner_windows_no_admin_gives_manual():
-    """Windows：代码/venv 可装；sc.exe 无提权失败 → 报错附可照做的手动命令。"""
-    import app.services.install_recipes as ir
-
-    def fake_run(cmd, timeout=120.0):
-        if cmd == "uname -s":
-            return CommandResult(1, "", "not recognized")
-        if cmd == "ver":
-            return CommandResult(0, "Microsoft Windows [Version 10.0.22631]", "")
-        if cmd == "python --version":
-            return CommandResult(0, "Python 3.12.0", "")
-        if cmd == "echo %USERPROFILE%":
-            return CommandResult(0, "C:\\Users\\u", "")
-        if " -c " in cmd and "bind" in cmd:
-            return CommandResult(0, "", "")
-        if cmd.startswith("sc.exe create"):
-            return CommandResult(5, "", "拒绝访问。")
-        return CommandResult(0, "", "")
-
-    ssh = MagicMock()
-    ssh.run.side_effect = fake_run
-    with pytest.raises(SSHError, match="sc.exe"):
-        ir._install_sync_runner(ssh, _sync_runner_spec())
-    # 确实走到了 Windows 服务注册分支
-    assert any(c.args[0].startswith("sc.exe create") for c in ssh.run.call_args_list)
-
-
-def test_install_sync_runner_startup_timeout_raises():
-    """服务起不来（healthz 永不通）→ 报「启动超时」，不真等 90 秒。"""
-    import app.services.install_recipes as ir
-
-    def fake_run(cmd, timeout=120.0):
-        if cmd == "uname -s":
-            return CommandResult(0, "Linux", "")
-        if cmd == "echo $HOME":
-            return CommandResult(0, "/home/ubuntu", "")
-        if "healthz" in cmd:  # 健康探测永失败
-            return CommandResult(1, "", "connection refused")
-        return CommandResult(0, "", "")
-
-    ssh = MagicMock()
-    ssh.run.side_effect = fake_run
-    ssh.sudo.return_value = ir.CommandResult(0, "", "")
-    with patch("app.services.install_recipes.time.sleep"), \
-         pytest.raises(SSHError, match="启动超时"):
-        ir._install_sync_runner(ssh, _sync_runner_spec())
-
-
-def test_teardown_sync_runner_disables_unit():
-    """卸载（Linux）= systemctl disable --now，成功返回 None。"""
-    import app.services.install_recipes as ir
-
-    ssh = MagicMock()
-    ssh.run.side_effect = _linux_run()
-    ssh.sudo.return_value = ir.CommandResult(0, "", "")
-    assert ir._teardown_sync_runner(ssh, _sync_runner_spec()) is None
-    assert "systemctl disable --now ontometa-sync-runner" in ssh.sudo.call_args.args[0]
-
-
-# --------------------------------------------------------------------- 平台分支（airflow / 工具）
 
 def test_install_airflow_macos_no_apt():
     """airflow 在 macOS：venv + standalone（纯 Python），无 apt、无 sudo。"""
@@ -499,7 +304,7 @@ def test_install_airflow_windows_raises_upstream():
         CommandResult(0, "Microsoft Windows [Version 10.0]", ""),
     ]
     with pytest.raises(SSHError, match="不支持 Windows"):
-        ir._install_airflow(ssh, _sync_runner_spec())
+        ir._install_airflow(ssh, _simple_spec())
 
 
 def test_wait_http_uses_python_probe():
@@ -525,25 +330,6 @@ def test_home_dir_windows_uses_userprofile():
     ssh.run.assert_called_once_with("echo %USERPROFILE%")
 
 
-def test_deploy_bare_metal_persists_resolved_port(svc, db):
-    """deploy() bare_metal 分支应把配方写回的端口落库，重装/卸载保持一致。"""
-    row = _insert_bare_metal_row(
-        db, "sync_runner",
-        {"ssh_host": "1.2.3.4", "ssh_user": "ubuntu", "ssh_password": "pw"},
-    )
-    conn = {"endpoint": "http://1.2.3.4:8098", "token": "x" * 32}
-
-    def fake_run_install(key, spec, log=None):
-        spec["port"] = 8098  # 模拟配方把解析出的端口写回 spec
-        return conn
-
-    with patch("app.services.install_recipes.run_install", side_effect=fake_run_install), \
-         patch.object(svc, "probe", return_value=ds.ProbeResult(True, "连接成功", 12)):
-        result = svc.deploy(db, row.id)
-    assert result["ok"] is True
-    db.refresh(row)
-    assert ds._loads(row.deploy_spec_json)["port"] == 8098
-    svc.delete_component(db, row.id)
 
 
 def test_deploy_bare_metal_failure_records_deploy_log(svc, db):

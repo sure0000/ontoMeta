@@ -218,6 +218,7 @@ def test_airflow_connection(db: Session = Depends(get_db)):
     return {"ok": True, "health": health}
 
 
+# Cube（已废弃，保留用于向后兼容）
 def _cube_settings_out(row) -> CubeSettingsOut:
     return CubeSettingsOut(
         api_url=row.get("api_url", ""),
@@ -230,13 +231,15 @@ def _cube_settings_out(row) -> CubeSettingsOut:
     )
 
 
-@router.get("/settings/cube", response_model=CubeSettingsOut)
+@router.get("/settings/cube", response_model=CubeSettingsOut, deprecated=True)
 def get_cube_settings(db: Session = Depends(get_db)):
+    """已废弃：Cube 不再作为可部署的基础设施组件。"""
     return _cube_settings_out(settings_service.get_cube_settings(db))
 
 
-@router.put("/settings/cube", response_model=CubeSettingsOut)
+@router.put("/settings/cube", response_model=CubeSettingsOut, deprecated=True)
 def update_cube_settings(data: CubeSettingsUpdate, db: Session = Depends(get_db)):
+    """已废弃：Cube 不再作为可部署的基础设施组件。"""
     row = settings_service.update_cube_settings(db, data.model_dump())
     return _cube_settings_out(row)
 

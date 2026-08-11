@@ -173,7 +173,7 @@ export function SettingsPage() {
             ),
             children: (
               <div className="om-tab-stack">
-                <SectionCard title="依赖组件部署管理" icon={<ApiOutlined />}>
+                <SectionCard title="依赖组件部署管理" icon={<ApiOutlined />} flush>
                   <DependencyPanel />
                 </SectionCard>
               </div>

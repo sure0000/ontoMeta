@@ -31,9 +31,10 @@ COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
     "airflow": ("Airflow 调度", False),
     "seatunnel": ("SeaTunnel 搬运", False),
     "warehouse": ("目标数仓（Doris/Hive/MySQL/…）", True),
-    "sync_runner": ("sync-runner", False),
-    "cube": ("Cube 语义层", False),
-    "postgres": ("ontoMeta 自身 PostgreSQL", False),
+    # 已移除：
+    # - sync_runner: 新架构统一走 Flink SQL，不再需要独立搬运服务
+    # - cube: 语义层可选，不是核心依赖，配置生成接口保留供手动部署
+    # - postgres: ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
 }
 
 SINGLETON_KEYS = {k for k, (_, multi) in COMPONENT_CATALOG.items() if not multi}
@@ -69,20 +70,6 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
     "warehouse": [
         ("sqlalchemy_url", "str", True, True, None),
         ("dialect", "str", False, True, "doris"),
-    ],
-    "sync_runner": [
-        ("endpoint", "str", False, True, "http://localhost:8098"),
-        ("token", "str", True, False, None),
-    ],
-    "cube": [
-        ("api_url", "str", False, True, "http://localhost:4000"),
-        ("api_secret", "str", True, False, None),
-        ("preagg_refresh", "str", False, False, "1 hour"),
-        ("tenant_dimension", "str", False, False, None),
-        ("timeout_seconds", "int", False, False, 30),
-    ],
-    "postgres": [
-        ("sqlalchemy_url", "str", True, True, None),
     ],
 }
 
@@ -154,14 +141,6 @@ _BARE_METAL_INSTALL_PARAMS: dict[str, list[ConnectionField]] = {
         ("db_password", "str", True, False, None),
         ("database", "str", False, False, ""),
     ],
-    "sync_runner": [("port", "int", False, False, None)],  # 留空则自动选空闲端口并回写
-    "cube": [("port", "int", False, False, 4000)],
-    "postgres": [
-        ("port", "int", False, False, 5432),
-        ("db_username", "str", False, True, "ontometa"),
-        ("db_password", "str", True, False, None),
-        ("database", "str", False, True, "ontometa"),
-    ],
     "llm": [
         ("port", "int", False, True, None),
         ("path", "str", False, False, "/v1"),
@@ -201,20 +180,15 @@ def build_bare_metal_connection(key: str, spec: dict[str, Any]) -> dict[str, Any
                 "token": spec.get("token"), "api_version": spec.get("api_version", "v1")}
     if key == "seatunnel":
         return {"rest_endpoint": f"http://{h}:{spec.get('port', 5801)}"}
-    if key in ("warehouse", "postgres"):
-        dialect = spec.get("dialect", "doris" if key == "warehouse" else "postgresql")
+    if key == "warehouse":
+        dialect = spec.get("dialect", "doris")
         user = spec.get("username", "root")
-        pwd = spec.get("password") or ""
-        port = spec.get("port", 5432 if key == "postgres" else 9030)
+        pwd = spec.get("db_password") or ""
+        port = spec.get("port", 9030)
         db = spec.get("database", "")
-        # postgresql 走 psycopg 驱动；其余数仓走 pymysql（MySQL 线协议）
-        driver = "+psycopg" if dialect == "postgresql" else "+pymysql"
+        # 数仓走 pymysql（MySQL 线协议）
+        driver = "+pymysql"
         return {"sqlalchemy_url": f"{dialect}{driver}://{user}:{pwd}@{h}:{port}/{db}", "dialect": dialect}
-    if key == "sync_runner":
-        return {"endpoint": f"http://{h}:{spec.get('port', 8098)}", "token": spec.get("token")}
-    if key == "cube":
-        return {"api_url": f"http://{h}:{spec.get('port', 4000)}", "api_secret": spec.get("api_secret"),
-                "preagg_refresh": "1 hour", "tenant_dimension": None, "timeout_seconds": 30}
     if key == "llm":
         return {"provider": spec.get("provider", "openai-compatible"),
                 "api_base_url": f"http://{h}:{spec.get('port')}{spec.get('path', '/v1')}",
@@ -637,31 +611,6 @@ class DependencyComponentService:
         c["updated_at"] = row.updated_at
         return c
 
-    # -- Cube --
-    def get_cube(self, db: Session) -> dict[str, Any]:
-        row = self._get_singleton(db, "cube")
-        if not row:
-            return {}
-        c = _loads(row.connection_json)
-        c["updated_at"] = row.updated_at
-        return c
-
-    def save_cube(self, db: Session, data: dict[str, Any]) -> dict[str, Any]:
-        current = self._conn(db, "cube")
-        row = self._upsert_singleton(
-            db, "cube", "Cube 语义层",
-            {
-                "api_url": data.get("api_url", ""),
-                "api_secret": data.get("api_secret") or current.get("api_secret"),
-                "preagg_refresh": data.get("preagg_refresh", "1 hour"),
-                "tenant_dimension": data.get("tenant_dimension"),
-                "timeout_seconds": data.get("timeout_seconds", 30),
-            },
-        )
-        c = _loads(row.connection_json)
-        c["updated_at"] = row.updated_at
-        return c
-
     # -- LLM (多实例) --
     def list_llm(self, db: Session) -> list[dict[str, Any]]:
         rows = db.execute(
@@ -778,24 +727,15 @@ class DependencyComponentService:
                 db.commit()
         return True
 
-    # -- 旧表迁移（幂等）：把既有 DatahubSetting/CubeSetting/LlmServiceConfig 搬进注册表 --
+    # -- 旧表迁移（幂等）：把既有 DatahubSetting/LlmServiceConfig 搬进注册表 --
     def migrate_from_legacy(self, db: Session) -> None:
-        from app.models import DatahubSetting, CubeSetting, LlmServiceConfig, AirflowSetting
+        from app.models import DatahubSetting, LlmServiceConfig, AirflowSetting
 
         dh = db.get(DatahubSetting, "default")
         if dh and not self._get_singleton(db, "datahub"):
             self._upsert_singleton(db, "datahub", "DataHub", {
                 "gms_url": dh.gms_url, "frontend_url": dh.frontend_url,
                 "token": dh.token, "fabric": dh.fabric or "PROD",
-            })
-
-        cube = db.get(CubeSetting, "default")
-        if cube and not self._get_singleton(db, "cube"):
-            self._upsert_singleton(db, "cube", "Cube 语义层", {
-                "api_url": cube.api_url, "api_secret": cube.api_secret,
-                "preagg_refresh": cube.preagg_refresh,
-                "tenant_dimension": cube.tenant_dimension,
-                "timeout_seconds": cube.timeout_seconds,
             })
 
         if db.query(LlmServiceConfig).count() > 0 and not db.execute(
@@ -813,7 +753,7 @@ class DependencyComponentService:
                 db.add(row)
             db.commit()
 
-        # Airflow：连接 → airflow 行，sync_runner 连接 → sync_runner 行，编排参数 → airflow 行 extra
+        # Airflow：连接 + 编排参数 → airflow 行
         af = db.get(AirflowSetting, "default")
         if af and not self._get_singleton(db, "airflow"):
             self._upsert_singleton(db, "airflow", "Airflow 调度", {
@@ -835,12 +775,8 @@ class DependencyComponentService:
                     "staging_swap": af.staging_swap,
                 }})
                 db.commit()
-        if af and not self._get_singleton(db, "sync_runner") and af.sync_runner_endpoint:
-            self._upsert_singleton(db, "sync_runner", "sync-runner", {
-                "endpoint": af.sync_runner_endpoint, "token": af.sync_runner_token,
-            })
 
-    # -- Airflow（连接 + sync_runner + 编排参数 extra，投影为单一 dict）--
+    # -- Airflow（连接 + 编排参数 extra，投影为单一 dict）--
     _AIRFLOW_EXTRA_FIELDS = (
         "dags_dir", "jobs_dir", "sync_channel", "docker_network", "drivers_dir",
         "sync_tool_images", "sync_tool", "max_tasks_per_dag", "max_active_tasks_per_dag",
@@ -853,9 +789,7 @@ class DependencyComponentService:
 
     def get_airflow(self, db: Session) -> dict[str, Any]:
         af = self._get_singleton(db, "airflow")
-        sr = self._get_singleton(db, "sync_runner")
         af_conn = _loads(af.connection_json) if af else {}
-        sr_conn = _loads(sr.connection_json) if sr else {}
         extra = (_loads(af.deploy_spec_json) if af else {}).get("extra", {})
         out: dict[str, Any] = {
             "endpoint": af_conn.get("endpoint", ""),
@@ -864,8 +798,9 @@ class DependencyComponentService:
             "token": af_conn.get("token"),
             "api_version": af_conn.get("api_version", "v1"),
             "enabled": af.enabled if af else False,
-            "sync_runner_endpoint": sr_conn.get("endpoint", ""),
-            "sync_runner_token": sr_conn.get("token"),
+            # 保留字段用于 API 兼容性，但不再实际使用（新架构统一走 Flink）
+            "sync_runner_endpoint": "",
+            "sync_runner_token": None,
         }
         for f in self._AIRFLOW_EXTRA_FIELDS:
             out[f] = extra.get(f)
@@ -903,25 +838,7 @@ class DependencyComponentService:
                 extra[f] = data[f]
         spec["extra"] = extra
         af_row.deploy_spec_json = _dumps(spec)
-        # sync_runner 连接行：仅在 data 出现时更新；token 为 None 保留原值
-        sr_current = self._conn(db, "sync_runner")
-        if "sync_runner_endpoint" in data or "sync_runner_token" in data:
-            sr_conn = dict(sr_current)
-            if "sync_runner_endpoint" in data:
-                sr_conn["endpoint"] = data["sync_runner_endpoint"]
-            if "sync_runner_token" in data:
-                t = data["sync_runner_token"]
-                if t is not None:
-                    sr_conn["token"] = t
-            sr_row = self._get_singleton(db, "sync_runner")
-            if sr_row:
-                sr_row.connection_json = _dumps(sr_conn)
-            else:
-                db.add(DependencyComponent(
-                    key="sync_runner", name="sync-runner", deploy_mode="external",
-                    deploy_status="connected" if sr_conn.get("endpoint") else "not_deployed",
-                    connection_json=_dumps(sr_conn),
-                ))
+        # sync_runner_endpoint/token 字段忽略（向后兼容，但不再实际操作）
         db.commit()
         return self.get_airflow(db)
 

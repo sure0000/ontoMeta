@@ -54,7 +54,7 @@ const MODE_LABEL: Record<string, string> = {
 };
 
 // Airflow 编排专有参数（存 deploy_spec.extra）。从 AirflowSettingsPanel 合并而来，
-// 连接字段已归本面板的 connection，sync-runner 连接归 sync_runner 组件，这里只剩编排旋钮。
+// 连接字段已归本面板的 connection，这里只剩编排旋钮。
 const AIRFLOW_EXTRA_FIELDS = [
   "dag_delivery_method",
   "dags_dir",
@@ -111,7 +111,7 @@ export function DependencyPanel() {
   const [logRow, setLogRow] = useState<DependencyComponent | null>(null);
 
   // 组件类型/部署方式切换时，上一组 conn_*/spec_* 字段靠 antd preserve 留在 store 里，
-  // 同名字段（如 conn_endpoint、conn_token 在 sync_runner/airflow/datahub 都存在）会把
+  // 同名字段（如 conn_endpoint、conn_token 在 airflow/datahub 都存在）会把
   // 上次填的值带过来——「新增时表单残留上次内容」即此。切换即清空动态字段。
   const dynamicFieldNames = useMemo(() => {
     if (!schema) return [];
@@ -406,7 +406,7 @@ export function DependencyPanel() {
 
   const addable =
     schema?.components
-      .filter((c) => c.key !== "airflow" && c.key !== "sync_runner")
+      .filter((c) => c.key !== "airflow")
       .filter((c) => c.multi || !rows.some((r) => r.key === c.key)) ?? [];
 
   return (
@@ -434,6 +434,9 @@ export function DependencyPanel() {
         loading={loading}
         pagination={false}
         locale={{ emptyText: "暂无组件，点击「新增」" }}
+        className="om-table"
+        size="middle"
+        scroll={{ x: 'max-content' }}
       />
       <Drawer
         title={editing ? "编辑依赖组件" : "新增依赖组件"}
@@ -604,11 +607,6 @@ export function DependencyPanel() {
                         ) : f.type === "int" ? (
                           <InputNumber
                             style={{ width: "100%" }}
-                            placeholder={
-                              key === "sync_runner" && f.name === "port"
-                                ? "留空自动选空闲端口"
-                                : undefined
-                            }
                           />
                         ) : (
                           <Input />
@@ -639,7 +637,7 @@ export function DependencyPanel() {
                     showIcon
                     style={{ marginBottom: 12 }}
                     message="DAG 投递 / 执行通道 / DAG 形状与时序"
-                    description="连接（endpoint/账密）与 sync-runner 连接已在上方与本面板 sync_runner 组件管理；这里只剩编排旋钮。sync-runner 地址/令牌在 sync_runner 组件的连接里。"
+                    description="连接（endpoint/账密）已在上方管理，这里只剩编排旋钮。"
                   />
                   <Collapse
                     defaultActiveKey={["delivery", "channel", "shape"]}
@@ -746,7 +744,7 @@ export function DependencyPanel() {
                             <Form.Item
                               label="通道"
                               name="extra_sync_channel"
-                              extra="runner：Airflow 任务向常驻 sync-runner 发 HTTP（推荐）；docker：经 docker.sock 起搬运容器"
+                              extra="runner：Airflow 任务向 Flink 提交作业（推荐）；docker：经 docker.sock 起搬运容器（已废弃）"
                             >
                               <Radio.Group
                                 optionType="button"
@@ -756,12 +754,6 @@ export function DependencyPanel() {
                                 ]}
                               />
                             </Form.Item>
-                            <Text
-                              type="secondary"
-                              style={{ display: "block", fontSize: 13, marginBottom: 12 }}
-                            >
-                              sync-runner 的地址/令牌在 sync_runner 组件的连接里配。
-                            </Text>
                             <Form.Item
                               label="搬运容器网络"
                               name="extra_docker_network"

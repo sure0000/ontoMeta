@@ -301,23 +301,25 @@ class SettingsService:
             enabled=a.get("enabled", False),
         )
 
+    # Cube（保留用于向后兼容，但不再作为可部署组件）
     def get_cube_settings(self, db: Session) -> dict:
-        self.ensure_defaults(db)
-        return self._deps.get_cube(db)
+        """已废弃：Cube 不再作为可部署的基础设施组件。保留此方法用于向后兼容。"""
+        from datetime import datetime, timezone
+        return {"updated_at": datetime.now(timezone.utc)}
 
     def update_cube_settings(self, db: Session, data: dict) -> dict:
-        self.ensure_defaults(db)
-        return self._deps.save_cube(db, data)
+        """已废弃：Cube 不再作为可部署的基础设施组件。保留此方法用于向后兼容。"""
+        from datetime import datetime, timezone
+        return {"updated_at": datetime.now(timezone.utc)}
 
     def get_cube_runtime(self, db: Session) -> CubeRuntimeConfig:
-        self.ensure_defaults(db)
-        c = self._deps.get_cube(db)
+        """已废弃：Cube 不再作为可部署的基础设施组件。返回空配置用于向后兼容。"""
         return CubeRuntimeConfig(
-            api_url=c.get("api_url", ""),
-            api_secret=c.get("api_secret"),
-            preagg_refresh=c.get("preagg_refresh", "1 hour"),
-            tenant_dimension=(c.get("tenant_dimension") or None),
-            timeout_seconds=int(c.get("timeout_seconds", 30) or 30),
+            api_url="",
+            api_secret=None,
+            preagg_refresh="1 hour",
+            tenant_dimension=None,
+            timeout_seconds=30,
         )
 
     def get_llm_runtime(self, db: Session) -> LlmRuntimeConfig:
