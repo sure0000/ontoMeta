@@ -64,10 +64,20 @@ SKILLS: dict[str, Skill] = {
             "拿回候选 SQL 后仔细看一眼再用 run_sql 提交。单对象、无需探值的取数直接写 SQL 更快。\n"
             "拿到结果后：找异常/看分布/离群用 **analyze_result** 对结果做统计画像（均值/分位/IQR 离群），"
             "别口头臆测；若适合可视化就调 **render_chart** 出图：时间/日期维度用 line 或 area，"
-            "类别对比用 bar；x/y 必须照抄结果表里的真实列名。单值或纯明细不必作图。"
+            "类别对比用 bar；x/y 必须照抄结果表里的真实列名。单值或纯明细不必作图。\n"
+            "用户要把这份结果**留下来**（做成面板/图表/看板/大屏、「加到看板上」、「以后天天看」）时，"
+            "用 **propose_panel**（加进某个已有看板，用户确认时选）或 **propose_dashboard**（新建看板）"
+            "出提案。render_chart 只是这一轮的图，关掉就没了；面板才是能发布分享的交付物。"
+            "两者都只需给标题与图型——绑定由服务端复用本轮口径重建；但**提之前必须先对主对象调过 "
+            "get_object**（面板要绑主对象，只搜过或只取过数不算），否则会被判错白费一轮。"
         ),
-        extra_tool_names=("update_plan", "scout_query", "analyze_result", "render_chart"),
-        block_types=("markdown", "plan", "sql", "table", "insight", "chart", "mapping"),
+        extra_tool_names=(
+            "update_plan", "scout_query", "analyze_result", "render_chart",
+            "propose_panel", "propose_dashboard",
+        ),
+        block_types=(
+            "markdown", "plan", "sql", "table", "insight", "chart", "mapping", "app_proposal",
+        ),
     ),
     "lineage": Skill(
         name="lineage",
@@ -90,13 +100,21 @@ SKILLS: dict[str, Skill] = {
         prompt_overlay=(
             "【建数技能】用户想新建口径定义（指标 metric / 标签 tag / 规则 rule）。\n"
             "先用 search_logics 查重——本体里已有同义口径就别重复建，直接指给用户。\n"
-            "确无重复时用 **propose_draft** 产出一份**提案**（中文名 + 类型 + 口径自然语言说明）。\n"
-            "**不要替用户编具体表达式**——口径是人定的；提案只给名字与说明，交由用户确认后创建为草稿、"
-            "再自行补全表达式并走发布。你不直接改动本体或数据，只出提案。\n"
+            "确无重复时，两种提法按「口径说得清不清楚」二选一：\n"
+            "1. **用户把算法说清楚了**（哪个字段、怎么聚合、怎么分桶、阈值多少）→ 用 "
+            "**propose_expression** 连表达式一起提。**先 search_objects/get_object 把对象名与"
+            "字段技术名查准**（fields 里写的是技术名如 order/amount，不是中文显示名），"
+            "服务端会当场编译并做语义证明：编不过会把原因和该对象真实有哪些字段返给你，"
+            "照着改一次再提，别原样重发。编过之后用户看到的是**真 SQL**。\n"
+            "2. **口径还没说清**（只说了「加个高价值客户标签」但没说怎么算）→ 用 "
+            "**propose_draft** 只提名字与说明，表达式留给用户自己补。"
+            "**别自己替用户定阈值**：「高价值」是 1 万还是 10 万，猜错了比不猜更糟——"
+            "要么先 ask_clarification 问清楚，要么走 propose_draft。\n"
+            "两种都只是**提案**：创建/修改由用户点击后发生，你不写库。\n"
             "提案终会过下方治理规约的校验；若提案涉及具体物理表名，先用 **lint_against_standard** "
             "自检命名是否合规约、按返回的 fix 修正后再提。"
         ),
-        extra_tool_names=("propose_draft", "lint_against_standard"),
+        extra_tool_names=("propose_draft", "propose_expression", "lint_against_standard"),
         block_types=("markdown", "draft_proposal"),
         attach_governance=True,
     ),
@@ -132,6 +150,35 @@ SKILLS: dict[str, Skill] = {
             "lint_against_standard",
         ),
         block_types=("markdown", "action_proposal", "pipeline_proposal", "task_status"),
+        attach_governance=True,
+    ),
+    "onboard": Skill(
+        name="onboard",
+        display="接数据",
+        when_to_use=(
+            "用户要把一个新的库/系统接进来、问怎么连数据源、或要为某个数据域生成本体草稿"
+            "（如『把我们的 ERP 库接进来』『给销售域生成一版本体』）"
+        ),
+        prompt_overlay=(
+            "【接数据技能】用户想把新数据接进来。**第一步必须调 list_onboarding_targets**"
+            "拿到真实落点（DataHub 配没配、有哪些域及其草稿/发布状态、已登记哪些数据源）——"
+            "不先问就只能编域 id，而编出来的一定过不了校验。\n"
+            "接数据分两件独立的事，别混为一谈：\n"
+            "1. **登记数据源**（能取数/能搬数）→ **propose_datasource**。"
+            "**凭据一律不由你给**：用户名/密码/连接串由用户在确认卡里自己填，你只给名称、类型、catalog。"
+            "查重后再提，同名或同 catalog 的源已存在就直接指给用户。\n"
+            "2. **生成本体草稿**（有业务语义）→ **propose_ontology_draft**，domain_id 用真实的。"
+            "该域已有发布本体时先说清楚：重跑产生新草稿并走合并，不是原地覆盖。\n"
+            "**边界要如实说**：ontoMeta 不触发 DataHub 自身的元数据采集——域与表是 DataHub 那边"
+            "爬好后同步过来的。用户问「怎么让系统认识这个库的表」而该库尚未在 DataHub 里时，"
+            "如实告诉他这一步要在 DataHub 侧配采集，别承诺你做不到的事。\n"
+            "两个工具都只出**提案**：真正建源/启动生成由用户点击后触发，你不写库。\n"
+            "接好之后要搬数/物化是**另一件事**，那属于建数任务——切 task 技能。"
+        ),
+        extra_tool_names=(
+            "list_onboarding_targets", "propose_datasource", "propose_ontology_draft",
+        ),
+        block_types=("markdown", "onboard_proposal"),
         attach_governance=True,
     ),
 }

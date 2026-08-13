@@ -121,6 +121,14 @@ from app.services.chat_bi_tool_schemas import (  # noqa: F401
     _match_option,
     _apply_prefill,
     _REQUEST_FORM_TOOL,
+    _PANEL_VIZ_TYPES,
+    _PROPOSE_PANEL_TOOL,
+    _PROPOSE_DASHBOARD_TOOL,
+    _DATASOURCE_KINDS,
+    _DRAFT_SCOPES,
+    _LIST_ONBOARDING_TARGETS_TOOL,
+    _PROPOSE_DATASOURCE_TOOL,
+    _PROPOSE_ONTOLOGY_DRAFT_TOOL,
     _BASE_TOOL_SCHEMAS,
     _TOOL_BY_NAME,
     _ALL_AGENT_TOOL_NAMES,
@@ -1383,12 +1391,19 @@ class ChatBiService:
                 for e in result.get("edges") or []:
                     if isinstance(e, dict) and e.get("label"):
                         ledger.add_context_name(str(e["label"]))
-            elif tool_name == "propose_draft" and isinstance(result, dict):
+            elif tool_name in ("propose_draft", "propose_expression") and isinstance(result, dict):
                 # 提案里的口径名是本轮工具产出的事实——答案复述「建议新建指标X」时
                 # 引用 X 不得被 F4 判成幻觉（它是提案而非对已有实体的断言）。
-                ledger.add_context_name(
-                    *[str(v) for v in (result.get("display_name"), result.get("name")) if v]
-                )
+                # description 同属提案自产：模型复述自己刚提的口径说明（「订单金额求和」）
+                # 同样会被 F4 当成未证实实体。
+                names = [
+                    result.get("display_name"), result.get("name"), result.get("description")
+                ]
+                # propose_expression 还会复述编译出的口径展开（字段名、聚合式）：那是编译器
+                # 从已发布本体确定性产出的，与 compile_metric 的入账同理。
+                for line in result.get("caliber_trace") or []:
+                    names.append(line)
+                ledger.add_context_name(*[str(v) for v in names if v])
             elif tool_name == "propose_preference" and isinstance(result, dict):
                 # 记忆提案的约定文本是本轮工具产出——答案复述该约定时不被 F4 判成幻觉。
                 if result.get("text"):
@@ -1436,6 +1451,30 @@ class ChatBiService:
                     *[str(e.get("display_name") or "") for e in result.get("entities") or []],
                     *[str(o.get("name") or "") for o in result.get("objects") or []],
                     *[str(o.get("display_name") or "") for o in result.get("objects") or []],
+                )
+            elif tool_name in ("propose_panel", "propose_dashboard") and isinstance(result, dict):
+                # 面板/看板的名字是模型在本轮**提出**的，不是对本体已有实体的断言——
+                # 同 propose_draft：不入账的话，回答复述「已拟好「订单量趋势」面板」
+                # 必被 F4 当成幻觉实体拒答，而那正是这个工具唯一要说的话。
+                ledger.add_context_name(
+                    *[str(v) for v in (result.get("title"), result.get("name")) if v]
+                )
+            elif tool_name in ("propose_datasource", "propose_ontology_draft") and isinstance(
+                result, dict
+            ):
+                # 同上：数据源名是本轮提案产出；域名是 list_onboarding_targets 查出来的真实域。
+                ledger.add_context_name(
+                    *[str(v) for v in (
+                        result.get("name"), result.get("catalog_name"), result.get("domain_name"),
+                    ) if v]
+                )
+            elif tool_name == "list_onboarding_targets" and isinstance(result, dict):
+                # 与 get_task_options 同理：这些是库里查出来的真实域名/源名/catalog，
+                # 把事实塞进模型上下文又因它引用而拒答，说不过去。
+                ledger.add_context_name(
+                    *[str(d.get("name") or "") for d in result.get("domains") or []],
+                    *[str(s.get("name") or "") for s in result.get("data_sources") or []],
+                    *[str(s.get("catalog_name") or "") for s in result.get("data_sources") or []],
                 )
             elif isinstance(result, dict) and "data" in result:
                 # P4：外部工具返回（{"data": ...}）是本轮工具的真实产出——把其中的字符串/数值
@@ -2304,6 +2343,89 @@ class ChatBiService:
         label = self._PROPOSE_TYPE_LABEL[logic_type]
         return proposal, f"提案：新建{label}「{display_name}」", False
 
+    def _dispatch_propose_expression(
+        self, db: Session, *, domain_id: str | None, ontology_id: str | None, args: dict
+    ) -> tuple[dict, str, bool]:
+        """产出**带表达式**的口径提案：组装 AST → 当场编译并自证 → 才允许出提案（不写库）。
+
+        与 propose_draft 的分工：那个只给名字与自然语言说明（表达式留给人），这个连表达式
+        一起给。敢让模型写表达式，是因为守卫不是提示词而是编译器——编不出来或过不了语义
+        证明的 AST 到不了用户面前，编译器的错误码与候选字段会原样回给模型让它改。
+
+        人看到的因此是**真 SQL 与口径展开轨迹**；确认与落库仍是用户点击后的事，ask() 只读。
+        """
+        from app.services.expression_candidate import CandidateError, compile_expression
+
+        display_name = str(args.get("display_name") or "").strip()
+        if not display_name:
+            return {"error": "需要 display_name（口径中文名）"}, "口径提案缺名称", True
+        logic_type = str(args.get("logic_type") or "").strip().lower()
+        if logic_type not in self._PROPOSE_LOGIC_TYPES:
+            return (
+                {"error": f"logic_type 须为 metric/tag/rule，收到「{logic_type}」",
+                 "available": list(self._PROPOSE_LOGIC_TYPES)},
+                "提案类型非法",
+                True,
+            )
+        if not ontology_id:
+            return {"error": "当前域没有已发布本体，无法形式化口径"}, "口径提案无本体", True
+
+        name = str(args.get("name") or "").strip()
+        if not name:
+            slug = re.sub(r"[^a-zA-Z0-9_]+", "_", display_name).strip("_").lower()
+            name = slug or "new_logic"
+        summary = str(args.get("summary") or "").strip()
+        logic_id = str(args.get("logic_id") or "").strip() or None
+
+        try:
+            candidate = compile_expression(
+                db,
+                ontology_id=ontology_id,
+                logic_type=logic_type,
+                name=name,
+                display_name=display_name,
+                fields=args.get("fields") or [],
+                body=args.get("body") or {},
+                summary=summary or None,
+            )
+        except CandidateError as exc:
+            # 编译器的拒绝信号原样交给模型：里面有可用字段/支持的算子/该怎么修。
+            return exc.to_dict(), f"表达式编译未通过：{exc.code}", True
+
+        label = self._PROPOSE_TYPE_LABEL[logic_type]
+        proposal: dict[str, Any] = {
+            "kind": "business_logic",
+            "logic_type": logic_type,
+            "display_name": display_name,
+            "name": name,
+            "description": summary,
+            # 人在卡片上看的就是这两样——不是自然语言承诺。
+            "compiled_sql": candidate.sql,
+            "caliber_trace": candidate.caliber_trace,
+            "expression_json": candidate.ast,
+        }
+        if logic_id:
+            # 补全已有口径：前端 PATCH /api/business-logics/{id}
+            proposal["logic_id"] = logic_id
+            proposal["update_payload"] = {
+                "logic_type": logic_type,
+                "expression_summary": summary or display_name,
+                "expression_json": candidate.ast,
+            }
+            summary_text = f"提案：为{label}「{display_name}」补全表达式"
+        else:
+            proposal["create_payload"] = {
+                "domain_id": domain_id,
+                "name": name,
+                "display_name": display_name,
+                "logic_type": logic_type,
+                "description": summary or None,
+                "expression_summary": summary or display_name,
+                "expression_json": candidate.ast,
+            }
+            summary_text = f"提案：新建{label}「{display_name}」（表达式已编译通过）"
+        return proposal, summary_text, False
+
     def _dispatch_lint(self, db: Session, *, args: dict) -> tuple[dict, str, bool]:
         """规约自检：用当前生效规约 lint 一份规格，返回违规项+可照做的 fix（只读，不写库）。
 
@@ -2333,6 +2455,263 @@ class ChatBiService:
             return {"error": "需要 text（要记住的约定）"}, "记忆提案为空", True
         proposal = {"kind": "preference", "text": text[:255], "domain_id": domain_id}
         return proposal, f"提案：记住约定「{text[:24]}」", False
+
+    # ------------------------------------------- 数据应用提案（面板 / 看板）
+
+    def _dispatch_propose_app(
+        self,
+        *,
+        kind: str,
+        domain_id: str | None,
+        question: str,
+        args: dict,
+        referenced_objects: list[dict],
+    ) -> tuple[dict, str, bool]:
+        """把本轮口径做成面板/看板的**提案**（纯 spec，不写库、不建应用）。
+
+        与 propose_draft/propose_action 同构：ask() 保持只读——真正生成由用户点击后走
+        POST /chat-bi/generate-widget|generate-app。
+
+        **口径不在这里重算**：面板绑定由服务端从本轮回答的 caliber_decomposition +
+        referenced_objects 重建（`generate_widget_from_chat` 带载荷就不重调 LLM 的既有保证），
+        所以 create_payload 只带「叫什么、什么图型」，口径由前端把本条消息的 payload 附上。
+        这正是「生成的应用与对话里看到的口径完全一致」那条保证的来源，别在这里另起一套。
+
+        **门槛按后端真实要求判，不按前端动作条那条宽判据**：动作条只看「有口径展开或有数据行」，
+        而 `_binding_from_caliber` 真正要的是一个主对象——它从 caliber 的 object_type 引用取，
+        取不到就回退 referenced_objects[0]。两者都空时生成出来的只是个空壳，且会在
+        generate_widget_from_chat 里抛「未命中主对象」——那时用户已经点过按钮了。故这里当场判错。
+        """
+        if not referenced_objects:
+            # 门槛精确到 **get_object**，不是「查过本体」：面板绑定的主对象由
+            # `_binding_from_caliber` 从 caliber 的 object_type 引用取、取不到回退
+            # referenced_objects[0]；而 `_steps_to_caliber` 现在只产口径展开卡（引用全是
+            # business_logic），referenced_objects 又只由 get_object 填。于是 search_objects
+            # 命中一堆、run_sql 取到数，都仍然凑不出主对象。提示必须点名 get_object，
+            # 否则模型会照着「我搜过了」再提一次，白费一轮。
+            return (
+                {
+                    "error": "本轮没有 get_object 过任何对象，做不出面板（面板必须绑定一个主对象）",
+                    "hint": "先对要做面板的那个对象调 **get_object** 拿到它的 id（只 search_objects "
+                            "或只 run_sql 都不够），再提面板；纯结构性问答与拒答轮次不要提面板。",
+                },
+                "面板提案缺主对象",
+                True,
+            )
+        if not domain_id:
+            return {"error": "未选定数据域，无法生成数据应用"}, "面板提案缺域", True
+
+        viz_type = str(args.get("viz_type") or "").strip() or "bar"
+        if viz_type not in _PANEL_VIZ_TYPES:
+            return (
+                {"error": f"viz_type 须为 {'/'.join(_PANEL_VIZ_TYPES)}，收到「{viz_type}」",
+                 "available": list(_PANEL_VIZ_TYPES)},
+                "面板图型非法",
+                True,
+            )
+        if kind == "panel":
+            title = str(args.get("title") or "").strip()
+            if not title:
+                return {"error": "需要 title（面板标题）"}, "面板提案缺标题", True
+            proposal = {
+                "kind": "panel",
+                "title": title,
+                "viz_type": viz_type,
+                "domain_id": domain_id,
+                # 前端「生成并加入看板」按钮的载荷：再并上本条消息 payload 里的
+                # caliber_decomposition / referenced_objects 后 POST /chat-bi/generate-widget。
+                # dashboard_id 故意不由模型给——它不知道有哪些看板，编一个 id 只会 404；
+                # 由用户在既有的「加入看板」弹窗里选已有或新建。
+                "create_payload": {
+                    "domain_id": domain_id,
+                    "question": question,
+                    "widget_type": viz_type,
+                    "name": title,
+                },
+            }
+            return proposal, f"提案：生成面板「{title}」", False
+
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return {"error": "需要 name（看板名称）"}, "看板提案缺名称", True
+        panel_title = str(args.get("panel_title") or "").strip() or name
+        proposal = {
+            "kind": "dashboard",
+            "name": name,
+            "title": panel_title,
+            "viz_type": viz_type,
+            "domain_id": domain_id,
+            # 前端「新建看板」按钮的载荷 → POST /chat-bi/generate-app（同样再并上本条消息的口径）。
+            "create_payload": {
+                "domain_id": domain_id,
+                "app_type": "dashboard",
+                "question": question,
+                "name": name,
+            },
+        }
+        return proposal, f"提案：新建看板「{name}」", False
+
+    # ----------------------------------------------- 接数据提案（源 / 草稿）
+
+    def _dispatch_list_onboarding_targets(self, db: Session) -> tuple[dict, str, bool]:
+        """接数据的可选项目录（只读）：DataHub 配没配、有哪些域、已登记哪些数据源。
+
+        与 get_task_options 同职责——模型没有工具读得到这些，就只能编域 id 和源名。
+        DataHub 这里只报「配没配」，**不去拨测**：拨测要走网络，会把一次目录查询变成一次
+        可能超时的外呼；连通性由用户在设置页看，或由建源后的「测试连接」给出。
+        """
+        from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
+        from app.services.data_app import DataAppService
+
+        gms_url = ""
+        try:
+            gms_url = (self.settings_service.get_datahub_runtime(db).gms_url or "").strip()
+        except Exception as exc:  # noqa: BLE001 - 设置读不出来不该让整个工具挂掉
+            logger.warning("read datahub runtime failed: %s", exc)
+
+        draft_statuses = (OntologyStatus.DRAFT.value, OntologyStatus.IN_REVIEW.value)
+        domains: list[dict] = []
+        for d in db.query(DomainContext).order_by(DomainContext.name.asc()).all():
+            ontos = db.query(Ontology).filter(Ontology.domain_context_id == d.id).all()
+            published = [o for o in ontos if o.status == OntologyStatus.PUBLISHED.value]
+            drafts = [o for o in ontos if o.status in draft_statuses]
+            obj_count = 0
+            if published:
+                obj_count = (
+                    db.query(ObjectType)
+                    .filter(ObjectType.ontology_id == published[0].id)
+                    .count()
+                )
+            domains.append({
+                "domain_id": d.id,
+                "name": d.name,
+                "has_published_ontology": bool(published),
+                "draft_count": len(drafts),
+                "published_object_count": obj_count,
+            })
+
+        sources: list[dict] = []
+        for ds in DataAppService().list_data_sources(db):
+            sources.append({
+                "data_source_id": ds.id,
+                "name": ds.name,
+                "kind": ds.kind,
+                "catalog_name": ds.catalog_name,
+                "status": ds.status,
+            })
+
+        result = {
+            "datahub_configured": bool(gms_url),
+            "datahub_note": (
+                "元数据采集由 DataHub 侧完成，ontoMeta 只读取已采集的域与表；"
+                "库尚未被 DataHub 采集时，这一步要在 DataHub 配采集，本系统触发不了。"
+            ),
+            "domains": domains,
+            "data_sources": sources,
+        }
+        return (
+            result,
+            f"接数据目录：{len(domains)} 个域 / {len(sources)} 个数据源",
+            False,
+        )
+
+    @staticmethod
+    def _dispatch_propose_datasource(*, args: dict) -> tuple[dict, str, bool]:
+        """登记数据源的**提案**（纯 spec，不写库）。
+
+        **凭据一律不进提案**：DSN/用户名/密码由用户在确认卡里自己填，前端拼好再 POST
+        /api/data-sources。模型即便硬塞 dsn/password 字段也会被这里丢掉——提案里出现一串
+        明文口令，它就会跟着对话记录、trace、日志一起落盘，那是不该由一次工具调用造成的后果。
+        """
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return {"error": "需要 name（数据源显示名）"}, "数据源提案缺名称", True
+        kind = str(args.get("kind") or "").strip()
+        if kind not in _DATASOURCE_KINDS:
+            return (
+                {"error": f"kind 须为 {'/'.join(_DATASOURCE_KINDS)}，收到「{kind}」",
+                 "available": list(_DATASOURCE_KINDS)},
+                "数据源类型非法",
+                True,
+            )
+        catalog_name = str(args.get("catalog_name") or "").strip() or None
+        note = str(args.get("note") or "").strip()
+        dropped = sorted(
+            k for k in args
+            if k not in ("name", "kind", "catalog_name", "note")
+        )
+        proposal = {
+            "kind": "datasource",
+            "name": name,
+            "datasource_kind": kind,
+            "catalog_name": catalog_name,
+            "note": note,
+            # 前端「去填连接信息」按钮的载荷底稿（DataSourceCreate 的非机密部分）。
+            # dsn_secret_ref 由用户在卡里填完连接信息后补上，不由 agent 提供。
+            "create_payload": {
+                "name": name,
+                "kind": kind,
+                "catalog_name": catalog_name,
+            },
+            "credentials_required": True,
+        }
+        if dropped:
+            # 如实告诉模型这些参数没被采纳，免得它以为凭据已经交上去了。
+            proposal["dropped_args"] = dropped
+        return proposal, f"提案：登记数据源「{name}」（凭据待用户填）", False
+
+    @staticmethod
+    def _dispatch_propose_ontology_draft(
+        db: Session, *, args: dict
+    ) -> tuple[dict, str, bool]:
+        """为某域生成本体草稿的**提案**（纯 spec，不写库、不启动生成）。
+
+        真正启动由用户点击后 POST /api/domains/{id}/generate-{draft|objects|relations}。
+        域 id 当场核验存在——编一个 id 的提案点下去只会 404，那时用户已经点过了。
+        """
+        from app.models import DomainContext, Ontology, OntologyStatus
+
+        domain_id = str(args.get("domain_id") or "").strip()
+        if not domain_id:
+            return {"error": "需要 domain_id（先调 list_onboarding_targets 拿真实域 id）"}, "草稿提案缺域", True
+        domain = db.get(DomainContext, domain_id)
+        if domain is None:
+            return (
+                {"error": f"数据域 {domain_id} 不存在",
+                 "hint": "domain_id 必须来自 list_onboarding_targets 的返回，不要自己编"},
+                "草稿提案域不存在",
+                True,
+            )
+        scope = str(args.get("scope") or "draft").strip()
+        if scope not in _DRAFT_SCOPES:
+            return (
+                {"error": f"scope 须为 {'/'.join(_DRAFT_SCOPES)}，收到「{scope}」",
+                 "available": list(_DRAFT_SCOPES)},
+                "草稿范围非法",
+                True,
+            )
+        has_published = (
+            db.query(Ontology)
+            .filter(
+                Ontology.domain_context_id == domain_id,
+                Ontology.status == OntologyStatus.PUBLISHED.value,
+            )
+            .first()
+            is not None
+        )
+        proposal = {
+            "kind": "ontology_draft",
+            "domain_id": domain_id,
+            "domain_name": domain.name,
+            "scope": scope,
+            "reason": str(args.get("reason") or "").strip(),
+            # 已有发布本体时重跑不是原地覆盖，而是产生新草稿走合并——前端据此提示，
+            # 免得用户以为点一下就把现有本体改了。
+            "has_published_ontology": has_published,
+            "create_payload": {"domain_id": domain_id, "scope": scope},
+        }
+        label = {"draft": "对象+关系", "objects": "业务对象", "relations": "业务关系"}[scope]
+        return proposal, f"提案：为「{domain.name}」生成本体草稿（{label}）", False
 
     def _dispatch_get_task_options(
         self, db: Session, *, ontology_id: str, args: dict
@@ -3421,6 +3800,10 @@ class ChatBiService:
                 return self._dispatch_get_lineage(db, ontology_id=anchor_ontology, args=args)
             if name == "propose_draft":
                 return self._dispatch_propose_draft(domain_id=anchor_domain, args=args)
+            if name == "propose_expression":
+                return self._dispatch_propose_expression(
+                    db, domain_id=anchor_domain, ontology_id=anchor_ontology, args=args
+                )
             if name == "lint_against_standard":
                 return self._dispatch_lint(db, args=args)
             if name == "get_task_options":
@@ -3437,11 +3820,19 @@ class ChatBiService:
                 )
             if name == "propose_preference":
                 return self._dispatch_propose_preference(domain_id=anchor_domain, args=args)
+            if name == "list_onboarding_targets":
+                return self._dispatch_list_onboarding_targets(db)
+            if name == "propose_datasource":
+                return self._dispatch_propose_datasource(args=args)
+            if name == "propose_ontology_draft":
+                return self._dispatch_propose_ontology_draft(db, args=args)
             if name == "update_plan":
                 return self._dispatch_update_plan(args)
             if name == "request_form":
                 return self._dispatch_request_form(db, ontology_id=anchor_ontology, args=args)
             # get_task_status 在 agent 循环里特判（需注入 conversation_id 做跨轮解析），不走此处。
+            # propose_panel / propose_dashboard 同样在循环里特判：它们要按**本轮已命中的对象**
+            # 判「有没有口径可做面板」，那是循环态，这里看不见。
             if name == "ask_clarification":
                 q = str(args.get("question") or "").strip()
                 if not q:
@@ -3880,6 +4271,8 @@ class ChatBiService:
         preference_proposals: list[dict] = []  # propose_preference 产出的记忆提案（供 preference_proposal 块）
         action_proposals: list[dict] = []  # propose_action 产出的数据任务提案（供 action_proposal 块）
         pipeline_proposals: list[dict] = []  # propose_pipeline 产出的任务链提案（供 pipeline_proposal 块）
+        app_proposals: list[dict] = []  # propose_panel/dashboard 产出的数据应用提案（供 app_proposal 块）
+        onboard_proposals: list[dict] = []  # propose_datasource/ontology_draft 产出的接数据提案
         task_statuses: list[dict] = []  # get_task_status 产出的任务状态（供 task_status 块）
         plan: dict | None = None  # update_plan 产出的多步分析计划（供 plan 块；整体覆盖）
         # V4 O2：本次问答的大结果离场 store（run_sql 全量行寄存于此，上下文只见样例）。
@@ -4052,6 +4445,16 @@ class ChatBiService:
                         args=call_args,
                         conversation_id=conversation_id,
                     )
+                elif tool_name in ("propose_panel", "propose_dashboard"):
+                    # 数据应用提案：注入本轮已命中的对象——面板必须绑定一个主对象，
+                    # 而那是循环态（referenced_objects 边跑边收），dispatcher 里看不到。
+                    result, summary, is_error = self._dispatch_propose_app(
+                        kind="panel" if tool_name == "propose_panel" else "dashboard",
+                        domain_id=domains[0].id if domains else None,
+                        question=question,
+                        args=call_args,
+                        referenced_objects=referenced_objects,
+                    )
                 else:
                     result, summary, is_error = await asyncio.to_thread(
                         self._dispatch_agent_tool,
@@ -4107,9 +4510,15 @@ class ChatBiService:
                     or (tool_name in (
                         "get_object", "get_logic", "get_domain_overview",
                         "find_join_path", "profile_values", "compile_metric", "get_lineage",
-                        "propose_draft", "propose_action", "propose_pipeline",
+                        "propose_draft", "propose_expression",
+                        "propose_action", "propose_pipeline",
                         "get_task_status",
                         "propose_preference", "get_task_options",
+                        # 数据应用/接数据两条车道：与上面的提案类同理——成功的提案是基于
+                        # 真实本体对象（面板须命中主对象）或真实系统状态（域/数据源目录）产出的。
+                        "propose_panel", "propose_dashboard",
+                        "list_onboarding_targets", "propose_datasource",
+                        "propose_ontology_draft",
                     ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))
                     # P5：结果分析成功=基于真实数据的统计，算接地。
@@ -4152,12 +4561,26 @@ class ChatBiService:
                         lineage = result
                     elif tool_name == "propose_draft" and result.get("create_payload"):
                         draft_proposals.append(result)
+                    elif tool_name == "propose_expression" and (
+                        result.get("create_payload") or result.get("update_payload")
+                    ):
+                        # 与 propose_draft 同一个块：都是「建/补一条口径」，只是这条带了
+                        # 编译通过的表达式。前端一张卡多渲染一段 SQL，不必再开一种块。
+                        draft_proposals.append(result)
                     elif tool_name == "propose_preference" and result.get("text"):
                         preference_proposals.append(result)
                     elif tool_name == "propose_action" and result.get("draft_payload"):
                         action_proposals.append(result)
                     elif tool_name == "propose_pipeline" and result.get("create_payload"):
                         pipeline_proposals.append(result)
+                    elif tool_name in ("propose_panel", "propose_dashboard") and result.get(
+                        "create_payload"
+                    ):
+                        app_proposals.append(result)
+                    elif tool_name in (
+                        "propose_datasource", "propose_ontology_draft"
+                    ) and result.get("create_payload"):
+                        onboard_proposals.append(result)
                     elif tool_name == "get_task_status" and "tasks" in result:
                         task_statuses.append(result)
                     elif tool_name == "update_plan" and result.get("plan"):
@@ -4362,6 +4785,8 @@ class ChatBiService:
                 "preference_proposals": preference_proposals,
                 "action_proposals": action_proposals,
                 "pipeline_proposals": pipeline_proposals,
+                "app_proposals": app_proposals,
+                "onboard_proposals": onboard_proposals,
                 "task_statuses": task_statuses,
                 "plan": plan,
                 "skill": active_skill.name if active_skill else None,

@@ -461,7 +461,128 @@ def _resolve_dimension(token: str, proj: OntologyProjection, base: ObjView) -> _
     return _Ref(f"dim:{obj.name}.{prop.name}", obj, prop)
 
 
+# --------------------------------------------------- 口径类型 → 结果表形状（唯一权威）
+#
+# 编译器对三类口径产出的列并不相同（见下面 §1 的分叉），所以「口径结果表长什么样」
+# 只能由这里说了算。此前有**两处**各自写死了指标形状（stat_date + metric_value decimal）：
+# `agents/executors/metric._build_table`（指标任务）与 `warehouse_generator._logic_tables`
+# （本体物化）。两处都对标签/规则给错形状，且彼此还会不一致——物化建的表与指标任务
+# INSERT 的列对不上。本模块的 docstring 早就写过「不要另写一套口径→SQL 的翻译」，
+# 结果表形状是同一条道理。
+
+LOGIC_TYPES: tuple[str, ...] = ("metric", "tag", "rule")
+
+# 供工具 schema / 前端提示复用，避免各处再抄一份算子清单（抄岔了就是编译期才报错）。
+METRIC_OPS: tuple[str, ...] = tuple(sorted(_METRIC_OPS))
+COMPARE_OPS: tuple[str, ...] = tuple(sorted(_COMPARE_OPS))
+
+# 标签取值列名。标签的「值」是个可分组的字符串标签，不能挤进 metric_value。
+TAG_VALUE_COLUMN = "tag_value"
+
+
+def effective_logic_type(logic: BusinessLogic) -> str:
+    """这条口径**编译时会被当成哪一类**。
+
+    以 AST 的 ``type`` 为准、表列 ``logic_type`` 兜底——``compile_metric`` 读的正是 AST，
+    调用方若按表列判类型，建出来的表列就可能与编译器产的 SQL 列对不上。
+    """
+    if logic.expression_json:
+        try:
+            ast = json.loads(logic.expression_json)
+        except (TypeError, ValueError):
+            ast = None
+        if isinstance(ast, dict):
+            lt = str(ast.get("type") or "").strip().lower()
+            if lt in LOGIC_TYPES:
+                return lt
+    lt = str(logic.logic_type or "metric").strip().lower()
+    return lt if lt in LOGIC_TYPES else "metric"
+
+
+def value_source_column(logic_type: str, logic_name: str) -> str:
+    """``metric_value`` 该从编译产物的哪一列取。
+
+    metric → 度量列别名即口径技术名；tag → 分桶计数 ``row_count``；
+    rule → 违规行数 ``violations``（**没有**以口径名命名的列，照 metric 取会 column not found）。
+    """
+    if logic_type == "tag":
+        return "row_count"
+    if logic_type == "rule":
+        return "violations"
+    return logic_name
+
+
+def result_column_specs(
+    logic_type: str, display_name: str
+) -> tuple[tuple[str, str, str, str], ...]:
+    """结果表里**除 stat_date 与维度列以外**的列：(列名, 物理类型, 语义类型, 注释)。
+
+    返回裸元组而不是 LogicalColumn：编译器不该依赖 warehouse 层，由调用方自行构造。
+    tag/rule 落的是**计数**不是金额——语义标 count（adapter 语义优先，映射成整型），
+    标成 amount 会得到 DECIMAL(18,4)，读表的人会以为那是笔钱。
+    """
+    if logic_type == "tag":
+        return (
+            (TAG_VALUE_COLUMN, "string", "category", f"{display_name} · 标签取值"),
+            ("metric_value", "bigint", "count", f"{display_name} · 该标签取值下的实体数"),
+        )
+    if logic_type == "rule":
+        return (("metric_value", "bigint", "count", f"{display_name} · 违规行数"),)
+    return (("metric_value", "decimal", "amount", display_name),)
+
+
 # --------------------------------------------------------------------------- 主流程
+
+
+def compile_candidate(
+    db: Session,
+    *,
+    ontology_id: str,
+    ast: dict,
+    name: str,
+    display_name: str | None = None,
+    expression_summary: str | None = None,
+    dimensions: list[str] | tuple[str, ...] = (),
+    filters: list[dict] | tuple[dict, ...] = (),
+    grain: str | None = None,
+    time_property: str | None = None,
+    limit: int | None = _DEFAULT_LIMIT,
+    dialect: str | None = None,
+    mapping: dict | None = None,
+) -> CompiledMetric:
+    """编译一个**尚未落库**的候选表达式（AST），走与已发布口径完全同一条路。
+
+    为什么需要它：``compile_metric`` 只认「已落库且已发布」的口径，于是编译器——这个系统里
+    唯一能判定「这条口径到底能不能变成一条可执行且自证的 SQL」的东西——在**写入路径上从未
+    被调用过**。表达式格式化出来什么就存什么、存什么就发布什么，第一次发现 AST 编不出来
+    是在建任务的 dry-run 里（甚至是在问数时）。谁写的口径，谁在几天后才知道它是坏的。
+
+    有了它，「LLM 出表达式」才敢做：模型产 AST → 当场编译 → 编不过就把编译器的错误原样
+    还给模型让它改，编过了才允许作为提案交给人看，而人看到的是**真 SQL 与口径展开轨迹**，
+    不是一段自然语言承诺。
+
+    传入的候选口径不落库、不进 session（transient ORM 实例），因此本函数无任何写副作用。
+    """
+    candidate = BusinessLogic(
+        ontology_id=ontology_id,
+        name=name,
+        display_name=display_name or name,
+        logic_type=str((ast or {}).get("type") or "metric"),
+        expression_summary=expression_summary,
+        status=EntityStatus.PUBLISHED.value,
+    )
+    return _compile_ast(
+        db,
+        logic=candidate,
+        ast=ast if isinstance(ast, dict) else {},
+        dimensions=dimensions,
+        filters=filters,
+        grain=grain,
+        time_property=time_property,
+        limit=limit,
+        dialect=dialect,
+        mapping=mapping,
+    )
 
 
 def compile_metric(
@@ -482,7 +603,34 @@ def compile_metric(
         raise MetricCompileError(
             "logic_not_found", f"业务逻辑「{logic_id}」不存在或未发布。"
         )
-    ast = _load_ast(logic)
+    return _compile_ast(
+        db,
+        logic=logic,
+        ast=_load_ast(logic),
+        dimensions=dimensions,
+        filters=filters,
+        grain=grain,
+        time_property=time_property,
+        limit=limit,
+        dialect=dialect,
+        mapping=mapping,
+    )
+
+
+def _compile_ast(
+    db: Session,
+    *,
+    logic: BusinessLogic,
+    ast: dict,
+    dimensions: list[str] | tuple[str, ...] = (),
+    filters: list[dict] | tuple[dict, ...] = (),
+    grain: str | None = None,
+    time_property: str | None = None,
+    limit: int | None = _DEFAULT_LIMIT,
+    dialect: str | None = None,
+    mapping: dict | None = None,
+) -> CompiledMetric:
+    """编译主体。``logic`` 只作元信息载体（名字/域/摘要），可以是未落库的候选。"""
     logic_type = (ast.get("type") or "metric").lower()
     if logic_type not in ("metric", "tag", "rule"):
         raise MetricCompileError(
@@ -915,4 +1063,16 @@ def _certify(
     }
 
 
-__all__ = ["CompiledMetric", "MetricCompileError", "compile_metric"]
+__all__ = [
+    "CompiledMetric",
+    "MetricCompileError",
+    "compile_metric",
+    "compile_candidate",
+    "METRIC_OPS",
+    "COMPARE_OPS",
+    "LOGIC_TYPES",
+    "TAG_VALUE_COLUMN",
+    "effective_logic_type",
+    "value_source_column",
+    "result_column_specs",
+]

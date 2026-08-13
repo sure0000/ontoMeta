@@ -1143,6 +1143,20 @@
   margin: 4px 0 10px;
 }
 
+/* 口径展开轨迹（带表达式的建数提案）：编译器确定性产出的「这条口径怎么展开的」，
+   摆在编译 SQL 之前——人先看得懂口径，再去核对 SQL。 */
+.chatbi-draft-trace {
+  margin: 6px 0 8px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-draft-trace li {
+  list-style: disc;
+}
+
 /* 提案参数表（P2）：标签一列、值一列；标量可改，嵌套结构只读。 */
 .chatbi-proposal-params {
   display: flex;

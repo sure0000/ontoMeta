@@ -8,6 +8,7 @@ import { useApi } from "../../hooks/useApi";
 import type {
   ChatBiAgentStep,
   ChatBiAnswer,
+  ChatBiBlock,
   ChatBiCategoryItem,
   ChatBiConversation,
   ChatBiHistoryItem,
@@ -721,6 +722,8 @@ const ChatBiMain = memo(function ChatBiMain({
       question: string,
       appType: "data_table" | "screen" | "dashboard",
       payload?: ChatBiAnswer,
+      /** agent 提案给的看板名；动作条不传，沿用后端按问题截断的默认名。 */
+      name?: string,
     ) => {
       const anchorDomainId = domainIds[0];
       if (!anchorDomainId || !question.trim()) {
@@ -744,6 +747,7 @@ const ChatBiMain = memo(function ChatBiMain({
           // 复用当前回答的口径，保证生成应用与对话展示一致（不重调 LLM）
           caliber_decomposition: payload?.caliber_decomposition,
           referenced_objects: payload?.referenced_objects,
+          name,
         });
         hide();
         message.success("已生成数据应用草稿");
@@ -760,18 +764,22 @@ const ChatBiMain = memo(function ChatBiMain({
   const [addDashTarget, setAddDashTarget] = useState<string | undefined>();
   const [addingDash, setAddingDash] = useState(false);
   const [dashboards, setDashboards] = useState<DataAppSummary[]>([]);
-  const [pendingAdd, setPendingAdd] = useState<{ question: string; payload?: ChatBiAnswer } | null>(
-    null,
-  );
+  const [pendingAdd, setPendingAdd] = useState<{
+    question: string;
+    payload?: ChatBiAnswer;
+    /** agent 提案给的面板标题/图型；动作条不传，走默认（问题截断 + bar）。 */
+    title?: string;
+    vizType?: string;
+  } | null>(null);
 
   const openAddToDashboard = useCallback(
-    (question: string, payload?: ChatBiAnswer) => {
+    (question: string, payload?: ChatBiAnswer, title?: string, vizType?: string) => {
       const anchorDomainId = domainIds[0];
       if (!anchorDomainId) {
         message.warning("请先选择至少一个数据域再加入看板");
         return;
       }
-      setPendingAdd({ question, payload });
+      setPendingAdd({ question, payload, title, vizType });
       setAddDashTarget("__new__");
       setAddDashOpen(true);
       void api
@@ -795,14 +803,15 @@ const ChatBiMain = memo(function ChatBiMain({
         const created = await api.createDataApp({
           domain_id: anchorDomainId,
           app_type: "dashboard",
-          name: pendingAdd.question.slice(0, 20) || "新看板",
+          name: pendingAdd.title || pendingAdd.question.slice(0, 20) || "新看板",
         });
         dashboardId = created.id;
       }
       await api.generateWidgetFromChat({
         domain_id: anchorDomainId,
         question: pendingAdd.question,
-        widget_type: "bar",
+        widget_type: pendingAdd.vizType || "bar",
+        name: pendingAdd.title,
         caliber_decomposition: pendingAdd.payload?.caliber_decomposition,
         referenced_objects: pendingAdd.payload?.referenced_objects,
         dashboard_id: dashboardId,
@@ -817,6 +826,28 @@ const ChatBiMain = memo(function ChatBiMain({
       setAddingDash(false);
     }
   }, [domainIds, pendingAdd, addDashTarget, navigate]);
+
+  /**
+   * agent 主动提的面板/看板提案被点确认（app_proposal 块）。
+   *
+   * 走的是与动作条**完全相同**的两条路，只是标题/图型来自提案：
+   * panel → 开「加入看板」弹窗让用户选落到哪块板；dashboard → 直接新建看板。
+   * 口径一律取该条消息的 payload，不重新问一次数。
+   */
+  const handleProposeApp = useCallback(
+    (
+      proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"],
+      payload?: ChatBiAnswer,
+    ) => {
+      const question = proposal.create_payload.question;
+      if (proposal.kind === "dashboard") {
+        void handleGenerateApp(question, "dashboard", payload, proposal.name || proposal.title);
+        return;
+      }
+      openAddToDashboard(question, payload, proposal.title, proposal.viz_type);
+    },
+    [handleGenerateApp, openAddToDashboard],
+  );
 
   useEffect(() => {
     setLoadingSuggestions(true);
@@ -1071,6 +1102,7 @@ const ChatBiMain = memo(function ChatBiMain({
         onSuggestionClick={submit}
         onGenerateApp={handleGenerateApp}
         onAddToDashboard={openAddToDashboard}
+        onProposeApp={handleProposeApp}
       />
 
       <ChatBiComposer

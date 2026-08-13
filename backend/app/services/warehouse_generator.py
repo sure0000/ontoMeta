@@ -30,6 +30,7 @@ from app.models import (
     RelationType,
 )
 from app.models.warehouse import TargetKind
+from app.services.metric_compiler import effective_logic_type, result_column_specs
 from app.services.ontology_projection import (
     foreign_key_names,
     primary_key_is_confident,
@@ -516,10 +517,17 @@ class WarehouseGenerator:
                     database=naming.database_of(contract.target_layer),
                     layer=contract.target_layer,
                     comment=_comment_of(logic.display_name, logic.expression_summary),
+                    # 结果表形状按口径类型分叉，且与指标任务读**同一份**权威
+                    # （metric_compiler.result_column_specs）。两处各写各的后果是：
+                    # 物化建出 stat_date+metric_value，指标任务却按 tag 形状
+                    # INSERT tag_value+row_count——列对不上，跑到执行才炸。
                     columns=(
                         LogicalColumn("stat_date", "date", "datetime", "统计日期"),
-                        LogicalColumn(
-                            "metric_value", "decimal", "amount", logic.display_name
+                        *(
+                            LogicalColumn(cname, dtype, stype, comment)
+                            for cname, dtype, stype, comment in result_column_specs(
+                                effective_logic_type(logic), logic.display_name
+                            )
                         ),
                     ),
                     partition_key="stat_date",

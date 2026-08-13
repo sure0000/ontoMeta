@@ -15,7 +15,7 @@ import pytest
 from app.agents.drafters.metric import MetricDrafter
 from app.agents.drafters.sync import SyncDrafter, decide_preservation
 from app.agents.drafters.transform import TransformDrafter
-from app.agents.executors.metric import MetricExecutor
+from app.agents.executors.metric import MetricExecutor, _build_table
 from app.agents.executors.sync import SyncExecutor
 from app.agents.executors.transform import TransformExecutor
 from app.database import SessionLocal
@@ -754,3 +754,224 @@ def test_transform_flink_task_carries_lineage_urns(seeded, monkeypatch):
     assert "dataPlatform:postgres" in task.target_urn
     # 物理表名含在 URN 里（库.表 或表名）
     assert "customer" in task.target_urn
+
+
+# ---------- ④ 标签 / 规则走同一条指标任务链 ----------
+
+
+def _seed_logic(logic_type: str, ast_body: dict, *, summary: str) -> dict:
+    """建一条已发布、已形式化的 tag/rule 口径（订单.金额 + 订单.状态）。"""
+    from app.models import EntityStatus
+
+    tag = uuid.uuid4().hex[:8]
+    pub = EntityStatus.PUBLISHED.value
+    with SessionLocal() as db:
+        domain = DomainContext(datahub_domain_id=f"urn:li:domain:tg-{tag}", name=f"tg-{tag}")
+        db.add(domain)
+        db.flush()
+        onto = Ontology(
+            domain_context_id=domain.id, status=OntologyStatus.PUBLISHED.value, version=1
+        )
+        db.add(onto)
+        db.flush()
+        order = ObjectType(
+            ontology_id=onto.id, name="order", display_name="订单",
+            table_role="business_object", status=pub,
+            source_ref=_URN.format(t="tab_order"),
+        )
+        db.add(order)
+        db.flush()
+        amount = Property(object_type_id=order.id, name="amount", display_name="金额",
+                          data_type="decimal", semantic_type="measure", status=pub)
+        db.add(amount)
+        db.flush()
+        body = json.loads(
+            json.dumps(ast_body).replace("__REF__", "r1")
+        )
+        logic = BusinessLogic(
+            ontology_id=onto.id, name=f"{logic_type}_big_order", display_name="大额订单",
+            logic_type=logic_type, status=pub,
+            expression_summary=summary,
+            expression_json=json.dumps({
+                "type": logic_type,
+                "refs": [{
+                    "ref_id": "r1", "object_type_id": order.id, "object_name": "order",
+                    "object_display_name": "订单", "property_id": amount.id,
+                    "property_name": "amount", "property_display_name": "金额",
+                }],
+                "body": body,
+            }, ensure_ascii=False),
+        )
+        db.add(logic)
+        db.commit()
+        return {"ontology_id": onto.id, "logic_id": logic.id, "name": logic.name}
+
+
+@pytest.fixture
+def tag_logic():
+    """标签：金额 > 1000 记「大额」，否则「普通」。"""
+    return _seed_logic(
+        "tag",
+        {
+            "cases": [
+                {"when": {"left": {"ref": "__REF__"}, "op": ">", "right": {"value": 1000}},
+                 "then": {"value": "大额"}},
+                {"when": None, "then": {"value": "普通"}},
+            ]
+        },
+        summary="金额>1000 记为大额",
+    )
+
+
+@pytest.fixture
+def rule_logic():
+    """规则：金额应当 > 0（违规=不满足的行）。"""
+    return _seed_logic(
+        "rule",
+        {"condition": {"left": {"ref": "__REF__"}, "op": ">", "right": {"value": 0}},
+         "message": "订单金额必须为正"},
+        summary="金额必须为正",
+    )
+
+
+def _draft(fixture: dict) -> dict:
+    return MetricDrafter().draft(
+        "大额订单",
+        {"ontology_id": fixture["ontology_id"], "business_logic_id": fixture["logic_id"]},
+    )
+
+
+def test_drafter_carries_logic_type_from_ast(tag_logic, rule_logic):
+    """Spec 必须带口径类型：结果表形状与取数列都按它分叉，缺了就一律当指标处理。"""
+    assert _draft(tag_logic)["logic_type"] == "tag"
+    assert _draft(rule_logic)["logic_type"] == "rule"
+
+
+def test_tag_task_keeps_label_and_count_in_separate_columns(tag_logic):
+    """标签任务：标签取值单独一列，metric_value 落的是**该取值下的实体数**。
+
+    此前一律 `logic.name AS metric_value`——对 tag 而言那是 CASE 分桶列（字符串标签），
+    于是标签被塞进 decimal 的 metric_value，真正要的 row_count 整列丢掉：跑得通、数是错的。
+    """
+    out = MetricExecutor().execute(_draft(tag_logic), {})
+    ddl, sql = out["ddl"], out["sql"]
+    # 结果表：标签取值是可分组的字符串列，值列是计数（不是金额类型）
+    assert "`tag_value` STRING" in ddl
+    assert "`metric_value` INT" in ddl
+    assert "DECIMAL" not in ddl.split("metric_value")[1].split("\n")[0]
+    # SQL：标签列 → tag_value；row_count → metric_value
+    assert "AS `tag_value`" in sql
+    assert "`row_count` AS metric_value" in sql
+    # 标签值不该再被当成度量值
+    assert "`tag_big_order` AS metric_value" not in sql
+
+
+def test_rule_task_selects_violations_column(rule_logic):
+    """规则任务：metric_value 取 violations。
+
+    编译器给规则的计数列叫 violations，**没有**以口径名命名的列；此前外层照样
+    `SELECT \\`rule_big_order\\`` —— 引用了子查询里不存在的列，一执行就 column not found。
+    """
+    out = MetricExecutor().execute(_draft(rule_logic), {})
+    sql = out["sql"]
+    assert "`violations` AS metric_value" in sql
+    assert "`rule_big_order` AS metric_value" not in sql
+    assert "`metric_value` INT" in out["ddl"]
+    # 规则没有标签列
+    assert "tag_value" not in out["ddl"]
+
+
+def test_metric_task_shape_unchanged(formal_logic):
+    """回归护栏：指标那一类的形状一个字节都没变（度量值仍是 decimal、无标签列）。"""
+    out = MetricExecutor().execute(
+        MetricDrafter().draft(
+            "订单总额",
+            {"ontology_id": formal_logic["ontology_id"],
+             "business_logic_id": formal_logic["logic_id"]},
+        ),
+        {},
+    )
+    assert "`metric_value` DECIMAL(18,4)" in out["ddl"]
+    assert "tag_value" not in out["ddl"]
+    assert "`order_total` AS metric_value" in out["sql"]
+
+
+def test_unformalized_tag_refuses_instead_of_faking_a_metric():
+    """没形式化的标签不能建任务：兜底路只会拼出一条与该标签无关的聚合。"""
+    import pytest as _pytest
+
+    from app.agents.executors.metric import _build_sql
+
+    spec = {
+        "metric_name": "vip_customer", "display_name": "高价值客户",
+        "logic_type": "tag", "target_layer": "ads",
+        "subject_objects": ["customer"], "group_by": [], "expression": "COUNT(1)",
+    }
+    with _pytest.raises(ValueError) as err:
+        _build_sql(spec, "hive")
+    assert "形式化" in str(err.value) and "标签" in str(err.value)
+
+
+def test_tag_walks_the_same_governance_pipeline(client, admin_headers, tag_logic):
+    """端到端：标签口径穿完整治理流水线（起草 → 校验 → 确认 → 执行）。
+
+    这条链此前只有指标走过。标签走它有两处会踩空：Spec 要带 logic_type（否则结果表
+    按指标形状建），校验闸门要认标签的主对象（它来自 AST 而非绑定表）。
+    """
+    a = client.post(
+        "/api/agents/draft",
+        headers=admin_headers,
+        json={
+            "kind": "metric",
+            "intent": "大额订单",
+            "ontology_id": tag_logic["ontology_id"],
+            "context": {
+                "ontology_id": tag_logic["ontology_id"],
+                "business_logic_id": tag_logic["logic_id"],
+            },
+        },
+    ).json()
+    aid = a["id"]
+    assert a["spec"]["logic_type"] == "tag"
+    assert a["name"].startswith("标签 · "), a["name"]  # 任务列表里认得出这是标签
+
+    a = client.post(f"/api/agents/artifacts/{aid}/validate", headers=admin_headers, json={}).json()
+    assert a["status"] == "validated", a
+    a = client.post(f"/api/agents/artifacts/{aid}/confirm", headers=admin_headers, json={}).json()
+    assert a["status"] == "confirmed"
+    a = client.post(f"/api/agents/artifacts/{aid}/execute", headers=admin_headers, json={}).json()
+    assert a["status"] == "succeeded", a
+    receipt = a["execution_receipt"]
+    assert "`row_count` AS metric_value" in receipt["sql"]
+    assert "`tag_value` STRING" in receipt["ddl"]
+
+
+def test_materialize_and_metric_task_agree_on_tag_table_shape(tag_logic):
+    """同一条标签口径，**物化**建的表与**指标任务**写的表必须同形。
+
+    两处曾各自写死指标形状：物化建 stat_date+metric_value(DECIMAL)，指标任务按 tag 形状
+    INSERT tag_value+row_count——列对不上，直到执行才炸。现在共读
+    metric_compiler.result_column_specs 这一份权威。
+    """
+    from app.models import MaterializationContract
+    from app.models.warehouse import TargetKind
+    from app.services.warehouse_generator import WarehouseGenerator
+
+    with SessionLocal() as db:
+        db.add(
+            MaterializationContract(
+                ontology_id=tag_logic["ontology_id"],
+                target_kind=TargetKind.BUSINESS_LOGIC.value,
+                target_id=tag_logic["logic_id"],
+                target_layer="ads",
+                materialized=True,
+            )
+        )
+        db.commit()
+        plan = WarehouseGenerator().build_logical_schema(db, tag_logic["ontology_id"])
+
+    mat = next(t for t in plan.schema.tables if t.source_name == tag_logic["name"])
+    task = _build_table(_draft(tag_logic))
+    assert [c.name for c in mat.columns] == [c.name for c in task.columns]
+    assert [c.data_type for c in mat.columns] == [c.data_type for c in task.columns]
+    assert "tag_value" in [c.name for c in mat.columns]

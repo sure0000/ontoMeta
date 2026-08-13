@@ -18,7 +18,13 @@ from app.agents.executors.base import Executor
 from app.database import SessionLocal
 from app.models import BusinessLogic, DataSource
 from app.services.flink_sql_generator import FlinkEndpoint, generate_flink_sql
-from app.services.metric_compiler import compile_metric
+from app.services.metric_compiler import (
+    LOGIC_TYPES,
+    TAG_VALUE_COLUMN,
+    compile_metric,
+    result_column_specs,
+    value_source_column,
+)
 from app.warehouse.jobs.base import endpoint_credential_env
 from app.warehouse import (
     LogicalColumn,
@@ -34,23 +40,45 @@ def _qualified(spec: dict[str, Any]) -> tuple[str, str]:
     return database, spec["metric_name"]
 
 
+# 「指标任务」这条链原本只按 metric 一种形状生成结果表与取数列，但编译器对三类口径
+# 产出的列**并不相同**（见 metric_compiler 的 §1 分叉）：
+#
+#   metric → 度量列，别名 = 口径技术名（agg_alias=logic.name）
+#   tag    → 分桶列，别名 = 口径技术名（**字符串标签**）；外加计数列 row_count
+#   rule   → 计数列 violations；**没有**以口径名命名的列
+#
+# 一律取 `logic.name AS metric_value` 的后果：
+#   · tag：字符串标签被塞进 decimal 的 metric_value，而真正要的「每个标签值下多少实体」
+#     （row_count）被整列丢掉——跑得通，数是错的，最难发现的那种。
+#   · rule：引用了子查询里根本不存在的列，SQL 一执行就报 column not found。
+# 故结果表形状与取数列都必须按口径类型分叉——形状的唯一权威在 metric_compiler
+# （物化那条路的 warehouse_generator._logic_tables 读的是同一份），这里不另立一套。
+
+
+def _spec_logic_type(spec: dict[str, Any]) -> str:
+    """本 Spec 的口径类型。未知一律当 metric——旧 Spec 没这个字段，行为不变。"""
+    lt = str(spec.get("logic_type") or "metric").strip().lower()
+    return lt if lt in LOGIC_TYPES else "metric"
+
+
 def _build_table(spec: dict[str, Any]) -> LogicalTable:
     database, name = _qualified(spec)
+    logic_type = _spec_logic_type(spec)
+    display = spec.get("display_name") or name
     columns = [LogicalColumn("stat_date", "date", "datetime", "统计日期")]
     # 维度字段进结果表，指标才可下钻。
     columns += [
         LogicalColumn(dim, "string", "category", dim) for dim in spec.get("group_by") or []
     ]
-    columns.append(
-        LogicalColumn(
-            "metric_value", "decimal", "amount", spec.get("display_name") or name
-        )
-    )
+    columns += [
+        LogicalColumn(cname, dtype, stype, comment)
+        for cname, dtype, stype, comment in result_column_specs(logic_type, display)
+    ]
     return LogicalTable(
         name=name,
         database=database,
         layer=spec.get("target_layer") or "ads",
-        comment=f"{spec.get('display_name') or name} · 口径：{spec.get('expression') or '未填写'}",
+        comment=f"{display} · 口径：{spec.get('expression') or '未填写'}",
         columns=tuple(columns),
         partition_key="stat_date",
     )
@@ -65,6 +93,16 @@ def _build_sql(spec: dict[str, Any], engine: str) -> str:
     :func:`_compiled_sql`，由 metric_compiler 从 AST 确定性编译。
     """
     database, name = _qualified(spec)
+    logic_type = _spec_logic_type(spec)
+    if logic_type in ("tag", "rule"):
+        # 标签/规则的口径**只存在于表达式里**：标签是 CASE 分桶、规则是违规谓词，
+        # 二者都无法从「绑定角色 + 口径摘要」拼出来——这条兜底路只会拼出一条与该口径
+        # 毫无关系的聚合。宁可在起草时报错，也不产出一张跑得通、数无意义的表。
+        label = "标签" if logic_type == "tag" else "规则"
+        raise ValueError(
+            f"{label}「{spec.get('display_name') or name}」尚未形式化（没有表达式 AST），"
+            f"无法生成任务——请先在业务逻辑里补全该{label}的表达式并发布，再建任务。"
+        )
     # 主对象缺失时绝不塞占位符——那会产出看似合法、实则无法执行的 `FROM <未绑定>`，
     # 比直接报错更危险（不静默降级）。真实本体的 order_gmv 即无 subject 绑定。
     subjects = spec.get("subject_objects") or spec.get("object_types") or []
@@ -116,11 +154,16 @@ def _compiled_sql(spec: dict[str, Any], engine: str) -> str | None:
             return None  # 只有文字口径 → 退回 _build_sql 的既有行为
         compiled = compile_metric(db, logic_id, limit=None, dialect=engine)
 
-    # 结果表形状固定：统计日 + 维度 + 度量值。维度列名即口径里的属性名，
-    # 度量列在编译产物里的别名是口径技术名（agg_alias=logic.name）。
+    # 结果表形状：统计日 + 维度 + [标签取值] + 值列。按**编译产物自报的口径类型**分叉
+    # （compiled.logic_type 来自 AST，与编译器实际产出的列名同源；用 spec 里的类型可能
+    # 与 AST 不一致，DDL 与 SQL 就会各说各话）。
     select_cols = ["  CURRENT_DATE AS stat_date"]
     select_cols += [f"  {q(c)} AS {q(c)}" for c in spec.get("group_by") or []]
-    select_cols.append(f"  {q(compiled.logic_name)} AS metric_value")
+    if compiled.logic_type == "tag":
+        select_cols.append(f"  {q(compiled.logic_name)} AS {q(TAG_VALUE_COLUMN)}")
+    select_cols.append(
+        f"  {q(value_source_column(compiled.logic_type, compiled.logic_name))} AS metric_value"
+    )
     select_body = (
         "SELECT\n" + ",\n".join(select_cols)
         + f"\nFROM (\n{compiled.sql}\n) {q('metric_src')}"
@@ -150,7 +193,11 @@ def _compiled_select_body(
         compiled = compile_metric(db, logic_id, limit=None, dialect="hive")
     cols = ["  CURRENT_DATE AS stat_date"]
     cols += [f"  `{c}` AS `{c}`" for c in group_by]
-    cols.append(f"  `{compiled.logic_name}` AS metric_value")
+    if compiled.logic_type == "tag":
+        cols.append(f"  `{compiled.logic_name}` AS `{TAG_VALUE_COLUMN}`")
+    cols.append(
+        f"  `{value_source_column(compiled.logic_type, compiled.logic_name)}` AS metric_value"
+    )
     return (
         "SELECT\n" + ",\n".join(cols)
         + f"\nFROM (\n{compiled.sql}\n) `metric_src`"

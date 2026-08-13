@@ -17,7 +17,8 @@ import type { OntologySummary, DomainContext } from "../types";
 const ENTITY_REQUIRED: Record<string, string> = {
   sync: "请选择要同步的对象",
   transform: "请选择加工的目标对象",
-  metric: "请选择指标口径（业务逻辑）",
+  // 这条任务链三类口径共用（指标/标签/规则），文案只写「指标」会让人以为标签选不了。
+  metric: "请选择口径（业务逻辑：指标 / 标签 / 规则）",
 };
 
 /** spec → selectedEntities 的反向映射（与 handleSubmit 里的正向映射对称）。 */

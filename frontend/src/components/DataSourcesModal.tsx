@@ -34,6 +34,15 @@ interface ConnFormValues {
   url?: string;
   raw_dsn?: string;
   mapping?: string;
+  /** StarRocks 多目录：源库注册成的 catalog 名；留空=数仓内部源。 */
+  catalog_name?: string;
+}
+
+/** 从别处（如 Data Agent 的接数据提案）带过来的非机密预填。凭据永远只由用户在本表单里填。 */
+export interface DataSourcePrefill {
+  name?: string;
+  kind?: string;
+  catalog_name?: string;
 }
 
 const KIND_PROFILES: Record<
@@ -137,7 +146,16 @@ export function DataSourceStatusTag({ status }: { status: string }) {
   );
 }
 
-export function DataSourcesModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function DataSourcesModal({
+  open,
+  onClose,
+  prefill,
+}: {
+  open: boolean;
+  onClose: () => void;
+  /** 带着预填打开时，直接弹出「新增数据源」表单并填好非机密字段（连接信息仍由用户填）。 */
+  prefill?: DataSourcePrefill;
+}) {
   return (
     <Modal
       title="数据源管理"
@@ -147,7 +165,7 @@ export function DataSourcesModal({ open, onClose }: { open: boolean; onClose: ()
       width={720}
       destroyOnClose
     >
-      <DataSourcesPanel />
+      <DataSourcesPanel prefill={prefill} />
     </Modal>
   );
 }
@@ -155,7 +173,7 @@ export function DataSourcesModal({ open, onClose }: { open: boolean; onClose: ()
 /** 数据源管理面板：登记 / 测试 / 删除可写连接。供物化落库与数据应用取数复用；
  *  可内嵌于设置页 Tab，或包在 {@link DataSourcesModal} 里从数据应用编辑器打开。
  *  新增 / 编辑通过弹框填写，连接按类型给结构化表单（账号密码分列）。 */
-export function DataSourcesPanel() {
+export function DataSourcesPanel({ prefill }: { prefill?: DataSourcePrefill } = {}) {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
@@ -183,6 +201,22 @@ export function DataSourcesPanel() {
 
   useEffect(() => {
     load();
+  }, []);
+
+  // 带预填打开（Data Agent 的接数据提案点进来）：直接弹「新增」表单并填好非机密字段。
+  // 只认第一次——之后用户关掉表单不该被再次弹开。
+  useEffect(() => {
+    if (!prefill) return;
+    setEditingId(null);
+    setEditingPwSet(false);
+    setRawMode(false);
+    setInitialVals({
+      kind: prefill.kind || "postgres",
+      name: prefill.name,
+      catalog_name: prefill.catalog_name,
+    });
+    setFormOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const openAdd = () => {
@@ -261,6 +295,7 @@ export function DataSourcesPanel() {
           kind: values.kind,
           dsn_secret_ref: dsn,
           mapping,
+          catalog_name: values.catalog_name?.trim() || undefined,
         });
         message.success("已添加数据源");
       }
@@ -389,6 +424,15 @@ export function DataSourcesPanel() {
             <Form.Item name="kind" label="类型">
               <Select options={KIND_OPTIONS} style={{ width: 180 }} />
             </Form.Item>
+            {!editingId && (
+              <Form.Item
+                name="catalog_name"
+                label="Catalog 名（可选）"
+                tooltip="源库在 StarRocks 里注册成的外部 catalog 名（如 erp/crm），取数时用它显式选源；留空＝数仓内部源"
+              >
+                <Input placeholder="如 erp" style={{ width: 160 }} />
+              </Form.Item>
+            )}
           </Space>
 
           {editingId && (

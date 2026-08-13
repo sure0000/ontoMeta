@@ -153,6 +153,17 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for proposal in payload.get("pipeline_proposals") or []:
         _add({"type": "pipeline_proposal", "proposal": proposal})
 
+    # 数据应用提案块（propose_panel / propose_dashboard 产出）。纯提案 + 「生成」载荷；
+    # 点击时前端再并上本条消息的口径（caliber_decomposition/referenced_objects），
+    # 保证生成的面板与对话里看到的口径一致——与动作条走的是同一条路，只是由 agent 主动提。
+    for proposal in payload.get("app_proposals") or []:
+        _add({"type": "app_proposal", "proposal": proposal})
+
+    # 接数据提案块（propose_datasource / propose_ontology_draft 产出）。同样不写库：
+    # 建源要用户自己填凭据，生成草稿要用户点了才启动。
+    for proposal in payload.get("onboard_proposals") or []:
+        _add({"type": "onboard_proposal", "proposal": proposal})
+
     # P3.1：记忆提案块（propose_preference 产出）。纯提案 + 「记住」写入本域约定；不写库。
     for proposal in payload.get("preference_proposals") or []:
         _add({"type": "preference_proposal", "proposal": proposal})

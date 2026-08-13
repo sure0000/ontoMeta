@@ -1093,6 +1093,8 @@ export const api = {
     kind: string;
     dsn_secret_ref?: string;
     mapping?: Record<string, unknown>;
+    /** StarRocks 多目录：源库注册成的 catalog 名；留空=数仓内部源。 */
+    catalog_name?: string;
   }) =>
     request<DataSource>(`/api/data-sources`, {
       method: "POST",

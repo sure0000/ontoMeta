@@ -145,7 +145,7 @@ export function TaskDataRangeSelector({
             return {
               value: b.id,
               label: unbound
-                ? `${b.display_name || b.name}（未绑定对象，不可建指标）`
+                ? `${b.display_name || b.name}（未绑定对象，不可建任务）`
                 : b.display_name || b.name,
               isLeaf: true,
               disabled: unbound,
@@ -158,13 +158,13 @@ export function TaskDataRangeSelector({
         if (children.length === 0) {
           setEmptyHint(
             entityConfig.source === "businessLogics"
-              ? "该本体下还没有业务逻辑。指标口径须先在「业务逻辑」中定义，再回来建指标任务。"
+              ? "该本体下还没有业务逻辑。口径（指标 / 标签 / 规则）须先在「业务逻辑」中定义，再回来建任务。"
               : "该本体下还没有业务对象。",
           );
         } else if (selectable.length === 0) {
           setEmptyHint(
             entityConfig.source === "businessLogics"
-              ? "该本体下的业务逻辑都还没绑定对象，无法建指标任务；请先在「业务逻辑」里绑定主对象。"
+              ? "该本体下的业务逻辑都还没绑定对象，无法建任务；请先在「业务逻辑」里绑定主对象。"
               : "该本体下的对象都没有源表（source_ref），无法建同步任务；请先完成元数据接入。",
           );
         } else {

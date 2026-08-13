@@ -28,6 +28,7 @@ from app.models import (
     Property,
 )
 from app.models.warehouse import TargetKind
+from app.services.metric_compiler import effective_logic_type
 
 
 def _walk_refs(node: Any, out: list[str]) -> None:
@@ -41,6 +42,9 @@ def _walk_refs(node: Any, out: list[str]) -> None:
     elif isinstance(node, list):
         for value in node:
             _walk_refs(value, out)
+
+
+_LOGIC_TYPE_LABEL = {"metric": "指标", "tag": "标签", "rule": "规则"}
 
 
 def _roles_from_expression(logic: BusinessLogic) -> dict[str, list[str]]:
@@ -197,6 +201,9 @@ class MetricDrafter(Drafter):
             "metric_name": logic.name,
             "display_name": logic.display_name,
             "business_logic_id": logic.id,
+            # 口径类型决定结果表形状与取数列（executor 的 _build_table/_compiled_sql）。
+            # 三类共用这条任务链——标签落「标签取值 + 实体数」，规则落「违规行数」。
+            "logic_type": effective_logic_type(logic),
             "expression": logic.expression_summary or "",
             **roles,
             # 见 sync.py 同名字段：引擎随目标数据源走，不取契约默认。
@@ -214,4 +221,7 @@ class MetricDrafter(Drafter):
         return self.name_from_spec(spec)
 
     def name_from_spec(self, spec: dict[str, Any]) -> str:
-        return f"指标 · {spec.get('display_name') or spec.get('metric_name')}"
+        # 三类口径共用这条任务链，名字就不能一律叫「指标」——任务列表里一排「指标 · X」
+        # 里混着标签和规则，看的人无从分辨自己在批准什么。
+        label = _LOGIC_TYPE_LABEL.get(str(spec.get("logic_type") or "metric"), "指标")
+        return f"{label} · {spec.get('display_name') or spec.get('metric_name')}"

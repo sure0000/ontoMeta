@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from app.api.deps import chat_bi_service as svc
@@ -21,14 +22,22 @@ from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golde
 
 
 def test_registry_has_overview_and_query():
-    assert set(SKILLS) == {"overview", "query", "lineage", "create", "task"}
-    assert SKILLS["query"].extra_tool_names == ("update_plan", "scout_query", "analyze_result", "render_chart")
+    assert set(SKILLS) == {"overview", "query", "lineage", "create", "task", "onboard"}
+    assert SKILLS["query"].extra_tool_names == (
+        "update_plan", "scout_query", "analyze_result", "render_chart",
+        "propose_panel", "propose_dashboard",
+    )
     assert SKILLS["overview"].extra_tool_names == ()
     assert SKILLS["lineage"].extra_tool_names == ("get_lineage",)
-    assert SKILLS["create"].extra_tool_names == ("propose_draft", "lint_against_standard")
+    assert SKILLS["create"].extra_tool_names == (
+        "propose_draft", "propose_expression", "lint_against_standard",
+    )
     assert SKILLS["task"].extra_tool_names == (
         "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
         "lint_against_standard",
+    )
+    assert SKILLS["onboard"].extra_tool_names == (
+        "list_onboarding_targets", "propose_datasource", "propose_ontology_draft",
     )
     assert "overview" in skill_choices_text() and "query" in skill_choices_text()
 
@@ -82,7 +91,10 @@ def test_select_skill_appends_overlay_and_unlocks():
     assert skill is not None and skill.name == "query"
     assert messages[0]["content"].startswith("BASE\n\n")
     assert "取数分析技能" in messages[0]["content"]
-    assert result["tools_unlocked"] == ["update_plan", "scout_query", "analyze_result", "render_chart"]
+    assert result["tools_unlocked"] == [
+        "update_plan", "scout_query", "analyze_result", "render_chart",
+        "propose_panel", "propose_dashboard",
+    ]
 
 
 def test_select_skill_reselect_replaces_not_stacks():
@@ -1175,3 +1187,384 @@ def test_remember_preference_endpoint(client, admin_headers):
         json={"domain_id": "nope", "text": "x"}, headers=admin_headers,
     )
     assert bad.status_code == 400
+
+
+# ------------- 数据应用车道：面板/看板提案（query 技能） -------------
+
+
+_OBJ_REF = [{"id": "obj-1", "name": "order", "display_name": "订单"}]
+
+
+def test_propose_panel_builds_create_payload():
+    r, summary, is_error = svc._dispatch_propose_app(
+        kind="panel", domain_id="d1", question="各区域订单量",
+        args={"title": "各区域订单量", "viz_type": "bar"},
+        referenced_objects=_OBJ_REF,
+    )
+    assert is_error is False
+    assert r["kind"] == "panel" and r["title"] == "各区域订单量"
+    # 载荷是 generate-widget 的入参；口径不在这里带——由前端并上本条消息的 payload。
+    assert r["create_payload"] == {
+        "domain_id": "d1", "question": "各区域订单量", "widget_type": "bar", "name": "各区域订单量",
+    }
+    assert "caliber_decomposition" not in r["create_payload"]
+    assert "面板" in summary
+
+
+def test_propose_panel_refuses_without_hit_object():
+    """没命中任何对象就提面板 = 生成一个空壳。当场判错，别等用户点了才在服务端抛。"""
+    r, _s, is_error = svc._dispatch_propose_app(
+        kind="panel", domain_id="d1", question="你能做什么",
+        args={"title": "空壳", "viz_type": "bar"}, referenced_objects=[],
+    )
+    assert is_error is True and "主对象" in r["error"]
+
+
+def test_propose_panel_rejects_bad_viz_and_missing_title():
+    r1, _s1, e1 = svc._dispatch_propose_app(
+        kind="panel", domain_id="d1", question="q",
+        args={"title": "x", "viz_type": "sankey"}, referenced_objects=_OBJ_REF,
+    )
+    assert e1 is True and "sankey" in r1["error"]
+    r2, _s2, e2 = svc._dispatch_propose_app(
+        kind="panel", domain_id="d1", question="q",
+        args={"viz_type": "bar"}, referenced_objects=_OBJ_REF,
+    )
+    assert e2 is True and "title" in r2["error"]
+
+
+def test_propose_dashboard_builds_create_payload():
+    r, _s, is_error = svc._dispatch_propose_app(
+        kind="dashboard", domain_id="d1", question="渠道销售",
+        args={"name": "渠道销售看板", "panel_title": "各渠道销售额", "viz_type": "bar"},
+        referenced_objects=_OBJ_REF,
+    )
+    assert is_error is False
+    assert r["kind"] == "dashboard" and r["title"] == "各渠道销售额"
+    assert r["create_payload"]["app_type"] == "dashboard"
+    assert r["create_payload"]["name"] == "渠道销售看板"
+
+
+def test_propose_dashboard_defaults_panel_title_to_name():
+    r, _s, e = svc._dispatch_propose_app(
+        kind="dashboard", domain_id="d1", question="q",
+        args={"name": "销售看板"}, referenced_objects=_OBJ_REF,
+    )
+    assert e is False and r["title"] == "销售看板" and r["viz_type"] == "bar"
+
+
+def test_panel_flow_stays_read_only(client):
+    """端到端：select_skill(query) → get_object → propose_panel 穿真实循环；
+    payload 带提案、投影出 app_proposal 块，且 **ask() 不新建任何数据应用**。"""
+    from app.models import DataApp, DataAppWidget
+
+    domain_id, _onto, aliases = _seed_golden_domain()
+
+    def _counts() -> tuple[int, int]:
+        with SessionLocal() as db:
+            return db.query(DataApp).count(), db.query(DataAppWidget).count()
+
+    before = _counts()
+    script = [
+        ToolTurn([("select_skill", {"skill": "query"})]),
+        ToolTurn([("get_object", {"object_id": "@order"})]),
+        ToolTurn([("propose_panel", {"title": "订单量趋势", "viz_type": "bar"})]),
+        FinalTurn("已为你拟好「订单量趋势」面板，点确认即可生成并加入看板。"),
+    ]
+    completions = _StubCompletions(script, aliases)
+    orig = c.AsyncOpenAI
+    c.AsyncOpenAI = lambda **_k: _StubClient(completions)  # type: ignore[assignment]
+    service = ChatBiService()
+    service.settings_service = SimpleNamespace(  # type: ignore[assignment]
+        get_llm_runtime=lambda _db: SimpleNamespace(
+            api_key="stub-key", api_base_url="http://stub", model="stub-model"
+        )
+    )
+    service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
+    try:
+        with SessionLocal() as db:
+            payload = asyncio.run(
+                service.ask(db, domain_ids=[domain_id], question="订单量趋势做成图",
+                            principal_role="publisher")
+            )
+    finally:
+        c.AsyncOpenAI = orig  # type: ignore[assignment]
+
+    assert payload.get("grounding_refused") is not True, payload.get("answer")
+    assert payload["app_proposals"] and payload["app_proposals"][0]["title"] == "订单量趋势"
+    assert "app_proposal" in [b["type"] for b in answer_to_blocks(payload)]
+    assert _counts() == before  # 只读不变式：提案不建应用
+
+
+# ------------- 接数据车道：数据源/本体草稿提案（onboard 技能） -------------
+
+
+def test_list_onboarding_targets_reports_domains_and_sources():
+    domain_id, _onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, summary, is_error = svc._dispatch_list_onboarding_targets(db)
+    assert is_error is False
+    ids = {d["domain_id"] for d in r["domains"]}
+    assert domain_id in ids
+    hit = next(d for d in r["domains"] if d["domain_id"] == domain_id)
+    assert hit["has_published_ontology"] is True and hit["published_object_count"] >= 2
+    assert isinstance(r["data_sources"], list)
+    # 边界如实告知：采集不由本系统触发
+    assert "DataHub" in r["datahub_note"]
+    assert "域" in summary
+
+
+def test_propose_datasource_drops_credentials():
+    """凭据不进提案：模型硬塞 dsn/password 也会被丢掉，并如实回告哪些参数没被采纳。"""
+    r, summary, is_error = svc._dispatch_propose_datasource(
+        args={
+            "name": "ERP 生产库（只读）", "kind": "mysql", "catalog_name": "erp",
+            "dsn_secret_ref": "mysql://root:hunter2@10.0.0.1/erp",
+            "password": "hunter2", "username": "root",
+        }
+    )
+    assert is_error is False
+    blob = json.dumps(r, ensure_ascii=False)
+    assert "hunter2" not in blob and "root" not in blob
+    assert r["create_payload"] == {"name": "ERP 生产库（只读）", "kind": "mysql", "catalog_name": "erp"}
+    assert r["credentials_required"] is True
+    assert set(r["dropped_args"]) == {"dsn_secret_ref", "password", "username"}
+    assert "凭据待用户填" in summary
+
+
+def test_propose_datasource_rejects_bad_kind_and_missing_name():
+    r1, _s1, e1 = svc._dispatch_propose_datasource(args={"name": "x", "kind": "oracle"})
+    assert e1 is True and "oracle" in r1["error"]
+    r2, _s2, e2 = svc._dispatch_propose_datasource(args={"kind": "mysql"})
+    assert e2 is True and "name" in r2["error"]
+
+
+def test_propose_ontology_draft_builds_payload_and_flags_published():
+    domain_id, _onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, summary, is_error = svc._dispatch_propose_ontology_draft(
+            db, args={"domain_id": domain_id, "scope": "objects", "reason": "补几个对象"}
+        )
+    assert is_error is False
+    assert r["create_payload"] == {"domain_id": domain_id, "scope": "objects"}
+    # 该域已有发布本体 → 前端据此提示「重跑产生新草稿走合并，不是原地覆盖」
+    assert r["has_published_ontology"] is True
+    assert "业务对象" in summary
+
+
+def test_propose_ontology_draft_rejects_unknown_domain_and_scope():
+    with SessionLocal() as db:
+        r1, _s1, e1 = svc._dispatch_propose_ontology_draft(db, args={"domain_id": "nope"})
+        assert e1 is True and "不存在" in r1["error"]
+        domain_id, _o, _a = _seed_golden_domain()
+        r2, _s2, e2 = svc._dispatch_propose_ontology_draft(
+            db, args={"domain_id": domain_id, "scope": "everything"}
+        )
+    assert e2 is True and "everything" in r2["error"]
+
+
+def test_onboard_flow_stays_read_only(client):
+    """端到端：select_skill(onboard) → list_onboarding_targets → propose_datasource
+    穿真实循环；出 onboard_proposal 块，且 **ask() 不新建任何数据源**。"""
+    from app.models import DataSource
+
+    domain_id, _onto, aliases = _seed_golden_domain()
+
+    def _ds_count() -> int:
+        with SessionLocal() as db:
+            return db.query(DataSource).count()
+
+    before = _ds_count()
+    script = [
+        ToolTurn([("select_skill", {"skill": "onboard"})]),
+        ToolTurn([("list_onboarding_targets", {})]),
+        ToolTurn([("propose_datasource", {"name": "ERP 只读库", "kind": "mysql",
+                                           "catalog_name": "erp"})]),
+        FinalTurn("已拟好数据源登记提案，连接信息需要你自己填，我不经手凭据。"),
+    ]
+    completions = _StubCompletions(script, aliases)
+    orig = c.AsyncOpenAI
+    c.AsyncOpenAI = lambda **_k: _StubClient(completions)  # type: ignore[assignment]
+    service = ChatBiService()
+    service.settings_service = SimpleNamespace(  # type: ignore[assignment]
+        get_llm_runtime=lambda _db: SimpleNamespace(
+            api_key="stub-key", api_base_url="http://stub", model="stub-model"
+        ),
+        get_datahub_runtime=lambda _db: SimpleNamespace(gms_url=""),
+    )
+    service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
+    try:
+        with SessionLocal() as db:
+            payload = asyncio.run(
+                service.ask(db, domain_ids=[domain_id], question="把我们的 ERP 库接进来",
+                            principal_role="publisher")
+            )
+    finally:
+        c.AsyncOpenAI = orig  # type: ignore[assignment]
+
+    assert payload.get("grounding_refused") is not True, payload.get("answer")
+    assert payload["skill"] == "onboard"
+    assert payload["onboard_proposals"] and payload["onboard_proposals"][0]["name"] == "ERP 只读库"
+    assert "onboard_proposal" in [b["type"] for b in answer_to_blocks(payload)]
+    assert _ds_count() == before  # 只读不变式：提案不建源
+
+
+# ------------- 口径形式化：让模型出可编译的表达式（create 技能） -------------
+
+
+def _expr_args(**over) -> dict:
+    base = {
+        "display_name": "订单总额",
+        "logic_type": "metric",
+        "fields": [{"alias": "amt", "object": "order", "property": "amount"}],
+        "body": {"operation": "sum", "args": [{"ref": "amt"}]},
+        "summary": "订单金额求和",
+    }
+    base.update(over)
+    return base
+
+
+def test_propose_expression_compiles_and_returns_real_sql():
+    """提案里带的是**编译并自证过的 SQL**，不是自然语言承诺。"""
+    domain_id, onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, summary, is_error = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto, args=_expr_args()
+        )
+    assert is_error is False, r
+    assert "SUM" in r["compiled_sql"] and "amount" in r["compiled_sql"]
+    assert r["expression_json"]["type"] == "metric"
+    # refs 由服务端从本体解析，模型给的只是别名
+    assert r["expression_json"]["refs"][0]["object_name"] == "order"
+    assert r["expression_json"]["refs"][0]["property_name"] == "amount"
+    assert r["create_payload"]["expression_json"] == r["expression_json"]
+    assert any("SUM" in line for line in r["caliber_trace"])
+    assert "编译通过" in summary
+
+
+def test_propose_expression_rejects_unknown_field_with_candidates():
+    """字段编错时**当场判错并给出该对象真实有哪些字段**——模型据此改，不必再猜一轮。"""
+    domain_id, onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, _s, is_error = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto,
+            args=_expr_args(fields=[{"alias": "amt", "object": "order", "property": "amt"}]),
+        )
+    assert is_error is True
+    assert r["code"] == "unknown_property"
+    assert "amount" in r["available_columns"]
+
+
+def test_propose_expression_rejects_illegal_aggregation():
+    """语义代数照样拦：对类别字段求和编不过，提案到不了用户面前。"""
+    domain_id, onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, _s, is_error = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto,
+            args=_expr_args(
+                fields=[{"alias": "st", "object": "order", "property": "status"}],
+                body={"operation": "sum", "args": [{"ref": "st"}]},
+            ),
+        )
+    assert is_error is True
+    assert r["code"] == "illegal_aggregation"
+
+
+def test_propose_expression_rejects_undeclared_ref():
+    """表达式引用了没声明的别名 → 判错。
+
+    放过的话 _ref_of 会静默解析成 None，SUM 退化成 COUNT(*)：跑得通、算错数。
+    """
+    domain_id, onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, _s, is_error = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto,
+            args=_expr_args(body={"operation": "sum", "args": [{"ref": "nope"}]}),
+        )
+    assert is_error is True and r["code"] == "undeclared_ref"
+
+
+def test_propose_expression_tag_requires_labels():
+    """标签每个分支都要有标签值，否则编出来只是一列 NULL——编译器拦下。"""
+    domain_id, onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        ok, _s1, e1 = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto,
+            args=_expr_args(
+                display_name="大额订单", logic_type="tag",
+                body={"cases": [
+                    {"when": {"left": {"ref": "amt"}, "op": ">", "right": {"value": 1000}},
+                     "then": {"value": "大额"}},
+                    {"when": None, "then": {"value": "普通"}},
+                ]},
+            ),
+        )
+        bad, _s2, e2 = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto,
+            args=_expr_args(
+                display_name="大额订单", logic_type="tag",
+                body={"cases": [
+                    {"when": {"left": {"ref": "amt"}, "op": ">", "right": {"value": 1000}},
+                     "then": {"value": None}},
+                ]},
+            ),
+        )
+    assert e1 is False and "CASE" in ok["compiled_sql"]
+    assert e2 is True and bad["code"] == "incomplete_tag"
+
+
+def test_propose_expression_patches_existing_logic():
+    """给已有草稿口径补表达式 → 出 update_payload（前端 PATCH），不是新建。"""
+    domain_id, onto, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        r, summary, is_error = svc._dispatch_propose_expression(
+            db, domain_id=domain_id, ontology_id=onto, args=_expr_args(logic_id="bl-existing"),
+        )
+    assert is_error is False
+    assert r["logic_id"] == "bl-existing"
+    assert "create_payload" not in r
+    assert r["update_payload"]["expression_json"]["type"] == "metric"
+    assert "补全表达式" in summary
+
+
+def test_expression_flow_stays_read_only(client):
+    """端到端：select_skill(create) → propose_expression 穿真实循环；
+    出 draft_proposal 块（带编译 SQL），且 **ask() 不新建任何 BusinessLogic**。"""
+    from app.models import BusinessLogic
+
+    domain_id, _onto, aliases = _seed_golden_domain()
+
+    def _count() -> int:
+        with SessionLocal() as db:
+            return db.query(BusinessLogic).count()
+
+    before = _count()
+    script = [
+        ToolTurn([("select_skill", {"skill": "create"})]),
+        ToolTurn([("propose_expression", _expr_args())]),
+        FinalTurn("已按「订单金额求和」拟好指标提案，SQL 已编译通过，点确认即可创建。"),
+    ]
+    completions = _StubCompletions(script, aliases)
+    orig = c.AsyncOpenAI
+    c.AsyncOpenAI = lambda **_k: _StubClient(completions)  # type: ignore[assignment]
+    service = ChatBiService()
+    service.settings_service = SimpleNamespace(  # type: ignore[assignment]
+        get_llm_runtime=lambda _db: SimpleNamespace(
+            api_key="stub-key", api_base_url="http://stub", model="stub-model"
+        )
+    )
+    service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
+    try:
+        with SessionLocal() as db:
+            payload = asyncio.run(
+                service.ask(db, domain_ids=[domain_id], question="建个订单总额指标，按金额求和",
+                            principal_role="publisher")
+            )
+    finally:
+        c.AsyncOpenAI = orig  # type: ignore[assignment]
+
+    assert payload.get("grounding_refused") is not True, payload.get("answer")
+    assert payload["draft_proposals"], payload
+    assert "SUM" in payload["draft_proposals"][0]["compiled_sql"]
+    assert "draft_proposal" in [b["type"] for b in answer_to_blocks(payload)]
+    assert _count() == before  # 只读不变式：提案不落库

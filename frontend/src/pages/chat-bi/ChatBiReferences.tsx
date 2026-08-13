@@ -16,6 +16,7 @@ import {
   AppstoreAddOutlined,
   AppstoreOutlined,
   DashboardOutlined,
+  DatabaseOutlined,
   RobotOutlined,
   SafetyOutlined,
 } from "@ant-design/icons";
@@ -25,6 +26,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api";
 import { ArtifactDetail } from "../../components/AgentsPanel";
 import { CronPicker } from "../../components/CronPicker";
+import { DataSourcesModal } from "../../components/DataSourcesModal";
 import { SpecForm } from "../../components/artifact-spec/SpecForm";
 import { SPEC_FIELDS } from "../../components/artifact-spec/specFields";
 import type {
@@ -271,6 +273,10 @@ const NON_ANALYTIC_BLOCKS = new Set<ChatBiBlock["type"]>([
   "draft_proposal",
   "preference_proposal",
   "task_status",
+  // 接数据车道：与看板无关。
+  "onboard_proposal",
+  // agent 已经主动提了面板/看板 → 底下再挂一条「基于此口径生成面板」是同一件事说两遍。
+  "app_proposal",
 ]);
 
 export function ChatBubble({
@@ -280,6 +286,7 @@ export function ChatBubble({
   onGenerateApp,
   onAddToDashboard,
   onClarify,
+  onProposeApp,
 }: {
   message: ChatMessage;
   question?: string;
@@ -292,6 +299,14 @@ export function ChatBubble({
   onAddToDashboard?: (question: string, payload?: ChatMessage["payload"]) => void;
   /** 点击澄清候选项 → 直接以该选项追问（P4.1）。 */
   onClarify?: (text: string) => void;
+  /**
+   * agent 主动提的面板/看板提案被点确认。与动作条同一条生成路径，只是标题/图型来自提案；
+   * 口径仍取本条消息的 payload（在这里绑上，卡片不必自己拿 payload）。
+   */
+  onProposeApp?: (
+    proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"],
+    payload?: ChatMessage["payload"],
+  ) => void;
 }) {
   const isUser = message.role === "user";
   // V3 S0：回答由渲染块序列投影而来。后端双写 blocks 优先；流式/旧消息由 answerToBlocks
@@ -350,6 +365,11 @@ export function ChatBubble({
                   question={question}
                   conversationId={conversationId}
                   onClarify={onClarify}
+                  onProposeApp={
+                    onProposeApp
+                      ? (proposal) => onProposeApp(proposal, message.payload)
+                      : undefined
+                  }
                 />
               </div>
             ))}
@@ -401,12 +421,14 @@ function BlockRenderer({
   question,
   conversationId,
   onClarify,
+  onProposeApp,
 }: {
   block: ChatBiBlock;
   streaming?: boolean;
   question?: string;
   conversationId?: string;
   onClarify?: (text: string) => void;
+  onProposeApp?: (proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"]) => void;
 }) {
   switch (block.type) {
     case "steps":
@@ -454,6 +476,10 @@ function BlockRenderer({
       return <PipelineProposalBlock proposal={block.proposal} conversationId={conversationId} />;
     case "preference_proposal":
       return <PreferenceProposalBlock proposal={block.proposal} />;
+    case "app_proposal":
+      return <AppProposalBlock proposal={block.proposal} onProposeApp={onProposeApp} />;
+    case "onboard_proposal":
+      return <OnboardProposalBlock proposal={block.proposal} />;
     case "task_status":
       return <TaskStatusBlock status={block.status} />;
     case "notice":
@@ -787,10 +813,19 @@ function DraftProposalBlock({
   const navigate = useNavigate();
   const [state, setState] = useState<"idle" | "creating" | "done" | "error">("idle");
   const typeLabel = DRAFT_TYPE_LABEL[proposal.logic_type] ?? proposal.logic_type;
+  // 带表达式的提案（propose_expression）：表达式已过编译器与语义证明，人审的是**真 SQL**。
+  const formalized = Boolean(proposal.compiled_sql);
+  const patching = Boolean(proposal.logic_id && proposal.update_payload);
   const onConfirm = async () => {
     setState("creating");
     try {
-      const created = await api.createBusinessLogic(proposal.create_payload);
+      if (patching) {
+        await api.updateBusinessLogic(proposal.logic_id!, proposal.update_payload!);
+        setState("done");
+        navigate(`/business-logic/${proposal.logic_id}`);
+        return;
+      }
+      const created = await api.createBusinessLogic(proposal.create_payload!);
       setState("done");
       navigate(`/business-logic/${created.id}`);
     } catch {
@@ -803,12 +838,37 @@ function DraftProposalBlock({
         <Tag color="gold" bordered={false}>
           建数提案
         </Tag>
-        <span>新建{typeLabel}</span>
+        <span>
+          {patching ? `补全${typeLabel}表达式` : `新建${typeLabel}`}
+        </span>
+        {formalized && (
+          <Tag color="green" bordered={false}>
+            表达式已编译通过
+          </Tag>
+        )}
       </div>
       <div className="chatbi-draft-name">{proposal.display_name}</div>
       {proposal.description && <div className="chatbi-draft-desc">{proposal.description}</div>}
+      {formalized && (
+        <>
+          {/* 口径展开轨迹由编译器确定性产出（聚合了谁、按什么分组、走了哪条关联）， */}
+          {/* 是人判断「这条口径对不对」的依据，比 SQL 更好读，所以摆在 SQL 前面。 */}
+          {proposal.caliber_trace?.length ? (
+            <ul className="chatbi-draft-trace">
+              {proposal.caliber_trace.map((line, i) => (
+                <li key={i}>{line}</li>
+              ))}
+            </ul>
+          ) : null}
+          <SqlBlock sql={proposal.compiled_sql!} />
+        </>
+      )}
       <div className="chatbi-draft-note">
-        确认后创建为草稿口径（待你补全表达式并发布），不会直接改动本体或数据。
+        {formalized
+          ? patching
+            ? "确认后把这份表达式写入该口径（仍是草稿，需你自行发布）；表达式已过编译与语义证明，但口径对不对请你自己看一眼上面的 SQL。"
+            : "确认后创建为草稿口径并带上这份表达式（需你自行发布）；表达式已过编译与语义证明，但口径对不对请你自己看一眼上面的 SQL。"
+          : "确认后创建为草稿口径（待你补全表达式并发布），不会直接改动本体或数据。"}
       </div>
       <Space>
         <Button
@@ -818,12 +878,193 @@ function DraftProposalBlock({
           disabled={state === "done"}
           onClick={() => void onConfirm()}
         >
-          {state === "done" ? "已创建，跳转中…" : "去确认创建"}
+          {state === "done" ? "已保存，跳转中…" : patching ? "去确认写入" : "去确认创建"}
         </Button>
         {state === "error" && (
-          <span className="chatbi-draft-error">创建失败，请重试或到口径页手动创建。</span>
+          <span className="chatbi-draft-error">保存失败，请重试或到口径页手动处理。</span>
         )}
       </Space>
+    </div>
+  );
+}
+
+const VIZ_LABEL: Record<string, string> = {
+  bar: "柱状图",
+  kpi: "指标卡",
+  table: "表格",
+};
+
+/**
+ * 数据应用提案块：Data Agent 主动提出「把这份口径做成面板/看板」。
+ *
+ * 与页面顶部那条动作条走**同一条路**（generate-widget / generate-app），区别只是由 agent
+ * 提出而非用户自己想起来点。口径同样由本条消息的 payload 附上，不重调 LLM——生成出来的
+ * 面板与对话里看到的口径一致，这条保证在 ChatBiPage 的 handler 里，不要在这里另起一套。
+ */
+function AppProposalBlock({
+  proposal,
+  onProposeApp,
+}: {
+  proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"];
+  onProposeApp?: (proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"]) => void;
+}) {
+  const isDashboard = proposal.kind === "dashboard";
+  return (
+    <div className="chatbi-draft">
+      <div className="chatbi-draft-head">
+        <Tag color="cyan" bordered={false}>
+          数据应用提案
+        </Tag>
+        <span>{isDashboard ? "新建看板" : "生成面板"}</span>
+      </div>
+      <div className="chatbi-draft-name">{isDashboard ? proposal.name : proposal.title}</div>
+      <div className="chatbi-draft-desc">
+        {isDashboard ? `首个面板：${proposal.title} · ` : ""}
+        {VIZ_LABEL[proposal.viz_type] ?? proposal.viz_type}
+      </div>
+      <div className="chatbi-draft-note">
+        {isDashboard
+          ? "确认后按本轮口径新建看板，随后可在编辑器里继续加面板。"
+          : "确认后按本轮口径生成面板，并由你选择加入哪个看板（可新建）。"}
+        口径复用这条回答，不会重新问一次数。
+      </div>
+      <Space>
+        <Button
+          type="primary"
+          size="small"
+          icon={isDashboard ? <DashboardOutlined /> : <AppstoreAddOutlined />}
+          disabled={!onProposeApp}
+          onClick={() => onProposeApp?.(proposal)}
+        >
+          {isDashboard ? "去新建看板" : "去生成面板"}
+        </Button>
+      </Space>
+    </div>
+  );
+}
+
+const DRAFT_SCOPE_LABEL: Record<string, string> = {
+  draft: "业务对象 + 业务关系",
+  objects: "只补业务对象",
+  relations: "只补业务关系",
+};
+
+/**
+ * 接数据提案块：登记数据源 / 为某域生成本体草稿。
+ *
+ * **凭据不经 agent**：建源点进去打开的是既有的数据源表单（预填名称/类型/catalog），
+ * 连接信息由用户自己填、DSN 由那个表单组装。这里不碰密码，也不留密码。
+ * 生成草稿点下去才真正启动 LLM 生成，产出仍是草稿——要在工作区确认、再发布。
+ */
+function OnboardProposalBlock({
+  proposal,
+}: {
+  proposal: Extract<ChatBiBlock, { type: "onboard_proposal" }>["proposal"];
+}) {
+  const navigate = useNavigate();
+  const [dsOpen, setDsOpen] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const isDatasource = proposal.kind === "datasource";
+
+  const startDraft = async () => {
+    const domainId = proposal.domain_id;
+    if (!domainId) return;
+    setStarting(true);
+    try {
+      const scope = proposal.scope ?? "draft";
+      if (scope === "objects") await api.generateObjects(domainId);
+      else if (scope === "relations") await api.generateRelations(domainId);
+      else await api.generateDraft(domainId);
+      message.success("已启动草稿生成，可在工作区查看进度");
+      navigate(`/workspace/${domainId}`);
+    } catch (err) {
+      message.error(
+        err instanceof ApiError && err.status === 409
+          ? "该域已有草稿生成任务在跑，等它跑完再试"
+          : err instanceof Error
+            ? err.message
+            : "启动失败，请重试",
+      );
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <div className="chatbi-draft">
+      <div className="chatbi-draft-head">
+        <Tag color="green" bordered={false}>
+          接数据提案
+        </Tag>
+        <span>{isDatasource ? "登记数据源" : "生成本体草稿"}</span>
+      </div>
+      <div className="chatbi-draft-name">
+        {isDatasource ? proposal.name : proposal.domain_name}
+      </div>
+      <div className="chatbi-draft-desc">
+        {isDatasource ? (
+          <>
+            {proposal.datasource_kind}
+            {proposal.catalog_name ? ` · catalog：${proposal.catalog_name}` : ""}
+            {proposal.note ? ` · ${proposal.note}` : ""}
+          </>
+        ) : (
+          <>
+            {DRAFT_SCOPE_LABEL[proposal.scope ?? "draft"]}
+            {proposal.reason ? ` · ${proposal.reason}` : ""}
+          </>
+        )}
+      </div>
+      <div className="chatbi-draft-note">
+        {isDatasource ? (
+          <>
+            <SafetyOutlined /> 连接信息（账号/密码/连接串）由你在表单里自己填，助手不经手也不留存。
+            {proposal.dropped_args?.length ? (
+              <>（提案里的 {proposal.dropped_args.join("、")} 已被丢弃）</>
+            ) : null}
+          </>
+        ) : (
+          <>
+            点击后才启动 LLM 生成，产出的对象/关系仍是**草稿**，要在工作区逐条确认后才能发布。
+            {proposal.has_published_ontology
+              ? "该域已有已发布本体：重跑会产生新草稿并进入合并流程，不是原地覆盖。"
+              : ""}
+          </>
+        )}
+      </div>
+      <Space>
+        {isDatasource ? (
+          <Button
+            type="primary"
+            size="small"
+            icon={<DatabaseOutlined />}
+            onClick={() => setDsOpen(true)}
+          >
+            去填连接信息
+          </Button>
+        ) : (
+          <Button
+            type="primary"
+            size="small"
+            loading={starting}
+            disabled={!proposal.domain_id}
+            onClick={() => void startDraft()}
+          >
+            去生成草稿
+          </Button>
+        )}
+      </Space>
+      {isDatasource && dsOpen && (
+        <DataSourcesModal
+          open={dsOpen}
+          onClose={() => setDsOpen(false)}
+          prefill={{
+            name: proposal.name,
+            kind: proposal.datasource_kind,
+            catalog_name: proposal.catalog_name ?? undefined,
+          }}
+        />
+      )}
     </div>
   );
 }

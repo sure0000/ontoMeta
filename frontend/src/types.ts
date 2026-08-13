@@ -898,7 +898,23 @@ export type ChatBiBlock =
         display_name: string;
         name: string;
         description?: string;
-        create_payload: BusinessLogicCreateInput;
+        /**
+         * propose_expression 产的提案还带**已编译并自证过**的表达式：
+         * compiled_sql/caliber_trace 给人看（判断口径对不对，看的是真 SQL 不是承诺），
+         * expression_json 是要落库的权威 AST。propose_draft 产的提案没有这几项。
+         */
+        compiled_sql?: string;
+        caliber_trace?: string[];
+        expression_json?: Record<string, unknown>;
+        /** 新建：POST /api/business-logics。 */
+        create_payload?: BusinessLogicCreateInput;
+        /** 给已有口径补表达式：PATCH /api/business-logics/{logic_id}。 */
+        logic_id?: string;
+        update_payload?: {
+          logic_type?: string;
+          expression_summary?: string;
+          expression_json?: Record<string, unknown>;
+        };
       };
     }
   | {
@@ -938,6 +954,66 @@ export type ChatBiBlock =
           intent?: string;
           ontology_id?: string | null;
           steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
+        };
+      };
+    }
+  | {
+      id: string;
+      /**
+       * 数据应用提案（propose_panel / propose_dashboard 产出）：把本轮口径做成面板或新看板。
+       * agent 只出提案；点按钮才走既有的 generate-widget / generate-app，口径由本条消息的
+       * payload 附上（与动作条同一条路，保证生成的东西与对话里看到的一致）。
+       */
+      type: "app_proposal";
+      proposal: {
+        kind: "panel" | "dashboard";
+        /** 面板标题；kind=dashboard 时是首个面板的标题。 */
+        title: string;
+        /** 仅 kind=dashboard：看板名称。 */
+        name?: string;
+        viz_type: "bar" | "kpi" | "table";
+        domain_id: string;
+        create_payload: {
+          domain_id: string;
+          question: string;
+          /** kind=panel：面板图型（→ generate-widget 的 widget_type）。 */
+          widget_type?: string;
+          /** kind=dashboard：固定 "dashboard"（→ generate-app 的 app_type）。 */
+          app_type?: string;
+          name: string;
+        };
+      };
+    }
+  | {
+      id: string;
+      /**
+       * 接数据提案（propose_datasource / propose_ontology_draft 产出）。
+       * 建源的凭据**不由 agent 提供**：用户在卡里自己填连接信息后才 POST /api/data-sources。
+       */
+      type: "onboard_proposal";
+      proposal: {
+        kind: "datasource" | "ontology_draft";
+        /** kind=datasource：数据源显示名。 */
+        name?: string;
+        /** kind=datasource：数据源类型（mysql/postgres/…）。 */
+        datasource_kind?: string;
+        catalog_name?: string | null;
+        note?: string;
+        /** 提案里被丢弃的参数名（模型塞了凭据时如实回显）。 */
+        dropped_args?: string[];
+        credentials_required?: boolean;
+        /** kind=ontology_draft：目标域与生成范围。 */
+        domain_id?: string;
+        domain_name?: string;
+        scope?: "draft" | "objects" | "relations";
+        reason?: string;
+        has_published_ontology?: boolean;
+        create_payload: {
+          name?: string;
+          kind?: string;
+          catalog_name?: string | null;
+          domain_id?: string;
+          scope?: string;
         };
       };
     }

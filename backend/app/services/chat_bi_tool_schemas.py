@@ -18,6 +18,7 @@ import sqlparse
 from sqlalchemy.orm import Session
 
 from app.services.chat_bi_skills import SKILLS, Skill, skill_choices_text
+from app.services.metric_compiler import COMPARE_OPS, LOGIC_TYPES, METRIC_OPS
 
 
 # 预算只会更紧——真被拒一次就没有余量修正了。
@@ -516,6 +517,79 @@ _PROPOSE_DRAFT_TOOL: dict[str, Any] = {
                 "description": {"type": "string", "description": "口径的自然语言说明/意图"},
             },
             "required": ["display_name", "logic_type"],
+        },
+    },
+}
+
+# ---- 口径形式化：让模型出**可编译**的表达式 ----
+# propose_draft 只出名字与自然语言说明，表达式留给人在编辑器里补——那一跳是这条链上最容易
+# 断的地方（提案确认完，口径停在「有名字没表达式」的草稿态）。现在可以让模型直接出表达式，
+# 因为守卫不是提示词而是**编译器**：产出的 AST 当场过 compile_candidate（与已发布口径同一条
+# 编译+自证路径），编不出来就把编译器的错误与候选字段还给模型让它改；编得出来，人看到的
+# 也是真 SQL 与口径展开轨迹，而不是一段自然语言承诺。
+_PROPOSE_EXPRESSION_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_expression",
+        "description": (
+            "为一条口径产出**带表达式**的提案：你给字段与表达式体，服务端解析成本体引用、"
+            "当场编译成 SQL 并做语义证明，编不过会把原因和可用字段返给你改。\n"
+            "**字段必须来自本体**：先用 search_objects/get_object 确认对象名与字段名，别猜。\n"
+            "编过之后人看到的是真 SQL；确认与落库仍由用户点击，你不写库。\n"
+            "只想给个名字、表达式交给人写，用 propose_draft。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "display_name": {"type": "string", "description": "口径中文名，如「大额订单」"},
+                "logic_type": {"type": "string", "enum": list(LOGIC_TYPES),
+                               "description": "指标 metric / 标签 tag / 规则 rule"},
+                "fields": {
+                    "type": "array",
+                    "description": (
+                        "表达式用到的本体字段。别名由你起（表达式体里用它引用），"
+                        "object/property 必须是本体里的**技术名**（如 order / amount），不是中文显示名"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "alias": {"type": "string", "description": "别名，如 amt"},
+                            "object": {"type": "string", "description": "对象技术名，如 order"},
+                            "property": {"type": "string",
+                                          "description": "字段技术名，如 amount；只引用对象本身时可省"},
+                        },
+                        "required": ["alias", "object"],
+                    },
+                },
+                "body": {
+                    "type": "object",
+                    "description": (
+                        "表达式体，按类型三选一，引用一律写 {\"ref\":\"别名\"}：\n"
+                        "· metric：{\"operation\":\"" + "|".join(METRIC_OPS) + "\","
+                        "\"args\":[{\"ref\":\"amt\"}],\"group_by\":[{\"ref\":\"st\"}],\"filter\":<条件|null>}"
+                        "（SUM/AVG 只能作用于语义类型为 measure 的字段）\n"
+                        "· tag：{\"cases\":[{\"when\":<条件>,\"then\":{\"value\":\"大额\"}},"
+                        "{\"when\":null,\"then\":{\"value\":\"普通\"}}]}"
+                        "（when=null 即 else 分支；**每个分支都要给标签值**，否则编不过）\n"
+                        "· rule：{\"condition\":<应当成立的条件>,\"message\":\"违规说明\"}"
+                        "（规则统计的是**不满足**该条件的行数）\n"
+                        "条件形如 {\"left\":{\"ref\":\"amt\"},\"op\":\"" + "|".join(COMPARE_OPS)
+                        + "\",\"right\":{\"value\":1000}}，"
+                        "可嵌套 {\"op\":\"and|or\",\"conditions\":[…]}"
+                    ),
+                },
+                "name": {"type": "string",
+                          "description": "英文标识符（snake_case）；缺省由中文名派生"},
+                "summary": {"type": "string", "description": "口径的一句话说明（给人看）"},
+                "logic_id": {
+                    "type": "string",
+                    "description": (
+                        "可选：为**已存在**的口径补全表达式时给它的 id"
+                        "（search_logics 能查到、但还没形式化的那些）；不给即新建"
+                    ),
+                },
+            },
+            "required": ["display_name", "logic_type", "fields", "body"],
         },
     },
 }
@@ -1025,6 +1099,154 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
     },
 }
 
+# ---- 数据应用车道：把本轮口径做成面板/看板 ----
+# 此前这条路只有前端按钮（ChatBiReferences 的动作条 → /chat-bi/generate-widget|generate-app），
+# agent 手里只有 render_chart（对话内画图、不落库），于是它能画给你看却交付不了东西。
+# 这两个工具把那两个端点接进工具循环，**不换机制**：仍是「agent 只出提案、写在用户点击」。
+#
+# 口径从哪来：面板的绑定由服务端**复用本轮回答的 caliber_decomposition + referenced_objects**
+# 重建（generate_widget_from_chat 的既有保证：带了载荷就不重调 LLM）。所以模型不需要、也不
+# 应该自己写 SQL 或列字段——它只决定「叫什么、用哪种图」。
+
+# 面板可视化类型。**只列渲染器真支持的三种**：DashboardGrid.renderBody 里 bar / kpi 各有
+# 渲染器，其余一律回退表格。多列一个 line/pie 只会让模型提出一个渲染不出来的面板。
+_PANEL_VIZ_TYPES: tuple[str, ...] = ("bar", "kpi", "table")
+
+_PROPOSE_PANEL_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_panel",
+        "description": (
+            "把**本轮回答的口径**做成一个数据面板的**提案**（不写库）。面板=一个数据逻辑，"
+            "用户点确认后才真正生成，并由用户选择加入哪个看板（可新建）。\n"
+            "**前置条件：本轮必须先对主对象调过 get_object**——面板要绑定一个主对象，"
+            "只 search_objects 或只 run_sql 都凑不出来，缺了会被当场判错。\n"
+            "面板绑定由服务端复用本轮回答重建，你**不用也不该**自己写 SQL 或列字段，只需给标题与图型。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "面板标题（中文，简短），如「各渠道订单量」"},
+                "viz_type": {
+                    "type": "string", "enum": list(_PANEL_VIZ_TYPES),
+                    "description": "bar=柱状（有分组维度时用）/ kpi=指标卡（单值）/ table=表格（明细）",
+                },
+            },
+            "required": ["title", "viz_type"],
+        },
+    },
+}
+
+_PROPOSE_DASHBOARD_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_dashboard",
+        "description": (
+            "为**新建一个看板**产出提案（不写库）：以本轮口径生成首个面板并放进新看板。"
+            "用户点确认后才创建，随后可在看板编辑器里继续加面板。\n"
+            "**要往已有看板里加一块**用 propose_panel，别为此新建看板。"
+            "同样要求本轮真取到数或编译过口径。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "看板名称（中文，简短），如「渠道销售看板」"},
+                "panel_title": {"type": "string", "description": "首个面板的标题；缺省用看板名"},
+                "viz_type": {
+                    "type": "string", "enum": list(_PANEL_VIZ_TYPES),
+                    "description": "首个面板的图型，同 propose_panel；缺省 bar",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+}
+
+# ---- 接数据车道：连数据源 + 生成本体草稿 ----
+# 这条路此前整段在 UI 里（设置页配 DataHub / 数据源页建连接 / 工作区点「生成草稿」），
+# 对话只能从「已经接好的数据」开始。三个工具补上前半段，仍是提案制。
+#
+# **诚实边界**：ontoMeta 不触发 DataHub 自身的采集（connectors/datahub.py 没有 ingestion API），
+# 域与 dataset 是 DataHub 那边爬好后同步过来的。所以这里没有「一键把某个库爬进来」的工具，
+# 只有「登记一个可查询的数据源」与「让 LLM 从已同步的元数据生成本体草稿」。
+
+# 可提案的数据源类型。与 data_app._HOST_DSN_KINDS / _FILE_DSN_KINDS 对齐——超出这些的
+# kind 建出来也拼不出 DSN。
+_DATASOURCE_KINDS: tuple[str, ...] = (
+    "mysql", "postgres", "starrocks", "doris", "hive", "clickhouse", "sqlite", "duckdb",
+)
+
+# 草稿生成范围 → workspace 的三个端点（generate-draft / -objects / -relations）。
+_DRAFT_SCOPES: tuple[str, ...] = ("draft", "objects", "relations")
+
+_LIST_ONBOARDING_TARGETS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_onboarding_targets",
+        "description": (
+            "读取接数据时**可选什么**：DataHub 配没配、已同步的数据域（各自草稿/发布状态与对象数）、"
+            "已登记的数据源（id/名称/类型/catalog/连通状态）。\n"
+            "**接数据开工第一步就调它**：propose_datasource 要靠它避免建重复的源，"
+            "propose_ontology_draft 的 domain_id 必须是这里返回的真实域 id，不得自己编。"
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+_PROPOSE_DATASOURCE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_datasource",
+        "description": (
+            "为**新登记一个数据源连接**产出提案（不写库）。数据源是后续取数与搬运的落点。\n"
+            "**绝不要在参数里写主机地址以外的凭据**：用户名/密码/DSN 一律由用户在确认卡里自己填，"
+            "你给的是名称、类型、catalog 这类非机密骨架。带凭据的字段会被丢弃。\n"
+            "先调 list_onboarding_targets 查重——同名或同 catalog 的源已存在就别重复建。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "数据源显示名，如「ERP 生产库（只读）」"},
+                "kind": {"type": "string", "enum": list(_DATASOURCE_KINDS),
+                          "description": "数据源类型"},
+                "catalog_name": {
+                    "type": "string",
+                    "description": (
+                        "可选：StarRocks 外部 catalog 名（如 erp/crm），取数时用它选源；"
+                        "留空表示这是数仓内部源"
+                    ),
+                },
+                "note": {"type": "string", "description": "可选：给用户看的一句话说明（这个源是干什么的）"},
+            },
+            "required": ["name", "kind"],
+        },
+    },
+}
+
+_PROPOSE_ONTOLOGY_DRAFT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_ontology_draft",
+        "description": (
+            "为某个数据域**生成本体草稿**产出提案（不写库、不启动生成）。用户点确认后才真正启动"
+            "LLM 草稿生成，产出的对象/关系仍需在工作区人工确认、再发布。\n"
+            "domain_id 必须来自 list_onboarding_targets。scope：draft=对象+关系全量（首次用它）、"
+            "objects=只补业务对象、relations=只补业务关系（需已有含对象的草稿）。\n"
+            "该域已有发布本体时要提醒用户：重跑会产生新草稿并进入合并流程，不是原地覆盖。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domain_id": {"type": "string", "description": "数据域 id（来自 list_onboarding_targets）"},
+                "scope": {"type": "string", "enum": list(_DRAFT_SCOPES),
+                           "description": "draft=全量 / objects=只对象 / relations=只关系；缺省 draft"},
+                "reason": {"type": "string", "description": "可选：为什么现在要生成（给用户看的一句话）"},
+            },
+            "required": ["domain_id"],
+        },
+    },
+}
+
 # 基础工具集 = 12 检索/执行工具 + select_skill + 记忆提案 + 交互表单；技能激活后再并上其 extra 工具。
 # read_result 不入基础集（V4 O3 渐进披露）：只在首次 run_sql 取到结果后动态解锁。
 _BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -1040,12 +1262,18 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _SCOUT_QUERY_TOOL,
         _GET_LINEAGE_TOOL,
         _PROPOSE_DRAFT_TOOL,
+        _PROPOSE_EXPRESSION_TOOL,
         _LINT_TOOL,
         _PROPOSE_ACTION_TOOL,
         _PROPOSE_PIPELINE_TOOL,
         _GET_TASK_OPTIONS_TOOL,
         _GET_TASK_STATUS_TOOL,
         _UPDATE_PLAN_TOOL,
+        _PROPOSE_PANEL_TOOL,
+        _PROPOSE_DASHBOARD_TOOL,
+        _LIST_ONBOARDING_TARGETS_TOOL,
+        _PROPOSE_DATASOURCE_TOOL,
+        _PROPOSE_ONTOLOGY_DRAFT_TOOL,
     ]
 }
 # 所有可能出现的工具名——供 FactLedger 登记为可信上下文（工具名非业务实体）。
@@ -1147,6 +1375,7 @@ __all__ = [
     '_SCOUT_QUERY_TOOL',
     '_GET_LINEAGE_TOOL',
     '_PROPOSE_DRAFT_TOOL',
+    '_PROPOSE_EXPRESSION_TOOL',
     '_LINT_TOOL',
     '_ACTION_KINDS',
     '_ACTION_KIND_LABEL',
@@ -1175,6 +1404,14 @@ __all__ = [
     '_match_option',
     '_apply_prefill',
     '_REQUEST_FORM_TOOL',
+    '_PANEL_VIZ_TYPES',
+    '_PROPOSE_PANEL_TOOL',
+    '_PROPOSE_DASHBOARD_TOOL',
+    '_DATASOURCE_KINDS',
+    '_DRAFT_SCOPES',
+    '_LIST_ONBOARDING_TARGETS_TOOL',
+    '_PROPOSE_DATASOURCE_TOOL',
+    '_PROPOSE_ONTOLOGY_DRAFT_TOOL',
     '_BASE_TOOL_SCHEMAS',
     '_TOOL_BY_NAME',
     '_ALL_AGENT_TOOL_NAMES',

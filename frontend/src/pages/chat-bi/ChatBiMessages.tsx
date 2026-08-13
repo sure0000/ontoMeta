@@ -20,6 +20,11 @@ export interface ChatBiMessagesProps {
     payload?: import("../../types").ChatBiAnswer,
   ) => void;
   onAddToDashboard?: (question: string, payload?: import("../../types").ChatBiAnswer) => void;
+  /** agent 主动提的面板/看板提案被确认（app_proposal 块的按钮）。 */
+  onProposeApp?: (
+    proposal: Extract<import("../../types").ChatBiBlock, { type: "app_proposal" }>["proposal"],
+    payload?: import("../../types").ChatBiAnswer,
+  ) => void;
 }
 
 export function ChatBiMessages({
@@ -34,6 +39,7 @@ export function ChatBiMessages({
   onSuggestionClick,
   onGenerateApp,
   onAddToDashboard,
+  onProposeApp,
 }: ChatBiMessagesProps) {
   return (
     <div className="chatbi-messages" ref={scrollRef}>
@@ -96,6 +102,7 @@ export function ChatBiMessages({
               onGenerateApp={onGenerateApp}
               onAddToDashboard={onAddToDashboard}
               onClarify={onSuggestionClick}
+              onProposeApp={onProposeApp}
             />
           );
         })
