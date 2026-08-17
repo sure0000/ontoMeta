@@ -1,7 +1,7 @@
 """主体（Principal）管理：创建、改角色、启停、轮换 Token。
 
-Token 明文**仅在创建与轮换时返回一次**，库内只存 SHA-256 哈希与前缀——
-与 External App Key 的既有做法一致（见 ``services/external_api.py``）。
+Token 明文**仅在创建与轮换时返回一次**，库内只存 SHA-256 哈希与前缀
+（哈希/前缀工具见 ``app/auth.py``）。
 """
 
 from __future__ import annotations

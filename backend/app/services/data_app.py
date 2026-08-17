@@ -1000,30 +1000,6 @@ class DataAppService:
 
     # ------------------------------------------------------- public (read-only)
 
-    def list_published_apps(
-        self, db: Session, *, domain_id: str | None = None
-    ) -> list[DataApp]:
-        q = db.query(DataApp).filter(DataApp.status == "published")
-        if domain_id:
-            q = q.filter(DataApp.domain_id == domain_id)
-        return q.order_by(desc(DataApp.published_at)).all()
-
-    def get_published_app(self, db: Session, app_id: str) -> DataApp | None:
-        app = self.get_app(db, app_id)
-        if not app or app.status != "published":
-            return None
-        return app
-
-    def query_published_app_data(
-        self, db: Session, app_id: str, *, limit: int = 100,
-        security_context: dict | None = None,
-    ) -> dict:
-        """对外只读：返回已发布应用各数据集与图表 tile 的数据。"""
-        app = self.get_published_app(db, app_id)
-        if not app:
-            raise ValueError("应用不存在或未发布")
-        return self._render_app_data(db, app, limit=limit, security_context=security_context)
-
     def _render_app_data(
         self, db: Session, app: DataApp, *, limit: int = 100,
         security_context: dict | None = None,

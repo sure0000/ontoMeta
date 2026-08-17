@@ -57,7 +57,7 @@ ontoMeta 的目标，是构建在 DataHub 之上的企业级本体建模系统�
 
 ### 4.1 目标用户
 
-- 鉴权模型：**四层角色 RBAC**（读 reader < 编 editor < 审 reviewer < 发 publisher，按主体签发令牌）+ **外部 App API Key**（REST v1 / MCP，含 scope）
+- 鉴权模型：**四层角色 RBAC**（读 reader < 编 editor < 审 reviewer < 发 publisher，按主体签发令牌）
 - `ONTOMETA_ADMIN_TOKEN` 保留为 superuser（等价 publisher）；写侧治理智能体等高危操作需 publisher。详见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0
 
 ### 4.2 典型场景

@@ -14,7 +14,7 @@
 ┌──────────────┐    /api/*    ┌────────────────────┐   SQLAlchemy    ┌────────────┐
 │  Frontend    │ ───────────▶ │  Backend (FastAPI) │ ──────────────▶ │ PostgreSQL │
 │  React+Vite  │   /health    │  :8000             │   Alembic       │  (或 SQLite)│
-│  :5180 / :80 │ ◀─────────── │  /docs /api/mcp    │ ◀────────────── │            │
+│  :5180 / :80 │ ◀─────────── │  /docs             │ ◀────────────── │            │
 └──────────────┘              └─────────┬──────────┘                 └────────────┘
                                          │  外部依赖（按功能按需启用）
               ┌──────────────┬───────────┼───────────┬──────────────┐
@@ -61,7 +61,7 @@
 
 ## 3. 一键起栈（Docker Compose，推荐）
 
-最短路径，起出「本体浏览 + 工作区 + Chat BI + 外部 API」全可用（外部数据源按 §5 接）。
+最短路径，起出「本体浏览 + 工作区 + Chat BI」全可用（外部数据源按 §5 接）。
 
 ```bash
 git clone <repo> && cd ontoMeta
@@ -109,11 +109,10 @@ docker compose down -v           # 连数据卷一起删（清空所有数据）
 | Data Agent（Chat BI 问数） | ✅ | ✅ | ✅ | — | ✅ | — | — | §5.5 |
 | Data Agent 执行 SQL/取值画像 | ✅ | ✅ | ✅ | — | ✅ | — | — | §5.5 |
 | 语义检索（同义词召回） | ✅ | ✅ | ✅ | — | ✅(嵌入) | — | — | §5.5 |
-| 外部 REST / MCP | ✅ | ✅ | ✅ | — | — | — | — | §5.6 |
-| 数据应用（表格/大屏/看板） | ✅ | ✅ | ✅ | — | — | — | — | §5.7 |
-| Cube 语义层/预聚合 | ✅ | ✅ | ✅ | — | — | ✅ | — | §5.8 |
-| 物化编排（生成 DAG/搬运/血缘） | ✅ | ✅ | ✅ | ✅ | — | — | ✅ | §5.9 |
-| DataHub 元数据导入 | ✅ | ✅ | ✅ | ✅ | — | — | — | §5.10 |
+| 数据应用（表格/大屏/看板） | ✅ | ✅ | ✅ | — | — | — | — | §5.6 |
+| Cube 语义层/预聚合 | ✅ | ✅ | ✅ | — | — | ✅ | — | §5.7 |
+| 物化编排（生成 DAG/搬运/血缘） | ✅ | ✅ | ✅ | ✅ | — | — | ✅ | §5.8 |
+| DataHub 元数据导入 | ✅ | ✅ | ✅ | ✅ | — | — | — | §5.9 |
 
 > 「—」表示该功能不依赖此项。**未配置的依赖走确定性路径或显式报错，不会静默错乱**：
 > 无 LLM → 草稿以证据确定性命名兽底（不报错），但问数/表达式等纯 LLM 能力显式报错；
@@ -126,7 +125,7 @@ docker compose down -v           # 连数据卷一起删（清空所有数据）
 ### 5.1 本体浏览与图谱
 **需要**：后端 + 前端 + DB + 管理令牌（§3 已满足）。
 **验收**：前端「本体浏览」页能列出已发布对象；图谱视图可展开邻域。
-**无数据时**：先走 §5.2 建模发布，或 §5.10 从 DataHub 导入。
+**无数据时**：先走 §5.2 建模发布，或 §5.9 从 DataHub 导入。
 
 ### 5.2 本体建模（草稿生成）
 **需要**：§5.1 + DataHub GMS 可达 + LLM。
@@ -173,33 +172,19 @@ AGENT_EMBEDDING_DIM=256
 AGENT_EMBEDDING_MIN_SCORE=0.0
 ```
 **直连数仓执行 SQL**：Data Agent 的 `run_sql` / `profile_values` 需要后端能连到目标数仓。
-在「设置 → 数据源」或本体 `source_ref` 配置数仓连接串；按目标引擎装驱动（见 §5.9.4）。
+在「设置 → 数据源」或本体 `source_ref` 配置数仓连接串；按目标引擎装驱动（见 §5.8.4）。
 **验收**：
 1. 「Data Agent」页提问 → 回答含口径映射 + 可执行 SQL + （有数据时）结果表。
 2. `AGENT_SOUNDNESS=on` 时，语义不可证的 SQL 被拒答。
 3. 启用嵌入后，同义词（客户/往来单位/Customer）能召回。
 **无 LLM**：问数显式报错（不 Mock）。
 
-### 5.6 外部 REST / MCP
-**需要**：§5.1。**配置**：
-```bash
-API_KEY_HASH_PEPPER=...            # 可选；变更后须重新生成全部 App Key
-EXTERNAL_API_RATE_LIMIT_PER_MINUTE=60   # 每应用每分钟默认上限（<=0 关闭）
-```
-**验收**：
-1. 前端「外部 API」创建应用 → 获得 API Key（仅创建/重置时明文返回一次）。
-2. `curl -H "X-API-Key: <key>" http://localhost:8000/api/v1/objects` 返回已发布对象。
-3. MCP：`ONTOMETA_MCP_URL=http://<host>:8000/api/mcp`，用同一 API Key 调 `tools/list`。
-4. 超限返回 429，缺 scope 返回 403。
-**MCP stdio（可选）**：`backend/mcp_stdio_server.py` 与 HTTP `/api/mcp` 共用工具目录，
-按 MCP 客户端文档配置（`.env.mcp` 勿提交）。
-
-### 5.7 数据应用（表格 / 大屏 / 看板）
+### 5.6 数据应用（表格 / 大屏 / 看板）
 **需要**：§5.1。**验收**：Data Agent 回答后「生成数据表格 / 生成看板 / 加入看板」可用；
 「数据应用」页可编辑/预览/发布；公开页可嵌入。
-**直连数仓渲染**：若数据应用直连数仓取数，需配数据源连接 + 装对应驱动（§5.9.4）。
+**直连数仓渲染**：若数据应用直连数仓取数，需配数据源连接 + 装对应驱动（§5.8.4）。
 
-### 5.8 Cube 语义层（可选）
+### 5.7 Cube 语义层（可选）
 **需要**：§5.1 + Cube。**启用**：取消 `docker-compose.yml` 里 `cube` / `cube_refresh_worker`
 两段注释，填 `CUBE_API_SECRET`，`docker compose up -d cube cube_refresh_worker`。
 ```bash
@@ -213,10 +198,10 @@ CUBE_TIMEOUT_SECONDS=30
 **验收**：发布本体后 `GET /api/ontologies/{id}/cube-model` 返回 model；Cube 加载成功；
 数据应用走 Cube 取数返回结果。
 
-### 5.9 物化编排（Airflow + 搬运 + 目标数仓）
+### 5.8 物化编排（Airflow + 搬运 + 目标数仓）
 **需要**：§5.2 + Airflow + 搬运工具 + 目标数仓。这是最重的一块，分步来。
 
-#### 5.9.1 起编排验证栈
+#### 5.8.1 起编排验证栈
 ```bash
 cd docker/orchestration
 cp .env.example .env               # 改镜像源、DataHub/ERP 连接、ONTOMETA_ADMIN_TOKEN
@@ -239,7 +224,7 @@ make orch-logs                     # 跟日志
   ORCH_JOBS_DIR=./seatunnel/jobs
   ```
 
-#### 5.9.2 后端侧编排配置（部署基础设施，不进设置页）
+#### 5.8.2 后端侧编排配置（部署基础设施，不进设置页）
 ```bash
 AIRFLOW_DAGS_DIR=/path/to/dags      # 与 Airflow 容器挂载点对齐
 AIRFLOW_JOBS_DIR=/path/to/jobs
@@ -253,7 +238,7 @@ ONTOMETA_MAX_TASKS_PER_DAG=50
 ONTOMETA_MAX_ACTIVE_TASKS_PER_DAG=16
 ```
 
-#### 5.9.3 sync-runner（runner 通道推荐）
+#### 5.8.3 sync-runner（runner 通道推荐）
 ```bash
 docker build -f docker/sync-runner/Dockerfile -t ontometa/sync-runner:3 .
 docker run -d -p 8098:8098 \
@@ -265,7 +250,7 @@ docker run -d -p 8098:8098 \
 ```
 驱动构建期烘进镜像、运行期零挂载（消 ClassNotFoundException）。`GET /capabilities` 声明装到哪些驱动。
 
-#### 5.9.4 后端数仓驱动（直连数仓取数/执行 SQL 用）
+#### 5.8.4 后端数仓驱动（直连数仓取数/执行 SQL 用）
 按目标引擎在 `backend/.venv` 内安装（`requirements.txt` 默认不带，避免版本耦合）：
 ```bash
 # Doris / StarRocks / MySQL 线协议
@@ -278,7 +263,7 @@ pip install clickhouse-sqlalchemy
 > Compose 的 `api` 镜像默认只装了 `psycopg`。直连其他数仓需在 `backend/Dockerfile`
 > 追加对应 `pip install` 后重新构建。
 
-#### 5.9.5 Flink on YARN（计算任务，可选）
+#### 5.8.5 Flink on YARN（计算任务，可选）
 ```bash
 FLINK_SQL_RUNNER_JAR=/path/to/sql-runner.jar   # 空=只产 SQL 不执行（仅产出模式）
 FLINK_SQL_RUNNER_CLASS=com.ontometa.flink.SqlRunner
@@ -288,14 +273,14 @@ FLINK_PARALLELISM=1
 FLINK_YARN_QUEUE=
 ```
 
-#### 5.9.6 验收
+#### 5.8.6 验收
 1. 本体发布后触发物化 → `docker/orchestration/dags/` 出现新 DAG。
 2. Airflow Web 能看到该 DAG 并成功跑通；目标数仓里出现物化表且有数据。
 3. DataHub 出现对应 DataFlow/DataJob 血缘（`curl localhost:8081/openapi.json | grep dagRuns` 确认 REST 版本）。
 4. 端到端冒烟：`make smoke`（需后端 + Airflow + 目标仓可达；换表 `SMOKE_ENTITY=item make smoke`）。
 5. DAG 解析校验：`make dag-parse`（用真 Airflow DagBag 解析，`DAG_PARSE_IMAGE=` 指实际镜像）。
 
-### 5.10 DataHub 元数据导入
+### 5.9 DataHub 元数据导入
 **需要**：§5.2 的 DataHub 配置。**验收**：前端「本体建模」选数据域从 DataHub 拉取数据集/
 字段/血缘/逻辑证据；`DATAHUB_MAX_CONCURRENCY` 控制拉取并发（隧道不稳时调低，默认 3）。
 
@@ -329,7 +314,7 @@ alembic revision --autogenerate -m "描述"   # 生成新迁移（须审阅）
 - `ONTOMETA_ADMIN_TOKEN`：改强随机（`openssl rand -hex 24`），勿用默认 `dev-admin-token-change-me`。
 - `DEBUG=false`：避免 500 响应泄露异常细节。
 - `DATABASE_URL`：用 PostgreSQL，勿用 SQLite。
-- `API_KEY_HASH_PEPPER`：设强随机；**变更后须重新生成全部外部 App Key**。
+- `API_KEY_HASH_PEPPER`：设强随机；**变更后须重新签发全部主体令牌**。
 - Airflow `admin/admin` 仅限本地验证，生产改强密码并接 LDAP/OIDC。
 
 ### 7.2 前端管理令牌注入
@@ -352,7 +337,7 @@ JSON 数组。Compose 默认放行 `localhost:5180/127.0.0.1:5180`，生产改�
 ### 7.5 持久化与备份
 - Compose 数据卷 `ontometa_pg` 保留 PG 数据；`docker compose down` 不删，`-v` 才删。
 - 生产 PG 按常规做物理备份（pg_basebackup / WAL 归档）。
-- 外部 App Key 库内只存 SHA-256 哈希 + 前缀，备份 DB 即备份凭据；`API_KEY_HASH_PEPPER` 务必另行安全保管。
+- 主体令牌库内只存 SHA-256 哈希 + 前缀，备份 DB 即备份凭据；`API_KEY_HASH_PEPPER` 务必另行安全保管。
 
 ### 7.6 资源与并发
 - `MAX_CONCURRENT_DRAFT_GENERATIONS=2`：草稿生成并发，按 LLM 配额与机器调。
@@ -380,7 +365,7 @@ JSON 数组。Compose 默认放行 `localhost:5180/127.0.0.1:5180`，生产改�
 | 物化 DAG 没出现在 Airflow | `AIRFLOW_DAGS_DIR` 与 Airflow 容器挂载点不一致；`dag_dir_list_interval` 默认 300s，等解析或调 `ONTOMETA_DAG_PARSE_TIMEOUT` |
 | 搬运任务 ClassNotFoundException | runner 通道用 `ontometa/sync-runner` 镜像（驱动烘进）；docker 通道需 `AIRFLOW_SYNC_DRIVERS_DIR` 挂 JDBC jar |
 | DataX 任务 pull 404 | DataX 无官方镜像，须 `SYNC_TOOL_IMAGES=datax=<自建镜像>` |
-| 连 Doris/Hive 报缺驱动 | 见 §5.9.4 装驱动；Compose `api` 镜像需重建 |
+| 连 Doris/Hive 报缺驱动 | 见 §5.8.4 装驱动；Compose `api` 镜像需重建 |
 | 镜像拉取超慢/失败 | 配镜像源（§2.3）；`make orch-preflight` 会测速并拦下 |
 | 旧库启动报 schema 错 | 极旧缺列库勿 stamp；备份后空库 upgrade 再导数据（§6） |
 
@@ -402,7 +387,7 @@ JSON 数组。Compose 默认放行 `localhost:5180/127.0.0.1:5180`，生产改�
 | `ONTOMETA_ADMIN_TOKEN` | — | 管理 API 共享 Token（必填，否则管理接口 503） |
 | `DEBUG` | `true` | `false` 时 500 脱敏 |
 | `DATABASE_URL` | `sqlite:///./ontometa.db` | 生产用 PG |
-| `API_KEY_HASH_PEPPER` | — | 外部 Key 哈希 pepper |
+| `API_KEY_HASH_PEPPER` | — | 主体令牌哈希 pepper |
 | `DATAHUB_GMS_URL` | `http://localhost:8080` | DataHub GMS |
 | `DATAHUB_FRONTEND_URL` | `http://localhost:9002` | DataHub 前端 |
 | `DATAHUB_TOKEN` | — | DataHub 鉴权 |
@@ -412,7 +397,6 @@ JSON 数组。Compose 默认放行 `localhost:5180/127.0.0.1:5180`，生产改�
 | `LLM_CONTEXT_BUDGET_CHARS` | `48000` | 草稿分块字符预算 |
 | `MAX_CONCURRENT_DRAFT_GENERATIONS` | `2` | 草稿并发 |
 | `CORS_ORIGINS` | localhost 三端口 | JSON 数组 |
-| `EXTERNAL_API_RATE_LIMIT_PER_MINUTE` | `60` | 外部 API 限流 |
 | `CUBE_API_URL` / `CUBE_API_SECRET` | `http://localhost:4000` / — | Cube 语义层 |
 | `CUBE_PREAGG_REFRESH` / `CUBE_TENANT_DIMENSION` | `1 hour` / — | 预聚合 / RLS 列 |
 | `AGENT_SOUNDNESS` | `on` | 形式化闸门 off/warn/on |

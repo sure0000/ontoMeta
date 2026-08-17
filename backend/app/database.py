@@ -88,7 +88,6 @@ def init_db() -> None:
         SettingsService().ensure_defaults(db)
 
     _backfill_relation_structure_types()
-    _migrate_external_api_key_hashes()
     recover_stale_draft_tasks()
 
 
@@ -116,42 +115,3 @@ def _backfill_relation_structure_types() -> None:
             logger.info("Backfilled structure_type on %s relation_types", updated)
 
 
-def _migrate_external_api_key_hashes() -> None:
-    """幂等：将遗留明文 api_key 哈希回填（B1 数据迁移，可重复执行）。"""
-    from app.auth import api_key_prefix, hash_api_key
-    from app.models import ExternalApp
-
-    inspector = inspect(engine)
-    if "external_apps" not in inspector.get_table_names():
-        return
-    cols = {c["name"] for c in inspector.get_columns("external_apps")}
-    if "api_key_hash" not in cols:
-        return
-
-    pepper = settings.api_key_hash_pepper
-    migrated = 0
-    with SessionLocal() as db:
-        rows = db.query(ExternalApp).all()
-        for row in rows:
-            if row.api_key_hash:
-                raw = (row.api_key or "").strip()
-                if raw.startswith("om_sk_"):
-                    row.api_key = f"hashed:{row.api_key_hash}"
-                    migrated += 1
-                continue
-            raw = (row.api_key or "").strip()
-            if not raw or raw.startswith("hashed:"):
-                logger.warning(
-                    "external_app %s (%s) 无可用明文 Key 且无 hash，需重新生成密钥",
-                    row.id,
-                    row.name,
-                )
-                continue
-            key_hash = hash_api_key(raw, pepper)
-            row.api_key_hash = key_hash
-            row.api_key_prefix = api_key_prefix(raw)
-            row.api_key = f"hashed:{key_hash}"
-            migrated += 1
-        if migrated:
-            db.commit()
-            logger.info("Migrated %s external app API key(s) to hash storage", migrated)

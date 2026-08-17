@@ -228,21 +228,3 @@ def test_ontology_graph_expand_center(client, admin_headers):
     assert body["center_id"] == center_id
     assert any(n["id"] == center_id for n in body["nodes"])
     assert body["truncated"] is True
-
-
-def test_external_v1_still_returns_list(client, admin_headers):
-    """外部 API 契约保持 list，不受管理端 PageResult 影响。"""
-    create = client.post(
-        "/api/external-apps",
-        headers=admin_headers,
-        json={"name": "b7-ext", "description": "b7"},
-    )
-    assert create.status_code == 200
-    api_key = create.json()["api_key"]
-    app_id = create.json()["id"]
-
-    res = client.get("/api/v1/object-types", headers={"X-API-Key": api_key})
-    assert res.status_code == 200
-    assert isinstance(res.json(), list)
-
-    client.delete(f"/api/external-apps/{app_id}", headers=admin_headers)

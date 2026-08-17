@@ -1,0 +1,74 @@
+# 业务系统栈之二：Odoo（扮演「前端营销/电商系统」）
+#
+# ERPNext 不在本文件里——它用官方 frappe_docker 的 pwd.yml 起，
+# 只叠加本目录的 erpnext.override.yml。理由：那套 compose 版本耦合紧，
+# 手写一份必然跟不上上游。
+#
+# 用法（本目录下）：
+#   docker compose --env-file .env -f compose.biz.yml up -d
+#
+# 阶段 A（造数）跑完后可整栈停掉，只留 odoo-db 供采集：
+#   docker compose -f compose.biz.yml stop odoo
+
+name: bench-biz
+
+services:
+  odoo-db:
+    image: ${IMG_POSTGRES:-postgres:16}
+    mem_limit: 2g
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: ${ODOO_DB_PASSWORD:?}
+      POSTGRES_DB: postgres
+    # 数据集不到 500MB，shared_buffers 给 512M 已能全库驻留，再多是浪费
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - max_connections=100
+    volumes:
+      - odoo_pg:/var/lib/postgresql/data
+    ports:
+      - "${ODOO_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odoo"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [bench]
+
+  odoo:
+    image: ${IMG_ODOO:-odoo:17}
+    mem_limit: 3g
+    depends_on:
+      odoo-db:
+        condition: service_healthy
+    environment:
+      HOST: odoo-db
+      USER: odoo
+      PASSWORD: ${ODOO_DB_PASSWORD:?}
+    # 4 worker 足够：造数并发受生成器控制，不是靠 Odoo 堆进程
+    command:
+      - odoo
+      - --workers=4
+      - --limit-memory-soft=1610612736
+      - --limit-memory-hard=2147483648
+      - --limit-time-cpu=600
+      - --limit-time-real=1200
+    volumes:
+      - odoo_data:/var/lib/odoo
+    ports:
+      - "${ODOO_WEB_PORT:-8069}:8069"
+    networks: [bench]
+
+networks:
+  bench:
+    external: true
+    name: ontometa-bench
+
+volumes:
+  odoo_pg:
+  odoo_data:

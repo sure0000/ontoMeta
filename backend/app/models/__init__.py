@@ -18,7 +18,6 @@ from app.models.domain import (
     DraftChunkCheckpoint,
     DraftGenerationTask,
 )
-from app.models.external import ExternalApiCallLog, ExternalApp
 from app.models.logic import (
     BusinessLogic,
     BusinessLogicCategory,
@@ -99,8 +98,6 @@ __all__ = [
     "DataAppDataset",
     "DataAppVersion",
     "DataAppWidget",
-    "ExternalApp",
-    "ExternalApiCallLog",
     "MaterializationContract",
     "MaterializationLayer",
     "LoadStrategy",

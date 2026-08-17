@@ -1,6 +1,6 @@
 # ontoMeta
 
-建立在 DataHub 之上的企业级本体建模系统，实现「读取元数据 → 生成草稿 → 工作区编辑确认 → 发布本体」的完整闭环，并提供 Chat BI、对外 REST/MCP 与表达式编辑能力。
+建立在 DataHub 之上的企业级本体建模系统，实现「读取元数据 → 生成草稿 → 工作区编辑确认 → 发布本体」的完整闭环，并提供 Chat BI 与表达式编辑能力。
 
 ## 项目结构
 
@@ -9,7 +9,7 @@ ontoMeta/
 ├── backend/          # FastAPI 后端
 │   ├── alembic/            # Schema 迁移
 │   └── app/
-│       ├── api/              # REST / MCP 路由
+│       ├── api/              # REST 路由
 │       ├── connectors/       # DataHub 接入层
 │       ├── models/           # SQLAlchemy 数据模型
 │       ├── schemas/          # Pydantic 请求/响应模型
@@ -24,9 +24,8 @@ ontoMeta/
 
 | 通道 | 鉴权 | 用途 |
 |------|------|------|
-| 管理 API `/api/*`（除下述） | `ONTOMETA_ADMIN_TOKEN`（`X-Admin-Token` 或 `Authorization: Bearer`） | 工作区、发布、设置、外部应用管理等 |
-| 对外 REST `/api/v1/*` | 外部应用 API Key（`X-API-Key`） | 已发布本体只读查询 |
-| MCP `/api/mcp*` | 同上 API Key | tools/list、tools/call |
+| 管理 API `/api/*`（除下述） | `ONTOMETA_ADMIN_TOKEN`（`X-Admin-Token` 或 `Authorization: Bearer`） | 工作区、发布、设置等 |
+| 公开分享 `/api/public/*` | 无（分享令牌 + 可选口令） | 免登录只读看板 |
 | `GET /health` | 无 | 存活探针 |
 
 完整 RBAC（读/编/审/发四层角色 reader < editor < reviewer < publisher）已产品化（见「角色与令牌」设置页与 `POST /api/principals`）：按主体签发令牌、分级授权，写侧智能体（`/api/agents`）等高危操作需 publisher。`ONTOMETA_ADMIN_TOKEN` 仍为 superuser（等价 publisher）；未创建任何主体时行为与启用 RBAC 前一致。详见 [TECH_DESIGN.md](./docs/TECH_DESIGN.md) §9、[DW_IMPLEMENTATION.md](./docs/DW_IMPLEMENTATION.md) M0。
@@ -99,7 +98,6 @@ npm run dev
 | Query Service | 本体、对象、业务逻辑查询（分页、图谱邻域展开） |
 | Expression Formatter | 业务逻辑表达式富文本编辑与格式化 |
 | Chat BI | 基于已发布本体的智能问数（须落地引用，无命中不编造） |
-| External API / MCP | 应用 Key、scope、限流、调用日志；REST v1 与 MCP 目录同源 |
 
 ## 前端导航
 
@@ -107,7 +105,6 @@ npm run dev
 - **本体建模（工作区）**：按数据域组织建模任务，触发草稿生成与发布
 - **业务逻辑**：指标、标签、规则；表达式编辑
 - **Data Agent（Chat BI）**：会话问数、本体引用，并可一键生成数据表格/大屏
-- **外部 API**：应用创建、MCP/REST 目录试用
 - **设置**：管理鉴权、LLM 服务、DataHub 配置
 
 ## 配置
@@ -117,7 +114,7 @@ npm run dev
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
 | `ONTOMETA_ADMIN_TOKEN` | 管理 API 共享 Token（必填） | — |
-| `API_KEY_HASH_PEPPER` | 外部 API Key 哈希 pepper（可选） | — |
+| `API_KEY_HASH_PEPPER` | 主体令牌哈希 pepper（可选） | — |
 | `DATABASE_URL` | 开发 SQLite；生产 / Compose 用 PostgreSQL | `sqlite:///./ontometa.db` |
 | `DEBUG` | `false` 时 500 响应脱敏 | `true` |
 | `DATAHUB_GMS_URL` | DataHub GMS API 地址 | `http://localhost:8080` |
@@ -126,9 +123,8 @@ npm run dev
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | LLM（也可在设置页配置） | — / `gpt-4o-mini` |
 | `LLM_TIMEOUT_SECONDS` | LLM 超时 | `300` |
 | `MAX_CONCURRENT_DRAFT_GENERATIONS` | 草稿生成并发上限 | `2` |
-| `EXTERNAL_API_RATE_LIMIT_PER_MINUTE` | 外部 API/MCP 每应用默认每分钟上限 | `60` |
 
-外部应用 API Key 仅在创建/重置时明文返回一次，库内只存 SHA-256 哈希与前缀。应用可配置 scope（`domains:read` / `objects:read` / `relations:read` / `logics:read`），缺权 403；超限 429。
+主体令牌仅在创建/轮换时明文返回一次，库内只存 SHA-256 哈希与前缀。
 
 ### 数据库与迁移
 
@@ -145,10 +141,6 @@ cd frontend && npm run lint && npm run build
 ```
 
 GitHub Actions：`.github/workflows/ci.yml`（backend pytest + frontend lint/build）。
-
-### MCP stdio（可选）
-
-仓库另有 `backend/mcp_stdio_server.py`，与 HTTP `/api/mcp` 共用工具目录；配置见部署侧 MCP 客户端文档（`.env.mcp` 勿提交）。
 
 ## 文档
 

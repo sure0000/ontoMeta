@@ -107,7 +107,7 @@ def test_execute_sql_mapping(tmp_path):
     assert rows and rows[0]["chan"] == "A"
 
 
-# ------------------------------------------------- published app + external API
+# ------------------------------------------------- published app 夹具
 
 
 def _seed_published_app_with_source(dsn: str | None = None):
@@ -167,75 +167,6 @@ def _seed_published_app_with_source(dsn: str | None = None):
         return domain.id, app.id
     finally:
         db.close()
-
-
-def _create_app_key(client, admin_headers, scopes):
-    res = client.post(
-        "/api/external-apps",
-        headers=admin_headers,
-        json={"name": f"key-{uuid.uuid4().hex[:6]}", "scopes": scopes},
-    )
-    assert res.status_code == 200, res.text
-    return res.json()["api_key"]
-
-
-def test_v1_data_apps_scope_enforced(client, admin_headers):
-    _domain_id, app_id = _seed_published_app_with_source()
-
-    # 无 dataapps:read scope → 403
-    key_wrong = _create_app_key(client, admin_headers, ["domains:read"])
-    res = client.get("/api/v1/data-apps", headers={"X-API-Key": key_wrong})
-    assert res.status_code == 403, res.text
-
-    # 有 scope → 200，能查询到已发布应用
-    key_ok = _create_app_key(client, admin_headers, ["dataapps:read"])
-    res = client.get("/api/v1/data-apps", headers={"X-API-Key": key_ok})
-    assert res.status_code == 200, res.text
-    assert any(a["id"] == app_id for a in res.json())
-
-    # 详情
-    res = client.get(f"/api/v1/data-apps/{app_id}", headers={"X-API-Key": key_ok})
-    assert res.status_code == 200, res.text
-    assert res.json()["name"] == "渠道金额表"
-
-    # 数据（Mock 数据源 → used_mock True）
-    res = client.get(f"/api/v1/data-apps/{app_id}/data", headers={"X-API-Key": key_ok})
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["app_id"] == app_id
-    assert len(body["datasets"]) == 1
-    assert body["datasets"][0]["columns"]
-
-
-def test_v1_data_app_real_source(client, admin_headers, tmp_path):
-    db_path = tmp_path / "orders.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        "CREATE TABLE orders (channel TEXT, amount REAL);"
-        "INSERT INTO orders VALUES ('A', 100), ('A', 50), ('B', 30);"
-    )
-    conn.commit()
-    conn.close()
-
-    _domain_id, app_id = _seed_published_app_with_source(dsn=f"sqlite:///{db_path}")
-    key_ok = _create_app_key(client, admin_headers, ["dataapps:read"])
-    res = client.get(f"/api/v1/data-apps/{app_id}/data", headers={"X-API-Key": key_ok})
-    assert res.status_code == 200, res.text
-    ds0 = res.json()["datasets"][0]
-    assert ds0["used_mock"] is False
-    by_channel = {r["channel"]: r["sum_amount"] for r in ds0["rows"]}
-    assert by_channel["A"] == 150
-
-
-def test_mcp_data_app_tools_listed(client, admin_headers):
-    key_ok = _create_app_key(client, admin_headers, ["dataapps:read"])
-    res = client.post(
-        "/api/mcp/tools/call",
-        headers={"X-API-Key": key_ok},
-        json={"name": "list_data_apps", "arguments": {}},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json().get("isError") in (False, None)
 
 
 # ------------------------------------------------- 参数化筛选 / 下钻（runtime filters）

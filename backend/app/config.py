@@ -178,9 +178,6 @@ class Settings(BaseSettings):
     # 并发过高会加重不稳定隧道(如 ngrok)的断连概率；配合 _graphql 重试，取较稳的 3。
     datahub_max_concurrency: int = 3
 
-    # 外部 API / MCP：每应用每分钟默认请求上限（进程内固定窗口；<=0 关闭）
-    external_api_rate_limit_per_minute: int = 60
-
     cors_origins: list[str] = [
         "http://localhost:5180",
         "http://localhost:5173",

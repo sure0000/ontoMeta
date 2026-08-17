@@ -73,17 +73,6 @@ from app.schemas.domain import (
     LogicEvidenceInput,
     TaskRecordOut,
 )
-from app.schemas.external import (
-    ALL_EXTERNAL_SCOPES,
-    ExternalApiCallLogOut,
-    ExternalApiCatalogItem,
-    ExternalAppCreate,
-    ExternalAppCreated,
-    ExternalAppOut,
-    ExternalAppUpdate,
-    McpToolCallRequest,
-    McpToolCallResult,
-)
 from app.schemas.logic import (
     BusinessLogicCategoryCreate,
     BusinessLogicCategoryOut,
@@ -381,15 +370,6 @@ __all__ = [
     "PublicDataAppSummary",
     "PublicDataAppDetail",
     "PublicDataAppData",
-    "ExternalAppCreate",
-    "ExternalAppUpdate",
-    "ExternalAppOut",
-    "ExternalAppCreated",
-    "ExternalApiCatalogItem",
-    "ExternalApiCallLogOut",
-    "ALL_EXTERNAL_SCOPES",
-    "McpToolCallRequest",
-    "McpToolCallResult",
     "MaterializationContractOut",
     "MaterializationContractUpdate",
     "MaterializationContractSyncResult",

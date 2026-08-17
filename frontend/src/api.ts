@@ -20,7 +20,6 @@ import type {
   Confirmation,
   DataHubDatasetOption,
   AirflowSettings,
-  SyncRunnerSecret,
   DatahubSettings,
   CubeSettings,
   DomainContext,
@@ -30,9 +29,6 @@ import type {
   DraftProgress,
   ExpressionDraft,
   ExpressionJson,
-  ExternalApiCallLog,
-  ExternalApiCatalogItem,
-  McpToolCallResult,
   DataAppSummary,
   DataAppDetail,
   DataAppPreviewResult,
@@ -42,8 +38,6 @@ import type {
   DataAppWidget,
   PublicShareStatus,
   DataSource,
-  ExternalApp,
-  ExternalAppCreated,
   LlmModelOption,
   LlmServiceConfig,
   MaterializationContract,
@@ -708,18 +702,6 @@ export const api = {
     }),
 
   getAirflowSettings: () => request<AirflowSettings>("/api/settings/airflow"),
-  // 连接配置是**代填**：值发给 runner 就没了，ontoMeta 不落库、也读不回明文。
-  listSyncRunnerSecrets: () => request<SyncRunnerSecret[]>("/api/settings/sync-runner/secrets"),
-  putSyncRunnerSecret: (alias: string, values: Record<string, string>) =>
-    request<{ alias: string; ok: boolean }>(
-      `/api/settings/sync-runner/secrets/${encodeURIComponent(alias)}`,
-      { method: "PUT", body: JSON.stringify({ values }) },
-    ),
-  deleteSyncRunnerSecret: (alias: string) =>
-    request<{ alias: string; removed: boolean }>(
-      `/api/settings/sync-runner/secrets/${encodeURIComponent(alias)}`,
-      { method: "DELETE" },
-    ),
   updateAirflowSettings: (body: {
     endpoint: string;
     username?: string | null;
@@ -937,82 +919,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-
-  // --- External API ---
-
-  listExternalApps: () => request<ExternalApp[]>("/api/external-apps"),
-
-  listExternalScopes: () => request<{ scopes: string[] }>("/api/external-apps/scopes"),
-
-  createExternalApp: (body: {
-    name: string;
-    description?: string;
-    scopes?: string[];
-    rate_limit_per_minute?: number | null;
-  }) =>
-    request<ExternalAppCreated>("/api/external-apps", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  getExternalApp: (id: string) => request<ExternalApp>(`/api/external-apps/${id}`),
-
-  updateExternalApp: (
-    id: string,
-    body: {
-      name?: string;
-      description?: string;
-      status?: string;
-      scopes?: string[];
-      rate_limit_per_minute?: number | null;
-    },
-  ) =>
-    request<ExternalApp>(`/api/external-apps/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-
-  regenerateExternalAppKey: (id: string) =>
-    request<ExternalAppCreated>(`/api/external-apps/${id}/regenerate-key`, {
-      method: "POST",
-    }),
-
-  deleteExternalApp: (id: string) =>
-    request<{ id: string; deleted: boolean }>(`/api/external-apps/${id}`, {
-      method: "DELETE",
-    }),
-
-  listExternalAppCallLogs: (appId: string, limit = 50) =>
-    request<ExternalApiCallLog[]>(`/api/external-apps/${appId}/call-logs?limit=${limit}`),
-
-  listExternalApiCatalog: () => request<ExternalApiCatalogItem[]>("/api/external-api/catalog"),
-
-  getExternalApiCatalogItem: (apiId: string) =>
-    request<ExternalApiCatalogItem>(`/api/external-api/catalog/${apiId}`),
-
-  /** 调用 MCP tools/call（试用），需传入 API Key（真实鉴权） */
-  callMcpTool: async (
-    toolName: string,
-    arguments_: Record<string, unknown>,
-    apiKey: string,
-  ): Promise<{ status: number; data: McpToolCallResult | unknown }> => {
-    const response = await fetch("/api/mcp/tools/call", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": apiKey,
-      },
-      body: JSON.stringify({ name: toolName, arguments: arguments_ }),
-    });
-    let data: unknown;
-    const text = await response.text();
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = text;
-    }
-    return { status: response.status, data };
-  },
 
   // ------------------------------------------------------------ Data Apps
 

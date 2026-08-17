@@ -619,14 +619,6 @@ export interface AirflowSettings {
   updated_at: string;
 }
 
-/** runner 侧一个别名的连接配置概览。**不含机密明文**——机密键只回「已设置」。 */
-export interface SyncRunnerSecret {
-  alias: string;
-  /** store：设置页写入 runner 存储，可改；env：部署时钉死的环境变量，只读。 */
-  source: string;
-  values: Record<string, string>;
-}
-
 // ===== 依赖组件统一部署管理（DEPENDENCY_DEPLOYMENT_REDESIGN Phase 0） =====
 
 export interface DependencySchemaField {
@@ -1102,66 +1094,6 @@ export interface ChatBiSuggestions {
 export interface ChatBiHistoryItem {
   role: "user" | "assistant";
   content: string;
-}
-
-// --- External API ---
-
-export interface ExternalApp {
-  id: string;
-  name: string;
-  description?: string | null;
-  app_key: string;
-  api_key_hint?: string | null;
-  api_key?: string | null;
-  scopes: string[];
-  rate_limit_per_minute?: number | null;
-  status: string;
-  created_at: string;
-  updated_at: string;
-  last_used_at?: string | null;
-}
-
-export interface ExternalAppCreated extends ExternalApp {
-  api_key: string;
-}
-
-export interface ExternalApiFieldDoc {
-  name: string;
-  type: string;
-  description: string;
-}
-
-export interface ExternalApiCatalogItem {
-  id: string;
-  name: string;
-  tool_name: string;
-  category: string;
-  description: string;
-  auth_required: boolean;
-  required_scope: string;
-  rest_method?: string | null;
-  rest_path?: string | null;
-  input_schema: Record<string, unknown>;
-  output_fields: ExternalApiFieldDoc[];
-  example_result?: unknown;
-  mcp_endpoint: string;
-}
-
-export interface ExternalApiCallLog {
-  id: string;
-  app_id: string;
-  tool_name?: string | null;
-  path?: string | null;
-  status_code: number;
-  duration_ms?: number | null;
-  error_message?: string | null;
-  created_at: string;
-}
-
-export interface McpToolCallResult {
-  content: Array<{ type: string; text?: string; [key: string]: unknown }>;
-  structuredContent?: unknown;
-  isError?: boolean;
 }
 
 // ---- 字段级溯源：合并报告与冲突复核 ----

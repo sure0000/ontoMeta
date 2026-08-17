@@ -120,10 +120,6 @@ async function resolveBreadcrumbs(
     return [{ label: "任务管理", path: "/tasks/materialize" }, { label: "任务链" }];
   }
 
-  if (pathname === "/tasks/connections") {
-    return [{ label: "任务管理", path: "/tasks/materialize" }, { label: "搬运连接" }];
-  }
-
   if (pathname.startsWith("/tasks/")) {
     const TASK_KIND_LABEL: Record<string, string> = {
       materialize: "物化任务",
@@ -133,31 +129,6 @@ async function resolveBreadcrumbs(
     };
     const kind = pathname.split("/")[2] ?? "";
     return [{ label: "任务管理" }, { label: TASK_KIND_LABEL[kind] ?? "任务" }];
-  }
-
-  if (pathname === "/external-api/apps" || pathname === "/external-api") {
-    return [{ label: "外部API", path: "/external-api/apps" }, { label: "应用创建" }];
-  }
-
-  if (pathname === "/external-api/endpoints") {
-    return [{ label: "外部API", path: "/external-api/endpoints" }, { label: "MCP接口" }];
-  }
-
-  if (pathname.startsWith("/external-api/endpoints/")) {
-    const apiId = pathname.split("/")[3];
-    const crumbs: Crumb[] = [
-      { label: "外部API", path: "/external-api/endpoints" },
-      { label: "MCP接口", path: "/external-api/endpoints" },
-    ];
-    if (apiId) {
-      try {
-        const item = await api.getExternalApiCatalogItem(apiId);
-        crumbs.push({ label: item.name });
-      } catch {
-        crumbs.push({ label: "MCP Tool" });
-      }
-    }
-    return crumbs;
   }
 
   if (pathname === "/settings") {

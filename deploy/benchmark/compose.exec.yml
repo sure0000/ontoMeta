@@ -1,0 +1,197 @@
+# 执行栈：Airflow（调度 + 血缘上报）+ Flink 会话集群（统一执行）+ 目标数仓 Postgres
+#
+# 阶段 B 才起（造数期间不需要，见 README 的阶段划分）。
+#
+# 用法（本目录下，先 build 两个镜像）：
+#   docker compose --env-file .env -f compose.exec.yml build
+#   docker compose --env-file .env -f compose.exec.yml up -d
+#
+# 为什么是 standalone 会话集群而不是 YARN：
+#   airflow_dag_builder 的 deploy_target 是 env 可配的（FLINK_DEPLOY_TARGET），
+#   设成 remote 即可提交到会话集群。在 docker 里搭 YARN 要多耗 8GB 且毫无收益——
+#   验证的是 SQL 生成与落数正确性，不是资源调度。
+
+name: bench-exec
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow.Dockerfile
+    args:
+      IMG_AIRFLOW: ${IMG_AIRFLOW:-apache/airflow:2.10.5}
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    # 2.x 默认只有 session 后端（仅供 Web UI）；不开 basic_auth 则 /api/v1/* 一律 401，
+    # ontoMeta 触发/回读 DagRun 全部失败。
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+    AIRFLOW__DATAHUB__CONN_ID: datahub_rest_default
+    AIRFLOW__DATAHUB__CAPTURE_EXECUTIONS: "true"
+    # flink run -t remote 靠这份 conf 找 JobManager
+    FLINK_CONF_DIR: /opt/flink/conf
+  volumes:
+    # ontoMeta（在 mac 上）通过 NFS/SMB 往这个目录投递 DAG 与 SQL。
+    # DAG 内的 sql_dir 是 Path(__file__).parent/"jobs" 运行期解析的，
+    # 所以两侧挂载点不同不影响，但必须是同一份文件。
+    - ${BENCH_DAGS_DIR:?}:/opt/airflow/dags
+    - airflow_logs:/opt/airflow/logs
+  networks: [bench]
+
+services:
+  airflow-db:
+    image: ${IMG_POSTGRES:-postgres:16}
+    mem_limit: 512m
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [bench]
+
+  # 一次性：建库、建管理员、登记 DataHub 与源库/目标库连接。
+  # erp_readonly 这个 conn_id 是 transform/metric 任务读源的入口，缺它任务会以
+  # "Connection refused" 之类指不到原因的错失败。
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create --username admin --password "$${AIRFLOW_ADMIN_PASSWORD:-admin}" \
+          --firstname a --lastname d --role Admin --email admin@example.com || true
+
+        # 用宿主机地址而非 datahub-gms 服务名：DataHub 由它自己的 quickstart compose
+        # 管理，在另一个 project/network 里，服务名跨栈解析不了；走已发布的端口最稳。
+        airflow connections delete datahub_rest_default || true
+        airflow connections add datahub_rest_default \
+          --conn-type datahub-rest --conn-host "http://$${BENCH_HOST_IP}:$${DATAHUB_GMS_PORT}"
+
+        airflow connections delete erp_readonly || true
+        airflow connections add erp_readonly --conn-type mysql \
+          --conn-host db --conn-port 3306 --conn-schema "$${ERP_SITE_DB:-_erpnext}" \
+          --conn-login "$${RO_USER}" --conn-password "$${RO_PASSWORD}"
+
+        airflow connections delete odoo_readonly || true
+        airflow connections add odoo_readonly --conn-type postgres \
+          --conn-host odoo-db --conn-port 5432 --conn-schema odoo_o2c \
+          --conn-login "$${RO_USER}" --conn-password "$${RO_PASSWORD}"
+
+        airflow connections delete ontometa_dwh || true
+        airflow connections add ontometa_dwh --conn-type postgres \
+          --conn-host dwh-db --conn-port 5432 --conn-schema ontometa_dwh \
+          --conn-login dwh --conn-password "$${DWH_DB_PASSWORD}"
+        echo "airflow-init done"
+    environment:
+      <<: *airflow-env
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      ERP_SITE_DB: ${ERP_SITE_DB:-_erpnext}
+      RO_USER: ${RO_USER:?}
+      RO_PASSWORD: ${RO_PASSWORD:?}
+      DWH_DB_PASSWORD: ${DWH_DB_PASSWORD:?}
+      BENCH_HOST_IP: ${BENCH_HOST_IP:?}
+      DATAHUB_GMS_PORT: ${DATAHUB_GMS_PORT:-8080}
+
+  airflow-webserver:
+    <<: *airflow-common
+    mem_limit: 1536m
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEB_PORT:-8081}:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    mem_limit: 1536m
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  flink-jobmanager:
+    build:
+      context: .
+      dockerfile: flink.Dockerfile
+      args:
+        IMG_FLINK: ${IMG_FLINK:-flink:1.13.6-scala_2.12-java8}
+    mem_limit: 1g
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 800m
+        rest.address: flink-jobmanager
+        rest.port: 8081
+    ports:
+      - "${FLINK_REST_PORT:-8082}:8081"
+    networks: [bench]
+    restart: unless-stopped
+
+  flink-taskmanager:
+    build:
+      context: .
+      dockerfile: flink.Dockerfile
+      args:
+        IMG_FLINK: ${IMG_FLINK:-flink:1.13.6-scala_2.12-java8}
+    mem_limit: 3g
+    command: taskmanager
+    depends_on: [flink-jobmanager]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.memory.process.size: 2600m
+        taskmanager.numberOfTaskSlots: ${FLINK_TM_SLOTS:-4}
+    networks: [bench]
+    restart: unless-stopped
+
+  # 物化目标仓。选 Postgres 而不是 StarRocks/Doris：后者光 BE 就要 8-12GB，
+  # 而这次验的是「本体能否正向生成数仓并落对数」，不是 OLAP 性能。
+  # PostgresAdapter 已支持真 PK/FK，反而比 Doris 更能检验约束生成是否正确。
+  dwh-db:
+    image: ${IMG_POSTGRES:-postgres:16}
+    mem_limit: 2g
+    environment:
+      POSTGRES_USER: dwh
+      POSTGRES_PASSWORD: ${DWH_DB_PASSWORD:?}
+      POSTGRES_DB: ontometa_dwh
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=32MB
+    volumes:
+      - dwh_pg:/var/lib/postgresql/data
+    ports:
+      - "${DWH_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dwh"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [bench]
+
+networks:
+  bench:
+    external: true
+    name: ontometa-bench
+
+volumes:
+  airflow_pg:
+  airflow_logs:
+  dwh_pg:

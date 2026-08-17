@@ -152,7 +152,6 @@
 - `governance_artifacts`（M5 治理制品）
 - `data_sources`、`data_apps`、`data_app_widgets`、`data_app_datasets`、`data_app_versions`（数据应用 / 面板 / 大屏）
 - `chat_bi_conversations`、`chat_bi_messages`（问数会话）
-- `external_apps`、`external_api_call_logs`（对外应用与调用日志）
 - `business_logic_categories` 及绑定表、`draft_generation_tasks`、`draft_chunk_checkpoints`、settings 等
 
 ### 5.2 关键字段原则
@@ -201,33 +200,26 @@
 - `POST /api/chat-bi/ask`、`GET /api/chat-bi/suggestions`
 - `POST /api/chat-bi/messages/{id}/execute`（执行该消息的 suggested_sql，多方言，需 publisher）
 
-### 6.6 设置与外部应用管理
+### 6.6 设置
 
 - LLM / DataHub：`/api/settings/*`、`GET /api/config`
-- 外部应用 CRUD、Key 轮换、调用日志、目录：`/api/external-apps*`、`/api/external-api/*`
 
-### 6.7 对外只读（App API Key）
-
-- REST：`GET /api/v1/domains|object-types|relation-types|business-logics`（及详情）
-- MCP：`GET|POST /api/mcp`、`GET /api/mcp/tools`、`POST /api/mcp/tools/call`
-- Scope：`domains:read` / `objects:read` / `relations:read` / `logics:read`；限流超限 `429`
-
-### 6.8 角色与令牌（RBAC，需 publisher）
+### 6.7 角色与令牌（RBAC，需 publisher）
 
 - `POST|GET /api/principals`、`PATCH|DELETE /api/principals/{id}`、`POST /api/principals/{id}/rotate-token`、`GET /api/principals-policy`
 
-### 6.9 智能数仓（本体 → 物理）
+### 6.8 智能数仓（本体 → 物理）
 
 - 物化契约：`GET /api/ontologies/{id}/materialization-contracts`、`POST .../sync`、`PATCH /api/materialization-contracts/{id}`
 - 生成：`GET /api/warehouse/engines`、`GET /api/ontologies/{id}/warehouse/{ddl,etl,dag,mapping,derivation,bundle}`
 - DataHub 回写：`GET /api/ontologies/{id}/datahub/writeback-plan`、`POST .../datahub/writeback`
 
-### 6.10 治理智能体（写侧，需 publisher）
+### 6.9 治理智能体（写侧，需 publisher）
 
 - `GET /api/agents/kinds`、`GET /api/agents/artifacts[/{id}]`
 - `POST /api/agents/draft`、`POST /api/agents/artifacts/{id}/{validate,confirm,execute}`
 
-### 6.11 数据应用
+### 6.10 数据应用
 
 - 数据源 / 数据应用 / 面板：`/api/data-sources*`、`/api/data-apps*`、`/api/data-app-widgets*`
 - 由问数生成：`POST /api/chat-bi/generate-app`、`POST /api/chat-bi/generate-widget`
@@ -280,7 +272,6 @@
 - 发布版本不可被无痕覆盖；支持版本 diff 与快照只读查看
 - **权限模型**：
   - 四层角色 RBAC（读 reader < 编 editor < 审 reviewer < 发 publisher）**已产品化**——按主体签发令牌、集中策略闸门（`app/auth.py`），写侧治理智能体等高危操作需 publisher；`ONTOMETA_ADMIN_TOKEN` 保留为 superuser（等价 publisher），未创建主体时行为与启用前一致。详见 [DW_IMPLEMENTATION.md](./DW_IMPLEMENTATION.md) M0
-  - 对外面：外部 App API Key（哈希存储）+ 应用级 scope + 进程内限流
 - 生产（`DEBUG=false`）500 响应脱敏；CORS 使用显式 origins
 ---
 

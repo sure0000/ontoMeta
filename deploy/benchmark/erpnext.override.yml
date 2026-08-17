@@ -1,0 +1,65 @@
+# 叠加在 frappe_docker 官方 pwd.yml 之上的覆盖层。
+#
+# 用法（在 frappe_docker 目录下）：
+#   docker compose --env-file <本目录>/.env \
+#     -f pwd.yml -f <本目录>/erpnext.override.yml up -d
+#
+# 干四件事：
+#   1. 暴露 MariaDB 端口——DataHub 要采集、Flink 要读源，不暴露则两者都做不了
+#   2. 全部容器设 mem_limit——防某个容器吃爆整机，那会毁掉跑了一夜的造数
+#   3. 加大 gunicorn worker——REST 提交单据是同步执行在 web worker 里的，
+#      并发上限由它决定，不是由内存决定
+#   4. 接入 ontometa-bench 网络——Airflow/Flink 要按服务名连过来
+#
+# ⚠ pwd.yml 的服务名随上游版本变动（本文件按 v15 编写）。若 up 时报
+#   "service X not found"，用 `docker compose -f pwd.yml config --services` 对一遍再改。
+
+services:
+  db:
+    mem_limit: 3g
+    # 全库 400-600MB，1500M buffer pool 已能整库驻留；skip-log-bin 省掉单机用不上的写入
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+      - --innodb-buffer-pool-size=1500M
+      - --skip-log-bin
+    ports:
+      - "${ERP_DB_PORT:-3306}:3306"
+    networks: [default, bench]
+
+  redis-cache:
+    mem_limit: 512m
+    command: ["redis-server", "--maxmemory", "384mb", "--maxmemory-policy", "allkeys-lru"]
+
+  redis-queue:
+    mem_limit: 512m
+
+  backend:
+    mem_limit: 5g
+    environment:
+      # frappe_docker 的 backend 镜像读此变量决定 gunicorn 进程数。
+      # 若该版本不认，改为直接覆盖 command 里的 --workers。
+      GUNICORN_WORKERS: 8
+    networks: [default, bench]
+
+  # 后台队列只处理重算/邮件这类异步活，2 个进程够——前提是按时间正序造数，
+  # 不产生 Repost Item Valuation 风暴（见 BENCHMARK_ENV_SETUP.md §5.4）
+  queue-short:
+    mem_limit: 1g
+  queue-long:
+    mem_limit: 1g
+  scheduler:
+    mem_limit: 512m
+  websocket:
+    mem_limit: 384m
+  frontend:
+    mem_limit: 384m
+    ports:
+      - "${ERP_WEB_PORT:-8090}:8080"
+
+networks:
+  bench:
+    external: true
+    name: ontometa-bench

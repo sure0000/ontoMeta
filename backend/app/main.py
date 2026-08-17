@@ -7,8 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.external_routes import router as external_router
-from app.api.external_routes import v1_router as external_v1_router
 from app.api.routes import router
 from app.auth import AdminAuthMiddleware
 from app.config import settings
@@ -23,7 +21,7 @@ async def lifespan(_: FastAPI):
     init_db()
     if not (settings.ontometa_admin_token or "").strip():
         logger.warning(
-            "ONTOMETA_ADMIN_TOKEN 未配置：管理 API（/api/* 除 v1/mcp）将返回 503。"
+            "ONTOMETA_ADMIN_TOKEN 未配置：管理 API（/api/* 除 public）将返回 503。"
             "请在 backend/.env 中设置后重启。"
         )
     yield
@@ -71,8 +69,6 @@ async def _unhandled_exc_handler(_: Request, exc: Exception) -> JSONResponse:
 
 
 app.include_router(router, prefix="/api")
-app.include_router(external_router, prefix="/api")
-app.include_router(external_v1_router, prefix="/api")
 
 
 @app.get("/health")

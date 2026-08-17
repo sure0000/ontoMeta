@@ -10,7 +10,6 @@ import "./styles/layout.css";
 import "./styles/graph.css";
 import "./styles/expression.css";
 import "./styles/chat-bi.css";
-import "./styles/external-api.css";
 import "./styles/dashboard.css";
 import "./styles/big-screen.css";
 import "./styles/materialize.css";

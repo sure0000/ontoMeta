@@ -1,6 +1,5 @@
 import {
   ApartmentOutlined,
-  ApiOutlined,
   AppstoreOutlined,
   FunctionOutlined,
   FolderOutlined,
@@ -40,14 +39,8 @@ function getSelectedKey(pathname: string, search: string) {
   if (pathname.startsWith("/tasks/orchestration") || pathname.startsWith("/tasks/pipelines")) {
     return "/tasks/orchestration";
   }
-  if (pathname.startsWith("/tasks/connections")) return "/tasks/connections";
   if (pathname.startsWith("/tasks")) return "/tasks";
   if (pathname.startsWith("/data-apps")) return "/data-apps";
-  if (pathname.startsWith("/external-api/apps")) return "/external-api/apps";
-  if (pathname.startsWith("/external-api/endpoints")) {
-    return "/external-api/endpoints";
-  }
-  if (pathname.startsWith("/external-api")) return "/external-api/apps";
   if (pathname.startsWith("/settings")) return "/settings";
   return "/ontology";
 }
@@ -55,7 +48,6 @@ function getSelectedKey(pathname: string, search: string) {
 function getOpenKeys(pathname: string) {
   if (pathname.startsWith("/ontology")) return ["/ontology"];
   if (pathname.startsWith("/tasks")) return ["/tasks"];
-  if (pathname.startsWith("/external-api")) return ["/external-api"];
   return [];
 }
 
@@ -127,29 +119,15 @@ export function AppLayout() {
         children: [
           { key: "/tasks", label: "📋 我的任务" },
           { key: "/tasks/orchestration", label: "🔧 任务编排" },
-          { key: "/tasks/connections", label: "⚙️ 连接配置" },
         ],
       },
       { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },
-      {
-        key: "/external-api",
-        icon: <ApiOutlined />,
-        label: "外部API",
-        children: [
-          { key: "/external-api/apps", label: "应用创建" },
-          { key: "/external-api/endpoints", label: "MCP接口" },
-        ],
-      },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ];
   }, [domains]);
 
   const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
     if (key === "/ontology-empty") return;
-    if (key === "/external-api") {
-      navigate("/external-api/apps");
-      return;
-    }
     if (key.startsWith("/ontology?")) {
       const [, query] = key.split("?");
       const params = new URLSearchParams(query);

@@ -18,7 +18,7 @@ alembic revision --autogenerate -m "描述"   # 根据 models 生成新迁移（
 ## 旧 SQLite / 已有数据
 
 1. **备份** `ontometa.db`（及 `-wal`/`-shm`）。
-2. 确认 schema 已包含 B1 字段（如 `external_apps.api_key_hash`）。若不确定，先启动一次旧版本或对照 models。
+2. 确认 schema 已与当时的 models 对齐（如 `principals.token_hash`）。若不确定，先启动一次旧版本或对照 models。
 3. 启动应用，或运行：`python scripts/alembic_stamp_legacy.py`
 4. 之后的 schema 变更只通过新的 Alembic revision 演进。
 

@@ -1,8 +1,7 @@
 """管理端主体（Principal）与四层角色。
 
-Token 存储方案复用 ``models/external.py`` + ``services/external_api.py`` 对
-External App Key 的既有做法：SHA-256(pepper + 明文)，库内只存哈希与前缀，
-明文仅在创建/轮换时返回一次。
+Token 存储方案：SHA-256(pepper + 明文)，库内只存哈希与前缀，明文仅在
+创建/轮换时返回一次。
 """
 
 import enum

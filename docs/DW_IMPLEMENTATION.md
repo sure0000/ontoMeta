@@ -94,13 +94,13 @@
 
 **验收标准**：角色 × 端点的允许/拒绝矩阵成立；Token 轮换后旧 Token 立即失效；未创建任何主体时行为与启用 RBAC 前一致；`ONTOMETA_ADMIN_TOKEN` 等价 publisher（superuser）。
 
-**数据模型**（`b2c3d4e5f6a7_rbac_principals.py`）：新表 `principals`——`id`、`name`、`role`、`token_hash`、`token_prefix`、`active`、`last_used_at`、`created_at`、`updated_at`。Token 哈希方案复用 `services/external_api.py` 的 external_apps 做法（SHA-256 + pepper，明文仅创建/轮换时返回一次，库内只存哈希与前缀）。
+**数据模型**（`b2c3d4e5f6a7_rbac_principals.py`）：新表 `principals`——`id`、`name`、`role`、`token_hash`、`token_prefix`、`active`、`last_used_at`、`created_at`、`updated_at`。Token 哈希方案：SHA-256 + pepper，明文仅创建/轮换时返回一次，库内只存哈希与前缀（沿用当时 external_apps 的既有做法，该模块已随外部 API 一并移除）。
 
 **文件**：`app/models/principal.py`、`app/schemas/principal.py`、`app/services/principal_service.py`、`app/api/principals.py`；修改 `app/auth.py`、`app/api/router.py`、`app/models/__init__.py`。
 
 **关键接口**：
 - `app/auth.py::minimum_role_for(method, path) -> str` —— 集中策略表，`_ROLE_OVERRIDES`（正则匹配 method×path）优先于 `_METHOD_DEFAULTS`（GET→reader，POST/PUT/PATCH→editor，DELETE→publisher）。
-- `AdminAuthMiddleware` 解析主体令牌→角色，强制 `minimum_role`；豁免前缀 `/api/v1`、`/api/mcp`、`/api/public`、`/health` 不变。
+- `AdminAuthMiddleware` 解析主体令牌→角色，强制 `minimum_role`；豁免前缀 `/api/public`、`/health` 不变（`/api/v1`、`/api/mcp` 随外部 API 模块移除）。
 
 **权限矩阵**（`_ROLE_OVERRIDES` 摘要，`GET /api/principals-policy` 返回完整策略）：
 
@@ -383,7 +383,6 @@
 | `ObjectType.source_ref`、`Property.source_field_ref`、`RelationType.structure_type/cardinality/mapping_object_type_id`、`ProvenanceMixin` | `models/ontology.py` |
 | `DataSource.dsn_secret_ref` 仅存引用、`mapping_json` 结构 | `models/data_app.py` |
 | BusinessLogic 双向绑定 | `models/logic.py` |
-| External App Key 哈希方案（M0 复用） | `models/external.py`、`services/external_api.py` |
 | 发布前一致性校验（Gate 复用基础） | `services/draft_consistency.py` |
 | 三路合并 | `services/ontology_merge.py` |
 | RBAC 集中策略与豁免前缀 | `app/auth.py` |

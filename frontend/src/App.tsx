@@ -12,16 +12,12 @@ import { DataAppEmbedPage } from "./pages/DataAppEmbedPage";
 import { DataAppPublicPage } from "./pages/DataAppPublicPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
-import { ExternalApiAppsPage } from "./pages/ExternalApiAppsPage";
-import { ExternalApiCatalogPage } from "./pages/ExternalApiCatalogPage";
-import { ExternalApiDetailPage } from "./pages/ExternalApiDetailPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
 import { PipelinesPage } from "./pages/PipelinesPage";
 import { TasksPage } from "./pages/TasksPage";
 import { TasksOverviewPage } from "./pages/TasksOverviewPage";
 import { TaskCreatePage } from "./pages/TaskCreatePage";
-import { TasksConnectionsPage } from "./pages/TasksConnectionsPage";
 import { RelationGroupDetailPage } from "./pages/RelationGroupDetailPage";
 import { RelationTypeDetailPage } from "./pages/RelationTypeDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -63,7 +59,6 @@ export default function App() {
         <Route path="/tasks/create" element={<TaskCreatePage />} />
         <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />
         <Route path="/tasks/orchestration" element={<PipelinesPage />} />
-        <Route path="/tasks/connections" element={<TasksConnectionsPage />} />
         {/* 保留旧路由以兼容 */}
         <Route path="/tasks/materialize" element={<TasksPage kind="materialize" />} />
         <Route path="/tasks/sync" element={<TasksPage kind="sync" />} />
@@ -72,10 +67,6 @@ export default function App() {
         <Route path="/tasks/pipelines" element={<PipelinesPage />} />
         <Route path="/data-apps" element={<DataAppsPage />} />
         <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />
-        <Route path="/external-api" element={<Navigate to="/external-api/apps" replace />} />
-        <Route path="/external-api/apps" element={<ExternalApiAppsPage />} />
-        <Route path="/external-api/endpoints" element={<ExternalApiCatalogPage />} />
-        <Route path="/external-api/endpoints/:apiId" element={<ExternalApiDetailPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       <Route path="/apps/:appId" element={<DataAppViewPage />} />
