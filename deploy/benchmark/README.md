@@ -159,16 +159,36 @@ docker compose -f compose.biz.yml exec odoo-db \
 
 **生成器跑在宿主机上，不进 docker**——它只发 HTTP/XML-RPC，容器化没有收益。
 
+分三步走，别一上来就全量——投递器接不上时，全量跑到一半才发现最贵。
+
 ```bash
 python3 -m venv ~/bench-venv && source ~/bench-venv/bin/activate
 pip install requests
+cd benchmark
 
-python generate_o2c.py \
-  --erp  http://localhost:8090 --erp-key <key>:<secret> \
-  --odoo http://localhost:8069 --odoo-db odoo_o2c \
+# ① 只生成台账与真值，不连任何系统。先确认配方与八个指标数值合理
+python generate_o2c.py --only ledger --out /srv/ontometa/benchmark/truth.json
+
+# ② 小规模冒烟，确认两个投递器都接得上（几分钟；脏案例条数会同比例缩）
+python generate_o2c.py --orders 40 \
+  --erp http://localhost:8090 --erp-key <key>:<secret> \
+  --odoo http://localhost:8069 --odoo-db odoo_o2c --odoo-password <pwd> \
+  --out /tmp/truth-smoke.json
+
+# ③ 全量，跑一夜
+nohup python generate_o2c.py \
+  --erp http://localhost:8090 --erp-key <key>:<secret> \
+  --odoo http://localhost:8069 --odoo-db odoo_o2c --odoo-password <pwd> \
   --seed 42 --concurrency 8 \
-  --out /srv/ontometa/benchmark/truth.json
+  --out /srv/ontometa/benchmark/truth.json \
+  > /srv/ontometa/benchmark/gen.log 2>&1 &
 ```
+
+冒烟之后、全量之前，**必须把两个库恢复到 baseline 快照**——冒烟那 40 张单会混进最终数据，
+让实际行数与 truth.json 对不上。
+
+**不支持断点续跑**：中途失败就恢复 baseline 重跑。做成可续跑要在两侧维护幂等键，
+成本远高于重跑一夜，而且半截数据混着重试痕迹比重来更难排查。
 
 三条约束照 `docs/BENCHMARK_ENV_SETUP.md` 执行，任一条破了整夜白跑：
 
@@ -183,22 +203,34 @@ python generate_o2c.py \
 
 ## 7. 步骤 4：一致性校验与数据快照
 
-跑完先校验，**不通过就改生成器重跑，不要手工补数据**——手工补的行不会进 `truth.json`，
-真值一旦和实际数据脱节，后面所有交叉校验全部失效。
+校验有脚本，直连两个库跑 SQL（聚合校验走 REST 又慢又容易被分页坑）：
 
-| 检查 | 判据 |
-|---|---|
-| 台账 vs ERPNext | 订单数 / 行数 / 金额合计逐项相等 |
-| 台账 vs Odoo | 同上（对 1800 张线上单） |
-| 冲突注入生效 | 那 60 张确实不在 ERP；120 个重复客户两边都在 |
-| GL 自洽 | `tabGL Entry` 借贷合计相等 |
-| 库存自洽 | Stock Ledger Entry 累计 = Bin 结存 |
+```bash
+pip install pymysql psycopg2-binary
+cd benchmark
+python3 verify.py --truth /srv/ontometa/benchmark/truth.json \
+  --erp-dsn  mysql://datahub_ro:<pwd>@localhost:3306/_erpnext \
+  --odoo-dsn postgres://datahub_ro:<pwd>@localhost:5432/odoo_o2c \
+  --manifest /srv/ontometa/benchmark/manifest.json
+```
 
-过了就打快照（这才是重放的单位，重放是分钟级，不是重跑生成器的小时级）：
+它逐项比对 `truth.json` 里的 `expected_erp` / `expected_odoo`：单据行数、提交态金额合计、
+尾差订单数、GL 借贷平衡、库存台账与结存一致、未下传的 60 张确实不在 ERP、难匹配客户
+两边都在且名称确实对不上。
+
+**跳过不等于通过**：缺驱动或缺 DSN 时该项记 `SKIP` 且整体返回非零。补齐再跑，别拿带
+SKIP 的结果当验收依据——那正是这套方案从头到尾在防的假绿。
+
+**不通过就改生成器、恢复 baseline、重跑，不要手工补数据**——手工补的行不会进
+`truth.json`，真值一旦和实际数据脱节，后面所有交叉校验全部失效。
+
+全绿之后才打数据快照（这才是重放的单位，恢复是分钟级，不是重跑生成器的小时级）：
 
 ```bash
 # 同前面的 mysqldump / pg_dump，文件名换成 erp_data_v1 / odoo_data_v1
-# 并写 manifest.json：各表行数、校验和、seed、镜像 digest、ERPNext/Odoo 版本
+# manifest.json 由 verify.py 写出，但 images 字段是空的——
+# 打快照时把镜像 digest 与 ERPNext/Odoo 版本号补进去，否则半个月后重建环境
+# 说不清拿到的是不是同一套 schema
 ```
 
 ---
