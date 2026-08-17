@@ -60,33 +60,75 @@ class ErpClient:
             raise ErpError(f"{what} 失败 HTTP {resp.status_code}: {detail}")
         return resp.json()
 
+    def _request(self, what: str, fn: Callable[[], "requests.Response"]) -> Any:
+        """带重试的请求。
+
+        ``tabSeries``（单据编号表）在 8 并发提交下会抛两类瞬态错误——
+        ``QueryDeadlockError``（编号 UPDATE 撞乐观锁）与 ``Duplicate entry``
+        （系列首次 INSERT 撞车）。事务已回滚，重试是安全且幂等的（不会造出重复单据）。
+        """
+        import time
+
+        last: Exception | None = None
+        for attempt in range(10):
+            try:
+                return self._check(fn(), what)
+            except ErpError as exc:
+                msg = str(exc)
+                if (
+                    "QueryDeadlockError" in msg
+                    or "Record has changed" in msg
+                    or "Duplicate entry" in msg
+                    or "HTTP 5" in msg
+                ):
+                    last = exc
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+        assert last is not None
+        raise last
+
     def insert(self, doctype: str, doc: dict) -> dict:
-        r = self.session.post(f"{self.base}/api/resource/{doctype}", json=doc, timeout=self.timeout)
-        return self._check(r, f"新建 {doctype}")["data"]
+        return self._request(
+            f"新建 {doctype}",
+            lambda: self.session.post(
+                f"{self.base}/api/resource/{doctype}", json=doc, timeout=self.timeout
+            ),
+        )["data"]
 
     def submit(self, doctype: str, name: str) -> dict:
-        r = self.session.put(
-            f"{self.base}/api/resource/{doctype}/{name}", json={"docstatus": 1}, timeout=self.timeout
-        )
-        return self._check(r, f"提交 {doctype} {name}")["data"]
+        return self._request(
+            f"提交 {doctype} {name}",
+            lambda: self.session.put(
+                f"{self.base}/api/resource/{doctype}/{name}", json={"docstatus": 1}, timeout=self.timeout
+            ),
+        )["data"]
 
     def cancel(self, doctype: str, name: str) -> dict:
-        r = self.session.put(
-            f"{self.base}/api/resource/{doctype}/{name}", json={"docstatus": 2}, timeout=self.timeout
-        )
-        return self._check(r, f"取消 {doctype} {name}")["data"]
+        return self._request(
+            f"取消 {doctype} {name}",
+            lambda: self.session.put(
+                f"{self.base}/api/resource/{doctype}/{name}", json={"docstatus": 2}, timeout=self.timeout
+            ),
+        )["data"]
 
     def call(self, method: str, payload: dict) -> Any:
-        r = self.session.post(f"{self.base}/api/method/{method}", json=payload, timeout=self.timeout)
-        return self._check(r, f"调用 {method}").get("message")
+        return self._request(
+            f"调用 {method}",
+            lambda: self.session.post(
+                f"{self.base}/api/method/{method}", json=payload, timeout=self.timeout
+            ),
+        ).get("message")
 
     def get_value(self, doctype: str, filters: dict, field: str) -> Any:
-        r = self.session.get(
-            f"{self.base}/api/method/frappe.client.get_value",
-            params={"doctype": doctype, "filters": _json(filters), "fieldname": field},
-            timeout=self.timeout,
-        )
-        msg = self._check(r, f"取 {doctype}.{field}").get("message") or {}
+        msg = self._request(
+            f"取 {doctype}.{field}",
+            lambda: self.session.get(
+                f"{self.base}/api/method/frappe.client.get_value",
+                params={"doctype": doctype, "filters": _json(filters), "fieldname": field},
+                timeout=self.timeout,
+            ),
+        ).get("message") or {}
         return msg.get(field)
 
 
@@ -150,6 +192,11 @@ class ErpnextDeliverer:
                     "stock_uom": cfg.erp_uom,
                     "is_stock_item": 1,
                     "valuation_rate": _d(p.std_cost),
+                    # over_under 脏案例会超发/短发（factor 1.1/1.2）+ partial 拆批四舍五入
+                    # 溢出 0.01。放开 item 级超量允许量——全局 Stock Settings 走的是
+                    # frappe 缓存，直接 SQL 改不动，建 item 时带上最稳。
+                    "over_delivery_receipt_allowance": 100,
+                    "over_billing_allowance": 100,
                 },
             ),
             "物料",
@@ -225,7 +272,10 @@ class ErpnextDeliverer:
             "company": self.company,
             "transaction_date": o.ordered_on.isoformat(),
             "delivery_date": o.promised_on.isoformat(),
-            "currency": o.currency,
+            # 外币单（foreign_currency_orders）在 ERPNext 侧按 CNY 落——ERPNext 客户默认
+            # 币种是 CNY，外币单需要给客户配 USD 应收账户（本环境未配），否则 SI 阶段会触发
+            # 「结算货币需与业务交易货币相同」。台账仍记 USD（真值），投递时按 CNY，金额数值不变。
+            "currency": "CNY",
             "po_no": o.po_no or "",
             "items": [
                 {
@@ -238,8 +288,6 @@ class ErpnextDeliverer:
                 for ln in o.lines
             ],
         }
-        if o.currency != "CNY":
-            doc["conversion_rate"] = 7.2  # 固定汇率，避免依赖 Currency Exchange 记录
         if o.rounding_residue:
             # 聚合口径陷阱：表头比行合计少 0.01。ERPNext 的表头由行算出，改不了，
             # 只能挂一笔整单折扣把差额做出来——否则这条脏案例只存在于 truth.json 里。
@@ -361,8 +409,11 @@ class ErpnextDeliverer:
                 )
             refs = refs + extra
         elif refs:
-            # 部分回款：分配额小于应收，账龄里留尾巴
-            refs[0]["allocated_amount"] = _d(p.amount)
+            # 部分回款：分配额小于应收，账龄里留尾巴。但退货的贷项会冲减应收，
+            # 全款回款时 p.amount 可能大于实际 outstanding——用 min 兜住，别让分配额超应收。
+            refs[0]["allocated_amount"] = min(
+                _d(p.amount), float(refs[0].get("allocated_amount") or p.amount)
+            )
         doc["references"] = refs
         created = self.c.insert("Payment Entry", doc)
         self.c.submit("Payment Entry", created["name"])
@@ -393,6 +444,7 @@ class ErpnextDeliverer:
                 fn(x)
             except Exception as exc:  # noqa: BLE001 — 单据失败不该中断整轮，末尾统一报
                 errs.append((label, str(exc)[:300]))
+                self.log(f"  !! 失败 {label}: {str(exc)[:200]}")
 
         with ThreadPoolExecutor(max_workers=self.cfg.concurrency) as pool:
             list(pool.map(run, items))

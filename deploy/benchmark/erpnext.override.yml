@@ -25,9 +25,12 @@ services:
       - --skip-innodb-read-only-compressed
       - --innodb-buffer-pool-size=1500M
       - --skip-log-bin
+      # READ-COMMITTED：8 并发提交下 tabSeries 编号表在 REPEATABLE-READ（默认）会撞
+      # QueryDeadlockError「record changed」，全量造数跑一夜也做不完。必须设。
+      - --transaction-isolation=READ-COMMITTED
     ports:
       - "${ERP_DB_PORT:-3306}:3306"
-    networks: [default, bench]
+    networks: [frappe_network, bench]
 
   redis-cache:
     mem_limit: 512m
@@ -42,7 +45,7 @@ services:
       # frappe_docker 的 backend 镜像读此变量决定 gunicorn 进程数。
       # 若该版本不认，改为直接覆盖 command 里的 --workers。
       GUNICORN_WORKERS: 8
-    networks: [default, bench]
+    networks: [frappe_network, bench]
 
   # 后台队列只处理重算/邮件这类异步活，2 个进程够——前提是按时间正序造数，
   # 不产生 Repost Item Valuation 风暴（见 BENCHMARK_ENV_SETUP.md §5.4）

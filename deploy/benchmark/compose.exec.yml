@@ -124,6 +124,8 @@ services:
     restart: unless-stopped
 
   flink-jobmanager:
+    # flink:1.13.6 只有 amd64 镜像（无 arm64 manifest），在 Apple Silicon 上须走 amd64 模拟
+    platform: linux/amd64
     build:
       context: .
       dockerfile: flink.Dockerfile
@@ -143,6 +145,7 @@ services:
     restart: unless-stopped
 
   flink-taskmanager:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: flink.Dockerfile
@@ -177,8 +180,9 @@ services:
       - work_mem=32MB
     volumes:
       - dwh_pg:/var/lib/postgresql/data
+    # DB 端口只对 tailnet 开放（绑宿主 tailscale IP，不绑 0.0.0.0）
     ports:
-      - "${DWH_DB_PORT:-5433}:5432"
+      - "${BENCH_HOST_IP}:${DWH_DB_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dwh"]
       interval: 5s

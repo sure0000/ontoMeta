@@ -146,13 +146,13 @@ def check_erp(sql: Sql, truth: dict, rep: Report) -> dict[str, int]:
         counts[key] = actual
         rep.check(f"ERP {key}", actual, exp[key])
 
-    total = sql.scalar("SELECT COALESCE(SUM(base_grand_total),0) FROM `tabSales Order` WHERE docstatus=1")
+    total = sql.scalar("SELECT COALESCE(SUM(grand_total),0) FROM `tabSales Order` WHERE docstatus=1")
     counts["submitted_grand_total"] = float(total or 0)
     rep.check("ERP 提交态订单金额合计", Decimal(str(total or 0)), Decimal(exp["submitted_grand_total"]))
 
-    # 尾差脏案例：挂了整单折扣的订单数应等于配方值
+    # 尾差脏案例：挂了整单折扣的提交态订单数（in_erp 且未取消的单才会在库里留下折扣）
     residue = sql.scalar("SELECT COUNT(*) FROM `tabSales Order` WHERE docstatus=1 AND discount_amount > 0")
-    rep.check("ERP 尾差订单数（表头≠行合计）", residue, truth["dirty_cases"]["rounding_residue"])
+    rep.check("ERP 尾差订单数（表头≠行合计）", residue, truth["expected_erp"]["rounding_residue_rows"])
 
     # GL 借贷必须平
     diff = sql.scalar("SELECT COALESCE(SUM(debit),0)-COALESCE(SUM(credit),0) FROM `tabGL Entry` WHERE is_cancelled=0")

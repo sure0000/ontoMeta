@@ -31,8 +31,9 @@ services:
       - max_connections=100
     volumes:
       - odoo_pg:/var/lib/postgresql/data
+    # DB 端口只对 tailnet 开放（绑宿主 tailscale IP，不绑 0.0.0.0）
     ports:
-      - "${ODOO_DB_PORT:-5432}:5432"
+      - "${BENCH_HOST_IP}:${ODOO_DB_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U odoo"]
       interval: 5s

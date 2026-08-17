@@ -367,7 +367,7 @@ def _gen_orders(
                 currency="USD" if i in fx_idx else "CNY",
                 lines=lines,
                 po_no=f"WEB-{ordered_on:%Y%m}-{i + 1:06d}" if online else None,
-                in_erp=True,
+                in_erp=cust.match_kind != MATCH_ODOO_ONLY,
                 in_odoo=online,
             )
         )
@@ -536,7 +536,9 @@ def build_ledger(cfg: Recipe) -> Ledger:
     # 未下传 ERP 的线上单 —— 跨系统题「线上下单但 ERP 里没有」的答案，
     # 是配方参数不是跑出来的现象
     online = [o for o in orders if o.channel == "online"]
-    for o in rng.sample(online, cfg.orders_missing_in_erp):
+    # 只从共享客户的线上单里抽「故意未下传」——odoo_only 客户的单在上面的循环里
+    # 已经因 match_kind 被置 in_erp=False（自然缺失），不该占这 60 张的配额
+    for o in rng.sample([o for o in online if o.in_erp], cfg.orders_missing_in_erp):
         o.in_erp = False
 
     payments = _inject(rng, cfg, orders, customers)

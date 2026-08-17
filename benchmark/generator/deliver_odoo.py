@@ -48,10 +48,23 @@ class OdooClient:
         return m
 
     def call(self, model: str, method: str, args: list, kwargs: dict | None = None) -> Any:
-        try:
-            return self.models.execute_kw(self.db, self.uid, self.pwd, model, method, args, kwargs or {})
-        except xmlrpc.client.Fault as fault:
-            raise OdooError(f"{model}.{method} 失败: {str(fault.faultString)[:600]}") from fault
+        import time
+
+        last_fault: xmlrpc.client.Fault | None = None
+        for attempt in range(10):
+            try:
+                return self.models.execute_kw(self.db, self.uid, self.pwd, model, method, args, kwargs or {})
+            except xmlrpc.client.Fault as fault:
+                msg = str(fault.faultString)
+                # 过账时发票名序列在并发下会撞「同名条目已存在」，重试即取到下一号
+                if "Another entry with the same name" in msg or "Record has changed" in msg:
+                    last_fault = fault
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise OdooError(f"{model}.{method} 失败: {msg[:600]}") from fault
+        raise OdooError(
+            f"{model}.{method} 失败（重试耗尽）: {str(last_fault.faultString)[:600]}"
+        ) from last_fault
 
     def create(self, model: str, vals: dict, context: dict | None = None) -> int:
         return self.call(model, "create", [vals], {"context": context} if context else None)
@@ -99,7 +112,19 @@ class OdooDeliverer:
             "客户",
         )
 
-        # SPU 建 template，SKU 建 product。粒度差就在这里：ERP 侧只有一层 Item。
+        # SPU 建 template，SKU 建 product 变体。粒度差就在这里：ERP 侧只有一层 Item。
+        # Odoo 建 template 时会自动展开一个空组合变体，再显式 create 同 template 的
+        # product.product 会撞 product_product_combination_unique 唯一约束。正确做法是
+        # 走 product.attribute 让 Odoo 自己生成变体，再把 default_code 回填成 SKU。
+        # spec 是 rng.choice、跨 SPU 会重名，不能当 attribute value 的 name（有
+        # (attribute_id, name) 唯一约束），改用全局唯一的 SKU key 作 value name。
+        attr = self.c.create("product.attribute", {"name": "SKU"})
+        value_by_sku: dict[str, int] = {}
+        for p in led.products:
+            value_by_sku[p.key] = self.c.create(
+                "product.attribute.value", {"name": p.key, "attribute_id": attr}
+            )
+
         spus: dict[str, list] = {}
         for p in led.products:
             spus.setdefault(p.spu_key, []).append(p)
@@ -108,20 +133,45 @@ class OdooDeliverer:
             spu_key, skus = item
             tmpl = self.c.create(
                 "product.template",
-                {"name": skus[0].name, "list_price": _f(skus[0].list_price), "type": "consu"},
+                {
+                    "name": skus[0].name,
+                    "list_price": _f(skus[0].list_price),
+                    "type": "consu",
+                    "attribute_line_ids": [
+                        (0, 0, {
+                            "attribute_id": attr,
+                            "value_ids": [(6, 0, [value_by_sku[p.key] for p in skus])],
+                        })
+                    ],
+                },
             )
             self._set(self.template, spu_key, tmpl)
-            for p in skus:
-                pid = self.c.create(
-                    "product.product",
-                    {
-                        "product_tmpl_id": tmpl,
-                        "default_code": p.key,
-                        "lst_price": _f(p.list_price),
-                        "standard_price": _f(p.std_cost),
-                    },
+            # 变体映射：product.product.product_template_attribute_value_ids 引用的是
+            # product.template.attribute.value 的 id，不是 product.attribute.value 的 id
+            # （后者是按 SKU 顺序 1..800，前者是按模板创建顺序、SPU 内 1..N）。读回
+            # product.template.attribute.value 的 name（= SKU key）对号入座。
+            variants = self.c.search_read(
+                "product.product",
+                [("product_tmpl_id", "=", tmpl)],
+                ["id", "product_template_attribute_value_ids"],
+            )
+            for v in variants:
+                pvals = v.get("product_template_attribute_value_ids") or []
+                if not pvals:
+                    continue
+                ptav = self.c.search_read(
+                    "product.template.attribute.value",
+                    [("id", "=", pvals[0])],
+                    ["name"],
+                    limit=1,
                 )
-                self._set(self.product, p.key, pid)
+                if not ptav:
+                    continue
+                sku_key = ptav[0].get("name")
+                if sku_key not in value_by_sku:
+                    continue
+                self.c.write("product.product", [v["id"]], {"default_code": sku_key})
+                self._set(self.product, sku_key, v["id"])
 
         self._parallel(list(spus.items()), make_spu, "商品(SPU/SKU)")
 
@@ -212,7 +262,14 @@ class OdooDeliverer:
         """开票必须走向导：execute_kw 调不了 _create_invoices（下划线开头）。"""
         ctx = {"active_model": "sale.order", "active_ids": [so], "active_id": so}
         wiz = self.c.create("sale.advance.payment.inv", {"advance_payment_method": "delivered"}, context=ctx)
-        self.c.call("sale.advance.payment.inv", "create_invoices", [[wiz]], {"context": ctx})
+        try:
+            self.c.call("sale.advance.payment.inv", "create_invoices", [[wiz]], {"context": ctx})
+        except OdooError as exc:
+            # create_invoices 会先把发票建好（draft），但它的返回值是 action_view_invoice 的
+            # 动作 dict、含 None；Odoo 服务端用 allow_none=False 序列化响应时崩（已知坑）。
+            # 发票此时已经落库，忽略这个 marshalling 错误，继续找 draft 发票并过账。
+            if "marshal None" not in str(exc) and "allow_none" not in str(exc):
+                raise
 
         moves = self.c.search_read("account.move", [("invoice_origin", "!=", False), ("state", "=", "draft")], ["id", "invoice_origin"])
         so_name = self.c.search_read("sale.order", [("id", "=", so)], ["name"])

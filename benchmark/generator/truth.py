@@ -180,6 +180,9 @@ def _expected_erp(led: Ledger) -> dict[str, Any]:
         # grand_total = 行合计 - 尾差折扣。若目标站点挂了默认税模板，这条会红——
         # 那是对的，说明数据里多了没预期的税额，别把判据放宽。
         "submitted_grand_total": sum((o.total for o in active), ZERO),
+        # 尾差脏案例「落库后」的提交态行数：只有 in_erp 且未取消的单会在库里留下
+        # discount_amount>0 的提交态 SO，verify 用这个口径比对
+        "rounding_residue_rows": sum(1 for o in active if o.rounding_residue),
         "customer_rows": sum(1 for c in led.customers if c.erp_name),
         "item_rows": len(led.products),
     }
@@ -206,7 +209,13 @@ def build_truth(led: Ledger) -> dict[str, Any]:
     cfg = led.recipe
 
     shared = [c for c in led.customers if c.erp_name and c.odoo_name]
-    missing = [o for o in led.orders if o.channel == "online" and not o.in_erp]
+    # 只算「故意未下传」的线上单（共享客户）；odoo_only 客户的自然缺失单独在
+    # conflicts.odoo_only_customers 里，不混进这个 60 张的答案
+    missing = [
+        o for o in led.orders
+        if o.channel == "online" and not o.in_erp
+        and led.customer(o.customer_key).match_kind != MATCH_ODOO_ONLY
+    ]
 
     spu_sku: dict[str, list[str]] = defaultdict(list)
     for p in led.products:

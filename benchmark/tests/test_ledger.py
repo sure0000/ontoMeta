@@ -141,9 +141,21 @@ def test_online_orders_only_reference_odoo_visible_customers(led):
 
 
 def test_missing_orders_are_subset_of_online(led):
-    missing = [o for o in led.orders if not o.in_erp]
+    # 「故意未下传」只算共享客户的线上单；odoo_only 客户的单是自然缺失，不算在内
+    missing = [
+        o for o in led.orders
+        if not o.in_erp and led.customer(o.customer_key).match_kind != MATCH_ODOO_ONLY
+    ]
     assert len(missing) == SMALL.orders_missing_in_erp
     assert all(o.channel == "online" and o.in_odoo for o in missing)
+
+
+def test_odoo_only_customer_orders_never_in_erp(led):
+    """odoo_only 客户只存在于 Odoo，其线上单天然不进 ERP（in_erp=False）。"""
+    odoo_only = {c.key for c in led.customers if c.match_kind == MATCH_ODOO_ONLY}
+    orders = [o for o in led.orders if o.customer_key in odoo_only]
+    assert orders, "odoo_only 客户应有线上单"
+    assert all(o.channel == "online" and o.in_odoo and not o.in_erp for o in orders)
 
 
 # ---------------------------------------------------------------- 分布形状
