@@ -74,6 +74,7 @@ class DatahubRuntimeConfig:
     frontend_url: str
     token: str | None
     fabric: str = "PROD"
+    request_timeout: float = 90.0
 
 
 @dataclass
@@ -117,6 +118,15 @@ class AirflowRuntimeConfig:
     preflight_sentinel_timeout: float
     staging_swap: bool
     enabled: bool
+    # Flink 执行引擎参数（设置页配）：搬运/计算任务经 Airflow BashOperator 提交 flink run。
+    # runner_jar 空 → 退「仅产出 SQL 不执行」。flink_bin 缺 PATH 时填绝对路径。
+    flink_sql_runner_jar: str = ""
+    flink_sql_runner_class: str = "com.ontometa.flink.SqlRunner"
+    flink_bin: str = "flink"
+    flink_deploy_target: str = "yarn-per-job"
+    flink_parallelism: int = 1
+    flink_yarn_queue: str = ""
+    flink_checkpoint_dir: str = ""
 
     @property
     def available(self) -> bool:
@@ -213,6 +223,7 @@ class SettingsService:
             frontend_url=c.get("frontend_url", ""),
             token=c.get("token"),
             fabric=c.get("fabric") or "PROD",
+            request_timeout=float(c.get("request_timeout") or 90),
         )
 
     def get_draft_generation_settings(self, db: Session) -> DraftGenerationSetting:
@@ -271,6 +282,15 @@ class SettingsService:
             preflight_sentinel_timeout=a.get("preflight_sentinel_timeout") or 20.0,
             staging_swap=a.get("staging_swap") if a.get("staging_swap") is not None else True,
             enabled=a.get("enabled", False),
+            # Flink 执行参数（设置页配，空则用默认；flink_bin 缺省 PATH 上的 `flink`）。
+            flink_sql_runner_jar=a.get("flink_sql_runner_jar") or "",
+            flink_sql_runner_class=a.get("flink_sql_runner_class")
+            or "com.ontometa.flink.SqlRunner",
+            flink_bin=a.get("flink_bin") or "flink",
+            flink_deploy_target=a.get("flink_deploy_target") or "yarn-per-job",
+            flink_parallelism=int(a.get("flink_parallelism") or 1),
+            flink_yarn_queue=a.get("flink_yarn_queue") or "",
+            flink_checkpoint_dir=a.get("flink_checkpoint_dir") or "",
         )
 
     # Cube（保留用于向后兼容，但不再作为可部署组件）

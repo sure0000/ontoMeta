@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from app.config import settings
 from app.database import SessionLocal
@@ -78,6 +78,73 @@ def mark_task_running(task_id: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+def _try_claim_running_slot(task_id: str, max_running: int) -> str:
+    """跨进程原子占用一个 running 名额（分离子进程模式，C）。
+
+    以单条带子查询的 UPDATE 完成"检查名额 + 置 running"：SQLite 在语句执行期间持有
+    写锁并在同一语句内求值 COUNT 子查询，故并发的多个 worker 会被串行化（配合
+    busy_timeout 等待），不会两个进程同时抢到最后一个名额。
+
+    返回 "claimed"（已占用可执行）/ "waiting"（暂无名额）/ "gone"（任务不存在或已终态，
+    如被取消，调用方应直接退出）。
+    """
+    db = SessionLocal()
+    try:
+        task = db.get(DraftGenerationTask, task_id)
+        if task is None or task.status in TERMINAL_STATUSES:
+            return "gone"
+        # 原子占名额：仅当仍排队且当前 running 数未达上限时才置 running。
+        # 显式写 updated_at（原生 SQL 绕过 ORM 的 onupdate），喂饱 B 的陈旧宽限窗口。
+        result = db.execute(
+            text(
+                "UPDATE draft_generation_tasks "
+                "SET status='running', "
+                "    progress=CASE WHEN progress < 2 THEN 2 ELSE progress END, "
+                "    message=CASE WHEN message IS NULL OR message LIKE '%排队%' "
+                "                 THEN '开始生成本体草稿...' ELSE message END, "
+                "    updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=:tid AND status='queued' "
+                "  AND (SELECT COUNT(*) FROM draft_generation_tasks "
+                "       WHERE status='running') < :maxr"
+            ),
+            {"tid": task_id, "maxr": int(max_running)},
+        )
+        db.commit()
+        return "claimed" if result.rowcount == 1 else "waiting"
+    finally:
+        db.close()
+
+
+async def await_running_slot(
+    task_id: str,
+    update_progress: Callable[[str, int, str], Awaitable[None]],
+    is_cancelled: Callable[[str], bool] | None = None,
+) -> bool:
+    """跨进程并发准入（替代进程内 asyncio.Semaphore）：在 DB 内原子占用一个 running
+    名额；暂无名额时按队列位次更新排队进度并轮询等待。
+
+    返回 True 表示已置 running、可开始执行；False 表示任务已取消/不存在，调用方应直接退出。
+    """
+    max_running = settings.max_concurrent_draft_generations
+    while True:
+        if is_cancelled and is_cancelled(task_id):
+            return False
+
+        outcome = await asyncio.to_thread(_try_claim_running_slot, task_id, max_running)
+        if outcome == "claimed":
+            return True
+        if outcome == "gone":
+            return False
+
+        pos, total = await asyncio.to_thread(get_queue_position, task_id)
+        if pos > 0:
+            msg = f"排队中（第 {pos} 位，共 {total} 个等待）…"
+        else:
+            msg = "排队等待中，等待执行名额…"
+        await update_progress(task_id, 1, msg)
+        await asyncio.sleep(1.0)
 
 
 def _acquire_succeeded(acquire_task: asyncio.Task) -> bool:

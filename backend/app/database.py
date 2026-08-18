@@ -27,6 +27,10 @@ if settings.database_url.startswith("sqlite"):
     def _set_sqlite_wal_mode(dbapi_conn, _connection_record) -> None:
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
+        # 分离子进程生成（C）：API worker 与多个 draft-worker 子进程会并发写同一
+        # SQLite 文件。WAL 允许并发读 + 单写，但写锁竞争仍会抛 "database is locked"；
+        # busy_timeout 让写方最多等待 15s 而非立即失败。
+        cursor.execute("PRAGMA busy_timeout=15000")
         cursor.close()
 
 

@@ -65,20 +65,8 @@ class Settings(BaseSettings):
     # 让人去配（而不是产出一个连不上 runner 的 DAG）。
     sync_runner_endpoint: str = ""
 
-    # Flink on YARN 计算任务（P1-3）的部署参数。属部署基础设施，不进设置页。
-    # flink_sql_runner_jar 是预置的通用 SqlRunner JAR（读 SQL 文件、用环境变量替换占位符
-    # 后逐条 executeSql），runner_class 是其 main class，flink_bin 是 flink 命令路径。
-    # 缺 runner_jar 时 transform/metric 不执行、只产 SQL（回退「仅产出」模式）。
-    flink_sql_runner_jar: str = ""
-    flink_sql_runner_class: str = "com.ontometa.flink.SqlRunner"
-    flink_bin: str = "flink"
-    flink_deploy_target: str = "yarn-per-job"
-    flink_parallelism: int = 1
-    flink_yarn_queue: str = ""
-    # 增量/CDC 搬运是常驻流式作业，读位点靠 checkpoint 续存（重启从最近 checkpoint 恢复，
-    # 不重搬不漏）。这是它落哪儿的根目录（``file://…`` 本地，或 ``hdfs://…`` 集群），
-    # 属部署基础设施。空 = 未配；有增量/CDC 表时编译会报错要求配上，全量搬运不需要它。
-    flink_checkpoint_dir: str = ""
+    # Flink 执行引擎参数已迁到【设置页 → Airflow/Flink】（落库，见 AirflowRuntimeConfig）。
+    # 不再从 env 读——遵循 docs/DEVELOPMENT_PRINCIPLES.md P1（配置只在 Web 端）。
 
     @property
     def sync_tool_image_map(self) -> dict[str, str]:
@@ -175,6 +163,13 @@ class Settings(BaseSettings):
     draft_relation_chunk_max_concurrency: int = 4
 
     max_concurrent_draft_generations: int = 2
+    # 草稿生成是否在分离子进程执行（C）：默认 True，reload/异常退出杀 API worker
+    # 时子进程不受影响，任务能跑到底。测试置 false 走进程内 inline，保持确定/快速。
+    draft_worker_subprocess: bool = True
+    # 进程启动时回收僵尸草稿任务的陈旧宽限窗口（秒）：仅回收 updated_at 早于
+    # now-窗口 的 queued/running 任务，避免热重载/孤儿进程并存时误杀另一存活进程里
+    # 正在推进的任务。须大于单个生成分块的最坏 LLM 延迟。
+    draft_task_stale_grace_seconds: int = 180
     # 并发过高会加重不稳定隧道(如 ngrok)的断连概率；配合 _graphql 重试，取较稳的 3。
     datahub_max_concurrency: int = 3
 

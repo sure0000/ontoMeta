@@ -36,6 +36,14 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
         preflight_sentinel_timeout=20.0,
         staging_swap=True,
         jobs_dir="",
+        # Flink 执行参数现在也在设置行上（不再有环境变量）。
+        flink_sql_runner_jar="/opt/flink/runner.jar",
+        flink_sql_runner_class="com.ontometa.flink.SqlRunner",
+        flink_bin="flink",
+        flink_deploy_target="yarn-per-job",
+        flink_parallelism=1,
+        flink_yarn_queue="",
+        flink_checkpoint_dir="",
     )
     available = over.pop("available", None)
     base.update(over)
@@ -268,22 +276,17 @@ def test_selected_targets_narrow_batch_count(monkeypatch, tmp_path):
 # ---------- 统一执行架构：Flink 前置条件（替代已废除的 runner/docker 检查）----------
 
 
-def _no_flink_settings(monkeypatch):
-    """钉死 Flink 部署设置：JAR 与 checkpoint 都未配置（与用例无关的环境变量不参与）。"""
-    import app.config as cfg
-
-    monkeypatch.setattr(cfg.settings, "flink_sql_runner_jar", "")
-    monkeypatch.setattr(cfg.settings, "flink_checkpoint_dir", "")
+# Flink 部署设置已从环境变量搬进 Airflow 设置行（DB）；用例通过 runtime_over 覆盖。
+_NO_FLINK = {"flink_sql_runner_jar": "", "flink_checkpoint_dir": ""}
 
 
 def test_missing_flink_jar_warns_but_not_blocks(monkeypatch, tmp_path):
     """缺 SqlRunner JAR → 搬运只产出不执行（handoff），WARN 不阻断提交。"""
-    _no_flink_settings(monkeypatch)
-    db = _install(monkeypatch, tmp_path, _make_handler())
+    db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
     item = _by_key(report)["flink_jar"]
     assert item.status == pf.WARN and item.blocking is False
-    assert "FLINK_SQL_RUNNER_JAR" in (item.next_step or "")
+    assert "Flink SqlRunner JAR" in (item.next_step or "")
     assert report.ok is True
 
 
@@ -291,7 +294,6 @@ def test_incremental_without_checkpoint_blocks(monkeypatch, tmp_path):
     """本次有增量/CDC 表但未配 checkpoint：流式作业编译期必挂，提交前必须红。"""
     from app.services.job_planner import JobPlanner
 
-    _no_flink_settings(monkeypatch)
     plan = SimpleNamespace(
         jobs=(
             SimpleNamespace(name="inc_a", mode="incremental",
@@ -299,11 +301,11 @@ def test_incremental_without_checkpoint_blocks(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: plan)
-    db = _install(monkeypatch, tmp_path, _make_handler())
+    db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
     item = _by_key(report)["flink_checkpoint"]
     assert item.status == pf.FAIL and item.blocking is True
-    assert "FLINK_CHECKPOINT_DIR" in (item.next_step or "")
+    assert "Checkpoint" in (item.next_step or "")
     assert report.ok is False
 
 
@@ -311,10 +313,6 @@ def test_incremental_with_checkpoint_passes(monkeypatch, tmp_path):
     """增量/CDC 表配了 checkpoint → PASS。"""
     from app.services.job_planner import JobPlanner
 
-    import app.config as cfg
-
-    _no_flink_settings(monkeypatch)
-    monkeypatch.setattr(cfg.settings, "flink_checkpoint_dir", "file:///tmp/ckpt")
     plan = SimpleNamespace(
         jobs=(
             SimpleNamespace(name="inc_a", mode="incremental",
@@ -322,7 +320,10 @@ def test_incremental_with_checkpoint_passes(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: plan)
-    db = _install(monkeypatch, tmp_path, _make_handler())
+    db = _install(
+        monkeypatch, tmp_path, _make_handler(),
+        runtime_over={"flink_sql_runner_jar": "", "flink_checkpoint_dir": "file:///tmp/ckpt"},
+    )
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
     item = _by_key(report)["flink_checkpoint"]
     assert item.status == pf.PASS and item.blocking is False

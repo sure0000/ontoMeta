@@ -69,6 +69,14 @@ const AIRFLOW_EXTRA_FIELDS = [
   "dag_parse_timeout",
   "preflight_sentinel_timeout",
   "staging_swap",
+  // Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）
+  "flink_sql_runner_jar",
+  "flink_sql_runner_class",
+  "flink_bin",
+  "flink_deploy_target",
+  "flink_parallelism",
+  "flink_yarn_queue",
+  "flink_checkpoint_dir",
 ] as const;
 
 const MODE_ICON: Record<string, React.ReactNode> = {
@@ -774,6 +782,52 @@ export function DependencyPanel() {
                               extra="先搬进 staging 表、成功后再切换；关掉则直接写正式表"
                             >
                               <Switch />
+                            </Form.Item>
+                            <Divider plain>Flink 执行引擎</Divider>
+                            <Form.Item
+                              label="Flink SqlRunner JAR"
+                              name="extra_flink_sql_runner_jar"
+                              extra="通用 SqlRunner JAR 路径；留空则搬运/计算只产出 SQL、不执行"
+                            >
+                              <Input placeholder="/opt/flink/sql-runner.jar" />
+                            </Form.Item>
+                            <Space align="start" wrap>
+                              <Form.Item label="flink 命令路径" name="extra_flink_bin">
+                                <Input placeholder="flink（在 PATH 上）或绝对路径" style={{ width: 260 }} />
+                              </Form.Item>
+                              <Form.Item label="提交目标" name="extra_flink_deploy_target">
+                                <Select
+                                  style={{ width: 180 }}
+                                  options={[
+                                    { value: "yarn-per-job", label: "yarn-per-job" },
+                                    { value: "yarn-session", label: "yarn-session" },
+                                    { value: "remote", label: "remote" },
+                                    { value: "local", label: "local" },
+                                  ]}
+                                  allowClear
+                                />
+                              </Form.Item>
+                              <Form.Item label="并行度" name="extra_flink_parallelism">
+                                <InputNumber min={1} max={512} style={{ width: 120 }} />
+                              </Form.Item>
+                            </Space>
+                            <Space align="start" wrap>
+                              <Form.Item label="YARN 队列" name="extra_flink_yarn_queue">
+                                <Input placeholder="default" style={{ width: 200 }} />
+                              </Form.Item>
+                              <Form.Item
+                                label="SqlRunner main class"
+                                name="extra_flink_sql_runner_class"
+                              >
+                                <Input placeholder="com.ontometa.flink.SqlRunner" style={{ width: 280 }} />
+                              </Form.Item>
+                            </Space>
+                            <Form.Item
+                              label="Checkpoint 目录"
+                              name="extra_flink_checkpoint_dir"
+                              extra="增量/CDC 流式作业持久化读位点用；file://… 本地 或 hdfs://… 集群。全量搬运不需要"
+                            >
+                              <Input placeholder="file:///var/flink/checkpoints 或 hdfs://…" />
                             </Form.Item>
                           </>
                         ),

@@ -47,7 +47,8 @@ install-frontend:
 
 backend:
 	cd "$(BACKEND)" && . .venv/bin/activate && \
-		uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+		ONTOMETA_ADMIN_TOKEN="$${ONTOMETA_ADMIN_TOKEN:-dev-admin-token-change-me}" \
+		uvicorn app.main:app --reload --reload-dir app --host 0.0.0.0 --port 8000
 
 frontend:
 	cd "$(FRONTEND)" && npm run dev

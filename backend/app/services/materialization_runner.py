@@ -21,7 +21,6 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import settings as env_settings
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
 from app.models.data_app import DataSource
@@ -323,8 +322,8 @@ def _run_orchestrated(
         load_strategy=load_strategy,
     )
 
-    # Flink on YARN 提交参数（部署基础设施，来自 env）。缺 SqlRunner JAR → 退「仅产出」。
-    runner_jar = env_settings.flink_sql_runner_jar.strip()
+    # Flink on YARN 提交参数（设置页 → Airflow/Flink，DB）。缺 SqlRunner JAR → 退「仅产出」。
+    runner_jar = (airflow.flink_sql_runner_jar or "").strip()
     if not runner_jar:
         return _handoff_receipt(
             ontology_id, ds, engine, plan, ddl_items,
@@ -332,13 +331,13 @@ def _run_orchestrated(
         )
     flink_cfg = FlinkSubmitConfig(
         runner_jar=runner_jar,
-        runner_class=env_settings.flink_sql_runner_class,
-        flink_bin=env_settings.flink_bin,
-        deploy_target=env_settings.flink_deploy_target,
-        parallelism=env_settings.flink_parallelism,
-        yarn_queue=env_settings.flink_yarn_queue.strip() or None,
+        runner_class=airflow.flink_sql_runner_class,
+        flink_bin=airflow.flink_bin,
+        deploy_target=airflow.flink_deploy_target,
+        parallelism=airflow.flink_parallelism,
+        yarn_queue=(airflow.flink_yarn_queue or "").strip() or None,
     )
-    checkpoint_dir = env_settings.flink_checkpoint_dir.strip() or None
+    checkpoint_dir = (airflow.flink_checkpoint_dir or "").strip() or None
     warehouse_conn_id = _warehouse_conn_id(ds)
 
     # 按 cron 分组 + 按上限分批：一个 cron 一个 DAG、少数派不再被众数吞掉，超上限再拆（M16）。

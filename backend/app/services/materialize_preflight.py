@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError
-from app.config import settings as env_settings
 from app.models.data_app import DataSource
 from app.services.job_planner import (
     DEFAULT_SOURCE_ALIAS,
@@ -687,7 +686,7 @@ def _check_execution_channel(
 
     不再有 sync_channel/runner/docker 多通道——那套已废除，preflight 不再探 runner probe。
     """
-    runner_jar = env_settings.flink_sql_runner_jar.strip()
+    runner_jar = (airflow.flink_sql_runner_jar or "").strip()
     if not runner_jar:
         report.add(
             PreflightItem(
@@ -696,10 +695,10 @@ def _check_execution_channel(
                 status=WARN,
                 blocking=False,
                 detail=(
-                    "未配置 FLINK_SQL_RUNNER_JAR，搬运不执行、只产出 SQL（handoff 模式）。"
+                    "未配置 Flink SqlRunner JAR，搬运不执行、只产出 SQL（handoff 模式）。"
                     "建表仍会产 DDL、可用物化触发，但数据搬运需配上 JAR 并重跑。"
                 ),
-                next_step="设置环境变量 FLINK_SQL_RUNNER_JAR 指向预置的 SqlRunner JAR 路径。",
+                next_step="在 设置 → Airflow/Flink 填写「Flink SqlRunner JAR」路径。",
             )
         )
 
@@ -724,7 +723,7 @@ def _check_execution_channel(
     incremental_or_cdc = [
         j.name for j in plan.jobs if j.mode in ("incremental", "cdc")
     ]
-    checkpoint_dir = env_settings.flink_checkpoint_dir.strip()
+    checkpoint_dir = (airflow.flink_checkpoint_dir or "").strip()
     if incremental_or_cdc and not checkpoint_dir:
         report.add(
             PreflightItem(
@@ -734,11 +733,11 @@ def _check_execution_channel(
                 blocking=True,
                 detail=(
                     f"本次有 {len(incremental_or_cdc)} 张增量/CDC 表（如 {incremental_or_cdc[0]}），"
-                    "但未配置 FLINK_CHECKPOINT_DIR。增量/CDC 是流式作业、需 checkpoint 持久化读位点，"
+                    "但未配置 Flink Checkpoint 目录。增量/CDC 是流式作业、需 checkpoint 持久化读位点，"
                     "否则重启会重搬。编译期会直接报错，提交无法成功。"
                 ),
                 next_step=(
-                    "设置环境变量 FLINK_CHECKPOINT_DIR 指向一个持久化目录（file://… 本地 或 "
+                    "在 设置 → Airflow/Flink 填写「Flink Checkpoint 目录」（file://… 本地 或 "
                     "hdfs://… 集群）；或把这批表的契约改为全量（mode=full），全量不需要 checkpoint。"
                 ),
             )

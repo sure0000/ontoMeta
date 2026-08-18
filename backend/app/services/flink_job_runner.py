@@ -17,7 +17,6 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import settings as env_settings
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.services.airflow_dag_builder import (
     FlinkSqlTask,
@@ -91,13 +90,13 @@ def run_flink_sql(
             "未配置可用的 Airflow（需在设置页填 endpoint 并启用），无法执行 Flink 作业"
         )
 
-    # Flink on YARN 部署参数：从 env 读默认值（部署基础设施）。缺 runner_jar 退回「仅产出」。
-    runner_jar = env_settings.flink_sql_runner_jar.strip()
+    # Flink on YARN 部署参数：从设置页（DB）读。缺 runner_jar 退回「仅产出」。
+    runner_jar = (airflow.flink_sql_runner_jar or "").strip()
     if not runner_jar:
         return {
             "base": base,
             "execute_mode": "handoff",
-            "note": "未配置 Flink SqlRunner JAR（FLINK_SQL_RUNNER_JAR），ontoMeta 只产出 SQL，不执行",
+            "note": "未配置 Flink SqlRunner JAR（设置页 → Airflow/Flink），ontoMeta 只产出 SQL，不执行",
             "sql_files": [t.task_id + ".sql" for t in tasks],
             # **把 SQL 本身带出来**：此前这里只给了几个从未落盘的文件名，"仅产出"
             # 产出的是个空回执，人拿不到任何可执行的东西。数据搬运一律走 Flink，
@@ -107,12 +106,12 @@ def run_flink_sql(
 
     flink = FlinkSubmitConfig(
         runner_jar=runner_jar,
-        runner_class=env_settings.flink_sql_runner_class,
-        flink_bin=env_settings.flink_bin,
-        deploy_target=env_settings.flink_deploy_target,
-        parallelism=env_settings.flink_parallelism,
-        yarn_queue=env_settings.flink_yarn_queue.strip() or "default",
-        checkpoint_dir=env_settings.flink_checkpoint_dir.strip(),
+        runner_class=airflow.flink_sql_runner_class,
+        flink_bin=airflow.flink_bin,
+        deploy_target=airflow.flink_deploy_target,
+        parallelism=airflow.flink_parallelism,
+        yarn_queue=(airflow.flink_yarn_queue or "").strip() or "default",
+        checkpoint_dir=(airflow.flink_checkpoint_dir or "").strip(),
     )
 
     # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/；flink run --file

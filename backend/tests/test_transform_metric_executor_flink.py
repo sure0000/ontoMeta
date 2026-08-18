@@ -75,11 +75,11 @@ def test_transform_with_datasource_but_no_runner_jar_returns_handoff(transform_s
     """有 datasource 但无 SqlRunner JAR 时，run_flink_sql 内部退回「仅产出」。"""
     _make_datasource("ds-123")
 
-    with patch("app.services.flink_job_runner.env_settings") as env:
-        env.flink_sql_runner_jar = ""  # 未配 JAR
-        with patch("app.services.flink_job_runner._settings") as settings:
-            settings.get_airflow_runtime.return_value = MagicMock(available=True)
-            with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
+    with patch("app.services.flink_job_runner._settings") as settings:
+        settings.get_airflow_runtime.return_value = MagicMock(
+            available=True, flink_sql_runner_jar=""  # 未配 JAR
+        )
+        with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
                 mock_input.return_value = {
                     "source_table": MagicMock(name="src_customer", columns=()),
                     "target_table": MagicMock(name="customer", qualified_name="dim_erp.customer", columns=()),
@@ -103,15 +103,7 @@ def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
     """有 datasource+SqlRunner JAR+Airflow 时，返回 dag_run_id/run_url（Airflow mock 解析到 DAG）。"""
     _make_datasource("ds-123")
 
-    with patch("app.services.flink_job_runner.env_settings") as env:
-        env.flink_sql_runner_jar = "/opt/flink/runner.jar"
-        env.flink_sql_runner_class = "com.ontometa.flink.SqlRunner"
-        env.flink_bin = "flink"
-        env.flink_deploy_target = "yarn-per-job"
-        env.flink_parallelism = 1
-        env.flink_yarn_queue = ""
-        env.flink_checkpoint_dir = ""
-        with patch("app.services.flink_job_runner._settings") as settings:
+    with patch("app.services.flink_job_runner._settings") as settings:
             airflow = MagicMock(
                 available=True,
                 dags_dir=str(tmp_path / "dags"),
@@ -119,6 +111,14 @@ def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
                 endpoint="http://airflow",
                 max_active_tasks_per_dag=16,
                 dag_parse_timeout=0.1,
+                # Flink 执行参数现来自 Airflow 运行期配置（DB）
+                flink_sql_runner_jar="/opt/flink/runner.jar",
+                flink_sql_runner_class="com.ontometa.flink.SqlRunner",
+                flink_bin="flink",
+                flink_deploy_target="yarn-per-job",
+                flink_parallelism=1,
+                flink_yarn_queue="",
+                flink_checkpoint_dir="",
             )
             settings.get_airflow_runtime.return_value = airflow
             with patch("app.services.flink_job_runner.AirflowClient") as client_cls:

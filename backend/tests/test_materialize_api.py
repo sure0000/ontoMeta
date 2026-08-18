@@ -78,16 +78,6 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
             pass
 
     monkeypatch.setattr(materialization_runner, "AirflowClient", _FakeClient)
-    # 统一执行架构：搬运走 Flink SQL on YARN。给 JAR 走真实 DAG 路径（非 handoff）；给
-    # checkpoint 目录以支持含 timestamp 分区键的表默认的 incremental→CDC。
-    monkeypatch.setattr(
-        materialization_runner.env_settings, "flink_sql_runner_jar", "/opt/sql-runner.jar"
-    )
-    monkeypatch.setattr(
-        materialization_runner.env_settings,
-        "flink_checkpoint_dir",
-        "file:///tmp/ontometa-ckpt",
-    )
 
     # 提交前 preflight（P2 强制闸门）会真连 Airflow 核实可达性/连接；本用例只替身了
     # runner 通道的客户端，preflight 自有一套 AirflowClient。这里桩掉 preflight 直接放行——
@@ -107,6 +97,10 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
             "enabled": True,
             "dags_dir": str(tmp_path / "dags"),
             "jobs_dir": str(tmp_path / "jobs"),
+            # 统一执行：Flink 参数经设置页落库。给 JAR 走真实 DAG 路径（非 handoff）；给
+            # checkpoint 目录以支持含 timestamp 分区键的表默认的 incremental→CDC。
+            "flink_sql_runner_jar": "/opt/sql-runner.jar",
+            "flink_checkpoint_dir": "file:///tmp/ontometa-ckpt",
         },
     )
     try:

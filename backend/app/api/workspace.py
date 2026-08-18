@@ -1,10 +1,15 @@
 import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import edit_service, provenance_service, revision_service, settings_service, workspace
+from app.config import settings
 from app.database import get_db
 from app.models import ObjectType
 from app.schemas import (
@@ -139,8 +144,45 @@ def get_domain(domain_id: str, db: Session = Depends(get_db)):
     return detail
 
 
+# backend 根目录（含 app/ 包），供子进程 cwd 与日志目录定位。
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+_LOG_DIR = _BACKEND_DIR.parent / ".logs"
+
+
+def _spawn_draft_worker(task_id: str) -> None:
+    """在分离子进程执行草稿生成（C）：start_new_session=True 使其脱离 uvicorn 的
+    进程组，``--reload`` 重启或异常退出杀 API worker 时不会波及生成任务。"""
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = _LOG_DIR / f"draft-worker-{task_id}.log"
+        logfile = open(log_path, "ab", buffering=0)  # noqa: SIM115 —— 交由子进程持有
+    except OSError:
+        logfile = subprocess.DEVNULL
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "app.jobs.draft_worker", task_id],
+            cwd=str(_BACKEND_DIR),
+            stdout=logfile,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=os.environ.copy(),
+        )
+    finally:
+        # 父进程立即关闭自己的文件句柄；子进程已继承独立副本。
+        if logfile not in (subprocess.DEVNULL, None):
+            logfile.close()
+
+
 def _launch_draft_task(progress: DraftProgressOut, runner) -> None:
-    """把某个范围的生成执行函数挂到并发限流队列上并跟踪其 asyncio 任务。"""
+    """派发某个范围的生成执行。
+
+    默认（``draft_worker_subprocess=True``）走分离子进程，reload 免疫；否则回退到进程内
+    asyncio 限流队列（测试/inline）。两条路径的进度/状态/取消都经由 DB，语义一致。
+    """
+    if settings.draft_worker_subprocess:
+        _spawn_draft_worker(progress.task_id)
+        return
 
     async def _execute() -> None:
         await runner(progress.task_id)

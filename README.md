@@ -65,11 +65,23 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --port 8000
+# 无需 .env：业务/连接配置全部在【设置页】配置（落库）。仅引导期鉴权根用环境变量：
+ONTOMETA_ADMIN_TOKEN=dev-admin-token-change-me \
+  uvicorn app.main:app --reload --reload-dir app --port 8000
+# 或直接 ./service.sh start，脚本已内置引导期默认值。
 ```
 
-本地无 DataHub / OpenAI 时，未配置的服务会在调用时显式报错（未配 LLM 时本体草稿以证据确定性命名兽底，不报错）；配齐对应 `DATAHUB_*` / `OPENAI_API_KEY` 即走真实服务。
+> **配置原则**：所有业务/连接/执行配置（DataHub、LLM、Airflow、Flink 执行、草稿生成、
+> Data Agent…）都在 Web 设置页配置并落库，运行期从 DB 读取——不使用 `.env`。仅「引导期」走
+> 环境变量：`ONTOMETA_ADMIN_TOKEN`（鉴权根，缺失时 `/api` 返回 503）、`DATABASE_URL`
+> （默认 SQLite）。详见 `docs/DEVELOPMENT_PRINCIPLES.md`。
+
+> 本体生成默认在**分离子进程**（`app.jobs.draft_worker`）执行，`--reload` 热重载或异常退出
+> 杀掉 API worker 时生成任务不受影响，能跑到底。`--reload-dir app` 把监视范围限定在 `app/`，
+> 避免改动 `tests/` 等误触发重载中断生成。设 `DRAFT_WORKER_SUBPROCESS=false` 可回退进程内执行
+> （测试用）。清端口/重启时注意：分离子进程不随后端退出，`./service.sh stop` 会一并清理。
+
+本地无 DataHub / OpenAI 时，未配置的服务会在调用时显式报错（未配 LLM 时本体草稿以证据确定性命名兽底，不报错）；在【设置页】配齐 DataHub / LLM 即走真实服务。
 
 **管理鉴权（必填）**：在 `backend/.env` 设置 `ONTOMETA_ADMIN_TOKEN`（见 `.env.example`）。前端打开「设置 → 管理鉴权」填入相同 Token，或设置 `VITE_ONTOMETA_ADMIN_TOKEN`。
 

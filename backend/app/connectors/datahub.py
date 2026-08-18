@@ -454,10 +454,13 @@ class DataHubConnector:
             self.api_url = env_settings.datahub_gms_url.rstrip("/")
             self.frontend_url = env_settings.datahub_frontend_url.rstrip("/")
             self.token = env_settings.datahub_token
+            # 无 DB runtime（bootstrap/测试）时用默认；运行期恒走下面的 runtime_config 分支。
+            self._timeout = 90.0
         else:
             self.api_url = runtime_config.gms_url.rstrip("/")
             self.frontend_url = runtime_config.frontend_url.rstrip("/")
             self.token = runtime_config.token
+            self._timeout = float(getattr(runtime_config, "request_timeout", 90) or 90)
 
         # 懒初始化的复用 httpx 客户端，连接池跨多次 GraphQL 请求复用。
         self._client: httpx.AsyncClient | None = None
@@ -465,7 +468,7 @@ class DataHubConnector:
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=30.0,
+                timeout=httpx.Timeout(self._timeout, connect=min(10.0, self._timeout)),
                 trust_env=False,
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             )

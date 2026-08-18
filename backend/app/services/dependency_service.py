@@ -56,6 +56,8 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("frontend_url", "str", False, True, "http://localhost:9002"),
         ("token", "str", True, False, None),
         ("fabric", "str", False, False, "PROD"),
+        # GraphQL 读取超时（秒）。大域(ERP ~734 表)批量拉取 + 不稳定隧道时 30s 易读超时，默认 90。
+        ("request_timeout", "int", False, False, 90),
     ],
     "airflow": [
         ("endpoint", "str", False, True, "http://localhost:8081"),
@@ -540,6 +542,9 @@ class DependencyComponentService:
                 "frontend_url": data.get("frontend_url", ""),
                 "token": data.get("token") or current.get("token"),
                 "fabric": data.get("fabric", "PROD"),
+                "request_timeout": data.get("request_timeout")
+                or current.get("request_timeout")
+                or 90,
             },
         )
         c = _loads(row.connection_json)
@@ -720,6 +725,10 @@ class DependencyComponentService:
         # push 到远程仓，Airflow 侧拉取——全部在设置页填，不进配置文件。
         "dag_delivery_method", "git_remote", "git_branch", "git_auto_init",
         "git_author", "git_email",
+        # Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）。
+        "flink_sql_runner_jar", "flink_sql_runner_class", "flink_bin",
+        "flink_deploy_target", "flink_parallelism", "flink_yarn_queue",
+        "flink_checkpoint_dir",
     )
 
     def get_airflow(self, db: Session) -> dict[str, Any]:

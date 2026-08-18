@@ -297,8 +297,8 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
     """把 Airflow 配成可用，把 REST 调用换成记录器，并配上 Flink SqlRunner JAR。
 
     统一执行架构：搬运一律走 Flink SQL on YARN（无 seatunnel/docker/runner 多通道）。
-    JAR 路径经 env 读（部署基础设施），测试里 monkeypatch 成一个非空值以走真实 DAG 路径
-    （不落地执行，只产 DAG + .sql + 触发替身）。缺 JAR 会走 handoff（仅产出）。
+    Flink 参数现在也在 Airflow 设置行里（DB，见 DEVELOPMENT_PRINCIPLES P1）：给个非空 JAR
+    路径走真实 DAG 生成而非 handoff（不落地执行，只产 DAG + .sql + 触发替身）。
     """
     from app.services.settings_service import SettingsService
 
@@ -310,18 +310,12 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
                 "enabled": True,
                 "dags_dir": str(tmp_path / "dags"),
                 "jobs_dir": str(tmp_path / "jobs"),
+                # Flink 提交参数（DB）：非空 JAR 走真实 DAG 生成；checkpoint 供含 timestamp 分区键
+                # 的表默认 incremental 的 CDC 流式作业（缺它仅在专门用例里清回空验证）。
+                "flink_sql_runner_jar": "/opt/sql-runner.jar",
+                "flink_checkpoint_dir": "file:///tmp/ontometa-ckpt",
             },
         )
-    # Flink 提交参数从 env 读；给个非空 JAR 路径，走真实 DAG 生成而非 handoff。
-    monkeypatch.setattr(
-        materialization_runner.env_settings, "flink_sql_runner_jar", "/opt/sql-runner.jar"
-    )
-    # 这是个支持增量的部署：给出 checkpoint 目录，含 timestamp 分区键的表默认走 incremental
-    # → CDC 流式作业需要它。缺它只在专门的 test_incremental_without_checkpoint_dir_errors
-    # 里验证（那用例会把它清回空）。
-    monkeypatch.setattr(
-        materialization_runner.env_settings, "flink_checkpoint_dir", "file:///tmp/ontometa-ckpt"
-    )
 
     class _FakeClient:
         def __init__(self, *a, **kw):
@@ -426,9 +420,8 @@ def test_incremental_without_checkpoint_dir_errors(tmp_path, monkeypatch):
     ids = _seed("incrnockpt")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     _enable_airflow(tmp_path, monkeypatch, triggered={})
-    monkeypatch.setattr(
-        materialization_runner.env_settings, "flink_checkpoint_dir", ""
-    )
+    # 清空 checkpoint（DB 设置行）：增量作业缺 checkpoint 应报可读错误
+    _set_airflow(flink_checkpoint_dir="")
     # customer 源平台 mysql 有 CDC 连接器；全局 load_strategy=incremental 触发 CDC 路径
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError, match="checkpoint"):

@@ -160,6 +160,31 @@ class DraftTaskService:
             raise DraftGenerationCancelled()
 
     @staticmethod
+    def _describe_exc(exc: BaseException) -> str:
+        """把异常转成对用户可读、非空的失败原因。
+
+        坑：``httpx.ReadTimeout`` 等超时异常的 ``str()`` 为空，直接落 ``str(exc)`` 会得到
+        空 message → UI 显示"失败且无原因"。这里：网络类异常给中文可操作提示；其余在类名
+        基础上补 ``str``（为空则仅类名），保证任何失败都能看到原因。完整堆栈另在
+        ``.logs/draft-worker-<task_id>.log``。
+        """
+        try:
+            import httpx
+
+            if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+                return f"连接 DataHub 失败（{type(exc).__name__}）：请检查 DataHub 地址/网络/隧道"
+            if isinstance(exc, httpx.TimeoutException):
+                return (
+                    f"DataHub 请求超时（{type(exc).__name__}）："
+                    "响应过慢或隧道不稳定，请重试或检查 DataHub 连接"
+                )
+        except Exception:
+            pass
+        detail = str(exc).strip()
+        name = type(exc).__name__
+        return f"{name}: {detail}" if detail else name
+
+    @staticmethod
     def _mark_task_failed(task_id: str, message: str) -> None:
         from app.database import SessionLocal
 
@@ -173,7 +198,7 @@ class DraftTaskService:
             task.status = "failed"
             task.message = message
             # 截断错误摘要，便于列表展示；完整信息仍在 message
-            summary = message.strip().split("\n")[0]
+            summary = (message or "").strip().split("\n")[0]
             task.error_summary = summary[:500] if summary else "任务失败"
             db.commit()
         finally:
@@ -605,7 +630,7 @@ class DraftTaskService:
             if self._is_task_cancelled(task_id):
                 return
             logger.exception("Draft generation failed for task %s: %s", task_id, exc)
-            self._mark_task_failed(task_id, str(exc))
+            self._mark_task_failed(task_id, self._describe_exc(exc))
 
     async def _run_object_generation(self, domain_id: str, task_id: str) -> None:
         """仅生成业务对象+属性：与 ``_run_relation_generation`` 完全独立，可
@@ -726,7 +751,7 @@ class DraftTaskService:
             if self._is_task_cancelled(task_id):
                 return
             logger.exception("Object generation failed for task %s: %s", task_id, exc)
-            self._mark_task_failed(task_id, str(exc))
+            self._mark_task_failed(task_id, self._describe_exc(exc))
 
     async def _run_relation_generation(self, domain_id: str, task_id: str) -> None:
         """仅生成业务关系：与 ``_run_object_generation`` 完全独立，可并行执行——
@@ -878,7 +903,7 @@ class DraftTaskService:
             if self._is_task_cancelled(task_id):
                 return
             logger.exception("Relation generation failed for task %s: %s", task_id, exc)
-            self._mark_task_failed(task_id, str(exc))
+            self._mark_task_failed(task_id, self._describe_exc(exc))
 
     def _purge_draft_ontologies(self, db: Session, domain_id: str) -> int:
         """删除同域所有 draft 状态本体及其关联数据，返回删除的本体数。
@@ -1071,27 +1096,58 @@ class DraftTaskService:
 
 
 def recover_stale_draft_tasks() -> int:
-    """进程启动时：将遗留的 queued/running 标记为 failed，避免永久僵尸任务。
+    """进程启动时：将「陈旧」的 queued/running 任务标记为 failed，避免永久僵尸任务。
 
-    策略说明（B5）：本进程内 Semaphore + asyncio 任务在重启后无法恢复，
+    策略说明（B5）：本进程内 Semaphore + asyncio 任务在进程重启后无法恢复，
     故采用 fail-on-restart，不自动 resume。用户可重新触发生成。
+
+    仅回收 updated_at 早于 now-grace 的任务（grace=draft_task_stale_grace_seconds）：
+    开发热重载或异常退出会杀掉承载任务的进程，而残留/孤儿的旧进程可能与新进程短暂
+    并存（日志中出现过 "Address already in use"）。若无差别地回收所有活跃任务，新进程
+    的启动钩子会误杀仍在另一存活进程里推进的任务。真死的任务其 updated_at 已冻结、必然
+    超过窗口而被回收；活着的任务每写一次进度都会刷新 updated_at，从而被保护。now 取自
+    数据库（func.now()）而非本地时钟，避免 Python 与 DB 时区口径不一致。
     """
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+
+    from app.config import settings
     from app.database import SessionLocal
 
     db = SessionLocal()
     try:
-        stale = (
+        grace = max(0, int(settings.draft_task_stale_grace_seconds))
+        db_now = db.execute(select(func.now())).scalar()
+        cutoff = db_now - timedelta(seconds=grace) if db_now is not None else None
+
+        active = (
             db.query(DraftGenerationTask)
             .filter(DraftGenerationTask.status.in_(list(ACTIVE_STATUSES)))
             .all()
         )
-        if not stale:
+        if not active:
             return 0
-        for task in stale:
+
+        reaped = 0
+        skipped = 0
+        for task in active:
+            if cutoff is not None and task.updated_at is not None and task.updated_at > cutoff:
+                # 最近仍在推进 → 可能属于另一存活进程，暂不回收（下次启动越过宽限再回收）。
+                skipped += 1
+                continue
             task.status = "failed"
-            task.message = "服务重启，任务已中断（请重新触发生成）"
+            task.message = "服务进程重启（开发热重载或异常退出），任务已中断，请重新触发生成。"
+            reaped += 1
         db.commit()
-        logger.warning("Recovered %s stale draft generation task(s) → failed", len(stale))
-        return len(stale)
+        if reaped or skipped:
+            logger.warning(
+                "Recovered %s stale draft generation task(s) → failed; "
+                "skipped %s recently-active task(s) within %ss grace",
+                reaped,
+                skipped,
+                grace,
+            )
+        return reaped
     finally:
         db.close()

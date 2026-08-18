@@ -15,9 +15,21 @@ from app.services.draft_task_service import (
 
 
 def test_recover_stale_draft_tasks(client):
-    # client fixture 触发 init_db；在此基础上写入僵尸任务再修复
+    # client fixture 触发 init_db；在此基础上写入僵尸任务再修复。
+    # 陈旧（updated_at 早于宽限窗口）→ 回收；最近仍在推进 → 保护不回收。
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+
+    from app.config import settings
+
     db = SessionLocal()
     try:
+        db_now = db.execute(select(func.now())).scalar()
+        grace = settings.draft_task_stale_grace_seconds
+        old = db_now - timedelta(seconds=grace + 60)
+        fresh = db_now  # 窗口内
+
         domain = DomainContext(
             datahub_domain_id="urn:li:domain:b5-recover",
             name="B5 Recover",
@@ -26,28 +38,37 @@ def test_recover_stale_draft_tasks(client):
         db.flush()
 
         queued = DraftGenerationTask(
-            domain_context_id=domain.id, status="queued", progress=0, message="排队"
+            domain_context_id=domain.id, status="queued", progress=0, message="排队",
+            updated_at=old,
         )
         running = DraftGenerationTask(
-            domain_context_id=domain.id, status="running", progress=50, message="执行中"
+            domain_context_id=domain.id, status="running", progress=50, message="执行中",
+            updated_at=old,
+        )
+        recent = DraftGenerationTask(
+            domain_context_id=domain.id, status="running", progress=70, message="推进中",
+            updated_at=fresh,
         )
         done = DraftGenerationTask(
-            domain_context_id=domain.id, status="succeeded", progress=100, message="完成"
+            domain_context_id=domain.id, status="succeeded", progress=100, message="完成",
+            updated_at=old,
         )
-        db.add_all([queued, running, done])
+        db.add_all([queued, running, recent, done])
         db.commit()
-        qid, rid, did = queued.id, running.id, done.id
+        qid, rid, freshid, did = queued.id, running.id, recent.id, done.id
     finally:
         db.close()
 
     n = recover_stale_draft_tasks()
-    assert n >= 2
+    assert n == 2  # 仅两条陈旧的 queued/running 被回收
 
     db = SessionLocal()
     try:
         assert db.get(DraftGenerationTask, qid).status == "failed"
         assert db.get(DraftGenerationTask, rid).status == "failed"
         assert "重启" in (db.get(DraftGenerationTask, qid).message or "")
+        # 窗口内最近推进的任务受保护，不被误杀（可能属于另一存活进程）
+        assert db.get(DraftGenerationTask, freshid).status == "running"
         assert db.get(DraftGenerationTask, did).status == "succeeded"
     finally:
         db.close()

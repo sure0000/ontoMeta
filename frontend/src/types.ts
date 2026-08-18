@@ -616,6 +616,14 @@ export interface AirflowSettings {
   dag_parse_timeout: number;
   preflight_sentinel_timeout: number;
   staging_swap: boolean;
+  /** Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）。 */
+  flink_sql_runner_jar?: string;
+  flink_sql_runner_class?: string;
+  flink_bin?: string;
+  flink_deploy_target?: string;
+  flink_parallelism?: number;
+  flink_yarn_queue?: string;
+  flink_checkpoint_dir?: string;
   updated_at: string;
 }
 
