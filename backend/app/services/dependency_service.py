@@ -942,23 +942,6 @@ import time  # noqa: E402
 from app.services.common import make_http_client  # noqa: E402
 
 
-def _probe_http(url: str, timeout: float = 8.0) -> ProbeResult:
-    import httpx
-
-    start = time.perf_counter()
-    try:
-        with make_http_client() as client:
-            resp = client.get(url, timeout=timeout)
-        ok = 200 <= resp.status_code < 400
-        return ProbeResult(
-            ok,
-            f"HTTP {resp.status_code}" if ok else f"HTTP {resp.status_code}: {resp.text[:120]}",
-            int((time.perf_counter() - start) * 1000),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
-
-
 def _probe_llm(conn: dict[str, Any]) -> ProbeResult:
     from openai import OpenAI
 
@@ -1011,9 +994,67 @@ def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
 
 
 
+def _probe_datahub(conn: dict[str, Any]) -> ProbeResult:
+    """拨测 DataHub：打运行时真正用到的 GraphQL 端点，并校验响应确实是 GMS。
+
+    只 ``GET {gms_url}/config`` 看状态码会给假绿灯——若 ``gms_url`` 误填成前端 SPA
+    端口（如 :9002），任意 GET 路径都被前端路由兜底成 ``200`` + HTML 首页，只看状态码
+    的探测便误判"连接成功"，而真实取域走的 ``POST {gms_url}/api/graphql`` 却 404。
+    这里改打真实的 GraphQL POST（与 ``connectors/datahub.py`` 同一路径/方法/鉴权），
+    并要求响应是 GraphQL JSON（含 ``data``、无 ``errors``），从而把"端口/路径填错"
+    与"token 无权限"都暴露成明确失败，而非假绿灯。与 Airflow 拨测同款思路。
+    """
+    import httpx
+
+    base = (conn.get("gms_url") or "").strip().rstrip("/")
+    if not base:
+        return ProbeResult(False, "缺少 gms_url")
+    url = f"{base}/api/graphql"
+    headers = {"Content-Type": "application/json"}
+    token = conn.get("token")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    start = time.perf_counter()
+    try:
+        with make_http_client() as client:
+            resp = client.post(
+                url,
+                json={"query": "{ listDomains(input: {start: 0, count: 1}) { total } }"},
+                headers=headers,
+                timeout=8.0,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
+    latency = int((time.perf_counter() - start) * 1000)
+
+    if resp.status_code in (401, 403):
+        return ProbeResult(False, f"鉴权失败 HTTP {resp.status_code}：请检查 token", latency)
+    if resp.status_code >= 400:
+        return ProbeResult(
+            False,
+            f"HTTP {resp.status_code}：{resp.text[:100]}"
+            "（gms_url 是否填成了前端端口？应指向 GMS，通常 :8080）",
+            latency,
+        )
+    # 必须解析为 GraphQL JSON——前端 SPA 兜底返回的是 HTML，会在此暴露。
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return ProbeResult(
+            False,
+            "响应不是 JSON（疑似前端 SPA 页面）：gms_url 应指向 GMS（通常 :8080）而非前端端口",
+            latency,
+        )
+    if payload.get("errors"):
+        return ProbeResult(False, f"GraphQL 错误：{str(payload['errors'])[:160]}", latency)
+    if not isinstance(payload.get("data"), dict):
+        return ProbeResult(False, "响应缺少 GraphQL data 字段（端点可能不是 DataHub GMS）", latency)
+    return ProbeResult(True, "连接成功", latency)
+
+
 _PROBES: dict[str, Any] = {
     "llm": _probe_llm,
-    "datahub": lambda c: _probe_http(f"{(c.get('gms_url') or '').rstrip('/')}/config"),
+    "datahub": _probe_datahub,
     "airflow": _probe_airflow,
 }
 

@@ -1,5 +1,6 @@
 import logging
 
+import httpx
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -24,8 +25,12 @@ class WorkspaceService(DraftTaskService):
         connector = self._datahub(db)
         try:
             domains = await connector.list_domains()
-        except Exception:
-            logger.warning("无法连接 DataHub 同步数据域，将返回本地缓存数据", exc_info=True)
+        except httpx.TransportError:
+            # DataHub 真·不可达（连接被拒/超时等传输层故障）：降级为本地缓存，工作区离线可用。
+            # **只**兜底传输层错误——4xx/5xx（HTTPStatusError，如 gms_url 填错致 404）与
+            # GraphQL 业务错误（RuntimeError）是配置/权限/服务端问题，须上抛让 /domains 端点回
+            # 502 暴露，别再把它们伪装成"连不上→回退缓存"而静默吞掉（那样工作区只会显示空数据域）。
+            logger.warning("DataHub 不可达，返回本地缓存数据域", exc_info=True)
             return self.list_domains(db)
         finally:
             await connector.aclose()
