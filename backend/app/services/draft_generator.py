@@ -1,11 +1,18 @@
 import asyncio
 import json
 import logging
+import random
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
-from openai import AsyncOpenAI
+import httpx
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+)
 
 from app.config import settings
 from app.schemas import (
@@ -28,6 +35,41 @@ from app.services.draft_checkpoint import chunk_key
 from app.services.evidence_chunker import split_evidence, split_relations
 
 logger = logging.getLogger(__name__)
+
+# 可重试的 LLM 错误：连接/传输抖动与 5xx。自建 GLM 端点在大扇出预生成下会重置
+# 空闲连接，SDK 把底层 httpx 错包成 APIConnectionError/APITimeoutError；同时直接
+# 兜住裸 httpx 传输错，双保险。解析错/4xx 不在此列——直接抛，不做无意义重试。
+_RETRYABLE_LLM_ERRORS = (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.PoolTimeout,
+)
+
+
+class DraftEnrichmentError(RuntimeError):
+    """分块命名增强有子块在重试后仍失败。
+
+    刻意让任务失败而**不**用确定性 candidate_name 降级掩盖——成功块已存入
+    checkpoint，续跑（含自动续跑）只补这几块缺失的 LLM 命名，保证最终产出的是
+    真实业务命名而非技术名回退。
+    """
+
+    def __init__(
+        self, phase: str, failed: int, total: int, cause: BaseException | None = None
+    ) -> None:
+        self.phase = phase
+        self.failed = failed
+        self.total = total
+        super().__init__(f"{phase}命名增强 {failed}/{total} 块在重试后仍失败")
+        if cause is not None:
+            self.__cause__ = cause
 
 # 进度回调：(已完成步数, 总步数) -> None，用于分块生成时逐块回报进度。
 ProgressCallback = Callable[[int, int], Awaitable[None]]
@@ -229,6 +271,7 @@ class OntologyDraftGenerator:
                 api_key=api_key,
                 base_url=base_url,
                 timeout=timeout,
+                max_retries=settings.llm_max_retries,
                 http_client=make_async_http_client(),
             )
             if api_key
@@ -511,10 +554,18 @@ class OntologyDraftGenerator:
 
         advance = self._make_progress_advancer(progress_cb, total_steps)
 
+        # 全量生成时对象+关系两条流水线并行，用**共享**信号量给总并发封顶，避免两池
+        # 各自 4 并发叠成峰值 8 把脆弱端点打崩（曾致 ReadError 整任务失败）。
+        shared_semaphore = asyncio.Semaphore(max(1, self.object_chunk_concurrency))
+
         (merged_objects, merged_properties, merged_roles), merged_relations = (
             await asyncio.gather(
-                self._run_object_chunks(object_sub_bundles, checkpoint, advance),
-                self._run_relation_chunks(relation_sub_bundles, checkpoint, advance),
+                self._run_object_chunks(
+                    object_sub_bundles, checkpoint, advance, shared_semaphore
+                ),
+                self._run_relation_chunks(
+                    relation_sub_bundles, checkpoint, advance, shared_semaphore
+                ),
             )
         )
         return merged_objects, merged_properties, merged_relations, merged_roles
@@ -555,10 +606,16 @@ class OntologyDraftGenerator:
         object_sub_bundles: list[EvidenceBundle],
         checkpoint: CheckpointStore | None,
         advance: Callable[[], Awaitable[None]] | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[ObjectOverrides, PropertyOverrides, RoleOverrides]:
-        """并发执行对象/属性命名分块，按内容哈希缓存，返回合并后的增强字典（含角色否决）。"""
+        """并发执行对象/属性命名分块，按内容哈希缓存，返回合并后的增强字典（含角色否决）。
+
+        ``semaphore`` 由调用方传入以给跨流水线的总并发封顶；未传则退回本流水线自己的
+        并发度。任一子块在重试后仍失败时抛 :class:`DraftEnrichmentError`——成功块已
+        落 checkpoint，不做确定性命名降级。
+        """
         checkpoint_lock = asyncio.Lock()
-        semaphore = asyncio.Semaphore(max(1, self.object_chunk_concurrency))
+        semaphore = semaphore or asyncio.Semaphore(max(1, self.object_chunk_concurrency))
 
         async def run_chunk(sub: EvidenceBundle) -> dict[str, Any]:
             key = self._object_chunk_key(self._build_prompt(sub))
@@ -583,7 +640,14 @@ class OntologyDraftGenerator:
                 await advance()
             return result
 
-        results = await asyncio.gather(*(run_chunk(sub) for sub in object_sub_bundles))
+        results = await asyncio.gather(
+            *(run_chunk(sub) for sub in object_sub_bundles), return_exceptions=True
+        )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if failures:
+            raise DraftEnrichmentError(
+                "对象", len(failures), len(object_sub_bundles), failures[0]
+            )
 
         merged_objects: ObjectOverrides = {}
         merged_properties: PropertyOverrides = {}
@@ -600,10 +664,16 @@ class OntologyDraftGenerator:
         relation_sub_bundles: list[EvidenceBundle],
         checkpoint: CheckpointStore | None,
         advance: Callable[[], Awaitable[None]] | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> RelationOverrides:
-        """并发执行关系命名分块，按内容哈希缓存，返回合并后的关系增强字典。"""
+        """并发执行关系命名分块，按内容哈希缓存，返回合并后的关系增强字典。
+
+        ``semaphore`` 语义同 :meth:`_run_object_chunks`；失败处理亦一致（抛错不降级）。
+        """
         checkpoint_lock = asyncio.Lock()
-        semaphore = asyncio.Semaphore(max(1, self.relation_chunk_concurrency))
+        semaphore = semaphore or asyncio.Semaphore(
+            max(1, self.relation_chunk_concurrency)
+        )
 
         async def run_chunk(sub: EvidenceBundle) -> dict[str, Any]:
             key = self._relation_chunk_key(self._build_prompt(sub))
@@ -625,8 +695,13 @@ class OntologyDraftGenerator:
             return result
 
         results = await asyncio.gather(
-            *(run_chunk(sub) for sub in relation_sub_bundles)
+            *(run_chunk(sub) for sub in relation_sub_bundles), return_exceptions=True
         )
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if failures:
+            raise DraftEnrichmentError(
+                "关系", len(failures), len(relation_sub_bundles), failures[0]
+            )
         merged_relations: RelationOverrides = {}
         for result in results:
             merged_relations.update(result.get("relations") or {})
@@ -720,29 +795,64 @@ class OntologyDraftGenerator:
     def _relation_chunk_key(prompt: str) -> str:
         return chunk_key(f"relation:{prompt}")
 
+    async def _acall_with_retry(
+        self, make_call: Callable[[], Awaitable[Any]], *, label: str
+    ) -> Any:
+        """在 SDK 自带 ``max_retries`` 之外再包一层退避重试。
+
+        端点在大扇出下可能把整条连接池打到反复重置，SDK 的固定次数不够；这里对
+        连接/传输/5xx 类错误做指数退避+jitter，仅当仍失败才把异常抛给分块流水线
+        （由其决定失败子块、配合 checkpoint 续跑）。
+        """
+        attempts = max(1, settings.draft_chunk_retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await make_call()
+            except _RETRYABLE_LLM_ERRORS as exc:
+                if attempt >= attempts:
+                    raise
+                backoff = min(8.0, 0.5 * 2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                logger.warning(
+                    "draft llm %s transient error (attempt %d/%d): %s — retrying in %.1fs",
+                    label,
+                    attempt,
+                    attempts,
+                    type(exc).__name__,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+
     async def _call_llm_objects(self, evidence: EvidenceBundle) -> dict:
         prompt = self._build_prompt(evidence)
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": _LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-        )
+
+        async def _create() -> Any:
+            return await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+            )
+
+        response = await self._acall_with_retry(_create, label="objects")
         content = response.choices[0].message.content or "{}"
         return self._coerce_llm_response(content, primary_list_key="object_types")
 
     async def _call_llm_relations(self, evidence: EvidenceBundle) -> dict:
         prompt = self._build_prompt(evidence)
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": _LLM_RELATION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-        )
+
+        async def _create() -> Any:
+            return await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": _LLM_RELATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+            )
+
+        response = await self._acall_with_retry(_create, label="relations")
         content = response.choices[0].message.content or "{}"
         return self._coerce_llm_response(content, primary_list_key="relations")
 

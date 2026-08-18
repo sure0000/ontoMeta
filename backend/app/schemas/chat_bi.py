@@ -211,6 +211,75 @@ class ChatBiTaskLinkRequest(BaseModel):
     artifact_id: str
     kind: str | None = None
     intent: str | None = None
+    # 决策留痕：提案原样 vs 人确认前改成的样子。两份都在前端手上（proposal.context 与
+    # 本地编辑态），顺这一次已有的往返带回来，无需额外请求。
+    proposed_context: dict[str, Any] | None = None
+    chosen_context: dict[str, Any] | None = None
+    message_id: str | None = None
+    block_id: str | None = None
+
+
+class ChatBiDecisionRequest(BaseModel):
+    """记一条人工决策留痕。
+
+    **不含 operator/subject 字段**：责任人一律由服务端从已认证主体取，
+    前端传了也会被忽略——否则「谁确认的」可被客户端伪造，追踪与管理就失去依据。
+    """
+
+    node: str
+    outcome: str | None = None
+    stage: str | None = None
+    trigger: str | None = None
+    message_id: str | None = None
+    block_id: str | None = None
+    summary: str | None = None
+    proposed: Any | None = None
+    chosen: Any | None = None
+    ref_kind: str | None = None
+    ref_id: str | None = None
+    dedup_key: str | None = None
+
+
+class ChatBiDecisionOut(BaseModel):
+    id: str
+    conversation_id: str
+    message_id: str | None = None
+    block_id: str | None = None
+    seq: int = 0
+    node: str
+    stage: str | None = None
+    trigger: str | None = None
+    outcome: str
+    subject_id: str | None = None
+    subject_role: str | None = None
+    summary: str | None = None
+    proposed: Any | None = None
+    chosen: Any | None = None
+    overridden_fields: list[str] = []
+    ref_kind: str | None = None
+    ref_id: str | None = None
+    created_at: datetime | None = None
+
+
+class ChatBiClosureNode(BaseModel):
+    node: str
+    label: str
+    reached: bool
+    latest_outcome: str | None = None
+    latest_at: datetime | None = None
+    summary: str | None = None
+    count: int = 0
+
+
+class ChatBiDecisionClosure(BaseModel):
+    """一次对话的确认闭环总结。恒六环——未到达的标灰而非隐藏。"""
+
+    conversation_id: str
+    nodes: list[ChatBiClosureNode]
+    reached_count: int
+    total_count: int
+    dangling: list[str] = []
+    records: list[ChatBiDecisionOut] = []
 
 
 class ChatBiPreferenceRequest(BaseModel):

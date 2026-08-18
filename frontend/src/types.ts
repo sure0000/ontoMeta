@@ -710,6 +710,53 @@ export interface ChatBiMessageItem {
   created_at: string;
 }
 
+/** 决策留痕：一次对话里人在某个关键节点拍的板。 */
+export interface ChatBiDecision {
+  id: string;
+  conversation_id: string;
+  message_id?: string | null;
+  block_id?: string | null;
+  seq: number;
+  /** requirement | ontology | data | plan | execute | result | other */
+  node: string;
+  stage?: string | null;
+  trigger?: string | null;
+  /** accepted | modified | rejected | skipped */
+  outcome: string;
+  subject_id?: string | null;
+  subject_role?: string | null;
+  summary?: string | null;
+  /** agent 原样提的 */
+  proposed?: unknown;
+  /** 人最终定的 */
+  chosen?: unknown;
+  /** 人相对机器基线改过的顶层键 */
+  overridden_fields: string[];
+  ref_kind?: string | null;
+  ref_id?: string | null;
+  created_at?: string | null;
+}
+
+export interface ChatBiClosureNode {
+  node: string;
+  label: string;
+  reached: boolean;
+  latest_outcome?: string | null;
+  latest_at?: string | null;
+  summary?: string | null;
+  count: number;
+}
+
+/** 一次对话的确认闭环总结。nodes 恒为六项——未到达的标灰而非隐藏。 */
+export interface ChatBiDecisionClosure {
+  conversation_id: string;
+  nodes: ChatBiClosureNode[];
+  reached_count: number;
+  total_count: number;
+  dangling: string[];
+  records: ChatBiDecision[];
+}
+
 export interface ChatBiReference {
   id?: string | null;
   name?: string | null;

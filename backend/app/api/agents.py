@@ -9,13 +9,13 @@
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.agents import registry
 from app.api.deps import agent_pipeline, task_pipeline
 from app.database import get_db
-from app.models.agent import HIGH_RISK_KINDS, GovernanceArtifact
+from app.models.agent import HIGH_RISK_KINDS, ArtifactStatus, GovernanceArtifact
 from app.schemas import (
     AgentKindsOut,
     ArtifactConfirmRequest,
@@ -31,8 +31,51 @@ from app.schemas import (
     TaskPipelineOut,
 )
 from app.services.agent_pipeline import PipelineError
+from app.services import chat_bi_ledger
 
 router = APIRouter()
+
+
+def _record_artifact_decision(
+    db: Session,
+    request: Request,
+    artifact: GovernanceArtifact,
+    *,
+    node: str,
+    stage: str,
+    trigger: str,
+    summary: str,
+    outcome: str | None = None,
+    chosen: dict | None = None,
+) -> None:
+    """把制品的确认/执行记进催生它的会话的决策留痕。
+
+    **记录点放 API 层而非 agent_pipeline 服务层**，有两个理由：
+    ① ``agent_pipeline`` 必须对 chat 无感——制品的权威在 agent 侧，对话只是入口之一，
+       制品也能从工单表单直接起草；服务层依赖会话会把方向弄反。
+    ② ``request.state`` 里的已认证主体只在 API 层可得。
+    与 ``record_domain_memory`` 由 API 层而非 ``ask()`` 调用完全同构。
+
+    制品无对应会话（工单直接起草）时静默跳过——不是错误，是正常路径。
+    """
+    conversation_id = chat_bi_ledger.resolve_conversation_for_artifact(db, artifact.id)
+    if not conversation_id:
+        return
+    chat_bi_ledger.safe_record(
+        db,
+        conversation_id=conversation_id,
+        node=node,
+        stage=stage,
+        trigger=trigger,
+        outcome=outcome,
+        summary=summary,
+        chosen=chosen,
+        ref_kind="artifact",
+        ref_id=artifact.id,
+        subject_id=getattr(request.state, "principal_id", None),
+        subject_role=getattr(request.state, "principal_role", None),
+        dedup_key=f"{conversation_id}:{node}:{stage}:{artifact.id}",
+    )
 
 
 def _loads(raw: str | None):
@@ -249,6 +292,7 @@ def validate_artifact(
 )
 def confirm_artifact(
     artifact_id: str,
+    request: Request,
     data: ArtifactConfirmRequest | None = None,
     db: Session = Depends(get_db),
 ):
@@ -256,6 +300,15 @@ def confirm_artifact(
     operator = data.operator if data else None
     artifact = _guard(
         lambda: agent_pipeline.confirm(db, artifact_id, operator=operator)
+    )
+    _record_artifact_decision(
+        db,
+        request,
+        artifact,
+        node="plan",
+        stage="artifact_confirm",
+        trigger="artifact_confirm",
+        summary=f"确认「{artifact.name or artifact.kind}」可执行",
     )
     return _to_out(artifact)
 
@@ -265,12 +318,27 @@ def confirm_artifact(
 )
 def execute_artifact(
     artifact_id: str,
+    request: Request,
     data: ArtifactExecuteRequest | None = None,
     db: Session = Depends(get_db),
 ):
     """执行。仅接受 confirmed 状态；已成功的制品重复调用直接返回原回执（幂等）。"""
     context = data.context if data else {}
     artifact = _guard(lambda: agent_pipeline.execute(db, artifact_id, context=context))
+    _record_artifact_decision(
+        db,
+        request,
+        artifact,
+        node="execute",
+        stage="artifact_execute",
+        trigger="artifact_execute",
+        summary=f"执行「{artifact.name or artifact.kind}」：{artifact.status}",
+        # 执行成功与否是事实而非人的选择，但它决定这一环算不算走通，故落进 outcome。
+        outcome=(
+            "rejected" if artifact.status == ArtifactStatus.FAILED.value else "accepted"
+        ),
+        chosen={"status": artifact.status},
+    )
     return _to_out(artifact)
 
 

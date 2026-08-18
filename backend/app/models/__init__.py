@@ -6,6 +6,12 @@ from app.models.chat_bi import (
     ChatBiDomainMemory,
     ChatBiMessage,
 )
+from app.models.chat_bi_ledger import (
+    NODE_SEQUENCE,
+    ChatBiDecisionRecord,
+    DecisionNode,
+    DecisionOutcome,
+)
 from app.models.data_app import (
     DataApp,
     DataAppDataset,
@@ -93,6 +99,10 @@ __all__ = [
     "ChatBiConversationTask",
     "ChatBiDomainMemory",
     "ChatBiMessage",
+    "ChatBiDecisionRecord",
+    "DecisionNode",
+    "DecisionOutcome",
+    "NODE_SEQUENCE",
     "DataSource",
     "DataApp",
     "DataAppDataset",

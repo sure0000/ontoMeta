@@ -3,6 +3,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import httpx
+from openai import APIConnectionError, APITimeoutError, InternalServerError
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -24,13 +26,18 @@ from app.models import (
 from app.schemas import (
     ChangeLogOut,
     DraftProgressOut,
+    EvidenceBundle,
     TaskRecordOut,
 )
+from app.config import settings
 from app.services.common import log_change
 from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generation_queue import ACTIVE_STATUSES
 
 logger = logging.getLogger("ontometa.workspace")
+
+# 自动续跑任务的 message 哨兵：用于按域+范围计数已发生的自动续跑次数（无需加表列）。
+_AUTO_RESUME_SENTINEL = "⟳自动续跑"
 
 # 持有后台草稿生成任务的强引用，避免 asyncio 在任务完成前将其 GC 回收。
 _background_tasks: set = set()
@@ -261,8 +268,12 @@ class DraftTaskService:
 
         self._ensure_no_conflicting_task(db, domain_id, "full")
 
-        # 全新生成：清空该域历史分块检查点，避免复用过期结果(重试才续跑)。
+        # 全新生成：清空该域历史分块检查点与证据缓存，确保重新抓取最新元数据
+        # （重试/自动续跑才复用二者续跑，跳过分钟级抓取）。
         DraftCheckpointStore(domain_id).clear()
+        from app.services import draft_evidence_cache
+
+        draft_evidence_cache.clear(domain_id)
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
@@ -475,6 +486,160 @@ class DraftTaskService:
             message=msg,
         )
 
+    @staticmethod
+    def _is_transient_failure(exc: BaseException) -> bool:
+        """判断失败是否为「连接抖动」类——值得自动续跑（复用检查点+证据缓存补缺）。
+
+        覆盖：分块命名增强的 :class:`DraftEnrichmentError`（子块重试后仍失败）、OpenAI
+        SDK 的连接/超时/5xx，以及 DataHub 侧的 httpx 传输错（``TransportError`` 是
+        ConnectError/ReadError/超时/RemoteProtocolError 的共同基类）。解析错/4xx/逻辑
+        错不在此列——那类重跑也不会好，直接失败等人工介入。
+        """
+        from app.services.draft_generator import DraftEnrichmentError
+
+        return isinstance(
+            exc,
+            (
+                DraftEnrichmentError,
+                APIConnectionError,
+                APITimeoutError,
+                InternalServerError,
+                httpx.TransportError,
+            ),
+        )
+
+    def _maybe_auto_resume(
+        self, domain_id: str, task_id: str, exc: BaseException
+    ) -> bool:
+        """连接抖动类失败时有界自动续跑：新建排队任务并拉起分离子进程，复用 checkpoint
+        与 evidence 缓存只补缺失块。返回是否已调度续跑。
+
+        次数按 message 哨兵计（本域+范围），达到 ``draft_auto_resume_max`` 即停，退回
+        人工重试。任何调度异常都吞掉——自动续跑是尽力而为，绝不因它二次抛错。
+        """
+        max_resumes = settings.draft_auto_resume_max
+        if max_resumes <= 0 or not self._is_transient_failure(exc):
+            return False
+
+        from app.database import SessionLocal
+        from app.jobs.draft_worker import spawn_draft_worker
+
+        try:
+            with SessionLocal() as db:
+                failed = db.get(DraftGenerationTask, task_id)
+                if failed is None:
+                    return False
+                scope = failed.scope or "full"
+                prior = (
+                    db.query(DraftGenerationTask)
+                    .filter(
+                        DraftGenerationTask.domain_context_id == domain_id,
+                        DraftGenerationTask.scope == scope,
+                        DraftGenerationTask.message.like(f"{_AUTO_RESUME_SENTINEL}%"),
+                    )
+                    .count()
+                )
+                if prior >= max_resumes:
+                    logger.warning(
+                        "draft auto-resume exhausted domain=%s scope=%s (%d/%d)，退回人工重试",
+                        domain_id,
+                        scope,
+                        prior,
+                        max_resumes,
+                    )
+                    return False
+                attempt = prior + 1
+                resume = DraftGenerationTask(
+                    domain_context_id=domain_id,
+                    scope=scope,
+                    status="queued",
+                    progress=0,
+                    message=(
+                        f"{_AUTO_RESUME_SENTINEL} 第 {attempt}/{max_resumes} 次"
+                        "（连接抖动，复用检查点+证据缓存续跑）…"
+                    ),
+                )
+                db.add(resume)
+                _log_change(
+                    db,
+                    "task",
+                    task_id,
+                    "auto-resume",
+                    summary=f"连接抖动自动续跑 第{attempt}/{max_resumes}次 → 新任务 {resume.id}",
+                )
+                db.commit()
+                resume_id = resume.id
+
+            spawn_draft_worker(resume_id)
+            logger.info(
+                "draft auto-resume scheduled domain=%s scope=%s attempt=%d new_task=%s",
+                domain_id,
+                scope,
+                attempt,
+                resume_id,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "draft auto-resume failed to schedule domain=%s", domain_id, exc_info=True
+            )
+            return False
+
+    async def _load_or_fetch_evidence(
+        self,
+        domain_id: str,
+        datahub_domain_id: str | None,
+        task_id: str,
+        *,
+        log_prefix: str,
+    ) -> EvidenceBundle:
+        """取证据包：命中磁盘缓存则跳过 DataHub 的分钟级抓取，否则抓取+组装并回填缓存。
+
+        缓存跨进程有效，是「失败后（自动/人工）续跑不必重跑 ~7 分钟 DataHub 抓取」的
+        关键——三条生成流水线（full/objects/relations）抓取与组装参数一致，共享一份。
+        """
+        from app.services import draft_evidence_cache
+
+        fingerprint = datahub_domain_id or "none"
+        cached = draft_evidence_cache.load(domain_id, fingerprint)
+        if cached is not None:
+            await self._update_task_progress(
+                task_id, 50, "命中证据缓存，跳过 DataHub 抓取..."
+            )
+            self._ensure_not_cancelled(task_id)
+            return cached
+
+        phase_start = time.perf_counter()
+        connector = self._datahub_connector()
+        try:
+            bundle = await connector.fetch_domain_bundle(
+                datahub_domain_id, include_logic_evidences=False
+            )
+        finally:
+            await connector.aclose()
+        self._ensure_not_cancelled(task_id)
+        logger.info(
+            "%s phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
+            log_prefix,
+            task_id,
+            domain_id,
+            (time.perf_counter() - phase_start) * 1000,
+        )
+
+        await self._update_task_progress(task_id, 30, "正在组装证据包...")
+        phase_start = time.perf_counter()
+        evidence = self.evidence_builder.build(bundle, include_business_logics=False)
+        self._ensure_not_cancelled(task_id)
+        logger.info(
+            "%s phase=evidence task_id=%s domain_id=%s elapsed_ms=%.1f",
+            log_prefix,
+            task_id,
+            domain_id,
+            (time.perf_counter() - phase_start) * 1000,
+        )
+        draft_evidence_cache.save(domain_id, fingerprint, evidence)
+        return evidence
+
     async def _run_draft_generation(self, domain_id: str, task_id: str) -> None:
         from app.database import SessionLocal
 
@@ -500,33 +665,8 @@ class DraftTaskService:
             self._ensure_not_cancelled(task_id)
             await self._update_task_progress(task_id, 5, "正在从 DataHub 拉取元数据...")
 
-            phase_start = time.perf_counter()
-            connector = self._datahub_connector()
-            try:
-                bundle = await connector.fetch_domain_bundle(
-                    datahub_domain_id,
-                    include_logic_evidences=False,
-                )
-            finally:
-                await connector.aclose()
-            self._ensure_not_cancelled(task_id)
-            logger.info(
-                "draft_generation phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
-                task_id,
-                domain_id,
-                (time.perf_counter() - phase_start) * 1000,
-            )
-
-            await self._update_task_progress(task_id, 30, "正在组装证据包...")
-
-            phase_start = time.perf_counter()
-            evidence = self.evidence_builder.build(bundle, include_business_logics=False)
-            self._ensure_not_cancelled(task_id)
-            logger.info(
-                "draft_generation phase=evidence task_id=%s domain_id=%s elapsed_ms=%.1f",
-                task_id,
-                domain_id,
-                (time.perf_counter() - phase_start) * 1000,
+            evidence = await self._load_or_fetch_evidence(
+                domain_id, datahub_domain_id, task_id, log_prefix="draft_generation"
             )
 
             await self._update_task_progress(task_id, 55, "正在生成本体草稿...")
@@ -631,6 +771,7 @@ class DraftTaskService:
                 return
             logger.exception("Draft generation failed for task %s: %s", task_id, exc)
             self._mark_task_failed(task_id, self._describe_exc(exc))
+            self._maybe_auto_resume(domain_id, task_id, exc)
 
     async def _run_object_generation(self, domain_id: str, task_id: str) -> None:
         """仅生成业务对象+属性：与 ``_run_relation_generation`` 完全独立，可
@@ -657,25 +798,9 @@ class DraftTaskService:
             self._ensure_not_cancelled(task_id)
             await self._update_task_progress(task_id, 5, "正在从 DataHub 拉取元数据...")
 
-            phase_start = time.perf_counter()
-            connector = self._datahub_connector()
-            try:
-                bundle = await connector.fetch_domain_bundle(
-                    datahub_domain_id, include_logic_evidences=False
-                )
-            finally:
-                await connector.aclose()
-            self._ensure_not_cancelled(task_id)
-            logger.info(
-                "object_generation phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
-                task_id,
-                domain_id,
-                (time.perf_counter() - phase_start) * 1000,
+            evidence = await self._load_or_fetch_evidence(
+                domain_id, datahub_domain_id, task_id, log_prefix="object_generation"
             )
-
-            await self._update_task_progress(task_id, 30, "正在组装证据包...")
-            evidence = self.evidence_builder.build(bundle, include_business_logics=False)
-            self._ensure_not_cancelled(task_id)
 
             await self._update_task_progress(task_id, 45, "正在生成业务对象...")
 
@@ -752,6 +877,7 @@ class DraftTaskService:
                 return
             logger.exception("Object generation failed for task %s: %s", task_id, exc)
             self._mark_task_failed(task_id, self._describe_exc(exc))
+            self._maybe_auto_resume(domain_id, task_id, exc)
 
     async def _run_relation_generation(self, domain_id: str, task_id: str) -> None:
         """仅生成业务关系：与 ``_run_object_generation`` 完全独立，可并行执行——
@@ -799,25 +925,9 @@ class DraftTaskService:
             self._ensure_not_cancelled(task_id)
             await self._update_task_progress(task_id, 5, "正在从 DataHub 拉取元数据...")
 
-            phase_start = time.perf_counter()
-            connector = self._datahub_connector()
-            try:
-                bundle = await connector.fetch_domain_bundle(
-                    datahub_domain_id, include_logic_evidences=False
-                )
-            finally:
-                await connector.aclose()
-            self._ensure_not_cancelled(task_id)
-            logger.info(
-                "relation_generation phase=datahub task_id=%s domain_id=%s elapsed_ms=%.1f",
-                task_id,
-                domain_id,
-                (time.perf_counter() - phase_start) * 1000,
+            evidence = await self._load_or_fetch_evidence(
+                domain_id, datahub_domain_id, task_id, log_prefix="relation_generation"
             )
-
-            await self._update_task_progress(task_id, 30, "正在组装证据包...")
-            evidence = self.evidence_builder.build(bundle, include_business_logics=False)
-            self._ensure_not_cancelled(task_id)
 
             object_id_by_candidate = {
                 ot.candidate_name: object_urn_to_id[ot.source_dataset_urn]
@@ -904,6 +1014,7 @@ class DraftTaskService:
                 return
             logger.exception("Relation generation failed for task %s: %s", task_id, exc)
             self._mark_task_failed(task_id, self._describe_exc(exc))
+            self._maybe_auto_resume(domain_id, task_id, exc)
 
     def _purge_draft_ontologies(self, db: Session, domain_id: str) -> int:
         """删除同域所有 draft 状态本体及其关联数据，返回删除的本体数。
@@ -1112,7 +1223,6 @@ def recover_stale_draft_tasks() -> int:
 
     from sqlalchemy import func, select
 
-    from app.config import settings
     from app.database import SessionLocal
 
     db = SessionLocal()

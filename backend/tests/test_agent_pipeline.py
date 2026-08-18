@@ -227,6 +227,122 @@ def test_cannot_confirm_without_validate(client, admin_headers, metric_agent):
     assert "请先执行校验" in resp.json()["detail"]
 
 
+def test_confirm_and_execute_record_into_conversation_ledger(
+    client, admin_headers, metric_agent
+):
+    """接线验证：制品的确认/执行自动记进催生它的会话——前端零改动。
+
+    走完整生命周期（draft → validate → confirm → execute），核对账本里
+    「执行方案确认」与「执行任务」两环都到达，且指向同一制品。
+    """
+    from app.database import SessionLocal
+    from app.models.chat_bi import ChatBiConversation, ChatBiConversationTask
+
+    a = _draft(client, admin_headers)
+
+    db = SessionLocal()
+    try:
+        conv = ChatBiConversation(title="生命周期留痕")
+        db.add(conv)
+        db.commit()
+        conversation_id = conv.id
+        # 模拟前端在「去校验并执行」时建立的 (会话, 制品) 关联
+        db.add(
+            ChatBiConversationTask(
+                conversation_id=conversation_id, artifact_id=a["id"]
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    client.post(
+        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
+    )
+    assert (
+        client.post(
+            f"/api/agents/artifacts/{a['id']}/confirm", headers=admin_headers, json={}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/agents/artifacts/{a['id']}/execute", headers=admin_headers, json={}
+        ).status_code
+        == 200
+    )
+
+    items = client.get(
+        f"/api/chat-bi/conversations/{conversation_id}/decisions", headers=admin_headers
+    ).json()
+    by_node = {i["node"]: i for i in items}
+    assert by_node["plan"]["stage"] == "artifact_confirm"
+    assert by_node["execute"]["outcome"] == "accepted"
+    assert by_node["execute"]["ref_id"] == a["id"]
+
+    closure = client.get(
+        f"/api/chat-bi/conversations/{conversation_id}/closure", headers=admin_headers
+    ).json()
+    # 执行完但没人确认结果 → 悬挂项如实报出来
+    assert any("结果尚未确认" in d for d in closure["dangling"])
+
+
+def test_artifact_without_conversation_records_nothing(
+    client, admin_headers, metric_agent
+):
+    """工单直接起草的制品无会话——静默跳过留痕，确认/执行照常成功。"""
+    a = _draft(client, admin_headers)
+    client.post(
+        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
+    )
+    resp = client.post(
+        f"/api/agents/artifacts/{a['id']}/confirm", headers=admin_headers, json={}
+    )
+    assert resp.status_code == 200
+
+
+def test_decision_ledger_never_authorizes_execution(
+    client, admin_headers, metric_agent
+):
+    """**账本只记录、不授权**：账本里有 execute 记录也不能让未确认的制品被执行。
+
+    决策留痕是观察层，执行门槛的唯一权威是 ``GovernanceArtifact.status``。
+    这条把「账本永不成为第二授权源」钉死——将来谁想让 executor 顺手读账本判状态，
+    这条会先红。
+    """
+    from app.database import SessionLocal
+    from app.models.chat_bi import ChatBiConversation
+    from app.services import chat_bi_ledger
+
+    _, executor = metric_agent
+    a = _draft(client, admin_headers)
+
+    db = SessionLocal()
+    try:
+        conv = ChatBiConversation(title="伪造授权尝试")
+        db.add(conv)
+        db.commit()
+        # 往账本里塞一条"已确认、已执行"的记录——制品本身仍是 drafted
+        for node in ("plan", "execute"):
+            chat_bi_ledger.record_decision(
+                db,
+                conversation_id=conv.id,
+                node=node,
+                outcome="accepted",
+                ref_kind="artifact",
+                ref_id=a["id"],
+            )
+    finally:
+        db.close()
+
+    resp = client.post(
+        f"/api/agents/artifacts/{a['id']}/execute", headers=admin_headers, json={}
+    )
+    assert resp.status_code == 409
+    assert "未经人工确认" in resp.json()["detail"]
+    assert executor.executions == 0
+
+
 def test_execution_failure_marks_failed(client, admin_headers):
     registry.register("metric", _FakeDrafter({"metric_name": "x", "subject_objects": ["order"]}), _CountingExecutor(fail=True))
     try:

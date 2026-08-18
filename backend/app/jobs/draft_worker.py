@@ -16,7 +16,43 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
 import sys
+from pathlib import Path
+
+# backend/ 根目录与日志目录（与 app/api/workspace.py 的 _spawn_draft_worker 对齐）。
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+_LOG_DIR = _BACKEND_DIR / ".logs"
+
+
+def spawn_draft_worker(task_id: str) -> None:
+    """在分离子进程（``start_new_session=True``）拉起草稿生成 worker。
+
+    供**失败自动续跑**复用同一执行路径：续跑同样 reload 免疫、脱离 uvicorn 进程组，
+    日志落 ``.logs/draft-worker-<task_id>.log``。与 API 首发用的
+    ``app.api.workspace._spawn_draft_worker`` 是同一行为的服务层孪生（后者带 FastAPI
+    依赖，不宜从 worker/服务层导入，故此处独立留一份）。
+    """
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        logfile = open(  # noqa: SIM115 —— 交由子进程持有
+            _LOG_DIR / f"draft-worker-{task_id}.log", "ab", buffering=0
+        )
+    except OSError:
+        logfile = subprocess.DEVNULL
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "app.jobs.draft_worker", task_id],
+            cwd=str(_BACKEND_DIR),
+            stdout=logfile,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=os.environ.copy(),
+        )
+    finally:
+        if logfile not in (subprocess.DEVNULL, None):
+            logfile.close()
 
 
 def _configure_logging() -> None:

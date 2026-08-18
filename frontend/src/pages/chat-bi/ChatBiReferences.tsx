@@ -29,6 +29,7 @@ import { CronPicker } from "../../components/CronPicker";
 import { DataSourcesModal } from "../../components/DataSourcesModal";
 import { SpecForm } from "../../components/artifact-spec/SpecForm";
 import { SPEC_FIELDS } from "../../components/artifact-spec/specFields";
+import { AckTarget, formDefaults, recordAck, recordDecisionQuietly, toJsonSafe } from "./ledger";
 import type {
   ChatBiAgentStep,
   ChatBiBlock,
@@ -364,6 +365,7 @@ export function ChatBubble({
                   streaming={message.streaming}
                   question={question}
                   conversationId={conversationId}
+                  messageId={message.id}
                   onClarify={onClarify}
                   onProposeApp={
                     onProposeApp
@@ -420,6 +422,7 @@ function BlockRenderer({
   streaming,
   question,
   conversationId,
+  messageId,
   onClarify,
   onProposeApp,
 }: {
@@ -427,6 +430,8 @@ function BlockRenderer({
   streaming?: boolean;
   question?: string;
   conversationId?: string;
+  /** 决策留痕的消息锚。流式刚产出的消息尚未落库、拿不到 id，故可空。 */
+  messageId?: string;
   onClarify?: (text: string) => void;
   onProposeApp?: (proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"]) => void;
 }) {
@@ -437,10 +442,24 @@ function BlockRenderer({
       return <MarkdownBlock content={block.content} streaming={streaming} />;
     case "mapping":
       return (
-        <MappingBlock variant={block.variant} items={block.items} references={block.references} />
+        <MappingBlock
+          variant={block.variant}
+          items={block.items}
+          references={block.references}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
       );
     case "sql":
-      return <SqlBlock sql={block.sql} />;
+      return (
+        <SqlBlock
+          sql={block.sql}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     case "table":
       return (
         <ResultTable
@@ -449,6 +468,9 @@ function BlockRenderer({
             rows: block.rows,
             truncated: block.truncated,
           }}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
         />
       );
     case "chart":
@@ -469,19 +491,47 @@ function BlockRenderer({
     case "plan":
       return <PlanBlock steps={block.steps} note={block.note} />;
     case "draft_proposal":
-      return <DraftProposalBlock proposal={block.proposal} />;
+      return (
+        <DraftProposalBlock
+          proposal={block.proposal}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     case "action_proposal":
-      return <ActionProposalBlock proposal={block.proposal} conversationId={conversationId} />;
+      return (
+        <ActionProposalBlock
+          proposal={block.proposal}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     case "pipeline_proposal":
       return <PipelineProposalBlock proposal={block.proposal} conversationId={conversationId} />;
     case "preference_proposal":
-      return <PreferenceProposalBlock proposal={block.proposal} />;
+      return (
+        <PreferenceProposalBlock
+          proposal={block.proposal}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     case "app_proposal":
       return <AppProposalBlock proposal={block.proposal} onProposeApp={onProposeApp} />;
     case "onboard_proposal":
       return <OnboardProposalBlock proposal={block.proposal} />;
     case "task_status":
-      return <TaskStatusBlock status={block.status} />;
+      return (
+        <TaskStatusBlock
+          status={block.status}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     case "notice":
       return block.variant === "refused" ? <RefusedNotice /> : <MockNotice />;
     case "clarify":
@@ -490,11 +540,23 @@ function BlockRenderer({
           clarification={block.clarification}
           question={question}
           onClarify={onClarify}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
         />
       );
     case "form":
-      // P6：Agent 动态生成的可填写表单。提交后把结构化回填文本经澄清通道作为新一轮问题带回。
-      return <FormBlock form={block.form} onSubmit={onClarify} />;
+      // P6：Agent 动态生成的可填写表单。提交后把结构化回填文本经澄清通道作为新一轮问题带回，
+      // 同时把结构化原值单独留痕（散文里没有机器可解析的字段/取值对）。
+      return (
+        <FormBlock
+          form={block.form}
+          onSubmit={onClarify}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     default:
       return null;
   }
@@ -534,17 +596,78 @@ function MockNotice() {
   );
 }
 
+/**
+ * 「认可 / 存疑」轻量表态条（P1）。
+ *
+ * 挂在本体映射 / 数据结果 / 任务回执三类**纯展示**块上，把「人看过并认了」这件事
+ * 从推断变成记录。刻意**不做闸门**：不点不拦，答案照看照用。
+ *
+ * 无 `conversationId` 时（历史消息渲染、导出预览）整条不渲染——留痕无处可去，
+ * 摆一对点不动的按钮只会让人以为坏了。
+ */
+function AckControl({ target, label }: { target: AckTarget; label: string }) {
+  const [picked, setPicked] = useState<"yes" | "no" | null>(null);
+  if (!target.conversationId) return null;
+  const choose = (accepted: boolean) => {
+    setPicked(accepted ? "yes" : "no");
+    recordAck(target, accepted);
+  };
+  return (
+    <div className="chatbi-ack">
+      <span className="chatbi-ack-label">{picked ? "已留痕" : label}</span>
+      <button
+        type="button"
+        className={`chatbi-ack-btn${picked === "yes" ? " chatbi-ack-btn--on" : ""}`}
+        onClick={() => choose(true)}
+      >
+        认可
+      </button>
+      <button
+        type="button"
+        className={`chatbi-ack-btn${picked === "no" ? " chatbi-ack-btn--off" : ""}`}
+        onClick={() => choose(false)}
+      >
+        存疑
+      </button>
+    </div>
+  );
+}
+
 function ClarifyBlock({
   clarification,
   question,
   onClarify,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   clarification: ChatBiClarification;
   question?: string;
   onClarify?: (text: string) => void;
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   // 澄清反问：正文即问题与候选项，这里把候选项做成可点击的追问，
   // 让用户一步接上，而不是自己再打一遍。
+  const onPick = (opt: string) => {
+    onClarify?.(`${question ?? ""}（${opt}）`.trim());
+    // 留痕：用户选了哪个候选项，是"需求确认"最直接的证据。
+    // 同一块换选项算两次决策（那是真实的改主意，应各记一条），故 dedup_key 带选项。
+    recordDecisionQuietly(conversationId, {
+      node: "requirement",
+      stage: "clarify",
+      trigger: "clarify_option",
+      message_id: messageId,
+      block_id: blockId,
+      summary: `澄清「${clarification.question}」→ 选择「${opt}」`,
+      proposed: { options: clarification.options },
+      chosen: { option: opt },
+      dedup_key: blockId
+        ? `${conversationId}:requirement:clarify:${blockId}:${opt}`
+        : undefined,
+    });
+  };
   return (
     <div className="chatbi-clarify">
       <div className="chatbi-clarify-q">{clarification.question}</div>
@@ -556,7 +679,7 @@ function ClarifyBlock({
             type="button"
             className="chatbi-clarify-option"
             disabled={!onClarify}
-            onClick={() => onClarify?.(`${question ?? ""}（${opt}）`.trim())}
+            onClick={() => onPick(opt)}
           >
             {opt}
           </button>
@@ -723,9 +846,15 @@ function CronPickerControl({
 function FormBlock({
   form,
   onSubmit,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   form: ChatBiFormRequest;
   onSubmit?: (text: string) => void;
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   const [antForm] = Form.useForm();
   const [submitted, setSubmitted] = useState(false);
@@ -743,7 +872,23 @@ function FormBlock({
   }, [form]);
   const handleFinish = (values: Record<string, unknown>) => {
     setSubmitted(true);
+    // 回填文本照发：Agent 靠它在 history 里续多轮，这条链路不能动。
     onSubmit?.(composeFormReply(form, values));
+    // 并行留痕：把**结构化原值**单独存一份。回填文本是给模型读的散文，
+    // 里面没有「哪个字段被填了什么」的机器可解析结构，事后追溯只能靠这份。
+    recordDecisionQuietly(conversationId, {
+      node: "requirement",
+      stage: "form",
+      trigger: "form_submit",
+      message_id: messageId,
+      block_id: blockId,
+      summary: `填写了表单「${form.title}」`,
+      proposed: formDefaults(form.fields),
+      chosen: toJsonSafe(values),
+      dedup_key: blockId
+        ? `${conversationId}:requirement:form:${messageId ?? ""}:${blockId}`
+        : undefined,
+    });
   };
   return (
     <div className="chatbi-form">
@@ -807,8 +952,14 @@ const DRAFT_TYPE_LABEL: Record<string, string> = { metric: "指标", tag: "标�
  */
 function DraftProposalBlock({
   proposal,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "draft_proposal" }>["proposal"];
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   const navigate = useNavigate();
   const [state, setState] = useState<"idle" | "creating" | "done" | "error">("idle");
@@ -816,17 +967,33 @@ function DraftProposalBlock({
   // 带表达式的提案（propose_expression）：表达式已过编译器与语义证明，人审的是**真 SQL**。
   const formalized = Boolean(proposal.compiled_sql);
   const patching = Boolean(proposal.logic_id && proposal.update_payload);
+  // 留痕：此前这个确认完全绕开会话——点完就 navigate 走人，会话里看不出用户点没点。
+  const recordOntologyDecision = (logicId: string) =>
+    recordDecisionQuietly(conversationId, {
+      node: "ontology",
+      stage: "draft_proposal",
+      trigger: patching ? "logic_updated" : "logic_created",
+      message_id: messageId,
+      block_id: blockId,
+      summary: `${patching ? "补全" : "新建"}${typeLabel}「${proposal.name ?? ""}」`,
+      proposed: (proposal.update_payload ?? proposal.create_payload) as unknown,
+      ref_kind: "business_logic",
+      ref_id: logicId,
+      dedup_key: `${conversationId}:ontology:draft:${logicId}`,
+    });
   const onConfirm = async () => {
     setState("creating");
     try {
       if (patching) {
         await api.updateBusinessLogic(proposal.logic_id!, proposal.update_payload!);
         setState("done");
+        recordOntologyDecision(proposal.logic_id!);
         navigate(`/business-logic/${proposal.logic_id}`);
         return;
       }
       const created = await api.createBusinessLogic(proposal.create_payload!);
       setState("done");
+      recordOntologyDecision(created.id);
       navigate(`/business-logic/${created.id}`);
     } catch {
       setState("error");
@@ -860,7 +1027,12 @@ function DraftProposalBlock({
               ))}
             </ul>
           ) : null}
-          <SqlBlock sql={proposal.compiled_sql!} />
+          <SqlBlock
+            sql={proposal.compiled_sql!}
+            conversationId={conversationId}
+            messageId={messageId}
+            blockId={blockId}
+          />
         </>
       )}
       <div className="chatbi-draft-note">
@@ -1088,8 +1260,14 @@ const TREND_ICON: Record<string, string> = { up: "↑", down: "↓", flat: "→"
  */
 function PreferenceProposalBlock({
   proposal,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "preference_proposal" }>["proposal"];
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
   const onRemember = async () => {
@@ -1101,6 +1279,18 @@ function PreferenceProposalBlock({
     try {
       await api.rememberPreference(proposal.domain_id, proposal.text);
       setState("done");
+      // 留痕：约定本身进的是域记忆（无会话溯源），这里补记"是这次对话定的"。
+      recordDecisionQuietly(conversationId, {
+        node: "data",
+        stage: "preference",
+        trigger: "preference_remembered",
+        message_id: messageId,
+        block_id: blockId,
+        summary: `记住本域约定：${proposal.text}`,
+        chosen: { text: proposal.text, domain_id: proposal.domain_id },
+        ref_kind: "preference",
+        dedup_key: blockId ? `${conversationId}:data:preference:${blockId}` : undefined,
+      });
     } catch {
       setState("error");
     }
@@ -1477,9 +1667,13 @@ function ProposalContextForm({
 function ActionProposalBlock({
   proposal,
   conversationId,
+  messageId,
+  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "action_proposal" }>["proposal"];
   conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   const [drafting, setDrafting] = useState(false);
   const [context, setContext] = useState<Record<string, unknown>>(() => ({
@@ -1493,12 +1687,18 @@ function ActionProposalBlock({
       // 用户改过的参数为准：draft_payload 的 context 以本地编辑值覆盖后再提交。
       const artifact = await api.draftArtifact({ ...proposal.draft_payload, context });
       // P1：把本会话与该任务关联，后续可免 id 追踪。best-effort，失败不阻断主流程。
+      // 顺带带上「提案原样」与「人改后」两份 context——服务端据此留痕出人改了哪些参数。
+      // 这个 diff 此前只存在于浏览器内存里，确认完就没了。
       if (conversationId) {
         void api
           .linkChatBiTask(conversationId, {
             artifact_id: artifact.id,
             kind: proposal.kind,
             intent: proposal.intent,
+            proposed_context: (proposal.context ?? {}) as Record<string, unknown>,
+            chosen_context: toJsonSafe(context) as Record<string, unknown>,
+            message_id: messageId,
+            block_id: blockId,
           })
           .catch(() => {});
       }
@@ -1897,8 +2097,14 @@ function PipelineProposalBlock({
  */
 function TaskStatusBlock({
   status,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   status: Extract<ChatBiBlock, { type: "task_status" }>["status"];
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const { open, node } = useArtifactDrawer();
@@ -1958,6 +2164,18 @@ function TaskStatusBlock({
           })}
         </div>
       )}
+      <AckControl
+        target={{
+          conversationId,
+          messageId,
+          blockId,
+          node: "data",
+          stage: "task_status",
+          summary: `数据任务（${tasks.length} 项）`,
+          chosen: tasks.map((t) => t.id),
+        }}
+        label="任务状态是否符合预期？"
+      />
       {node}
     </div>
   );
@@ -1972,10 +2190,16 @@ function MappingBlock({
   variant,
   items,
   references,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   variant: "inline" | "caliber";
   items: ChatBiCaliberItem[];
   references: ChatBiCaliberReference[];
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   if (variant === "inline") {
     // 无口径展开——只有「命中本体」，收成一行内联 chip。
@@ -1986,10 +2210,38 @@ function MappingBlock({
         {references.map((reference, ri) => (
           <CaliberRefChip key={ri} reference={reference} />
         ))}
+        <AckControl
+          target={{
+            conversationId,
+            messageId,
+            blockId,
+            node: "ontology",
+            stage: "mapping",
+            summary: `映射本体（${references.length} 项）`,
+            chosen: references.map((r) => r.id),
+          }}
+          label="映射是否准确？"
+        />
       </div>
     );
   }
-  return <CaliberDecomposition items={items} references={references} />;
+  return (
+    <>
+      <CaliberDecomposition items={items} references={references} />
+      <AckControl
+        target={{
+          conversationId,
+          messageId,
+          blockId,
+          node: "ontology",
+          stage: "mapping",
+          summary: `映射本体（${references.length} 项）`,
+          chosen: references.map((r) => r.id),
+        }}
+        label="映射是否准确？"
+      />
+    </>
+  );
 }
 
 function colTitle(columns: ChatBiDataResult["columns"], key: string): string {
@@ -2345,7 +2597,17 @@ function fmtCell(value: unknown): string {
   return String(value);
 }
 
-function ResultTable({ result }: { result: ChatBiDataResult }) {
+function ResultTable({
+  result,
+  conversationId,
+  messageId,
+  blockId,
+}: {
+  result: ChatBiDataResult;
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
+}) {
   const rows = result.rows ?? [];
   const cols =
     result.columns && result.columns.length
@@ -2382,6 +2644,18 @@ function ResultTable({ result }: { result: ChatBiDataResult }) {
       {rows.length > shown.length && (
         <div className="chatbi-result-more">仅展示前 {shown.length} 行</div>
       )}
+      <AckControl
+        target={{
+          conversationId,
+          messageId,
+          blockId,
+          node: "data",
+          stage: "result",
+          summary: `查询结果（${rows.length} 行）`,
+          chosen: { row_count: rows.length, truncated: result.truncated },
+        }}
+        label="数据结果是否符合预期？"
+      />
     </div>
   );
 }
@@ -2464,7 +2738,17 @@ function refToPath(ref: ChatBiCaliberReference): string | null {
   }
 }
 
-function SqlBlock({ sql }: { sql: string }) {
+function SqlBlock({
+  sql,
+  conversationId,
+  messageId,
+  blockId,
+}: {
+  sql: string;
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
+}) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     try {
@@ -2486,6 +2770,18 @@ function SqlBlock({ sql }: { sql: string }) {
       <pre className="chatbi-sql-pre">
         <code>{highlightSql(sql)}</code>
       </pre>
+      <AckControl
+        target={{
+          conversationId,
+          messageId,
+          blockId,
+          node: "data",
+          stage: "sql",
+          summary: "生成的 SQL",
+          chosen: { sql_preview: sql.slice(0, 200) },
+        }}
+        label="SQL 是否符合预期？"
+      />
     </div>
   );
 }

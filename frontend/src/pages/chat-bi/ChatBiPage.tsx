@@ -881,6 +881,7 @@ const ChatBiMain = memo(function ChatBiMain({
         const data = await api.getChatBiMessages(conversationId);
         if (cancelled || loadingConversationRef.current !== conversationId) return;
         const chatMessages: ChatMessage[] = data.map((m: ChatBiMessageItem) => ({
+          id: m.id,
           role: m.role as "user" | "assistant",
           content: m.content,
           payload: m.payload

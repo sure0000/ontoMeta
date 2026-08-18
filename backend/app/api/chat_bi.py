@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import chat_bi_service
 from app.database import get_db
-from app.services import agent_telemetry
+from app.services import agent_telemetry, chat_bi_ledger
 from app.services.chat_bi_blocks import answer_to_blocks
 from app.services.data_app_executor import ExecutionError
 from app.schemas import (
@@ -17,6 +17,9 @@ from app.schemas import (
     ChatBiCategoryList,
     ChatBiCategoryRenameRequest,
     ChatBiConversationCreate,
+    ChatBiDecisionClosure,
+    ChatBiDecisionOut,
+    ChatBiDecisionRequest,
     ChatBiExecuteRequest,
     ChatBiExecuteResult,
     ChatBiConversationSummary,
@@ -99,18 +102,114 @@ def chat_bi_delete_conversation(
 def chat_bi_link_conversation_task(
     conversation_id: str,
     data: ChatBiTaskLinkRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """P1：记录「本会话催生了某数据任务（治理制品）」。
 
     前端在用户对任务提案点「去校验并执行」建出制品后调用；使该会话后续能免 id 追踪任务。
+
+    顺带记一条「执行方案确认」决策留痕：提案原样 vs 人改后的参数都在这一次请求里，
+    不必再多一次往返。留痕失败不影响关联本身（record_decision 自身吞异常）。
     """
     try:
-        return chat_bi_service.link_conversation_task(
+        result = chat_bi_service.link_conversation_task(
             db, conversation_id, data.artifact_id, kind=data.kind, intent=data.intent
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    chat_bi_ledger.safe_record(
+        db,
+        conversation_id=conversation_id,
+        node="plan",
+        stage="proposal_draft",
+        trigger="action_proposal_draft",
+        message_id=data.message_id,
+        block_id=data.block_id,
+        summary=data.intent or f"确认{data.kind or ''}任务方案",
+        proposed=data.proposed_context,
+        chosen=data.chosen_context,
+        ref_kind="artifact",
+        ref_id=data.artifact_id,
+        subject_id=_principal_id(request),
+        subject_role=_principal_role(request),
+        dedup_key=f"{conversation_id}:plan:draft:{data.artifact_id}",
+    )
+    return result
+
+
+@router.post("/chat-bi/conversations/{conversation_id}/decisions")
+def chat_bi_record_decision(
+    conversation_id: str,
+    data: ChatBiDecisionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """记一条人工决策留痕。
+
+    **永远返回 200**（``recorded=false`` 表未记成），不返回 4xx/5xx：前端是
+    fire-and-forget 调用，返回错误码只会在控制台刷红而没人能处理，更不该让
+    留痕失败连累用户正在做的确认动作。
+    """
+    decision_id = chat_bi_ledger.safe_record(
+        db,
+        conversation_id=conversation_id,
+        node=data.node,
+        outcome=data.outcome,
+        stage=data.stage,
+        trigger=data.trigger,
+        message_id=data.message_id,
+        block_id=data.block_id,
+        summary=data.summary,
+        proposed=data.proposed,
+        chosen=data.chosen,
+        ref_kind=data.ref_kind,
+        ref_id=data.ref_id,
+        # 责任人只认已认证主体，请求体里给什么都不看。
+        subject_id=_principal_id(request),
+        subject_role=_principal_role(request),
+        dedup_key=data.dedup_key,
+    )
+    return {"id": decision_id, "recorded": decision_id is not None}
+
+
+@router.get(
+    "/chat-bi/conversations/{conversation_id}/decisions",
+    response_model=list[ChatBiDecisionOut],
+)
+def chat_bi_list_decisions(conversation_id: str, db: Session = Depends(get_db)):
+    """本会话的决策时间线（最早在前）。"""
+    return chat_bi_ledger.list_decisions(db, conversation_id)
+
+
+@router.get(
+    "/chat-bi/conversations/{conversation_id}/closure",
+    response_model=ChatBiDecisionClosure,
+)
+def chat_bi_decision_closure(conversation_id: str, db: Session = Depends(get_db)):
+    """一次对话的确认闭环总结：恒六环 + 悬挂项 + 完整时间线。"""
+    return chat_bi_ledger.build_closure(db, conversation_id)
+
+
+@router.get("/chat-bi/decisions", response_model=list[ChatBiDecisionOut])
+def chat_bi_search_decisions(
+    node: str | None = None,
+    outcome: str | None = None,
+    ref_kind: str | None = None,
+    subject_id: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """跨会话决策查询，供决策追踪页。"""
+    return chat_bi_ledger.search_decisions(
+        db,
+        node=node,
+        outcome=outcome,
+        ref_kind=ref_kind,
+        subject_id=subject_id,
+        limit=limit,
+    )
 
 
 @router.post("/chat-bi/domain-memory/preferences")
@@ -181,6 +280,18 @@ def _principal_role(request: Request) -> str | None:
     否则 editor 自己执行 SQL 被 403、让 Agent 代跑却放行。
     """
     return getattr(request.state, "principal_role", None)
+
+
+def _principal_id(request: Request) -> str | None:
+    """当前请求主体的 id（由 AdminAuthMiddleware 写入 request.state）。
+
+    决策留痕的责任人**必须**由这里取，不能信前端请求体里的 operator——否则
+    「谁确认的」可被客户端随意伪造，追踪与管理就失去依据。
+
+    用共享 ``ONTOMETA_ADMIN_TOKEN`` 访问时 ``resolve_principal`` 不查库、返回 None，
+    此时只有角色可考；要精确到人需先把 Principal 逐人配起来（运营前提，非代码问题）。
+    """
+    return getattr(request.state, "principal_id", None)
 
 
 @router.post("/chat-bi/ask", response_model=ChatBiAnswer)

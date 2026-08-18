@@ -13,6 +13,8 @@ import type {
   ChatBiAnswer,
   ChatBiCategoryList,
   ChatBiConversation,
+  ChatBiDecision,
+  ChatBiDecisionClosure,
   ChatBiHistoryItem,
   ChatBiMessageItem,
   ChatBiStreamEvent,
@@ -891,11 +893,62 @@ export const api = {
   /** P1：记录「本会话催生了某数据任务（治理制品）」，使会话可免 id 追踪任务。 */
   linkChatBiTask: (
     conversationId: string,
-    body: { artifact_id: string; kind?: string; intent?: string },
+    body: {
+      artifact_id: string;
+      kind?: string;
+      intent?: string;
+      /**
+       * 决策留痕：提案原样 vs 人确认前改成的样子。
+       * 两份都在前端手上（proposal.context 与本地编辑态），顺这一次已有的往返带回，
+       * 无需额外请求。服务端据此算出「人改了哪些参数」。
+       */
+      proposed_context?: Record<string, unknown>;
+      chosen_context?: Record<string, unknown>;
+      message_id?: string;
+      block_id?: string;
+    },
   ) =>
     request<{ id: string; artifact_id: string; linked: boolean }>(
       `/api/chat-bi/conversations/${conversationId}/tasks`,
       { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /**
+   * 决策留痕：记一条人工确认。
+   *
+   * **责任人不用传**——服务端从已认证主体取，前端给了也会被忽略。
+   * 端点恒返回 200（recorded 表是否记成），故调用方只需 fire-and-forget。
+   */
+  recordChatBiDecision: (
+    conversationId: string,
+    body: {
+      node: string;
+      outcome?: string;
+      stage?: string;
+      trigger?: string;
+      message_id?: string;
+      block_id?: string;
+      summary?: string;
+      proposed?: unknown;
+      chosen?: unknown;
+      ref_kind?: string;
+      ref_id?: string;
+      dedup_key?: string;
+    },
+  ) =>
+    request<{ id: string | null; recorded: boolean }>(
+      `/api/chat-bi/conversations/${conversationId}/decisions`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  listChatBiDecisions: (conversationId: string) =>
+    request<ChatBiDecision[]>(
+      `/api/chat-bi/conversations/${conversationId}/decisions`,
+    ),
+
+  getChatBiClosure: (conversationId: string) =>
+    request<ChatBiDecisionClosure>(
+      `/api/chat-bi/conversations/${conversationId}/closure`,
     ),
 
   /** P3.1：把用户确认的约定落库为本域记忆（点「记住」后调用）。 */

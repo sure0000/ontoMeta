@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
     llm_timeout_seconds: float = 300.0
+    # LLM 客户端可靠性（草稿预生成对自建 GLM 端点大扇出时易触发连接抖动）：
+    # - max_retries：OpenAI SDK 自带的连接错重试次数（默认 2 偏低，端点抖动时不够）。
+    # - connect/keepalive：给 httpx 客户端显式分档超时与 keepalive 上限，主动在服务器
+    #   关闭空闲连接前丢弃它，避免复用死连接触发 ReadError/RemoteProtocolError。
+    llm_max_retries: int = 5
+    llm_connect_timeout_seconds: float = 10.0
+    llm_http_keepalive_expiry_seconds: float = 15.0
+    llm_http_max_keepalive: int = 8
 
     # Cube 语义层（可选外挂）：ontoMeta 生成 Cube data model 并调用其 Load API。
     cube_api_url: str = "http://localhost:4000"
@@ -161,6 +169,18 @@ class Settings(BaseSettings):
     draft_chunk_relation_batch_size: int = 40
     # 关系命名分块流水线：并发调用 LLM 的子块数上限(与对象流水线各自独立的信号量)。
     draft_relation_chunk_max_concurrency: int = 4
+    # 单个命名分块的 app 级重试次数（叠加在 SDK max_retries 之上）：分块流水线用
+    # return_exceptions 收集失败块，仍失败才让任务失败（不做确定性命名降级），配合
+    # checkpoint 续跑只补缺失块。退避为指数+jitter。
+    draft_chunk_retry_attempts: int = 3
+    # 预生成的 evidence 证据包磁盘缓存 TTL（秒）：续跑/重试时命中则跳过 DataHub 的
+    # 分钟级抓取，直接进入分块生成。0 = 禁用缓存。默认 6 小时。
+    draft_evidence_cache_ttl_seconds: int = 21600
+    # evidence 缓存落盘目录（相对 backend 工作目录，跟随 agent_trace_dir 的约定）。
+    draft_evidence_cache_dir: str = ".cache/draft_evidence"
+    # 连接类瞬时失败时自动续跑的最大次数（0 = 禁用，退回人工重试）：自动入队的续跑
+    # 任务复用 checkpoint + evidence 缓存，只补缺失块，绝不重跑抓取。
+    draft_auto_resume_max: int = 2
 
     max_concurrent_draft_generations: int = 2
     # 草稿生成是否在分离子进程执行（C）：默认 True，reload/异常退出杀 API worker

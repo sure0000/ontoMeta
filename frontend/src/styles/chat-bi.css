@@ -1951,6 +1951,46 @@
   }
 }
 
+/* 认可/存疑轻量表态条（P1 决策留痕） */
+.chatbi-ack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: var(--om-surface-secondary, #f8fafc);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.chatbi-ack-label {
+  color: var(--om-text-secondary, #64748b);
+  margin-right: 4px;
+}
+.chatbi-ack-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-radius: 4px;
+  background: var(--om-surface, #fff);
+  color: var(--om-text-secondary, #475569);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.chatbi-ack-btn:hover {
+  border-color: var(--om-primary, #2563eb);
+  color: var(--om-primary, #2563eb);
+}
+.chatbi-ack-btn--on {
+  background: var(--om-success, #10b981);
+  border-color: var(--om-success, #10b981);
+  color: #fff;
+}
+.chatbi-ack-btn--off {
+  background: var(--om-warning, #f59e0b);
+  border-color: var(--om-warning, #f59e0b);
+  color: #fff;
+}
+
 /* 澄清反问（P4.1）：候选项做成可点击追问，用户一步接上而不必重打一遍 */
 .chatbi-clarify {
   display: flex;

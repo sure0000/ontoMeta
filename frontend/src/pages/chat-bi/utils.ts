@@ -8,6 +8,11 @@ import type {
 } from "../../types";
 
 export interface ChatMessage {
+  /**
+   * 消息的库 id。决策留痕用它把「人点了什么」锚到具体某一轮。
+   * 仅在从历史加载时有值——流式刚产出的消息尚未落库，此时留痕只锚到会话。
+   */
+  id?: string;
   role: "user" | "assistant";
   content: string;
   payload?: ChatBiAnswer;
