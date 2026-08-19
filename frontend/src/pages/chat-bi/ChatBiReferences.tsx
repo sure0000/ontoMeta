@@ -29,7 +29,15 @@ import { CronPicker } from "../../components/CronPicker";
 import { DataSourcesModal } from "../../components/DataSourcesModal";
 import { SpecForm } from "../../components/artifact-spec/SpecForm";
 import { SPEC_FIELDS } from "../../components/artifact-spec/specFields";
-import { AckTarget, formDefaults, recordAck, recordDecisionQuietly, toJsonSafe } from "./ledger";
+import { useDecisionLedger } from "./DecisionLedger";
+import {
+  AckTarget,
+  ackKey,
+  formDefaults,
+  recordAck,
+  recordDecisionQuietly,
+  toJsonSafe,
+} from "./ledger";
 import type {
   ChatBiAgentStep,
   ChatBiBlock,
@@ -522,7 +530,14 @@ function BlockRenderer({
     case "app_proposal":
       return <AppProposalBlock proposal={block.proposal} onProposeApp={onProposeApp} />;
     case "onboard_proposal":
-      return <OnboardProposalBlock proposal={block.proposal} />;
+      return (
+        <OnboardProposalBlock
+          proposal={block.proposal}
+          conversationId={conversationId}
+          messageId={messageId}
+          blockId={block.id}
+        />
+      );
     case "task_status":
       return (
         <TaskStatusBlock
@@ -604,27 +619,37 @@ function MockNotice() {
  *
  * 无 `conversationId` 时（历史消息渲染、导出预览）整条不渲染——留痕无处可去，
  * 摆一对点不动的按钮只会让人以为坏了。
+ *
+ * 表态可改判：已认可的再点存疑会追加一条新记录、闭环取最新（账本追加式，不改写）。
+ * 重复点同一个结论则整条挡掉——那不是决策，只是手抖。
  */
 function AckControl({ target, label }: { target: AckTarget; label: string }) {
-  const [picked, setPicked] = useState<"yes" | "no" | null>(null);
+  const { ackOf, notifyWritten } = useDecisionLedger();
+  const [local, setLocal] = useState<"accepted" | "rejected" | null>(null);
+  const key = ackKey(target.messageId, target.node, target.stage, target.blockId);
+  // 本地态优先：刚点完的这一下要立刻见效，不能等 closure 重取回来才亮。
+  const picked = local ?? ackOf(key) ?? null;
   if (!target.conversationId) return null;
   const choose = (accepted: boolean) => {
-    setPicked(accepted ? "yes" : "no");
+    const next = accepted ? "accepted" : "rejected";
+    if (picked === next) return;
+    setLocal(next);
     recordAck(target, accepted);
+    notifyWritten();
   };
   return (
     <div className="chatbi-ack">
       <span className="chatbi-ack-label">{picked ? "已留痕" : label}</span>
       <button
         type="button"
-        className={`chatbi-ack-btn${picked === "yes" ? " chatbi-ack-btn--on" : ""}`}
+        className={`chatbi-ack-btn${picked === "accepted" ? " chatbi-ack-btn--on" : ""}`}
         onClick={() => choose(true)}
       >
         认可
       </button>
       <button
         type="button"
-        className={`chatbi-ack-btn${picked === "no" ? " chatbi-ack-btn--off" : ""}`}
+        className={`chatbi-ack-btn${picked === "rejected" ? " chatbi-ack-btn--off" : ""}`}
         onClick={() => choose(false)}
       >
         存疑
@@ -1130,8 +1155,14 @@ const DRAFT_SCOPE_LABEL: Record<string, string> = {
  */
 function OnboardProposalBlock({
   proposal,
+  conversationId,
+  messageId,
+  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "onboard_proposal" }>["proposal"];
+  conversationId?: string;
+  messageId?: string;
+  blockId?: string;
 }) {
   const navigate = useNavigate();
   const [dsOpen, setDsOpen] = useState(false);
@@ -1148,6 +1179,20 @@ function OnboardProposalBlock({
       else if (scope === "relations") await api.generateRelations(domainId);
       else await api.generateDraft(domainId);
       message.success("已启动草稿生成，可在工作区查看进度");
+      // 留痕：启动本体草稿生成是「本体确认」环。此前这个确认走 REST 旁路且立刻导航去
+      // 工作区，会话里看不出用户点没点、按哪个范围生成的。
+      recordDecisionQuietly(conversationId, {
+        node: "ontology",
+        stage: "onboard_draft",
+        trigger: "draft_generation_started",
+        message_id: messageId,
+        block_id: blockId,
+        summary: `为域「${proposal.domain_name ?? domainId}」启动生成：${DRAFT_SCOPE_LABEL[scope] ?? scope}`,
+        proposed: { domain_id: domainId, scope: proposal.scope ?? "draft" },
+        chosen: { domain_id: domainId, scope },
+        ref_kind: "domain",
+        ref_id: domainId,
+      });
       navigate(`/workspace/${domainId}`);
     } catch (err) {
       message.error(
@@ -1235,6 +1280,22 @@ function OnboardProposalBlock({
             kind: proposal.datasource_kind,
             catalog_name: proposal.catalog_name ?? undefined,
           }}
+          // 只在数据源**真的建成**后才留痕（表单打开又取消不算决策）。
+          // 回调只带 id/name/kind——凭据不经 agent，也不进账本。
+          onCreated={(ds) =>
+            recordDecisionQuietly(conversationId, {
+              node: "data",
+              stage: "onboard_datasource",
+              trigger: "datasource_created",
+              message_id: messageId,
+              block_id: blockId,
+              summary: `登记数据源「${ds.name}」（${ds.kind}）`,
+              proposed: { name: proposal.name, kind: proposal.datasource_kind },
+              chosen: { name: ds.name, kind: ds.kind },
+              ref_kind: "datasource",
+              ref_id: ds.id,
+            })
+          }
         />
       )}
     </div>
@@ -2169,7 +2230,9 @@ function TaskStatusBlock({
           conversationId,
           messageId,
           blockId,
-          node: "data",
+          // 任务回执的验收就是六环里的**结果确认**——挂错环（曾记成 data）会让
+          // result 恒不可达，闭环永远差最后一格、且恒报「已执行但结果未确认」。
+          node: "result",
           stage: "task_status",
           summary: `数据任务（${tasks.length} 项）`,
           chosen: tasks.map((t) => t.id),
@@ -2650,7 +2713,9 @@ function ResultTable({
           messageId,
           blockId,
           node: "data",
-          stage: "result",
+          // stage 叫 data_result 而不是 result——"result" 是**环名**（任务回执验收），
+          // 拿它当数据环的场景名，日后按 stage 下钻分析时两者会混作一谈。
+          stage: "data_result",
           summary: `查询结果（${rows.length} 行）`,
           chosen: { row_count: rows.length, truncated: result.truncated },
         }}

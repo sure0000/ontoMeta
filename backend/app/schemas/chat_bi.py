@@ -243,6 +243,8 @@ class ChatBiDecisionRequest(BaseModel):
 class ChatBiDecisionOut(BaseModel):
     id: str
     conversation_id: str
+    # 仅跨会话查询（search_decisions）填充：会话内时间线本就在会话上下文里，不必重复。
+    conversation_title: str | None = None
     message_id: str | None = None
     block_id: str | None = None
     seq: int = 0

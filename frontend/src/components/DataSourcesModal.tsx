@@ -150,11 +150,14 @@ export function DataSourcesModal({
   open,
   onClose,
   prefill,
+  onCreated,
 }: {
   open: boolean;
   onClose: () => void;
   /** 带着预填打开时，直接弹出「新增数据源」表单并填好非机密字段（连接信息仍由用户填）。 */
   prefill?: DataSourcePrefill;
+  /** 新建成功后的回调（仅新建，不含编辑）。供调用方留痕/刷新，可选。 */
+  onCreated?: (source: { id: string; name: string; kind: string }) => void;
 }) {
   return (
     <Modal
@@ -165,7 +168,7 @@ export function DataSourcesModal({
       width={720}
       destroyOnClose
     >
-      <DataSourcesPanel prefill={prefill} />
+      <DataSourcesPanel prefill={prefill} onCreated={onCreated} />
     </Modal>
   );
 }
@@ -173,7 +176,14 @@ export function DataSourcesModal({
 /** 数据源管理面板：登记 / 测试 / 删除可写连接。供物化落库与数据应用取数复用；
  *  可内嵌于设置页 Tab，或包在 {@link DataSourcesModal} 里从数据应用编辑器打开。
  *  新增 / 编辑通过弹框填写，连接按类型给结构化表单（账号密码分列）。 */
-export function DataSourcesPanel({ prefill }: { prefill?: DataSourcePrefill } = {}) {
+export function DataSourcesPanel({
+  prefill,
+  onCreated,
+}: {
+  prefill?: DataSourcePrefill;
+  /** 新建成功后的回调（仅新建，不含编辑）。默认无——三个既有调用点行为不变。 */
+  onCreated?: (source: { id: string; name: string; kind: string }) => void;
+} = {}) {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
@@ -290,7 +300,7 @@ export function DataSourcesPanel({ prefill }: { prefill?: DataSourcePrefill } = 
         await api.updateDataSource(editingId, body);
         message.success("已保存修改");
       } else {
-        await api.createDataSource({
+        const created = await api.createDataSource({
           name: values.name,
           kind: values.kind,
           dsn_secret_ref: dsn,
@@ -298,6 +308,9 @@ export function DataSourcesPanel({ prefill }: { prefill?: DataSourcePrefill } = 
           catalog_name: values.catalog_name?.trim() || undefined,
         });
         message.success("已添加数据源");
+        // 只在**真的建成**之后才回调：调用方据此留痕，打开表单又取消不该留下记录。
+        // 只传 id/name/kind——凭据绝不外泄给回调方。
+        onCreated?.({ id: created.id, name: created.name, kind: created.kind });
       }
       closeForm();
       load();

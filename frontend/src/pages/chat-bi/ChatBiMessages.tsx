@@ -2,6 +2,8 @@ import { RobotOutlined } from "@ant-design/icons";
 import { Spin } from "antd";
 import type { RefObject } from "react";
 import { ChatBubble } from "./ChatBiReferences";
+import { ClosureCard } from "./ClosureCard";
+import { useDecisionLedger } from "./DecisionLedger";
 import type { ChatMessage } from "./utils";
 
 export interface ChatBiMessagesProps {
@@ -107,6 +109,20 @@ export function ChatBiMessages({
           );
         })
       )}
+      {/*
+        确认闭环总结（P2）：**整个对话只有一份，钉在末尾**。
+        它是会话级的当前状态，不是某一条消息的属性——做成随消息落库的块，就得在
+        「每轮都重复同一张图」和「靠时间戳猜有没有新决策」之间二选一，两条都不成立。
+        数据来自 DecisionLedgerProvider，每次留痕写入后自动重取，故恒为最新。
+      */}
+      {activeConversationId && messages.length > 0 && <ConversationClosure />}
     </div>
   );
+}
+
+/** 会话闭环卡；一环未达则整块不渲染——随口一问不该顶着一张全灰的六环图。 */
+function ConversationClosure() {
+  const { closure } = useDecisionLedger();
+  if (!closure || closure.reached_count === 0) return null;
+  return <ClosureCard closure={closure} />;
 }

@@ -191,3 +191,51 @@ def test_search_decisions_filters(db, conv):
     ledger.record_decision(db, conversation_id=conv.id, node="plan", ref_kind="artifact")
     ledger.record_decision(db, conversation_id=conv.id, node="data")
     assert all(r["node"] == "plan" for r in ledger.search_decisions(db, node="plan"))
+
+
+def test_search_decisions_carries_conversation_title(db, conv):
+    """跨会话查询必须带上会话名——追踪页只给一串 uuid 等于逼人逐条点开才知道在看什么。"""
+    ledger.record_decision(db, conversation_id=conv.id, node="plan", summary="s")
+    row = next(r for r in ledger.search_decisions(db) if r["conversation_id"] == conv.id)
+    assert row["conversation_title"] == "决策留痕测试"
+
+
+def test_closure_can_omit_records(db, conv):
+    """轻量摘要不带时间线，但六环聚合照常算出来。"""
+    ledger.record_decision(db, conversation_id=conv.id, node="requirement")
+    light = ledger.build_closure(db, conv.id, include_records=False)
+    assert light["records"] == []
+    assert light["reached_count"] == 1  # 聚合本身照常算出来
+
+
+def test_ack_can_be_reversed(db, conv):
+    """表态可改判：先认可后存疑，闭环取最新态。
+
+    账本是追加式的，故改判必须**追加**一条而不是改写旧的——两条都在，最新的说了算。
+    这条钉住的是一个真实回归：前端曾按 (会话,环,块) 传 dedup_key，服务端命中即返回
+    既有记录而不改写，于是「存疑」被静默丢弃、界面却把「存疑」点亮，账本与人看到的对不上。
+    """
+    common = {"conversation_id": conv.id, "node": "data", "stage": "sql", "block_id": "b3"}
+    ledger.record_decision(db, **common, outcome="accepted", trigger="ack_accept")
+    ledger.record_decision(db, **common, outcome="rejected", trigger="ack_doubt")
+
+    records = [r for r in ledger.list_decisions(db, conv.id) if r["node"] == "data"]
+    assert [r["outcome"] for r in records] == ["accepted", "rejected"]
+    data_node = next(n for n in ledger.build_closure(db, conv.id)["nodes"] if n["node"] == "data")
+    assert data_node["latest_outcome"] == "rejected"
+
+
+def test_deleting_conversation_takes_its_decisions(db, conv):
+    """删会话必须带走它的决策留痕。
+
+    SQLite 默认不启外键，不显式删就会留下孤儿——在决策追踪页上表现为一行没有会话名、
+    点「看闭环」还打不开的脏数据；而在真启外键的库上，删会话会被外键直接挡下变成 500。
+    """
+    from app.services.chat_bi import ChatBiService
+
+    ledger.record_decision(db, conversation_id=conv.id, node="plan", summary="待删")
+    assert ledger.list_decisions(db, conv.id)
+
+    ChatBiService().delete_conversation(db, conv.id)
+    assert ledger.list_decisions(db, conv.id) == []
+    assert not [r for r in ledger.search_decisions(db) if r["conversation_id"] == conv.id]

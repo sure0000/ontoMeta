@@ -3,6 +3,7 @@ import {
   AppstoreOutlined,
   FunctionOutlined,
   FolderOutlined,
+  HistoryOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   ProfileOutlined,
@@ -36,6 +37,7 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
+  if (pathname.startsWith("/decisions")) return "/decisions";
   if (pathname.startsWith("/tasks/orchestration") || pathname.startsWith("/tasks/pipelines")) {
     return "/tasks/orchestration";
   }
@@ -112,6 +114,9 @@ export function AppLayout() {
         label: "业务逻辑",
       },
       { key: "/chat-bi", icon: <RobotOutlined />, label: "Data Agent" },
+      // 与 Data Agent 平级而不是做成它的子项：决策留痕是**跨会话**看的，
+      // 塞进对话页的子菜单会把主入口从一次点击变成两次，换来的分组并不成立。
+      { key: "/decisions", icon: <HistoryOutlined />, label: "决策追踪" },
       {
         key: "/tasks",
         icon: <ProfileOutlined />,

@@ -77,10 +77,34 @@ export interface AckTarget {
 }
 
 /**
- * 表态并留痕。返回本次的 outcome 供组件回显。
+ * 一次表态的身份，用于把已表态状态回显到对应的块上。
  *
- * dedup_key 只到 (会话, 环, 块)，**不带 outcome**：先「认可」后改「存疑」是真实的改主意，
- * 应覆盖成最终态而不是两条打架的记录（服务端按 dedup_key 幂等取最终态）。
+ * **必须带 messageId**：`blockId` 是 `answer_to_blocks` 给的位置序号 `b0/b1…`，
+ * 同一位置在每一轮里都叫同一个名字。只按 blockId 归并，第三轮的结果表会顶着
+ * 第一轮的「已认可」出现。
+ *
+ * 流式刚产出的消息还没落库、拿不到 id，此时返回 null——调用方退回纯本地态。
+ * 宁可这一轮不回显，也不能张冠李戴。
+ */
+export function ackKey(
+  messageId: string | undefined,
+  node: string,
+  stage: string,
+  blockId: string | undefined,
+): string | null {
+  if (!messageId || !blockId) return null;
+  return `${messageId}:${node}:${stage}:${blockId}`;
+}
+
+/**
+ * 表态并留痕。
+ *
+ * **刻意不传 dedup_key**。账本是追加式的（见 models/chat_bi_ledger 模块头），服务端
+ * 命中 dedup_key 时返回既有记录而**不改写**它——若把 (会话,环,块) 当去重键，
+ * 先「认可」后改「存疑」这条改判就会被静默丢掉，而界面照样把「存疑」点亮，
+ * 账本与人看到的东西直接对不上。改判本身是有价值的信息，追加一条、由闭环取最新即可。
+ *
+ * 重复点同一个结论由调用方按已表态状态挡掉（见 AckControl），不靠服务端去重。
  */
 export function recordAck(target: AckTarget, accepted: boolean): void {
   const { conversationId, messageId, blockId, node, stage, summary, refKind, refId, chosen } =
@@ -96,6 +120,5 @@ export function recordAck(target: AckTarget, accepted: boolean): void {
     chosen: chosen === undefined ? undefined : toJsonSafe(chosen),
     ref_kind: refKind,
     ref_id: refId,
-    dedup_key: blockId ? `${conversationId}:${node}:${stage}:${blockId}` : undefined,
   });
 }

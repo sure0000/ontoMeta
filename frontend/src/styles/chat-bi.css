@@ -1991,6 +1991,92 @@
   color: #fff;
 }
 
+/* 确认闭环总结块（P2）：恒六环，未走到的标灰而非隐藏——「哪一环没走」才是要看的 */
+.chatbi-closure {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--om-surface-secondary, #f8fafc);
+}
+.chatbi-closure-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.chatbi-closure-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text-primary, #0f172a);
+}
+.chatbi-closure-count {
+  font-size: 12px;
+  color: var(--om-text-tertiary, #94a3b8);
+}
+.chatbi-closure-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chatbi-closure-node {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 88px;
+  padding: 6px 10px;
+  border: 1px solid var(--om-border, #e2e8f0);
+  border-radius: 6px;
+  background: var(--om-surface, #fff);
+  /* 未到达：整格降到 60% 不透明度。比换一套灰色变量省事，且深浅色主题下都成立 */
+  opacity: 0.6;
+}
+.chatbi-closure-node--on {
+  opacity: 1;
+  border-color: var(--om-success, #10b981);
+}
+.chatbi-closure-node-label {
+  font-size: 12px;
+  color: var(--om-text-secondary, #475569);
+}
+.chatbi-closure-node-state {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--om-text-primary, #0f172a);
+}
+.chatbi-closure-node--on .chatbi-closure-node-state {
+  color: var(--om-success, #10b981);
+}
+.chatbi-closure-dangling {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--om-warning, #b45309);
+}
+
+/* 决策追踪页抽屉里的时间线条目。闭环条本身与对话内总结块共用 .chatbi-closure-* */
+.om-decision-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--om-border, #e2e8f0);
+  font-size: 13px;
+}
+.om-decision-item:last-child {
+  border-bottom: none;
+}
+.om-decision-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+/* 机器提案 / 人最终定的并排对照；窄屏下自动落成上下两栏 */
+.om-decision-diff {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
 /* 澄清反问（P4.1）：候选项做成可点击追问，用户一步接上而不必重打一遍 */
 .chatbi-clarify {
   display: flex;

@@ -10,6 +10,7 @@ import { DataAppsPage } from "./pages/DataAppsPage";
 import { DataAppViewPage } from "./pages/DataAppViewPage";
 import { DataAppEmbedPage } from "./pages/DataAppEmbedPage";
 import { DataAppPublicPage } from "./pages/DataAppPublicPage";
+import { DecisionsPage } from "./pages/DecisionsPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
@@ -55,6 +56,7 @@ export default function App() {
         <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
         <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
         <Route path="/chat-bi" element={<ChatBiPage />} />
+        <Route path="/decisions" element={<DecisionsPage />} />
         <Route path="/tasks" element={<TasksOverviewPage />} />
         <Route path="/tasks/create" element={<TaskCreatePage />} />
         <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />

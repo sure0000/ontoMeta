@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -198,6 +199,8 @@ def chat_bi_search_decisions(
     outcome: str | None = None,
     ref_kind: str | None = None,
     subject_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
@@ -208,6 +211,8 @@ def chat_bi_search_decisions(
         outcome=outcome,
         ref_kind=ref_kind,
         subject_id=subject_id,
+        since=since,
+        until=until,
         limit=limit,
     )
 

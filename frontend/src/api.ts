@@ -951,6 +951,26 @@ export const api = {
       `/api/chat-bi/conversations/${conversationId}/closure`,
     ),
 
+  /** 跨会话决策查询，供决策追踪页。结果附带 conversation_title。 */
+  searchChatBiDecisions: (params: {
+    node?: string;
+    outcome?: string;
+    ref_kind?: string;
+    subject_id?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+    const suffix = qs.toString();
+    return request<ChatBiDecision[]>(
+      `/api/chat-bi/decisions${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+
   /** P3.1：把用户确认的约定落库为本域记忆（点「记住」后调用）。 */
   rememberPreference: (domainId: string, text: string) =>
     request<{ id: string; text: string; remembered: boolean }>(

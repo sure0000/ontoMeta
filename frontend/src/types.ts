@@ -714,6 +714,8 @@ export interface ChatBiMessageItem {
 export interface ChatBiDecision {
   id: string;
   conversation_id: string;
+  /** 仅跨会话查询填充——会话内时间线本就在会话上下文里，不必重复。 */
+  conversation_title?: string | null;
   message_id?: string | null;
   block_id?: string | null;
   seq: number;

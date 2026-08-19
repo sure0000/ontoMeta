@@ -32,6 +32,7 @@ from app.models import (
     BusinessLogic,
     ChatBiConversation,
     ChatBiConversationTask,
+    ChatBiDecisionRecord,
     ChatBiDomainMemory,
     ChatBiMessage,
     DomainContext,
@@ -652,6 +653,14 @@ class ChatBiService:
         if not conv:
             raise ValueError("对话不存在")
         log_change(db, "chat_bi_conversation", conversation_id, "delete")
+        # 决策留痕随会话一起删。**不能靠 FK 兜底**：SQLite 默认不启外键，记录会留成
+        # 孤儿——在决策追踪页上表现为一行没有会话名、点「看闭环」还打不开的脏数据；
+        # 而在真启外键的库上，这条 delete 会直接被外键挡下、删会话变成 500。
+        # 显式删一次，两种库行为一致。
+        # （消息由 relationship 的 delete-orphan 级联带走，故此处只需处理本表。）
+        db.query(ChatBiDecisionRecord).filter(
+            ChatBiDecisionRecord.conversation_id == conversation_id
+        ).delete(synchronize_session=False)
         db.delete(conv)
         db.commit()
 

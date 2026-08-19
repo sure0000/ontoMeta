@@ -172,4 +172,9 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for status in payload.get("task_statuses") or []:
         _add({"type": "task_status", "status": status})
 
+    # 确认闭环总结**刻意不做成块**：块随消息落库，于是每条回答都会带一份快照——
+    # 要么每轮重复同一张图（噪声），要么得靠时间戳判断"自上条回答以来有无新决策"来抑制
+    # （SQLite 的 now() 只到秒，同秒内的决策会被误判成旧的）。而闭环是**会话级**状态，
+    # 本来就只该有一份当前值。故它由前端在对话末尾按 GET /closure 实时渲染一次。
+
     return blocks

@@ -19,6 +19,8 @@ import type {
 import { ChatBiComposer } from "./ChatBiComposer";
 import { ChatBiMessages } from "./ChatBiMessages";
 import { ChatBiSidebar } from "./ChatBiSidebar";
+import { DecisionLedgerProvider } from "./DecisionLedger";
+import { recordDecisionQuietly } from "./ledger";
 import { EMPTY_DEPS, getTimeGroup, type ChatMessage, type TimeGroup } from "./utils";
 
 export function ChatBiPage() {
@@ -751,6 +753,17 @@ const ChatBiMain = memo(function ChatBiMain({
         });
         hide();
         message.success("已生成数据应用草稿");
+        // 留痕：数据应用落成即「结果确认」环——此前这个确认走 REST 旁路且立刻导航离开，
+        // 会话里完全看不出用户到底点没点、生成了哪个应用。
+        recordDecisionQuietly(activeConversationId ?? undefined, {
+          node: "result",
+          stage: "data_app",
+          trigger: "app_generated",
+          summary: `生成${appType === "dashboard" ? "看板" : appType === "screen" ? "大屏" : "表格"}「${app.name ?? name ?? question}」`,
+          chosen: { app_type: appType, question, name: app.name ?? name },
+          ref_kind: "data_app",
+          ref_id: app.id,
+        });
         navigate(`/data-apps/${app.id}/edit`);
       } catch (err) {
         hide();
@@ -819,13 +832,28 @@ const ChatBiMain = memo(function ChatBiMain({
       setAddDashOpen(false);
       setPendingAdd(null);
       message.success("已生成图表并加入看板");
+      // 留痕：面板落成同属「结果确认」环。记的是最终落到哪块看板，不是用户点开弹窗那一下——
+      // 打开弹窗又取消不该在账本里留下一条「他确认了」。
+      recordDecisionQuietly(activeConversationId ?? undefined, {
+        node: "result",
+        stage: "data_app",
+        trigger: "widget_added",
+        summary: `生成面板「${pendingAdd.title || pendingAdd.question}」并加入看板`,
+        chosen: {
+          question: pendingAdd.question,
+          widget_type: pendingAdd.vizType || "bar",
+          dashboard_id: dashboardId,
+        },
+        ref_kind: "data_app",
+        ref_id: dashboardId,
+      });
       navigate(`/data-apps/${dashboardId}/edit`);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加入失败");
     } finally {
       setAddingDash(false);
     }
-  }, [domainIds, pendingAdd, addDashTarget, navigate]);
+  }, [domainIds, pendingAdd, addDashTarget, navigate, activeConversationId]);
 
   /**
    * agent 主动提的面板/看板提案被点确认（app_proposal 块）。
@@ -1072,7 +1100,8 @@ const ChatBiMain = memo(function ChatBiMain({
   );
 
   return (
-    <section className="chatbi-shell">
+    <DecisionLedgerProvider conversationId={activeConversationId ?? undefined}>
+      <section className="chatbi-shell">
       <div className="chatbi-shell-topbar">
         <Tooltip title={sidebarVisible ? "收起侧栏" : "展开侧栏"}>
           <Button
@@ -1137,5 +1166,6 @@ const ChatBiMain = memo(function ChatBiMain({
         />
       </Modal>
     </section>
+    </DecisionLedgerProvider>
   );
 });

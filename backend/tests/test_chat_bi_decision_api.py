@@ -181,3 +181,43 @@ def test_ledger_failure_does_not_break_decision_endpoint(
     )
     assert resp.status_code == 200
     assert resp.json()["recorded"] is False
+
+
+def test_search_endpoint_backs_the_tracking_page(client, admin_headers, conversation_id):
+    """追踪页依赖跨会话查询：能按环筛，且每条自带会话名。
+
+    会话名是服务端 join 来的——列表页只给一串 uuid 等于逼人逐条点开才知道在看什么，
+    而前端逐条回查会话就是 N+1。
+    """
+    for node in ("requirement", "result"):
+        client.post(
+            f"/api/chat-bi/conversations/{conversation_id}/decisions",
+            headers=admin_headers,
+            json={"node": node, "summary": f"{node} 拍板"},
+        )
+
+    rows = client.get("/api/chat-bi/decisions?node=result", headers=admin_headers).json()
+    mine = [r for r in rows if r["conversation_id"] == conversation_id]
+    assert [r["node"] for r in mine] == ["result"]
+    assert mine[0]["conversation_title"] == "决策留痕 API 测试"
+
+
+def test_closure_endpoint_can_reach_the_result_ring(client, admin_headers, conversation_id):
+    """六环必须**能走完**。
+
+    这条钉住一个真实回归：任务回执上的「认可」曾被记成 data 环，于是 result 恒不可达——
+    闭环永远差最后一格，且恒报「任务已执行但结果尚未确认」，久了就没人再看那条告警。
+    """
+    for node in ("requirement", "ontology", "data", "plan", "execute", "result"):
+        client.post(
+            f"/api/chat-bi/conversations/{conversation_id}/decisions",
+            headers=admin_headers,
+            json={"node": node, "ref_kind": "artifact", "ref_id": "art-1"},
+        )
+
+    closure = client.get(
+        f"/api/chat-bi/conversations/{conversation_id}/closure", headers=admin_headers
+    ).json()
+    assert closure["reached_count"] == closure["total_count"] == 6
+    assert all(n["reached"] for n in closure["nodes"])
+    assert closure["dangling"] == []  # 走完了就不该再有悬挂告警

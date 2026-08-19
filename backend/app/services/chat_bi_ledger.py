@@ -272,11 +272,15 @@ def list_decisions(db: Session, conversation_id: str) -> list[dict]:
     return [_to_dict(r) for r in rows]
 
 
-def build_closure(db: Session, conversation_id: str) -> dict:
+def build_closure(
+    db: Session, conversation_id: str, *, include_records: bool = True
+) -> dict:
     """闭环总结：恒六环 + 悬挂项告警 + 完整时间线。
 
     **未到达的环标灰而不隐藏**——"哪一环没走"正是管理要看的东西。
     闭环状态由记录聚合推导、不独立维护（同 PipelineStatus 的取舍：两处状态迟早分叉）。
+
+    ``include_records=False`` 给出不含时间线的轻量摘要，供只要六环聚合的调用方。
     """
     records = list_decisions(db, conversation_id)
     by_node: dict[str, list[dict]] = {}
@@ -305,7 +309,7 @@ def build_closure(db: Session, conversation_id: str) -> dict:
         "reached_count": sum(1 for n in nodes if n["reached"]),
         "total_count": len(NODE_SEQUENCE),
         "dangling": _detect_dangling(by_node),
-        "records": records,
+        "records": records if include_records else [],
     }
 
 
@@ -341,8 +345,15 @@ def search_decisions(
     until: datetime | None = None,
     limit: int = 200,
 ) -> list[dict]:
-    """跨会话查询，供决策追踪页。"""
-    q = db.query(ChatBiDecisionRecord)
+    """跨会话查询，供决策追踪页。
+
+    结果附带 ``conversation_title``：追踪页列的是跨会话的记录，只给一串 uuid
+    等于逼人逐条点进去才知道在看什么。一次 outer join 换掉 N 次往返。
+    """
+    q = db.query(ChatBiDecisionRecord, ChatBiConversation.title).outerjoin(
+        ChatBiConversation,
+        ChatBiConversation.id == ChatBiDecisionRecord.conversation_id,
+    )
     if node:
         q = q.filter(ChatBiDecisionRecord.node == node)
     if outcome:
@@ -360,7 +371,7 @@ def search_decisions(
         .limit(max(1, min(limit, 1000)))
         .all()
     )
-    return [_to_dict(r) for r in rows]
+    return [{**_to_dict(row), "conversation_title": title} for row, title in rows]
 
 
 def resolve_conversation_for_artifact(db: Session, artifact_id: str) -> str | None:
