@@ -13,6 +13,7 @@
 
 export type SpecControlType =
   | "text"
+  | "number"
   | "textarea"
   | "select"
   | "multiSelect"
@@ -43,6 +44,11 @@ export interface SpecFieldDef {
   optionSource?: OptionSource;
   default?: unknown;
   help?: string;
+  /** number 控件的取值范围（与后端 flink_params 的校验同界，免得填完才被闸门拦）。 */
+  min?: number;
+  max?: number;
+  /** 折进「高级」折叠面板：调优项，不填也能跑（留空 = 跟随设置页默认）。 */
+  advanced?: boolean;
 }
 
 // ---- 闭集常量（与后端同源，注释标注来源；变动极少，P0 前端内置避免多一次请求） ----
@@ -68,6 +74,14 @@ const LAYER_OPTIONS = [
   { value: "dwd", label: "明细层 DWD" },
   { value: "dws", label: "汇总层 DWS" },
   { value: "ads", label: "应用层 ADS" },
+];
+
+/** flink run -t 的取值闭集：与后端 `flink_params.DEPLOY_TARGETS`、设置页下拉同源。 */
+const DEPLOY_TARGET_OPTIONS = [
+  { value: "yarn-per-job", label: "yarn-per-job" },
+  { value: "yarn-session", label: "yarn-session" },
+  { value: "remote", label: "remote" },
+  { value: "local", label: "local" },
 ];
 
 const EXEC_MODE_OPTIONS = [
@@ -97,6 +111,58 @@ const targetDatasourceField = (note: string): SpecFieldDef => ({
   optionSource: { kind: "dataSources" },
   help: note,
 });
+
+/**
+ * 任务级 Flink 执行参数。**设置页那份是默认值，这里是这一个任务的覆盖**——
+ * 一条搬 300 张表的同步和一条小指标聚合，对并行度/队列/checkpoint 的要求不是一回事。
+ * 留空 = 跟随设置页（后端 `flink_params.normalize` 直接丢弃空值，不落进 Spec）。
+ *
+ * 只给**真的经 Flink 跑**的三类任务（sync/transform/metric）。物化只建表
+ * （Airflow SQLExecuteQueryOperator 直连目标仓），给它摆一组 Flink 参数等于让人白填。
+ *
+ * 不含 SqlRunner JAR / main class / flink 命令路径：那是「Flink 装在哪」的部署事实
+ * （jar 由 ontoMeta 随包投递），逐任务改只会让投递的 jar 与命令行对不上，仍只在设置页配。
+ */
+const flinkFields = (): SpecFieldDef[] => [
+  {
+    key: "flink_parallelism",
+    label: "并行度",
+    control: "number",
+    min: 1,
+    max: 512,
+    advanced: true,
+    help: "这个任务的 flink run -p；留空跟随设置页。大表搬运调高，小任务别占满集群",
+  },
+  {
+    key: "flink_yarn_queue",
+    label: "YARN 队列",
+    control: "text",
+    advanced: true,
+    help: "提交到哪个队列（-Dyarn.application.queue）；留空跟随设置页",
+  },
+  {
+    key: "flink_deploy_target",
+    label: "提交目标",
+    control: "select",
+    optionSource: { kind: "static", options: DEPLOY_TARGET_OPTIONS },
+    advanced: true,
+    help: "flink run -t；留空跟随设置页",
+  },
+  {
+    key: "flink_checkpoint_dir",
+    label: "Checkpoint 目录",
+    control: "text",
+    advanced: true,
+    help: "流式/CDC 作业的读位点目录，file:///var/… 或 hdfs://…；批作业不需要，留空跟随设置页",
+  },
+  {
+    key: "flink_extra_args",
+    label: "额外 flink run 参数",
+    control: "stringList",
+    advanced: true,
+    help: "如 -Dtaskmanager.memory.process.size=2g，输入后回车添加；不接受空白与 shell 元字符",
+  },
+];
 
 /**
  * 各 kind 的字段集。metric 是特例：手填只暴露「选一个业务逻辑」+ 少量覆盖，
@@ -129,6 +195,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       optionSource: { kind: "static", options: EXEC_MODE_OPTIONS },
       default: "batch",
     },
+    ...flinkFields(),
   ],
   transform: [
     {
@@ -163,6 +230,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       default: "batch",
     },
     { key: "notes", label: "备注", control: "textarea" },
+    ...flinkFields(),
   ],
   sync: [
     {
@@ -196,6 +264,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       help: "连接别名（=Airflow conn_id），不是凭据本身",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
+    ...flinkFields(),
   ],
   materialize: [
     targetDatasourceField("本体要物化到哪个仓。materialize 的 drafter 强制要求此项，缺它无法起草"),

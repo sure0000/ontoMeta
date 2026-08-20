@@ -599,12 +599,12 @@ export interface CubeSettings {
 
 /** Airflow 编排配置。凭据只回「是否已设 + 掩码」，不回明文。 */
 export interface AirflowSettings {
+  /** 连接一：调度 API。没有 token/api_version——前者 Airflow REST 用的是 basic auth，
+   *  后者由客户端 404 时自协商。 */
   endpoint: string;
   username?: string | null;
   password_set: boolean;
   password_hint?: string | null;
-  token_set: boolean;
-  api_version: string;
   enabled: boolean;
   /** 启用且 endpoint / SSH 主机已填才算真的可用；否则物化报错无法执行。 */
   available: boolean;
@@ -614,8 +614,7 @@ export interface AirflowSettings {
   ssh_host: string;
   ssh_port: number;
   ssh_user: string;
-  /** 私钥路径（ontoMeta 侧可读）。留空则用密码（需要 sshpass）。 */
-  ssh_key_path: string;
+  /** 填了就用密码认证（需 sshpass）；留空则用 ontoMeta 主机的默认 SSH 身份/agent。 */
   ssh_password_set: boolean;
   ssh_password_hint: string | null;
   max_tasks_per_dag: number;
@@ -648,9 +647,16 @@ export interface DependencyComponentMeta {
   label: string;
   multi: boolean;
 }
+/** 连接分组：一个组件可能握着几条互不相干的连接（Airflow = 调度 API + DAG 投递）。 */
+export interface DependencyConnectionGroup {
+  id: string;
+  label: string;
+  fields: string[];
+}
 export interface DependencySchema {
   components: DependencyComponentMeta[];
   connection_schemas: Record<string, DependencySchemaField[]>;
+  connection_groups: Record<string, DependencyConnectionGroup[]>;
   deploy_modes: string[];
   // 每组件允许的部署方式（未列出=全支持）；前端据此收窄模式选择器。
   component_deploy_modes?: Record<string, string[]>;
@@ -678,6 +684,17 @@ export interface DependencyProbeResult {
   ok: boolean;
   message: string;
   latency_ms?: number;
+  /** 逐条连接的拨测明细；单连接组件也回一条。 */
+  parts?: DependencyProbePart[];
+}
+export interface DependencyProbePart {
+  group: string;
+  label: string;
+  ok: boolean;
+  message: string;
+  latency_ms?: number | null;
+  /** 记账时间（ISO）。只在组件行的 deploy_spec._probe 里有。 */
+  at?: string;
 }
 export interface DependencyDeployResult {
   status: string;

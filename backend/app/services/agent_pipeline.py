@@ -446,8 +446,7 @@ class AgentPipelineService:
                 return
 
             client = AirflowClient(
-                rt.endpoint, username=rt.username, password=rt.password,
-                token=rt.token, api_version=rt.api_version,
+                rt.endpoint, username=rt.username, password=rt.password
             )
             try:
                 states: list = []

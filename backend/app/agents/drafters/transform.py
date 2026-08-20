@@ -14,6 +14,7 @@ from app.agents.drafters.base import Drafter
 from app.database import SessionLocal
 from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
+from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 
 # 清洗需求 → 结构化规则。命中不了的原文保留在 notes 里交人处理，不臆造规则。
@@ -87,6 +88,9 @@ class TransformDrafter(Drafter):
                 or self._rules(intent),
                 # 表单填的备注优先；对话路径仍把未匹配成规则的原文留在这里交人处理。
                 "notes": context.get("notes") or intent,
+                # 任务级 Flink 执行参数（并行度/队列/提交目标/checkpoint/额外 -D）。
+                # 只落人真填了的项——留空 = 跟随设置页默认，不在 Spec 里凝固成快照。
+                **flink_params.from_context(context),
             }
 
     # code → 描述，用于把表单下拉给的规则码结构化成 {rule, description}。

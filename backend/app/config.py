@@ -17,9 +17,9 @@ class Settings(BaseSettings):
     datahub_frontend_url: str = "http://localhost:9002"
     datahub_token: str | None = None
 
-    # Airflow 编排的产物投递目录（方案 A：生成 DAG/作业配置文件 → Airflow 读共享卷）。
-    # 属部署基础设施（与 Airflow 容器的挂载点对齐），不在设置页配；缺省由
-    # settings_service 解析为 docker/orchestration 下的本地验证栈目录，可用环境变量覆盖。
+    # Airflow 编排的产物投递目录（部署路径，config-web-only 法则的 bootstrap 例外）：
+    # 只在给新库播种 Airflow 设置行时读一次，缺省落到 docker/orchestration 下的本地
+    # 验证栈目录；此后以设置页（DB）为权威，运行期不再读本变量。
     airflow_dags_dir: str = ""
     airflow_jobs_dir: str = ""
     # 搬运任务容器接哪张 Docker 网络。默认 bridge 保持原行为；真实部署里源库与目标仓

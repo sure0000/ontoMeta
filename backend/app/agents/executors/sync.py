@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents.executors.base import Executor
+from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 
 
@@ -106,6 +107,9 @@ class SyncExecutor(Executor):
                     # 只搬这一个对象（按实体名裁剪）
                     selected_targets=[object_type],
                     artifact_id=context.get("artifact_id"),
+                    # 这条同步自己的 Flink 提交参数（并行度/队列/提交目标/checkpoint/
+                    # 额外 -D）：Spec 优先、context 兜底，留空的项跟随设置页默认。
+                    flink_task_params=flink_params.from_spec(spec, context),
                 )
             except materialization_runner.MaterializationError as exc:
                 # 未配 Airflow / Flink / 投递失败 / 无可搬对象：退回仅产出，不静默假装执行了。

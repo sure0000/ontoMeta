@@ -34,6 +34,13 @@ deploy_target / parallelism / yarn_queue / checkpoint_dir）等「这套部署�
 `_AIRFLOW_EXTRA_FIELDS`）。判断标准不是「是不是部署相关」，而是「能不能 Web 化」——只要运行期
 能从 DB 读到、且不造成引导期先有鸡问题，就必须走设置页。
 
+**全局配置 ≠ 唯一取值**：设置页那份是**默认值**。作业级的调优参数（Flink 的
+parallelism / yarn_queue / deploy_target / checkpoint_dir / 额外 `-D`）在**每个任务的
+Spec 里可逐条覆盖**（见 `app/services/flink_params.py` 与前端 `specFields.ts` 的
+「高级：Flink 执行参数」），留空才跟随设置页。判断标准：这个值**回答的是「这套部署长什么样」
+还是「这次作业怎么跑」**——前者（jar 路径、flink 命令路径、main class）只在设置页一处；
+后者随任务走，一条搬 300 张表的同步与一条小指标聚合本就不该共用一套集群参数。
+
 例外项应尽量少、集中在引导期（`.env` 或部署编排的环境注入）里。**除此之外的任何配置都必须走
 Web 端。** 本仓库已删除 `backend/.env`，引导期变量由 `service.sh` / `Makefile` 注入默认值。
 

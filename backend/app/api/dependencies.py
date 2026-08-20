@@ -72,10 +72,18 @@ def delete_dependency(component_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/settings/dependencies/{component_id}/probe", response_model=ProbeResultOut)
-def probe_dependency(component_id: str, db: Session = Depends(get_db)):
-    """拨测当前连接信息（按组件类型分派，复用既有 LLM/Airflow/SQLAlchemy 拨测）。"""
-    result = _service.probe(db, component_id)
-    return ProbeResultOut(ok=result.ok, message=result.message, latency_ms=result.latency_ms)
+def probe_dependency(
+    component_id: str, target: str | None = None, db: Session = Depends(get_db)
+):
+    """拨测当前连接信息（按组件类型分派，复用既有 LLM/Airflow/SQLAlchemy 拨测）。
+
+    ``target``：只测某一条连接（Airflow 的 ``api`` / ``ssh``），省略则全测。一个组件的
+    几条连接互不相干，得能分开测——否则 SSH 没配好会把「调度 API 其实是通的」也盖掉。
+    """
+    result = _service.probe(db, component_id, target=target)
+    return ProbeResultOut(
+        ok=result.ok, message=result.message, latency_ms=result.latency_ms, parts=result.parts
+    )
 
 
 @router.post("/settings/dependencies/{component_id}/deploy", response_model=DeployResultOut)

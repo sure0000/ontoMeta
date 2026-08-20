@@ -59,7 +59,6 @@ const AIRFLOW_EXTRA_FIELDS = [
   "ssh_host",
   "ssh_port",
   "ssh_user",
-  "ssh_key_path",
   "max_tasks_per_dag",
   "max_active_tasks_per_dag",
   "dag_parse_timeout",
@@ -74,6 +73,19 @@ const AIRFLOW_EXTRA_FIELDS = [
   "flink_yarn_queue",
   "flink_checkpoint_dir",
 ] as const;
+
+// 连接字段的中文名：schema 回的是后端字段名，直接当 label 会让表单变成一串英文。
+const FIELD_LABEL: Record<string, string> = {
+  endpoint: "服务地址",
+  username: "用户名",
+  password: "密码",
+};
+
+// 由组件专有分节自己渲染的连接分组：airflow 的 SSH 密码要和 SSH 主机/端口/目录放在
+// 一起才读得懂，故不在通用「连接信息」段再渲染一遍——那正是「SSH 密码填两遍」的由来。
+const CONN_GROUPS_RENDERED_ELSEWHERE: Record<string, string[]> = {
+  airflow: ["ssh"],
+};
 
 const MODE_ICON: Record<string, React.ReactNode> = {
   external: <CloudServerOutlined />,
@@ -177,12 +189,12 @@ export function DependencyPanel() {
     setDrawerOpen(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (opts?: { keepOpen?: boolean }): Promise<boolean> => {
     let values: Record<string, unknown>;
     try {
       values = await form.validateFields();
     } catch {
-      return;
+      return false;
     }
     const key = values.key as string;
     const mode = values.deploy_mode as string;
@@ -230,28 +242,95 @@ export function DependencyPanel() {
         await api.createDependency(body);
         message.success("已新增");
       }
-      setDrawerOpen(false);
+      if (!opts?.keepOpen) setDrawerOpen(false);
       await load();
+      return true;
     } catch (err) {
       message.error(err instanceof ApiError ? err.message : "保存失败");
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
-  const handleProbe = async (id: string) => {
-    setProbing((p) => ({ ...p, [id]: true }));
+  // 表单里改了、但还没保存的字段。拨测走的是**库里已保存**的配置（探针在后端跑，
+  // 读的是组件行），不提示的话就会出现「我明明改了目录，报错里还是旧路径」——
+  // 那不是路径写死了，是拨测压根没看见你刚填的值。
+  const norm = (v: unknown) => (v === undefined || v === null ? "" : String(v));
+  const unsavedFields = (): string[] => {
+    if (!editing) return [];
+    const v = form.getFieldsValue() as Record<string, unknown>;
+    const out: string[] = [];
+    (schema?.connection_schemas[editing.key] ?? []).forEach((f) => {
+      const cur = v[`conn_${f.name}`];
+      // 机密回显的是掩码，比不了原值：输入框里有内容就当改过
+      if (f.secret) {
+        if (cur) out.push(FIELD_LABEL[f.name] ?? f.name);
+        return;
+      }
+      if (norm(cur) !== norm(editing.connection[f.name])) {
+        out.push(FIELD_LABEL[f.name] ?? f.name);
+      }
+    });
+    const extra = (editing.deploy_spec?.extra ?? {}) as Record<string, unknown>;
+    AIRFLOW_EXTRA_FIELDS.forEach((f) => {
+      if (norm(v[`extra_${f}`]) !== norm(extra[f])) out.push(f);
+    });
+    return out;
+  };
+
+  // target 只测组件的其中一条连接（如 airflow 的 api / ssh），省略则全测。
+  // 一个组件的几条连接互不相干，得能分开测——否则 SSH 没配好会把「调度 API 其实是
+  // 通的」也一起盖成红叉，用户根本看不出该修哪条。
+  const handleProbe = async (id: string, target?: string) => {
+    const busy = target ? `${id}:${target}` : id;
+    setProbing((p) => ({ ...p, [busy]: true }));
     try {
-      const r = await api.probeDependency(id);
+      const r = await api.probeDependency(id, target);
       if (r.ok) message.success(`拨测通过${r.latency_ms ? ` · ${r.latency_ms}ms` : ""}`);
       else message.error(r.message);
       await load();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "拨测失败");
     } finally {
-      setProbing((p) => ({ ...p, [id]: false }));
+      setProbing((p) => ({ ...p, [busy]: false }));
     }
   };
+
+  // 某一条连接的「只测这条」按钮，放在该连接的配置分节里。拨测读的是**已保存**的
+  // 配置，故新增未保存时不给按钮，免得测的和刚填的不是一回事。
+  const probeSaved = (id: string, target: string) => {
+    const dirty = unsavedFields();
+    if (!dirty.length) {
+      void handleProbe(id, target);
+      return;
+    }
+    Modal.confirm({
+      title: "表单有未保存的改动",
+      content: `拨测读的是已保存的配置，不是你刚填的内容（${dirty.join("、")}）。先保存再测吗？`,
+      okText: "保存并测试",
+      cancelText: "取消",
+      onOk: async () => {
+        if (await handleSave({ keepOpen: true })) await handleProbe(id, target);
+      },
+    });
+  };
+
+  const probeButton = (target: string, label: string) =>
+    editing ? (
+      <Button
+        size="small"
+        style={{ marginBottom: 12 }}
+        loading={probing[`${editing.id}:${target}`]}
+        onClick={() => probeSaved(editing.id, target)}
+      >
+        测试「{label}」
+      </Button>
+    ) : (
+      <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+        保存后可单独测试这条连接
+      </Text>
+    );
 
   const handleDeploy = async (id: string) => {
     setDeploying((p) => ({ ...p, [id]: true }));
@@ -352,16 +431,37 @@ export function DependencyPanel() {
     {
       title: "状态",
       dataIndex: "deploy_status",
-      width: 100,
+      width: 190,
       render: (s: string, r) => {
         // external 模式的 not_deployed 显示"未拨测"而非"未部署"
         const label = s === "not_deployed" && r.deploy_mode === "external"
           ? "未拨测"
           : (STATUS_LABEL[s] ?? s);
+        // 多条连接的组件（airflow = 调度 API + DAG 投递）逐条显示最近一次拨测结果：
+        // 总状态只说"失败"，说不出是哪条断了。
+        const groups = schema?.connection_groups?.[r.key] ?? [];
+        const ledger = (r.deploy_spec?._probe ?? {}) as Record<
+          string,
+          { ok: boolean; message: string }
+        >;
         return (
-          <Tooltip title={r.deploy_error}>
-            <Tag color={STATUS_COLOR[s] ?? "default"}>{label}</Tag>
-          </Tooltip>
+          <Space direction="vertical" size={2} align="start">
+            <Tooltip title={r.deploy_error}>
+              <Tag color={STATUS_COLOR[s] ?? "default"}>{label}</Tag>
+            </Tooltip>
+            {groups.length > 1
+              ? groups.map((g) => {
+                  const part = ledger[g.id];
+                  return (
+                    <Tooltip key={g.id} title={part?.message ?? "尚未拨测"}>
+                      <Tag color={part ? (part.ok ? "success" : "error") : "default"}>
+                        {g.label} {part ? (part.ok ? "✓" : "✗") : "—"}
+                      </Tag>
+                    </Tooltip>
+                  );
+                })
+              : null}
+          </Space>
         );
       },
     },
@@ -516,17 +616,29 @@ export function DependencyPanel() {
               if (!key) return <Text type="secondary">请先选择组件类型</Text>;
               // external：手填连接信息；其余模式：填部署参数，部署后自动回收连接。
               if (mode === "external") {
-                const fields = schema?.connection_schemas[key] ?? [];
+                const groups = schema?.connection_groups?.[key] ?? [];
+                const movedOut = CONN_GROUPS_RENDERED_ELSEWHERE[key] ?? [];
+                // 已由专有分节渲染的字段在这里跳过，否则同一个字段填两遍。
+                const skip = new Set(
+                  movedOut.flatMap((gid) => groups.find((g) => g.id === gid)?.fields ?? []),
+                );
+                const fields = (schema?.connection_schemas[key] ?? []).filter(
+                  (f) => !skip.has(f.name),
+                );
+                // 多连接组件：这一段就是其中一条，标题用它的名字并给「只测这条」按钮。
+                const here = groups.filter((g) => !movedOut.includes(g.id));
+                const solo = groups.length > 1 && here.length === 1 ? here[0] : null;
                 return (
                   <>
-                    <Divider>连接信息</Divider>
+                    <Divider>{solo ? `${solo.label} 连接` : "连接信息"}</Divider>
+                    {solo ? probeButton(solo.id, solo.label) : null}
                     {fields.length === 0 ? (
                       <Text type="secondary">该组件暂无连接字段</Text>
                     ) : (
                       fields.map((f) => (
                         <Form.Item
                           key={f.name}
-                          label={f.name}
+                          label={FIELD_LABEL[f.name] ?? f.name}
                           name={`conn_${f.name}`}
                           rules={f.required ? [{ required: true, message: "必填" }] : []}
                         >
@@ -560,18 +672,6 @@ export function DependencyPanel() {
               return (
                 <>
                   <Divider>部署参数</Divider>
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 12 }}
-                    message={
-                      mode === "bare_metal"
-                        ? "SSH 远程安装：填目标机 IP + SSH 账号 + 密码/私钥，点「保存」后在列表点「部署」，由 ontoMeta 远程安装、启动服务并自动回收连接。安装可能持续数分钟，状态会自动刷新。"
-                        : mode === "docker"
-                          ? "填 compose 文件与服务端口，点「保存」后在列表点「部署」起容器并自动回收连接。"
-                          : "填 K8s manifest（含同名 Service），点「保存」后在列表点「部署」apply 并回收端点。"
-                    }
-                  />
                   {specFields.map((f) =>
                     hiddenForAuth(f.name) ? null : (
                       <Form.Item
@@ -630,34 +730,21 @@ export function DependencyPanel() {
               getFieldValue("key") === "airflow" ? (
                 <>
                   <Divider>编排参数</Divider>
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 12 }}
-                    message="DAG 投递 / 执行通道 / DAG 形状与时序"
-                    description="连接（endpoint/账密）已在上方管理，这里只剩编排旋钮。"
-                  />
                   <Collapse
                     defaultActiveKey={["delivery", "channel", "shape"]}
                     items={[
                       {
                         key: "delivery",
-                        label: "DAG 投递",
+                        label: "DAG 投递（SSH）",
                         children: (
                           <>
-                            <Alert
-                              type="info"
-                              showIcon
-                              style={{ marginBottom: 12 }}
-                              message="产物经 SSH 投递到 Airflow 主机"
-                              description="ontoMeta 在本地临时目录组装制品包（DAG + spec + SQL + SqlRunner jar），用 rsync 推到下面这台主机，再原子切换到 DAG 目录。SqlRunner jar 随包分发，无需预先摆在 Airflow 机器上。本机验证可把主机填 localhost。"
-                            />
+                            {probeButton("ssh", "DAG 投递")}
                             <Form.Item
                               label="DAG 目录"
                               name="extra_dags_dir"
-                              extra="Airflow 主机上的路径（不是 ontoMeta 本机的）"
+                              extra="Airflow 主机上、它已在扫描的 DAG 目录（容器部署填宿主机上的挂载源）"
                             >
-                              <Input placeholder="/opt/airflow/dags" />
+                              <Input placeholder="~/airflow/dags" />
                             </Form.Item>
                             <Space align="start" wrap>
                               <Form.Item
@@ -667,11 +754,11 @@ export function DependencyPanel() {
                               >
                                 <Input placeholder="airflow-host" style={{ width: 200 }} />
                               </Form.Item>
-                              <Form.Item label="端口" name="extra_ssh_port" extra="默认 22">
+                              <Form.Item label="SSH 端口" name="extra_ssh_port" extra="默认 22">
                                 <InputNumber min={1} max={65535} style={{ width: 110 }} />
                               </Form.Item>
                               <Form.Item
-                                label="用户名"
+                                label="SSH 用户名"
                                 name="extra_ssh_user"
                                 extra="留空用 ssh 默认"
                               >
@@ -679,16 +766,9 @@ export function DependencyPanel() {
                               </Form.Item>
                             </Space>
                             <Form.Item
-                              label="私钥路径"
-                              name="extra_ssh_key_path"
-                              extra="ontoMeta 侧可读的私钥。留空则用下方密码（需目标机装 sshpass）"
-                            >
-                              <Input placeholder="~/.ssh/id_ed25519" />
-                            </Form.Item>
-                            <Form.Item
                               label="SSH 密码"
                               name="conn_ssh_password"
-                              extra="仅在未填私钥路径时使用"
+                              extra="留空 = 用 ontoMeta 主机的默认 SSH 身份/agent（要指定私钥就写进该机 ~/.ssh/config）；填了则用密码认证，需装 sshpass"
                             >
                               <Input.Password placeholder={editing ? "留空=保持不变" : ""} />
                             </Form.Item>
@@ -740,7 +820,14 @@ export function DependencyPanel() {
                             >
                               <Switch />
                             </Form.Item>
-                            <Divider plain>Flink 执行引擎</Divider>
+                            <Divider plain>Flink 执行引擎（默认值）</Divider>
+                            <Alert
+                              type="info"
+                              showIcon
+                              style={{ marginBottom: 16 }}
+                              message="这里配的是默认值"
+                              description="并行度 / YARN 队列 / 提交目标 / Checkpoint 目录可在每个任务的「高级：Flink 执行参数」里单独覆盖，任务留空才用这里的值。SqlRunner JAR、main class、flink 命令路径是部署事实，只在这里配。"
+                            />
                             <Form.Item
                               label="Flink SqlRunner JAR"
                               name="extra_flink_sql_runner_jar"

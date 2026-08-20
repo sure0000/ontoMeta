@@ -571,8 +571,6 @@ def get_materialize_task_result(
         airflow.endpoint,
         username=airflow.username,
         password=airflow.password,
-        token=airflow.token,
-        api_version=airflow.api_version,
     )
     # 任务落在哪一批不由前端记：逐批试，命中即返回。批数是个位到十位数，代价可接受。
     try:
@@ -622,8 +620,6 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
         airflow.endpoint,
         username=airflow.username,
         password=airflow.password,
-        token=airflow.token,
-        api_version=airflow.api_version,
     )
 
     def _tasks(items):

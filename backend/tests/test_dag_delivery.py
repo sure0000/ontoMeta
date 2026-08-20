@@ -205,10 +205,14 @@ def test_chain_dag_shape_without_jobs_or_lib():
 # ---------- 认证 ----------
 
 
-def test_key_auth_passes_identity_options():
-    opts = get_delivery("h", key_path="/keys/id_ed25519")._ssh_opts()
-    assert "-i" in opts and "/keys/id_ed25519" in opts
-    assert "IdentitiesOnly=yes" in opts
+def test_no_password_uses_default_identity_in_batch_mode():
+    """不填密码 = 走本机默认 SSH 身份/agent。BatchMode=yes：认证不了就立刻失败，
+    而不是挂在一个没人看得见的交互式密码提示上直到超时。
+
+    私钥**路径**不再是配置项——那是 ontoMeta 主机 ~/.ssh/config 的事。"""
+    opts = get_delivery("h")._ssh_opts()
+    assert "BatchMode=yes" in opts
+    assert "-i" not in opts
 
 
 def test_custom_port_is_passed():
@@ -228,9 +232,9 @@ def test_password_auth_uses_sshpass_when_available(monkeypatch):
     assert get_delivery("h", password="pw")._auth_prefix() == ["sshpass", "-p", "pw"]
 
 
-def test_key_path_takes_precedence_over_password(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda _: None)  # 没装 sshpass 也不该报错
-    assert get_delivery("h", key_path="/k", password="pw")._auth_prefix() == []
+def test_password_switches_off_batch_mode():
+    """填了密码就得让 ssh 接受 sshpass 喂进去的密码，BatchMode 必须关掉。"""
+    assert "BatchMode=no" in get_delivery("h", password="pw")._ssh_opts()
 
 
 # ---------- 错误映射 ----------

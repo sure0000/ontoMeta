@@ -198,7 +198,6 @@ def _try_live_state(db: Session, artifact: GovernanceArtifact) -> dict | None:
             return None
         client = AirflowClient(
             rt.endpoint, username=rt.username, password=rt.password,
-            token=rt.token, api_version=rt.api_version,
         )
         try:
             states: list = []

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.governance import GovernanceStandard, active_standard
 from app.governance.lint import lint_spec
 from app.models import ObjectType, Ontology, Property
+from app.services import flink_params
 from app.services.draft_consistency import ValidationIssue, validate_ontology
 from app.warehouse import UnknownEngineError, get_adapter
 
@@ -68,6 +69,7 @@ def validate_spec(
 
     standard = active_standard(db)
     issues.extend(_check_engines(spec))
+    issues.extend(_check_flink_params(spec))
     issues.extend(_check_ontology_refs(db, spec, ontology_id))
     issues.extend(_check_required_metadata(kind, spec, standard))
     issues.extend(_check_standard(kind, spec, standard))
@@ -135,6 +137,25 @@ def _scoped_ontology_issues(
             )
         )
     return scoped
+
+
+def _check_flink_params(spec: dict[str, Any]) -> list[ValidationIssue]:
+    """任务级 Flink 执行参数（并行度/队列/提交目标/checkpoint/额外 -D）的形态校验。
+
+    这些值会拼进 DAG 里 ``flink run`` 的命令行与流作业的 SQL。放到 DagRun 里才炸，
+    人拿到的是一条看不懂的 bash 报错；在闸门上拦，说的是"并行度须在 1~512 之间"。
+    """
+    try:
+        flink_params.normalize(spec)
+    except flink_params.FlinkParamError as exc:
+        return [
+            ValidationIssue(
+                code="flink_param_invalid",
+                message=f"Flink 执行参数：{exc}",
+                entity_type="artifact",
+            )
+        ]
+    return []
 
 
 def _check_engines(spec: dict[str, Any]) -> list[ValidationIssue]:

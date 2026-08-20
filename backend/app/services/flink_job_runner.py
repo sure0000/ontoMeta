@@ -20,9 +20,9 @@ from sqlalchemy.orm import Session
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.services.airflow_dag_builder import (
     FlinkSqlTask,
-    FlinkSubmitConfig,
     build_flink_sql_dag,
 )
+from app.services import flink_params
 from app.services.settings_service import SettingsService
 
 _settings = SettingsService()
@@ -64,6 +64,7 @@ def run_flink_sql(
     dag_id_suffix: str | None = None,
     artifact_id: str | None = None,
     swaps: dict[str, list[str]] | None = None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """为一批 Flink SQL 任务生成 DAG、落盘、触发，返回回执。
 
@@ -77,6 +78,8 @@ def run_flink_sql(
         dag_id_suffix: 批次 / cron 分组后缀
         artifact_id: 制品 id（作 dag_run_id，重复提交幂等）
         swaps: ``{task_id: [swap SQL]}``，全量搬运 staging→正式表原子切换（见 build_flink_sql_dag）
+        flink_task_params: **这个任务自己的** Flink 提交参数（并行度/队列/提交目标/
+            checkpoint/额外 -D），来自制品 Spec；留空的项跟随设置页默认值。
 
     Returns:
         回执 dict：dag_id / dag_run_id / state / run_url / artifacts（落盘路径）/ error（若有）
@@ -90,7 +93,12 @@ def run_flink_sql(
             "未配置可用的 Airflow（需在设置页填 endpoint 并启用），无法执行 Flink 作业"
         )
 
-    # Flink on YARN 部署参数：从设置页（DB）读。缺 runner_jar 退回「仅产出」。
+    # Flink on YARN 提交参数：设置页（DB）给默认值，**制品 Spec 逐任务覆盖**——
+    # 大搬运与小聚合对并行度/队列的要求不同，共用一套参数总有一边是错的。
+    try:
+        task_params = flink_params.normalize(flink_task_params)
+    except flink_params.FlinkParamError as exc:
+        raise FlinkJobError(f"任务的 Flink 执行参数非法：{exc}") from exc
     runner_jar = (airflow.flink_sql_runner_jar or "").strip()
     if not runner_jar:
         return {
@@ -104,14 +112,8 @@ def run_flink_sql(
             "sql": {t.task_id: t.sql for t in tasks},
         }
 
-    flink = FlinkSubmitConfig(
-        runner_jar=runner_jar,
-        runner_class=airflow.flink_sql_runner_class,
-        flink_bin=airflow.flink_bin,
-        deploy_target=airflow.flink_deploy_target,
-        parallelism=airflow.flink_parallelism,
-        yarn_queue=(airflow.flink_yarn_queue or "").strip() or "default",
-        checkpoint_dir=(airflow.flink_checkpoint_dir or "").strip(),
+    flink = flink_params.resolve_config(
+        airflow, task_params, runner_jar=runner_jar, queue_fallback="default"
     )
 
     # 生成 DAG（.sql 文件 + DAG 源码 + spec.json）
@@ -171,8 +173,6 @@ def run_flink_sql(
         airflow.endpoint,
         username=airflow.username,
         password=airflow.password,
-        token=airflow.token,
-        api_version=airflow.api_version,
     )
     run_id = f"ontometa__{artifact_id or 'manual'}"
     error: str | None = None
@@ -204,6 +204,9 @@ def run_flink_sql(
         "run_url": client.run_url(bundle.dag_id, run_id) if not error else None,
         "schedule": schedule,
         "flink_runner_jar": flink.runner_jar,
+        # 这次**真正生效**的提交参数（设置页默认 + 本任务覆盖后的结果）。参数现在逐任务
+        # 不同，"去设置页看一眼" 已不再是答案，回执必须自己说清用了什么。
+        "flink": flink_params.effective(flink, task_params),
         "tasks": [{"task_id": t.task_id, "sql_file": f"{bundle.dag_id}__{t.task_id}.sql"} for t in tasks],
         # L4 血缘：把每个任务的 inlets/outlets URN 一并带出，供任务状态块展示
         # 「本次启动了哪些任务 + 谁依赖谁」。空（未解析到）则不带。

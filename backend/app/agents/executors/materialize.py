@@ -15,7 +15,7 @@ from typing import Any
 
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
-from app.services import materialization_runner
+from app.services import flink_params, materialization_runner
 
 
 class MaterializeExecutor(Executor):
@@ -109,5 +109,8 @@ class MaterializeExecutor(Executor):
                 refresh_cron=spec.get("refresh_cron"),
                 # run_id 取制品 id：重复提交在 Airflow 侧因 run_id 冲突而幂等
                 artifact_id=context.get("artifact_id"),
+                # 物化建表不经 Flink，但 Spec 里的 Flink 参数照样透传下去：一份 Spec
+                # 里的参数只有一处口径，别让「物化时填的和同步时填的」变成两回事。
+                flink_task_params=flink_params.from_spec(spec, context),
             )
         return receipt

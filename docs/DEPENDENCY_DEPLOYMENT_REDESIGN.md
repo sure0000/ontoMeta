@@ -56,7 +56,7 @@
 |-----|------|--------------|------------|----------|
 | `llm` | LLM / 嵌入服务 | api_base_url, api_key, model | external, docker, k8s, bare_metal | `LlmServiceConfig` |
 | `datahub` | DataHub GMS(+前端) | gms_url, frontend_url, token, fabric | external, docker, k8s | `DatahubSetting` |
-| `airflow` | Airflow 调度 | endpoint, username/password/token, api_version | external, docker, k8s | `AirflowSetting` |
+| `airflow` | Airflow 调度 | 调度 API：endpoint, username/password；DAG 投递：ssh_password（主机/端口/目录在 `deploy_spec.extra`） | external, docker, k8s | `AirflowSetting` |
 | `seatunnel` | SeaTunnel 搬运 | rest_endpoint | external, docker, k8s | 无（散在 compose） |
 | `warehouse` | 目标数仓(Doris/Hive/MySQL/…) | sqlalchemy_url, dialect | external, docker, k8s, bare_metal | `DataSource` |
 | `source_db` | 源库(ERPNext MariaDB/…) | sqlalchemy_url, dialect | external, bare_metal | `DataSource` |
@@ -106,7 +106,7 @@ class DependencyComponent(Base):
 CONNECTION_SCHEMAS = {
     "llm":       {"api_base_url": str, "api_key": secret, "model": str},
     "datahub":   {"gms_url": str, "frontend_url": str, "token": secret, "fabric": str},
-    "airflow":   {"endpoint": str, "username": str?, "password": secret?, "token": secret?, "api_version": str},
+    "airflow":   {"endpoint": str, "username": str?, "password": secret?, "ssh_password": secret?},
     "seatunnel": {"rest_endpoint": str},
     "warehouse": {"sqlalchemy_url": secret, "dialect": str},      # doris/hive/mysql/clickhouse/...
     "source_db": {"sqlalchemy_url": secret, "dialect": str},

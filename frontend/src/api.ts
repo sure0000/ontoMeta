@@ -708,8 +708,6 @@ export const api = {
     endpoint: string;
     username?: string | null;
     password?: string;
-    token?: string;
-    api_version: string;
     enabled: boolean;
     // 编排配置全部在设置页管理，不再需要配置文件。
     dags_dir?: string;
@@ -717,7 +715,6 @@ export const api = {
     ssh_host?: string;
     ssh_port?: number;
     ssh_user?: string;
-    ssh_key_path?: string;
     ssh_password?: string;
     max_tasks_per_dag?: number;
     max_active_tasks_per_dag?: number;
@@ -729,8 +726,15 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  /** 调度 API 连通性测试（/health + 带版本前缀的 REST 鉴权）。 */
   testAirflowConnection: () =>
-    request<{ ok: boolean; health: Record<string, unknown> }>("/api/settings/airflow/test", {
+    request<{ ok: boolean; health: Record<string, unknown>; api_version: string }>(
+      "/api/settings/airflow/test",
+      { method: "POST" },
+    ),
+  /** DAG 投递（SSH）连通性测试：另一条连接，单独测。 */
+  testAirflowSshDelivery: () =>
+    request<{ ok: boolean; detail: string }>("/api/settings/airflow/test-ssh", {
       method: "POST",
     }),
 
@@ -783,8 +787,12 @@ export const api = {
     request<{ id: string; deleted: boolean }>(`/api/settings/dependencies/${id}`, {
       method: "DELETE",
     }),
-  probeDependency: (id: string) =>
-    request<DependencyProbeResult>(`/api/settings/dependencies/${id}/probe`, { method: "POST" }),
+  /** 拨测组件连接。`target` 只测其中一条（如 airflow 的 api / ssh），省略则全测。 */
+  probeDependency: (id: string, target?: string) =>
+    request<DependencyProbeResult>(
+      `/api/settings/dependencies/${id}/probe${target ? `?target=${encodeURIComponent(target)}` : ""}`,
+      { method: "POST" },
+    ),
   deployDependency: (id: string) =>
     request<DependencyDeployResult>(`/api/settings/dependencies/${id}/deploy`, { method: "POST" }),
   teardownDependency: (id: string) =>

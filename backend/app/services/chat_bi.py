@@ -3521,8 +3521,7 @@ class ChatBiService:
                 return None
             rt = self.settings_service.get_airflow_runtime(db)
             client = AirflowClient(
-                rt.endpoint, username=rt.username, password=rt.password,
-                token=rt.token, api_version=rt.api_version,
+                rt.endpoint, username=rt.username, password=rt.password
             )
             try:
                 states: list = []

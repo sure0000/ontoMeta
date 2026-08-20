@@ -1,4 +1,4 @@
-import { Form, Input, Select } from "antd";
+import { Collapse, Form, Input, InputNumber, Select } from "antd";
 import { CronPicker } from "../CronPicker";
 import { SPEC_FIELDS, type SpecFieldDef } from "./specFields";
 import { useSpecOptions } from "./useSpecOptions";
@@ -33,19 +33,43 @@ export function SpecForm({
   if (!visible.length) {
     return null;
   }
+  // 调优项（Flink 执行参数）折起来：它们留空就跟随设置页默认，摆在主表单里会淹没必填项。
+  const basic = visible.filter((f) => !f.advanced);
+  const advanced = visible.filter((f) => f.advanced);
+  const render = (field: SpecFieldDef) => (
+    <SpecFieldControl
+      key={field.key}
+      def={field}
+      value={value[field.key]}
+      ontologyId={ontologyId}
+      allValues={value}
+      onChange={(next) => onChange(field.key, next)}
+      requiredMark={mode === "manual"}
+    />
+  );
+  // 已经填过的（编辑模式回填 / 上一步填过）默认展开——折叠起来会让人以为自己没填。
+  const advancedTouched = advanced.some((f) => {
+    const v = value[f.key];
+    return v != null && v !== "" && !(Array.isArray(v) && v.length === 0);
+  });
+
   return (
     <>
-      {visible.map((field) => (
-        <SpecFieldControl
-          key={field.key}
-          def={field}
-          value={value[field.key]}
-          ontologyId={ontologyId}
-          allValues={value}
-          onChange={(next) => onChange(field.key, next)}
-          requiredMark={mode === "manual"}
+      {basic.map(render)}
+      {advanced.length > 0 && (
+        <Collapse
+          size="small"
+          style={{ marginBottom: 12 }}
+          defaultActiveKey={advancedTouched ? ["advanced"] : []}
+          items={[
+            {
+              key: "advanced",
+              label: "高级：Flink 执行参数（留空则跟随设置页的默认值）",
+              children: <>{advanced.map(render)}</>,
+            },
+          ]}
         />
-      ))}
+      )}
     </>
   );
 }
@@ -102,6 +126,19 @@ function renderControl(
           value={(value as string) ?? ""}
           placeholder={def.default ? `默认 ${String(def.default)}` : undefined}
           onChange={(e) => onChange(e.target.value)}
+        />
+      );
+    case "number":
+      return (
+        <InputNumber
+          value={(value as number) ?? null}
+          min={def.min}
+          max={def.max}
+          style={{ width: 200 }}
+          placeholder={def.default != null ? `默认 ${String(def.default)}` : "跟随设置页"}
+          // 清空要落成 undefined（而不是 null）：后端把空值当"没填 = 跟随设置页"，
+          // 落一个 null 进 Spec 会让人以为这里显式配过。
+          onChange={(v) => onChange(v ?? undefined)}
         />
       );
     case "textarea":

@@ -39,13 +39,13 @@ from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
 from app.models.data_app import DataSource
 from app.services.airflow_dag_builder import (
-    FlinkSubmitConfig,
     _plan_staging,
     build_flink_sql_dag,
 )
 from app.services.job_planner import JobPlanner
 from app.services.materialization_contract import MaterializationContractService
 from app.services.move_job_compiler import compile_move_task
+from app.services import flink_params
 from app.services.settings_service import SettingsService
 from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse import DEFAULT_ENGINE, list_engines
@@ -317,6 +317,7 @@ def _run_orchestrated(
     selected_targets: list[str] | None,
     artifact_id: str | None,
     load_strategy: str | None = None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """产出 DAG → 投递 → 触发一次运行。**不在本进程里落库**。
 
@@ -366,15 +367,12 @@ def _run_orchestrated(
             ontology_id, ds, engine, emit, plan, ddl_items,
             database_prefix, database_overrides, table_overrides,
         )
-    flink_cfg = FlinkSubmitConfig(
-        runner_jar=runner_jar,
-        runner_class=airflow.flink_sql_runner_class,
-        flink_bin=airflow.flink_bin,
-        deploy_target=airflow.flink_deploy_target,
-        parallelism=airflow.flink_parallelism,
-        yarn_queue=(airflow.flink_yarn_queue or "").strip() or None,
+    # 设置页给默认值，**制品 Spec 逐任务覆盖**（并行度/队列/提交目标/checkpoint/额外 -D）：
+    # 一条搬 300 张表的同步与一条小表 CDC 对集群资源的要求不是一回事。
+    flink_cfg = flink_params.resolve_config(
+        airflow, flink_task_params, runner_jar=runner_jar
     )
-    checkpoint_dir = (airflow.flink_checkpoint_dir or "").strip() or None
+    checkpoint_dir = flink_cfg.checkpoint_dir or None
     warehouse_conn_id = _warehouse_conn_id(ds)
 
     # 按 cron 分组 + 按上限分批：一个 cron 一个 DAG、少数派不再被众数吞掉，超上限再拆（M16）。
@@ -488,8 +486,6 @@ def _run_orchestrated(
         airflow.endpoint,
         username=airflow.username,
         password=airflow.password,
-        token=airflow.token,
-        api_version=airflow.api_version,
     )
     batch_results: list[dict] = []
     parse_timeout = airflow.dag_parse_timeout
@@ -551,6 +547,12 @@ def _run_orchestrated(
         "emit": emit,
         # 搬运一律走 Flink SQL on YARN（统一执行架构），不再有多通道选择。
         "sync_tool": _SYNC_TOOL,
+        # 这次搬运**真正生效**的 Flink 提交参数（设置页默认 + 本任务覆盖后的结果）。
+        # 参数已逐任务不同，回执不写清就只能去翻 DAG 源码反推。建表不经 Flink，故只在
+        # emit="dml" 时给。
+        "flink": (
+            flink_params.effective(flink_cfg, flink_task_params) if emit == "dml" else None
+        ),
         "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
         "engine": engine,
         "database_prefix": database_prefix,
@@ -651,6 +653,7 @@ def _orchestrate(
     load_strategy: str | None,
     sync_contracts: bool,
     artifact_id: str | None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """物化与同步共用的编排骨架：前置校验 → 契约对齐 → 生成 DDL → 交 ``_run_orchestrated``。
 
@@ -674,6 +677,13 @@ def _orchestrate(
         raise MaterializationError(
             "未配置可用的 Airflow（需在设置页填 endpoint 并启用），无法执行"
         )
+
+    # 任务级 Flink 参数先校验：非法值要在动契约/生成 DDL 之前就说清楚，而不是等编排到
+    # 一半从底层抛出一个 ValueError。
+    try:
+        flink_task_params = flink_params.normalize(flink_task_params)
+    except flink_params.FlinkParamError as exc:
+        raise MaterializationError(f"任务的 Flink 执行参数非法：{exc}") from exc
 
     # 契约是生成器的输入事实源：先对齐，保证 materialized/层/分区等为最新，
     # 再应用人工覆盖（override 会钉住，后续机器推导不覆盖）。
@@ -719,6 +729,7 @@ def _orchestrate(
         selected_targets=selected_targets,
         artifact_id=artifact_id,
         load_strategy=load_strategy,
+        flink_task_params=flink_task_params,
     )
 
 
@@ -736,6 +747,7 @@ def run_materialize(
     refresh_cron: str | None = None,
     sync_contracts: bool = True,
     artifact_id: str | None = None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """**物化 = 建结构**：把本体想要的表在目标数据源里建出来，返回回执 dict。
 
@@ -762,6 +774,10 @@ def run_materialize(
 
     ``database_overrides``（层 → 库名）与 ``table_overrides``（contract_id → 表名）
     是本次落库的目标位置，只作用于本次生成、不写回契约。
+
+    ``flink_task_params``：**这个任务自己的** Flink 提交参数（见
+    :mod:`app.services.flink_params`），留空的项跟随设置页默认值。物化本身不经 Flink
+    （建表走 SQLExecuteQueryOperator），收下它只为签名与同步一致、Spec 可原样透传。
     """
     return _orchestrate(
         db,
@@ -778,6 +794,7 @@ def run_materialize(
         load_strategy=None,
         sync_contracts=sync_contracts,
         artifact_id=artifact_id,
+        flink_task_params=flink_task_params,
     )
 
 
@@ -796,6 +813,7 @@ def run_sync(
     refresh_cron: str | None = None,
     sync_contracts: bool = True,
     artifact_id: str | None = None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """**同步 = 搬数据**：把源表的数据搬进目标表，返回回执 dict。
 
@@ -815,6 +833,11 @@ def run_sync(
     决定各 DAG 的 schedule（一个 cron 一个 DAG）。语义与 ``run_materialize`` 的同名形参
     一致，区别是这里真的会作用到本次产出的 DAG 上。
 
+    ``flink_task_params``：这条同步自己的 Flink 提交参数（并行度/队列/提交目标/
+    checkpoint/额外 -D）。**搬运真的经 Flink**，故它在这里逐字生效：填了的项覆盖设置页
+    默认，留空的项跟随设置页。CDC/增量的 checkpoint 目录也从这里取（缺则用设置页那份，
+    再缺就在编译期报错——读位点无处持久化）。
+
     其余形参见 ``run_materialize``。
     """
     return _orchestrate(
@@ -832,4 +855,5 @@ def run_sync(
         load_strategy=load_strategy,
         sync_contracts=sync_contracts,
         artifact_id=artifact_id,
+        flink_task_params=flink_task_params,
     )

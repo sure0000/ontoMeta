@@ -408,8 +408,7 @@ def test_deploy_bare_metal_recovers_connection_and_probes(svc, db):
         db, "airflow",
         {"ssh_host": "1.2.3.4", "ssh_user": "root", "ssh_password": "pw", "port": 8081},
     )
-    conn = {"endpoint": "http://1.2.3.4:8081", "username": "admin",
-            "password": "pw", "token": None, "api_version": "v1"}
+    conn = {"endpoint": "http://1.2.3.4:8081", "username": "admin", "password": "pw"}
     with patch("app.services.install_recipes.run_install", return_value=conn), \
          patch.object(svc, "probe", return_value=ds.ProbeResult(True, "连接成功", 12)):
         result = svc.deploy(db, row.id)

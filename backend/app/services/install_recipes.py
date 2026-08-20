@@ -167,8 +167,6 @@ def _install_airflow(ssh: SSHSession, spec: dict[str, Any]) -> dict[str, Any]:
         "endpoint": f"http://{_host(spec)}:{port}",
         "username": admin_user,
         "password": admin_pwd,
-        "token": None,
-        "api_version": "v1",
     }
 
 

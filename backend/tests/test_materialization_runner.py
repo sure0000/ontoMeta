@@ -433,6 +433,62 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
     assert "INSERT INTO" in body and "${" in body
 
 
+def test_sync_task_params_override_global_flink_settings(tmp_path, monkeypatch):
+    """**每个任务自己的 Flink 参数**：Spec 里填的并行度/队列进这条任务的 flink run 命令，
+    没填的项跟随设置页。搬 300 张表的同步与一条小表同步不该共用一套集群参数。"""
+    import json
+
+    ids = _seed("flinkparams")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    _set_airflow(flink_parallelism=2, flink_yarn_queue="global_q")
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="artifact-fp",
+            flink_task_params={
+                "flink_parallelism": 16,
+                "flink_extra_args": ["-Dtaskmanager.memory.process.size=4g"],
+            },
+        )
+
+    spec = json.loads(next((tmp_path / "dags").rglob("*.json")).read_text())
+    command = spec["tasks"][0]["command"]
+    assert "-p 16" in command  # 任务级覆盖
+    assert "-Dtaskmanager.memory.process.size=4g" in command
+    assert "-Dyarn.application.queue=global_q" in command  # 没填 → 跟随设置页
+    # 回执自报家门：参数已逐任务不同，只看设置页不再知道这次跑的是什么。
+    assert receipt["flink"]["parallelism"] == 16
+    assert receipt["flink"]["yarn_queue"] == "global_q"
+
+
+def test_incremental_uses_task_checkpoint_dir(tmp_path, monkeypatch):
+    """设置页没配 checkpoint，但这条任务自己填了 → CDC 作业照样能编出来，且用的是它。"""
+    ids = _seed("taskckpt")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    _set_airflow(flink_checkpoint_dir="")
+
+    with SessionLocal() as db:
+        materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="doris",
+            load_strategy="incremental",
+            selected_targets=["customer"],
+            artifact_id="artifact-ckpt",
+            flink_task_params={"flink_checkpoint_dir": "file:///task/ckpt"},
+        )
+
+    sql = next((tmp_path / "dags").rglob("jobs/*.sql")).read_text(encoding="utf-8")
+    assert "'state.checkpoints.dir' = 'file:///task/ckpt'" in sql
+
+
 def test_incremental_without_checkpoint_dir_errors(tmp_path, monkeypatch):
     """增量/CDC 是流式作业需 checkpoint_dir；未配 → 用户可读的物化错误，而非 500。"""
     ids = _seed("incrnockpt")

@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import posixpath
+
 import os
 import time
 import uuid
@@ -116,12 +118,10 @@ def run_preflight(
         airflow.endpoint,
         username=airflow.username,
         password=airflow.password,
-        token=airflow.token,
-        api_version=airflow.api_version,
     )
     try:
         _check_api_auth(report, client)
-        _check_api_version(report, client, airflow.api_version)
+        _check_api_version(report, client)
         _check_warehouse_conn(report, client, ds)
         _check_dag_dir_visible(report, client, airflow)
     finally:
@@ -151,8 +151,6 @@ def _check_airflow_reachable(report: PreflightReport, airflow) -> bool:
         airflow.endpoint,
         username=airflow.username,
         password=airflow.password,
-        token=airflow.token,
-        api_version=airflow.api_version,
     )
     try:
         client.health()
@@ -217,10 +215,13 @@ def _check_api_auth(report: PreflightReport, client: AirflowClient) -> None:
     )
 
 
-def _check_api_version(
-    report: PreflightReport, client: AirflowClient, configured: str
-) -> None:
-    """自探 REST 版本并与设置对照。不匹配不硬失败——给出应改成哪个版本。"""
+def _check_api_version(report: PreflightReport, client: AirflowClient) -> None:
+    """自探实例暴露的 REST 版本，如实报出来。
+
+    这里**不再和任何设置项对照**：版本已不是配置项，客户端 404 时会自协商（见
+    ``connectors/airflow.py``）。留着这一项是因为它仍有诊断价值——下发报 404 时，
+    「实例暴露的是 v2」与「探不到 openapi.json」是两条完全不同的线索。
+    """
     detected = client.detect_api_version()
     if detected is None:
         report.add(
@@ -229,23 +230,11 @@ def _check_api_version(
                 label="REST 版本",
                 status=WARN,
                 blocking=False,
-                detail="探不到 openapi.json，无法自动确认 REST 版本。",
+                detail="探不到 openapi.json，无法确认该实例的 REST 版本。",
                 next_step=(
-                    f"当前按 {configured} 下发；若下发 DagRun 报 404，"
-                    "手动核对该实例是 /api/v1（2.x）还是 /api/v2（3.x）。"
+                    "下发按 v1 起步、404 时自动改试 v2；若两者都不通，"
+                    "核对 endpoint 是否指向 Airflow webserver 本身而非其前置代理的子路径。"
                 ),
-            )
-        )
-        return
-    if detected != configured:
-        report.add(
-            PreflightItem(
-                key="airflow_api_version",
-                label="REST 版本",
-                status=WARN,
-                blocking=False,
-                detail=f"设置里是 {configured}，实测该实例暴露的是 {detected}。",
-                next_step=f"把 Airflow 设置的 api_version 改成 {detected}，否则请求会 404。",
             )
         )
         return
@@ -255,7 +244,7 @@ def _check_api_version(
             label="REST 版本",
             status=PASS,
             blocking=False,
-            detail=f"设置与实测一致（{detected}）。",
+            detail=f"实测该实例暴露的是 {detected}（下发时自动按此版本请求）。",
         )
     )
 
@@ -350,14 +339,25 @@ def probe_ssh_pipeline(airflow) -> tuple[bool, str]:
             airflow.ssh_host,
             user=airflow.ssh_user or None,
             port=airflow.ssh_port,
-            key_path=airflow.ssh_key_path or None,
             password=airflow.ssh_password or None,
         )
         dags_dir = airflow.dags_dir
         # mkdir -p 再测可写：目录不存在是常态（首次投递会建），不该报成失败。
         delivery._ssh(f"mkdir -p '{dags_dir}' && test -w '{dags_dir}'")
     except DagDeliveryError as exc:
-        return False, str(exc)
+        detail = str(exc)
+        # 建不出来时最常见的是「填了个 Airflow 根本没在扫的路径」（如照抄官方镜像的
+        # /opt/airflow/dags，而那台是原生安装）。此时该改配置，而不是去 sudo mkdir。
+        if "Permission denied" in detail or "mkdir" in detail:
+            detail += (
+                f"\n提示：这里用的是「已保存」的 DAG 目录 {airflow.dags_dir}"
+                "（表单里刚改、还没点保存的值不参与拨测）。它要填的是那台 Airflow "
+                "已经在扫描的目录，不是新建一个目录给它——投进别处 Airflow 也不会去看。"
+                "Airflow 跑在容器里时，/opt/airflow/dags 是容器内路径，而 SSH 投递落在"
+                "宿主机上，该填宿主机上挂载到它的那个目录；原生安装则是 "
+                "$AIRFLOW_HOME/dags（通常 ~/airflow/dags）。"
+            )
+        return False, detail
     return True, f"{delivery.target}:{airflow.dags_dir} 可写，投递管道连通。"
 
 
@@ -397,6 +397,7 @@ def _check_dag_dir_visible(
                 detail=detail,
             )
         )
+        _check_dag_dir_matches_instance(report, client, airflow)
         return
     report.add(
         PreflightItem(
@@ -407,8 +408,85 @@ def _check_dag_dir_visible(
             detail=detail,
             next_step=(
                 "确认：①SSH 主机/端口/用户名正确且主机可达；"
-                "②私钥路径在 **ontoMeta 侧**可读（或已填 SSH 密码且目标机装了 sshpass）；"
-                "③该用户对 DAG 目录有写权限。以上都在设置页 → Airflow → DAG 投递。"
+                "②已填 SSH 密码且 ontoMeta 侧装了 sshpass（或留空密码、走本机 ~/.ssh 免密身份）；"
+                "③DAG 目录填的是那台 Airflow 已在扫描的 dags_folder（点「从 Airflow 读取」取回），"
+                "且该用户对它有写权限。以上都在设置页 → Airflow → DAG 投递。"
+            ),
+        )
+    )
+    _check_dag_dir_matches_instance(report, client, airflow)
+
+
+def dags_folder_of(client: AirflowClient) -> str | None:
+    """问 Airflow 自己：你在扫哪个目录（``core.dags_folder``）。
+
+    ``expose_config=False`` 时读不到，返回 None——这不是错误，只是没法对账。
+    """
+    return client.get_config_option("core", "dags_folder")
+
+
+def _within(child: str, parent: str) -> bool:
+    """child 是否就是 parent 或落在 parent 之下（两边都按 posix 规范化）。"""
+    c = posixpath.normpath(child.rstrip("/") or "/")
+    p = posixpath.normpath(parent.rstrip("/") or "/")
+    return c == p or c.startswith(p + "/")
+
+
+def _check_dag_dir_matches_instance(
+    report: PreflightReport, client: AirflowClient, airflow
+) -> None:
+    """把投递目录和实例自报的 ``core.dags_folder`` 对一次账。
+
+    治的是失败模式 #3 最隐蔽的一种：SSH 通、目录可写、rsync 成功、回执一片绿，可
+    Airflow 从头到尾没扫过那个路径，只能等 dag_parse_timeout 超时才暴露。
+
+    **只提醒、不阻断**：容器部署下两者本来就不同——``dags_folder`` 是**容器内**路径
+    （官方镜像恒为 ``/opt/airflow/dags``），而 SSH 投递落在**宿主机**文件系统上，该填的
+    是挂载到那个容器路径的宿主机目录。ontoMeta 看不见这层映射，故不一致只是"值得核对"，
+    不是"必错"。软链接同理。
+    """
+    folder = dags_folder_of(client)
+    if not folder:
+        report.add(
+            PreflightItem(
+                key="dag_dir_matches_instance",
+                label="DAG 目录与实例一致",
+                status=WARN,
+                blocking=False,
+                detail="该实例关掉了 expose_config，读不到 core.dags_folder，无法对账。",
+                next_step=(
+                    f"手动核对 Airflow 主机上的 dags_folder 是否就是 {airflow.dags_dir}"
+                    "（airflow.cfg 的 [core] dags_folder，或 AIRFLOW__CORE__DAGS_FOLDER）。"
+                ),
+            )
+        )
+        return
+    if _within(airflow.dags_dir, folder):
+        report.add(
+            PreflightItem(
+                key="dag_dir_matches_instance",
+                label="DAG 目录与实例一致",
+                status=PASS,
+                blocking=False,
+                detail=f"实例扫描 {folder}，投递目录 {airflow.dags_dir} 在其中。",
+            )
+        )
+        return
+    report.add(
+        PreflightItem(
+            key="dag_dir_matches_instance",
+            label="DAG 目录与实例一致",
+            status=WARN,
+            blocking=False,
+            detail=(
+                f"实例扫描的是 {folder}，投递目录配的是 {airflow.dags_dir}，两者不一致。"
+            ),
+            next_step=(
+                f"若 Airflow 是**直接装在这台机器上**：把 DAG 目录改成 {folder}"
+                "（点「从 Airflow 读取」可直接填入），否则产物投过去没人扫。"
+                f"若 Airflow 跑在**容器里**：{folder} 是容器内路径，这里要填宿主机上"
+                "挂载到它的那个目录（docker inspect / compose 的 volumes 可查），"
+                "此时不一致是正常的。"
             ),
         )
     )

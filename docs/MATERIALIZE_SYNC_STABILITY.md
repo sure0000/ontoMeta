@@ -167,7 +167,7 @@ ORC、要过 metastore，逐行 JDBC 不成立），而 Hive 是本仓的 `DEFAU
 |---|---|---|
 | Airflow 可达 | `GET /health` | endpoint 是否写错、是否被反向代理挡了登录页 |
 | Airflow API 鉴权真的可用 | `GET /api/{v}/dags?limit=1`（[ping_api](../backend/app/connectors/airflow.py:120) 已实现） | `AIRFLOW__API__AUTH_BACKENDS` 该怎么配 |
-| REST 版本 | `GET /openapi.json` 自探 v1/v2，不照抄文档 | 自动纠正 `api_version`，并在回执里说明 |
+| REST 版本 | 按 v1 起步，404 时 `GET /openapi.json` 自探 v1/v2 并换过来重试 | 版本不是配置项，客户端自协商 |
 | runner 可达且契约匹配 | `GET /capabilities`，比对 `contract_version` | 版本不匹配即拒绝提交，并给出该升哪一侧 |
 | 源库可连 | `POST /probe {source_alias}` | 该 alias 在 runner 侧的 secret 没配 / 网络不通 |
 | 目标仓可连 | `POST /probe {target_alias}` | 同上 |

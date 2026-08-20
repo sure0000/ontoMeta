@@ -6,9 +6,9 @@ Airflow 负责重试、补数、水位与并发，本模块只做两件事——
 凭据不入产物：连接信息来自 ``settings``（比照 DatahubSetting/CubeSetting 的 DB-backed 做法），
 生成的 DAG 里只有 conn_id，不含任何账号密码。
 
-⚠ **REST 版本**：Airflow 2.x 为 ``/api/v1``，3.x 为 ``/api/v2``。本客户端把版本做成参数，
-起栈后用 ``GET /openapi.json`` 实测确认，不照抄文档（见
-`docker/orchestration/README.md`「起栈后待核实项」）。
+⚠ **REST 版本**：Airflow 2.x 为 ``/api/v1``，3.x 为 ``/api/v2``。**不要用户去配**——
+先按 v1 打，遇 404/405 自探一次 ``openapi.json``（``detect_api_version``），探到别的版本
+就换过来重试。设置页因此没有 api_version 这一项：填了也只是把猜错的机会交给人。
 """
 
 from __future__ import annotations
@@ -42,15 +42,16 @@ class AirflowClient:
         *,
         username: str | None = None,
         password: str | None = None,
-        token: str | None = None,
         api_version: str = DEFAULT_API_VERSION,
         client: httpx.Client | None = None,
         timeout: float = 30.0,
     ):
+        """``api_version`` 只是**起点**：打不通时客户端会自探真实版本并换过来（见 ``_request``）。"""
         self.endpoint = (endpoint or "").rstrip("/")
         self.api_version = api_version or DEFAULT_API_VERSION
         self._auth = (username, password) if username and password else None
-        self._token = token
+        # 版本自协商每个客户端只做一次：探不到就认了，别把每个请求都拖成三次 openapi 探测。
+        self._version_negotiated = False
         # trust_env=False：Airflow 是内网服务，绝不该走开发机的 HTTP(S)_PROXY / ALL_PROXY。
         # 尤其 ALL_PROXY=socks5://… 时 httpx 会直接抛 ImportError（缺 socksio），
         # 连通性测试因此永远失败。与 cube/datahub 连接器、services.common 同一处置。
@@ -65,22 +66,34 @@ class AirflowClient:
         return f"{self.endpoint}/api/{self.api_version}{path}"
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        return headers
+        return {"Content-Type": "application/json"}
 
-    def _request(self, method: str, path: str, operation: str, **kwargs: Any) -> dict:
+    def _send(self, method: str, path: str, operation: str, **kwargs: Any) -> httpx.Response:
         try:
-            response = self._client.request(
-                method,
-                self._url(path),
-                headers=self._headers(),
-                auth=self._auth if not self._token else None,
-                **kwargs,
+            return self._client.request(
+                method, self._url(path), headers=self._headers(), auth=self._auth, **kwargs
             )
         except httpx.HTTPError as exc:
             raise AirflowError(operation, exc) from exc
+
+    def _renegotiate_version(self) -> bool:
+        """自探实例真实的 REST 版本，与当前不同就换过来（每个客户端只试一次）。"""
+        if self._version_negotiated:
+            return False
+        self._version_negotiated = True
+        detected = self.detect_api_version()
+        if not detected or detected == self.api_version:
+            return False
+        logger.info("Airflow REST 版本自协商：%s → %s", self.api_version, detected)
+        self.api_version = detected
+        return True
+
+    def _request(self, method: str, path: str, operation: str, **kwargs: Any) -> dict:
+        response = self._send(method, path, operation, **kwargs)
+        # 404/405 最常见的成因是 2.x(/api/v1) 与 3.x(/api/v2) 之争。自探一次真实版本，
+        # 探到别的就换过来重试——这比让用户在设置页手配一个版本号可靠得多。
+        if response.status_code in (404, 405) and self._renegotiate_version():
+            response = self._send(method, path, operation, **kwargs)
         if response.status_code >= 400:
             # 原样带出 Airflow 的错误体：它通常已经说清了原因（DAG 不存在、run 重复等）。
             raise AirflowError(operation, f"HTTP {response.status_code} {response.text[:300]}")
@@ -102,9 +115,7 @@ class AirflowClient:
         """
         try:
             response = self._client.get(
-                f"{self.endpoint}/health",
-                headers=self._headers(),
-                auth=self._auth if not self._token else None,
+                f"{self.endpoint}/health", headers=self._headers(), auth=self._auth
             )
         except httpx.HTTPError as exc:
             raise AirflowError("health", exc) from exc
@@ -222,9 +233,7 @@ class AirflowClient:
         for candidate in ("/openapi.json", "/api/v1/openapi.json", "/api/v2/openapi.json"):
             try:
                 resp = self._client.get(
-                    f"{self.endpoint}{candidate}",
-                    headers=self._headers(),
-                    auth=self._auth if not self._token else None,
+                    f"{self.endpoint}{candidate}", headers=self._headers(), auth=self._auth
                 )
             except httpx.HTTPError:
                 continue
@@ -302,18 +311,15 @@ def is_terminal(state: str | None) -> bool:
     return (state or "").lower() in TERMINAL_STATES
 
 
-def explain_ping_failure(
-    client: "AirflowClient", configured_version: str, error: "AirflowError"
-) -> str:
+def explain_ping_failure(client: "AirflowClient", error: "AirflowError") -> str:
     """把 ``ping_api`` 的失败翻成人能照做的解释。
 
     ``/health`` 能通但带版本前缀的 REST 打不通时，失败几乎只有两类，分别给出下一步：
 
-    - **401/403（鉴权）**：最常见是没开 basic_auth 后端（2.x 默认只有 session，仅供 Web UI），
-      或 token 过期。
-    - **404/405（版本）**：配的 ``api_version`` 与实例暴露的对不上。此时自探一次真实版本
-      （``detect_api_version``），若探到就直接告诉用户应改成哪个——这正是「地址密码都对却
-      连不上」最隐蔽的一种。
+    - **401/403（鉴权）**：最常见是没开 basic_auth 后端（2.x 默认只有 session，仅供 Web UI）。
+    - **404/405（版本/路径）**：客户端已在请求里自协商过版本（见 ``_request``），走到这里
+      说明换版本也没用——要么探不到 ``openapi.json``，要么两个版本都 404。故这里只如实
+      说明「已试过哪个版本」，不再要用户去改一个早已不存在的 api_version 配置项。
 
     其余错误原样带出，不臆测。返回补充说明后的完整 detail 字符串。
     """
@@ -324,23 +330,18 @@ def explain_ping_failure(
             "Airflow 2.x 默认 api.auth_backends 只有 session，仅供 Web UI；"
             "请在 Airflow 侧设 AIRFLOW__API__AUTH_BACKENDS="
             "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session "
-            "后重启 webserver，或改用 token 鉴权）"
+            "后重启 webserver，并确认设置页填的账号密码是该实例的 API 账号）"
         )
     if "404" in detail or "405" in detail:
         detected = client.detect_api_version()
-        if detected and detected != configured_version:
-            return detail + (
-                f"（实测该实例暴露的 REST 版本是 {detected}，设置里配的是 "
-                f"{configured_version}；把 Airflow 设置的 api_version 改成 {detected} 再试）"
-            )
         if detected:
             return detail + (
-                f"（REST 版本 {detected} 与设置一致，404/405 可能是端点路径或部署问题，"
-                "非版本不符）"
+                f"（已按实测版本 {detected} 请求仍 404/405，"
+                "多半是端点路径或反向代理问题，非版本不符）"
             )
         return detail + (
-            f"（当前按 {configured_version} 请求且返回 404/405，"
-            "但探不到 openapi.json 无法自动确认版本；"
-            "手动核对该实例是 /api/v1（2.x）还是 /api/v2（3.x））"
+            f"（已按 {client.api_version} 请求且返回 404/405，"
+            "又探不到 openapi.json 无法自动确认版本；"
+            "请核对 endpoint 是否指向 Airflow webserver 本身而非其前置代理的子路径）"
         )
     return detail

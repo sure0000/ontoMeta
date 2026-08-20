@@ -28,6 +28,7 @@ from app.models import (
     Property,
 )
 from app.models.warehouse import TargetKind
+from app.services import flink_params
 from app.services.metric_compiler import effective_logic_type
 
 
@@ -215,6 +216,9 @@ class MetricDrafter(Drafter):
             or (contract.target_layer if contract else "ads"),
             "database_prefix": context.get("database_prefix"),
             "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming（metric 允许 streaming）
+            # 任务级 Flink 执行参数（并行度/队列/提交目标/checkpoint/额外 -D）。
+            # 只落人真填了的项——留空 = 跟随设置页默认。
+            **flink_params.from_context(context),
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

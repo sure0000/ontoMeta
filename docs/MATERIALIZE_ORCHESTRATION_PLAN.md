@@ -172,7 +172,7 @@ curl -s localhost:8081/openapi.json | grep -o '/api/v[0-9]*/dags/{dag_id}/dagRun
 >   （档位由 runner 逐表自选），却会以「没有可用镜像」的名义拦住提交。改由
 >   `services/sync_tool_resolver` 统一决策，设置页 `sync_tool`（空 = 自动）是唯一人工入口；
 >   `GET /warehouse/sync-tools` 改为**告知结果**（`resolved`/`detail`/`modes`）。
-> - **设置页只留 Airflow 连接信息**（endpoint/鉴权/api_version/enabled）：
+> - **设置页只留 Airflow 连接信息**（endpoint/鉴权/enabled；REST 版本由客户端自协商）：
 >   `seatunnel_image` 归入工具 Adapter；`warehouse_conn_id` 由目标数据源推导
 >   （`ontometa_ds_<slug>`）；`dags_dir`/`jobs_dir` 归部署基础设施（`config.airflow_dags_dir/jobs_dir`，
 >   缺省指向 `docker/orchestration`）。已减 `airflow_settings` 四列（迁移 `d9e0f1a2b3c4`）。

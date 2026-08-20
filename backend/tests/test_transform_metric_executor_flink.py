@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,7 +14,7 @@ from app.agents.executors.transform import TransformExecutor
 from app.agents.executors.metric import MetricExecutor
 from app.database import SessionLocal
 from app.models import DataSource
-from tests.support.delivery import make_runner_jar
+from tests.support.delivery import LocalTransportDelivery, make_runner_jar
 
 
 def _make_datasource(ds_id: str = "ds-123") -> None:
@@ -149,6 +150,71 @@ def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
     assert receipt["dag_run_id"] == "ontometa__artifact-456"
     assert receipt["state"] == "queued"
     assert "http://airflow" in receipt["run_url"]
+
+
+def test_transform_task_flink_params_reach_command_and_sql(transform_spec, tmp_path):
+    """任务级 Flink 参数逐条落地：并行度进 flink run，checkpoint 进流作业 SQL，流式作业 -d。
+
+    checkpoint 只塞进提交参数是不够的——读位点靠 ``SET 'state.checkpoints.dir'`` 写在
+    SQL 里，缺它流作业一重启就从头重算。
+    """
+    _make_datasource("ds-123")
+
+    with patch("app.services.flink_job_runner._settings") as settings:
+        airflow = MagicMock(
+            available=True,
+            dags_dir=str(tmp_path / "dags"),
+            endpoint="http://airflow",
+            max_active_tasks_per_dag=16,
+            dag_parse_timeout=0.1,
+            flink_sql_runner_jar=make_runner_jar(tmp_path),
+            flink_sql_runner_class="com.ontometa.flink.SqlRunner",
+            flink_bin="flink",
+            flink_deploy_target="yarn-per-job",
+            flink_parallelism=1,
+            flink_yarn_queue="",
+            flink_checkpoint_dir="",
+        )
+        airflow.build_delivery.return_value = LocalTransportDelivery()
+        settings.get_airflow_runtime.return_value = airflow
+        # streaming 分支要读设置页兜底 checkpoint（任务级没填时）——这里任务级填了，
+        # 但仍会取一次运行期配置，故一并指到同一份替身。
+        with patch("app.services.settings_service.SettingsService.get_airflow_runtime",
+                   return_value=airflow):
+            with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
+                client = MagicMock()
+                client_cls.return_value = client
+                client.dag_exists.return_value = True
+                client.trigger_dag.return_value = {"state": "queued"}
+                with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
+                    mock_input.return_value = {
+                        "source_table": MagicMock(name="src_customer", columns=()),
+                        "target_table": MagicMock(
+                            name="customer", qualified_name="dim_erp.customer", columns=()
+                        ),
+                        "source_physical": "erp_ods.tab_customer",
+                        "target_physical": "dim_erp.customer",
+                        "source_platform": "hive",
+                        "target_platform": "hive",
+                        "select_body": "SELECT `cust_id` AS `customer_id` FROM `src_customer`",
+                    }
+                    TransformExecutor().execute(
+                        {
+                            **transform_spec,
+                            "target_datasource_id": "ds-123",
+                            "execution_mode": "streaming",
+                            "flink_parallelism": 6,
+                            "flink_checkpoint_dir": "file:///task/ckpt",
+                        },
+                        context={"artifact_id": "artifact-789"},
+                    )
+
+    spec = json.loads(next((tmp_path / "dags").rglob("*.json")).read_text())
+    task = spec["tasks"][0]
+    assert "-p 6" in task["command"]
+    assert " -d " in f" {task['command']} "  # 流作业提交即 detach，否则 Airflow 永远阻塞
+    assert task["detached"] is True
+    assert "'state.checkpoints.dir' = 'file:///task/ckpt'" in task["sql"]
 
 
 def test_metric_source_table_comes_from_ontology_not_hardcoded_dwd(monkeypatch):

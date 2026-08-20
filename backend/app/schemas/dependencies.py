@@ -11,6 +11,9 @@ class DependencySchemaOut(BaseModel):
 
     components: list[dict[str, Any]]
     connection_schemas: dict[str, list[dict[str, Any]]]
+    # 连接分组：一个组件可能握着几条互不相干的连接（Airflow = 调度 API + DAG 投递），
+    # 前端据此分节渲染并逐条拨测。同样必须显式声明，否则被 response_model 剔除。
+    connection_groups: dict[str, list[dict[str, Any]]]
     deploy_modes: list[str]
     deploy_spec_schemas: dict[str, list[dict[str, Any]]]
     # 未声明的字段会被 response_model 从响应里剔除，导致前端拿到 undefined 后
@@ -64,6 +67,8 @@ class ProbeResultOut(BaseModel):
     ok: bool
     message: str
     latency_ms: int | None = None
+    # 逐条连接的拨测明细（Airflow = 调度 API + DAG 投递）。单连接组件也回一条。
+    parts: list[dict] = Field(default_factory=list)
 
 
 class DeployResultOut(BaseModel):

@@ -32,7 +32,7 @@ def test_probe_rejects_frontend_spa_html_200(monkeypatch):
         return httpx.Response(200, text=_SPA_HTML, headers={"content-type": "text/html"})
 
     _patch_transport(monkeypatch, handler)
-    result = ds._probe_datahub({"gms_url": "http://h:9002/gms", "token": "t"})
+    result = ds._probe_datahub({"gms_url": "http://h:9002/gms", "token": "t"}, {})
     assert result.ok is False
     assert "SPA" in result.message or "JSON" in result.message
 
@@ -44,7 +44,7 @@ def test_probe_rejects_404(monkeypatch):
         return httpx.Response(404, json={"error": "Not Found", "status": 404})
 
     _patch_transport(monkeypatch, handler)
-    result = ds._probe_datahub({"gms_url": "http://h:9002/gms", "token": "t"})
+    result = ds._probe_datahub({"gms_url": "http://h:9002/gms", "token": "t"}, {})
     assert result.ok is False
     assert "404" in result.message
 
@@ -56,7 +56,7 @@ def test_probe_rejects_unauthorized(monkeypatch):
         return httpx.Response(401, text="Unauthorized")
 
     _patch_transport(monkeypatch, handler)
-    result = ds._probe_datahub({"gms_url": "http://h:8080", "token": "bad"})
+    result = ds._probe_datahub({"gms_url": "http://h:8080", "token": "bad"}, {})
     assert result.ok is False
     assert "鉴权" in result.message
 
@@ -68,7 +68,7 @@ def test_probe_rejects_graphql_errors(monkeypatch):
         return httpx.Response(200, json={"errors": [{"message": "boom"}]})
 
     _patch_transport(monkeypatch, handler)
-    result = ds._probe_datahub({"gms_url": "http://h:8080", "token": "t"})
+    result = ds._probe_datahub({"gms_url": "http://h:8080", "token": "t"}, {})
     assert result.ok is False
     assert "GraphQL" in result.message
 
@@ -83,7 +83,7 @@ def test_probe_accepts_real_gms(monkeypatch):
         return httpx.Response(200, json={"data": {"listDomains": {"total": 2}}})
 
     _patch_transport(monkeypatch, handler)
-    result = ds._probe_datahub({"gms_url": "http://h:8080", "token": "t"})
+    result = ds._probe_datahub({"gms_url": "http://h:8080", "token": "t"}, {})
     assert result.ok is True
     assert result.message == "连接成功"
     assert seen["method"] == "POST"
@@ -91,11 +91,11 @@ def test_probe_accepts_real_gms(monkeypatch):
 
 
 def test_probe_missing_gms_url():
-    result = ds._probe_datahub({"gms_url": "", "token": "t"})
+    result = ds._probe_datahub({"gms_url": "", "token": "t"}, {})
     assert result.ok is False
     assert "gms_url" in result.message
 
 
 def test_datahub_registered_probe_is_the_hardened_one():
     """_PROBES['datahub'] 就是这个加固后的函数，别再退回只 GET /config 的 lambda。"""
-    assert ds._PROBES["datahub"] is ds._probe_datahub
+    assert ds._PROBES[("datahub", "default")] is ds._probe_datahub

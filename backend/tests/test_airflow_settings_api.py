@@ -1,7 +1,8 @@
 """Airflow 编排连接配置端点 + 物化运行状态端点。
 
-凭据只回「是否已设 + 掩码」；``available`` 是「真的能用」（启用 + endpoint）而非仅「勾了启用」。
-投递目录不再入设置（属部署基础设施，由 config 给默认）。
+凭据只回「是否已设 + 掩码」；``available`` 是「真的能用」（启用 + endpoint + SSH 主机）
+而非仅「勾了启用」。Airflow 握着两条互不相干的连接（调度 API / DAG 投递 SSH），
+故有两个独立的测试端点。
 """
 
 from __future__ import annotations
@@ -28,7 +29,51 @@ def test_defaults_to_disabled(client, admin_headers):
     body = client.get("/api/settings/airflow", headers=admin_headers).json()
     assert body["enabled"] is False
     assert body["available"] is False  # 没配就是不可用，物化会直接报错
-    assert body["api_version"] == "v1"
+
+
+def test_ineffective_fields_are_gone(client, admin_headers):
+    """token / api_version / 私钥路径都不再是配置项——填了也不生效的东西不该占着表单。
+
+    · token：Airflow REST 是 basic auth，没有任何部署路径产出过 bearer token；
+    · api_version：由客户端 404 时自协商（见 connectors/airflow.py）；
+    · ssh_key_path：那是 ontoMeta 主机上的文件，归该机 ~/.ssh/config 管，
+      Web 表单里填一个别处的路径只会得到一个测不出真假的配置。
+    """
+    body = client.get("/api/settings/airflow", headers=admin_headers).json()
+    for gone in ("token_set", "token", "api_version", "ssh_key_path"):
+        assert gone not in body, gone
+
+
+def test_ssh_delivery_tests_separately_from_the_api(client, admin_headers, monkeypatch):
+    """两条连接分开测：SSH 通不通与调度 API 通不通是两件事，不该糊成一次拨测。"""
+    # 缺主机/目录：直接说清缺什么，而不是去连一个空主机等超时
+    r = client.post("/api/settings/airflow/test-ssh", headers=admin_headers)
+    assert r.status_code == 400 and "SSH 主机" in r.json()["detail"]
+
+    client.put(
+        "/api/settings/airflow",
+        json={
+            "endpoint": "http://airflow:8080",
+            "enabled": True,
+            "ssh_host": "airflow-host",
+            "ssh_user": "deploy",
+            "dags_dir": "/opt/airflow/dags",
+        },
+        headers=admin_headers,
+    )
+    seen = {}
+
+    def _fake_probe(cfg):
+        seen["host"] = cfg.ssh_host
+        seen["dags_dir"] = cfg.dags_dir
+        return True, "airflow-host:/opt/airflow/dags 可写"
+
+    monkeypatch.setattr(
+        "app.services.materialize_preflight.probe_ssh_pipeline", _fake_probe
+    )
+    r = client.post("/api/settings/airflow/test-ssh", headers=admin_headers)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert seen == {"host": "airflow-host", "dags_dir": "/opt/airflow/dags"}
 
 
 def test_enabled_with_endpoint_is_available(client, admin_headers):

@@ -17,6 +17,7 @@ from typing import Any
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
 from app.models import BusinessLogic, DataSource
+from app.services import flink_params
 from app.services.flink_sql_generator import FlinkEndpoint, generate_flink_sql
 from app.services.metric_compiler import (
     LOGIC_TYPES,
@@ -280,6 +281,9 @@ class MetricExecutor(Executor):
         engine = artifacts["engine"]
         execution_mode = spec.get("execution_mode") or "batch"
         metric_name = spec.get("metric_name")
+        # 这条指标自己的 Flink 提交参数（并行度/队列/提交目标/checkpoint/额外 -D）：
+        # Spec 优先、context 兜底，留空的项跟随设置页。
+        task_flink = flink_params.from_spec(spec, context)
 
         with SessionLocal() as db:
             ds = db.get(DataSource, target_datasource_id)
@@ -345,6 +349,16 @@ class MetricExecutor(Executor):
                 if group_by:
                     select_body += "\nGROUP BY " + ", ".join(f"`{c}`" for c in group_by)
 
+            # streaming 指标的 checkpoint 要写进 SQL（SET 'state.checkpoints.dir'）：
+            # 只放进提交参数不够，没有它流作业重启就从头重算。任务级优先、其次设置页。
+            checkpoint_dir = ""
+            if execution_mode == "streaming":
+                from app.services.settings_service import SettingsService
+
+                checkpoint_dir = flink_params.resolve_checkpoint_dir(
+                    SettingsService().get_airflow_runtime(db), task_flink
+                )
+
             # 生成完整 Flink SQL
             flink_sql = generate_flink_sql(
                 source_table=source_table,
@@ -355,6 +369,7 @@ class MetricExecutor(Executor):
                 execution_mode=execution_mode,
                 source_physical=source_physical,
                 target_physical=target_table.qualified_name,
+                checkpoint_dir=checkpoint_dir or None,
             )
 
             # L1 血缘：源 = 主对象物化表，目标 = ads 结果表 → inlets/outlets URN。
@@ -379,6 +394,10 @@ class MetricExecutor(Executor):
                         # 见 transform 同处：占位符的运行期取值表。metric 两端同为数仓，
                         # 但仍要显式给——不给就没有任何凭据注入。
                         env=endpoint_credential_env(warehouse_conn_id, engine),
+                        # 流式作业提交即 detach（-d），否则 Airflow 任务永远阻塞在一个
+                        # 不会结束的流作业上（与 move_job_compiler 的增量/CDC 同理）。
+                        detached=execution_mode == "streaming",
+                        checkpoint_dir=checkpoint_dir,
                         # L1 血缘：inlets/outlets
                         source_urns=source_urns,
                         target_urn=target_urn,
@@ -387,6 +406,7 @@ class MetricExecutor(Executor):
                 warehouse_conn_id=warehouse_conn_id,
                 warehouse_ddl=(artifacts["ddl"],),  # 先建 ads 表
                 artifact_id=context.get("artifact_id"),
+                flink_task_params=task_flink,
             )
             return receipt
 

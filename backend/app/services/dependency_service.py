@@ -10,8 +10,10 @@ ERPNext 等外部源库不在此纳管——它们是外部数据源，走 ``Dat
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
@@ -59,19 +61,47 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         # GraphQL 读取超时（秒）。大域(ERP ~734 表)批量拉取 + 不稳定隧道时 30s 易读超时，默认 90。
         ("request_timeout", "int", False, False, 90),
     ],
+    # Airflow 一个组件、两条独立连接，故连接字段也分两组（前端分节渲染、分别拨测）：
+    #   · 调度 API：endpoint + 账密。REST 版本不入配置——客户端 404 时自协商。
+    #     也没有 token：Airflow 2.x REST 是 basic auth，没有任何部署路径产出过 bearer token，
+    #     那个字段填了不生效，只会让人以为配了鉴权。
+    #   · DAG 投递（SSH）：主机/端口/用户/目录在 deploy_spec.extra，唯独密码落在这里——
+    #     extra 脱敏时原样透传（_SPEC_PRESERVE_KEYS），机密搁那儿会明文回显，且
+    #     「留空=保持不变」失效；落进本 schema 才有 _mask_connection/_merge_connection 兜着。
     "airflow": [
         ("endpoint", "str", False, True, "http://localhost:8081"),
         ("username", "str", False, False, None),
         ("password", "str", True, False, None),
-        ("token", "str", True, False, None),
-        ("api_version", "str", False, False, "v1"),
-        # DAG 投递用的 SSH 密码。放这里而非 deploy_spec.extra：extra 在脱敏时原样透传
-        # （_SPEC_PRESERVE_KEYS），机密搁那儿会明文回显，且「留空=保持不变」失效。
-        # 落进本 schema 就白嫖了 _mask_connection / _merge_connection 的全套处理。
-        # 拨测不用它（_probe_airflow 只读 endpoint/凭据），非必填。
         ("ssh_password", "str", True, False, None),
     ],
 }
+
+# 组件的连接分组：一个组件可能同时握着几条互不相干的连接（Airflow = 调度 API + SSH 投递），
+# 它们各自会通/会断，得能分开拨测、分别显示。key → [(分组 id, 分组名, 该组的连接字段)]。
+# 未列出的组件只有一条连接（分组 id 固定 "default"）。
+CONNECTION_GROUPS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
+    "airflow": [
+        ("api", "调度 API", ("endpoint", "username", "password")),
+        ("ssh", "DAG 投递（SSH）", ("ssh_password",)),
+    ],
+}
+
+
+def connection_groups(key: str) -> list[tuple[str, str, tuple[str, ...]]]:
+    """取组件的连接分组；单连接组件回一条 default 分组（含全部连接字段）。"""
+    groups = CONNECTION_GROUPS.get(key)
+    if groups:
+        return groups
+    return [("default", "连接", tuple(f[0] for f in CONNECTION_SCHEMAS.get(key, [])))]
+
+
+def primary_connection_group(key: str) -> str:
+    """组件"自己那条"连接（第一组）。
+
+    部署完只验它：装完 Airflow 该验的是这台服务本身活没活，而 DAG 投递（SSH）是
+    ontoMeta 侧另配的一条连接，还没配就把整次安装判成失败是冤枉的。
+    """
+    return connection_groups(key)[0][0]
 
 # 部署参数 schema：按 mode（跨组件通用）。
 # Phase 0 只落地结构；docker/k8s/bare_metal 的实际部署在 Phase 3 实现。
@@ -109,7 +139,7 @@ DEPLOY_SPEC_SCHEMAS: dict[str, list[ConnectionField]] = {
 
 # 物理机模式：填目标机 IP + SSH 账密/私钥，ontoMeta 远程 SSH 安装、启动、回收连接、拨测。
 # 字段 = 通用 SSH 接入参数（所有组件共用）+ 每组件少量安装参数（端口/安装目录/管理员密码）。
-# 服务自身的 API 参数（如 Airflow 的 token/api_version）由安装流程自动生成回收，不再要人填。
+# 服务自身的 API 参数（如 Airflow 的端点）由安装流程自动生成回收，不再要人填。
 # 安装编排见 install_recipes.py；deploy() 开 SSH → 派发 recipe → 回收 connection → 拨测。
 _SSH_ACCESS_FIELDS: list[ConnectionField] = [
     ("ssh_host", "str", False, True, None),
@@ -167,8 +197,7 @@ def build_bare_metal_connection(key: str, spec: dict[str, Any]) -> dict[str, Any
                 "token": spec.get("token"), "fabric": "PROD"}
     if key == "airflow":
         return {"endpoint": f"http://{h}:{spec.get('port', 8081)}",
-                "username": spec.get("username"), "password": spec.get("password"),
-                "token": spec.get("token"), "api_version": spec.get("api_version", "v1")}
+                "username": spec.get("username"), "password": spec.get("password")}
     if key == "llm":
         return {"provider": spec.get("provider", "openai-compatible"),
                 "api_base_url": f"http://{h}:{spec.get('port')}{spec.get('path', '/v1')}",
@@ -257,7 +286,7 @@ def _spec_schema_for(key: str, mode: str) -> list[ConnectionField]:
 
 
 # deploy_spec 里由安装流程写回、不属于任何输入 schema 的内部键，脱敏时原样保留。
-_SPEC_PRESERVE_KEYS = {"extra", "_datasource_id"}
+_SPEC_PRESERVE_KEYS = {"extra", "_datasource_id", "_probe"}
 
 
 def _mask_deploy_spec(key: str, mode: str, spec: dict[str, Any]) -> dict[str, Any]:
@@ -289,6 +318,17 @@ def _mask_deploy_spec(key: str, mode: str, spec: dict[str, Any]) -> dict[str, An
     return out
 
 
+def _drop_probe_ledger(row: DependencyComponent) -> None:
+    """把逐条拨测记账清掉：配置变了，上次的结论就不再是这份配置的结论。
+
+    只退行状态、不清记账的话，前端那几个逐条 ✓/✗ 会拿着旧配置的结果继续显示——
+    地址改对了却仍挂着红叉，是「保存即绿灯」那种假绿灯的镜像版假红灯。
+    """
+    spec = _loads(row.deploy_spec_json)
+    if spec.pop("_probe", None) is not None:
+        row.deploy_spec_json = _dumps(spec)
+
+
 def _merge_deploy_spec(
     key: str, mode: str, current: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
@@ -316,6 +356,9 @@ class ProbeResult:
     ok: bool
     message: str
     latency_ms: int | None = None
+    # 分组拨测明细：[{group, label, ok, message, latency_ms}]。单连接组件也回一条，
+    # 前端据此逐条显示「调度 API ✓ / DAG 投递 ✗」而不是把两条连接糊成一个红叉。
+    parts: list[dict[str, Any]] = field(default_factory=list)
 
 
 class DependencyComponentService:
@@ -336,6 +379,14 @@ class DependencyComponentService:
             ],
             "connection_schemas": {
                 k: field_list(fields) for k, fields in CONNECTION_SCHEMAS.items()
+            },
+            # 连接分组：一个组件可能握着几条互不相干的连接，前端据此分节渲染并逐条拨测。
+            "connection_groups": {
+                k: [
+                    {"id": gid, "label": label, "fields": list(fields)}
+                    for gid, label, fields in connection_groups(k)
+                ]
+                for k in COMPONENT_CATALOG
             },
             "deploy_modes": DEPLOY_MODES,
             # 每组件允许的部署方式（前端据此收窄模式选择器）；未列出=全支持。
@@ -439,6 +490,9 @@ class DependencyComponentService:
                     f"（仅支持 {'/'.join(allowed_deploy_modes(row.key))}）"
                 )
             row.deploy_mode = data["deploy_mode"]
+        # 连接参数分居两处（连接信息 + deploy_spec.extra 里的 SSH 主机/目录），
+        # 任一处变动都让上次拨测记账失效。
+        touched_config = "deploy_spec" in data or "connection" in data
         if "deploy_spec" in data:
             # secret-merge：机密字段（SSH 密码/私钥等）留空表示保留原值，避免编辑清空
             merged_spec = _merge_deploy_spec(
@@ -460,6 +514,8 @@ class DependencyComponentService:
             # 的假绿灯。真正的 connected 只由拨测/部署成功回写（见 probe/deploy）。
             row.deploy_status = "not_deployed"
             row.deploy_error = None
+        if touched_config:
+            _drop_probe_ledger(row)
         db.commit()
         db.refresh(row)
         return row
@@ -703,8 +759,7 @@ class DependencyComponentService:
         if af and not self._get_singleton(db, "airflow"):
             self._upsert_singleton(db, "airflow", "Airflow 调度", {
                 "endpoint": af.endpoint, "username": af.username,
-                "password": af.password, "token": af.token,
-                "api_version": af.api_version,
+                "password": af.password,
             }, enabled=af.enabled)
             # 编排参数落 extra
             af_row = self._get_singleton(db, "airflow")
@@ -729,7 +784,9 @@ class DependencyComponentService:
         # DAG 投递（SSH 单通道）：产物 rsync 到 Airflow 主机后原子切换。
         # ontoMeta / Airflow / Flink 常分处三台机器，故没有"写本地"这种通道。
         # 密码是机密，走 CONNECTION_SCHEMAS 而非这里（extra 不脱敏）。
-        "ssh_host", "ssh_port", "ssh_user", "ssh_key_path",
+        # 没有私钥路径：那是 ontoMeta 主机上的文件，归该机 ~/.ssh/config 管；
+        # 密码留空即走本机默认身份/agent。
+        "ssh_host", "ssh_port", "ssh_user",
         # Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）。
         # flink_sql_runner_jar 是 **ontoMeta 侧**的 jar 路径：投递时读它的字节随包发到
         # Airflow 主机的 ontometa/_lib/，不再要求预先摆在 Airflow 机器上。
@@ -746,8 +803,6 @@ class DependencyComponentService:
             "endpoint": af_conn.get("endpoint", ""),
             "username": af_conn.get("username"),
             "password": af_conn.get("password"),
-            "token": af_conn.get("token"),
-            "api_version": af_conn.get("api_version", "v1"),
             "ssh_password": af_conn.get("ssh_password"),
             "enabled": af.enabled if af else False,
         }
@@ -760,13 +815,12 @@ class DependencyComponentService:
         current = self._conn(db, "airflow")
         # 连接字段：仅在 data 中出现时更新；机密为 None 时保留原值（与旧实现一致）
         af_conn = dict(current)
-        for f in ("endpoint", "username", "password", "token", "api_version", "ssh_password"):
+        for f in ("endpoint", "username", "password", "ssh_password"):
             if f in data:
                 v = data[f]
-                if f in ("password", "token", "ssh_password") and v is None:
+                if f in ("password", "ssh_password") and v is None:
                     continue
                 af_conn[f] = v
-        af_conn.setdefault("api_version", "v1")
         af_row = self._get_singleton(db, "airflow")
         if af_row:
             af_row.connection_json = _dumps(af_conn)
@@ -788,26 +842,97 @@ class DependencyComponentService:
                 extra[f] = data[f]
         spec["extra"] = extra
         af_row.deploy_spec_json = _dumps(spec)
+        _drop_probe_ledger(af_row)
         db.commit()
         return self.get_airflow(db)
 
     # ---- 拨测 ----
-    def probe(self, db: Session, component_id: str) -> ProbeResult:
+    def probe(
+        self, db: Session, component_id: str, target: str | None = None
+    ) -> ProbeResult:
+        """拨测组件的连接。
+
+        ``target`` 指定只测哪一条连接（如 airflow 的 ``api`` / ``ssh``），省略则全测。
+        一个组件的几条连接互不相干——调度 API 通不通与 SSH 投递通不通是两件事，混在
+        一次拨测里只会得到一个说不清哪儿断了的红叉，故结果**逐条记账**（存
+        ``deploy_spec._probe``），行状态由各条的最新结果聚合而成。
+        """
         row = db.get(DependencyComponent, component_id)
         if not row:
             return ProbeResult(False, "组件不存在")
+        groups = connection_groups(row.key)
+        if target:
+            groups = [g for g in groups if g[0] == target]
+            if not groups:
+                return ProbeResult(
+                    False,
+                    f"组件 {row.key} 没有名为 {target} 的连接"
+                    f"（可选：{'/'.join(g[0] for g in connection_groups(row.key))}）",
+                )
         conn = _loads(row.connection_json)
-        try:
-            result = _PROBES[row.key](conn)
-        except KeyError:
-            return ProbeResult(False, f"组件 {row.key} 暂不支持拨测")
-        if result.ok:
+        spec = _loads(row.deploy_spec_json)
+        extra = dict(spec.get("extra", {}))
+        ledger = dict(spec.get("_probe", {}))
+
+        parts: list[dict[str, Any]] = []
+        for gid, label, _fields in groups:
+            fn = _PROBES.get((row.key, gid))
+            if fn is None:
+                return ProbeResult(False, f"组件 {row.key} 暂不支持拨测")
+            r = fn(conn, extra)
+            part = {
+                "group": gid, "label": label, "ok": r.ok,
+                "message": r.message, "latency_ms": r.latency_ms,
+            }
+            parts.append(part)
+            ledger[gid] = {**part, "at": datetime.now(timezone.utc).isoformat()}
+
+        spec["_probe"] = ledger
+        row.deploy_spec_json = _dumps(spec)
+        # 行状态看**全部**连接的最新记账：只测了一条就通过，不足以把整行判成已连接。
+        all_groups = connection_groups(row.key)
+        recorded = [ledger.get(g[0]) for g in all_groups]
+        failed = [
+            f"{g[1]}：{ledger[g[0]]['message']}"
+            for g in all_groups
+            if ledger.get(g[0]) and not ledger[g[0]]["ok"]
+        ]
+        if failed:
+            row.deploy_status = "failed"
+            row.deploy_error = "；".join(failed)[:500]
+        elif all(recorded):
             row.deploy_status = "connected"
             row.deploy_error = None
         else:
-            row.deploy_status = "failed"
-            row.deploy_error = result.message
+            # 还有连接没测过：不算已连接，也别报错——如实停在「未拨测」。
+            row.deploy_status = "not_deployed"
+            row.deploy_error = None
         db.commit()
+
+        ok = all(p["ok"] for p in parts)
+        if len(parts) == 1:
+            message = parts[0]["message"]
+        elif ok:
+            message = "全部连接拨测通过"
+        else:
+            message = "；".join(f"{p['label']}：{p['message']}" for p in parts if not p["ok"])
+        latency = next((p["latency_ms"] for p in parts if p["latency_ms"] is not None), None)
+        return ProbeResult(ok, message, latency, parts)
+
+    def _probe_after_deploy(self, db: Session, component_id: str) -> ProbeResult:
+        """部署后只拨测组件自身那条连接（见 primary_connection_group）。
+
+        通过时把行状态提到 ``deployed``：其余连接还没测过，聚合规则不会给 ``connected``，
+        但"装完了、服务自己是通的"不该显示成未部署——那会让前端把成功的安装报成失败。
+        """
+        row = db.get(DependencyComponent, component_id)
+        if not row:
+            return ProbeResult(False, "组件不存在")
+        result = self.probe(db, component_id, target=primary_connection_group(row.key))
+        db.refresh(row)
+        if result.ok and row.deploy_status == "not_deployed":
+            row.deploy_status = "deployed"
+            db.commit()
         return result
 
     # ---- 部署 ----
@@ -852,7 +977,7 @@ class DependencyComponentService:
                 row.deploy_spec_json = _dumps(spec)
                 row.deploy_log = "\n".join(log)
                 db.commit()
-                result = self.probe(db, component_id)
+                result = self._probe_after_deploy(db, component_id)
                 log.append(f"拨测：{'连接成功' if result.ok else result.message}")
                 row.deploy_log = "\n".join(log)
                 db.commit()
@@ -864,7 +989,7 @@ class DependencyComponentService:
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
                 row.deploy_log = "\n".join(log)
                 db.commit()
-                result = self.probe(db, component_id)
+                result = self._probe_after_deploy(db, component_id)
                 log.append(f"拨测：{'连接成功' if result.ok else result.message}")
                 row.deploy_log = "\n".join(log)
                 db.commit()
@@ -876,7 +1001,7 @@ class DependencyComponentService:
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
                 row.deploy_log = "\n".join(log)
                 db.commit()
-                result = self.probe(db, component_id)
+                result = self._probe_after_deploy(db, component_id)
                 log.append(f"拨测：{'连接成功' if result.ok else result.message}")
                 row.deploy_log = "\n".join(log)
                 db.commit()
@@ -959,7 +1084,7 @@ import time  # noqa: E402
 from app.services.common import make_http_client  # noqa: E402
 
 
-def _probe_llm(conn: dict[str, Any]) -> ProbeResult:
+def _probe_llm(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
     from openai import OpenAI
 
     base = (conn.get("api_base_url") or "").strip()
@@ -976,20 +1101,20 @@ def _probe_llm(conn: dict[str, Any]) -> ProbeResult:
         return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
 
 
-def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
-    """两步拨测：/health 探通，再打带版本前缀的 REST 探鉴权（复用既有 AirflowClient 逻辑）。"""
+def _probe_airflow_api(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
+    """调度 API 两步拨测：/health 探通，再打带版本前缀的 REST 探鉴权。
+
+    只测 ``/health`` 会给假绿灯——它在 2.x 默认匿名可读，而触发 DagRun 走的
+    ``/api/{version}/*`` 可能因为没开 basic_auth 后端而 401。REST 版本由客户端
+    自协商，拨测因此也不必知道实例是 2.x 还是 3.x。
+    """
     from app.connectors.airflow import AirflowClient, AirflowError, explain_ping_failure
 
     endpoint = (conn.get("endpoint") or "").strip()
     if not endpoint:
         return ProbeResult(False, "缺少 endpoint")
-    api_version = conn.get("api_version") or "v1"
     client = AirflowClient(
-        endpoint,
-        username=conn.get("username"),
-        password=conn.get("password"),
-        token=conn.get("token"),
-        api_version=api_version,
+        endpoint, username=conn.get("username"), password=conn.get("password")
     )
     start = time.perf_counter()
     try:
@@ -999,8 +1124,8 @@ def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
     try:
         client.ping_api()
     except AirflowError as exc:
-        # /health 通、REST 不通：按 401/403（鉴权）与 404/405（版本，自动探测应改成哪个）补充下一步。
-        return ProbeResult(False, explain_ping_failure(client, api_version, exc)[:300])
+        # /health 通、REST 不通：按 401/403（鉴权）与 404/405（路径）补充下一步。
+        return ProbeResult(False, explain_ping_failure(client, exc)[:300])
     except Exception as exc:  # noqa: BLE001
         return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
     else:
@@ -1009,9 +1134,37 @@ def _probe_airflow(conn: dict[str, Any]) -> ProbeResult:
         client.close()
 
 
+def _probe_airflow_ssh(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
+    """DAG 投递拨测：真连一次 Airflow 主机，并确认 DAG 目录可写。
+
+    与调度 API 拨测分开：这两条连接常常一通一断（API 走 8080 端口、投递走 22 端口，
+    甚至不是同一台机器），合成一次拨测只会告诉用户"Airflow 有问题"却指不出是哪条。
+    复用 preflight 的 ``probe_ssh_pipeline``，与提交前自检判的是同一件事。
+    """
+    from app.services.materialize_preflight import probe_ssh_pipeline
+
+    host = (extra.get("ssh_host") or "").strip()
+    dags_dir = (extra.get("dags_dir") or "").strip()
+    if not host:
+        return ProbeResult(False, "缺少 SSH 主机（DAG 产物没有地方可投）")
+    if not dags_dir:
+        return ProbeResult(False, "缺少 DAG 目录（Airflow 主机上的路径）")
+
+    cfg = SimpleNamespace(  # probe_ssh_pipeline 只读这几个字段
+        ssh_host=host,
+        ssh_user=(extra.get("ssh_user") or "").strip(),
+        ssh_port=int(extra.get("ssh_port") or 22),
+        ssh_password=conn.get("ssh_password") or None,
+        dags_dir=dags_dir,
+    )
+    start = time.perf_counter()
+    ok, detail = probe_ssh_pipeline(cfg)
+    return ProbeResult(ok, detail[:300], int((time.perf_counter() - start) * 1000) if ok else None)
 
 
-def _probe_datahub(conn: dict[str, Any]) -> ProbeResult:
+
+
+def _probe_datahub(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
     """拨测 DataHub：打运行时真正用到的 GraphQL 端点，并校验响应确实是 GMS。
 
     只 ``GET {gms_url}/config`` 看状态码会给假绿灯——若 ``gms_url`` 误填成前端 SPA
@@ -1069,10 +1222,12 @@ def _probe_datahub(conn: dict[str, Any]) -> ProbeResult:
     return ProbeResult(True, "连接成功", latency)
 
 
-_PROBES: dict[str, Any] = {
-    "llm": _probe_llm,
-    "datahub": _probe_datahub,
-    "airflow": _probe_airflow,
+# (组件 key, 连接分组 id) → 探针。分组见 CONNECTION_GROUPS；单连接组件用 "default"。
+_PROBES: dict[tuple[str, str], Any] = {
+    ("llm", "default"): _probe_llm,
+    ("datahub", "default"): _probe_datahub,
+    ("airflow", "api"): _probe_airflow_api,
+    ("airflow", "ssh"): _probe_airflow_ssh,
 }
 
 

@@ -98,9 +98,11 @@ class DagDelivery(ABC):
 class SshDelivery(DagDelivery):
     """SSH 投递器：rsync 推到 Airflow 主机，远端原子切换。
 
-    **认证**：优先私钥（``key_path``），否则密码（需要 ``sshpass``——ssh 二进制不从
-    stdin 读密码）。缺 sshpass 时明确报错而非静默降级成免密尝试，否则用户看到的会是
-    一句指不到原因的 "Permission denied"。
+    **认证**：填了密码就用密码（需要 ``sshpass``——ssh 二进制不从 stdin 读密码）；
+    留空则用 ontoMeta 主机的默认 SSH 身份/agent。缺 sshpass 时明确报错而非静默降级成
+    免密尝试，否则用户看到的会是一句指不到原因的 "Permission denied"。私钥**路径**不做
+    成设置项：那是 ontoMeta 主机上的文件，属该机 ``~/.ssh/config`` 的事，Web 表单里填
+    一个别处的路径只会得到一个测不出真假的配置。
 
     **传输 seam**：所有子进程调用收在 ``_run`` 一处。测试据此注入替身，既能验路径拼接
     与命令序列，又不必真开一个 sshd。
@@ -112,7 +114,6 @@ class SshDelivery(DagDelivery):
         host: str,
         user: str | None = None,
         port: int = 22,
-        key_path: str | None = None,
         password: str | None = None,
         timeout: float = 120.0,
         strict_host_key_checking: bool = False,
@@ -122,8 +123,8 @@ class SshDelivery(DagDelivery):
             host: Airflow 主机
             user: SSH 用户名，不设则用 ssh 自身的默认（~/.ssh/config 或当前用户）
             port: SSH 端口
-            key_path: 私钥路径（ontoMeta 侧可读）
-            password: SSH 密码（key_path 为空时使用，需要 sshpass）
+            password: SSH 密码（需要 sshpass）。留空 = 用 ontoMeta 主机的默认 SSH
+                身份/agent；要指定私钥就写进该主机的 ``~/.ssh/config``。
             timeout: 单条命令的超时（秒）
             strict_host_key_checking: 关掉时首次连接不会因 known_hosts 缺条目而卡住。
                 默认关——投递目标是运维自己配的内网主机，且卡住的表现是超时而非报错。
@@ -133,7 +134,6 @@ class SshDelivery(DagDelivery):
         self.host = host
         self.user = user or None
         self.port = port or 22
-        self.key_path = key_path or None
         self.password = password or None
         self.timeout = timeout
         self.strict_host_key_checking = strict_host_key_checking
@@ -171,22 +171,24 @@ class SshDelivery(DagDelivery):
         return f"{self.user}@{self.host}" if self.user else self.host
 
     def _auth_prefix(self) -> list[str]:
-        """密码认证时的 sshpass 前缀；密钥认证返回空。"""
-        if self.key_path or not self.password:
+        """密码认证时的 sshpass 前缀；用默认身份/agent 时返回空。"""
+        if not self.password:
             return []
         if not shutil.which("sshpass"):
             raise DagDeliveryError(
                 "SSH 密码认证需要 sshpass，但未安装（ssh 不从标准输入读密码）。"
                 "请安装 sshpass（macOS: brew install sshpass），"
-                "或改用密钥认证（设置页 → Airflow → SSH 私钥路径）。"
+                "或清空设置页 → Airflow → SSH 密码，改用本机的免密身份（~/.ssh）。"
             )
         return ["sshpass", "-p", self.password]
 
     def _ssh_opts(self) -> list[str]:
-        """ssh 的公共选项（端口/私钥/主机校验），rsync 经 -e 复用同一套。"""
-        opts = ["-p", str(self.port), "-o", "BatchMode=" + ("no" if self.password and not self.key_path else "yes")]
-        if self.key_path:
-            opts += ["-i", self.key_path, "-o", "IdentitiesOnly=yes"]
+        """ssh 的公共选项（端口/主机校验），rsync 经 -e 复用同一套。
+
+        没填密码时 ``BatchMode=yes``：走本机默认身份/agent，认证不了就立刻失败，
+        而不是挂在一个没人看得见的交互式密码提示上直到超时。
+        """
+        opts = ["-p", str(self.port), "-o", "BatchMode=" + ("no" if self.password else "yes")]
         if not self.strict_host_key_checking:
             opts += ["-o", "StrictHostKeyChecking=no"]
         return opts
@@ -364,7 +366,6 @@ def get_delivery(
     *,
     user: str | None = None,
     port: int = 22,
-    key_path: str | None = None,
     password: str | None = None,
 ) -> DagDelivery:
     """构造投递器。
@@ -375,8 +376,7 @@ def get_delivery(
         host: Airflow 主机
         user: SSH 用户名
         port: SSH 端口
-        key_path: 私钥路径（优先）
-        password: SSH 密码（key_path 为空时用，需要 sshpass）
+        password: SSH 密码（需要 sshpass）。留空 = 用本机默认 SSH 身份/agent。
 
     Returns:
         DagDelivery 实例
@@ -384,6 +384,4 @@ def get_delivery(
     Raises:
         DagDeliveryError: 缺少主机地址
     """
-    return SshDelivery(
-        host=host, user=user, port=port, key_path=key_path, password=password
-    )
+    return SshDelivery(host=host, user=user, port=port, password=password)

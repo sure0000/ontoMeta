@@ -145,8 +145,6 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         username=row.get("username"),
         password_set=bool(row.get("password")),
         password_hint=mask_secret(row.get("password")),
-        token_set=bool(row.get("token")),
-        api_version=row.get("api_version", "v1"),
         enabled=row.get("enabled", False),
         available=bool(
             row.get("enabled") and row.get("endpoint") and row.get("ssh_host")
@@ -155,7 +153,6 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         ssh_host=row.get("ssh_host") or "",
         ssh_port=row.get("ssh_port") or 22,
         ssh_user=row.get("ssh_user") or "",
-        ssh_key_path=row.get("ssh_key_path") or "",
         ssh_password_set=bool(row.get("ssh_password")),
         ssh_password_hint=mask_secret(row.get("ssh_password")),
         max_tasks_per_dag=row.get("max_tasks_per_dag") or 50,
@@ -185,20 +182,19 @@ def update_airflow_settings(data: AirflowSettingsUpdate, db: Session = Depends(g
 
 @router.post("/settings/airflow/test")
 def test_airflow_connection(db: Session = Depends(get_db)):
-    """连通性测试：先 ``/health`` 探通，再打一次带版本前缀的 REST API 探鉴权。
+    """**调度 API** 连通性测试：先 ``/health`` 探通，再打一次带版本前缀的 REST API 探鉴权。
 
     只测 ``/health`` 会给假绿灯——它在 Airflow 2.x 默认匿名可读，而下发 DagRun 走的
     ``/api/{version}/*`` 可能因为没开 basic_auth 后端而 401。两步都过才算真的能用。
+
+    DAG 投递（SSH）是**另一条连接**，另有 ``/settings/airflow/test-ssh``：两者常常一通
+    一断（一个走 8080、一个走 22，甚至不是同一台机器），合成一次测只会指不出断在哪。
     """
     from app.connectors.airflow import AirflowClient, AirflowError, explain_ping_failure
 
     cfg = settings_service.get_airflow_runtime(db)
     client = AirflowClient(
-        cfg.endpoint,
-        username=cfg.username,
-        password=cfg.password,
-        token=cfg.token,
-        api_version=cfg.api_version,
+        cfg.endpoint, username=cfg.username, password=cfg.password
     )
     try:
         health = client.health()
@@ -207,12 +203,32 @@ def test_airflow_connection(db: Session = Depends(get_db)):
     try:
         client.ping_api()
     except AirflowError as exc:
-        # /health 通、REST 不通：按 401/403（鉴权）与 404/405（版本，自动探测应改成哪个）补充下一步。
-        detail = explain_ping_failure(client, cfg.api_version, exc)
-        raise HTTPException(status_code=400, detail=detail) from exc
+        # /health 通、REST 不通：按 401/403（鉴权）与 404/405（路径）补充下一步。
+        raise HTTPException(
+            status_code=400, detail=explain_ping_failure(client, exc)
+        ) from exc
     finally:
         client.close()
-    return {"ok": True, "health": health}
+    return {"ok": True, "health": health, "api_version": client.api_version}
+
+
+@router.post("/settings/airflow/test-ssh")
+def test_airflow_ssh_delivery(db: Session = Depends(get_db)):
+    """**DAG 投递（SSH）** 连通性测试：真连一次 Airflow 主机，并确认 DAG 目录可写。
+
+    与调度 API 测试分开，判的与提交前自检（preflight）是同一件事，故复用同一个探针。
+    """
+    from app.services.materialize_preflight import probe_ssh_pipeline
+
+    cfg = settings_service.get_airflow_runtime(db)
+    if not cfg.ssh_host:
+        raise HTTPException(status_code=400, detail="未配置 SSH 主机，DAG 产物没有地方可投")
+    if not cfg.dags_dir:
+        raise HTTPException(status_code=400, detail="未配置 DAG 目录（Airflow 主机上的路径）")
+    ok, detail = probe_ssh_pipeline(cfg)
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "detail": detail}
 
 
 # Cube（已废弃，保留用于向后兼容）

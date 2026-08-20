@@ -73,7 +73,7 @@ def test_unpause_before_trigger():
 
 
 def test_api_version_is_configurable():
-    """Airflow 2.x=/api/v1，3.x=/api/v2——版本做成参数，不写死。"""
+    """Airflow 2.x=/api/v1，3.x=/api/v2——版本可给起点，不写死。"""
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -158,42 +158,82 @@ def test_explain_ping_failure_auth_hint_on_401():
     try:
         client.ping_api()
     except AirflowError as exc:
-        msg = explain_ping_failure(client, "v1", exc)
+        msg = explain_ping_failure(client, exc)
     assert "401" in msg
     assert "AUTH_BACKENDS" in msg
 
 
-def test_explain_ping_failure_detects_version_mismatch_on_404():
-    """404 且配的版本与实测不符 → 自动探测并明确告知应改成哪个版本。"""
+def test_version_is_renegotiated_on_404():
+    """v1 打不通、实例其实是 v2 → 客户端自己换过来重试，不再要用户去设置里改版本号。"""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "openapi" in path:
+            return httpx.Response(200, json={"servers": [{"url": "/api/v2"}]})
+        seen.append(path)
+        if path.startswith("/api/v1/"):
+            return httpx.Response(404, text='{"title": "Not Found"}')
+        return httpx.Response(200, json={"dag_run_id": "r1", "state": "queued"})
+
+    client = _client(handler)  # 起点是默认的 v1
+    out = client.trigger_dag("dag1", dag_run_id="r1")
+
+    assert out["state"] == "queued"
+    assert seen == ["/api/v1/dags/dag1/dagRuns", "/api/v2/dags/dag1/dagRuns"]
+    # 换过来之后就记住了：后续请求直接走 v2，不再每次先撞一次 404。
+    client.get_dag_run("dag1", "r1")
+    assert client.api_version == "v2"
+    assert seen[-1].startswith("/api/v2/")
+
+
+def test_version_renegotiation_tried_only_once():
+    """两个版本都 404 时如实报错，且不把每个请求都拖成反复的 openapi 探测。"""
+    probes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "openapi" in request.url.path:
+            probes.append(request.url.path)
+            return httpx.Response(200, json={"servers": [{"url": "/api/v2"}]})
+        return httpx.Response(404, text='{"title": "Not Found"}')
+
+    client = _client(handler)
+    for _ in range(3):
+        with pytest.raises(AirflowError):
+            client.get_dag_run("dag1", "r1")
+    assert len(probes) == 1
+
+
+def test_explain_ping_failure_404_after_renegotiation():
+    """自协商后仍 404 → 说清「已按实测版本试过」，不再指向早已不存在的 api_version 配置。"""
     from app.connectors.airflow import explain_ping_failure
 
     def handler(request: httpx.Request) -> httpx.Response:
-        # /api/v1/dags 打不通（404）；openapi 探测暴露的是 v2。
         if "openapi" in request.url.path:
             return httpx.Response(200, json={"servers": [{"url": "/api/v2"}]})
         return httpx.Response(404, text='{"title": "Not Found"}')
 
-    client = _client(handler, api_version="v1")
+    client = _client(handler)
     try:
         client.ping_api()
     except AirflowError as exc:
-        msg = explain_ping_failure(client, "v1", exc)
-    assert "v2" in msg
-    assert "api_version" in msg
+        msg = explain_ping_failure(client, exc)
+    assert "404" in msg and "v2" in msg
+    assert "api_version" not in msg
 
 
 def test_explain_ping_failure_404_when_version_undetectable():
-    """404 且探不到 openapi → 不臆测版本，只提示手动核对 v1/v2。"""
+    """404 且探不到 openapi → 不臆测版本，指回 endpoint 本身。"""
     from app.connectors.airflow import explain_ping_failure
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, text='{"title": "Not Found"}')
 
-    client = _client(handler, api_version="v1")
+    client = _client(handler)
     try:
         client.ping_api()
     except AirflowError as exc:
-        msg = explain_ping_failure(client, "v1", exc)
+        msg = explain_ping_failure(client, exc)
     assert "404" in msg
     assert "openapi.json" in msg
 

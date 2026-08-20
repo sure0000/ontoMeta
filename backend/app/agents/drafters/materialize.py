@@ -14,6 +14,7 @@ from typing import Any
 
 from app.agents.common import require_context
 from app.agents.drafters.base import Drafter
+from app.services import flink_params
 from app.models.warehouse import MaterializationLayer
 
 
@@ -59,6 +60,9 @@ class MaterializeDrafter(Drafter):
             "refresh_cron": (str(context.get("refresh_cron")).strip() or None)
             if context.get("refresh_cron") is not None
             else None,
+            # 任务级 Flink 执行参数。物化建表不经 Flink，但同一份 Spec 里参数只有一处
+            # 口径——收下并原样透传，别让「物化填的」与「同步填的」变成两回事。
+            **flink_params.from_context(context),
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

@@ -17,6 +17,7 @@ from app.agents.drafters.base import Drafter
 from app.database import SessionLocal
 from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
+from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 from app.services.source_ref import (
     has_physical_source,
@@ -116,6 +117,9 @@ class SyncDrafter(Drafter):
                 # 默认值取 job_planner 的同一常量——三处各写各的 "erp_readonly" /
                 # "default" 会让「改默认连接」这件事漏掉其中一处。
                 "source_ref_alias": context.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS,
+                # 任务级 Flink 执行参数（并行度/队列/提交目标/checkpoint/额外 -D）。
+                # 只落人真填了的项——留空 = 跟随设置页默认，不在 Spec 里凝固成快照。
+                **flink_params.from_context(context),
             }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

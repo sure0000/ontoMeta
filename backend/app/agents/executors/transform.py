@@ -20,6 +20,7 @@ from typing import Any
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
 from app.models import DataSource
+from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 from app.services.flink_sql_generator import (
     FlinkEndpoint,
@@ -259,6 +260,10 @@ class TransformExecutor(Executor):
         target_table = spec.get("target_table")
         engine = spec.get("engine") or "hive"
         execution_mode = spec.get("execution_mode") or "batch"
+        # 这条任务自己的 Flink 提交参数（并行度/队列/提交目标/checkpoint/额外 -D）：
+        # Spec 优先、context 兜底，留空的项跟随设置页。非法值在此就抛（消息可读），
+        # 不带着一个跑不起来的参数去投递 DAG。
+        task_flink = flink_params.from_spec(spec, context)
 
         with SessionLocal() as db:
             ds = db.get(DataSource, target_datasource_id)
@@ -298,6 +303,17 @@ class TransformExecutor(Executor):
                 flink_quote,
             )
 
+            # streaming 作业的 checkpoint 要写进 SQL（SET 'state.checkpoints.dir'），
+            # 只放进提交参数是不够的——没有它，流作业重启就从头重算。任务级优先，
+            # 其次设置页；批作业跑完即退，无状态可存，不注入。
+            checkpoint_dir = ""
+            if execution_mode == "streaming":
+                from app.services.settings_service import SettingsService
+
+                checkpoint_dir = flink_params.resolve_checkpoint_dir(
+                    SettingsService().get_airflow_runtime(db), task_flink
+                )
+
             # 生成完整 Flink SQL
             flink_sql = generate_flink_sql(
                 source_table=flink_input["source_table"],
@@ -309,6 +325,7 @@ class TransformExecutor(Executor):
                 execution_mode=execution_mode,
                 source_physical=flink_input["source_physical"],
                 target_physical=flink_input["target_physical"],
+                checkpoint_dir=checkpoint_dir or None,
             )
 
             # L1 血缘：源物理名 + 目标物理名 → inlets/outlets URN。
@@ -343,6 +360,10 @@ class TransformExecutor(Executor):
                                 warehouse_conn_id, flink_input["target_platform"]
                             ),
                         },
+                        # 流式作业提交即 detach（-d），否则 Airflow 任务会永远阻塞在一个
+                        # 不会结束的流作业上（与 move_job_compiler 的增量/CDC 同理）。
+                        detached=execution_mode == "streaming",
+                        checkpoint_dir=checkpoint_dir,
                         # L1 血缘：inlets/outlets
                         source_urns=source_urns,
                         target_urn=target_urn,
@@ -350,6 +371,7 @@ class TransformExecutor(Executor):
                 ),
                 warehouse_conn_id=warehouse_conn_id,
                 artifact_id=context.get("artifact_id"),
+                flink_task_params=task_flink,
             )
             return receipt
 

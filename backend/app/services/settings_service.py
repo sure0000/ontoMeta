@@ -22,8 +22,9 @@ from app.services.common import make_http_client
 OPENAI_COMPATIBLE_PROVIDERS = {"openai-compatible"}
 OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "EMPTY"
 
-# 产物投递目录属部署基础设施（不在设置页配）：优先用 config 环境变量，
-# 缺省落到仓库自带的 docker/orchestration 本地验证栈目录（与 compose 挂载点对齐）。
+# 产物投递目录是部署路径（config-web-only 法则允许读环境变量的少数 bootstrap 例外）：
+# 只在 ensure_defaults 给新库播种 Airflow 设置行时读一次 env，缺省落到仓库自带的
+# docker/orchestration 本地验证栈目录（与 compose 挂载点对齐）。运行期一律纯数据库读取。
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -88,20 +89,20 @@ class DraftGenerationRuntimeConfig:
 class AirflowRuntimeConfig:
     """Airflow 编排的运行期配置。``available`` 为假时物化无法执行（报错，不再回退直连）。"""
 
+    # ---- 连接一：调度 API（触发 DagRun、回读状态）----
+    # REST 版本不入配置：客户端按 v1 起步、404 时自协商（见 connectors/airflow.py）。
     endpoint: str
     username: str | None
     password: str | None
-    token: str | None
-    api_version: str
-    # 投递目录在设置页配（空则退默认路径）。**这是 Airflow 主机上的路径**——产物经
-    # SSH 推到那台机器，ontoMeta 本地不留副本。
+    # ---- 连接二：DAG 投递（SSH）----
+    # 投递目录在设置页配（纯数据库读取，空则视为未配置）。**这是 Airflow 主机上的
+    # 路径**——产物经 SSH 推到那台机器，ontoMeta 本地不留副本。
     dags_dir: str
-    # SSH 投递参数（设置页配）：产物 rsync 到 Airflow 主机后原子切换。
-    # key_path 优先，为空时用 ssh_password（需要 sshpass）。
+    # 填了密码就用密码（需 sshpass）；留空则用 ontoMeta 主机的默认 SSH 身份/agent
+    # （要指定私钥就写进该主机的 ~/.ssh/config——路径不是 Web 设置页管得了的东西）。
     ssh_host: str
     ssh_port: int
     ssh_user: str
-    ssh_key_path: str
     ssh_password: str | None
     # DAG 形状与时序。dag_parse_timeout 要大于 Airflow 的 dag_dir_list_interval，
     # 否则首次提交必然报「尚未解析到」。
@@ -141,7 +142,6 @@ class AirflowRuntimeConfig:
             self.ssh_host,
             user=self.ssh_user or None,
             port=self.ssh_port,
-            key_path=self.ssh_key_path or None,
             password=self.ssh_password or None,
         )
 
@@ -259,15 +259,13 @@ class SettingsService:
             endpoint=a.get("endpoint", ""),
             username=a.get("username"),
             password=a.get("password"),
-            token=a.get("token"),
-            api_version=a.get("api_version", "v1"),
-            # 投递目录空时退回默认（与既有行为一致）
-            dags_dir=a.get("dags_dir") or _default_dags_dir(),
-            # SSH 投递参数：纯数据库读取（法则：配置只在设置页，不读环境变量）。
+            # 纯数据库读取（法则：配置只在设置页，不读环境变量）：空 = 未配置，
+            # available 为假、物化报错——环境变量只在建行播种时读一次（bootstrap 例外）。
+            dags_dir=a.get("dags_dir") or "",
+            # SSH 投递参数：同上，纯数据库读取。
             ssh_host=a.get("ssh_host") or "",
             ssh_port=int(a.get("ssh_port") or 22),
             ssh_user=a.get("ssh_user") or "",
-            ssh_key_path=a.get("ssh_key_path") or "",
             ssh_password=a.get("ssh_password") or None,
             max_tasks_per_dag=a.get("max_tasks_per_dag") or 50,
             max_active_tasks_per_dag=a.get("max_active_tasks_per_dag") or 16,

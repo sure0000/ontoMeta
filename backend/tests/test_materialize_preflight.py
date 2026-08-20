@@ -26,14 +26,11 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
         endpoint="http://airflow:8080",
         username="admin",
         password="admin",
-        token=None,
-        api_version="v1",
         dags_dir=str(dags_dir),
         # SSH 投递参数：dag_dir_visible 检查改验 SSH 管道，基线给个主机名。
         ssh_host="test-airflow-host",
         ssh_user="deploy",
         ssh_port=22,
-        ssh_key_path="/k/id_test",
         ssh_password=None,
         # 编排旋钮现在全在设置行上（不再有环境变量），基线取与库默认一致的值。
         max_tasks_per_dag=50,
@@ -67,6 +64,7 @@ def _make_handler(
     connection=200,
     sentinel_found=True,
     dag_list=(),
+    dags_folder=None,
 ):
     """按路由分派的 MockTransport handler。各路由的响应可逐个覆盖以造不同失败。"""
 
@@ -78,8 +76,12 @@ def _make_handler(
             if openapi_version is None:
                 return httpx.Response(404)
             return httpx.Response(200, json={"servers": [{"url": f"/api/{openapi_version}"}]})
-        if path == "/api/v1/config":  # expose_config=False 的真实响应
-            return httpx.Response(403, text="config not exposed")
+        if path == "/api/v1/config":
+            if dags_folder is None:  # expose_config=False 的真实响应
+                return httpx.Response(403, text="config not exposed")
+            return httpx.Response(200, json={"sections": [
+                {"name": "core", "options": [{"key": "dags_folder", "value": dags_folder}]}
+            ]})
         if path == "/api/v1/dags":  # ping_api / list_dag_ids（带版本前缀，不含 id）
             return httpx.Response(
                 ping,
@@ -201,12 +203,13 @@ def test_readonly_connection_403_is_non_blocking_warn(monkeypatch, tmp_path):
     assert report.ok is True  # 非阻断项不拦提交
 
 
-def test_api_version_mismatch_warns_with_correction(monkeypatch, tmp_path):
+def test_api_version_reports_what_the_instance_exposes(monkeypatch, tmp_path):
+    """版本已不是配置项（客户端自协商），这一项只如实报出实测版本，不再判"不匹配"。"""
     db = _install(monkeypatch, tmp_path, _make_handler(openapi_version="v2"))
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
     ver = _by_key(report)["airflow_api_version"]
-    assert ver.status == pf.WARN and ver.blocking is False
-    assert "v2" in (ver.next_step or "")
+    assert ver.status == pf.PASS and ver.blocking is False
+    assert "v2" in ver.detail
     assert report.ok is True
 
 
@@ -258,7 +261,7 @@ def test_real_ssh_probe_uses_delivery(monkeypatch):
     monkeypatch.setattr(dd, "get_delivery", lambda *a, **k: Recording(host=a[0], **k))
     af = SimpleNamespace(
         ssh_host="h", ssh_user="u", ssh_port=22,
-        ssh_key_path="/k", ssh_password=None, dags_dir="/opt/airflow/dags",
+        ssh_password=None, dags_dir="/opt/airflow/dags",
     )
     ok, detail = pf.probe_ssh_pipeline(af)
     assert ok and "可写" in detail
@@ -267,7 +270,7 @@ def test_real_ssh_probe_uses_delivery(monkeypatch):
 
     ok, detail = pf.probe_ssh_pipeline(
         SimpleNamespace(ssh_host="h", ssh_user="u", ssh_port=22,
-                        ssh_key_path="/k", ssh_password=None, dags_dir="boom")
+                        ssh_password=None, dags_dir="boom")
     )
     assert not ok and "boom" in detail
 
@@ -429,3 +432,42 @@ def test_preflight_endpoint_unknown_ontology_404(client, admin_headers):
 
 
 # ---------- 用历史投递判「两侧目录不是同一个」 ----------
+
+
+def test_dag_dir_mismatch_with_instance_warns_with_both_readings(monkeypatch, tmp_path):
+    """投递目录与实例自报的 dags_folder 不一致 → 提醒并把两种可能都说清。
+
+    不阻断：容器部署下 dags_folder 是容器内路径、投递落在宿主机上，两者本来就不同，
+    ontoMeta 看不见那层挂载映射，判死会冤枉正确配置。
+    """
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(dags_folder="/opt/airflow/dags"),
+        runtime_over={"dags_dir": "/home/xuyc/airflow-docker/dags"},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["dag_dir_matches_instance"]
+    assert item.status == pf.WARN and item.blocking is False
+    assert "/opt/airflow/dags" in item.detail  # 实例那边是什么，如实说
+    assert "容器" in (item.next_step or "")  # 两种读法都给
+    assert report.ok is True  # 提醒项不拦提交
+
+
+def test_dag_dir_under_the_instance_folder_passes(monkeypatch, tmp_path):
+    """填成 dags_folder 的子目录也算数——Airflow 是递归扫的。"""
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(dags_folder="/home/xuyc/airflow/dags"),
+        runtime_over={"dags_dir": "/home/xuyc/airflow/dags/ontometa"},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    assert _by_key(report)["dag_dir_matches_instance"].status == pf.PASS
+
+
+def test_expose_config_off_only_warns(monkeypatch, tmp_path):
+    """读不到 core.dags_folder 是「没法对账」，不是「配错了」——别拿它拦提交。"""
+    db = _install(monkeypatch, tmp_path, _make_handler())  # dags_folder=None → 403
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["dag_dir_matches_instance"]
+    assert item.status == pf.WARN and item.blocking is False
+    assert "expose_config" in item.detail
