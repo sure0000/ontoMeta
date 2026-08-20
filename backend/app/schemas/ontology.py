@@ -221,9 +221,12 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     name: str
     display_name: str
     description: str | None = None
-    # 源表定位（DataHub urn）。列表里带上它，是因为「能不能建同步任务」等价于
-    # 「有没有 source_ref」——不给前端就只能让人选完提交才在 drafter 里被拒。
+    # 源表定位（DataHub urn）。列表里带上它，是因为「能不能建同步任务」要在前端就判出来，
+    # 不给的话只能让人选完提交才在 drafter 里被拒。
     source_ref: str | None = None
+    # 判「能不能同步」用这个，不要用 `source_ref` 是否为空：人工建模对象的 source_ref
+    # 是 `manual:<源>:<标识>`，非空却没有任何物理表可搬。取值见 services/source_ref。
+    source_provenance: str = "none"
     status: str
     property_count: int = 0
     relation_count: int = 0

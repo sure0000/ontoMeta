@@ -88,30 +88,40 @@ def compile_pipeline(db: Session, pipeline_id: str) -> dict[str, Any]:
         pipeline_name=pipeline.name,
     )
 
-    # 落盘 DAG。与 materialize/transform/metric 一致，按 <dags_dir>/ontometa/<id>/ 子目录聚合
-    # （链 DAG 不经 DagBundle，这里直接落盘，故手动拼子目录）。preflight 递归扫描能认到。
+    # 投递 DAG。与 materialize/transform/metric 一致，按 <dags_dir>/ontometa/<id>/ 子目录
+    # 聚合，并走同一个投递器 —— 链 DAG 此前直接 open().write() 写本地文件系统，在
+    # ontoMeta 与 Airflow 不同机时产物根本到不了 Airflow 主机。
     import os
+
     dag_filename = f"{compiled_dag_id}.py"
     spec_filename = f"{compiled_dag_id}.json"
     out_dir = os.path.join(airflow.dags_dir, "ontometa", compiled_dag_id)
-    dag_path = os.path.join(out_dir, dag_filename)
-    spec_path = os.path.join(out_dir, spec_filename)
+    spec_content = {
+        "pipeline_id": pipeline_id,
+        "compiled_dag_id": compiled_dag_id,
+        "schedule_cron": pipeline.schedule_cron,
+        "steps": step_dags,
+        "compiled_at": datetime.now(timezone.utc).isoformat(),
+    }
 
     try:
-        os.makedirs(out_dir, exist_ok=True)
-        with open(dag_path, "w", encoding="utf-8") as f:
-            f.write(dag_source)
-        spec_content = {
-            "pipeline_id": pipeline_id,
-            "compiled_dag_id": compiled_dag_id,
-            "schedule_cron": pipeline.schedule_cron,
-            "steps": step_dags,
-            "compiled_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with open(spec_path, "w", encoding="utf-8") as f:
-            json.dump(spec_content, f, ensure_ascii=False, indent=2, sort_keys=True)
-    except OSError as exc:
-        raise PipelineCompileError(f"DAG 落盘失败：{exc}") from exc
+        # 链 DAG 只有骨架：没有 SQL（job_files）也没有 jar（lib_files），
+        # 它调度的是别的 DAG（TriggerDagRunOperator），不自己跑 Flink。
+        result = airflow.build_delivery().deliver(
+            dags_dir=out_dir,
+            jobs_dir=os.path.join(out_dir, "jobs"),
+            dag_filename=dag_filename,
+            dag_source=dag_source,
+            spec_filename=spec_filename,
+            spec=spec_content,
+            job_files={},
+        )
+    except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
+        raise PipelineCompileError(f"DAG 投递失败：{exc}") from exc
+
+    # 远端路径（用户拿它去 Airflow 主机上找文件）
+    dag_path = result.files_written.get("dag", "")
+    spec_path = result.files_written.get("spec", "")
 
     # 更新链的 compiled 字段
     pipeline.compiled_dag_id = compiled_dag_id

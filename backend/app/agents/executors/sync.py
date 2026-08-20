@@ -1,8 +1,12 @@
-"""① 同步作业 Executor —— 对单个对象跑「搬运」，统一走 Flink SQL on YARN。
+"""① 同步作业 Executor —— 只**搬数据**，统一走 Flink SQL on YARN。
 
-统一执行架构：sync = 对单对象的搬运，与 materialize/transform/metric 同一条执行路径
-（`materialization_runner.run` → Flink SQL → BashOperator `flink run`）。不再渲染
-SeaTunnel/DataX 作业配置——那套多通道已废除。
+物化 = 建结构（DDL），同步 = 搬数据（DML），且物化在先。故这里调
+``materialization_runner.run_sync``：只产 Flink SQL 搬运作业（全量走 staging + 原子
+切换），**不建业务表**——目标表须已由物化任务建好。回执的 ``tables`` 因而恒为空
+（前端拿它判「已物化」，同步填了就会冒充成物化）。
+
+与 transform/metric 同一条执行路径（Flink SQL → BashOperator ``flink run``）。
+不再渲染 SeaTunnel/DataX 作业配置——那套多通道已废除。
 
 **凭据不进产物**：生成的 Flink SQL 里只有 `${别名_*}` 占位符，运行期由 Airflow
 Connection 解析（见 flink_sql_generator / endpoint_credential_env）。
@@ -63,7 +67,7 @@ class SyncExecutor(Executor):
                 "note": "未配置 target_datasource_id，ontoMeta 只给出搬运计划，不执行（链上游会传入此字段）",
             }
 
-        # 进链执行：sync = 对单对象搬运。复用 materialization_runner 的 Flink SQL 通道，
+        # 进链执行：sync = 只搬数据（不建表）。走 materialization_runner 的 Flink SQL 通道，
         # 传 selected_targets=[对象名] 只搬那一个对象。回执带 dag_id，可被
         # pipeline_compiler 串进链 DAG。
         object_type = spec.get("object_type")
@@ -92,7 +96,7 @@ class SyncExecutor(Executor):
 
         with SessionLocal() as db:
             try:
-                receipt = materialization_runner.run(
+                receipt = materialization_runner.run_sync(
                     db,
                     ontology_id,
                     target_datasource_id=target_datasource_id,
@@ -104,7 +108,7 @@ class SyncExecutor(Executor):
                     artifact_id=context.get("artifact_id"),
                 )
             except materialization_runner.MaterializationError as exc:
-                # 未配 Airflow / Flink / 投递失败：退回仅产出，不静默假装执行了。
+                # 未配 Airflow / Flink / 投递失败 / 无可搬对象：退回仅产出，不静默假装执行了。
                 return {
                     **self._plan(spec),
                     "handoff": "flink_sql",

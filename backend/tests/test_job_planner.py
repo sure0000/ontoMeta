@@ -36,8 +36,18 @@ def _init_db(client):
     return client
 
 
-def _seed(tag: str, *, with_source: bool = True, platform: str = "mariadb") -> str:
-    """客户（有列映射）+ 订单（无列映射，走同名回退）。"""
+def _seed(
+    tag: str,
+    *,
+    with_source: bool = True,
+    platform: str = "mariadb",
+    manual_source: bool = False,
+) -> str:
+    """客户（有列映射）+ 订单（无列映射，走同名回退）。
+
+    ``manual_source``：把「客户」做成人工建模对象（``manual:`` 引用）——它的 source_ref
+    非空却指不到任何物理表，是 ``with_source=False`` 之外的第二种「没有源」。
+    """
     urn = _URN.replace("mariadb", platform)
     with SessionLocal() as db:
         domain = DomainContext(
@@ -58,7 +68,11 @@ def _seed(tag: str, *, with_source: bool = True, platform: str = "mariadb") -> s
             name="customer",
             display_name="客户",
             table_role="business_object",
-            source_ref=urn.format(table="tab_customer") if with_source else None,
+            source_ref=(
+                "manual:mysql:customer"
+                if manual_source
+                else (urn.format(table="tab_customer") if with_source else None)
+            ),
         )
         order = ObjectType(
             ontology_id=onto.id,
@@ -167,7 +181,35 @@ def test_missing_source_ref_goes_to_unsupported():
     plan = _build(_seed("nosource", with_source=False))
     assert not any(j.target.table == "customer" for j in plan.jobs)
     reasons = {u["target"]: u["reason"] for u in plan.unsupported}
-    assert any("source_ref" in r for r in reasons.values())
+    assert any("源表" in r for r in reasons.values())
+
+
+def test_manual_object_produces_no_move_job_and_never_leaks_its_ref_as_a_table():
+    """人工建模对象（``manual:mysql:customer``）没有物理源表，不产搬运作业。
+
+    此前 ``_source_refs`` 用 ``_extract_dataset_name`` 解析，而它对非 URN 输入**原样回吐**，
+    于是 ``manual:mysql:customer`` 被当成表名一路传进 ETL 的 FROM 子句。这条用例同时钉住
+    两件事：不产作业，且这个引用串绝不出现在任何生成的 SQL 里。
+    """
+    ontology_id = _seed("manualref", manual_source=True)
+    plan = _build(ontology_id)
+
+    assert not any(j.target.table == "customer" for j in plan.jobs)
+    # 有真实 URN 的订单不受牵连，照常产作业。
+    assert any(j.target.table == "sales_order" for j in plan.jobs)
+
+    reasons = {u["target"]: u["reason"] for u in plan.unsupported}
+    customer_reason = next(r for t, r in reasons.items() if t.endswith(".customer"))
+    # 说的必须是「没有源表」，而不是误诊成「URN 没带平台信息」。
+    assert "物理源表" in customer_reason
+    assert "数据平台信息" not in customer_reason
+
+    with SessionLocal() as db:
+        etl = _generator.generate_etl_sql(db, ontology_id, "hive")
+        ddl = _generator.generate_ddl(db, ontology_id, "hive")
+    assert "manual:mysql:customer" not in json.dumps(etl)
+    # 但表照建——人工建模对象正是要靠物化把表建出来给业务用。
+    assert "dim.customer" in ddl["statements"]
 
 
 def test_schema_notes_are_not_mixed_into_unsupported():

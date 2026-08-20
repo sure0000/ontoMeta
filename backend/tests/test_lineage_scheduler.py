@@ -30,8 +30,12 @@ _ADS_BRAND = "urn:li:dataset:(urn:li:dataPlatform:hive,ads.brand,PROD)"
 _ERP = "urn:li:dataset:(urn:li:dataPlatform:mysql,erp.tab_brand,PROD)"
 
 
-def _cfg(**over) -> FlinkSubmitConfig:
-    base = dict(runner_jar="/opt/flink/flink-sql-runner.jar")
+def _cfg(tmp_path, **over) -> FlinkSubmitConfig:
+    # runner_jar 是 ontoMeta 侧真实路径（随包分发）：用临时假 jar，指向
+    # /opt/... 的占位路径现在会直接被 jar 读取报错。
+    from tests.support.delivery import make_runner_jar
+
+    base = dict(runner_jar=make_runner_jar(tmp_path))
     base.update(over)
     return FlinkSubmitConfig(**base)
 
@@ -124,28 +128,28 @@ def test_derive_duplicate_task_ids_raises():
 # --------------------------------------------------------------------------- DAG 编译
 
 
-def test_compile_lineage_dag_wires_dependencies_into_spec():
+def test_compile_lineage_dag_wires_dependencies_into_spec(tmp_path):
     a = _st("sync_brand", tgt=_DWD_BRAND)
     b = _st("clean_brand", src=[_DWD_BRAND], tgt=_ADS_BRAND)
     bundle = compile_lineage_dag(
         ontology_id="artifact-1",
         engine="hive",
         tasks=[a, b],
-        config=_cfg(),
+        config=_cfg(tmp_path),
         warehouse_conn_id="warehouse_hive",
     )
     assert bundle.spec["task_dependencies"] == [("sync_brand", "clean_brand")]
     ast.parse(bundle.dag_source)  # 合法 Python
 
 
-def test_compile_lineage_dag_dag_source_has_dependency_wiring():
+def test_compile_lineage_dag_dag_source_has_dependency_wiring(tmp_path):
     a = _st("sync_brand", tgt=_DWD_BRAND)
     b = _st("clean_brand", src=[_DWD_BRAND], tgt=_ADS_BRAND)
     bundle = compile_lineage_dag(
         ontology_id="artifact-1",
         engine="hive",
         tasks=[a, b],
-        config=_cfg(),
+        config=_cfg(tmp_path),
         warehouse_conn_id="warehouse_hive",
     )
     # 模板按 spec.task_dependencies 循环渲染依赖，不写死具体任务名
@@ -155,20 +159,20 @@ def test_compile_lineage_dag_dag_source_has_dependency_wiring():
     assert bundle.spec["task_dependencies"] == [("sync_brand", "clean_brand")]
 
 
-def test_compile_lineage_dag_no_deps_yields_empty():
+def test_compile_lineage_dag_no_deps_yields_empty(tmp_path):
     a = _st("a", tgt=_DWD_BRAND)
     b = _st("b", tgt=_ADS_BRAND)  # 无依赖
     bundle = compile_lineage_dag(
         ontology_id="artifact-1",
         engine="hive",
         tasks=[a, b],
-        config=_cfg(),
+        config=_cfg(tmp_path),
         warehouse_conn_id="warehouse_hive",
     )
     assert bundle.spec["task_dependencies"] == []
 
 
-def test_build_flink_sql_dag_rejects_unknown_dependency():
+def test_build_flink_sql_dag_rejects_unknown_dependency(tmp_path):
     """task_dependencies 引用了不在 tasks 里的任务 → 抛错。"""
     a = _st("a", tgt=_DWD_BRAND)
     ghost = _st("ghost", tgt=_ADS_BRAND)
@@ -178,7 +182,7 @@ def test_build_flink_sql_dag_rejects_unknown_dependency():
             engine="hive",
             tasks=[a.task],
             ddl_statements={},
-            config=_cfg(),
+            config=_cfg(tmp_path),
             task_dependencies=[(a.task, ghost.task)],
         )
 

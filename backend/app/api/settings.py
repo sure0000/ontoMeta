@@ -148,15 +148,16 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         token_set=bool(row.get("token")),
         api_version=row.get("api_version", "v1"),
         enabled=row.get("enabled", False),
-        available=bool(row.get("enabled") and row.get("endpoint")),
+        available=bool(
+            row.get("enabled") and row.get("endpoint") and row.get("ssh_host")
+        ),
         dags_dir=row.get("dags_dir") or "",
-        jobs_dir=row.get("jobs_dir") or "",
-        dag_delivery_method=row.get("dag_delivery_method") or "local",
-        git_remote=row.get("git_remote") or "origin",
-        git_branch=row.get("git_branch") or "main",
-        git_auto_init=bool(row.get("git_auto_init")),
-        git_author=row.get("git_author") or "",
-        git_email=row.get("git_email") or "",
+        ssh_host=row.get("ssh_host") or "",
+        ssh_port=row.get("ssh_port") or 22,
+        ssh_user=row.get("ssh_user") or "",
+        ssh_key_path=row.get("ssh_key_path") or "",
+        ssh_password_set=bool(row.get("ssh_password")),
+        ssh_password_hint=mask_secret(row.get("ssh_password")),
         max_tasks_per_dag=row.get("max_tasks_per_dag") or 50,
         max_active_tasks_per_dag=row.get("max_active_tasks_per_dag") or 16,
         dag_parse_timeout=row.get("dag_parse_timeout") or 60.0,
@@ -173,8 +174,11 @@ def get_airflow_settings(db: Session = Depends(get_db)):
 
 @router.put("/settings/airflow", response_model=AirflowSettingsOut)
 def update_airflow_settings(data: AirflowSettingsUpdate, db: Session = Depends(get_db)):
+    # exclude_unset：只更新请求里真正出现的字段（与 save_airflow 的"仅更新 data 中出现
+    # 的字段"语义一致）。用 model_dump() 会把未传字段用默认值覆写——ssh_host 之类没有
+    # 运行期兜底的字段会被静默清空，可用性无预警翻面。
     return _airflow_settings_out(
-        settings_service.update_airflow_settings(db, data.model_dump())
+        settings_service.update_airflow_settings(db, data.model_dump(exclude_unset=True))
     )
 
 

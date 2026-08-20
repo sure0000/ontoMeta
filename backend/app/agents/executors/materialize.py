@@ -1,9 +1,11 @@
-"""⑤ 物化 Executor —— 生成 DDL/ETL 并对目标数据源真正落库。
+"""⑤ 物化 Executor —— 只**建结构**：把本体想要的表在目标数据源里建出来。
 
-**这是唯一直接对数据源执行写操作的 Executor**：sync/transform/metric 只产产物交
-调度器，而物化是用户显式点「执行」要求真正建表落数，故在此调
-``services/materialization_runner`` 走 ``data_app_executor.execute_write``。
+物化 = 建表（DDL），同步 = 搬数据（DML），且物化在先。故这里只调
+``materialization_runner.run_materialize``，产出的 DAG 只有 ``create_tables``：
+**不产任何搬运作业、不产 staging/swap，一行数据都不动**。要把数据搬进来是
+同步制品（``executors/sync``）的事。
 
+建表幂等（``CREATE TABLE IF NOT EXISTS``），重复物化跳过已存在的表。
 dry-run 只渲染将建的表清单，不触碰目标库。
 """
 
@@ -20,7 +22,11 @@ class MaterializeExecutor(Executor):
     kind = "materialize"
 
     def _plan(self, spec: dict[str, Any]) -> dict[str, Any]:
-        """无副作用地算出将要物化的表清单（供 dry-run）。"""
+        """无副作用地算出将要建的表清单（供 dry-run）。
+
+        **只看 DDL**：物化不产搬运作业，此前这里还调 ``generate_etl_sql`` 报一份
+        「将装载的表」，拆分后那份清单是谎言——dry-run 说会装载，执行却只建表。
+        """
         from app.services.materialization_runner import _generator, _select
 
         ontology_id = spec.get("ontology_id")
@@ -40,20 +46,10 @@ class MaterializeExecutor(Executor):
                 database_overrides=spec.get("database_overrides"),
                 table_overrides=spec.get("table_overrides"),
             )
-            etl = _generator.generate_etl_sql(
-                db,
-                ontology_id,
-                engine,
-                database_prefix=spec.get("database_prefix"),
-                database_overrides=spec.get("database_overrides"),
-                table_overrides=spec.get("table_overrides"),
-                load_strategy=spec.get("load_strategy"),
-            )
         return {
             "engine": engine,
             "ddl_tables": [q for q, _ in _select(ddl["statements"], selected)],
-            "etl_tables": [q for q, _ in _select(etl["statements"], selected)],
-            "unsupported": (ddl.get("unsupported") or []) + (etl.get("unsupported") or []),
+            "unsupported": ddl.get("unsupported") or [],
         }
 
     def dry_run(self, spec: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -62,7 +58,6 @@ class MaterializeExecutor(Executor):
             "action": "materialize_ontology",
             "engine": plan["engine"],
             "create_tables": plan["ddl_tables"],
-            "load_tables": plan["etl_tables"],
             "unsupported": plan["unsupported"],
             "side_effects": "无（dry-run 仅渲染将建的表清单，不触碰目标库）",
         }
@@ -97,7 +92,7 @@ class MaterializeExecutor(Executor):
                 )
 
         with SessionLocal() as db:
-            receipt = materialization_runner.run(
+            receipt = materialization_runner.run_materialize(
                 db,
                 ontology_id,
                 target_datasource_id=spec["target_datasource_id"],
@@ -107,10 +102,10 @@ class MaterializeExecutor(Executor):
                 database_prefix=spec.get("database_prefix"),
                 database_overrides=spec.get("database_overrides"),
                 table_overrides=spec.get("table_overrides"),
-                load_strategy=spec.get("load_strategy"),
                 selected_targets=spec.get("selected_targets"),
                 overrides=spec.get("overrides"),
-                # 整批调度：runner 在对齐契约之后展开到各选中契约（见其 refresh_cron 形参）。
+                # 整批调度：runner 在对齐契约之后展开到各选中契约。物化产的是一次性建表
+                # DAG（schedule=None），故这里只是把 cron 写回契约供后续同步分组用。
                 refresh_cron=spec.get("refresh_cron"),
                 # run_id 取制品 id：重复提交在 Airflow 侧因 run_id 冲突而幂等
                 artifact_id=context.get("artifact_id"),

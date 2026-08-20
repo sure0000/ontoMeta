@@ -124,13 +124,17 @@ export function TaskDataRangeSelector({
             publishedOnly: false,
           });
           children = page.items.map((o) => {
-            // 同步任务必须能定位源表；无 source_ref 的对象置灰并说明原因，
-            // 而不是让人选完、提交、再收到「无 source_ref，无法定位源表」。
-            const unsyncable = kind === "sync" && !o.source_ref;
+            // 同步必须能定位源表；没有物理源表的对象置灰并说明原因，
+            // 而不是让人选完、提交、再在 drafter 里被拒。
+            // 判据用 source_provenance 而非 source_ref 是否为空：人工建模对象的
+            // source_ref 是 `manual:<源>:<标识>`，非空却没有任何表可搬。
+            const manual = o.source_provenance === "manual";
+            const unsyncable =
+              kind === "sync" && (manual || o.source_provenance !== "datahub");
             return {
               value: o.name,
               label: unsyncable
-                ? `${o.display_name || o.name}（无源表，不可同步）`
+                ? `${o.display_name || o.name}（${manual ? "手工建模对象，需先物化" : "无源表"}，不可同步）`
                 : o.display_name || o.name,
               isLeaf: true,
               disabled: unsyncable,
@@ -165,7 +169,7 @@ export function TaskDataRangeSelector({
           setEmptyHint(
             entityConfig.source === "businessLogics"
               ? "该本体下的业务逻辑都还没绑定对象，无法建任务；请先在「业务逻辑」里绑定主对象。"
-              : "该本体下的对象都没有源表（source_ref），无法建同步任务；请先完成元数据接入。",
+              : "该本体下的对象都没有物理源表，无法建同步任务。人工建模的对象只需「物化」把表建出来给业务用；要同步数据，请先完成数据源采集接入。",
           );
         } else {
           setEmptyHint(null);

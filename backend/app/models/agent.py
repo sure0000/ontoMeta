@@ -23,10 +23,14 @@ def _uuid() -> str:
 
 
 class ArtifactKind(str, enum.Enum):
-    SYNC = "sync"  # 同步作业 → SeaTunnel
-    TRANSFORM = "transform"  # ETL 任务 → Spark SQL
-    METRIC = "metric"  # 指标任务 → 聚合 SQL
-    MATERIALIZE = "materialize"  # 本体一键物化 → 目标数据源真正建表落数
+    # 物化与同步是本体两种来源的两种去处，不要混为一谈：
+    #   物化 = 把本体建成物理表（只出 DDL）。人工建模的本体只有元数据，必须先物化出表给业务用。
+    #   同步 = 把源库已有的数据搬进来（只出 DML）。前置条件是目标表已物化。
+    # 二者都编译成 Flink SQL / DDL 交 Airflow 执行（统一执行架构），本进程不落库。
+    SYNC = "sync"  # 数据同步 → 只出 DML；前置：目标表已存在
+    TRANSFORM = "transform"  # ETL 任务 → Flink SQL
+    METRIC = "metric"  # 指标任务 → 聚合 Flink SQL
+    MATERIALIZE = "materialize"  # 本体物化 → 只出建表 DDL，不搬数据、不触碰已有数据
 
 
 # 高危制品：执行不可逆的制品必须展示 dry-run 差异后才可确认。

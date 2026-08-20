@@ -103,6 +103,10 @@ def test_compile_pipeline_with_dag_topology(monkeypatch):
         with tempfile.TemporaryDirectory() as tmpdir:
             # mock Airflow 配置指向临时目录
             rt = MagicMock(available=True, dags_dir=tmpdir)
+            # 编译改走投递器：给真的（传输落到本地 tmp）。
+            from tests.support.delivery import LocalTransportDelivery
+
+            rt.build_delivery.return_value = LocalTransportDelivery()
             monkeypatch.setattr(
                 pipeline_compiler._settings, "get_airflow_runtime", lambda db: rt
             )

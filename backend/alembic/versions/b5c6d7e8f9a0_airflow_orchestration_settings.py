@@ -65,8 +65,20 @@ def _carry_over_env_values() -> None:
     而现场看起来像「什么都没改却坏了」。这是一次性的迁移动作，**只对已存在的行做**——
     新库建行时由 settings_service 播种，不走这里。
     """
+    from pathlib import Path
+
     from app.config import settings as env  # 迁移期读一次旧来源，运行期不再读
-    from app.services.settings_service import _default_dags_dir, _default_jobs_dir
+
+    # 目录默认值**内联**而非从 settings_service 导入：迁移是历史快照，不能依赖
+    # 会演进的活代码——_default_jobs_dir 后来随 seatunnel 组件一起下线，那次删除
+    # 曾让本迁移 ImportError、整套 alembic upgrade head 直接炸掉。
+    _repo_root = Path(__file__).resolve().parents[3]
+    dags_dir = env.airflow_dags_dir or str(
+        _repo_root / "docker" / "orchestration" / "dags"
+    )
+    jobs_dir = env.airflow_jobs_dir or str(
+        _repo_root / "docker" / "orchestration" / "seatunnel" / "jobs"
+    )
 
     op.execute(
         sa.text(
@@ -86,8 +98,8 @@ def _carry_over_env_values() -> None:
                 staging_swap = :staging_swap
             """
         ).bindparams(
-            dags_dir=_default_dags_dir(),
-            jobs_dir=_default_jobs_dir(),
+            dags_dir=dags_dir,
+            jobs_dir=jobs_dir,
             sync_channel=env.sync_channel or "runner",
             sync_runner_endpoint=env.sync_runner_endpoint or "",
             docker_network=env.airflow_docker_network or "bridge",

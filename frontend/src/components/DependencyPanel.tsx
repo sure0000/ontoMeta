@@ -20,7 +20,6 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
-  Radio,
   Select,
   Space,
   Switch,
@@ -56,14 +55,11 @@ const MODE_LABEL: Record<string, string> = {
 // Airflow 编排专有参数（存 deploy_spec.extra）。从 AirflowSettingsPanel 合并而来，
 // 连接字段已归本面板的 connection，这里只剩编排旋钮。
 const AIRFLOW_EXTRA_FIELDS = [
-  "dag_delivery_method",
   "dags_dir",
-  "jobs_dir",
-  "git_remote",
-  "git_branch",
-  "git_auto_init",
-  "git_author",
-  "git_email",
+  "ssh_host",
+  "ssh_port",
+  "ssh_user",
+  "ssh_key_path",
   "max_tasks_per_dag",
   "max_active_tasks_per_dag",
   "dag_parse_timeout",
@@ -649,91 +645,52 @@ export function DependencyPanel() {
                         label: "DAG 投递",
                         children: (
                           <>
-                            <Form.Item label="投递方式" name="extra_dag_delivery_method">
-                              <Radio.Group
-                                optionType="button"
-                                options={[
-                                  { label: "local（写共享目录）", value: "local" },
-                                  { label: "git（commit+push）", value: "git" },
-                                ]}
-                              />
-                            </Form.Item>
+                            <Alert
+                              type="info"
+                              showIcon
+                              style={{ marginBottom: 12 }}
+                              message="产物经 SSH 投递到 Airflow 主机"
+                              description="ontoMeta 在本地临时目录组装制品包（DAG + spec + SQL + SqlRunner jar），用 rsync 推到下面这台主机，再原子切换到 DAG 目录。SqlRunner jar 随包分发，无需预先摆在 Airflow 机器上。本机验证可把主机填 localhost。"
+                            />
                             <Form.Item
                               label="DAG 目录"
                               name="extra_dags_dir"
-                              extra="local：必须是 Airflow 真正挂进容器的那个目录；git：本地 git 工作副本里的 dags 目录"
+                              extra="Airflow 主机上的路径（不是 ontoMeta 本机的）"
                             >
-                              <Input placeholder="/opt/airflow/dags 在宿主机上的路径" />
+                              <Input placeholder="/opt/airflow/dags" />
+                            </Form.Item>
+                            <Space align="start" wrap>
+                              <Form.Item
+                                label="SSH 主机"
+                                name="extra_ssh_host"
+                                extra="Airflow 所在主机"
+                              >
+                                <Input placeholder="airflow-host" style={{ width: 200 }} />
+                              </Form.Item>
+                              <Form.Item label="端口" name="extra_ssh_port" extra="默认 22">
+                                <InputNumber min={1} max={65535} style={{ width: 110 }} />
+                              </Form.Item>
+                              <Form.Item
+                                label="用户名"
+                                name="extra_ssh_user"
+                                extra="留空用 ssh 默认"
+                              >
+                                <Input placeholder="deploy" style={{ width: 160 }} />
+                              </Form.Item>
+                            </Space>
+                            <Form.Item
+                              label="私钥路径"
+                              name="extra_ssh_key_path"
+                              extra="ontoMeta 侧可读的私钥。留空则用下方密码（需目标机装 sshpass）"
+                            >
+                              <Input placeholder="~/.ssh/id_ed25519" />
                             </Form.Item>
                             <Form.Item
-                              label="作业配置目录"
-                              name="extra_jobs_dir"
-                              extra="docker 通道的搬运作业配置落在这里并挂进搬运容器；runner 通道不用"
+                              label="SSH 密码"
+                              name="conn_ssh_password"
+                              extra="仅在未填私钥路径时使用"
                             >
-                              <Input placeholder="…/flink/jobs" />
-                            </Form.Item>
-                            <Form.Item
-                              noStyle
-                              shouldUpdate={(prev, cur) =>
-                                prev.extra_dag_delivery_method !== cur.extra_dag_delivery_method
-                              }
-                            >
-                              {({ getFieldValue: gv }) =>
-                                gv("extra_dag_delivery_method") === "git" ? (
-                                  <>
-                                    <Alert
-                                      type="info"
-                                      showIcon
-                                      style={{ marginBottom: 12 }}
-                                      message="git-sync 前置条件"
-                                      description="DAG 目录须在一个已配好 remote 的 git 工作副本内，且本服务进程有推送凭据。Airflow 侧用 git-sync sidecar 拉取同一仓库。产物进 git 天然可 diff / review / 回滚。"
-                                    />
-                                    <Space align="start" wrap>
-                                      <Form.Item
-                                        label="remote 名称"
-                                        name="extra_git_remote"
-                                        extra="默认 origin"
-                                      >
-                                        <Input placeholder="origin" style={{ width: 160 }} />
-                                      </Form.Item>
-                                      <Form.Item
-                                        label="推送分支"
-                                        name="extra_git_branch"
-                                        extra="默认 main"
-                                      >
-                                        <Input placeholder="main" style={{ width: 160 }} />
-                                      </Form.Item>
-                                    </Space>
-                                    <Form.Item
-                                      label="目录不是 git 仓库时自动 init"
-                                      name="extra_git_auto_init"
-                                      valuePropName="checked"
-                                      extra="关闭时若 DAG 目录不是 git 仓库则报错"
-                                    >
-                                      <Switch />
-                                    </Form.Item>
-                                    <Space align="start" wrap>
-                                      <Form.Item
-                                        label="commit 作者名"
-                                        name="extra_git_author"
-                                        extra="留空则用 git 全局配置"
-                                      >
-                                        <Input placeholder="ontoMeta" style={{ width: 200 }} />
-                                      </Form.Item>
-                                      <Form.Item
-                                        label="commit 邮箱"
-                                        name="extra_git_email"
-                                        extra="留空则用 git 全局配置"
-                                      >
-                                        <Input
-                                          placeholder="ontometa@example.com"
-                                          style={{ width: 240 }}
-                                        />
-                                      </Form.Item>
-                                    </Space>
-                                  </>
-                                ) : null
-                              }
+                              <Input.Password placeholder={editing ? "留空=保持不变" : ""} />
                             </Form.Item>
                           </>
                         ),

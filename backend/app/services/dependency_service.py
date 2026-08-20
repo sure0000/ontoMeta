@@ -65,6 +65,11 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("password", "str", True, False, None),
         ("token", "str", True, False, None),
         ("api_version", "str", False, False, "v1"),
+        # DAG 投递用的 SSH 密码。放这里而非 deploy_spec.extra：extra 在脱敏时原样透传
+        # （_SPEC_PRESERVE_KEYS），机密搁那儿会明文回显，且「留空=保持不变」失效。
+        # 落进本 schema 就白嫖了 _mask_connection / _merge_connection 的全套处理。
+        # 拨测不用它（_probe_airflow 只读 endpoint/凭据），非必填。
+        ("ssh_password", "str", True, False, None),
     ],
 }
 
@@ -718,14 +723,16 @@ class DependencyComponentService:
 
     # -- Airflow（连接 + 编排参数 extra，投影为单一 dict）--
     _AIRFLOW_EXTRA_FIELDS = (
-        "dags_dir", "jobs_dir",
+        "dags_dir",
         "max_tasks_per_dag", "max_active_tasks_per_dag",
         "dag_parse_timeout", "preflight_sentinel_timeout", "staging_swap",
-        # DAG 投递方式（local 默认 / git-sync）与 git 参数。跨机部署时 git-sync 把产物
-        # push 到远程仓，Airflow 侧拉取——全部在设置页填，不进配置文件。
-        "dag_delivery_method", "git_remote", "git_branch", "git_auto_init",
-        "git_author", "git_email",
+        # DAG 投递（SSH 单通道）：产物 rsync 到 Airflow 主机后原子切换。
+        # ontoMeta / Airflow / Flink 常分处三台机器，故没有"写本地"这种通道。
+        # 密码是机密，走 CONNECTION_SCHEMAS 而非这里（extra 不脱敏）。
+        "ssh_host", "ssh_port", "ssh_user", "ssh_key_path",
         # Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）。
+        # flink_sql_runner_jar 是 **ontoMeta 侧**的 jar 路径：投递时读它的字节随包发到
+        # Airflow 主机的 ontometa/_lib/，不再要求预先摆在 Airflow 机器上。
         "flink_sql_runner_jar", "flink_sql_runner_class", "flink_bin",
         "flink_deploy_target", "flink_parallelism", "flink_yarn_queue",
         "flink_checkpoint_dir",
@@ -741,6 +748,7 @@ class DependencyComponentService:
             "password": af_conn.get("password"),
             "token": af_conn.get("token"),
             "api_version": af_conn.get("api_version", "v1"),
+            "ssh_password": af_conn.get("ssh_password"),
             "enabled": af.enabled if af else False,
         }
         for f in self._AIRFLOW_EXTRA_FIELDS:
@@ -750,12 +758,12 @@ class DependencyComponentService:
 
     def save_airflow(self, db: Session, data: dict[str, Any]) -> dict[str, Any]:
         current = self._conn(db, "airflow")
-        # 连接字段：仅在 data 中出现时更新；password/token 为 None 时保留原值（与旧实现一致）
+        # 连接字段：仅在 data 中出现时更新；机密为 None 时保留原值（与旧实现一致）
         af_conn = dict(current)
-        for f in ("endpoint", "username", "password", "token", "api_version"):
+        for f in ("endpoint", "username", "password", "token", "api_version", "ssh_password"):
             if f in data:
                 v = data[f]
-                if f in ("password", "token") and v is None:
+                if f in ("password", "token", "ssh_password") and v is None:
                     continue
                 af_conn[f] = v
         af_conn.setdefault("api_version", "v1")

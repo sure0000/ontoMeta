@@ -1,7 +1,9 @@
-"""物化编排 materialization_runner.run：总是交 Airflow 编排（不再有直连落库）。
+"""物化 / 数据同步编排：``run_materialize``（只建结构）与 ``run_sync``（只搬数据）。
 
-验证：产出 DAG + 搬运作业并触发一次运行、按勾选/覆盖裁剪与重命名、触发失败不丢产物、
-前置校验（无数据源/无 dsn/未配 Airflow）报错。生成器按 hive 引擎产出真实 DDL。
+两者总是交 Airflow 编排（不再有直连落库）。验证：各自只产该产的东西（物化无搬运任务、
+同步无建表且回执 tables 为空）、按勾选/覆盖裁剪与重命名、按 cron 分组分批、触发失败不丢
+产物、前置校验（无数据源/无 dsn/未配 Airflow）报错、dag_id 按制品隔离。
+生成器按 hive 引擎产出真实 DDL。
 """
 
 from __future__ import annotations
@@ -176,7 +178,7 @@ def test_selected_targets_filters_tables(tmp_path, monkeypatch):
     _enable_airflow(tmp_path, monkeypatch, triggered={})
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -202,7 +204,7 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
         customer_contract = next(
             c for c in contracts if names.get(c.target_id, (None,))[0] == "customer"
         )
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -242,7 +244,7 @@ def test_batch_refresh_cron_expands_to_selected_contracts(tmp_path, monkeypatch)
         names = service.resolve_target_names(db, contracts)
         customer = next(c for c in contracts if names.get(c.target_id, (None,))[0] == "customer")
 
-        materialization_runner.run(
+        materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -271,7 +273,7 @@ def test_no_refresh_cron_leaves_contracts_untouched(tmp_path, monkeypatch):
             c.id: c.refresh_cron
             for c in service.list_contracts(db, ids["ontology_id"], materialized_only=True)
         }
-        materialization_runner.run(
+        materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -300,7 +302,17 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
     Flink 参数现在也在 Airflow 设置行里（DB，见 DEVELOPMENT_PRINCIPLES P1）：给个非空 JAR
     路径走真实 DAG 生成而非 handoff（不落地执行，只产 DAG + .sql + 触发替身）。
     """
-    from app.services.settings_service import SettingsService
+    from app.services.settings_service import AirflowRuntimeConfig, SettingsService
+
+    from tests.support.delivery import LocalTransportDelivery, make_runner_jar
+
+    # 投递器给真的（SSH 逻辑完整跑，传输落到本地 tmp）：runner 经 build_delivery()
+    # 拿实例，patch 类方法覆盖全部用例，避免真 ssh 到不存在的 test 主机。
+    monkeypatch.setattr(
+        AirflowRuntimeConfig,
+        "build_delivery",
+        lambda self: LocalTransportDelivery(),
+    )
 
     with SessionLocal() as db:
         SettingsService().update_airflow_settings(
@@ -309,10 +321,12 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
                 "endpoint": "http://airflow:8080",
                 "enabled": True,
                 "dags_dir": str(tmp_path / "dags"),
-                "jobs_dir": str(tmp_path / "jobs"),
+                # SSH 投递参数：available 判定需要主机；jar 是 ontoMeta 侧真实路径
+                # （随包分发），不再是 Airflow 机器上的占位绝对路径。
+                "ssh_host": "test-airflow-host",
                 # Flink 提交参数（DB）：非空 JAR 走真实 DAG 生成；checkpoint 供含 timestamp 分区键
                 # 的表默认 incremental 的 CDC 流式作业（缺它仅在专门用例里清回空验证）。
-                "flink_sql_runner_jar": "/opt/sql-runner.jar",
+                "flink_sql_runner_jar": make_runner_jar(tmp_path),
                 "flink_checkpoint_dir": "file:///tmp/ontometa-ckpt",
             },
         )
@@ -350,7 +364,7 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     _enable_airflow(tmp_path, monkeypatch, triggered=triggered)
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_sync(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -360,7 +374,11 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
 
     # 关键：没有任何直连写库
     assert rec.calls == []
-    assert receipt["execute_mode"] == "flink_on_yarn"
+    # execute_mode 是**对账的开关**：agent_pipeline._reconcile_orchestrated_status 只认
+    # "orchestrated"，此前这里产 "flink_on_yarn"，于是制品从提交那刻起就是 SUCCEEDED、
+    # 从不与真实 DagRun 对账。搬运通道另记在 sync_tool。
+    assert receipt["execute_mode"] == "orchestrated"
+    assert receipt["emit"] == "dml"
     assert receipt["ok"] is True
     assert receipt["state"] == "queued"
     # run_id = 制品 id + 批次后缀（无 cron → manual）：每个 DAG 一个确定性 run_id，重复提交幂等
@@ -388,7 +406,7 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
     _enable_airflow(tmp_path, monkeypatch, triggered=triggered)
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_sync(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -397,7 +415,7 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
         )
 
     assert receipt["ok"] is True
-    assert receipt["execute_mode"] == "flink_on_yarn"
+    assert receipt["execute_mode"] == "orchestrated"
     assert receipt["sync_tool"] == "flink"
     assert "sync_channel" not in receipt  # 多通道概念已废除
     assert receipt["state"] == "queued"
@@ -425,7 +443,7 @@ def test_incremental_without_checkpoint_dir_errors(tmp_path, monkeypatch):
     # customer 源平台 mysql 有 CDC 连接器；全局 load_strategy=incremental 触发 CDC 路径
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError, match="checkpoint"):
-            materialization_runner.run(
+            materialization_runner.run_sync(
                 db,
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
@@ -448,7 +466,7 @@ def test_orchestrated_reports_trigger_failure_without_losing_artifacts(tmp_path,
     monkeypatch.setattr(materialization_runner.AirflowClient, "trigger_dag", _boom)
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -482,7 +500,7 @@ def test_cron_grouping_one_dag_per_cron(tmp_path, monkeypatch):
     _enable_airflow(tmp_path, monkeypatch, triggered={})
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_sync(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -507,7 +525,7 @@ def test_batching_splits_group_over_max_tasks(tmp_path, monkeypatch):
     _enable_airflow(tmp_path, monkeypatch, triggered={})
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_sync(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -536,7 +554,7 @@ def test_tables_without_sync_jobs_still_get_ddl(tmp_path, monkeypatch):
     _enable_airflow(tmp_path, monkeypatch, triggered={})
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -595,7 +613,7 @@ def test_unparsed_dag_recorded_not_triggered(tmp_path, monkeypatch):
     monkeypatch.setattr(materialization_runner, "AirflowClient", _NoParse)
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_materialize(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -647,7 +665,7 @@ def test_parse_wait_is_bounded_by_one_timeout_across_batches(tmp_path, monkeypat
     monkeypatch.setattr(materialization_runner, "AirflowClient", _NoParse)
 
     with SessionLocal() as db:
-        receipt = materialization_runner.run(
+        receipt = materialization_runner.run_sync(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
@@ -661,12 +679,13 @@ def test_parse_wait_is_bounded_by_one_timeout_across_batches(tmp_path, monkeypat
     assert clock["now"] <= 10.0 + 2
 
 
-def test_errors_when_airflow_unavailable(monkeypatch):
-    """未配可用 Airflow 时直接报错——不再静默回退到直连落库。"""
-    ids = _seed("unset")
+@pytest.mark.parametrize("entry", ["run_materialize", "run_sync"])
+def test_errors_when_airflow_unavailable(entry, monkeypatch):
+    """未配可用 Airflow 时直接报错——不再静默回退到直连落库。两个入口共用同一套前置校验。"""
+    ids = _seed(f"unset-{entry}")
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError, match="Airflow"):
-            materialization_runner.run(
+            getattr(materialization_runner, entry)(
                 db,
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
@@ -674,12 +693,13 @@ def test_errors_when_airflow_unavailable(monkeypatch):
             )
 
 
-def test_missing_datasource_raises(monkeypatch):
-    ids = _seed("nods")
+@pytest.mark.parametrize("entry", ["run_materialize", "run_sync"])
+def test_missing_datasource_raises(entry, monkeypatch):
+    ids = _seed(f"nods-{entry}")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError):
-            materialization_runner.run(
+            getattr(materialization_runner, entry)(
                 db,
                 ids["ontology_id"],
                 target_datasource_id="does-not-exist",
@@ -687,17 +707,202 @@ def test_missing_datasource_raises(monkeypatch):
             )
 
 
-def test_datasource_without_dsn_raises(monkeypatch):
-    ids = _seed("nodsn", with_dsn=False)
+@pytest.mark.parametrize("entry", ["run_materialize", "run_sync"])
+def test_datasource_without_dsn_raises(entry, monkeypatch):
+    ids = _seed(f"nodsn-{entry}", with_dsn=False)
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError):
-            materialization_runner.run(
+            getattr(materialization_runner, entry)(
                 db,
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
                 engine="hive",
             )
+
+
+def test_run_is_gone_no_alias_left():
+    """``run()`` 必须整个消失，不留别名。
+
+    只有两个调用方且都要改口径，留个别名只会让「这到底是建表还是搬数」重新变成
+    调用点的猜谜——那正是本次拆分要消除的歧义。
+    """
+    assert not hasattr(materialization_runner, "run")
+
+
+# ---------- 拆分：物化只出 DDL，同步只出 DML ----------
+
+
+def _dag_specs(tmp_path) -> list[dict]:
+    """落盘的所有 DAG 边车 spec（跳过 jobs/ 下的作业 JSON）。"""
+    import json as _json
+
+    return [
+        _json.loads(p.read_text(encoding="utf-8"))
+        for p in sorted((tmp_path / "dags").rglob("*.json"))
+        if p.parent.name != "jobs"
+    ]
+
+
+def test_materialize_emits_ddl_only(tmp_path, monkeypatch):
+    """物化只建结构：产出的 DAG 有建表语句、**没有任何搬运任务与 staging/swap**。
+
+    此前物化与同步是同一个函数，物化会顺手把数据搬了（且全量走 staging swap 会整表
+    替换，业务直接写进目标表的行在第一次切换后消失）。
+    """
+    ids = _seed("emitddl")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run_materialize(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="art-emitddl",
+        )
+
+    assert receipt["emit"] == "ddl"
+    assert receipt["jobs"] == []
+    assert receipt["tables"]  # 表还是要建的
+    specs = _dag_specs(tmp_path)
+    assert len(specs) == 1  # 建表是一次性动作，不按 cron 分批
+    spec = specs[0]
+    assert spec["tasks"] == [], "物化不该产搬运任务"
+    assert not spec["swaps"], "物化不该产 staging swap"
+    assert spec["schedule"] is None, "建表 DAG 不挂定时，否则每轮重跑一遍 CREATE"
+    assert spec["warehouse_ddl"]
+    # 没有 .sql 搬运作业文件落盘
+    assert not list((tmp_path / "dags").rglob("jobs/*.sql"))
+
+
+def test_sync_emits_dml_only(tmp_path, monkeypatch):
+    """同步只搬数据：不建业务表，回执的 tables 为空。
+
+    ``tables`` 是前端（MaterializationContractPanel）判「这张表已物化」的依据，
+    同步填了就会让一次搬运冒充成物化。批里唯一允许出现的 DDL 是 staging 表
+    （``CREATE TABLE … LIKE 正式表``，属搬运侧且要求正式表已存在）。
+    """
+    ids = _seed("emitdml")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            load_strategy="full",
+            artifact_id="art-emitdml",
+        )
+
+    assert receipt["emit"] == "dml"
+    assert receipt["tables"] == [], "同步回执不得报告建了表"
+    assert receipt["jobs"]
+    assert all(b["tables"] == [] for b in receipt["batches"])
+    ddl = [s for spec in _dag_specs(tmp_path) for s in spec["warehouse_ddl"]]
+    # 只有 staging 建表（LIKE 正式表），没有一条业务表的列定义
+    assert ddl and all(" LIKE " in s.upper() for s in ddl), ddl
+    assert not any("customer_id" in s for s in ddl), ddl
+
+
+def test_sync_without_movable_objects_raises(tmp_path, monkeypatch):
+    """一个作业都编不出来 = 没有任何数据会被搬，必须大声拒绝而不是回 ok: True。
+
+    拆分后这是最可能的静默失败：选中的对象全是人工建模的（没有物理源表，只能物化）。
+    """
+    ids = _seed("nomovable", orphan=True)
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        with pytest.raises(
+            materialization_runner.MaterializationError, match="没有任何对象可以同步"
+        ) as exc:
+            materialization_runner.run_sync(
+                db,
+                ids["ontology_id"],
+                target_datasource_id=ids["datasource_id"],
+                engine="hive",
+                selected_targets=["manual_dim"],  # 无 source_ref，搬不了
+                artifact_id="art-nomovable",
+            )
+    # 报错要说清是哪个对象、为什么，而不是笼统一句「无可搬对象」
+    assert "manual_dim" in str(exc.value)
+
+
+def test_materialize_does_not_require_flink_jar(tmp_path, monkeypatch):
+    """物化不校验 Flink SqlRunner JAR：建表是 SQLExecuteQueryOperator，与 Flink 无关。
+
+    此前 ``_run_orchestrated`` 在建 bundle 之前就因缺 JAR 退 handoff，于是没装 SqlRunner
+    的部署上，人工建模的本体拿到 ok: True 却一张表都没建。
+    """
+    ids = _seed("nojarddl")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    _set_airflow(flink_sql_runner_jar="")
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run_materialize(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="art-nojarddl",
+        )
+
+    assert receipt["execute_mode"] == "orchestrated", "缺 JAR 不该让建表退成 handoff"
+    assert receipt["tables"]
+    assert any(spec["warehouse_ddl"] for spec in _dag_specs(tmp_path))
+
+
+def test_sync_without_flink_jar_handoffs(tmp_path, monkeypatch):
+    """同步缺 JAR 则如实退「仅产出」——数据搬运真的执行不了。"""
+    ids = _seed("nojardml")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    _set_airflow(flink_sql_runner_jar="")
+
+    with SessionLocal() as db:
+        receipt = materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="art-nojardml",
+        )
+
+    assert receipt["execute_mode"] == "handoff"
+    assert receipt["emit"] == "dml"
+    assert receipt["tables"] == []
+
+
+def test_dag_id_is_scoped_to_artifact_not_ontology(tmp_path, monkeypatch):
+    """同一本体上的物化与同步必须落在不同 dag_id 上。
+
+    dag_id 的 base 曾取本体 id，而两条制品的 cron 后缀相同 → 同一个 dag_id，
+    谁后投递谁覆盖谁（产物目录早已按 artifact_id 隔离，dag_id 没跟上）。
+    """
+    ids = _seed("dagid")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        ddl_receipt = materialization_runner.run_materialize(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="art-dagid-materialize",
+        )
+        dml_receipt = materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="hive",
+            artifact_id="art-dagid-sync",
+        )
+
+    ddl_dags = {b["dag_id"] for b in ddl_receipt["batches"]}
+    dml_dags = {b["dag_id"] for b in dml_receipt["batches"]}
+    assert ddl_dags and dml_dags
+    assert not (ddl_dags & dml_dags)
 
 
 # ---------- 两段式 DDL：外键裁剪与分批 ----------

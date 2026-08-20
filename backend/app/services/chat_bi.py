@@ -2961,8 +2961,8 @@ class ChatBiService:
         两者的 Drafter 在没给 object_type / target_table 时会用 ``select_by_intent`` **猜**
         一个对象——把候选摆出来让用户选，猜就不必发生了。
         """
-        from app.connectors.datahub import _extract_dataset_name
         from app.models import ObjectType
+        from app.services.source_ref import has_physical_source, source_table_of
 
         q = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
         rows = q.order_by(ObjectType.name).all()
@@ -2970,19 +2970,22 @@ class ChatBiService:
         for o in rows:
             if keyword and keyword.lower() not in f"{o.name or ''}{o.display_name or ''}".lower():
                 continue
-            # 同步要从源表搬，没有 source_ref 的对象定位不到源，不该进候选。
-            if kind == "sync" and not o.source_ref:
+            # 同步要从源表搬。没有物理源表的对象（无 source_ref，或人工建模的 manual: 引用）
+            # 定位不到源，不该进候选——它们的去处是物化。
+            if kind == "sync" and not has_physical_source(o.source_ref):
                 continue
             objects.append({
                 "name": o.name,
                 "display_name": o.display_name,
-                "source_table": _extract_dataset_name(o.source_ref) if o.source_ref else None,
+                "source_table": source_table_of(o.source_ref),
             })
             if len(objects) >= _TASK_OPTIONS_LIMIT:
                 break
 
         eligible = (
-            len([o for o in rows if o.source_ref]) if kind == "sync" else len(rows)
+            len([o for o in rows if has_physical_source(o.source_ref)])
+            if kind == "sync"
+            else len(rows)
         )
         result: dict[str, Any] = {
             "kind": kind,

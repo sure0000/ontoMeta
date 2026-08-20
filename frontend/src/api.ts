@@ -713,7 +713,12 @@ export const api = {
     enabled: boolean;
     // 编排配置全部在设置页管理，不再需要配置文件。
     dags_dir?: string;
-    jobs_dir?: string;
+    // SSH 投递（唯一通道）：产物 rsync 到 Airflow 主机后原子切换。
+    ssh_host?: string;
+    ssh_port?: number;
+    ssh_user?: string;
+    ssh_key_path?: string;
+    ssh_password?: string;
     max_tasks_per_dag?: number;
     max_active_tasks_per_dag?: number;
     dag_parse_timeout?: number;

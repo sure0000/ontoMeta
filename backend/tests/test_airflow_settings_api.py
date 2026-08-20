@@ -32,10 +32,14 @@ def test_defaults_to_disabled(client, admin_headers):
 
 
 def test_enabled_with_endpoint_is_available(client, admin_headers):
-    # 投递目录不再入设置（由 config 给默认），可用与否只看启用 + endpoint。
+    # 可用与否看启用 + endpoint + SSH 主机（投递通道只剩 SSH，没有主机就没法交 DAG）。
     r = client.put(
         "/api/settings/airflow",
-        json={"endpoint": "http://airflow:8080", "enabled": True},
+        json={
+            "endpoint": "http://airflow:8080",
+            "enabled": True,
+            "ssh_host": "airflow-host",
+        },
         headers=admin_headers,
     )
     assert r.status_code == 200, r.text
@@ -45,7 +49,19 @@ def test_enabled_with_endpoint_is_available(client, admin_headers):
     # 未启用 → 不可用，物化无法执行
     r = client.put(
         "/api/settings/airflow",
-        json={"endpoint": "http://airflow:8080", "enabled": False},
+        json={
+            "endpoint": "http://airflow:8080",
+            "enabled": False,
+            "ssh_host": "airflow-host",
+        },
+        headers=admin_headers,
+    )
+    assert r.json()["available"] is False
+
+    # 启用 + endpoint 但没有 SSH 主机 → 仍不可用
+    r = client.put(
+        "/api/settings/airflow",
+        json={"endpoint": "http://airflow:8080", "enabled": True, "ssh_host": ""},
         headers=admin_headers,
     )
     assert r.json()["available"] is False

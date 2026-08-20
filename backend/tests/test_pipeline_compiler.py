@@ -114,6 +114,11 @@ def airflow_dir(tmp_path, monkeypatch):
     from unittest.mock import MagicMock
 
     rt = MagicMock(available=True, dags_dir=str(tmp_path / "dags"))
+    # 编译改走投递器：给真的（SSH 逻辑完整跑，传输落到本地 tmp），否则 MagicMock 的
+    # deliver() 什么都不写，产物文件断言空转。
+    from tests.support.delivery import LocalTransportDelivery
+
+    rt.build_delivery.return_value = LocalTransportDelivery()
     monkeypatch.setattr(
         pipeline_compiler._settings, "get_airflow_runtime", lambda db: rt
     )

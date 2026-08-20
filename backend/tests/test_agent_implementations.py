@@ -593,7 +593,7 @@ def test_materialize_executor_blocks_on_preflight_failure(monkeypatch, seeded):
     ), patch(
         "app.services.materialize_preflight.run_preflight", return_value=bad_report
     ), patch(
-        "app.services.materialization_runner.run"
+        "app.services.materialization_runner.run_materialize"
     ) as mock_run:
         executor = MaterializeExecutor()
         with pytest.raises(RuntimeError, match="提交前自检发现"):
@@ -621,7 +621,7 @@ def test_materialize_executor_proceeds_when_preflight_ok(monkeypatch, seeded):
     ), patch(
         "app.services.materialize_preflight.run_preflight", return_value=ok_report
     ), patch(
-        "app.services.materialization_runner.run", return_value={"ok": True}
+        "app.services.materialization_runner.run_materialize", return_value={"ok": True}
     ) as mock_run:
         executor = MaterializeExecutor()
         receipt = executor.execute(spec, {"artifact_id": "art-1"})

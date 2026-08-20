@@ -1,4 +1,4 @@
-"""P3-1：sync 进链测试——sync executor 经 runner 通道产 dag_id。"""
+"""P3-1：sync 进链测试——sync executor 走 run_sync（只搬数据）产 dag_id。"""
 
 from __future__ import annotations
 
@@ -27,13 +27,17 @@ def test_sync_without_target_datasource_fallback_handoff():
     assert "未配置" in receipt["note"]
 
 
-def test_sync_with_target_datasource_calls_materialization_runner(monkeypatch):
-    """配了 target_datasource，sync 复用 materialization_runner 对单对象搬运。"""
+def test_sync_with_target_datasource_calls_run_sync(monkeypatch):
+    """配了 target_datasource，sync 走 run_sync 对单对象搬运。
+
+    **必须是 run_sync 而不是 run_materialize**：同步只搬数据，不建表——建表是物化任务
+    的事，且同步的回执若报告建了表，前端会把一次搬运当成「已物化」。
+    """
     ontology_id = "sync-onto"
     object_name = "Customer"
     ds_id = "target-warehouse"
 
-    # Mock materialization_runner.run
+    # Mock materialization_runner.run_sync
     mock_receipt = {
         "dag_id": "ontometa_materialize_synconto__single",
         "dag_run_id": "sync_run_123",
@@ -43,7 +47,7 @@ def test_sync_with_target_datasource_calls_materialization_runner(monkeypatch):
     mock_run = MagicMock(return_value=mock_receipt)
 
     from app.services import materialization_runner
-    monkeypatch.setattr(materialization_runner, "run", mock_run)
+    monkeypatch.setattr(materialization_runner, "run_sync", mock_run)
 
     executor = SyncExecutor()
     spec = {
@@ -60,8 +64,9 @@ def test_sync_with_target_datasource_calls_materialization_runner(monkeypatch):
 
     receipt = executor.execute(spec, context)
 
-    # 验证复用了 materialization_runner.run
+    # 验证走的是同步入口（run_sync），不是建表入口
     assert mock_run.called
+    assert not hasattr(materialization_runner, "run"), "拆分后不该再有含混的 run()"
     args, kwargs = mock_run.call_args
     # db, ontology_id 是位置参数
     assert args[1] == ontology_id
@@ -76,14 +81,14 @@ def test_sync_with_target_datasource_calls_materialization_runner(monkeypatch):
 
 
 def test_sync_handles_materialization_error_gracefully(monkeypatch):
-    """materialization_runner 失败时 sync 退回「仅产出」，不静默假装执行了。"""
+    """run_sync 失败时（未配 Airflow / 无可搬对象…）退回「仅产出」，不静默假装执行了。"""
     from app.services.materialization_runner import MaterializationError
 
     def mock_run_fail(*args, **kwargs):
         raise MaterializationError("未配 Airflow")
 
     from app.services import materialization_runner
-    monkeypatch.setattr(materialization_runner, "run", mock_run_fail)
+    monkeypatch.setattr(materialization_runner, "run_sync", mock_run_fail)
 
     executor = SyncExecutor()
     spec = {

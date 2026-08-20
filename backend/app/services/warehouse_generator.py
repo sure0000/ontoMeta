@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.connectors.datahub import _extract_dataset_name, _extract_platform, _field_path
+from app.connectors.datahub import _field_path
 from app.governance import active_standard
 from app.governance.lint import lint_logical_table
 from app.models import (
@@ -35,6 +35,11 @@ from app.services.ontology_projection import (
     foreign_key_names,
     primary_key_is_confident,
     primary_key_name,
+)
+from app.services.source_ref import (
+    NO_PHYSICAL_SOURCE_NOTE,
+    source_platform_of,
+    source_table_of,
 )
 from app.warehouse import (
     CapabilityError,
@@ -689,7 +694,7 @@ class WarehouseGenerator:
             )
             source = source_refs.get(table.source_name)
             if not source:
-                plan.note(table.qualified_name, "对象无 source_ref，无法定位源表")
+                plan.note(table.qualified_name, NO_PHYSICAL_SOURCE_NOTE)
                 continue
             mapping = field_refs.get(table.source_name, {})
             select_lines = [
@@ -815,12 +820,21 @@ class WarehouseGenerator:
         }
 
     def _source_refs(self, db: Session, ontology_id: str) -> dict[str, str]:
+        """对象名 → 源物理表名（``库.表``）。**没有物理源表的对象不进这个表。**
+
+        用严格解析（``source_ref.source_table_of``）而非 ``_extract_dataset_name``：后者对
+        非 URN 输入原样回吐，人工建模对象的 ``manual:mysql:foo`` 会被当成表名一路拼进
+        ``INSERT … SELECT … FROM manual:mysql:foo``。人工建模对象本就没有源可搬，
+        缺席即正确——``JobPlanner`` 见不到它就不产搬运作业，``_assign_ddl`` 仍会把它的建表
+        语句归进孤儿批，该建的表照建。
+        """
         out: dict[str, str] = {}
         for obj in (
             db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
         ):
-            if obj.source_ref:
-                out[obj.name] = _extract_dataset_name(obj.source_ref)
+            table = source_table_of(obj.source_ref)
+            if table:
+                out[obj.name] = table
         return out
 
     def _field_refs(self, db: Session, ontology_id: str) -> dict[str, dict[str, str]]:
@@ -1028,9 +1042,7 @@ class WarehouseGenerator:
             .filter(ObjectType.ontology_id == ontology_id, ObjectType.name == target.source_name)
             .first()
         )
-        source_platform = (
-            _extract_platform(obj.source_ref) if obj and obj.source_ref else None
-        ) or engine
+        source_platform = source_platform_of(obj.source_ref if obj else None) or engine
 
         # 源表 LogicalTable：列用源物理列名（JDBC 从物理表读，列名须匹配）
         source_columns = tuple(

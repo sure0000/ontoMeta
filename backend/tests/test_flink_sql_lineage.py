@@ -17,8 +17,12 @@ from app.services.airflow_dag_builder import (
 from app.services.flink_sql_lineage import parse_flink_sql_lineage
 
 
-def _cfg(**over) -> FlinkSubmitConfig:
-    base = dict(runner_jar="/opt/flink/flink-sql-runner.jar")
+def _cfg(tmp_path, **over) -> FlinkSubmitConfig:
+    # runner_jar 是 ontoMeta 侧真实路径（随包分发）：用临时假 jar，指向
+    # /opt/... 的占位路径现在会直接被 jar 读取报错。
+    from tests.support.delivery import make_runner_jar
+
+    base = dict(runner_jar=make_runner_jar(tmp_path))
     base.update(over)
     return FlinkSubmitConfig(**base)
 
@@ -111,7 +115,7 @@ INSERT INTO `o` SELECT * FROM `s` JOIN `s2` ON 1=1 JOIN `s` ON 1=1;
 # --------------------------------------------------------------------------- DAG 注入
 
 
-def test_inlets_outlets_land_in_task_spec():
+def test_inlets_outlets_land_in_task_spec(tmp_path):
     """FlinkSqlTask 的 source_urns/target_urn 进 task_spec 的 inlets/outlets。"""
     b = build_flink_sql_dag(
         ontology_id="artifact-abc",
@@ -125,27 +129,27 @@ def test_inlets_outlets_land_in_task_spec():
             )
         ],
         ddl_statements={"dwd.brand": "CREATE TABLE t (x int)"},
-        config=_cfg(),
+        config=_cfg(tmp_path),
     )
     task = b.spec["tasks"][0]
     assert task["inlets"] == ["urn:li:dataset:(urn:li:dataPlatform:hive,ods.brand,PROD)"]
     assert task["outlets"] == ["urn:li:dataset:(urn:li:dataPlatform:hive,dwd.brand,PROD)"]
 
 
-def test_empty_urns_yield_empty_inlets_outlets():
+def test_empty_urns_yield_empty_inlets_outlets(tmp_path):
     b = build_flink_sql_dag(
         ontology_id="artifact-abc",
         engine="hive",
         tasks=[FlinkSqlTask(task_id="mv", sql="INSERT INTO t SELECT 1;")],
         ddl_statements={},
-        config=_cfg(),
+        config=_cfg(tmp_path),
     )
     task = b.spec["tasks"][0]
     assert task["inlets"] == []
     assert task["outlets"] == []
 
 
-def test_dag_source_wires_inlets_outlets_and_is_valid_python():
+def test_dag_source_wires_inlets_outlets_and_is_valid_python(tmp_path):
     b = build_flink_sql_dag(
         ontology_id="artifact-abc",
         engine="hive",
@@ -158,7 +162,7 @@ def test_dag_source_wires_inlets_outlets_and_is_valid_python():
             )
         ],
         ddl_statements={},
-        config=_cfg(),
+        config=_cfg(tmp_path),
     )
     ast.parse(b.dag_source)  # 合法 Python
     assert "inlets=task_spec.get(\"inlets\", [])" in b.dag_source

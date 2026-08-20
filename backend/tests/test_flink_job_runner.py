@@ -6,13 +6,14 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services.flink_job_runner import FlinkJobError, run_flink_sql
 from app.services.airflow_dag_builder import FlinkSqlTask
-from app.services.dag_delivery import LocalFsDelivery
+from tests.support.delivery import LocalTransportDelivery, make_runner_jar
 
 
 @pytest.fixture
@@ -60,12 +61,11 @@ def test_with_runner_jar_writes_and_triggers(db_mock, tmp_path):
             airflow = MagicMock(
                 available=True,
                 dags_dir=str(tmp_path / "dags"),
-                jobs_dir=str(tmp_path / "jobs"),
                 endpoint="http://airflow",
                 max_active_tasks_per_dag=16,
                 dag_parse_timeout=10.0,
                 # Flink 参数现来自 Airflow 运行期配置（DB）
-                flink_sql_runner_jar="/opt/flink/runner.jar",
+                flink_sql_runner_jar=make_runner_jar(tmp_path),
                 flink_sql_runner_class="com.ontometa.flink.SqlRunner",
                 flink_bin="flink",
                 flink_deploy_target="yarn-per-job",
@@ -73,9 +73,9 @@ def test_with_runner_jar_writes_and_triggers(db_mock, tmp_path):
                 flink_yarn_queue="",
                 flink_checkpoint_dir="",
             )
-            # 投递器要给**真的**：MagicMock 的 deliver() 什么都不写，落盘断言会变成空转
-            # （投递器是后加的 seam，这个用例当时没跟着更新）。
-            airflow.build_delivery.return_value = LocalFsDelivery()
+            # 投递器要给**真的**：MagicMock 的 deliver() 什么都不写，落盘断言会变成空转。
+            # LocalTransportDelivery 走真实 SshDelivery 逻辑，只把传输落到本地目录。
+            airflow.build_delivery.return_value = LocalTransportDelivery()
             settings.get_airflow_runtime.return_value = airflow
             with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
                 client = MagicMock()
@@ -98,6 +98,13 @@ def test_with_runner_jar_writes_and_triggers(db_mock, tmp_path):
     assert receipt["state"] == "queued"
     assert receipt["run_url"] == "http://airflow/dags/x/grid?dag_run_id=y"
     assert "artifacts" in receipt
+    # 投递回执非空且带真实路径：此前调用方读的是不存在的 result.written，
+    # 恒为 None/{}，物化的「产物路径」面板因此永远空白。
+    assert receipt["artifacts"]  # 非空
+    assert os.path.isabs(receipt["artifacts"]["sql_dir"])
+    # SqlRunner jar 随包投到共享 _lib/（内容寻址文件名，与各制品目录平级）
+    lib_dir = receipt["artifacts"]["lib_dir"]
+    assert any(f.startswith("sql-runner-") for f in os.listdir(lib_dir))
     # 落盘了 .sql 文件（按 <dags>/ontometa/<artifact_id>/jobs/ 子目录聚合，名为 <task_id>.sql）
     sql_file = next(
         (tmp_path / "dags").rglob("clean_customer.sql")
@@ -113,11 +120,10 @@ def test_trigger_error_is_recorded_in_receipt(db_mock, tmp_path):
             airflow = MagicMock(
                 available=True,
                 dags_dir=str(tmp_path / "dags"),
-                jobs_dir=str(tmp_path / "jobs"),
                 endpoint="http://airflow",
                 max_active_tasks_per_dag=16,
                 dag_parse_timeout=0.1,
-                flink_sql_runner_jar="/opt/flink/runner.jar",
+                flink_sql_runner_jar=make_runner_jar(tmp_path),
                 flink_sql_runner_class="com.ontometa.flink.SqlRunner",
                 flink_bin="flink",
                 flink_deploy_target="yarn-per-job",

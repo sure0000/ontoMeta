@@ -14,11 +14,15 @@ from typing import Any
 
 from app.agents.common import require_context, resolve_spec_engine, select_by_intent
 from app.agents.drafters.base import Drafter
-from app.connectors.datahub import _extract_dataset_name
 from app.database import SessionLocal
 from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
+from app.services.source_ref import (
+    has_physical_source,
+    is_manual_source_ref,
+    source_table_of,
+)
 
 # 关键源保全判定规则。命中任一 → 需在 STG 留原始副本。
 _PRESERVE_RULES: tuple[tuple[str, str], ...] = (
@@ -64,8 +68,15 @@ class SyncDrafter(Drafter):
             )
             if target is None:
                 raise ValueError("未在本体中找到匹配的对象；请在 context.object_type 指定")
-            if not target.source_ref:
-                raise ValueError(f"对象 {target.name} 无 source_ref，无法定位源表")
+            if not has_physical_source(target.source_ref):
+                # 人工建模对象（``manual:`` 引用）与无 source_ref 的对象在这里是同一件事：
+                # 没有可搬的源。它们的正确去处是物化——建出表来给业务写，而不是同步。
+                raise ValueError(
+                    f"对象「{target.name}」没有物理源表"
+                    f"（{'手工建模对象' if is_manual_source_ref(target.source_ref) else '无 source_ref'}），"
+                    "不能建同步任务。这类对象只需物化建表；同步只适用于由数据源采集而来、"
+                    "背后有真实源表的对象。"
+                )
 
             contract = (
                 db.query(MaterializationContract)
@@ -76,7 +87,8 @@ class SyncDrafter(Drafter):
                 )
                 .first()
             )
-            source_table = _extract_dataset_name(target.source_ref)
+            # 严格解析：上面的 has_physical_source 已保证解得出，这里不会是 None。
+            source_table = source_table_of(target.source_ref)
             layer = contract.target_layer if contract else "dim"
             prefix = context.get("database_prefix")
             database = f"{layer}_{prefix}" if prefix else layer

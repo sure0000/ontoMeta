@@ -13,6 +13,7 @@ from app.agents.executors.transform import TransformExecutor
 from app.agents.executors.metric import MetricExecutor
 from app.database import SessionLocal
 from app.models import DataSource
+from tests.support.delivery import make_runner_jar
 
 
 def _make_datasource(ds_id: str = "ds-123") -> None:
@@ -107,12 +108,12 @@ def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
             airflow = MagicMock(
                 available=True,
                 dags_dir=str(tmp_path / "dags"),
-                jobs_dir=str(tmp_path / "jobs"),
                 endpoint="http://airflow",
                 max_active_tasks_per_dag=16,
                 dag_parse_timeout=0.1,
-                # Flink 执行参数现来自 Airflow 运行期配置（DB）
-                flink_sql_runner_jar="/opt/flink/runner.jar",
+                # Flink 执行参数现来自 Airflow 运行期配置（DB）。jar 是 ontoMeta 侧
+                # 真实路径（随包分发），指向 /opt 的占位路径现在会被 jar 读取报错。
+                flink_sql_runner_jar=make_runner_jar(tmp_path),
                 flink_sql_runner_class="com.ontometa.flink.SqlRunner",
                 flink_bin="flink",
                 flink_deploy_target="yarn-per-job",

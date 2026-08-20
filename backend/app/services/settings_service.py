@@ -33,12 +33,6 @@ def _default_dags_dir() -> str:
     )
 
 
-def _default_jobs_dir() -> str:
-    return env_settings.airflow_jobs_dir or str(
-        _REPO_ROOT / "docker" / "orchestration" / "seatunnel" / "jobs"
-    )
-
-
 
 DEEPSEEK_MODELS = [
     {
@@ -99,17 +93,16 @@ class AirflowRuntimeConfig:
     password: str | None
     token: str | None
     api_version: str
-    # 投递目录在设置页配（空则退默认路径）。
+    # 投递目录在设置页配（空则退默认路径）。**这是 Airflow 主机上的路径**——产物经
+    # SSH 推到那台机器，ontoMeta 本地不留副本。
     dags_dir: str
-    jobs_dir: str
-    # DAG 投递方式与 git-sync 参数（设置页配）：method=local 时 git_* 均忽略；
-    # method=git 时落盘后 commit + push 到远程仓，Airflow 侧用 git-sync sidecar 拉取。
-    dag_delivery_method: str
-    git_remote: str
-    git_branch: str
-    git_auto_init: bool
-    git_author: str
-    git_email: str
+    # SSH 投递参数（设置页配）：产物 rsync 到 Airflow 主机后原子切换。
+    # key_path 优先，为空时用 ssh_password（需要 sshpass）。
+    ssh_host: str
+    ssh_port: int
+    ssh_user: str
+    ssh_key_path: str
+    ssh_password: str | None
     # DAG 形状与时序。dag_parse_timeout 要大于 Airflow 的 dag_dir_list_interval，
     # 否则首次提交必然报「尚未解析到」。
     max_tasks_per_dag: int
@@ -130,24 +123,26 @@ class AirflowRuntimeConfig:
 
     @property
     def available(self) -> bool:
-        # 没有投递目录就没法把 DAG 交出去（缺省已由 config 给了），未启用/无 endpoint 也不可用。
-        return bool(self.enabled and self.endpoint and self.dags_dir and self.jobs_dir)
+        # 没有投递目录/投递主机就没法把 DAG 交出去；未启用或无 endpoint 也不可用。
+        return bool(self.enabled and self.endpoint and self.dags_dir and self.ssh_host)
 
     def build_delivery(self):
-        """按 dag_delivery_method 构造投递器（local 默认 / git-sync）。
+        """构造 SSH 投递器。
 
-        放在运行期配置上，调用侧（materialization_runner / flink_job_runner）拿到后
-        传给 ``DagBundle.write(..., delivery=...)``。
+        放在运行期配置上，调用侧（materialization_runner / flink_job_runner /
+        pipeline_compiler）拿到后直接 ``deliver(...)``。
+
+        只有 SSH 一条通道：ontoMeta / Airflow / Flink 常分处三台机器，"写本地文件系统"
+        在那种拓扑下只会把产物写进一台没人看的机器。本机验证把 ssh_host 指向 localhost。
         """
         from app.services.dag_delivery import get_delivery
 
         return get_delivery(
-            self.dag_delivery_method,
-            git_remote=self.git_remote,
-            git_branch=self.git_branch,
-            git_auto_init=self.git_auto_init,
-            git_author=self.git_author or None,
-            git_email=self.git_email or None,
+            self.ssh_host,
+            user=self.ssh_user or None,
+            port=self.ssh_port,
+            key_path=self.ssh_key_path or None,
+            password=self.ssh_password or None,
         )
 
 
@@ -268,14 +263,12 @@ class SettingsService:
             api_version=a.get("api_version", "v1"),
             # 投递目录空时退回默认（与既有行为一致）
             dags_dir=a.get("dags_dir") or _default_dags_dir(),
-            jobs_dir=a.get("jobs_dir") or _default_jobs_dir(),
-            # 投递方式与 git-sync 参数：纯数据库读取（法则：配置只在设置页，不读环境变量）。
-            dag_delivery_method=a.get("dag_delivery_method") or "local",
-            git_remote=a.get("git_remote") or "origin",
-            git_branch=a.get("git_branch") or "main",
-            git_auto_init=bool(a.get("git_auto_init")),
-            git_author=a.get("git_author") or "",
-            git_email=a.get("git_email") or "",
+            # SSH 投递参数：纯数据库读取（法则：配置只在设置页，不读环境变量）。
+            ssh_host=a.get("ssh_host") or "",
+            ssh_port=int(a.get("ssh_port") or 22),
+            ssh_user=a.get("ssh_user") or "",
+            ssh_key_path=a.get("ssh_key_path") or "",
+            ssh_password=a.get("ssh_password") or None,
             max_tasks_per_dag=a.get("max_tasks_per_dag") or 50,
             max_active_tasks_per_dag=a.get("max_active_tasks_per_dag") or 16,
             dag_parse_timeout=a.get("dag_parse_timeout") or 60.0,
@@ -441,7 +434,9 @@ class SettingsService:
                 AirflowSetting(
                     id="default",
                     dags_dir=_default_dags_dir(),
-                    jobs_dir=_default_jobs_dir(),
+                    # 遗留表仍有 jobs_dir 列（读取侧真源已是 dependency_components，
+                    # 且投递不再用它）——留空即可，不再播种一个指向已删组件的路径。
+                    jobs_dir="",
                     max_tasks_per_dag=env_settings.ontometa_max_tasks_per_dag,
                     max_active_tasks_per_dag=env_settings.ontometa_max_active_tasks_per_dag,
                     dag_parse_timeout=env_settings.ontometa_dag_parse_timeout,

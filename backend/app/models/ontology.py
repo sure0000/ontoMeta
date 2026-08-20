@@ -129,6 +129,18 @@ class ObjectType(Base, ProvenanceMixin):
         foreign_keys="RelationType.target_object_type_id",
     )
 
+    @property
+    def source_provenance(self) -> str:
+        """对象来源：``datahub``（有物理源表，可同步）/ ``manual`` / ``none``。
+
+        以派生属性提供而非落列：它完全由 ``source_ref`` 的形态决定，存一份就会与
+        ``source_ref`` 分叉。所有 ``from_attributes`` 的读模型声明同名字段即可自动带上，
+        前端因而不必再自己解析 URN 语法。
+        """
+        from app.services.source_ref import provenance_of
+
+        return provenance_of(self.source_ref)
+
     # 对象标识名在本体内唯一。``name`` 是 Agent 写 SQL 用的标识符，也是投影
     # （ontology_projection）按归一小写建索引的键——重名会让 ``object_of`` 静默
     # 只解析到其中一个，SQL 打到哪张表全看入库顺序。此前只在发布期由

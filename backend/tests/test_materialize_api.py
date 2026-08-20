@@ -79,6 +79,18 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
 
     monkeypatch.setattr(materialization_runner, "AirflowClient", _FakeClient)
 
+    # 投递器给真的（SSH 逻辑完整跑，传输落到本地 tmp）：runner 经 build_delivery()
+    # 拿实例，patch 类方法覆盖全部用例，避免真 ssh 到不存在的 test 主机。
+    from app.services.settings_service import AirflowRuntimeConfig
+
+    from tests.support.delivery import LocalTransportDelivery
+
+    monkeypatch.setattr(
+        AirflowRuntimeConfig,
+        "build_delivery",
+        lambda self: LocalTransportDelivery(),
+    )
+
     # 提交前 preflight（P2 强制闸门）会真连 Airflow 核实可达性/连接；本用例只替身了
     # runner 通道的客户端，preflight 自有一套 AirflowClient。这里桩掉 preflight 直接放行——
     # 本用例验证的是「环境就绪时端到端跑通」，preflight 本身另有 test_materialize_preflight.py 覆盖。
@@ -96,7 +108,8 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
             "endpoint": "http://airflow:8080",
             "enabled": True,
             "dags_dir": str(tmp_path / "dags"),
-            "jobs_dir": str(tmp_path / "jobs"),
+            # SSH 投递参数：available 判定需要主机。
+            "ssh_host": "test-airflow-host",
             # 统一执行：Flink 参数经设置页落库。给 JAR 走真实 DAG 路径（非 handoff）；给
             # checkpoint 目录以支持含 timestamp 分区键的表默认的 incremental→CDC。
             "flink_sql_runner_jar": "/opt/sql-runner.jar",
@@ -112,8 +125,10 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["artifact_id"]
-        # 编排回执：execute_mode=flink_on_yarn（搬运走 Flink），带 DagRun 信息与目标数据源
-        assert body["receipt"]["execute_mode"] == "flink_on_yarn"
+        # 编排回执：execute_mode=orchestrated（读时对账的开关），带 DagRun 信息与目标数据源；
+        # 物化只建结构，emit=ddl。
+        assert body["receipt"]["execute_mode"] == "orchestrated"
+        assert body["receipt"]["emit"] == "ddl"
         assert body["receipt"]["dag_id"]
         assert body["receipt"]["target_datasource"]["id"] == ids["datasource_id"]
 

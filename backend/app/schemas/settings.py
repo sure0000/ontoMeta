@@ -123,18 +123,17 @@ class AirflowSettingsOut(BaseModel):
     token_set: bool = False
     api_version: str
     enabled: bool
-    # 启用且 endpoint 已填才算真的可用；否则物化无法执行（不再有直连回退）。
+    # 启用且 endpoint / SSH 主机已填才算真的可用；否则物化无法执行（不再有直连回退）。
     available: bool
-    # ---- 投递目录 ----
+    # ---- 投递目录（**Airflow 主机上的路径**）----
     dags_dir: str = ""
-    jobs_dir: str = ""
-    # ---- DAG 投递方式（local 默认 / git-sync 跨机）----
-    dag_delivery_method: str = "local"
-    git_remote: str = "origin"
-    git_branch: str = "main"
-    git_auto_init: bool = False
-    git_author: str = ""
-    git_email: str = ""
+    # ---- SSH 投递（唯一通道：产物 rsync 到 Airflow 主机后原子切换）----
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_user: str = ""
+    ssh_key_path: str = ""
+    ssh_password_set: bool = False
+    ssh_password_hint: str | None = None
     # ---- DAG 形状与时序 ----
     max_tasks_per_dag: int = 50
     max_active_tasks_per_dag: int = 16
@@ -154,14 +153,13 @@ class AirflowSettingsUpdate(BaseModel):
     api_version: str = "v1"
     enabled: bool = False
     dags_dir: str = ""
-    jobs_dir: str = ""
-    # DAG 投递方式：local（同机/共享卷，默认）或 git（跨机，落盘后 push 到远程仓）。
-    dag_delivery_method: str = Field(default="local", pattern="^(local|git)$")
-    git_remote: str = "origin"
-    git_branch: str = "main"
-    git_auto_init: bool = False
-    git_author: str = ""
-    git_email: str = ""
+    # SSH 投递：ontoMeta / Airflow / Flink 常分处三台机器，产物经 rsync 推到 Airflow
+    # 主机。密钥优先，为空时用 ssh_password（需要目标机有 sshpass）。
+    ssh_host: str = ""
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_user: str = ""
+    ssh_key_path: str = ""
+    ssh_password: str | None = None  # 不传 = 保留原值
     max_tasks_per_dag: int = Field(default=50, ge=1, le=1000)
     max_active_tasks_per_dag: int = Field(default=16, ge=1, le=256)
     # 要大于 Airflow 的 dag_dir_list_interval，否则首次提交必报「尚未解析到」。

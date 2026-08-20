@@ -19,7 +19,11 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.connectors.datahub import _extract_platform
+from app.services.source_ref import (
+    NO_PHYSICAL_SOURCE_NOTE,
+    has_physical_source,
+    source_platform_of,
+)
 from app.warehouse.jobs import (
     ColumnMapping,
     JobEndpoint,
@@ -146,10 +150,13 @@ class JobPlanner:
 
             source_name = source_refs.get(entity)
             if not source_name:
-                plan.note(table.qualified_name, "对象无 source_ref，无法定位源表")
+                # 两种成因合流于此：压根没有 source_ref，或是人工建模对象（``manual:`` 引用）。
+                # 后者此前会漏到下面的平台检查，报「source_ref 未带数据平台信息」——
+                # 那句话把「本来就没有源表」误诊成「URN 写得不全」。
+                plan.note(table.qualified_name, NO_PHYSICAL_SOURCE_NOTE)
                 continue
             urn = source_urns.get(entity)
-            platform = _extract_platform(urn or "")
+            platform = source_platform_of(urn)
             if not platform:
                 plan.note(
                     table.qualified_name,
@@ -230,7 +237,7 @@ class JobPlanner:
             for obj in db.query(ObjectType)
             .filter(ObjectType.ontology_id == ontology_id)
             .all()
-            if obj.source_ref
+            if has_physical_source(obj.source_ref)
         }
 
     def render(self, plan: JobPlan, *, tool: str | None = None) -> dict[str, dict]:

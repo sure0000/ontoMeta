@@ -1,13 +1,27 @@
-"""本体一键物化编排：生成建表 DDL + 搬运作业 + DAG → 投递给 Airflow 执行 → 回执。
+"""本体 → Airflow 的编排入口：**物化**（建结构）与**数据同步**（搬数据）两条产出。
 
-本模块把已有能力串成一次可执行的物化，不重造任何一块：
+本体有两种来源，对应两件不同的事：
+
+- **人工建模**的对象任何库里都没有物理表，必须先建出来给业务用 → ``run_materialize``，
+  只产建表 DDL（含外键），DAG 是 ``read_spec → create_tables``、``schedule=None`` 的
+  一次性任务。**不产任何搬运作业、不产 staging/swap，一行数据都不动。**
+- **DataHub 采集**的对象源头数据已存在，要搬进数仓 → ``run_sync``，只产 Flink SQL 搬运
+  作业（含全量的 staging + 原子切换）。**不建业务表**——目标表必须已由物化建好，
+  这不只是策略：staging 的 ``CREATE TABLE … LIKE <正式表>`` 结构上就要求它先存在。
+
+两条共用 ``_orchestrate``（目标源校验、契约对齐、DDL 生成、投递、触发），差别只在
+``emit``。**刻意不做成单个 ``run(emit=...)``**：``load_strategy``/``refresh_cron`` 只对同步
+有意义，合成一个签名就会得到一串「只在 emit=X 时才有意义」的形参——本仓已被这个形状
+坑过两次（见 ``run_sync`` 的 ``load_strategy`` 说明）。
+
+本模块把已有能力串起来，不重造任何一块：
 
 - **物化契约**（``services/materialization_contract``）：先 ``sync`` 保证契约存在/最新，
   弹窗覆盖的存储策略/表名作为 override 写回并钉住，使“生成”与“展示”同一事实源。
 - **正向生成器**（``services/warehouse_generator``）：按目标引擎产出建表 DDL（本体反补的
   注释/分区/主键声明只在这条路径上）。
 - **搬运作业编译**（``services/job_planner`` + ``app/warehouse/jobs``）：本体+契约 → JobSpec
-  → 选定工具（seatunnel/datax/flink）的作业配置。
+  → Flink SQL 作业。
 - **DAG 生成与投递**（``services/airflow_dag_builder`` + ``connectors/airflow``）：产物落盘交
   Airflow，触发一次 DagRun。落库由 Airflow 按 conn_id 执行，ontoMeta 不直连目标库。
 """
@@ -17,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
@@ -40,6 +54,9 @@ from app.warehouse.jobs import JobPlan
 # 统一执行架构：搬运一律走 Flink SQL on YARN（与 transform/metric 同一执行路径），
 # 不再有 seatunnel/datax/docker/runner 多通道。工具恒为 flink。
 _SYNC_TOOL = "flink"
+
+# 本次编排产出什么：``ddl`` = 只建结构（物化），``dml`` = 只搬数据（同步）。
+Emit = Literal["ddl", "dml"]
 
 _contract_service = MaterializationContractService()
 _generator = WarehouseGenerator()
@@ -288,6 +305,7 @@ def _run_orchestrated(
     db: Session,
     ontology_id: str,
     *,
+    emit: Emit,
     ds: DataSource,
     engine: str,
     airflow,
@@ -300,33 +318,52 @@ def _run_orchestrated(
     artifact_id: str | None,
     load_strategy: str | None = None,
 ) -> dict[str, Any]:
-    """产出建表 DDL + Flink SQL 搬运作业 + DAG → 投递 → 触发一次运行。**不在本进程里落库**。
+    """产出 DAG → 投递 → 触发一次运行。**不在本进程里落库**。
+
+    ``emit="ddl"``（物化）：不调 ``JobPlanner``，``plan`` 恒为空。全部 DDL 经 ``_assign_ddl``
+    归进合成的 manual 批，产出一条 ``read_spec → create_tables [→ add_constraints]``、
+    ``schedule=None`` 的 DAG。**不校验 Flink SqlRunner JAR**——``create_tables`` 是
+    ``SQLExecuteQueryOperator``（直连目标仓的 Airflow Connection），与 Flink 无关。此前
+    在建 bundle 之前就因缺 JAR 退 handoff，于是没装 SqlRunner 的部署上人工建模的本体
+    拿到 ``ok: True`` 却一张表都没建。
+
+    ``emit="dml"``（同步）：``ddl_items``/``constraint_items`` 由调用方置空，批次只由搬运
+    作业分组产生，回执的 ``tables`` 因而为空（前端靠它判「已物化」，同步填了就会冒充
+    成物化）。批里的 DDL 只可能是 staging 表（``CREATE TABLE … LIKE 正式表``，属搬运侧）。
 
     统一执行架构：搬运一律编译成 Flink SQL、经 Airflow BashOperator ``flink run`` 提交到
-    YARN（与 transform/metric 同一路径）。不再有 seatunnel/datax/docker/runner 多通道。
+    YARN（与 transform/metric 同一路径）。
     """
-    # 搬运工具恒为 flink。planner 用 FlinkAdapter 判可搬性（full/incremental/cdc 均支持），
-    # runner_capabilities 传 None（那套是 sync-runner 通道的遗留，已废）。
-    plan = _job_planner.build(
-        db,
-        ontology_id,
-        engine=engine,
-        tool=_SYNC_TOOL,
-        target_alias=_warehouse_conn_id(ds),
-        database_prefix=database_prefix,
-        database_overrides=database_overrides,
-        table_overrides=table_overrides,
-        selected_targets=selected_targets,
-        runner_capabilities=None,
-        # 本次运行的装载方式覆盖（Spec 里选的「全量/增量」），缺省 None = 逐表按契约。
-        load_strategy=load_strategy,
-    )
+    if emit == "dml":
+        # 搬运工具恒为 flink。planner 用 FlinkAdapter 判可搬性（full/incremental/cdc 均支持），
+        # runner_capabilities 传 None（那套是 sync-runner 通道的遗留，已废）。
+        plan = _job_planner.build(
+            db,
+            ontology_id,
+            engine=engine,
+            tool=_SYNC_TOOL,
+            target_alias=_warehouse_conn_id(ds),
+            database_prefix=database_prefix,
+            database_overrides=database_overrides,
+            table_overrides=table_overrides,
+            selected_targets=selected_targets,
+            runner_capabilities=None,
+            # 本次运行的装载方式覆盖（Spec 里选的「全量/增量」），缺省 None = 逐表按契约。
+            load_strategy=load_strategy,
+        )
+        if not plan.jobs:
+            # 一个作业都编不出来 = 没有任何数据会被搬。此前这里静默回 ok: True，
+            # 而拆分后这是最可能的失败形态（选中的对象全是人工建模的，压根没有源表）。
+            raise MaterializationError(_no_movable_objects_message(plan))
+    else:
+        plan = JobPlan()
 
-    # Flink on YARN 提交参数（设置页 → Airflow/Flink，DB）。缺 SqlRunner JAR → 退「仅产出」。
+    # Flink on YARN 提交参数（设置页 → Airflow/Flink，DB）。搬运缺 SqlRunner JAR → 退「仅产出」；
+    # 建表不经 Flink，故物化不看这个。
     runner_jar = (airflow.flink_sql_runner_jar or "").strip()
-    if not runner_jar:
+    if emit == "dml" and not runner_jar:
         return _handoff_receipt(
-            ontology_id, ds, engine, plan, ddl_items,
+            ontology_id, ds, engine, emit, plan, ddl_items,
             database_prefix, database_overrides, table_overrides,
         )
     flink_cfg = FlinkSubmitConfig(
@@ -341,7 +378,9 @@ def _run_orchestrated(
     warehouse_conn_id = _warehouse_conn_id(ds)
 
     # 按 cron 分组 + 按上限分批：一个 cron 一个 DAG、少数派不再被众数吞掉，超上限再拆（M16）。
-    cron_map = _cron_by_entity(db, ontology_id)
+    # 物化没有作业，也就没有可分组的 cron——建表是幂等的一次性动作，全部归 manual 批
+    # （见 _assign_ddl），挂到定时 DAG 上只会每轮重复跑一遍 CREATE。
+    cron_map = _cron_by_entity(db, ontology_id) if plan.jobs else {}
     batches = _plan_batches(plan.jobs, cron_map, airflow.max_tasks_per_dag)
     # 建表分配：有作业的表跟着自己那批，无作业的表（ADS/缺 source_ref）归入 manual 批。
     _assign_ddl(batches, ddl_items, constraint_items)
@@ -400,12 +439,17 @@ def _run_orchestrated(
             dag_id_suffix=batch["suffix"],
             warehouse_conn_id=warehouse_conn_id,
             max_active_tasks=airflow.max_active_tasks_per_dag,
+            # dag_id 以**制品**为 base：同一本体上物化与同步是两条并存的制品，以本体 id
+            # 为 base 时两者算出同一个 dag_id，谁后投递谁覆盖谁。
+            dag_id_base=artifact_id or ontology_id,
+            # 无 artifact_id 时产物落扁平 dags_dir，DAG 里算 lib_dir 不能再往上一级
+            nested_layout=bool(artifact_id),
         )
         bundles.append((batch, bundle))
 
     # 先全部落盘：等解析时一次 dag_dir 扫描即可全部认到，避免逐个各等一个解析周期。
     # DagBundle 是纯数据（F/G 后不再有 write 方法），交给统一的 DagDelivery 投递器
-    # （LocalFsDelivery 默认写本地 FS，子类可做 git sync 等），SQL 作为 job_files 一并投。
+    # （SshDelivery：rsync 到 Airflow 主机后原子切换），SQL 作为 job_files 一并投。
     # 产物按 <dags>/ontometa/<artifact_id>/ 子目录聚合，.sql 落其 jobs/（与 read_spec 的
     # sql_dir 对齐）；无 artifact_id 时退回扁平 dags_dir。
     if artifact_id:
@@ -417,6 +461,12 @@ def _run_orchestrated(
     delivery = airflow.build_delivery()
     for _, bundle in bundles:
         job_files = {t["sql_file"]: t["sql"] for t in bundle.spec["tasks"]}
+        # SqlRunner jar 随包投递（内容寻址，落远端 ontometa/_lib/，多制品共享一份）。
+        # 同一批 bundle 用的是同一个 jar，rsync 增量会自动跳过重复传输。
+        lib_files = {}
+        if bundle.runner_jar_filename:
+            with open(bundle.runner_jar_path, "rb") as fh:
+                lib_files[bundle.runner_jar_filename] = fh.read()
         try:
             result = delivery.deliver(
                 dags_dir=_out_dir,
@@ -426,12 +476,13 @@ def _run_orchestrated(
                 spec_filename=bundle.spec_filename,
                 spec=bundle.spec,
                 job_files=job_files,
+                lib_files=lib_files,
             )
         except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
-            raise MaterializationError(
-                f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
-            ) from exc
-        written_all[bundle.dag_id] = getattr(result, "written", None) or {}
+            raise MaterializationError(f"DAG 投递失败：{exc}") from exc
+        # 投递器给的是**远端**路径（前端「产物路径」面板展示它）。此前这里读的是
+        # 不存在的 result.written，恒为 {} —— 面板永远是空白的。
+        written_all[bundle.dag_id] = result.files_written
 
     client = AirflowClient(
         airflow.endpoint,
@@ -456,8 +507,10 @@ def _run_orchestrated(
             if bundle.dag_id not in parsed:
                 # 落盘了但 Airflow 没解析到：多半是 dags 目录两侧不一致（失败模式 #3）。
                 error = (
-                    "Airflow 尚未解析到 DAG，请检查 dags 目录是否双向可见"
-                    "（ontoMeta 写的与 Airflow 读的是否同一路径）"
+                    "Airflow 尚未解析到 DAG。产物经 SSH 投递到 Airflow 主机的 dags 目录"
+                    "（设置页 → Airflow），请确认：①投递的 dags_dir 与 Airflow 的 "
+                    "dags_folder 是同一目录；②DAG 源码无 import 错误（看 Airflow UI 的 "
+                    "import errors）；③dag_dir_list_interval 较长的首次解析延迟。"
                 )
             else:
                 try:
@@ -489,7 +542,13 @@ def _run_orchestrated(
     first_error = next((b["error"] for b in batch_results if b["error"]), None)
     return {
         "ontology_id": ontology_id,
-        "execute_mode": "flink_on_yarn",
+        # 交 Airflow 编排执行。**这个字符串是对账的开关**：agent_pipeline
+        # ``_reconcile_orchestrated_status`` 只认 "orchestrated"，而此前这里产的是
+        # "flink_on_yarn"（全仓没有一处产 "orchestrated"），于是物化/同步制品从提交那刻起
+        # 就是 SUCCEEDED、从不与真实 DagRun 对账。具体搬运通道另见 sync_tool。
+        "execute_mode": "orchestrated",
+        # 本次产出什么：ddl = 只建结构（物化），dml = 只搬数据（同步）。
+        "emit": emit,
         # 搬运一律走 Flink SQL on YARN（统一执行架构），不再有多通道选择。
         "sync_tool": _SYNC_TOOL,
         "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
@@ -503,8 +562,10 @@ def _run_orchestrated(
         "run_url": first.get("run_url"),
         "artifacts": first.get("artifacts"),
         "schedule": first.get("schedule"),
-        # M16：一次物化可产多个 DAG（按 cron 分组 + 分批），逐个的触发结果在此。
+        # M16：一次编排可产多个 DAG（按 cron 分组 + 分批），逐个的触发结果在此。
         "batches": batch_results,
+        # 本次会**建**的表。同步侧恒为空：前端（MaterializationContractPanel）拿历史回执的
+        # tables 做字符串匹配来判「这张表已物化」，同步若填了表名就会让一次搬运冒充成物化。
         "tables": [q for q, _ in ddl_items],
         "jobs": [job.name for job in plan.jobs],
         "unsupported": plan.unsupported,
@@ -515,10 +576,29 @@ def _run_orchestrated(
     }
 
 
+def _no_movable_objects_message(plan: JobPlan) -> str:
+    """同步一个作业都编不出来时的错误文案：说清是哪些对象、为什么。
+
+    最常见的成因是选中的对象都没有物理源表（人工建模的对象只有元数据），此时用户要做的
+    是物化而不是同步——照抄 planner 给出的逐条 reason 比笼统说「无可搬对象」有用。
+    """
+    reasons = [
+        f"{item.get('target') or '?'}（{item.get('reason') or '原因未给出'}）"
+        for item in (plan.unsupported or [])[:10]
+    ]
+    tail = "" if len(plan.unsupported or []) <= 10 else f" 等 {len(plan.unsupported)} 项"
+    detail = ("：" + "；".join(reasons) + tail) if reasons else "。"
+    return (
+        "没有任何对象可以同步，本次不会搬运任何数据" + detail + " "
+        "人工建模的对象没有物理源表，只能物化建表，不能同步。"
+    )
+
+
 def _handoff_receipt(
     ontology_id: str,
     ds: DataSource,
     engine: str,
+    emit: Emit,
     plan: JobPlan,
     ddl_items: list[tuple[str, str]],
     database_prefix: str | None,
@@ -529,14 +609,17 @@ def _handoff_receipt(
 
     与 flink_job_runner 的 handoff 同义——数据搬运一律走 Flink，缺 JAR 就执行不了，
     如实说明而不是假装成功（见记忆 receipt-failure-vs-artifact-status）。
+
+    **只有同步会走到这里**：建表是 ``SQLExecuteQueryOperator`` 直连目标仓，与 Flink 无关。
     """
     return {
         "ontology_id": ontology_id,
         "execute_mode": "handoff",
+        "emit": emit,
         "sync_tool": _SYNC_TOOL,
         "note": (
-            "未配置 Flink SqlRunner JAR（FLINK_SQL_RUNNER_JAR），ontoMeta 只产出建表 DDL "
-            "与搬运计划，不执行；配上 JAR 后重跑即提交到 YARN。"
+            "未配置 Flink SqlRunner JAR（FLINK_SQL_RUNNER_JAR），ontoMeta 只产出搬运计划，"
+            "不执行；配上 JAR 后重跑即提交到 YARN。"
         ),
         "target_datasource": {"id": ds.id, "name": ds.name, "kind": ds.kind},
         "engine": engine,
@@ -552,61 +635,44 @@ def _handoff_receipt(
     }
 
 
-def run(
+def _orchestrate(
     db: Session,
     ontology_id: str,
     *,
+    emit: Emit,
     target_datasource_id: str,
     engine: str,
-    database_prefix: str | None = None,
-    database_overrides: dict[str, str] | None = None,
-    table_overrides: dict[str, str] | None = None,
-    load_strategy: str | None = None,
-    selected_targets: list[str] | None = None,
-    overrides: dict[str, dict[str, Any]] | None = None,
-    refresh_cron: str | None = None,
-    sync_contracts: bool = True,
-    artifact_id: str | None = None,
+    database_prefix: str | None,
+    database_overrides: dict[str, str] | None,
+    table_overrides: dict[str, str] | None,
+    selected_targets: list[str] | None,
+    overrides: dict[str, dict[str, Any]] | None,
+    refresh_cron: str | None,
+    load_strategy: str | None,
+    sync_contracts: bool,
+    artifact_id: str | None,
 ) -> dict[str, Any]:
-    """物化一个本体到目标数据源，返回回执 dict。
+    """物化与同步共用的编排骨架：前置校验 → 契约对齐 → 生成 DDL → 交 ``_run_orchestrated``。
 
-    **总是交 Airflow 编排执行**：产出建表 DDL + 搬运作业 + DAG，投递给 Airflow 并
-    触发一次运行，**不在本进程里落库**。未配可用 Airflow 时直接报错——不再有
-    直连落库（direct）回退：直连的 INSERT…SELECT 要求源表在目标数仓里可见，
-    真实拓扑下不成立（见 `MATERIALIZE_ORCHESTRATION.md` §1）。
+    **总是交 Airflow 编排执行**，不在本进程里落库。未配可用 Airflow 时直接报错——不再有
+    直连落库（direct）回退：直连的 INSERT…SELECT 要求源表在目标数仓里可见，真实拓扑下
+    不成立（见 `MATERIALIZE_ORCHESTRATION.md` §1）。
 
-    搬运工具恒为 flink（统一执行架构，见 ``services/sync_tool_resolver``）。同步策略逐实体
-    来自物化弹窗，随 ``overrides`` 写回契约，``JobPlanner`` 据契约逐表决定装载方式。
-
-    ``load_strategy``：**本次运行的全局覆盖**（Spec 里选的「全量/增量」），缺省 None
-    = 逐表按契约。它此前只是个签名上的摆设——收下就丢，于是 Spec 上写着 full、
-    DAG 里跑的却是契约的 incremental，连带 M15 的 staging+切换（只在全量时挂）
-    从来没被触发过。要改某张表的常态策略仍走 ``overrides`` 写回契约，两者不冲突。
-
-    ``overrides``：``{contract_id: {字段: 值}}``，弹窗里人工改的存储策略/层/表名等。
-    经 ``MaterializationContractService.update`` 写回并钉住，使生成读到的契约与展示
-    一致（不另存一份配置）。
-
-    ``refresh_cron``：**整批**调度，展开到本次选中的每个契约。弹窗逐实体配 cron（它本来
-    就摊开了所有实体），而 Data Agent 那边「每天凌晨跑一次」说的是整批，不该要求调用方
-    先知道契约 id。展开在契约对齐**之后**做，故新推导出来的契约也能被覆盖到；
-    ``overrides`` 里显式给了 refresh_cron 的实体保持不变——细粒度优先于整批默认。
-
-    ``database_overrides``（层 → 库名）与 ``table_overrides``（contract_id → 表名）
-    是本次落库的目标位置，只作用于本次生成、不写回契约。
+    ``emit="dml"`` 时 DDL 仍会生成但**不下发**（``ddl_items`` 置空后再进编排）：契约对齐与
+    生成是判定「本次选中的对象要落到哪张表」的同一套推导，同步的搬运目标就来自它。
     """
     ds = db.get(DataSource, target_datasource_id)
     if ds is None:
         raise MaterializationError("目标数据源不存在")
     if not ds.dsn_secret_ref:
         raise MaterializationError(
-            f"目标数据源「{ds.name}」未配置连接串（dsn），无法物化"
+            f"目标数据源「{ds.name}」未配置连接串（dsn），无法执行"
         )
 
     airflow = _settings.get_airflow_runtime(db)
     if not airflow.available:
         raise MaterializationError(
-            "未配置可用的 Airflow（需在设置页填 endpoint 并启用），无法执行物化"
+            "未配置可用的 Airflow（需在设置页填 endpoint 并启用），无法执行"
         )
 
     # 契约是生成器的输入事实源：先对齐，保证 materialized/层/分区等为最新，
@@ -630,12 +696,18 @@ def run(
     )
 
     selected = _selected_names(db, ontology_id, selected_targets, table_overrides)
-    ddl_items = _select(ddl["statements"], selected)
-    constraint_items = _select_constraints(ddl.get("constraints"), ddl_items)
+    if emit == "ddl":
+        ddl_items = _select(ddl["statements"], selected)
+        constraint_items = _select_constraints(ddl.get("constraints"), ddl_items)
+    else:
+        # 同步只搬数据：一条建表语句都不下发。目标表必须已由物化建好——除了「物化在先」
+        # 这条策略，staging 的 CREATE TABLE … LIKE <正式表> 结构上也要求它先存在。
+        ddl_items, constraint_items = [], {}
 
     return _run_orchestrated(
         db,
         ontology_id,
+        emit=emit,
         ds=ds,
         engine=engine,
         airflow=airflow,
@@ -647,4 +719,117 @@ def run(
         selected_targets=selected_targets,
         artifact_id=artifact_id,
         load_strategy=load_strategy,
+    )
+
+
+def run_materialize(
+    db: Session,
+    ontology_id: str,
+    *,
+    target_datasource_id: str,
+    engine: str,
+    database_prefix: str | None = None,
+    database_overrides: dict[str, str] | None = None,
+    table_overrides: dict[str, str] | None = None,
+    selected_targets: list[str] | None = None,
+    overrides: dict[str, dict[str, Any]] | None = None,
+    refresh_cron: str | None = None,
+    sync_contracts: bool = True,
+    artifact_id: str | None = None,
+) -> dict[str, Any]:
+    """**物化 = 建结构**：把本体想要的表在目标数据源里建出来，返回回执 dict。
+
+    产出的 DAG 只有 ``read_spec → create_tables [→ add_constraints]``，``schedule=None``
+    （建表是幂等的一次性动作，挂到定时 DAG 上只会每轮重复跑一遍 CREATE）。
+    **不产任何搬运作业、不产 staging/swap，一行数据都不动**——要把数据搬进来是同步
+    （``run_sync``）的事。故本函数没有 ``load_strategy``：装载方式只对搬运有意义。
+
+    幂等：各引擎的建表语句一律 ``CREATE TABLE IF NOT EXISTS``，重复物化跳过已存在的表，
+    既有数据原封不动（``generate_ddl`` 从不产 DROP/TRUNCATE，也从不 ALTER）。
+
+    零张表是空操作（回执 ``tables`` 为空、不报错）——与同步「零个可搬对象必须大声拒绝」
+    不同：没有要建的表说明本体里的表都已被别的制品覆盖，不是故障。
+
+    ``overrides``：``{contract_id: {字段: 值}}``，弹窗里人工改的存储策略/层/表名等。
+    经 ``MaterializationContractService.update`` 写回并钉住，使生成读到的契约与展示
+    一致（不另存一份配置）。
+
+    ``refresh_cron``：**整批**调度，展开到本次选中的每个契约。它不影响本次产出的建表
+    DAG（那条恒为 schedule=None），只写回契约供**后续同步**分组用。弹窗逐实体配 cron，
+    而 Data Agent 那边「每天凌晨跑一次」说的是整批，不该要求调用方先知道契约 id。
+    展开在契约对齐**之后**做，故新推导出来的契约也能被覆盖到；``overrides`` 里显式给了
+    refresh_cron 的实体保持不变——细粒度优先于整批默认。
+
+    ``database_overrides``（层 → 库名）与 ``table_overrides``（contract_id → 表名）
+    是本次落库的目标位置，只作用于本次生成、不写回契约。
+    """
+    return _orchestrate(
+        db,
+        ontology_id,
+        emit="ddl",
+        target_datasource_id=target_datasource_id,
+        engine=engine,
+        database_prefix=database_prefix,
+        database_overrides=database_overrides,
+        table_overrides=table_overrides,
+        selected_targets=selected_targets,
+        overrides=overrides,
+        refresh_cron=refresh_cron,
+        load_strategy=None,
+        sync_contracts=sync_contracts,
+        artifact_id=artifact_id,
+    )
+
+
+def run_sync(
+    db: Session,
+    ontology_id: str,
+    *,
+    target_datasource_id: str,
+    engine: str,
+    database_prefix: str | None = None,
+    database_overrides: dict[str, str] | None = None,
+    table_overrides: dict[str, str] | None = None,
+    load_strategy: str | None = None,
+    selected_targets: list[str] | None = None,
+    overrides: dict[str, dict[str, Any]] | None = None,
+    refresh_cron: str | None = None,
+    sync_contracts: bool = True,
+    artifact_id: str | None = None,
+) -> dict[str, Any]:
+    """**同步 = 搬数据**：把源表的数据搬进目标表，返回回执 dict。
+
+    只产 Flink SQL 搬运作业（全量走 staging + 原子切换），**不建业务表**：回执的 ``tables``
+    恒为空。目标表须已由 ``run_materialize`` 建好——除了「物化在先」这条策略，staging 的
+    ``CREATE TABLE … LIKE <正式表>`` 结构上也要求它先存在。
+
+    一个作业都编不出来时**抛 ``MaterializationError``**，不回 ``ok: True``：那意味着没有
+    任何数据会被搬，最常见的成因是选中的对象都是人工建模的（没有物理源表，只能物化）。
+
+    ``load_strategy``：**本次运行的全局覆盖**（Spec 里选的「全量/增量」），缺省 None
+    = 逐表按契约。它此前只是个签名上的摆设——收下就丢，于是 Spec 上写着 full、
+    DAG 里跑的却是契约的 incremental，连带 M15 的 staging+切换（只在全量时挂）
+    从来没被触发过。要改某张表的常态策略仍走 ``overrides`` 写回契约，两者不冲突。
+
+    ``refresh_cron``：**整批**调度，展开到本次选中的每个契约，再由 ``_cron_by_entity``
+    决定各 DAG 的 schedule（一个 cron 一个 DAG）。语义与 ``run_materialize`` 的同名形参
+    一致，区别是这里真的会作用到本次产出的 DAG 上。
+
+    其余形参见 ``run_materialize``。
+    """
+    return _orchestrate(
+        db,
+        ontology_id,
+        emit="dml",
+        target_datasource_id=target_datasource_id,
+        engine=engine,
+        database_prefix=database_prefix,
+        database_overrides=database_overrides,
+        table_overrides=table_overrides,
+        selected_targets=selected_targets,
+        overrides=overrides,
+        refresh_cron=refresh_cron,
+        load_strategy=load_strategy,
+        sync_contracts=sync_contracts,
+        artifact_id=artifact_id,
     )

@@ -94,8 +94,16 @@ export interface ObjectTypeSummary extends FieldProvenance {
   name: string;
   display_name: string;
   description?: string;
-  /** 源表定位（DataHub urn）。为空 = 无法建同步任务（SyncDrafter 会拒）。 */
+  /** 源表定位（DataHub urn，或人工建模对象的 `manual:<源>:<标识>`）。 */
   source_ref?: string;
+  /**
+   * 对象来源。判「能不能建同步任务」用这个，**不要**用 `source_ref` 是否为空——
+   * 人工建模对象的 source_ref 非空却没有任何物理表可搬。
+   * - `datahub` 由数据源采集而来，有真实源表 → 可同步
+   * - `manual`  人工建模，只有元数据 → 只能物化建表
+   * - `none`    无 source_ref 或无法解析
+   */
+  source_provenance?: "datahub" | "manual" | "none";
   status: string;
   property_count: number;
   relation_count: number;
@@ -598,19 +606,18 @@ export interface AirflowSettings {
   token_set: boolean;
   api_version: string;
   enabled: boolean;
-  /** 启用且 endpoint 已填才算真的可用；否则物化报错无法执行。 */
+  /** 启用且 endpoint / SSH 主机已填才算真的可用；否则物化报错无法执行。 */
   available: boolean;
-  /** DAG 与作业配置的投递目录（必须是 Airflow 真正挂进容器的那个）。 */
+  /** DAG 与作业配置的投递目录（**Airflow 主机上的路径**）。 */
   dags_dir: string;
-  jobs_dir: string;
-  /** DAG 投递方式：local（写共享目录）/ git（commit+push，Airflow 侧 git-sync 拉取）。 */
-  dag_delivery_method: string;
-  /** git 投递参数（仅 dag_delivery_method=git 时生效）。 */
-  git_remote: string;
-  git_branch: string;
-  git_auto_init: boolean;
-  git_author: string;
-  git_email: string;
+  /** SSH 投递参数：产物 rsync 到 Airflow 主机后原子切换（唯一投递通道）。 */
+  ssh_host: string;
+  ssh_port: number;
+  ssh_user: string;
+  /** 私钥路径（ontoMeta 侧可读）。留空则用密码（需要 sshpass）。 */
+  ssh_key_path: string;
+  ssh_password_set: boolean;
+  ssh_password_hint: string | null;
   max_tasks_per_dag: number;
   max_active_tasks_per_dag: number;
   dag_parse_timeout: number;

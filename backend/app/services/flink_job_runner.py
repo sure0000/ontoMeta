@@ -114,15 +114,6 @@ def run_flink_sql(
         checkpoint_dir=(airflow.flink_checkpoint_dir or "").strip(),
     )
 
-    # 有 artifact_id 时 .sql 落 <dags_dir>/ontometa/<artifact_id>/jobs/；flink run --file
-    # 的路径写死进 command，必须与该落盘目录对齐（worker 上可见）。空则退回扁平 jobs_dir。
-    if artifact_id:
-        _flink_jobs_dir = os.path.join(
-            airflow.dags_dir, "ontometa", artifact_id, "jobs"
-        )
-    else:
-        _flink_jobs_dir = airflow.jobs_dir
-
     # 生成 DAG（.sql 文件 + DAG 源码 + spec.json）
     # build_flink_sql_dag 的新签名：ontology_id + engine + ddl_statements。
     # 本 runner 是通用接口（transform/metric/搬运共用），用 base 当 ontology_id，
@@ -139,6 +130,8 @@ def run_flink_sql(
         dag_id_suffix=dag_id_suffix,
         warehouse_conn_id=warehouse_conn_id,
         max_active_tasks=airflow.max_active_tasks_per_dag,
+        # 无 artifact_id 时产物落扁平 dags_dir，DAG 里算 lib_dir 不能再往上一级
+        nested_layout=bool(artifact_id),
     )
 
     # 落盘：DagBundle 是纯数据（F/G 后不含 write 方法），交给统一的 DagDelivery 投递器。
@@ -152,6 +145,12 @@ def run_flink_sql(
     delivery = airflow.build_delivery()
     try:
         job_files = {t["sql_file"]: t["sql"] for t in bundle.spec["tasks"]}
+        # SqlRunner jar 随包投递：内容寻址（文件名含 sha12），落远端 ontometa/_lib/，
+        # 多个制品共享一份。bundle 无 jar = handoff 模式（只产 SQL 不执行）。
+        lib_files = {}
+        if bundle.runner_jar_filename:
+            with open(bundle.runner_jar_path, "rb") as fh:
+                lib_files[bundle.runner_jar_filename] = fh.read()
         result = delivery.deliver(
             dags_dir=_out_dir,
             jobs_dir=_jobs_dir,
@@ -160,16 +159,12 @@ def run_flink_sql(
             spec_filename=bundle.spec_filename,
             spec=bundle.spec,
             job_files=job_files,
+            lib_files=lib_files,
         )
-        written = getattr(result, "written", None) or {
-            "dag_file": os.path.join(_out_dir, bundle.dag_filename),
-            "spec_file": os.path.join(_out_dir, bundle.spec_filename),
-            "sql_files": [os.path.join(_jobs_dir, t["sql_file"]) for t in bundle.spec["tasks"]],
-        }
+        # 投递器给的是**远端**路径——ontoMeta 与 Airflow 不同机时，本地视角的路径是错的。
+        written = result.files_written
     except Exception as exc:  # noqa: BLE001 —— 投递失败（含 OSError / DagDeliveryError）
-        raise FlinkJobError(
-            f"DAG 投递失败（{airflow.dags_dir}）：{exc}"
-        ) from exc
+        raise FlinkJobError(f"DAG 投递失败：{exc}") from exc
 
     # 触发
     client = AirflowClient(
@@ -187,8 +182,10 @@ def run_flink_sql(
         parsed = _wait_for_parse(client, [bundle.dag_id], airflow.dag_parse_timeout)
         if bundle.dag_id not in parsed:
             error = (
-                "Airflow 尚未解析到 DAG，请检查 dags 目录是否双向可见"
-                "（ontoMeta 写的与 Airflow 读的是否同一路径）"
+                "Airflow 尚未解析到 DAG。产物经 SSH 投递到 Airflow 主机的 dags 目录"
+                "（设置页 → Airflow），请确认：①投递的 dags_dir 与 Airflow 的 "
+                "dags_folder 是同一目录；②DAG 源码无 import 错误（看 Airflow UI 的 "
+                "import errors）；③dag_dir_list_interval 较长的首次解析延迟。"
             )
         else:
             client.unpause_dag(bundle.dag_id)

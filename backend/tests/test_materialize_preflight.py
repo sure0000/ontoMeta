@@ -29,13 +29,18 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
         token=None,
         api_version="v1",
         dags_dir=str(dags_dir),
+        # SSH 投递参数：dag_dir_visible 检查改验 SSH 管道，基线给个主机名。
+        ssh_host="test-airflow-host",
+        ssh_user="deploy",
+        ssh_port=22,
+        ssh_key_path="/k/id_test",
+        ssh_password=None,
         # 编排旋钮现在全在设置行上（不再有环境变量），基线取与库默认一致的值。
         max_tasks_per_dag=50,
         max_active_tasks_per_dag=16,
         dag_parse_timeout=60.0,
         preflight_sentinel_timeout=20.0,
         staging_swap=True,
-        jobs_dir="",
         # Flink 执行参数现在也在设置行上（不再有环境变量）。
         flink_sql_runner_jar="/opt/flink/runner.jar",
         flink_sql_runner_class="com.ontometa.flink.SqlRunner",
@@ -48,7 +53,9 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
     available = over.pop("available", None)
     base.update(over)
     if available is None:
-        available = bool(base["endpoint"] and base["dags_dir"])
+        available = bool(
+            base["endpoint"] and base["dags_dir"] and base["ssh_host"]
+        )
     return SimpleNamespace(available=available, **base)
 
 
@@ -115,6 +122,11 @@ def _install(
     runtime_over.setdefault("max_tasks_per_dag", max_tasks)
     runtime = _runtime(runtime_dir, **runtime_over)
     monkeypatch.setattr(pf, "AirflowClient", factory)
+    # SSH 管道探测默认放行（可注入正是为这个：真实探活不属单测范围）。
+    # 专测失败的用例自己覆盖 probe 返回值。
+    monkeypatch.setattr(
+        pf, "probe_ssh_pipeline", lambda af: (True, "test：管道连通（桩）")
+    )
     monkeypatch.setattr(pf._settings, "get_airflow_runtime", lambda db: runtime)
     monkeypatch.setattr(
         pf._contract_service, "list_contracts", lambda db, oid, **kw: list(contracts)
@@ -152,14 +164,6 @@ def test_all_green_is_ok(monkeypatch, tmp_path):
     assert items["batch_size"].status == pf.PASS
     # 全绿 = 无 FAIL 项（PASS 项 blocking=True 是「必需检查已通过」，属正常）。
     assert all(i.status != pf.FAIL for i in report.items)
-
-
-def test_sentinel_file_is_cleaned_up(monkeypatch, tmp_path):
-    db = _install(monkeypatch, tmp_path, _make_handler())
-    pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    # sentinel 探测完必须删掉，不能在 dags 目录留一个 .py 污染 Airflow import errors。
-    leftover = [f for f in os.listdir(tmp_path) if f.endswith(".py")]
-    assert leftover == []
 
 
 def test_api_auth_failure_blocks(monkeypatch, tmp_path):
@@ -206,28 +210,66 @@ def test_api_version_mismatch_warns_with_correction(monkeypatch, tmp_path):
     assert report.ok is True
 
 
-def test_dag_dir_not_visible_warns(monkeypatch, tmp_path):
-    """sentinel 超时未被解析：不硬失败（可能只是解析间隔长），但要现形并给两种可能。"""
-    db = _install(
-        monkeypatch, tmp_path, _make_handler(sentinel_found=False), sentinel_timeout=0.2
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    dag = _by_key(report)["dag_dir_visible"]
-    assert dag.status == pf.WARN and dag.blocking is False
-    assert "dag_dir_list_interval" in (dag.next_step or "")
-    assert report.ok is True
-
-
-def test_unwritable_dags_dir_blocks(monkeypatch, tmp_path):
-    """ontoMeta 根本写不进投递目录：这一步单独就能抓到，且是阻断项。"""
-    bad = tmp_path / "nope"
-    bad.write_text("i am a file, not a dir")  # makedirs 会失败
-    db = _install(
-        monkeypatch, tmp_path, _make_handler(), runtime_over={"dags_dir": str(bad)}
+def test_dag_dir_not_visible_blocks(monkeypatch, tmp_path):
+    """SSH 管道不通：产物根本到不了 Airflow 主机，是阻断项（不再是本地 sentinel 的 WARN）。"""
+    db = _install(monkeypatch, tmp_path, _make_handler())
+    monkeypatch.setattr(
+        pf, "probe_ssh_pipeline", lambda af: (False, "SSH 投递失败：Permission denied")
     )
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
     dag = _by_key(report)["dag_dir_visible"]
     assert dag.status == pf.FAIL and dag.blocking is True
+    assert "Permission denied" in (dag.detail or "")
+    assert report.ok is False
+
+
+def test_missing_ssh_host_blocks(monkeypatch, tmp_path):
+    """未配 SSH 主机：dag_dir_visible 直接阻断，提示去设置页填。"""
+    db = _install(
+        monkeypatch, tmp_path, _make_handler(),
+        runtime_over={"ssh_host": "", "available": True},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    dag = _by_key(report)["dag_dir_visible"]
+    assert dag.status == pf.FAIL and dag.blocking is True
+    assert "设置页" in (dag.next_step or "")
+
+
+def test_real_ssh_probe_uses_delivery(monkeypatch):
+    """probe_ssh_pipeline 本体：真调投递器，把 mkdir+test -w 发到远端。
+
+    它不依赖 preflight 的桩——构造一个记录型投递器塞进 get_delivery，验证命令
+    形态与成功/失败两种返回。这正是旧 git 检查缺的覆盖：那时 subprocess 直接
+    内联，这个函数根本没法测。
+    """
+    from types import SimpleNamespace
+
+    import app.services.dag_delivery as dd
+
+    sent = {}
+
+    class Recording(dd.SshDelivery):
+        def _exec(self, cmd):
+            sent["cmd"] = cmd
+            if "boom" in (cmd[-1] if cmd else ""):
+                raise dd.DagDeliveryError("SSH 投递失败：boom")
+            return None
+
+    monkeypatch.setattr(dd, "get_delivery", lambda *a, **k: Recording(host=a[0], **k))
+    af = SimpleNamespace(
+        ssh_host="h", ssh_user="u", ssh_port=22,
+        ssh_key_path="/k", ssh_password=None, dags_dir="/opt/airflow/dags",
+    )
+    ok, detail = pf.probe_ssh_pipeline(af)
+    assert ok and "可写" in detail
+    assert "mkdir -p" in sent["cmd"][-1] and "test -w" in sent["cmd"][-1]
+    assert "/opt/airflow/dags" in sent["cmd"][-1]
+
+    ok, detail = pf.probe_ssh_pipeline(
+        SimpleNamespace(ssh_host="h", ssh_user="u", ssh_port=22,
+                        ssh_key_path="/k", ssh_password=None, dags_dir="boom")
+    )
+    assert not ok and "boom" in detail
 
 
 def test_airflow_unavailable_short_circuits(monkeypatch, tmp_path):
@@ -387,69 +429,3 @@ def test_preflight_endpoint_unknown_ontology_404(client, admin_headers):
 
 
 # ---------- 用历史投递判「两侧目录不是同一个」 ----------
-
-
-def _deliver(tmp_path, dag_id: str, *, age_seconds: float) -> None:
-    """伪造一个 ontoMeta 已投出的 DAG 文件，并把 mtime 拨老。"""
-    path = tmp_path / f"{dag_id}.py"
-    path.write_text("# fake delivered dag\n", encoding="utf-8")
-    stamp = time.time() - age_seconds
-    os.utime(path, (stamp, stamp))
-
-
-def test_old_delivered_dags_unseen_by_airflow_is_blocking(monkeypatch, tmp_path):
-    """投了很久的 DAG 一个都没被认领 → 断定路径不一致并阻断。
-
-    sentinel 只等 20s，分不清「路径错」和「扫得慢」（dag_dir_list_interval 默认 300s），
-    于是永远只能给提醒；而 15 分钟前就落盘的文件仍不在册，与扫描快慢无关，是确凿证据。
-    """
-    _deliver(tmp_path, "ontometa_materialize_abc123", age_seconds=3600)
-    db = _install(monkeypatch, tmp_path, _make_handler(dag_list=()))
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-
-    item = _by_key(report)["dag_dir_visible"]
-    assert item.status == pf.FAIL
-    assert item.blocking is True
-    assert "不是同一个目录" in item.detail
-    assert report.ok is False, "确证路径不一致却仍允许提交"
-
-
-def test_delivered_dag_seen_by_airflow_passes_without_sentinel(monkeypatch, tmp_path):
-    """历史投递已被认领 → 直接判通过，不必再写 sentinel 赌时序。"""
-    _deliver(tmp_path, "ontometa_materialize_abc123", age_seconds=3600)
-    db = _install(
-        monkeypatch, tmp_path,
-        _make_handler(dag_list=("ontometa_materialize_abc123",)),
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-
-    item = _by_key(report)["dag_dir_visible"]
-    assert item.status == pf.PASS
-    assert "两侧目录一致" in item.detail
-    # 走了快路径就不该再落 sentinel 文件
-    assert not [f for f in os.listdir(tmp_path) if f.startswith("ontometa_preflight_")]
-
-
-def test_recent_delivery_falls_back_to_sentinel(monkeypatch, tmp_path):
-    """刚投的 DAG 还没被认领**不算**证据——那可能只是没扫到，不能误报阻断。"""
-    _deliver(tmp_path, "ontometa_materialize_abc123", age_seconds=5)
-    db = _install(
-        monkeypatch, tmp_path,
-        _make_handler(dag_list=(), sentinel_found=False),
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-
-    item = _by_key(report)["dag_dir_visible"]
-    assert item.status == pf.WARN, "投递太新时应退回 sentinel 的提醒级结论"
-    assert item.blocking is False
-
-
-def test_sentinel_files_are_not_counted_as_delivered(monkeypatch, tmp_path):
-    """遗留的 sentinel 不能被当成「我们投的 DAG」——否则它自己会把自己判成路径不一致。"""
-    _deliver(tmp_path, "ontometa_preflight_deadbeef", age_seconds=3600)
-    db = _install(
-        monkeypatch, tmp_path,
-        _make_handler(dag_list=(), sentinel_found=True),
-    )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
-    assert _by_key(report)["dag_dir_visible"].status == pf.PASS
