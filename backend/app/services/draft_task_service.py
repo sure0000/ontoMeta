@@ -33,6 +33,7 @@ from app.config import settings
 from app.services.common import log_change
 from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generation_queue import ACTIVE_STATUSES
+from app.services import ontology_workspace
 
 logger = logging.getLogger("ontometa.workspace")
 
@@ -110,6 +111,19 @@ class DraftTaskService:
             runtime = self.settings_service.get_datahub_runtime(db)
         return DataHubConnector(runtime)
 
+    def _ensure_llm_ready(self, db: Session) -> None:
+        """起草前先确认 LLM 可用——业务命名全靠它，没配就当场提示，别让用户等一轮
+        任务失败才知道。
+
+        只查「配没配」（Key + 模型），不做拨测：拨测在设置页有专门入口，起草入口
+        再拨一次会把每次点击都拖成秒级等待。
+        """
+        from app.services.draft_generator import LlmNotConfiguredError
+
+        runtime = self.settings_service.get_llm_runtime(db)
+        if not (runtime.api_key or "").strip() or not (runtime.model or "").strip():
+            raise LlmNotConfiguredError("业务命名")
+
     def _draft_generator(self, db: Session):
         from app.services.draft_generator import OntologyDraftGenerator
 
@@ -175,6 +189,18 @@ class DraftTaskService:
         基础上补 ``str``（为空则仅类名），保证任何失败都能看到原因。完整堆栈另在
         ``.logs/draft-worker-<task_id>.log``。
         """
+        from app.services.draft_generator import (
+            LlmNotConfiguredError,
+            LlmResponseFormatError,
+            ObjectNamingIncompleteError,
+        )
+
+        # 命名类失败自带完整中文说明，原样透出，别再套一层类名。
+        if isinstance(
+            exc,
+            (LlmNotConfiguredError, ObjectNamingIncompleteError, LlmResponseFormatError),
+        ):
+            return str(exc)
         try:
             import httpx
 
@@ -250,30 +276,38 @@ class DraftTaskService:
             raise DraftGenerationAlreadyRunning(active.id)
 
     @staticmethod
-    def _get_draft_ontology(db: Session, domain_id: str) -> Ontology | None:
-        return (
-            db.query(Ontology)
-            .filter(
-                Ontology.domain_context_id == domain_id,
-                Ontology.status == OntologyStatus.DRAFT.value,
-            )
-            .order_by(Ontology.created_at.desc())
-            .first()
-        )
+    def _reset_evidence_for_fresh_run(domain_id: str) -> None:
+        """全新生成：清空该域的分块检查点与证据缓存，确保重新抓取最新上游元数据。
+
+        三个范围（full/objects/relations）语义一致——此前只有 full 清、另外两个静默
+        复用 TTL 内的磁盘缓存，同一个「生成」心智下藏着两种新鲜度，界面上还看不出来，
+        用户无法回答「我这次拿的到底是不是最新元数据」。
+
+        只有重试/自动续跑不清：那两条路正是要复用检查点与证据接着跑，跳过分钟级抓取。
+        """
+        from app.services import draft_evidence_cache
+
+        DraftCheckpointStore(domain_id).clear()
+        draft_evidence_cache.clear(domain_id)
+
+    @staticmethod
+    def _working_ontology(db: Session, domain_id: str) -> Ontology | None:
+        """该域的工作本体——**不看 status**（一域一本体，见 ontology_workspace）。
+
+        旧实现只认 ``status == draft``，发布后必然落空并新建空白行，人工修订基线随之
+        失忆。这里按域取行，发布后再生成会继续合并进同一行。
+        """
+        return ontology_workspace.get_working_ontology(db, domain_id)
 
     def start_draft_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
         domain = db.get(DomainContext, domain_id)
         if not domain:
             raise ValueError("Domain not found")
 
+        self._ensure_llm_ready(db)
         self._ensure_no_conflicting_task(db, domain_id, "full")
 
-        # 全新生成：清空该域历史分块检查点与证据缓存，确保重新抓取最新元数据
-        # （重试/自动续跑才复用二者续跑，跳过分钟级抓取）。
-        DraftCheckpointStore(domain_id).clear()
-        from app.services import draft_evidence_cache
-
-        draft_evidence_cache.clear(domain_id)
+        self._reset_evidence_for_fresh_run(domain_id)
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
@@ -282,12 +316,6 @@ class DraftTaskService:
             progress=0,
             message="已入队，等待执行名额…",
         )
-        dup = self.report_duplicate_drafts(db, domain_id)
-        if dup.draft_count > 1:
-            task.message = (
-                f"已入队；检测到 {dup.draft_count} 个草稿本体，"
-                "执行时将自动去重"
-            )
         db.add(task)
         db.commit()
         db.refresh(task)
@@ -308,7 +336,9 @@ class DraftTaskService:
         if not domain:
             raise ValueError("Domain not found")
 
+        self._ensure_llm_ready(db)
         self._ensure_no_conflicting_task(db, domain_id, "objects")
+        self._reset_evidence_for_fresh_run(domain_id)
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
@@ -337,7 +367,7 @@ class DraftTaskService:
         if not domain:
             raise ValueError("Domain not found")
 
-        ontology = self._get_draft_ontology(db, domain_id)
+        ontology = self._working_ontology(db, domain_id)
         has_objects = (
             ontology is not None
             and db.query(ObjectType)
@@ -348,7 +378,9 @@ class DraftTaskService:
         if not has_objects:
             raise ValueError("尚无业务对象，请先生成业务对象后再生成业务关系")
 
+        self._ensure_llm_ready(db)
         self._ensure_no_conflicting_task(db, domain_id, "relations")
+        self._reset_evidence_for_fresh_run(domain_id)
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
@@ -420,18 +452,10 @@ class DraftTaskService:
             raise ValueError("仅失败任务可以重试")
 
         scope = failed.scope or "full"
+        self._ensure_llm_ready(db)
         self._ensure_no_conflicting_task(db, domain_id, scope)
 
-        if scope == "full":
-            dup = self.report_duplicate_drafts(db, domain_id)
-            message = "已入队重试，等待执行名额…"
-            if dup.draft_count > 1:
-                message = (
-                    f"已入队重试；检测到 {dup.draft_count} 个草稿本体，"
-                    "执行时将自动去重保留最新生成结果"
-                )
-        else:
-            message = "已入队重试，等待执行名额…"
+        message = "已入队重试，等待执行名额…"
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
@@ -456,34 +480,6 @@ class DraftTaskService:
             progress=task.progress,
             message=task.message,
             scope=task.scope,
-        )
-
-    def report_duplicate_drafts(self, db: Session, domain_id: str):
-        from app.schemas.domain import DraftDuplicateReport
-
-        drafts = (
-            db.query(Ontology)
-            .filter(
-                Ontology.domain_context_id == domain_id,
-                Ontology.status == OntologyStatus.DRAFT.value,
-            )
-            .order_by(Ontology.created_at.desc())
-            .all()
-        )
-        ids = [o.id for o in drafts]
-        count = len(ids)
-        if count <= 1:
-            msg = "当前无重复草稿" if count == 0 else "当前仅有 1 个草稿本体"
-        else:
-            msg = (
-                f"检测到 {count} 个草稿本体；重新生成时将自动清理旧草稿并保留本次结果"
-            )
-        return DraftDuplicateReport(
-            domain_id=domain_id,
-            draft_count=count,
-            draft_ontology_ids=ids,
-            will_purge_on_regenerate=True,
-            message=msg,
         )
 
     @staticmethod
@@ -699,33 +695,12 @@ class DraftTaskService:
             db = SessionLocal()
             try:
                 self._ensure_not_cancelled(task_id)
-                # 同域只保留一个 active draft；历史遗留多个时以最新一个为合并
-                # 目标，其余重复草稿才清理（不再回到旧的“删库重建”）。
-                ontology = self._get_draft_ontology(db, domain_id)
-                dup = self.report_duplicate_drafts(db, domain_id)
-                if dup.draft_count > 1 and ontology is not None:
-                    stale_ids = [
-                        oid for oid in dup.draft_ontology_ids if oid != ontology.id
-                    ]
-                    if stale_ids:
-                        self._delete_ontologies_cascade(db, stale_ids)
-                        _log_change(
-                            db,
-                            "ontology",
-                            ontology.id,
-                            "purge_draft",
-                            summary=(
-                                f"合并前清理 {len(stale_ids)} 个遗留重复草稿本体"
-                            ),
-                        )
-                if ontology is None:
-                    ontology = Ontology(
-                        domain_context_id=domain_id,
-                        status=OntologyStatus.DRAFT.value,
-                        generated_by="llm",
-                    )
-                    db.add(ontology)
-                    db.flush()
+                # 一域一本体：合并目标不看 status，发布过的行也继续合并进去
+                # （已发布实体的结构性字段已在 publish 时钉住，机器改不动只提冲突）。
+                ontology = ontology_workspace.get_or_create_working_ontology(
+                    db, domain_id
+                )
+                self._purge_stale_draft_rows(db, ontology)
 
                 report = self.merge.merge_full(db, ontology.id, draft, task_id)
                 ontology.generated_at = datetime.now(timezone.utc)
@@ -830,15 +805,9 @@ class DraftTaskService:
             db = SessionLocal()
             try:
                 self._ensure_not_cancelled(task_id)
-                ontology = self._get_draft_ontology(db, domain_id)
-                if ontology is None:
-                    ontology = Ontology(
-                        domain_context_id=domain_id,
-                        status=OntologyStatus.DRAFT.value,
-                        generated_by="llm",
-                    )
-                    db.add(ontology)
-                    db.flush()
+                ontology = ontology_workspace.get_or_create_working_ontology(
+                    db, domain_id
+                )
 
                 from app.services.ontology_merge import MergeReport
 
@@ -899,7 +868,7 @@ class DraftTaskService:
                 return
             datahub_domain_id = domain.datahub_domain_id
 
-            ontology = self._get_draft_ontology(db, domain_id)
+            ontology = self._working_ontology(db, domain_id)
             if ontology is None:
                 task.status = "failed"
                 task.message = "尚无草稿本体，请先生成业务对象"
@@ -1015,6 +984,59 @@ class DraftTaskService:
             logger.exception("Relation generation failed for task %s: %s", task_id, exc)
             self._mark_task_failed(task_id, self._describe_exc(exc))
             self._maybe_auto_resume(domain_id, task_id, exc)
+
+    @staticmethod
+    def _has_manual_work(db: Session, ontology_id: str) -> bool:
+        """该本体行里是否有人工痕迹（人工新建 / 钉住过字段 / 被人工修正）。"""
+        for model in (ObjectType, RelationType):
+            hit = (
+                db.query(model.id)
+                .filter(
+                    model.ontology_id == ontology_id,
+                    or_(
+                        model.user_created.is_(True),
+                        model.overridden_fields.isnot(None),
+                        model.origin.in_(("manual", "machine_edited")),
+                    ),
+                )
+                .first()
+            )
+            if hit is not None:
+                return True
+        return False
+
+    def _purge_stale_draft_rows(self, db: Session, working: Ontology) -> int:
+        """合并前收敛到一域一本体：清掉域内多余的**草稿**行。
+
+        两条红线：已发布行绝不删（它可能仍在对外服务）；带人工痕迹的草稿行也不删——
+        那是用户在分叉里做过的事，宁可留着让 P1 的唯一约束逼人显式处理，也不静默销毁。
+        """
+        stale = [
+            o
+            for o in ontology_workspace.list_stale_ontologies(
+                db, working.domain_context_id
+            )
+            if o.status != OntologyStatus.PUBLISHED.value
+        ]
+        keep = [o for o in stale if self._has_manual_work(db, o.id)]
+        drop = [o for o in stale if o not in keep]
+        for o in keep:
+            logger.warning(
+                "保留带人工痕迹的遗留草稿本体 %s（域 %s），未自动清理",
+                o.id,
+                working.domain_context_id,
+            )
+        if not drop:
+            return 0
+        self._delete_ontologies_cascade(db, [o.id for o in drop])
+        _log_change(
+            db,
+            "ontology",
+            working.id,
+            "purge_draft",
+            summary=f"合并前清理 {len(drop)} 个遗留草稿本体行",
+        )
+        return len(drop)
 
     def _purge_draft_ontologies(self, db: Session, domain_id: str) -> int:
         """删除同域所有 draft 状态本体及其关联数据，返回删除的本体数。

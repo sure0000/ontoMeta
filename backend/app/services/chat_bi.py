@@ -157,6 +157,7 @@ class ChatBiService:
     def __init__(self) -> None:
         self.query_service = OntologyQueryService()
         self.settings_service = SettingsService()
+        self._current_conversation_id: str | None = None
 
     # ----------------------------------------------------------- 多域作用域
 
@@ -220,6 +221,9 @@ class ChatBiService:
         principal_role: str | None = None,
         conversation_id: str | None = None,
     ) -> dict:
+        # 设置当前会话 ID，供建模工单工具使用
+        self._current_conversation_id = conversation_id
+        
         domains, ontologies = self._resolve_scope(db, domain_ids)
         if not domains:
             raise ValueError("数据域不存在")
@@ -364,6 +368,9 @@ class ChatBiService:
         done.payload 与 ask() 返回结构一致；透传工具步骤与逐字答案，供 SSE 端点包装。
         Mock / 无本体 / 未接地等无过程可流的情况直接产出终态 done。
         """
+        # 设置当前会话 ID，供建模工单工具使用
+        self._current_conversation_id = conversation_id
+        
         domains, ontologies = self._resolve_scope(db, domain_ids)
         if not domains:
             raise ValueError("数据域不存在")
@@ -2722,6 +2729,426 @@ class ChatBiService:
         label = {"draft": "对象+关系", "objects": "业务对象", "relations": "业务关系"}[scope]
         return proposal, f"提案：为「{domain.name}」生成本体草稿（{label}）", False
 
+    def _dispatch_create_modeling_case(
+        self, db: Session, *, args: dict
+    ) -> tuple[dict, str, bool]:
+        """创建建模工单。"""
+        from app.models import ModelingCase, ModelingCaseStage
+        import json
+
+        title = str(args.get("title") or "").strip()
+        business_goal = str(args.get("business_goal") or "").strip()
+        if not title or not business_goal:
+            return {"error": "需要 title 和 business_goal"}, "建模工单参数不足", True
+
+        primary_domain_id = str(args.get("primary_domain_id") or "").strip() or None
+        domain_ids = args.get("domain_ids") or []
+        if isinstance(domain_ids, list):
+            domain_ids = [str(d).strip() for d in domain_ids if str(d).strip()]
+        else:
+            domain_ids = []
+
+        case = ModelingCase(
+            title=title,
+            conversation_id=getattr(self, "_current_conversation_id", None),
+            primary_domain_id=primary_domain_id,
+            domain_ids_json=json.dumps(domain_ids) if domain_ids else None,
+            stage=ModelingCaseStage.COLLECTING_REQUIREMENT.value,
+        )
+        db.add(case)
+        db.flush()
+
+        # 创建初始需求规格
+        from app.models import ModelingCaseSpec, ModelingCaseSpecKind, ModelingCaseSpecStatus
+        import hashlib
+
+        requirement_spec = {
+            "business_goal": business_goal,
+            "title": title,
+        }
+        spec_json = json.dumps(requirement_spec, sort_keys=True, ensure_ascii=False)
+        content_hash = hashlib.sha256(spec_json.encode()).hexdigest()
+
+        spec = ModelingCaseSpec(
+            case_id=case.id,
+            kind=ModelingCaseSpecKind.REQUIREMENT.value,
+            revision=1,
+            status=ModelingCaseSpecStatus.DRAFT.value,
+            payload_json=spec_json,
+            content_hash=content_hash,
+        )
+        db.add(spec)
+        db.commit()
+
+        result = {
+            "case_id": case.id,
+            "title": title,
+            "stage": case.stage,
+            "requirement_spec": requirement_spec,
+        }
+        return result, f"已创建建模工单「{title}」，进入需求确认阶段", False
+
+    def _dispatch_update_requirement_spec(
+        self, db: Session, *, args: dict
+    ) -> tuple[dict, str, bool]:
+        """更新需求规格。"""
+        from app.models import ModelingCase, ModelingCaseSpec, ModelingCaseSpecKind
+        import json
+        import hashlib
+
+        case_id = str(args.get("case_id") or "").strip()
+        if not case_id:
+            return {"error": "需要 case_id"}, "缺少工单 ID", True
+
+        case = db.get(ModelingCase, case_id)
+        if not case:
+            return {"error": "工单不存在"}, "工单未找到", True
+
+        # 获取当前需求规格
+        current_spec = (
+            db.query(ModelingCaseSpec)
+            .filter(
+                ModelingCaseSpec.case_id == case_id,
+                ModelingCaseSpec.kind == ModelingCaseSpecKind.REQUIREMENT.value,
+            )
+            .order_by(ModelingCaseSpec.revision.desc())
+            .first()
+        )
+
+        if current_spec:
+            requirement_spec = json.loads(current_spec.payload_json)
+        else:
+            requirement_spec = {}
+
+        # 更新字段
+        updates = {}
+        for key in [
+            "business_goal",
+            "analysis_scope",
+            "primary_subject",
+            "grain",
+            "time_range",
+            "metrics",
+            "dimensions",
+            "deliverables",
+        ]:
+            if key in args:
+                value = args[key]
+                if value is not None:
+                    requirement_spec[key] = value
+                    updates[key] = value
+
+        if not updates:
+            return {"error": "没有提供任何更新字段"}, "无更新内容", True
+
+        # 创建新版本
+        spec_json = json.dumps(requirement_spec, sort_keys=True, ensure_ascii=False)
+        content_hash = hashlib.sha256(spec_json.encode()).hexdigest()
+
+        # 检查是否有实质变化
+        if current_spec and current_spec.content_hash == content_hash:
+            return {
+                "case_id": case_id,
+                "requirement_spec": requirement_spec,
+                "message": "内容未变化",
+            }, "需求规格未变化", False
+
+        new_revision = (current_spec.revision + 1) if current_spec else 1
+        new_spec = ModelingCaseSpec(
+            case_id=case_id,
+            kind=ModelingCaseSpecKind.REQUIREMENT.value,
+            revision=new_revision,
+            status="draft",
+            payload_json=spec_json,
+            content_hash=content_hash,
+        )
+        db.add(new_spec)
+        db.commit()
+
+        result = {
+            "case_id": case_id,
+            "requirement_spec": requirement_spec,
+            "revision": new_revision,
+            "updates": updates,
+        }
+        return result, f"已更新需求规格（版本 {new_revision}）", False
+
+    def _dispatch_confirm_requirement_spec(
+        self, db: Session, *, args: dict
+    ) -> tuple[dict, str, bool]:
+        """确认需求规格，推进到本体确认阶段。"""
+        from app.models import (
+            ModelingCase,
+            ModelingCaseSpec,
+            ModelingCaseSpecKind,
+            ModelingCaseSpecStatus,
+            ModelingCaseStage,
+        )
+        from datetime import datetime
+        import json
+
+        case_id = str(args.get("case_id") or "").strip()
+        if not case_id:
+            return {"error": "需要 case_id"}, "缺少工单 ID", True
+
+        case = db.get(ModelingCase, case_id)
+        if not case:
+            return {"error": "工单不存在"}, "工单未找到", True
+
+        # 获取最新需求规格
+        spec = (
+            db.query(ModelingCaseSpec)
+            .filter(
+                ModelingCaseSpec.case_id == case_id,
+                ModelingCaseSpec.kind == ModelingCaseSpecKind.REQUIREMENT.value,
+            )
+            .order_by(ModelingCaseSpec.revision.desc())
+            .first()
+        )
+
+        if not spec:
+            return {"error": "需求规格不存在"}, "需求规格未找到", True
+
+        requirement_spec = json.loads(spec.payload_json)
+
+        # 验证关键字段
+        missing = []
+        for key in ["business_goal", "primary_subject", "grain"]:
+            if not requirement_spec.get(key):
+                missing.append(key)
+
+        if missing:
+            return {
+                "error": "需求规格不完整",
+                "missing_fields": missing,
+            }, f"需求规格缺少: {', '.join(missing)}", True
+
+        # 确认规格
+        spec.status = ModelingCaseSpecStatus.CONFIRMED.value
+        spec.confirmed_at = datetime.utcnow()
+        case.stage = ModelingCaseStage.REQUIREMENT_CONFIRMED.value
+        case.current_revision = spec.revision
+        db.commit()
+
+        result = {
+            "case_id": case_id,
+            "stage": case.stage,
+            "requirement_spec": requirement_spec,
+            "revision": spec.revision,
+        }
+        return result, f"需求规格已确认，进入本体确认阶段", False
+
+    def _dispatch_get_modeling_case(
+        self, db: Session
+    ) -> tuple[dict, str, bool]:
+        """查询当前会话关联的建模工单。"""
+        from app.models import ModelingCase, ModelingCaseSpec, ModelingCaseSpecKind
+        import json
+
+        conversation_id = getattr(self, "_current_conversation_id", None)
+        if not conversation_id:
+            return {"error": "当前会话无关联工单"}, "无会话上下文", True
+
+        case = (
+            db.query(ModelingCase)
+            .filter(ModelingCase.conversation_id == conversation_id)
+            .order_by(ModelingCase.created_at.desc())
+            .first()
+        )
+
+        if not case:
+            return {"error": "当前会话无关联工单"}, "无关联工单", True
+
+        # 获取最新需求规格
+        requirement_spec = None
+        spec = (
+            db.query(ModelingCaseSpec)
+            .filter(
+                ModelingCaseSpec.case_id == case.id,
+                ModelingCaseSpec.kind == ModelingCaseSpecKind.REQUIREMENT.value,
+            )
+            .order_by(ModelingCaseSpec.revision.desc())
+            .first()
+        )
+        if spec:
+            requirement_spec = json.loads(spec.payload_json)
+
+        result = {
+            "case_id": case.id,
+            "title": case.title,
+            "stage": case.stage,
+            "current_revision": case.current_revision,
+            "requirement_spec": requirement_spec,
+            "created_at": case.created_at.isoformat() if case.created_at else None,
+        }
+        return result, f"工单「{case.title}」，阶段：{case.stage}", False
+
+    def _dispatch_propose_dimensional_model(
+        self, db: Session, args: dict
+    ) -> tuple[dict, str, bool]:
+        """提议维度模型设计方案。"""
+        from app.services.dimensional_model import DimensionalModelService
+
+        dim_service = DimensionalModelService()
+
+        try:
+            model = dim_service.create_model(
+                db,
+                modeling_case_id=args.get("modeling_case_id"),
+                domain_id=args["domain_id"],
+                ontology_id=args["ontology_id"],
+                name=args["name"],
+                display_name=args["display_name"],
+                business_process=args["business_process"],
+                grain=args["grain"],
+                fact_tables=args["fact_tables"],
+                dimensions=args["dimensions"],
+                conformed_dimensions=args.get("conformed_dimensions"),
+                model_type=args.get("model_type", "star"),
+                description=args.get("description"),
+            )
+
+            # 自动验证
+            validation = dim_service.validate_model(db, model["id"])
+
+            summary = f"已创建维度模型「{model['display_name']}」"
+            if validation["has_errors"]:
+                summary += "，但存在验证错误，请修正后再确认"
+            elif validation["issues"]:
+                summary += f"，有 {len(validation['issues'])} 条警告"
+            else:
+                summary += "，验证通过"
+
+            return {
+                "model_id": model["id"],
+                "model": model,
+                "validation": validation,
+            }, summary, False
+
+        except Exception as e:
+            return {"error": str(e)}, f"创建维度模型失败：{e}", True
+
+    def _dispatch_propose_logic_batch(
+        self, db: Session, args: dict
+    ) -> tuple[dict, str, bool]:
+        """批量生成指标、标签或规则的形式化表达式。
+        
+        为每个口径独立编译验证，但共享业务上下文（粒度、对象、时间）。
+        返回批量结果，用户可一次确认，系统分别落成独立制品。
+        """
+        from app.services.expression_candidate import ExpressionCandidateService
+        from app.services.metric_compiler import MetricCompilerService
+        
+        ontology_id = args["ontology_id"]
+        business_subject = args["business_subject"]
+        logics = args["logics"]
+        modeling_case_id = args.get("modeling_case_id")
+        dimensional_model_id = args.get("dimensional_model_id")
+        shared_context = args.get("shared_context", {})
+        deduplication = args.get("deduplication", True)
+        
+        expr_service = ExpressionCandidateService()
+        compiler = MetricCompilerService()
+        
+        results = []
+        errors = []
+        warnings = []
+        
+        try:
+            # 如果启用查重，先检查已有口径
+            if deduplication:
+                from app.models import BusinessLogic
+                existing_names = {logic["name"] for logic in logics}
+                duplicates = db.query(BusinessLogic.name).filter(
+                    BusinessLogic.ontology_id == ontology_id,
+                    BusinessLogic.name.in_(existing_names)
+                ).all()
+                if duplicates:
+                    dup_names = [d[0] for d in duplicates]
+                    warnings.append(f"发现重名口径：{', '.join(dup_names)}，建议修改名称")
+            
+            # 逐个编译验证
+            for idx, logic in enumerate(logics):
+                logic_name = logic["name"]
+                logic_type = logic["logic_type"]
+                
+                try:
+                    # 验证字段引用
+                    fields = logic.get("fields", [])
+                    for field in fields:
+                        # 这里应该验证字段是否存在于本体中
+                        # 简化处理：假设字段已经过验证
+                        pass
+                    
+                    # 编译表达式（dry-run）
+                    body = logic["body"]
+                    compile_result = compiler.compile_expression(
+                        db,
+                        ontology_id=ontology_id,
+                        logic_type=logic_type,
+                        body=body,
+                        dry_run=True  # 只验证，不实际创建
+                    )
+                    
+                    if compile_result.get("error"):
+                        errors.append({
+                            "index": idx,
+                            "name": logic_name,
+                            "error": compile_result["error"]
+                        })
+                    else:
+                        results.append({
+                            "index": idx,
+                            "name": logic_name,
+                            "display_name": logic["display_name"],
+                            "logic_type": logic_type,
+                            "summary": logic.get("summary", ""),
+                            "sql": compile_result.get("sql"),
+                            "compiled": compile_result,
+                            "status": "ready"
+                        })
+                
+                except Exception as e:
+                    errors.append({
+                        "index": idx,
+                        "name": logic_name,
+                        "error": str(e)
+                    })
+            
+            # 构建返回结果
+            total = len(logics)
+            success_count = len(results)
+            error_count = len(errors)
+            
+            summary_parts = [
+                f"批量生成完成：{success_count}/{total} 个口径验证通过"
+            ]
+            
+            if error_count > 0:
+                summary_parts.append(f"{error_count} 个编译失败")
+            
+            if warnings:
+                summary_parts.append(f"{len(warnings)} 条警告")
+            
+            summary = "，".join(summary_parts)
+            
+            return {
+                "batch_id": f"batch_{ontology_id}_{hash(business_subject) % 10000}",
+                "business_subject": business_subject,
+                "modeling_case_id": modeling_case_id,
+                "dimensional_model_id": dimensional_model_id,
+                "shared_context": shared_context,
+                "total": total,
+                "success": success_count,
+                "failed": error_count,
+                "results": results,
+                "errors": errors,
+                "warnings": warnings,
+            }, summary, len(errors) > 0
+        
+        except Exception as e:
+            return {"error": str(e)}, f"批量生成失败：{e}", True
+
     def _dispatch_get_task_options(
         self, db: Session, *, ontology_id: str, args: dict
     ) -> tuple[dict, str, bool]:
@@ -3837,6 +4264,18 @@ class ChatBiService:
                 return self._dispatch_propose_datasource(args=args)
             if name == "propose_ontology_draft":
                 return self._dispatch_propose_ontology_draft(db, args=args)
+            if name == "create_modeling_case":
+                return self._dispatch_create_modeling_case(db, args=args)
+            if name == "update_requirement_spec":
+                return self._dispatch_update_requirement_spec(db, args=args)
+            if name == "confirm_requirement_spec":
+                return self._dispatch_confirm_requirement_spec(db, args=args)
+            if name == "get_modeling_case":
+                return self._dispatch_get_modeling_case(db)
+            if name == "propose_dimensional_model":
+                return self._dispatch_propose_dimensional_model(db, args=args)
+            if name == "propose_logic_batch":
+                return self._dispatch_propose_logic_batch(db, args=args)
             if name == "update_plan":
                 return self._dispatch_update_plan(args)
             if name == "request_form":

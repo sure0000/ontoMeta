@@ -62,14 +62,61 @@ class DraftEnrichmentError(RuntimeError):
     """
 
     def __init__(
-        self, phase: str, failed: int, total: int, cause: BaseException | None = None
+        self,
+        phase: str,
+        failed: int,
+        total: int,
+        cause: BaseException | None = None,
     ) -> None:
         self.phase = phase
         self.failed = failed
         self.total = total
-        super().__init__(f"{phase}命名增强 {failed}/{total} 块在重试后仍失败")
+        detail = f"{phase}命名增强 {failed}/{total} 块在重试后仍失败"
+        if cause is not None:
+            reason = str(cause).strip() or type(cause).__name__
+            detail = f"{detail}；首个失败原因：{reason}"
+        super().__init__(detail)
         if cause is not None:
             self.__cause__ = cause
+
+
+class LlmNotConfiguredError(RuntimeError):
+    """没有可用的 LLM，业务命名无从谈起——直接失败并提示，不做技术名降级。"""
+
+    def __init__(self, phase: str = "业务命名") -> None:
+        super().__init__(
+            f"未配置可用的 LLM 服务，无法生成{phase}。"
+            "请到【设置 → 依赖组件 → LLM】配置并测试连接后重试。"
+        )
+
+
+class LlmResponseFormatError(RuntimeError):
+    """LLM 返回内容无法解析成命名增强所需的 JSON 对象。
+
+    以前这里回退空字典 → 全部对象静默落回技术表名；现在如实抛错，由分块流水线
+    重试、最终失败并提示，绝不让「看起来生成成功、名字全是表名」的草稿出门。
+    """
+
+
+class ObjectNamingIncompleteError(RuntimeError):
+    """LLM 未给出（或只给出英文技术名）业务对象命名。
+
+    业务对象名必须是中文业务语义名；缺名、空名、非中文名都视为这次调用没完成
+    命名任务，重试后仍不合格即失败上报，不用表名顶替。
+    """
+
+
+# 「模型这次没干好活」类错误：格式不合规、命名不完整。与传输抖动一样值得**换一次
+# 采样重问**（模型输出有随机性），但不同于传输错——它需要重跑整个「调用+解析+校验」
+# 单元，因此由 ``_acall_with_retry(also_retry=...)`` 显式带上。
+_RETRYABLE_NAMING_ERRORS = (LlmResponseFormatError, ObjectNamingIncompleteError)
+
+# 业务对象名必须含中文——命中此正则才算完成了「技术名 → 业务语义名」的提升。
+_CJK_RE = re.compile(r"[一-鿿]")
+
+# LLM 常把 JSON 裹进 ```json ... ``` 代码围栏里（GLM 等模型即便设了
+# response_format=json_object 也会这么干），提取围栏内容后再解析。
+_JSON_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)\s*```", re.DOTALL)
 
 # 进度回调：(已完成步数, 总步数) -> None，用于分块生成时逐块回报进度。
 ProgressCallback = Callable[[int, int], Awaitable[None]]
@@ -109,9 +156,13 @@ class CheckpointStore(Protocol):
 # 确定性生成，保证零丢失；LLM 只负责把技术名「提升」为业务名——对象的
 # name/display_name/description，属性的中文 display_name，以及关系的业务语义
 # display_name。属性的英文标识名/数据类型/语义类型/归属对象、关系的两端对象/
-# 基数/结构类型始终来自证据，LLM 未覆盖或解析失败时属性 display_name 回退现状
-# (display_name or field_name)、关系 display_name 回退规则生成的默认词
-# (infer_relation_term)，因此不会因 LLM 输出不规范而丢字段。
+# 基数/结构类型始终来自证据，因此不会因 LLM 输出不规范而丢字段。
+#
+# **业务对象名没有降级方案**：display_name 必须是 LLM 给出的中文业务名，缺名/空名/
+# 非中文一律重试，重试后仍不合格就让任务失败并提示（见 ``_assert_object_naming_complete``）
+# ——宁可显式失败，也不产出「名字就是表名」的假草稿。属性 display_name 未覆盖时仍回退
+# 证据里的字段展示名、关系 display_name 回退规则词(compact_relation_term)，二者本就
+# 来自源端而非技术兜底。
 _LLM_SYSTEM_PROMPT = (
     "你是企业本体建模专家。你的任务包含三部分：\n"
     "1) 把 DataHub 技术元数据中的每个对象(表)提升为业务语义命名，而不是简单搬运表名；\n"
@@ -264,8 +315,9 @@ class OntologyDraftGenerator:
             api_key = runtime_config.api_key
             base_url = runtime_config.api_base_url
             self.model = runtime_config.model
-        # 未配置 LLM(无 api_key) → client=None：结构仍由证据确定性组装，只是跳过
-        # 「业务命名增强」这一步(用证据 candidate_name),不臆造数据,也不报错。
+        # 未配置 LLM(无 api_key) → client=None：生成入口一律抛
+        # :class:`LlmNotConfiguredError` 提示去设置页配置，**不**退化成用技术表名
+        # 当业务名的「确定性命名」草稿。
         self.client = (
             AsyncOpenAI(
                 api_key=api_key,
@@ -296,9 +348,9 @@ class OntologyDraftGenerator:
         progress_cb: ProgressCallback | None = None,
         checkpoint: CheckpointStore | None = None,
     ) -> OntologyDraftOutput:
-        # 无 LLM：纯确定性命名(证据 candidate_name)，结构零丢失。
+        # 无 LLM 就没有业务命名可言：直接失败并提示，不出技术名草稿。
         if self.client is None:
-            return self._build_draft_from_evidence(evidence, {}, {}, {}, {})
+            raise LlmNotConfiguredError("本体草稿")
         # 分批闸门：表数与字符预算都在限额内才一次拿到命名增强，否则分块。
         fits_table_batch = len(evidence.object_types) <= settings.draft_chunk_table_batch_size
         fits_char_budget = len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
@@ -329,10 +381,11 @@ class OntologyDraftGenerator:
         """从证据确定性组装完整草稿；overrides/property_overrides/relation_overrides
         提供对象、属性与关系的业务命名增强。
 
-        每个对象、每个属性、每条关系都来自证据，overrides 缺失或未匹配时回退到
-        确定性命名(refine)；property_overrides 缺失或未匹配时属性 display_name
-        回退现状(display_name or field_name)；relation_overrides 缺失、未匹配或未
-        通过 validate_relation_term 校验时回退规则生成的默认词(compact_relation_term)。
+        每个对象、每个属性、每条关系都来自证据。对象命名**必须**由 overrides 提供
+        (中文 display_name + 英文 name)，缺一即 :class:`ObjectNamingIncompleteError`；
+        property_overrides 缺失或未匹配时属性 display_name 回退证据里的字段展示名
+        (display_name or field_name)；relation_overrides 缺失、未匹配或未通过
+        validate_relation_term 校验时回退规则生成的默认词(compact_relation_term)。
         因此结构完整、必填字段齐全，不存在丢失或校验失败。
         """
         overrides = overrides or {}
@@ -379,20 +432,17 @@ class OntologyDraftGenerator:
         上注明由 LLM 判定；未命中时保留启发式结果。
         """
         role_overrides = role_overrides or {}
+        # 最后一道闸：组装前再校验一次命名齐备（正常路径已在每次 LLM 调用后校验过，
+        # 这里兜住 checkpoint 里的历史残缺结果等旁路输入）。不合格直接抛，不顶替。
+        self._assert_object_naming_complete(overrides, evidence)
         name_map: dict[str, str] = {}
         display_map: dict[str, str] = {}
         desc_map: dict[str, str | None] = {}
         for ot in evidence.object_types:
             ov = overrides.get(ot.candidate_name) or {}
-            ov_name = (ov.get("name") or "").strip()
-            ov_display = (ov.get("display_name") or "").strip()
+            name_map[ot.candidate_name] = str(ov.get("name") or "").strip()
+            display_map[ot.candidate_name] = str(ov.get("display_name") or "").strip()
             ov_desc = ov.get("description")
-            name_map[ot.candidate_name] = ov_name or self._refine_identifier_name(
-                ot.candidate_name
-            )
-            display_map[ot.candidate_name] = ov_display or self._refine_semantic_name(
-                ot.display_name, ot.candidate_name
-            )
             desc_map[ot.candidate_name] = (
                 ov_desc if (ov_desc and str(ov_desc).strip()) else ot.description
             )
@@ -506,12 +556,31 @@ class OntologyDraftGenerator:
         self, evidence: EvidenceBundle
     ) -> tuple[ObjectOverrides, PropertyOverrides, RelationOverrides, RoleOverrides]:
         """单次调用：拿到全量对象的命名增强、属性的中文名增强、关系的业务名增强与角色否决。"""
-        raw = await self._call_llm_objects(evidence)
+        raw = await self._objects_payload(evidence)
         return (
             self._parse_object_overrides(raw, evidence),
             self._parse_property_overrides(raw, evidence),
             self._parse_relation_overrides(raw, evidence),
             self._parse_role_overrides(raw, evidence),
+        )
+
+    async def _objects_payload(self, evidence: EvidenceBundle) -> dict:
+        """「调用 + 解析 + 命名校验」作为一个整体重试单元，返回已校验的原始响应。
+
+        校验放进重试单元内部，是因为「返回围栏/半截 JSON」「漏命名几张表」「名字还是
+        英文」都是**这次采样没干好活**，换一次采样往往就好了；只有连着 N 次都不合格
+        才认定这批表命不出来——此时抛错让任务失败并提示，绝不用技术表名顶上。
+        """
+
+        async def _once() -> dict:
+            raw = await self._call_llm_objects(evidence)
+            self._assert_object_naming_complete(
+                self._parse_object_overrides(raw, evidence), evidence
+            )
+            return raw
+
+        return await self._acall_with_retry(
+            _once, label="objects", also_retry=_RETRYABLE_NAMING_ERRORS
         )
 
     async def _llm_overrides_chunked(
@@ -621,13 +690,19 @@ class OntologyDraftGenerator:
             key = self._object_chunk_key(self._build_prompt(sub))
             if checkpoint is not None:
                 cached = checkpoint.load(key)
-                if cached is not None:
+                # 命中的检查点也要过命名校验：历史（降级时代）留下的残缺结果不能
+                # 复用，否则续跑永远补不上真实命名。不合格即当作 miss 重新调用。
+                if cached is not None and self._object_chunk_is_named(cached, sub):
                     logger.info("draft object chunk cache hit key=%s", key[:12])
                     if advance is not None:
                         await advance()
                     return cached
+                if cached is not None:
+                    logger.warning(
+                        "draft object chunk cache 命名不合格，丢弃重算 key=%s", key[:12]
+                    )
             async with semaphore:
-                raw = await self._call_llm_objects(sub)
+                raw = await self._objects_payload(sub)
             result = {
                 "objects": self._parse_object_overrides(raw, sub),
                 "properties": self._parse_property_overrides(raw, sub),
@@ -719,29 +794,28 @@ class OntologyDraftGenerator:
         两者互不等待、各自独立分块与并发，契合「对象/关系分开触发」的诉求。
         """
         if self.client is None:
-            overrides, property_overrides, role_overrides = {}, {}, {}
+            raise LlmNotConfiguredError("业务对象")
+        fits_table_batch = (
+            len(evidence.object_types) <= settings.draft_chunk_table_batch_size
+        )
+        fits_char_budget = (
+            len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
+        )
+        if fits_table_batch and fits_char_budget:
+            raw = await self._objects_payload(evidence)
+            overrides = self._parse_object_overrides(raw, evidence)
+            property_overrides = self._parse_property_overrides(raw, evidence)
+            role_overrides = self._parse_role_overrides(raw, evidence)
         else:
-            fits_table_batch = (
-                len(evidence.object_types) <= settings.draft_chunk_table_batch_size
+            object_sub_bundles = self._split_object_chunks(evidence)
+            advance = self._make_progress_advancer(
+                progress_cb, len(object_sub_bundles)
             )
-            fits_char_budget = (
-                len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
+            overrides, property_overrides, role_overrides = (
+                await self._run_object_chunks(
+                    object_sub_bundles, checkpoint, advance
+                )
             )
-            if fits_table_batch and fits_char_budget:
-                raw = await self._call_llm_objects(evidence)
-                overrides = self._parse_object_overrides(raw, evidence)
-                property_overrides = self._parse_property_overrides(raw, evidence)
-                role_overrides = self._parse_role_overrides(raw, evidence)
-            else:
-                object_sub_bundles = self._split_object_chunks(evidence)
-                advance = self._make_progress_advancer(
-                    progress_cb, len(object_sub_bundles)
-                )
-                overrides, property_overrides, role_overrides = (
-                    await self._run_object_chunks(
-                        object_sub_bundles, checkpoint, advance
-                    )
-                )
         object_types, properties, _name_map = self._build_object_types_from_evidence(
             evidence, overrides, property_overrides, role_overrides
         )
@@ -762,29 +836,28 @@ class OntologyDraftGenerator:
         ObjectType，而不是假设这里产出了新的对象命名。
         """
         if self.client is None:
-            relation_overrides = {}
+            raise LlmNotConfiguredError("业务关系")
+        fits_relation_batch = (
+            len(evidence.relations) <= settings.draft_chunk_relation_batch_size
+        )
+        fits_char_budget = (
+            len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
+        )
+        if fits_relation_batch and fits_char_budget:
+            raw = await self._call_llm_relations(evidence)
+            relation_overrides = self._parse_relation_overrides(raw, evidence)
         else:
-            fits_relation_batch = (
-                len(evidence.relations) <= settings.draft_chunk_relation_batch_size
+            relation_sub_bundles = split_relations(
+                evidence,
+                settings.llm_context_budget_chars,
+                settings.draft_chunk_relation_batch_size,
             )
-            fits_char_budget = (
-                len(self._build_prompt(evidence)) <= settings.llm_context_budget_chars
+            advance = self._make_progress_advancer(
+                progress_cb, len(relation_sub_bundles)
             )
-            if fits_relation_batch and fits_char_budget:
-                raw = await self._call_llm_relations(evidence)
-                relation_overrides = self._parse_relation_overrides(raw, evidence)
-            else:
-                relation_sub_bundles = split_relations(
-                    evidence,
-                    settings.llm_context_budget_chars,
-                    settings.draft_chunk_relation_batch_size,
-                )
-                advance = self._make_progress_advancer(
-                    progress_cb, len(relation_sub_bundles)
-                )
-                relation_overrides = await self._run_relation_chunks(
-                    relation_sub_bundles, checkpoint, advance
-                )
+            relation_overrides = await self._run_relation_chunks(
+                relation_sub_bundles, checkpoint, advance
+            )
         return self._build_relation_types_from_evidence(evidence, relation_overrides)
 
     @staticmethod
@@ -796,24 +869,32 @@ class OntologyDraftGenerator:
         return chunk_key(f"relation:{prompt}")
 
     async def _acall_with_retry(
-        self, make_call: Callable[[], Awaitable[Any]], *, label: str
+        self,
+        make_call: Callable[[], Awaitable[Any]],
+        *,
+        label: str,
+        also_retry: tuple[type[BaseException], ...] = (),
     ) -> Any:
         """在 SDK 自带 ``max_retries`` 之外再包一层退避重试。
 
         端点在大扇出下可能把整条连接池打到反复重置，SDK 的固定次数不够；这里对
         连接/传输/5xx 类错误做指数退避+jitter，仅当仍失败才把异常抛给分块流水线
         （由其决定失败子块、配合 checkpoint 续跑）。
+
+        ``also_retry`` 额外纳入「模型这次没干好活」类错误（格式不合规、命名不完整），
+        换一次采样重问；重试耗尽即如实抛出，由上层失败提示，不做降级。
         """
         attempts = max(1, settings.draft_chunk_retry_attempts)
+        retryable = _RETRYABLE_LLM_ERRORS + tuple(also_retry)
         for attempt in range(1, attempts + 1):
             try:
                 return await make_call()
-            except _RETRYABLE_LLM_ERRORS as exc:
+            except retryable as exc:
                 if attempt >= attempts:
                     raise
                 backoff = min(8.0, 0.5 * 2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 logger.warning(
-                    "draft llm %s transient error (attempt %d/%d): %s — retrying in %.1fs",
+                    "draft llm %s retryable error (attempt %d/%d): %s — retrying in %.1fs",
                     label,
                     attempt,
                     attempts,
@@ -835,9 +916,10 @@ class OntologyDraftGenerator:
                 response_format={"type": "json_object"},
             )
 
-        response = await self._acall_with_retry(_create, label="objects")
-        content = response.choices[0].message.content or "{}"
-        return self._coerce_llm_response(content, primary_list_key="object_types")
+        # 传输类重试由外层 ``_objects_payload`` 的重试单元统一负责（它把解析与命名
+        # 校验也一起包进去了），这里只管发一次请求并归一化响应。
+        response = await _create()
+        return self._coerce_choice(response.choices[0], primary_list_key="object_types")
 
     async def _call_llm_relations(self, evidence: EvidenceBundle) -> dict:
         prompt = self._build_prompt(evidence)
@@ -852,35 +934,85 @@ class OntologyDraftGenerator:
                 response_format={"type": "json_object"},
             )
 
-        response = await self._acall_with_retry(_create, label="relations")
-        content = response.choices[0].message.content or "{}"
-        return self._coerce_llm_response(content, primary_list_key="relations")
+        async def _once() -> dict:
+            response = await _create()
+            return self._coerce_choice(response.choices[0], primary_list_key="relations")
+
+        return await self._acall_with_retry(
+            _once, label="relations", also_retry=(LlmResponseFormatError,)
+        )
+
+    @classmethod
+    def _coerce_choice(cls, choice: Any, *, primary_list_key: str) -> dict:
+        """解析一个 choice，并在格式不合规时把 ``finish_reason`` 带进错误信息。
+
+        ``finish_reason=length`` 意味着响应被截断（分块太大 / 模型 max_tokens 太小），
+        与「模型加了代码围栏」是完全不同的处置方向——不带上这个线索，失败提示会
+        让人无从下手。
+        """
+        content = getattr(choice.message, "content", None) or ""
+        try:
+            return cls._coerce_llm_response(content, primary_list_key=primary_list_key)
+        except LlmResponseFormatError as exc:
+            finish_reason = getattr(choice, "finish_reason", None)
+            if not finish_reason:
+                raise
+            raise LlmResponseFormatError(
+                f"{exc}（finish_reason={finish_reason}"
+                f"{'：响应被截断，建议调小分块表数或加大模型 max_tokens' if finish_reason == 'length' else ''}）"
+            ) from exc
 
     @staticmethod
-    def _coerce_llm_response(content: str, *, primary_list_key: str) -> dict:
-        """把 LLM 返回文本解析为 parse_* 期望的顶层字典，容忍不规范输出。
+    def _unwrap_json_text(content: str) -> str:
+        """剥掉 LLM 常见的包装，返回第一段能解析成 JSON 的文本（都不行则返回空串）。
 
-        并非所有 provider/代理都遵守 ``response_format=json_object``：走自定义
-        ``base_url`` 的模型可能返回**顶层 JSON 数组**（裸的对象/关系列表），
-        或干脆返回非法 JSON。此前直接 ``json.loads`` 后交给 ``_parse_*``，一旦
-        拿到 list，首个 ``raw.get(...)`` 就抛 ``'list' object has no attribute
-        'get'``，整份草稿生成失败。
+        并非所有 provider/模型都遵守 ``response_format=json_object``：自建 GLM 端点
+        会把 JSON 裹进 ```json ... ``` 代码围栏，也有模型在 JSON 前后加一两句解说。
+        依次试：原文 → 围栏内容 → 最外层 ``{...}`` → 最外层 ``[...]``，逐个真解析，
+        谁先成功用谁（只截取不解析会把顶层数组的外层方括号剥掉，反而弄坏它）。
+        """
+        text = (content or "").strip()
+        if not text:
+            return ""
+        candidates = [text]
+        fenced = _JSON_FENCE_RE.search(text)
+        if fenced:
+            candidates.append(fenced.group(1).strip())
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start, end = text.find(opener), text.rfind(closer)
+            if start != -1 and end > start:
+                candidates.append(text[start : end + 1])
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            return candidate
+        return ""
 
-        这里在入口做归一化：
+    @classmethod
+    def _coerce_llm_response(cls, content: str, *, primary_list_key: str) -> dict:
+        """把 LLM 返回文本解析为 parse_* 期望的顶层字典。
+
+        归一化(都属于「读懂模型这次怎么写的」，不是降级)：
+        - 外层包装：代码围栏 / JSON 前后的解说文字，先剥掉（见 ``_unwrap_json_text``）。
         - 顶层是 dict：原样返回。
         - 顶层是 ``[dict]`` 单元素包裹：拆包（常见的「用数组裹一层」写法）。
         - 顶层是其它数组：按调用方语境归到 ``primary_list_key``（对象命名调用
-          归为 object_types，关系命名调用归为 relations），尽力保留命名增强。
-        - 非法 JSON / 其它类型：回退空字典。
+          归为 object_types，关系命名调用归为 relations）。
 
-        任何一种回退都不丢结构——草稿结构由证据确定性组装，命名增强缺失时
-        按现有规则回退（见 ``_build_draft_from_evidence``）。
+        实在读不出 JSON 对象则抛 :class:`LlmResponseFormatError`。**不再回退空字典**
+        ——那等于让整块表悄悄用回技术表名，正是要根除的降级：曾因 GLM 加了代码围栏，
+        整个域几十块命名全部静默落空，草稿看着「生成成功」，名字却全是表名。
         """
-        try:
-            data = json.loads(content or "{}")
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("LLM 返回非法 JSON，跳过命名增强并回退确定性命名")
-            return {}
+        text = cls._unwrap_json_text(content)
+        if not text:
+            raise LlmResponseFormatError(
+                f"LLM 返回内容不是合法 JSON（片段：{(content or '')[:120]!r}）"
+            )
+        data = json.loads(text)
         if isinstance(data, dict):
             return data
         if isinstance(data, list):
@@ -891,10 +1023,9 @@ class OntologyDraftGenerator:
                 primary_list_key,
             )
             return {primary_list_key: data}
-        logger.warning(
-            "LLM 返回非对象/数组 JSON（%s），跳过命名增强", type(data).__name__
+        raise LlmResponseFormatError(
+            f"LLM 返回的不是 JSON 对象/数组（{type(data).__name__}）"
         )
-        return {}
 
     @staticmethod
     def _build_candidate_lookup(evidence: EvidenceBundle) -> dict[str, Any]:
@@ -939,13 +1070,68 @@ class OntologyDraftGenerator:
             return lookup["refined_to_candidate"][nm]
         return None
 
+    @classmethod
+    def _assert_object_naming_complete(
+        cls, overrides: ObjectOverrides, evidence: EvidenceBundle
+    ) -> None:
+        """校验这批证据里**每个**对象都拿到了合格的业务命名，否则抛错。
+
+        合格 = 有英文标识名 ``name`` + 有**中文**业务名 ``display_name``。三类不合格：
+        - 漏命名：模型没回这张表，或回了但回链不上（source_ref 被改写）；
+        - 空名：字段在但值为空；
+        - 非中文名：把表名原样搬过来当业务名（正是用户看到的「名字全是英文表名」）。
+
+        抛 :class:`ObjectNamingIncompleteError` 让调用方换一次采样重问，重试耗尽则
+        任务失败并提示——不用 ``_refine_*`` 的技术名顶替。
+        """
+        missing: list[str] = []
+        not_chinese: list[str] = []
+        for ot in evidence.object_types:
+            ov = overrides.get(ot.candidate_name) or {}
+            name = str(ov.get("name") or "").strip()
+            display = str(ov.get("display_name") or "").strip()
+            if not name or not display:
+                missing.append(ot.candidate_name)
+            elif not _CJK_RE.search(display):
+                not_chinese.append(f"{ot.candidate_name}→{display}")
+        if not missing and not not_chinese:
+            return
+
+        def _sample(items: list[str]) -> str:
+            head = "、".join(items[:5])
+            return f"{head}…" if len(items) > 5 else head
+
+        parts: list[str] = []
+        if missing:
+            parts.append(f"{len(missing)} 张表未拿到业务命名（{_sample(missing)}）")
+        if not_chinese:
+            parts.append(
+                f"{len(not_chinese)} 张表的业务名不是中文（{_sample(not_chinese)}）"
+            )
+        raise ObjectNamingIncompleteError(
+            f"LLM 未完成业务对象中文命名：{'；'.join(parts)}"
+            f"（本批共 {len(evidence.object_types)} 张表）"
+        )
+
+    @classmethod
+    def _object_chunk_is_named(
+        cls, cached: dict[str, Any], evidence: EvidenceBundle
+    ) -> bool:
+        """检查点里的对象块命名是否仍然合格（供缓存复用前把关）。"""
+        try:
+            cls._assert_object_naming_complete(cached.get("objects") or {}, evidence)
+        except ObjectNamingIncompleteError:
+            return False
+        return True
+
     def _parse_object_overrides(
         self, raw: dict, evidence: EvidenceBundle
     ) -> ObjectOverrides:
         """把 LLM 返回的对象数组回链到证据 candidate_name，得到命名增强字典。
 
         回链多路兜底：source_ref(数据集 URN) → candidate_name → 与 refine 后同名。
-        任意一路命中即用；都不命中则跳过该对象的增强(结构仍由证据保证，不丢)。
+        任意一路命中即用；都不命中则该对象没有命名——由
+        ``_assert_object_naming_complete`` 判定不合格并触发重问。
         """
         objects = raw.get("object_types")
         if not isinstance(objects, list):
@@ -1061,13 +1247,14 @@ class OntologyDraftGenerator:
         - 一致：互证信号，保留启发式结果（含其原有置信度/待复核状态）。
         - 分歧：**不再让 LLM 静默否决**（旧行为把分歧「吃掉」，直接以 0.75 覆盖）。
           分歧点恰是最该人工看的地方——展示 LLM 的语义判定（对结构贫瘠的源更可信），
-          但**标记待复核并下调置信度**，原因里并陈两方观点与 LLM 报告的证据缺口，
+          但**置 needs_review 并下调置信度**，原因里并陈两方观点与 LLM 报告的证据缺口，
           交人工裁定。置信度是固定的低值，不由 LLM 自身生成物推导（反循环）。
         """
         base = {
             "table_role": ot.table_role,
             "role_confidence": ot.role_confidence,
             "role_reason": ot.role_reason,
+            "needs_review": ot.needs_review,
         }
         if not override:
             return base
@@ -1086,19 +1273,24 @@ class OntologyDraftGenerator:
         }
         label = role_labels.get(llm_role, llm_role)
         heur_label = role_labels.get(ot.table_role, ot.table_role)
-        note = f"[待复核] 启发式↔LLM 角色分歧：LLM 判为{label}"
+        note = f"启发式↔LLM 角色分歧：LLM 判为{label}"
         llm_reason = (override.get("reason") or "").strip()
         if llm_reason:
             note += f"（{llm_reason}）"
         note += f"；启发式判为{heur_label}"
-        heur_reason = (ot.role_reason or "").removeprefix("[待复核]").strip()
+        heur_reason = (ot.role_reason or "").strip()
         if heur_reason:
             note += f"（{heur_reason}）"
         evidence_gap = (override.get("evidence_gap") or "").strip()
         if evidence_gap:
             note += f"；证据缺口：{evidence_gap}"
         # 分歧固定低置信(0.5)——凸显「需人工确认」，且不受 LLM 自身生成物影响。
-        return {"table_role": llm_role, "role_confidence": 0.5, "role_reason": note}
+        return {
+            "table_role": llm_role,
+            "role_confidence": 0.5,
+            "role_reason": note,
+            "needs_review": True,
+        }
 
     def _parse_relation_overrides(
         self, raw: dict, evidence: EvidenceBundle
@@ -1153,27 +1345,14 @@ class OntologyDraftGenerator:
         return mapping.get(cardinality, cardinality)
 
     @staticmethod
-    def _refine_semantic_name(display_name: str | None, candidate_name: str) -> str:
-        """Extract a concise business semantic name from display_name.
-
-        Strips trailing technical suffixes like 1日汇总, 日表, 维表, 明细表 etc.
-        Falls back to candidate_name only if display_name is absent.
-        """
-        if not display_name:
-            return candidate_name
-        cleaned = re.sub(
-            r"(1日汇总|[1-9]日汇总|日表|日汇总|明细表|维表|日明细|汇总表|明细|全量|增量|快照|视图)$",
-            "",
-            display_name,
-        )
-        return cleaned.strip() or display_name
-
-    @staticmethod
     def _refine_identifier_name(candidate_name: str) -> str:
         """Clean a technical candidate_name into a concise English identifier.
 
         Strips technical suffixes (_entity, _di, _1d, etc.) to produce
         a business-friendly English name. DataHub layer prefixes are preserved.
+
+        仅用于**回链查找**（把 LLM 回传的 name 对回证据 candidate）与关系两端
+        兜底解析；对象自身的标识名/业务名一律取 LLM 结果，不在这里兜底。
         """
         name = candidate_name
         suffixes = [

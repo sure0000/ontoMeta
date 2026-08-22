@@ -99,10 +99,11 @@ def test_partial_publish_confirmed_objects_and_relations(client, admin_headers):
     src = _add_object(ontology_id, "customer", "business_object")
     tgt = _add_object(ontology_id, "company", "business_object")
     with SessionLocal() as db:
-        # 待复核业务对象（role_reason 带 [待复核] 前缀）→ 不应发布。
+        # 待复核业务对象（needs_review=True）→ 不应发布。
         pend = ObjectType(
             ontology_id=ontology_id, name="pending_obj", display_name="待复核对象",
-            table_role="business_object", status="suggested", role_reason="[待复核] 需人工确认",
+            table_role="business_object", status="suggested",
+            role_reason="需人工确认", needs_review=True,
         )
         db.add(pend)
         db.flush()

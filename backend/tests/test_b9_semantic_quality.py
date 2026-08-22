@@ -151,16 +151,12 @@ def test_publish_version_diff_readable(client, admin_headers):
 def test_inconsistent_draft_validation_fails(client, admin_headers):
     domain_id, ontology_id = _seed_domain_with_ontology(name="bad-draft")
 
-    # 再造一个域外对象，把关系源端点改成跨本体（SQLite 默认不强制 FK）
+    # 再造一个域外对象，把关系源端点改成跨本体（SQLite 默认不强制 FK）。
+    # 一域一本体后「另一个本体」必然属于另一个域。
+    _, other_ontology_id = _seed_domain_with_ontology(name="bad-draft-foreign")
     with SessionLocal() as db:
-        other = Ontology(
-            domain_context_id=domain_id,
-            status=OntologyStatus.DRAFT.value,
-        )
-        db.add(other)
-        db.flush()
         foreign = ObjectType(
-            ontology_id=other.id,
+            ontology_id=other_ontology_id,
             name="foreign_obj",
             display_name="域外对象",
             status="suggested",
@@ -270,7 +266,7 @@ def test_chat_bi_session_domain_binding(client, admin_headers):
     assert "数据域" in mismatch.json()["detail"]
 
 
-def test_failed_task_retry_and_duplicate_report(client, admin_headers):
+def test_failed_task_retry_and_duplicate_report(client, admin_headers, llm_ready):
     from app.services.draft_task_service import DraftTaskService
 
     domain_id, _ontology_id = _seed_domain_with_ontology(name="retry-domain")
@@ -284,23 +280,8 @@ def test_failed_task_retry_and_duplicate_report(client, admin_headers):
             error_summary="模拟失败：LLM timeout",
         )
         db.add(task)
-        # 制造两个 draft 以便去重报告
-        for _ in range(2):
-            db.add(
-                Ontology(
-                    domain_context_id=domain_id,
-                    status=OntologyStatus.DRAFT.value,
-                )
-            )
         db.commit()
         task_id = task.id
-
-    dups = client.get(
-        f"/api/domains/{domain_id}/draft-duplicates",
-        headers=admin_headers,
-    )
-    assert dups.status_code == 200
-    assert dups.json()["draft_count"] >= 2
 
     # 服务层重试（不经 HTTP，避免后台 asyncio 污染共享测试库）
     with SessionLocal() as db:

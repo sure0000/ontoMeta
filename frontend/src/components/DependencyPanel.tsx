@@ -36,6 +36,8 @@ import {
   DeleteOutlined,
   DesktopOutlined,
   EditOutlined,
+  EyeInvisibleOutlined,
+  EyeOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
@@ -86,6 +88,52 @@ const FIELD_LABEL: Record<string, string> = {
 const CONN_GROUPS_RENDERED_ELSEWHERE: Record<string, string[]> = {
   airflow: ["ssh"],
 };
+
+/**
+ * 多行机密（PEM 私钥等）输入框：TextArea 无内置显隐切换，这里自带的「眼睛」按钮
+ * 在掩码占位与明文 TextArea 间切换。Form.Item 注入 value/onChange，明文始终在表单
+ * 状态里，只是隐藏时不渲染进可见的 TextArea。
+ */
+function SecretTextArea(props: {
+  value?: string;
+  onChange?: (value: string) => void;
+  placeholder?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  const { value, onChange, placeholder } = props;
+  if (visible) {
+    return (
+      <Space direction="vertical" style={{ width: "100%" }} size={4}>
+        <Input.TextArea
+          rows={5}
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange?.(e.target.value)}
+        />
+        <Button
+          size="small"
+          icon={<EyeInvisibleOutlined />}
+          onClick={() => setVisible(false)}
+        >
+          隐藏
+        </Button>
+      </Space>
+    );
+  }
+  return (
+    <Space>
+      <Input
+        disabled
+        style={{ width: 320 }}
+        value={value ? "****（已配置）" : ""}
+        placeholder={placeholder}
+      />
+      <Button size="small" icon={<EyeOutlined />} onClick={() => setVisible(true)}>
+        显示明文
+      </Button>
+    </Space>
+  );
+}
 
 const MODE_ICON: Record<string, React.ReactNode> = {
   external: <CloudServerOutlined />,
@@ -263,13 +311,24 @@ export function DependencyPanel() {
     const out: string[] = [];
     (schema?.connection_schemas[editing.key] ?? []).forEach((f) => {
       const cur = v[`conn_${f.name}`];
-      // 机密回显的是掩码，比不了原值：输入框里有内容就当改过
-      if (f.secret) {
-        if (cur) out.push(FIELD_LABEL[f.name] ?? f.name);
-        return;
-      }
+      // 机密现已明文回显，可与预填值直接比对（之前是掩码比不了，只能当非空即改过）。
       if (norm(cur) !== norm(editing.connection[f.name])) {
         out.push(FIELD_LABEL[f.name] ?? f.name);
+      }
+    });
+    // 部署参数里的 secret 也明文回显了，一并与预填值比对（含 spec_* 与 extra_*）。
+    const specExtra = (editing.deploy_spec ?? {}) as Record<string, unknown>;
+    const specFields =
+      (editing.deploy_mode === "bare_metal"
+        ? schema?.bare_metal_params?.[editing.key]
+        : editing.deploy_mode === "docker"
+          ? schema?.docker_params?.[editing.key]
+          : editing.deploy_mode === "k8s"
+            ? schema?.deploy_spec_schemas?.["k8s"]
+            : []) ?? [];
+    specFields.forEach((f) => {
+      if (norm(v[`spec_${f.name}`]) !== norm(specExtra[f.name])) {
+        out.push(f.name);
       }
     });
     const extra = (editing.deploy_spec?.extra ?? {}) as Record<string, unknown>;
@@ -641,9 +700,14 @@ export function DependencyPanel() {
                           label={FIELD_LABEL[f.name] ?? f.name}
                           name={`conn_${f.name}`}
                           rules={f.required ? [{ required: true, message: "必填" }] : []}
+                          extra={
+                            editing && f.secret && editing.connection[f.name]
+                              ? "已回显，清空将保持原值不变"
+                              : undefined
+                          }
                         >
                           {f.secret ? (
-                            <Input.Password placeholder={editing ? "留空=保持不变" : ""} />
+                            <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
                           ) : (
                             <Input />
                           )}
@@ -683,6 +747,11 @@ export function DependencyPanel() {
                             ? [{ required: true, message: "必填" }]
                             : []
                         }
+                        extra={
+                          editing && f.secret && (editing.deploy_spec ?? {})[f.name]
+                            ? "已回显，清空将保持原值不变"
+                            : undefined
+                        }
                       >
                         {f.name === "auth_method" ? (
                           <Select
@@ -692,16 +761,9 @@ export function DependencyPanel() {
                             ]}
                           />
                         ) : f.type === "text" ? (
-                          <Input.TextArea
-                            rows={5}
-                            placeholder={
-                              editing && f.secret
-                                ? "留空=保持不变"
-                                : "粘贴 PEM 私钥（-----BEGIN ... KEY-----）"
-                            }
-                          />
+                          <SecretTextArea placeholder="粘贴 PEM 私钥（-----BEGIN ... KEY-----）" />
                         ) : f.secret ? (
-                          <Input.Password placeholder={editing ? "留空=保持不变" : ""} />
+                          <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
                         ) : f.type === "int" ? (
                           <InputNumber
                             style={{ width: "100%" }}
@@ -770,7 +832,7 @@ export function DependencyPanel() {
                               name="conn_ssh_password"
                               extra="留空 = 用 ontoMeta 主机的默认 SSH 身份/agent（要指定私钥就写进该机 ~/.ssh/config）；填了则用密码认证，需装 sshpass"
                             >
-                              <Input.Password placeholder={editing ? "留空=保持不变" : ""} />
+                              <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
                             </Form.Item>
                           </>
                         ),

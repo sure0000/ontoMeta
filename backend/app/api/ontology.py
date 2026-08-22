@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import edit_service, provenance_service, query
+from app.api.deps import edit_service, provenance_service, publish_service, query
 from app.database import get_db
 from app.models import ObjectType, Property
 from app.schemas import (
@@ -263,6 +263,18 @@ def validate_ontology(ontology_id: str, db: Session = Depends(get_db)):
         ok=len(issues) == 0,
         issues=[ValidationIssueOut(**i.to_dict()) for i in issues],
     )
+
+
+@router.get("/ontologies/{ontology_id}/publish-preflight")
+def publish_preflight(ontology_id: str, db: Session = Depends(get_db)):
+    """发布前自检：将发布多少对象/属性/关系、将跳过多少、为什么。
+
+    与 publish() 共用 select_publishable，两边不会漂移。
+    """
+    try:
+        return publish_service.preflight(db, ontology_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get(

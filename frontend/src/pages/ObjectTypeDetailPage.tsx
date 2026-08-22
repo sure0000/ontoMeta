@@ -34,6 +34,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
+import { FieldAuthorityPanel } from "../components/FieldAuthorityPanel";
 import { MaterializeModal } from "../components/MaterializeModal";
 import { ObjectRelationGraph } from "../components/ObjectRelationGraph";
 import { PageContainer } from "../components/PageContainer";
@@ -808,6 +809,14 @@ export function ObjectTypeDetailPage() {
             <Space>
               <StatusBadge status={obj.status} />
               <ProvenanceBadge provenance={obj} />
+              {inWorkspace && (
+                <FieldAuthorityPanel
+                  entityType="object_type"
+                  entityId={obj.id}
+                  pinnedFields={obj.pinned_fields}
+                  onChanged={() => void loadObject()}
+                />
+              )}
               {obj.table_role === "business_object" && (
                 <Tooltip title="把该业务对象物化到目标存储（建表落数，需 publisher 角色）">
                   <Button icon={<DatabaseOutlined />} onClick={() => setMaterializeOpen(true)}>

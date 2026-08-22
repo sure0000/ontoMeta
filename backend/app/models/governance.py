@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, Index, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -24,6 +24,9 @@ def _uuid() -> str:
 
 class GovernanceStandardRecord(Base):
     __tablename__ = "governance_standard_records"
+    __table_args__ = (
+        Index("ix_governance_standard_records_status", "status"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     version: Mapped[str] = mapped_column(String(50))

@@ -6,12 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     DomainContext,
+    EntityStatus,
     ObjectType,
     Ontology,
     OntologyStatus,
+    Property,
     RelationType,
 )
 from app.schemas import DomainContextDetail, DomainContextSummary
+from app.services import ontology_workspace
 from app.services.draft_task_service import DraftTaskService
 from app.services.logic_query import OntologyQueryService
 
@@ -188,19 +191,79 @@ class WorkspaceService(DraftTaskService):
         summary = next((d for d in self.list_domains(db) if d.id == domain_id), None)
         if not summary:
             return None
-        latest = (
-            db.query(Ontology)
-            .filter(Ontology.domain_context_id == domain_id)
-            .order_by(Ontology.updated_at.desc())
-            .first()
-        )
+        working = ontology_workspace.get_working_ontology(db, domain_id)
         published = OntologyQueryService().get_published_ontology(db, domain_id)
         datahub = self._datahub(db)
+        metrics = self._publish_metrics(db, working)
         return DomainContextDetail(
             **summary.model_dump(),
             datahub_url=datahub.get_domain_url(domain.datahub_domain_id),
-            latest_ontology_id=latest.id if latest else None,
-            latest_ontology_status=latest.status if latest else None,
+            working_ontology_id=working.id if working else None,
+            working_ontology_status=working.status if working else None,
             published_ontology_id=published.id if published else None,
             published_ontology_version=published.version if published else None,
+            **metrics,
         )
+
+    @staticmethod
+    def _publish_metrics(db: Session, working: Ontology | None) -> dict[str, int]:
+        """页头/域卡片要显示的发布态指标。
+
+        ``unpublished_change_count`` 读实体的 ``has_unpublished_change`` 标记——A 案下
+        人工编辑已发布实体会立即生效且**不改状态**，没有这个计数，「已发布内容被改过、
+        还没打成新版本」这件事在界面上就完全不可见。（不用 updated_at 与 published_at
+        比时间戳：SQLite 的 CURRENT_TIMESTAMP 只有秒级精度，同秒内分辨不出来。）
+        """
+        empty = {
+            "unpublished_change_count": 0,
+            "pending_publish_count": 0,
+            "needs_review_count": 0,
+            "unresolved_conflict_count": 0,
+        }
+        if working is None:
+            return empty
+
+        from app.services.publish import PublishService
+
+        selection = PublishService().select_publishable(db, working.id)
+        # 只数对象与关系：属性随其对象一起提升，把上千条属性算进「待提升」会把
+        # 治理单位淹掉（78 个对象会显示成 1626 项）。
+        pending = sum(
+            1
+            for e in selection.entities
+            if not isinstance(e, Property) and e.status != EntityStatus.PUBLISHED.value
+        )
+
+        changed = sum(
+            1
+            for e in selection.entities
+            if getattr(e, "has_unpublished_change", False)
+        )
+
+        needs_review = (
+            db.query(func.count(ObjectType.id))
+            .filter(
+                ObjectType.ontology_id == working.id,
+                ObjectType.table_role == "business_object",
+                ObjectType.needs_review.is_(True),
+            )
+            .scalar()
+            or 0
+        )
+        conflicts = 0
+        for model in (ObjectType, RelationType):
+            conflicts += (
+                db.query(func.count(model.id))
+                .filter(
+                    model.ontology_id == working.id,
+                    model.conflict_json.isnot(None),
+                )
+                .scalar()
+                or 0
+            )
+        return {
+            "unpublished_change_count": changed,
+            "pending_publish_count": pending,
+            "needs_review_count": int(needs_review),
+            "unresolved_conflict_count": int(conflicts),
+        }

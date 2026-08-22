@@ -1,0 +1,577 @@
+{
+  "fixture_version": "1.0.0",
+  "name": "sales_fulfillment_modeling_case",
+  "display_name": "销售履约对话式建模验收场景",
+  "purpose": "P0 场景基线：为 ModelingCase、DimensionalModel、LogicBundle、DeliveryPlan 与端到端验收提供稳定输入和预期结果。所有 ref 均为 fixture 稳定标识，不是生产数据库 ID。",
+  "requirement": {
+    "user_request": "分析过去 90 天订单履约，按客户、商品和渠道看销售额、订单量、延期率，并给高延期风险客户打标签，最后生成每天刷新的销售履约看板。",
+    "business_goal": "识别订单履约风险并定位高延期风险客户",
+    "business_processes": [
+      "销售订单履约"
+    ],
+    "subjects": [
+      "销售订单",
+      "销售订单行",
+      "客户",
+      "商品",
+      "渠道",
+      "发货"
+    ],
+    "time_scope": {
+      "type": "rolling",
+      "value": 90,
+      "unit": "day"
+    },
+    "grain_expectation": "每个销售订单行一行",
+    "requested_metrics": [
+      "销售额",
+      "订单量",
+      "延期率"
+    ],
+    "requested_tags": [
+      "高延期风险客户"
+    ],
+    "refresh_sla": "0 2 * * *",
+    "delivery": [
+      "dashboard"
+    ],
+    "required_clarifications": [
+      {
+        "key": "fact_grain",
+        "question": "销售分析按订单还是订单行作为事实粒度？",
+        "confirmed_value": "订单行"
+      },
+      {
+        "key": "delay_definition",
+        "question": "延期按承诺发货日还是要求到货日判断？",
+        "confirmed_value": "实际发货时间晚于承诺发货时间"
+      },
+      {
+        "key": "risk_threshold",
+        "question": "高延期风险客户的阈值是多少？",
+        "confirmed_value": "过去 90 天订单数不少于 5 且延期率大于等于 20%"
+      }
+    ],
+    "acceptance_criteria": [
+      "销售额、订单量、延期率与 fixture 金标准口径一致",
+      "多次发货不会重复累计订单行销售额",
+      "任务真实失败时建模工单不得进入 completed",
+      "看板中的所有面板均引用已确认模型与口径版本"
+    ]
+  },
+  "ontology": {
+    "domain_ref": "domain:sales",
+    "ontology_ref": "ontology:sales:v1",
+    "version": 1,
+    "objects": [
+      {
+        "ref": "object:sales_order",
+        "name": "sales_order",
+        "display_name": "销售订单",
+        "table_role": "business_object",
+        "properties": [
+          {
+            "ref": "property:sales_order:id",
+            "name": "order_id",
+            "display_name": "订单标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order:customer_id",
+            "name": "customer_id",
+            "display_name": "客户标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order:channel_id",
+            "name": "channel_id",
+            "display_name": "渠道标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order:ordered_at",
+            "name": "ordered_at",
+            "display_name": "下单时间",
+            "semantic_type": "datetime",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order:promised_ship_at",
+            "name": "promised_ship_at",
+            "display_name": "承诺发货时间",
+            "semantic_type": "datetime",
+            "required": false
+          }
+        ]
+      },
+      {
+        "ref": "object:sales_order_line",
+        "name": "sales_order_line",
+        "display_name": "销售订单行",
+        "table_role": "business_object",
+        "properties": [
+          {
+            "ref": "property:sales_order_line:id",
+            "name": "order_line_id",
+            "display_name": "订单行标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order_line:order_id",
+            "name": "order_id",
+            "display_name": "订单标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order_line:product_id",
+            "name": "product_id",
+            "display_name": "商品标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order_line:quantity",
+            "name": "quantity",
+            "display_name": "销售数量",
+            "semantic_type": "measure",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order_line:unit_price",
+            "name": "unit_price",
+            "display_name": "销售单价",
+            "semantic_type": "measure",
+            "required": true
+          },
+          {
+            "ref": "property:sales_order_line:discount_amount",
+            "name": "discount_amount",
+            "display_name": "折扣金额",
+            "semantic_type": "measure",
+            "required": false
+          },
+          {
+            "ref": "property:sales_order_line:line_amount",
+            "name": "line_amount",
+            "display_name": "订单行金额",
+            "semantic_type": "measure",
+            "required": true
+          }
+        ]
+      },
+      {
+        "ref": "object:customer",
+        "name": "customer",
+        "display_name": "客户",
+        "table_role": "business_object",
+        "properties": [
+          {
+            "ref": "property:customer:id",
+            "name": "customer_id",
+            "display_name": "客户标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:customer:name",
+            "name": "customer_name",
+            "display_name": "客户名称",
+            "semantic_type": "descriptive",
+            "required": true
+          },
+          {
+            "ref": "property:customer:level",
+            "name": "customer_level",
+            "display_name": "客户等级",
+            "semantic_type": "categorical",
+            "required": false
+          }
+        ]
+      },
+      {
+        "ref": "object:product",
+        "name": "product",
+        "display_name": "商品",
+        "table_role": "business_object",
+        "properties": [
+          {
+            "ref": "property:product:id",
+            "name": "product_id",
+            "display_name": "商品标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:product:name",
+            "name": "product_name",
+            "display_name": "商品名称",
+            "semantic_type": "descriptive",
+            "required": true
+          },
+          {
+            "ref": "property:product:category",
+            "name": "category",
+            "display_name": "商品分类",
+            "semantic_type": "categorical",
+            "required": false
+          }
+        ]
+      },
+      {
+        "ref": "object:channel",
+        "name": "channel",
+        "display_name": "渠道",
+        "table_role": "business_object",
+        "properties": [
+          {
+            "ref": "property:channel:id",
+            "name": "channel_id",
+            "display_name": "渠道标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:channel:name",
+            "name": "channel_name",
+            "display_name": "渠道名称",
+            "semantic_type": "descriptive",
+            "required": true
+          }
+        ]
+      },
+      {
+        "ref": "object:shipment",
+        "name": "shipment",
+        "display_name": "发货",
+        "table_role": "business_object",
+        "properties": [
+          {
+            "ref": "property:shipment:id",
+            "name": "shipment_id",
+            "display_name": "发货标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:shipment:order_id",
+            "name": "order_id",
+            "display_name": "订单标识",
+            "semantic_type": "identifier",
+            "required": true
+          },
+          {
+            "ref": "property:shipment:shipped_at",
+            "name": "shipped_at",
+            "display_name": "实际发货时间",
+            "semantic_type": "datetime",
+            "required": true
+          }
+        ]
+      }
+    ],
+    "relations": [
+      {
+        "ref": "relation:order_customer",
+        "name": "order_belongs_to_customer",
+        "display_name": "订单属于客户",
+        "source": "object:sales_order",
+        "target": "object:customer",
+        "cardinality": "many_to_one",
+        "structure_type": "foreign_key",
+        "source_key": "property:sales_order:customer_id",
+        "target_key": "property:customer:id"
+      },
+      {
+        "ref": "relation:order_channel",
+        "name": "order_comes_from_channel",
+        "display_name": "订单来自渠道",
+        "source": "object:sales_order",
+        "target": "object:channel",
+        "cardinality": "many_to_one",
+        "structure_type": "foreign_key",
+        "source_key": "property:sales_order:channel_id",
+        "target_key": "property:channel:id"
+      },
+      {
+        "ref": "relation:order_lines",
+        "name": "order_contains_lines",
+        "display_name": "订单包含订单行",
+        "source": "object:sales_order",
+        "target": "object:sales_order_line",
+        "cardinality": "one_to_many",
+        "structure_type": "foreign_key",
+        "source_key": "property:sales_order:id",
+        "target_key": "property:sales_order_line:order_id"
+      },
+      {
+        "ref": "relation:line_product",
+        "name": "order_line_references_product",
+        "display_name": "订单行引用商品",
+        "source": "object:sales_order_line",
+        "target": "object:product",
+        "cardinality": "many_to_one",
+        "structure_type": "foreign_key",
+        "source_key": "property:sales_order_line:product_id",
+        "target_key": "property:product:id"
+      },
+      {
+        "ref": "relation:order_shipments",
+        "name": "order_has_shipments",
+        "display_name": "订单产生发货",
+        "source": "object:sales_order",
+        "target": "object:shipment",
+        "cardinality": "one_to_many",
+        "structure_type": "foreign_key",
+        "source_key": "property:sales_order:id",
+        "target_key": "property:shipment:order_id"
+      }
+    ]
+  },
+  "data_context": {
+    "data_source_ref": "datasource:warehouse",
+    "source_catalog": "erp",
+    "source_database": "sales",
+    "target_engine": "iceberg",
+    "target_database_prefix": "sales",
+    "connection_status": "ok",
+    "credentials_in_fixture": false
+  },
+  "expected_dimensional_model": {
+    "name": "sales_fulfillment_model",
+    "display_name": "销售履约分析模型",
+    "business_process": "销售订单履约",
+    "facts": [
+      {
+        "name": "fact_sales_order_line",
+        "display_name": "销售订单行事实",
+        "fact_type": "transaction",
+        "grain": {
+          "statement": "每个销售订单行一行",
+          "keys": [
+            "property:sales_order_line:id"
+          ]
+        },
+        "source_object_ref": "object:sales_order_line",
+        "event_time_property_ref": "property:sales_order:ordered_at",
+        "measures": [
+          {
+            "property_ref": "property:sales_order_line:quantity",
+            "aggregation": "sum",
+            "additivity": "additive"
+          },
+          {
+            "property_ref": "property:sales_order_line:line_amount",
+            "aggregation": "sum",
+            "additivity": "additive"
+          }
+        ],
+        "dimensions": [
+          {
+            "dimension_ref": "dim_customer",
+            "role": "customer"
+          },
+          {
+            "dimension_ref": "dim_product",
+            "role": "product"
+          },
+          {
+            "dimension_ref": "dim_channel",
+            "role": "channel"
+          },
+          {
+            "dimension_ref": "dim_order_date",
+            "role": "order_date"
+          }
+        ],
+        "degenerate_dimensions": [
+          "property:sales_order_line:order_id"
+        ]
+      }
+    ],
+    "dimensions": [
+      {
+        "name": "dim_customer",
+        "display_name": "客户维度",
+        "source_object_ref": "object:customer",
+        "natural_key_property_refs": [
+          "property:customer:id"
+        ],
+        "surrogate_key": {
+          "enabled": true,
+          "name": "customer_sk"
+        },
+        "attribute_property_refs": [
+          "property:customer:name",
+          "property:customer:level"
+        ],
+        "scd_type": "scd2",
+        "conformed_key": "customer"
+      },
+      {
+        "name": "dim_product",
+        "display_name": "商品维度",
+        "source_object_ref": "object:product",
+        "natural_key_property_refs": [
+          "property:product:id"
+        ],
+        "surrogate_key": {
+          "enabled": true,
+          "name": "product_sk"
+        },
+        "attribute_property_refs": [
+          "property:product:name",
+          "property:product:category"
+        ],
+        "scd_type": "scd1",
+        "conformed_key": "product"
+      },
+      {
+        "name": "dim_channel",
+        "display_name": "渠道维度",
+        "source_object_ref": "object:channel",
+        "natural_key_property_refs": [
+          "property:channel:id"
+        ],
+        "surrogate_key": {
+          "enabled": true,
+          "name": "channel_sk"
+        },
+        "attribute_property_refs": [
+          "property:channel:name"
+        ],
+        "scd_type": "scd1",
+        "conformed_key": "channel"
+      },
+      {
+        "name": "dim_order_date",
+        "display_name": "下单日期维度",
+        "source_object_ref": null,
+        "natural_key_property_refs": [],
+        "surrogate_key": {
+          "enabled": false,
+          "name": "date_key"
+        },
+        "attribute_property_refs": [],
+        "scd_type": "none",
+        "conformed_key": "date",
+        "role_playing_source": "calendar_date"
+      }
+    ],
+    "bridges": [],
+    "required_validation_outcomes": {
+      "errors": [],
+      "warnings_allowed": [
+        "shipment_allocation_required"
+      ]
+    }
+  },
+  "expected_logic_bundle": {
+    "items": [
+      {
+        "kind": "metric",
+        "name": "sales_amount",
+        "display_name": "销售额",
+        "target_fact": "fact_sales_order_line",
+        "operation": "sum",
+        "input_property_ref": "property:sales_order_line:line_amount"
+      },
+      {
+        "kind": "metric",
+        "name": "order_count",
+        "display_name": "订单量",
+        "target_fact": "fact_sales_order_line",
+        "operation": "count_distinct",
+        "input_property_ref": "property:sales_order_line:order_id"
+      },
+      {
+        "kind": "metric",
+        "name": "delay_rate",
+        "display_name": "延期率",
+        "target_fact": "fact_sales_order_line",
+        "operation": "ratio",
+        "definition": "延期订单数 / 可判断履约的订单数"
+      },
+      {
+        "kind": "tag",
+        "name": "high_delay_risk_customer",
+        "display_name": "高延期风险客户",
+        "subject_dimension": "dim_customer",
+        "definition": "过去 90 天订单数不少于 5 且延期率大于等于 20%",
+        "threshold_source": "requirement_confirmation"
+      }
+    ]
+  },
+  "expected_delivery_plan": {
+    "steps": [
+      {
+        "id": "materialize_model",
+        "kind": "materialize",
+        "depends_on": []
+      },
+      {
+        "id": "sync_sources",
+        "kind": "sync",
+        "depends_on": [
+          "materialize_model"
+        ]
+      },
+      {
+        "id": "transform_fact_dimensions",
+        "kind": "transform",
+        "depends_on": [
+          "sync_sources"
+        ]
+      },
+      {
+        "id": "materialize_logic_bundle",
+        "kind": "metric",
+        "depends_on": [
+          "transform_fact_dimensions"
+        ]
+      }
+    ],
+    "schedule_cron": "0 2 * * *",
+    "data_app": {
+      "kind": "dashboard",
+      "name": "销售履约看板",
+      "panels": [
+        "销售额趋势",
+        "订单量趋势",
+        "客户延期率",
+        "高延期风险客户"
+      ]
+    }
+  },
+  "negative_cases": [
+    {
+      "name": "missing_grain",
+      "mutation": "remove expected_dimensional_model.facts[0].grain",
+      "expected_code": "grain_missing"
+    },
+    {
+      "name": "unresolved_grain_key",
+      "mutation": "replace grain key with property:unknown:id",
+      "expected_code": "grain_key_unresolved"
+    },
+    {
+      "name": "fanout_without_allocation",
+      "mutation": "join shipment directly to order lines and sum line_amount",
+      "expected_code": "fanout_risk"
+    },
+    {
+      "name": "tag_threshold_missing",
+      "mutation": "remove risk_threshold confirmation",
+      "expected_code": "tag_threshold_unconfirmed"
+    },
+    {
+      "name": "scd2_engine_gap",
+      "mutation": "set target_engine to clickhouse while customer scd_type remains scd2",
+      "expected_code": "scd_capability_gap"
+    }
+  ]
+}

@@ -33,8 +33,6 @@ _PROPERTY_BINDING_ROLES = {"input", "output", "filter", "group"}
 
 # 对象角色的合法取值（与前端 ROLE_META 一致）。
 _ALLOWED_TABLE_ROLES = {"business_object", "data_table", "bridge", "technical"}
-# 待复核软标记：写入 role_reason 前缀，全库以此为复核状态的唯一真源。
-_REVIEW_MARK = "[待复核]"
 
 
 def _assert_object_name_free(
@@ -84,15 +82,8 @@ def _validate_semantic_type_or_raise(value: str | None) -> None:
 
 
 def _set_review_mark(obj: ObjectType, needs_review: bool) -> None:
-    """在 role_reason 上增删 [待复核] 前缀。已确认=去除标记。"""
-    reason = (obj.role_reason or "").strip()
-    body = reason
-    if body.startswith(_REVIEW_MARK):
-        body = body[len(_REVIEW_MARK):].strip()
-    if needs_review:
-        obj.role_reason = f"{_REVIEW_MARK} {body}".strip() if body else _REVIEW_MARK
-    else:
-        obj.role_reason = body or None
+    """置复核状态。独立布尔列，不再动 role_reason——那是描述性字段，归机器刷新。"""
+    obj.needs_review = bool(needs_review)
 
 
 def _log_change(
@@ -104,6 +95,28 @@ def _log_change(
     summary: str | None = None,
 ) -> None:
     log_change(db, entity_type, entity_id, action, operator, summary)
+
+
+def _mark_edited(entity) -> None:
+    """人工编辑后的实体状态。
+
+    A 案（见 docs/ONTOLOGY_LIFECYCLE_REDESIGN.md §3.4）：**人工即权威，改了立即生效**。
+    已发布实体被编辑后仍保持 published，不再退回 edited——旧行为会让「只是改了个中文
+    名」把该对象从对外可见集里静默摘掉，直到用户再点一次发布才回来，界面上毫无提示。
+    机器改动才需要过闸（三方合并的冲突通道），人不需要。
+
+    发布这一刻仍有意义：打版本快照 + 提升新确认的实体。已发布内容被直接改动会由
+    「N 项待固化」提示条呈现，见 workspace_service 的 unpublished_change_count。
+    """
+    if entity.status == EntityStatus.PUBLISHED.value:
+        # 已发布内容被直接改动：状态不动（立即生效），但要留下「待固化」凭据，
+        # 否则这件事在界面上完全不可见。publish() 提升实体时清零。
+        if hasattr(entity, "has_unpublished_change"):
+            entity.has_unpublished_change = True
+        return
+    if entity.status == EntityStatus.PRE_PUBLISHED.value:
+        return
+    entity.status = EntityStatus.EDITED.value
 
 
 def _mark_overridden(entity, fields: list[str]) -> None:
@@ -180,26 +193,33 @@ class EditService:
                 raise ValueError(f"非法对象角色：{table_role}")
             obj.table_role = table_role
             changed.append("table_role")
-            # 人工改判角色即视为复核通过，自动清除 [待复核]。
+            # 人工改判角色即视为复核通过。
             role_confirmed = True
 
         # 复核状态：显式 needs_review 优先；否则改角色时自动置为已确认。
+        # 它是独立列，**不计入 changed**——changed 会被 _mark_overridden 永久钉住，
+        # 而复核与 role_reason 描述文本无关，钉住它等于让机器再也刷新不了角色依据。
+        review_changed = False
         if needs_review is not None:
             _set_review_mark(obj, needs_review)
-            changed.append("role_reason")
+            review_changed = True
         elif role_confirmed:
             _set_review_mark(obj, False)
-            changed.append("role_reason")
+            review_changed = True
 
         if changed:
             _mark_overridden(obj, changed)
+        elif not review_changed:
+            return self._object_detail_or_raise(db, object_type_id)
 
-        if obj.status != EntityStatus.PRE_PUBLISHED.value:
-            obj.status = EntityStatus.EDITED.value
+        _mark_edited(obj)
 
         _log_change(db, "object_type", obj.id, "edit", operator, "更新对象类型")
         db.commit()
 
+        return self._object_detail_or_raise(db, object_type_id)
+
+    def _object_detail_or_raise(self, db: Session, object_type_id: str) -> ObjectTypeDetail:
         detail = self.query.get_object_type(db, object_type_id)
         if not detail:
             raise ValueError("Object type not found")
@@ -217,7 +237,7 @@ class EditService:
         """批量改判对象角色(table_role)与复核状态(needs_review)。
 
         与单条 update_object_type 语义一致：改角色即视为复核通过（自动清除
-        [待复核]），显式 needs_review 优先。跳过不存在或无实际变更的 id，
+        needs_review=False），显式 needs_review 优先。跳过不存在或无实际变更的 id，
         一次性提交，返回已更新对象的摘要。
         """
         if table_role is not None and table_role not in _ALLOWED_TABLE_ROLES:
@@ -238,18 +258,20 @@ class EditService:
                 changed.append("table_role")
                 role_confirmed = True
 
-            if needs_review is not None:
+            # 复核状态是独立列，不计入 changed（同 update_object_type）。
+            review_changed = False
+            if needs_review is not None and bool(needs_review) != bool(obj.needs_review):
                 _set_review_mark(obj, needs_review)
-                changed.append("role_reason")
-            elif role_confirmed:
+                review_changed = True
+            elif needs_review is None and role_confirmed and obj.needs_review:
                 _set_review_mark(obj, False)
-                changed.append("role_reason")
+                review_changed = True
 
-            if not changed:
+            if not changed and not review_changed:
                 continue
-            _mark_overridden(obj, changed)
-            if obj.status != EntityStatus.PRE_PUBLISHED.value:
-                obj.status = EntityStatus.EDITED.value
+            if changed:
+                _mark_overridden(obj, changed)
+            _mark_edited(obj)
             _log_change(db, "object_type", obj.id, "edit", operator, "批量更新对象类型")
             updated.append(obj)
 
@@ -365,12 +387,11 @@ class EditService:
         if changed:
             _mark_overridden(prop, changed)
 
-        if prop.status != EntityStatus.PRE_PUBLISHED.value:
-            prop.status = EntityStatus.EDITED.value
+        _mark_edited(prop)
 
         obj = db.get(ObjectType, prop.object_type_id)
-        if obj and obj.status != EntityStatus.PRE_PUBLISHED.value:
-            obj.status = EntityStatus.EDITED.value
+        if obj:
+            _mark_edited(obj)
 
         _log_change(db, "property", prop.id, "edit", operator, "更新属性")
         db.commit()
@@ -516,9 +537,9 @@ class EditService:
             if ep.table_role != "business_object":
                 ep.table_role = "business_object"
                 _set_review_mark(ep, False)
-                _mark_overridden(ep, ["table_role", "role_reason"])
-                if ep.status != EntityStatus.PRE_PUBLISHED.value:
-                    ep.status = EntityStatus.EDITED.value
+                # 只钉 table_role：role_reason 没被改，钉住它会冻结机器的角色依据刷新。
+                _mark_overridden(ep, ["table_role"])
+                _mark_edited(ep)
                 _log_change(
                     db,
                     "object_type",
@@ -558,8 +579,7 @@ class EditService:
             f"（{endpoints[0].display_name} → {endpoints[1].display_name}），作为该关系的实现表"
         )
         _mark_overridden(obj, ["table_role", "role_reason"])
-        if obj.status != EntityStatus.PRE_PUBLISHED.value:
-            obj.status = EntityStatus.EDITED.value
+        _mark_edited(obj)
         _log_change(
             db, "object_type", obj.id, "edit", operator, f"转为业务关系「{compacted}」"
         )
@@ -637,8 +657,7 @@ class EditService:
                 raise ValueError("Source and target object cannot be the same")
             rel.target_object_type_id = target_object_type_id
 
-        if rel.status != EntityStatus.PRE_PUBLISHED.value:
-            rel.status = EntityStatus.EDITED.value
+        _mark_edited(rel)
 
         _log_change(db, "relation_type", rel.id, "edit", operator, "更新关系")
         db.commit()
@@ -816,8 +835,7 @@ class EditService:
         if expression_json is not None:
             logic.expression_json = json.dumps(expression_json, ensure_ascii=False)
 
-        if logic.status != EntityStatus.PRE_PUBLISHED.value:
-            logic.status = EntityStatus.EDITED.value
+        _mark_edited(logic)
 
         _log_change(db, "business_logic", logic.id, "edit", operator, "更新业务逻辑")
         db.commit()

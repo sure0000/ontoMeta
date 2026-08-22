@@ -25,7 +25,8 @@ def _seed_two_objects(tag: str) -> list[str]:
             name="t_a",
             display_name="A",
             table_role="business_object",
-            role_reason="[待复核] 机器判定",
+            role_reason="机器判定",
+            needs_review=True,
             status="suggested",
         )
         b = ObjectType(
@@ -33,7 +34,8 @@ def _seed_two_objects(tag: str) -> list[str]:
             name="t_b",
             display_name="B",
             table_role="business_object",
-            role_reason="[待复核] 机器判定",
+            role_reason="机器判定",
+            needs_review=True,
             status="suggested",
         )
         db.add_all([a, b])
@@ -55,8 +57,8 @@ def test_batch_update_role_and_review(client, admin_headers):
         for oid in ids:
             obj = db.get(ObjectType, oid)
             assert obj.table_role == "technical"
-            # 改角色即视为复核通过，[待复核] 被清除
-            assert "待复核" not in (obj.role_reason or "")
+            # 改角色即视为复核通过，needs_review 被清除
+            assert obj.needs_review is False
 
 
 def test_batch_mark_needs_review(client, admin_headers):
@@ -76,7 +78,7 @@ def test_batch_mark_needs_review(client, admin_headers):
     assert resp.json()["updated"] == 2
     with SessionLocal() as db:
         for oid in ids:
-            assert "待复核" in (db.get(ObjectType, oid).role_reason or "")
+            assert db.get(ObjectType, oid).needs_review is True
 
 
 def test_batch_rejects_invalid_role(client, admin_headers):

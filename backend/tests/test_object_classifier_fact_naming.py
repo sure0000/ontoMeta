@@ -358,5 +358,5 @@ def test_evidence_builder_marks_transaction_header_as_bridge():
         if p.source_dataset_urn == "urn:li:dataset:purchase_order"
     )
     assert po.table_role == ROLE_BRIDGE
-    assert "待复核" in (po.role_reason or "")
+    assert po.needs_review is True
     assert po.role_signals["signals"].get("weak_fact_name_token") == "订单"

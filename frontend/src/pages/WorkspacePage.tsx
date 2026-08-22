@@ -74,8 +74,15 @@ export function WorkspacePage() {
                   <div className="entity-card-desc">{domain.description || "暂无描述"}</div>
                   <div className="entity-card-foot">
                     <div className="entity-card-foot-stats">
+                      {/* 「N 已发布 / M 对象」比单看总数有用得多：部分发布只提升
+                          needs_review=false 的业务对象，两个数字差得远就说明还有一堆
+                          待复核卡在门外。 */}
                       <span className="entity-card-foot-item">
-                        <strong>{domain.object_type_count}</strong> 业务对象
+                        <strong>{domain.published_object_type_count}</strong> 已发布
+                        <span style={{ color: "var(--om-text-secondary)" }}>
+                          {" / "}
+                          {domain.object_type_count} 对象
+                        </span>
                       </span>
                       <span className="entity-card-foot-item">
                         <strong>{domain.relation_type_count}</strong> 关系

@@ -42,3 +42,17 @@ def test_alembic_head_creates_every_model_table(tmp_path):
 
     missing = sorted(set(Base.metadata.tables) - actual)
     assert not missing, f"这些模型表没有对应迁移，真实环境升级后会缺表：{missing}"
+
+    # 表名覆盖只能发现“整张表漏迁移”，抓不到 nullable、索引、外键等细粒度漂移。
+    # 对同一迁移库执行 Alembic autogenerate 对账，确保 ORM metadata 与 head 完全一致。
+    check = subprocess.run(
+        [sys.executable, "-m", "alembic", "check"],
+        cwd=_BACKEND,
+        env={"PATH": "/usr/bin:/bin", "DATABASE_URL": url, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+    assert check.returncode == 0, (
+        "alembic head 与 ORM metadata 存在 schema 漂移：\n"
+        f"{check.stdout}{check.stderr}"
+    )

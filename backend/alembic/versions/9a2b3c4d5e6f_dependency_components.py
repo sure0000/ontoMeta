@@ -12,7 +12,7 @@ Create Date: 2026-08-07
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "9a2b3c4d5e6f"
 down_revision: Union[str, Sequence[str], None] = "821bc8acf9c4"
@@ -21,22 +21,40 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "dependency_components",
-        sa.Column("id", sa.String(length=36), primary_key=True),
-        sa.Column("key", sa.String(length=32), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("deploy_mode", sa.String(length=16), nullable=False, server_default="external"),
-        sa.Column("deploy_spec_json", sa.Text(), nullable=True),
-        sa.Column("deploy_status", sa.String(length=16), nullable=False, server_default="not_deployed"),
-        sa.Column("deploy_error", sa.Text(), nullable=True),
-        sa.Column("connection_json", sa.Text(), nullable=True),
-        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
-        sa.Column("is_default", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
+    offline = context.is_offline_mode()
+    bind = op.get_bind()
+    inspector = None if offline else sa.inspect(bind)
+    table_names = set() if offline else set(inspector.get_table_names())
+
+    # Some legacy databases were partially advanced by Base.metadata.create_all
+    # while alembic_version remained at the preceding revision.  Treat the
+    # already-created model table as satisfied instead of failing the upgrade.
+    if "dependency_components" not in table_names:
+        op.create_table(
+            "dependency_components",
+            sa.Column("id", sa.String(length=36), primary_key=True),
+            sa.Column("key", sa.String(length=32), nullable=False),
+            sa.Column("name", sa.String(length=255), nullable=False),
+            sa.Column("deploy_mode", sa.String(length=16), nullable=False, server_default="external"),
+            sa.Column("deploy_spec_json", sa.Text(), nullable=True),
+            sa.Column("deploy_status", sa.String(length=16), nullable=False, server_default="not_deployed"),
+            sa.Column("deploy_error", sa.Text(), nullable=True),
+            sa.Column("connection_json", sa.Text(), nullable=True),
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            sa.Column("is_default", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("created_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
+            sa.Column("updated_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
+        )
+        if not offline:
+            inspector = sa.inspect(bind)
+
+    indexes = (
+        set()
+        if offline
+        else {index["name"] for index in inspector.get_indexes("dependency_components")}
     )
-    op.create_index("ix_dependency_components_key", "dependency_components", ["key"])
+    if "ix_dependency_components_key" not in indexes:
+        op.create_index("ix_dependency_components_key", "dependency_components", ["key"])
 
 
 def downgrade() -> None:

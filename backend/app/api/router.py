@@ -9,7 +9,9 @@ from app.api import (
     confirmations,
     data_app,
     dependencies,
+    dimensional_model,
     governance,
+    modeling,
     ontology,
     principals,
     public_routes,
@@ -31,4 +33,6 @@ router.include_router(warehouse.router)
 router.include_router(principals.router)
 router.include_router(agents.router)
 router.include_router(governance.router)
+router.include_router(modeling.router)
+router.include_router(dimensional_model.router)
 router.include_router(public_routes.router)

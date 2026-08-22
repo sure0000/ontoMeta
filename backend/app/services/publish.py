@@ -27,6 +27,7 @@ from app.schemas import (
     OntologyDraftOutput,
 )
 from app.services.common import log_change
+from app.services.ontology_merge import seed_published_authority
 
 logger = logging.getLogger("ontometa.publish")
 from app.services.version_diff import (
@@ -35,11 +36,6 @@ from app.services.version_diff import (
     load_previous_snapshot,
     summarize_diff,
 )
-
-# 待复核标记：对象 role_reason 的 [待复核] 前缀（与 edit._REVIEW_MARK 一致）。
-# 部分发布据此排除未确认的业务对象。
-_REVIEW_MARK = "[待复核]"
-
 
 def _log_change(
     db: Session,
@@ -96,6 +92,7 @@ class DraftPersistenceService:
                 table_role=item.table_role,
                 role_confidence=item.role_confidence,
                 role_reason=item.role_reason,
+                needs_review=item.needs_review,
                 role_signals=(
                     json.dumps(item.role_signals, ensure_ascii=False)
                     if item.role_signals is not None
@@ -403,8 +400,107 @@ class DraftPersistenceService:
         return written
 
 
+class PublishSelection:
+    """一次发布会提升哪些实体、又会跳过多少——发布与发布前自检共用同一份判定。"""
+
+    def __init__(self) -> None:
+        self.entities: list = []
+        self.object_count = 0
+        self.property_count = 0
+        self.relation_count = 0
+        self.skipped_needs_review = 0
+        self.skipped_non_business = 0
+        self.skipped_relation_endpoint = 0
+
+
 class PublishService:
     """将编辑确认后的草稿发布为正式版本。"""
+
+    def select_publishable(self, db: Session, ontology_id: str) -> PublishSelection:
+        """部分发布的判定：只发布「needs_review=false 的业务对象 + 其属性 + 两端都落在
+        该集合里的业务关系」。待复核对象、其它角色对象（数据表/关系表/技术表）、端点
+        未发布的关系一律保持原状。业务逻辑仍走 publish_business_logic 单独发布。
+
+        发布与发布前自检共用这一份判定——两边各写一遍必然漂移，而漂移的表现就是
+        「预检说要发 128 个，发完却是 0 个」。
+        """
+        sel = PublishSelection()
+        objects = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == ontology_id)
+            .all()
+        )
+        business_objects = [o for o in objects if o.table_role == "business_object"]
+        sel.skipped_non_business = len(objects) - len(business_objects)
+        confirmed = [
+            o
+            for o in business_objects
+            if not o.needs_review and not getattr(o, "deleted_by_user", False)
+        ]
+        sel.skipped_needs_review = len(business_objects) - len(confirmed)
+        sel.entities.extend(confirmed)
+        sel.object_count = len(confirmed)
+
+        confirmed_ids = {o.id for o in confirmed}
+        if confirmed_ids:
+            props = (
+                db.query(Property)
+                .filter(Property.object_type_id.in_(confirmed_ids))
+                .all()
+            )
+            sel.entities.extend(props)
+            sel.property_count = len(props)
+
+        relations = (
+            db.query(RelationType)
+            .filter(RelationType.ontology_id == ontology_id)
+            .all()
+        )
+        for r in relations:
+            if getattr(r, "deleted_by_user", False) or r.status == EntityStatus.DEPRECATED.value:
+                continue
+            if (
+                r.source_object_type_id in confirmed_ids
+                and r.target_object_type_id in confirmed_ids
+            ):
+                sel.entities.append(r)
+                sel.relation_count += 1
+            else:
+                sel.skipped_relation_endpoint += 1
+        return sel
+
+    def preflight(self, db: Session, ontology_id: str) -> dict:
+        """发布前自检：把「将发布什么、将跳过什么、为什么」在点之前算给用户看。
+
+        存在的理由是一个真实故障模式——源库无主键导致对象 100% 被打上待复核，
+        发布提升 0 个、本体浏览页一片空白，而用户只看到一句「发布成功」。
+        """
+        ontology = db.get(Ontology, ontology_id)
+        if not ontology:
+            raise ValueError("Ontology not found")
+        sel = self.select_publishable(db, ontology_id)
+        conflicts = 0
+        for model in (ObjectType, RelationType):
+            conflicts += (
+                db.query(model)
+                .filter(
+                    model.ontology_id == ontology_id,
+                    model.conflict_json.isnot(None),
+                )
+                .count()
+            )
+        return {
+            "ontology_id": ontology_id,
+            "current_version": ontology.version,
+            "next_version": ontology.version + 1,
+            "object_count": sel.object_count,
+            "property_count": sel.property_count,
+            "relation_count": sel.relation_count,
+            "skipped_needs_review": sel.skipped_needs_review,
+            "skipped_non_business": sel.skipped_non_business,
+            "skipped_relation_endpoint": sel.skipped_relation_endpoint,
+            "unresolved_conflicts": conflicts,
+        }
 
     def publish(self, db: Session, ontology_id: str, operator: str | None = None) -> Ontology:
         ontology = db.get(Ontology, ontology_id)
@@ -421,6 +517,24 @@ class PublishService:
             db, ontology_id, getattr(_env_settings, "formal_enforcement", "warn")
         )
 
+        # 一域一发布：域内绝不允许出现第二个 published 本体行。历史上发布后再生成会
+        # 新建一行、再发布就攒出两个 published——本体浏览页与 Agent 可检索集一起翻倍，
+        # 版本历史还会整段丢失。这里当场拦住，把用户导回那一行工作本体。
+        sibling = (
+            db.query(Ontology)
+            .filter(
+                Ontology.domain_context_id == ontology.domain_context_id,
+                Ontology.status == OntologyStatus.PUBLISHED.value,
+                Ontology.id != ontology.id,
+            )
+            .first()
+        )
+        if sibling is not None:
+            raise ValueError(
+                f"该数据域已有已发布本体（v{sibling.version}），不能再发布第二个。"
+                "请在该数据域的工作本体上继续编辑后发布。"
+            )
+
         new_version = ontology.version + 1
         previous_snapshot = load_previous_snapshot(
             db, ontology_id, before_version=new_version
@@ -434,51 +548,26 @@ class PublishService:
         ontology.published_at = datetime.now(timezone.utc)
         ontology.approved_by = operator
 
-        # 部分发布（不再硬校验阻断）：只发布「已确认(非待复核)的业务对象 + 其属性 +
-        # 两端都落在已发布业务对象集里的业务关系」。待复核对象、其它角色对象(数据表/
-        # 关系表/技术表)、端点未发布的关系一律保持原状。一致性冲突由 validate_ontology
-        # 作建议性提示(前端展示)，不阻断发布。业务逻辑仍走 publish_business_logic 单独发布。
-        entities: list = []
-        business_objects = (
-            db.query(ObjectType)
-            .filter(
-                ObjectType.ontology_id == ontology_id,
-                ObjectType.table_role == "business_object",
-            )
-            .all()
-        )
-        confirmed_objects = [
-            o
-            for o in business_objects
-            if not (o.role_reason or "").startswith(_REVIEW_MARK)
-            and not getattr(o, "deleted_by_user", False)
-        ]
-        entities.extend(confirmed_objects)
-        confirmed_object_ids = {o.id for o in confirmed_objects}
-        if confirmed_object_ids:
-            entities.extend(
-                db.query(Property)
-                .filter(Property.object_type_id.in_(confirmed_object_ids))
-                .all()
-            )
-        # 业务关系：两端都在已发布业务对象集里、未弃用、未被用户删除 → 随本体发布。
-        relations = (
-            db.query(RelationType)
-            .filter(RelationType.ontology_id == ontology_id)
-            .all()
-        )
-        entities.extend(
-            r
-            for r in relations
-            if r.source_object_type_id in confirmed_object_ids
-            and r.target_object_type_id in confirmed_object_ids
-            and not getattr(r, "deleted_by_user", False)
-            and r.status != EntityStatus.DEPRECATED.value
-        )
+        selection = self.select_publishable(db, ontology_id)
+        entities: list = selection.entities
 
+        # 提升状态的同时把结构性字段升为人工权威：一域一本体后再生成直接打在这一行上，
+        # 没有这一步，人没手动改过的已发布字段会被机器静默覆盖（详见 seed_published_authority）。
+        seeded = 0
         for entity in entities:
             if entity.status != EntityStatus.DEPRECATED.value:
                 entity.status = EntityStatus.PUBLISHED.value
+                # 本次发布把改动固化进新版本，「待固化」凭据随之清零。
+                if hasattr(entity, "has_unpublished_change"):
+                    entity.has_unpublished_change = False
+                if seed_published_authority(entity):
+                    seeded += 1
+        if seeded:
+            logger.info(
+                "发布固化人工权威：ontology=%s，%d 个实体的结构性字段已钉住",
+                ontology.id,
+                seeded,
+            )
 
         db.add(
             VersionRecord(

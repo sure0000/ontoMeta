@@ -1,6 +1,7 @@
 import {
   ApartmentOutlined,
   CheckCircleOutlined,
+  DeleteOutlined,
   DeploymentUnitOutlined,
   DownOutlined,
   EditOutlined,
@@ -11,12 +12,14 @@ import {
 import {
   Alert,
   Button,
+  Drawer,
   Dropdown,
   Modal,
   Progress,
   Space,
   Spin,
   Table,
+  Tag,
   Tooltip,
   message,
 } from "antd";
@@ -36,7 +39,10 @@ import type {
   DomainContextDetail,
   DraftGenerationScope,
   DraftProgress,
+  MergeReport,
+  MergeReportSummary,
   ObjectTypeSummary,
+  PublishPreflight,
   RelationType,
   VersionDiff,
   VersionRecord,
@@ -109,7 +115,7 @@ async function fetchDomainBundle(
   },
 ): Promise<DomainBundle> {
   const domain = await api.getDomain(domainId);
-  if (!domain.latest_ontology_id) {
+  if (!domain.working_ontology_id) {
     return {
       domain,
       objects: [],
@@ -118,8 +124,119 @@ async function fetchDomainBundle(
       relationTotal: 0,
     };
   }
-  const lists = await fetchOntologyLists(domain.latest_ontology_id, opts);
+  const lists = await fetchOntologyLists(domain.working_ontology_id, opts);
   return { domain, ...lists };
+}
+
+/** 发布前自检摘要：将发布什么、将跳过什么、为什么。 */
+function PublishPreflightSummary({ preflight }: { preflight: PublishPreflight }) {
+  const skipped = [
+    preflight.skipped_needs_review > 0 && `待复核业务对象 ${preflight.skipped_needs_review}`,
+    preflight.skipped_non_business > 0 && `非业务对象 ${preflight.skipped_non_business}`,
+    preflight.skipped_relation_endpoint > 0 &&
+      `端点未发布的关系 ${preflight.skipped_relation_endpoint}`,
+  ].filter(Boolean) as string[];
+
+  return (
+    <div style={{ fontSize: 13, lineHeight: 1.9 }}>
+      <div>
+        版本 v{preflight.current_version} → <strong>v{preflight.next_version}</strong>
+      </div>
+      <div>
+        将发布：业务对象 <strong>{preflight.object_count}</strong> · 属性{" "}
+        {preflight.property_count} · 业务关系 {preflight.relation_count}
+      </div>
+      {skipped.length > 0 && <div>将跳过：{skipped.join(" · ")}</div>}
+      {preflight.unresolved_conflicts > 0 && (
+        <div>未解决字段冲突：{preflight.unresolved_conflicts}（保持人工值，不阻断发布）</div>
+      )}
+      {preflight.object_count === 0 && (
+        <Alert
+          style={{ marginTop: 8 }}
+          type="warning"
+          showIcon
+          message="本次不会提升任何业务对象"
+          description="发布后本体浏览页仍会是空的。先在工作区把对象标为已确认（或改判角色）再发布。"
+        />
+      )}
+    </div>
+  );
+}
+
+/** 一次生成到底改了什么——机器动过的地方在这里一次性看完。 */
+function MergeReportDrawer({
+  report,
+  open,
+  onClose,
+}: {
+  report: MergeReport | null;
+  open: boolean;
+  onClose: () => void;
+}) {
+  if (!report) return null;
+  const s = report.summary;
+  const sections: { key: keyof MergeReportSummary; label: string; hint: string }[] = [
+    { key: "added", label: "新增", hint: "上游新出现，已入库" },
+    { key: "updated", label: "更新", hint: "人没动过，采纳了机器新值" },
+    { key: "kept", label: "保留", hint: "人工值优先，机器未改动" },
+    { key: "conflict", label: "冲突", hint: "双方都改，待你裁决" },
+    { key: "removed", label: "上游消失", hint: "源表已不在" },
+  ];
+  return (
+    <Drawer title="本次生成变更报告" open={open} onClose={onClose} width={560}>
+      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+          {sections.map((sec) => (
+            <div
+              key={sec.key}
+              style={{
+                flex: "1 1 90px",
+                padding: "10px 12px",
+                border: "1px solid var(--om-border)",
+                borderRadius: 8,
+              }}
+            >
+              <div style={{ fontSize: 20, fontWeight: 500 }}>{s[sec.key]}</div>
+              <div style={{ fontSize: 12, color: "var(--om-text-secondary)" }}>
+                {sec.label}
+              </div>
+            </div>
+          ))}
+        </div>
+        {sections.map((sec) => (
+          <div key={sec.key} style={{ fontSize: 13 }}>
+            <div style={{ fontWeight: 500, marginBottom: 4 }}>
+              {sec.label}
+              <span style={{ color: "var(--om-text-secondary)", fontWeight: 400 }}>
+                {" "}
+                — {sec.hint}
+              </span>
+            </div>
+            {(["object_types", "relation_types", "properties"] as const).map((entity) => {
+              const items = report[entity]?.[sec.key] ?? [];
+              if (!items.length) return null;
+              const label =
+                entity === "object_types"
+                  ? "对象"
+                  : entity === "relation_types"
+                    ? "关系"
+                    : "属性";
+              return (
+                <div key={entity} style={{ color: "var(--om-text-secondary)" }}>
+                  {label}（{items.length}）：
+                  {items
+                    .slice(0, 8)
+                    .map((i) => i.display_name || i.name)
+                    .join("、")}
+                  {items.length > 8 && ` 等 ${items.length} 项`}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </Space>
+    </Drawer>
+  );
 }
 
 export function DomainDetailPage() {
@@ -182,6 +299,8 @@ export function DomainDetailPage() {
   const [ontologyLoading, setOntologyLoading] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [mergeReport, setMergeReport] = useState<MergeReport | null>(null);
+  const [mergeReportOpen, setMergeReportOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versions, setVersions] = useState<VersionRecord[]>([]);
@@ -256,6 +375,16 @@ export function DomainDetailPage() {
               setBundle((prev) => (prev ? { ...prev, domain: updated } : prev));
               await loadOntology(p.ontology_id);
               message.success(`${SCOPE_LABEL[scope]}生成完成`);
+              // 二次生成的核心价值是「告诉我上游变了什么」。后端每次都落了完整合并
+              // 报告，此前前端从不读它——用户点完只得到一句 toast，然后自己去几百个
+              // 对象里翻。生成一结束就把变更报告推到眼前。
+              try {
+                const report = await api.getMergeReport(domainId!, taskId);
+                setMergeReport(report);
+                setMergeReportOpen(true);
+              } catch {
+                /* 报告拿不到不影响生成本身 */
+              }
             } else if (p.status === "failed") {
               setActionError(p.message || "生成失败");
             } else if (p.status === "cancelled") {
@@ -325,34 +454,24 @@ export function DomainDetailPage() {
     });
   };
 
-  const handleCreateRevision = () => {
-    if (!domainId) return;
-    Modal.confirm({
-      title: "创建修订草稿",
-      content:
-        "将从已发布本体派生一份修订草稿，已发布内容作为人工权威基线；随后再生成会以三方合并方式引入 DataHub 变化并产出复核冲突。",
-      okText: "创建",
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          const r = await api.createRevisionDraft(domainId);
-          setActionError(null);
-          await loadOntology(r.ontology_id);
-          void reloadBundle();
-        } catch (err) {
-          setActionError(err instanceof Error ? err.message : "创建修订草稿失败");
-        }
-      },
-    });
-  };
+  const handlePublish = async () => {
+    if (!domain?.working_ontology_id || !domainId) return;
 
-  const handlePublish = () => {
-    if (!domain?.latest_ontology_id || !domainId) return;
+    // 发布前自检：把「将发布多少、将跳过多少、为什么」在点之前算给用户看。
+    // 真实故障模式是源库无主键导致对象 100% 待复核 → 提升 0 个、本体浏览页空白，
+    // 而用户只看到一句「发布成功」。这里让原因在点之前就可见。
+    const preflight: PublishPreflight | null = await api
+      .publishPreflight(domain.working_ontology_id)
+      .catch(() => null);
 
     Modal.confirm({
       title: "确认发布本体",
-      content:
-        "发布后将把当前草稿固化为正式版本，对外在本体页与业务逻辑页展示。此操作需要二次确认。",
+      width: 520,
+      content: preflight ? (
+        <PublishPreflightSummary preflight={preflight} />
+      ) : (
+        "发布将把当前已确认内容固化为新版本，对外在本体页与业务逻辑页展示。此操作需要二次确认。"
+      ),
       okText: "确认发布",
       cancelText: "取消",
       onOk: async () => {
@@ -361,7 +480,7 @@ export function DomainDetailPage() {
           // 形式化不变式预检（F2）：error 级且 enforcement=error 时阻断（后端也会拦，
           // 这里提前给出可读提示，避免直接抛 400）。
           const formal = await api
-            .formalValidateOntology(domain.latest_ontology_id!)
+            .formalValidateOntology(domain.working_ontology_id!)
             .catch(() => null);
           if (formal && formal.enforcement === "error" && !formal.ok) {
             const errs = formal.issues.filter((i) => i.severity === "error");
@@ -378,10 +497,10 @@ export function DomainDetailPage() {
           // 一致性校验改为建议性：不再阻断发布。发布已确认的业务对象与业务关系，
           // 待复核/其它类型对象保持原状，冲突仅作简洁提示。
           const validation = await api
-            .validateOntology(domain.latest_ontology_id!)
+            .validateOntology(domain.working_ontology_id!)
             .catch(() => null);
           const confirmation = await api.createConfirmation({
-            ontology_id: domain.latest_ontology_id!,
+            ontology_id: domain.working_ontology_id!,
             target_type: "ontology",
             action_type: "publish",
             reason: "工作区发布确认",
@@ -417,6 +536,32 @@ export function DomainDetailPage() {
           setActionError(msg);
           message.error(msg);
           throw err;
+        }
+      },
+    });
+  };
+
+  const handleDiscardUnpublished = () => {
+    if (!domainId) return;
+    Modal.confirm({
+      title: "丢弃未发布内容",
+      okType: "danger",
+      content:
+        "将删除该数据域工作本体里从未发布过的对象与关系，已发布内容（含你对它们的修改）保持不变。此操作不可撤销。",
+      okText: "确认丢弃",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const r = await api.discardUnpublished(domainId);
+          setActionError(null);
+          message.success(
+            `已丢弃：对象 ${r.object_types} · 关系 ${r.relation_types} · 属性 ${r.properties}`,
+          );
+          void reloadBundle();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "丢弃失败";
+          setActionError(msg);
+          message.error(msg);
         }
       },
     });
@@ -462,9 +607,18 @@ export function DomainDetailPage() {
   const relationDetailPath = (relationId: string) =>
     `/workspace/${domainId}/relations/${relationId}`;
   const relationGroupDetailPath = (displayName: string) =>
-    `/workspace/${domainId}/relation-groups/${encodeURIComponent(displayName)}?oid=${domain.latest_ontology_id}`;
+    `/workspace/${domainId}/relation-groups/${encodeURIComponent(displayName)}?oid=${domain.working_ontology_id}`;
 
   const publishedVersion = domain.published_ontology_version;
+
+  // 一域一本体：工作本体永远可编辑，不论发没发布过。已发布实体被人工编辑后**立即
+  // 生效且保持 published**（人工即权威），改动会计入下面的「待固化」提示条，点发布
+  // 即固化成新版本。机器改动才需要过闸——那走三方合并的冲突通道。
+  const workspaceEditable = domain.working_ontology_id != null;
+  const pendingCount = domain.unpublished_change_count ?? 0;
+  const pendingPublish = domain.pending_publish_count ?? 0;
+  const needsReviewCount = domain.needs_review_count ?? 0;
+  const conflictCount = domain.unresolved_conflict_count ?? 0;
 
   return (
     <PageContainer full>
@@ -473,8 +627,8 @@ export function DomainDetailPage() {
         title={
           <Space size={10}>
             <span>{domain.name}</span>
-            {domain.latest_ontology_status && (
-              <StatusBadge status={domain.latest_ontology_status} />
+            {domain.working_ontology_status && (
+              <StatusBadge status={domain.working_ontology_status} />
             )}
           </Space>
         }
@@ -504,11 +658,6 @@ export function DomainDetailPage() {
                     <Button icon={<ApartmentOutlined />} aria-label="查看已发布本体" />
                   </Tooltip>
                 </Link>
-                {domain.latest_ontology_status === "published" && (
-                  <Button icon={<ThunderboltOutlined />} onClick={handleCreateRevision}>
-                    创建修订草稿
-                  </Button>
-                )}
                 <Tooltip title={`版本历史${publishedVersion ? ` v${publishedVersion}` : ""}`}>
                   <Button
                     icon={<HistoryOutlined />}
@@ -529,11 +678,35 @@ export function DomainDetailPage() {
                     label: "生成本体草稿",
                     onClick: () => handleGenerate("full"),
                   },
+                  // 对象/关系两个范围后端一直支持，此前只有 Data Agent 的提案块能触发，
+                  // 工作区点不到。
+                  {
+                    key: "objects",
+                    icon: <ApartmentOutlined />,
+                    label: "仅生成业务对象",
+                    onClick: () => handleGenerate("objects"),
+                  },
+                  {
+                    key: "relations",
+                    icon: <DeploymentUnitOutlined />,
+                    label: "仅生成业务关系",
+                    disabled: !domain.working_ontology_id,
+                    onClick: () => handleGenerate("relations"),
+                  },
+                  { type: "divider" as const },
                   {
                     key: "manual",
                     icon: <EditOutlined />,
                     label: "人工生成",
                     onClick: () => setManualOpen(true),
+                  },
+                  {
+                    key: "discard",
+                    icon: <DeleteOutlined />,
+                    danger: true,
+                    disabled: !domain.working_ontology_id,
+                    label: "丢弃未发布内容",
+                    onClick: handleDiscardUnpublished,
                   },
                 ],
               }}
@@ -549,15 +722,15 @@ export function DomainDetailPage() {
                 </Space>
               </Button>
             </Dropdown>
-            {domain.latest_ontology_id && domain.latest_ontology_status === "draft" && (
+            {domain.working_ontology_id && workspaceEditable && (
               <ConflictsPanel
-                ontologyId={domain.latest_ontology_id}
+                ontologyId={domain.working_ontology_id}
                 onChanged={() =>
-                  domain.latest_ontology_id && void loadOntology(domain.latest_ontology_id)
+                  domain.working_ontology_id && void loadOntology(domain.working_ontology_id)
                 }
               />
             )}
-            {domain.latest_ontology_id && domain.latest_ontology_status === "draft" && (
+            {domain.working_ontology_id && workspaceEditable && (
               <Button onClick={handlePublish} icon={<CheckCircleOutlined />}>
                 确认发布
               </Button>
@@ -573,6 +746,32 @@ export function DomainDetailPage() {
           showIcon
           closable
           onClose={() => setActionError(null)}
+        />
+      )}
+
+      {workspaceEditable && (pendingCount > 0 || pendingPublish > 0) && (
+        <Alert
+          style={{ marginTop: 12 }}
+          type="info"
+          showIcon
+          message={
+            <Space size={8} wrap>
+              {pendingCount > 0 && <Tag color="orange">{pendingCount} 项已发布内容被修改</Tag>}
+              {pendingPublish > 0 && <Tag color="blue">{pendingPublish} 项待提升</Tag>}
+              {needsReviewCount > 0 && (
+                <Tag>{needsReviewCount} 个待复核对象（发布会跳过）</Tag>
+              )}
+              {conflictCount > 0 && <Tag color="red">{conflictCount} 处字段冲突</Tag>}
+              <span style={{ color: "var(--om-text-secondary)", fontSize: 13 }}>
+                尚未固化为新版本
+              </span>
+            </Space>
+          }
+          action={
+            <Button size="small" type="primary" onClick={handlePublish}>
+              发布
+            </Button>
+          }
         />
       )}
 
@@ -605,7 +804,7 @@ export function DomainDetailPage() {
       )}
 
       <Spin spinning={ontologyLoading || loading}>
-        {!domain.latest_ontology_id ? (
+        {!domain.working_ontology_id ? (
           <EmptyState
             title="尚未生成本体草稿"
             description="从 DataHub 拉取数据域元数据并生成本体草稿，作为后续编辑与发布的起点。"
@@ -639,7 +838,7 @@ export function DomainDetailPage() {
               relations={relations}
               objectDetailPath={objectDetailPath}
               relationDetailPath={relationDetailPath}
-              relationScope={{ ontologyId: domain.latest_ontology_id ?? undefined }}
+              relationScope={{ ontologyId: domain.working_ontology_id ?? undefined }}
               relationGroupDetailPath={relationGroupDetailPath}
               workspaceMode
               searchQuery={searchQuery}
@@ -767,12 +966,18 @@ export function DomainDetailPage() {
         </Spin>
       </Modal>
 
+      <MergeReportDrawer
+        report={mergeReport}
+        open={mergeReportOpen}
+        onClose={() => setMergeReportOpen(false)}
+      />
+
       {domainId && (
         <ManualCreateModal
           open={manualOpen}
           onClose={() => setManualOpen(false)}
           domainId={domainId}
-          ontologyId={domain?.latest_ontology_id}
+          ontologyId={domain?.working_ontology_id}
           objects={objects}
           onCreated={() => void reloadBundle()}
         />

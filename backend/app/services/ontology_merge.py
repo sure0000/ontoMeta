@@ -43,6 +43,16 @@ PROPERTY_FIELDS = ["display_name", "description", "data_type", "semantic_type"]
 RELATION_FIELDS = ["display_name", "description", "cardinality", "structure_type"]
 LOGIC_FIELDS = ["display_name", "description", "expression_summary", "logic_type"]
 
+# 描述性字段：纯说明文字，下游不依赖，机器可持续刷新（除非人工显式改过而被钉住）。
+# 其余可合并字段都是**结构性**的——投影、建表、SQL 生成都读它们，改动即破坏性变更，
+# 故实体一经发布，其结构性字段即升为人工权威（见 publish.py 的 seed_published_authority）。
+DESCRIPTIVE_FIELDS = frozenset({"description", "role_reason"})
+
+
+def structural_fields(fields: Iterable[str]) -> list[str]:
+    """从可合并字段里筛出结构性字段。"""
+    return [f for f in fields if f not in DESCRIPTIVE_FIELDS]
+
 
 def relation_signature(
     source_ref: str | None, target_ref: str | None, structure_type: str | None
@@ -69,6 +79,39 @@ def _dumps(value: Any) -> str | None:
     if isinstance(value, (list, dict)) and not value:
         return None
     return json.dumps(value, ensure_ascii=False)
+
+
+_MERGEABLE_FIELDS_BY_ENTITY = {
+    "ObjectType": OBJECT_FIELDS,
+    "Property": PROPERTY_FIELDS,
+    "RelationType": RELATION_FIELDS,
+    "BusinessLogic": LOGIC_FIELDS,
+}
+
+
+def seed_published_authority(entity: Any) -> list[str]:
+    """把实体的结构性字段钉住——「已发布即人工权威」的落地，发布时调用。
+
+    这是三方合并唯一听得懂的语言：钉住的字段机器不得直接改，只会记冲突交人工裁决。
+    一域一本体后再生成会直接打在正对外服务的那一行上，没有这一步，人没手动改过的
+    已发布字段会被机器静默覆盖——生产内容在无人点发布的情况下变了。
+
+    刻意**不推进** ``machine_baseline``：基线要停在机器上次的输出上，机器再次给出同一个
+    值时 ``inc == base`` 即静默保留人工值；若把基线推到已发布值，机器每跑一次都会重报
+    同一条冲突，"冲突只提示一次"的约定就破了。
+
+    返回本次新钉住的字段名。``origin`` 不动——钉住表达的是权威，不是作者身份。
+    """
+    fields = _MERGEABLE_FIELDS_BY_ENTITY.get(type(entity).__name__)
+    if not fields or not hasattr(entity, "overridden_fields"):
+        return []
+    pinned = set(_loads(entity.overridden_fields, []))
+    newly = [f for f in structural_fields(fields) if f not in pinned]
+    if not newly:
+        return []
+    pinned.update(newly)
+    entity.overridden_fields = _dumps(sorted(pinned))
+    return newly
 
 
 def _prop_key(name: str | None) -> str:
@@ -273,6 +316,24 @@ class OntologyMergeService:
         object_ref_to_id: dict[str, str] = {}
         object_id_by_name: dict[str, str] = {}
         seen_object_ids: set[str] = set()
+        # 改名必须分两阶段落库。若 A 释放名称 x、B 同批接管 x，仅在内存里把
+        # A.name/B.name 直接改成最终值并不能保证安全：SQLAlchemy 可能按主键先 UPDATE B，
+        # SQLite 又逐条检查唯一约束，于是会在 A 尚未释放 x 的中间态报 IntegrityError。
+        # 第一阶段统一写入事务内唯一的临时名并 flush，第二阶段才写最终名。
+        pending_renames: list[tuple[ObjectType, str]] = []
+
+        def _stage_rename(obj: ObjectType, previous_name: str, final_name: str) -> None:
+            if final_name == previous_name:
+                obj.name = final_name
+                return
+            temp_name = f"__ontometa_tmp__{obj.id}"
+            suffix = 2
+            while temp_name in used_names:
+                temp_name = f"__ontometa_tmp__{obj.id}_{suffix}"
+                suffix += 1
+            used_names.add(temp_name)
+            obj.name = temp_name
+            pending_renames.append((obj, final_name))
 
         for item in object_types:
             existing = existing_by_ref.get(item.source_ref) if item.source_ref else None
@@ -298,6 +359,9 @@ class OntologyMergeService:
                     table_role=item.table_role,
                     role_confidence=item.role_confidence,
                     role_reason=item.role_reason,
+                    # 复核状态只在**新建**时取机器建议。再生成绝不回写——人确认过的
+                    # 对象不能被机器重新打成待复核（那会让它悄悄掉出下次发布集）。
+                    needs_review=item.needs_review,
                     role_signals=(
                         _dumps(item.role_signals)
                         if item.role_signals is not None
@@ -308,6 +372,10 @@ class OntologyMergeService:
                     machine_baseline=_dumps(incoming),
                     last_generation_id=gen_id,
                 )
+                # INSERT 也可能复用本批已有对象刚释放的名字；先单独刷出临时改名，
+                # 避免 UOW 选择 INSERT-before-UPDATE 时撞上数据库中的旧名。
+                if pending_renames:
+                    db.flush()
                 db.add(obj)
                 db.flush()
                 report.record(
@@ -326,11 +394,13 @@ class OntologyMergeService:
                         obj, incoming, OBJECT_FIELDS
                     )
                     # 三方合并可能把机器名回填到 obj.name，撞上别的对象照样 flush 报错。
-                    if obj.name != previous_name:
+                    final_name = obj.name
+                    if final_name != previous_name:
                         used_names.discard(previous_name)
-                        obj.name = _allocate(obj.name, obj.source_ref)
+                        final_name = _allocate(final_name, obj.source_ref)
+                        _stage_rename(obj, previous_name, final_name)
                         baseline = _loads(obj.machine_baseline, {})
-                        baseline["name"] = obj.name
+                        baseline["name"] = final_name
                         obj.machine_baseline = _dumps(baseline)
                     obj.source_confidence = item.confidence
                     obj.role_confidence = item.role_confidence
@@ -346,13 +416,22 @@ class OntologyMergeService:
                         else "machine"
                     )
                     report.record(
-                        "object_types", outcome, obj.id, obj.name, obj.display_name,
+                        "object_types", outcome, obj.id, final_name, obj.display_name,
                         fields=changed, conflicts=conflicts,
                     )
             if item.source_ref:
                 object_ref_to_id[item.source_ref] = obj.id
             object_id_by_name[item.name] = obj.id
             seen_object_ids.add(obj.id)
+
+        if pending_renames:
+            # 阶段一：所有旧名都已真正从唯一索引中释放。
+            db.flush()
+            for obj, final_name in pending_renames:
+                used_names.discard(obj.name)  # 释放仅供事务内部使用的临时名
+                obj.name = final_name
+            # 阶段二：最终名已经过 _allocate 全局分配，彼此唯一，可安全批量写入。
+            db.flush()
 
         self._merge_properties(db, object_id_by_name, properties, gen_id, report)
 

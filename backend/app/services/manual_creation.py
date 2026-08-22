@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.models import DomainContext, ObjectType, Ontology, Property
 from app.models.ontology import EntityStatus, OntologyStatus
+from app.services import ontology_workspace
 from app.services.edit import _assert_object_name_free
 
 # 语义类型 → 各数据源方言的物理列类型映射。仅覆盖常见方言，未知方言退回 ANSI。
@@ -153,25 +154,14 @@ class ManualCreationService:
     """把「人工定义的业务对象」写入数据域的草稿本体，并产出建表 DDL。"""
 
     def _get_or_create_draft_ontology(self, db: Session, domain: DomainContext) -> Ontology:
-        draft = (
-            db.query(Ontology)
-            .filter(
-                Ontology.domain_context_id == domain.id,
-                Ontology.status == OntologyStatus.DRAFT.value,
-            )
-            .order_by(Ontology.updated_at.desc())
-            .first()
+        """一域一本体：人工建模写进该域**唯一**的工作本体，不看 status。
+
+        旧实现只认 draft 行，发布后会再造一行空白草稿，人工新建的对象从此落在一个
+        没人看的分叉里（详见 ontology_workspace）。
+        """
+        return ontology_workspace.get_or_create_working_ontology(
+            db, domain.id, generated_by="manual"
         )
-        if draft:
-            return draft
-        draft = Ontology(
-            domain_context_id=domain.id,
-            status=OntologyStatus.DRAFT.value,
-            generated_by="manual",
-        )
-        db.add(draft)
-        db.flush()
-        return draft
 
     def create_object(
         self,

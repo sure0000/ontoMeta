@@ -236,9 +236,8 @@ class EvidenceBuilder:
                     row_count=dataset.row_count,
                     table_role=role.role,
                     role_confidence=role.confidence,
-                    role_reason=(
-                        f"[待复核] {role.reason}" if role.needs_review else role.reason
-                    ),
+                    role_reason=role.reason,
+                    needs_review=role.needs_review,
                     role_signals={
                         "score": role.score,
                         "needs_review": role.needs_review,
@@ -447,7 +446,7 @@ class EvidenceBuilder:
         抑制把它推向 bridge 的信号（is_child_table / fact / weak_fact）后重跑分类器，
         得到它作为**对象**时的角色：达标业务环节→业务对象，否则→数据表（分类器内的
         segment_size 降级已处理）。分类器若仍判 bridge（如多外键主键的关联式结构），
-        兜底落数据表——它不是业务关系。全部标 [待复核]。
+        兜底落数据表——它不是业务关系。全部标 needs_review。
         """
         from app.services.object_classifier import ROLE_BRIDGE, ROLE_DATA_TABLE
 
@@ -465,9 +464,10 @@ class EvidenceBuilder:
         )
         pack.table_role = new_role
         pack.role_reason = (
-            f"[待复核] 关系表未能塌缩为业务关系（连不到两个业务对象），"
+            f"关系表未能塌缩为业务关系（连不到两个业务对象），"
             f"智能重判为{label}：{res.reason}"
         )
+        pack.needs_review = True
         pack.role_signals = {
             "score": res.score,
             "needs_review": True,

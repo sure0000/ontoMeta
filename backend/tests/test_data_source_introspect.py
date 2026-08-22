@@ -88,3 +88,28 @@ def test_api_rejects_source_without_connection(client, admin_headers):
     r = client.get(f"/api/data-sources/{ds_id}/databases", headers=admin_headers)
     assert r.status_code == 400
     assert "Mock" in r.json()["detail"]
+
+
+def test_dsn_components_echoes_password_plaintext():
+    """DSN 里的密码现在明文回显（供前端 Input.Password 预填+眼睛切换），password_set 保留兼容。"""
+    from app.services.data_app import DataAppService
+
+    dsn = "postgresql+psycopg://alice:s3cr3t@db.example.com:5432/erp"
+    comps = DataAppService._dsn_components("postgres", dsn)
+    # 非机密连接字段原样
+    assert comps["host"] == "db.example.com"
+    assert comps["port"] == 5432
+    assert comps["database"] == "erp"
+    assert comps["username"] == "alice"
+    # 密码明文回显 + set 标志
+    assert comps["password"] == "s3cr3t"
+    assert comps["password_set"] is True
+
+
+def test_dsn_components_no_password_when_absent():
+    """密码段缺失时 password 为 None、password_set=False（不发明文也不假报已设）。"""
+    from app.services.data_app import DataAppService
+
+    comps = DataAppService._dsn_components("postgres", "postgresql+psycopg://alice@db:5432/erp")
+    assert comps["password"] is None
+    assert comps["password_set"] is False

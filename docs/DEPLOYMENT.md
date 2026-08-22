@@ -69,7 +69,7 @@ git clone <repo> && cd ontoMeta
 # ① 管理令牌（强烈建议改掉默认值）
 export ONTOMETA_ADMIN_TOKEN=$(openssl rand -hex 24)
 
-# ② LLM（不配则草稿走确定性命名兽、问数显式报错）
+# ② LLM（必配：草稿的业务命名与问数都靠它，不配则两者都显式报错）
 export OPENAI_API_KEY=sk-...
 
 # ③ 起栈
@@ -114,8 +114,9 @@ docker compose down -v           # 连数据卷一起删（清空所有数据）
 | 物化编排（生成 DAG/搬运/血缘） | ✅ | ✅ | ✅ | ✅ | — | — | ✅ | §5.8 |
 | DataHub 元数据导入 | ✅ | ✅ | ✅ | ✅ | — | — | — | §5.9 |
 
-> 「—」表示该功能不依赖此项。**未配置的依赖走确定性路径或显式报错，不会静默错乱**：
-> 无 LLM → 草稿以证据确定性命名兽底（不报错），但问数/表达式等纯 LLM 能力显式报错；
+> 「—」表示该功能不依赖此项。**未配置的依赖一律显式报错，不做静默降级**：
+> 无 LLM → 草稿生成入口直接 400 提示去设置页配置（**不会**退化成用技术表名当业务名），
+> 问数/表达式等纯 LLM 能力同样显式报错；
 > 无 DataHub → 导入/血缘相关接口报错；无 Cube → 语义层接口报 503/降级。
 
 ---
@@ -142,7 +143,8 @@ MAX_CONCURRENT_DRAFT_GENERATIONS=2 # 草稿生成并发上限
 ```
 **验收**：前端「本体建模」选数据域 → 触发草稿生成 → 对象/属性/关系/业务逻辑逐块产出，
 状态从 running → succeeded；发布后出现在「本体浏览」。
-**无 LLM**：草稿以确定性命名兽底生成（可用但命名质量低）；无 DataHub：无法拉取源数据域，报错。
+**无 LLM**：生成入口返回 400「未配置可用的 LLM 服务」，不生成任何草稿——业务对象名必须是
+LLM 给出的中文业务名，没有技术名兜底方案；无 DataHub：无法拉取源数据域，报错。
 
 ### 5.3 发布与一致性校验
 **需要**：§5.1。**配置**：
@@ -358,7 +360,7 @@ JSON 数组。Compose 默认放行 `localhost:5180/127.0.0.1:5180`，生产改�
 |------|------|
 | 前端打开空白 / 接口 404 | 后端没起或端口不对；`curl localhost:8000/health`；检查 `nginx.conf` `proxy_pass` |
 | 管理 API 返回 503 | `ONTOMETA_ADMIN_TOKEN` 未配置；前端「管理鉴权」令牌不一致 |
-| 草稿生成卡住/失败 | 看 `.logs/backend.log`；无 LLM 时走确定性命名兽（非故障）；`MAX_CONCURRENT_DRAFT_GENERATIONS` 是否打满 |
+| 草稿生成卡住/失败 | 看 `.logs/backend.log`；任务失败原因直接显示在任务卡片上（如「LLM 未完成业务对象中文命名」「未配置可用的 LLM 服务」）；`MAX_CONCURRENT_DRAFT_GENERATIONS` 是否打满 |
 | Chat BI 报「未配置 LLM」 | `OPENAI_API_KEY` 未设且设置页未配 LLM 服务 |
 | Chat BI 拒答 | `AGENT_SOUNDNESS=on` 且语义不可证；改 `warn` 观测，或修正本体口径 |
 | 语义检索同义词召回不到 | `AGENT_EMBEDDING_MODEL` 留空即关闭；填模型名并发布本体重建索引 |

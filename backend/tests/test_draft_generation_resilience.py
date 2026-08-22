@@ -17,7 +17,11 @@ from app.schemas import (
     ObjectTypeEvidencePack,
     PropertyEvidencePack,
 )
-from app.services.draft_generator import DraftEnrichmentError, OntologyDraftGenerator
+from app.services.draft_generator import (
+    DraftEnrichmentError,
+    LlmResponseFormatError,
+    OntologyDraftGenerator,
+)
 from types import SimpleNamespace
 
 
@@ -132,3 +136,114 @@ def test_persistent_transient_error_raises_not_degrades(monkeypatch):
 
     assert ei.value.phase == "对象"
     assert ei.value.failed >= 1
+
+
+# ---------------------------------------------------------------------------
+# 「模型这次没干好活」类失败：同样重试，重试完如实失败，绝不用技术表名顶替
+# ---------------------------------------------------------------------------
+class _FencedThenPlain:
+    """先返回代码围栏包裹的 JSON，后续返回裸 JSON——两种都必须解析出中文命名。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def create(self, *, model, messages, response_format=None):
+        self.calls += 1
+        body = _good_content("table_0_di_entity")
+        content = f"```json\n{body}\n```" if self.calls == 1 else body
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
+
+def test_code_fenced_response_needs_no_retry(monkeypatch):
+    """围栏 JSON 一次就该解析成功——它是格式包装，不是失败。"""
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    completions = _FencedThenPlain()
+    gen = _gen_with(completions)
+    draft = asyncio.run(gen.generate(_bundle(1)))
+
+    assert completions.calls == 1
+    assert draft.object_types[0].display_name == "业务名"
+
+
+def test_truncated_response_reports_finish_reason(monkeypatch):
+    """响应被截断(finish_reason=length)时，失败原因要点出截断，便于调小分块。"""
+    monkeypatch.setattr(settings, "draft_chunk_retry_attempts", 1)
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    class _Truncated:
+        async def create(self, *, model, messages, response_format=None):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"object_types": [{"nam'),
+                        finish_reason="length",
+                    )
+                ]
+            )
+
+    gen = _gen_with(_Truncated())
+    with pytest.raises(LlmResponseFormatError) as ei:
+        asyncio.run(gen.generate(_bundle(1)))
+    assert "finish_reason=length" in str(ei.value)
+    assert "截断" in str(ei.value)
+
+
+def test_stale_checkpoint_without_naming_is_recomputed(monkeypatch):
+    """历史检查点里存的是「没命名」的旧结果 → 丢弃重算，而不是拿它拼出技术名草稿。"""
+    monkeypatch.setattr(settings, "draft_chunk_retry_attempts", 1)
+    monkeypatch.setattr(settings, "draft_chunk_table_batch_size", 1)
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 1)  # 强制分块
+
+    class _MemoryCheckpoint:
+        def __init__(self) -> None:
+            self.data: dict = {}
+            self.loads = 0
+
+        def load(self, key: str):
+            self.loads += 1
+            # 老版本降级时代留下的空命名结果。
+            return {"objects": {}, "properties": {}, "roles": {}}
+
+        def save(self, key: str, value: dict) -> None:
+            self.data[key] = value
+
+    class _GoodForAny:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create(self, *, model, messages, response_format=None):
+            import json
+
+            self.calls += 1
+            payload = json.loads(messages[-1]["content"])
+            objs = [
+                {
+                    "candidate_name": o["candidate_name"],
+                    "name": o["candidate_name"].removesuffix("_di_entity"),
+                    "display_name": "业务" + o["display_name"],
+                }
+                for o in payload.get("object_types", [])
+            ]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps({"object_types": objs}, ensure_ascii=False)
+                        )
+                    )
+                ]
+            )
+
+    completions = _GoodForAny()
+    gen = _gen_with(completions)
+    checkpoint = _MemoryCheckpoint()
+    object_types, _props = asyncio.run(
+        gen.generate_object_types(_bundle(2), checkpoint=checkpoint)
+    )
+
+    assert completions.calls == 2  # 两块都因缓存不合格而重算
+    assert all(ot.display_name.startswith("业务") for ot in object_types)
+    assert len(checkpoint.data) == 2  # 重算结果覆盖写回

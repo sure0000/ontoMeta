@@ -126,10 +126,20 @@ class DomainContextSummary(BaseModel):
 
 class DomainContextDetail(DomainContextSummary):
     datahub_url: str | None = None
-    latest_ontology_id: str | None = None
-    latest_ontology_status: str | None = None
+    # 一域一本体：工作本体就是该域**唯一**那一行，既是草稿工作台也是发布载体。
+    # 旧字段名 latest_ontology_id 取的是「按 updated_at 最新的那行」，会在 draft 与
+    # published 两行之间来回跳——页面主体因此不稳定。现在没有第二行可跳。
+    working_ontology_id: str | None = None
+    working_ontology_status: str | None = None
     published_ontology_id: str | None = None
     published_ontology_version: int | None = None
+    # 发布态指标（供域卡片与页头「待固化」提示条）：
+    # 已发布内容改动后未固化的实体数 / 本次发布会新提升的实体数 /
+    # 待复核业务对象数 / 未解决的字段级冲突数。
+    unpublished_change_count: int = 0
+    pending_publish_count: int = 0
+    needs_review_count: int = 0
+    unresolved_conflict_count: int = 0
 
 
 class DraftProgressOut(BaseModel):

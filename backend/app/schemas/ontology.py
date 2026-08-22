@@ -55,6 +55,8 @@ class ObjectTypeEvidencePack(BaseModel):
     table_role: str = "business_object"
     role_confidence: float = 0.5
     role_reason: str | None = None
+    # 机器给出的复核建议（仅在对象**新建**时落库，再生成不回写人工确认）。
+    needs_review: bool = False
     # 分类证据快照：score / needs_review / signals，供复核界面展示「判定依据」。
     role_signals: dict | None = None
     # DataHub profiling：导入时沉淀，供落库到 ObjectType 表。
@@ -117,6 +119,8 @@ class DraftObjectType(BaseModel):
     table_role: str = "business_object"
     role_confidence: float = 0.5
     role_reason: str | None = None
+    # 机器给出的复核建议（仅在对象**新建**时落库，再生成不回写人工确认）。
+    needs_review: bool = False
     # DataHub profiling：导入时沉淀，供落库到 ObjectType 表。
     row_count: int | None = None
     role_signals: dict | None = None

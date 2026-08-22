@@ -86,6 +86,7 @@ import type {
   DependencyComponent,
   DependencyProbeResult,
   DependencyDeployResult,
+  PublishPreflight,
 } from "./types";
 import { buildQuery } from "./utils/format";
 
@@ -219,16 +220,15 @@ export const api = {
     request<TaskRecord>(`/api/domains/${domainId}/tasks/${taskId}/stop`, { method: "POST" }),
   retryDraftTask: (domainId: string, taskId: string) =>
     request<DraftProgress>(`/api/domains/${domainId}/tasks/${taskId}/retry`, { method: "POST" }),
-  getDraftDuplicates: (domainId: string) =>
-    request<{
-      domain_id: string;
-      draft_count: number;
-      draft_ontology_ids: string[];
-      will_purge_on_regenerate: boolean;
-      message: string;
-    }>(`/api/domains/${domainId}/draft-duplicates`),
   getTaskLogs: (domainId: string, taskId: string) =>
     request<ChangeLog[]>(`/api/domains/${domainId}/tasks/${taskId}/logs`),
+  publishPreflight: (ontologyId: string) =>
+    request<PublishPreflight>(`/api/ontologies/${ontologyId}/publish-preflight`),
+  discardUnpublished: (domainId: string) =>
+    request<{ object_types: number; relation_types: number; properties: number }>(
+      `/api/domains/${domainId}/discard-unpublished`,
+      { method: "POST" },
+    ),
   getMergeReport: (domainId: string, taskId: string) =>
     request<MergeReport>(`/api/domains/${domainId}/tasks/${taskId}/merge-report`),
 
@@ -250,10 +250,6 @@ export const api = {
       `/api/ontologies/${ontologyId}/conflicts/resolve-all${buildQuery({ resolution })}`,
       { method: "POST" },
     ),
-  createRevisionDraft: (domainId: string) =>
-    request<{ ontology_id: string; status: string }>(`/api/domains/${domainId}/create-revision`, {
-      method: "POST",
-    }),
   setFieldPin: (body: {
     entity_type: string;
     entity_id: string;

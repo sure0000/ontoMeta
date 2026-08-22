@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -48,7 +49,20 @@ class ConfirmationStatus(str, enum.Enum):
 
 
 class Ontology(Base):
+    """数据域的**唯一**本体行：既是草稿工作台，也是发布载体。
+
+    一域一本体（``uq_ontology_domain_context``）是这套治理闭环的地基：发布只是把这一行
+    的实体提升 + 打版本快照，工作台不会被抽走，再生成继续合并进同一行，人工修订的
+    三方合并基线因此跨发布边界连续。写侧一律经
+    ``services.ontology_workspace.get_or_create_working_ontology`` 取行。
+    """
+
     __tablename__ = "ontologies"
+    __table_args__ = (
+        # SQLite reflects a unique index separately from a UNIQUE constraint.
+        # Keep metadata aligned with the cross-dialect migration representation.
+        Index("uq_ontology_domain_context", "domain_context_id", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     domain_context_id: Mapped[str] = mapped_column(
@@ -101,6 +115,13 @@ class ObjectType(Base, ProvenanceMixin):
     upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 已发布内容被人工直接改动、尚未固化成新版本。A 案下人工编辑不再把已发布实体
+    # 退回 edited（改动立即对外生效），这个标记就是「待固化」在库里的唯一凭据——
+    # 靠 updated_at 与 published_at 比时间戳做不到：SQLite 的 CURRENT_TIMESTAMP 只有
+    # 秒级精度，同秒内的发布与编辑分辨不出来。publish() 提升实体时清零。
+    has_unpublished_change: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
     # 对象角色标注（不依赖表名，预生成时由结构/内容/拓扑信号判定）：
     # business_object / data_table / bridge / technical。role_reason 可追溯，供人工在工作区确认。
     table_role: Mapped[str] = mapped_column(
@@ -108,6 +129,17 @@ class ObjectType(Base, ProvenanceMixin):
     )
     role_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     role_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 复核状态：与实体生命周期状态、与 role_reason 文本都**正交**的独立开关，
+    # 也是部分发布的唯一门闸（True 的业务对象不随本体发布）。
+    #
+    # 历史上它是 role_reason 的 "[待复核]" 前缀，而 role_reason 又是可合并字段 →
+    # 人工确认会把该字段永久钉住、机器换个措辞就产生一条「角色依据」冲突，点
+    # 「采纳上游」还会把前缀写回、静默把对象重新打成待复核并踢出下次发布集。
+    # 拆成独立列后：role_reason 回归纯描述（机器可持续刷新），复核状态只由人改。
+    # 机器只在**新建**对象时给初值，再生成不回写——人的确认不会被机器推翻。
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", index=True
+    )
     # 分类证据快照（JSON 文本）：score / needs_review / signals（主键、外键入度、
     # 字段占比、tech_score、连通性等），供复核界面展示「判定依据」。机器每次生成
     # 重算并直接覆盖，非用户可编辑，不参与三方合并（比照 role_confidence）。
@@ -181,6 +213,13 @@ class Property(Base, ProvenanceMixin):
     upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 已发布内容被人工直接改动、尚未固化成新版本。A 案下人工编辑不再把已发布实体
+    # 退回 edited（改动立即对外生效），这个标记就是「待固化」在库里的唯一凭据——
+    # 靠 updated_at 与 published_at 比时间戳做不到：SQLite 的 CURRENT_TIMESTAMP 只有
+    # 秒级精度，同秒内的发布与编辑分辨不出来。publish() 提升实体时清零。
+    has_unpublished_change: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -222,6 +261,13 @@ class RelationType(Base, ProvenanceMixin):
     upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 已发布内容被人工直接改动、尚未固化成新版本。A 案下人工编辑不再把已发布实体
+    # 退回 edited（改动立即对外生效），这个标记就是「待固化」在库里的唯一凭据——
+    # 靠 updated_at 与 published_at 比时间戳做不到：SQLite 的 CURRENT_TIMESTAMP 只有
+    # 秒级精度，同秒内的发布与编辑分辨不出来。publish() 提升实体时清零。
+    has_unpublished_change: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

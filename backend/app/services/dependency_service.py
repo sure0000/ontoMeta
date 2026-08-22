@@ -232,11 +232,13 @@ def mask_secret(value: str | None) -> str | None:
 
 
 def _mask_connection(key: str, conn: dict[str, Any]) -> dict[str, Any]:
-    """连接信息脱敏：secret 字段只回 *_set + *_hint，非 secret 原样。"""
+    """连接信息回显：secret 字段下发明文原值（供前端 Input.Password 预填+眼睛切换显隐），
+    同时保留 *_set/*_hint 向前兼容；非 secret 原样。"""
     out: dict[str, Any] = {}
     for name, _typ, secret, _req, _default in CONNECTION_SCHEMAS.get(key, []):
         val = conn.get(name)
         if secret:
+            out[name] = val  # 明文回显：前端预填进 Input.Password，眼睛图标控制显隐
             out[f"{name}_set"] = bool(val)
             out[f"{name}_hint"] = mask_secret(val if isinstance(val, str) else None)
         else:
@@ -290,10 +292,11 @@ _SPEC_PRESERVE_KEYS = {"extra", "_datasource_id", "_probe"}
 
 
 def _mask_deploy_spec(key: str, mode: str, spec: dict[str, Any]) -> dict[str, Any]:
-    """deploy_spec 脱敏：secret 字段（SSH 密码/私钥、管理员密码等）只回 *_set + *_hint。
+    """deploy_spec 回显：secret 字段（SSH 密码/私钥、管理员密码等）下发明文原值
+    （供前端预填+显隐切换），同时保留 *_set/*_hint 向前兼容。
 
     非 secret 原样带出；schema 之外的内部键（extra/_datasource_id）保留，
-    其余未知键为安全起见不外泄。堵住 to_out 明文回显 SSH 凭据的口子。
+    其余未知键为安全起见不外泄。
     """
     out: dict[str, Any] = {}
     schema = _spec_schema_for(key, mode)
@@ -301,9 +304,9 @@ def _mask_deploy_spec(key: str, mode: str, spec: dict[str, Any]) -> dict[str, An
     for name, _typ, secret, _req, _default in schema:
         val = spec.get(name)
         if secret:
+            out[name] = val  # 明文回显：str 型走 Input.Password 眼睛切换，text 型走 SecretTextArea
             out[f"{name}_set"] = bool(val)
-            # text 型机密（PEM 私钥）不回尾 4 位：私钥尾部识别价值≈0、敏感度极高，
-            # 只回是否已设 + 固定占位；密码等短机密沿用全局 last-4 提示便于用户辨认。
+            # text 型机密（PEM 私钥）尾 4 位识别价值≈0，固定占位；密码等短机密沿用 last-4 便于辨认。
             if _typ == "text":
                 out[f"{name}_hint"] = "****" if val else None
             else:

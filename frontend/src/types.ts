@@ -41,10 +41,34 @@ export type ExpressionJson = Record<string, unknown>;
 
 export interface DomainContextDetail extends DomainContext {
   datahub_url?: string;
-  latest_ontology_id?: string;
-  latest_ontology_status?: string;
+  /** 一域一本体：该域唯一那行本体，既是草稿工作台也是发布载体。
+   *  旧字段 latest_ontology_id 取「按 updated_at 最新的那行」，会在 draft/published
+   *  两行之间来回跳，页面主体因此不稳定；现在没有第二行可跳。 */
+  working_ontology_id?: string;
+  working_ontology_status?: string;
   published_ontology_id?: string;
   published_ontology_version?: number;
+  /** 已发布内容被改动但未固化成新版本的实体数。 */
+  unpublished_change_count?: number;
+  /** 本次发布会新提升的实体数。 */
+  pending_publish_count?: number;
+  /** 待复核业务对象数（发布会跳过它们）。 */
+  needs_review_count?: number;
+  /** 未解决的字段级冲突数。 */
+  unresolved_conflict_count?: number;
+}
+
+export interface PublishPreflight {
+  ontology_id: string;
+  current_version: number;
+  next_version: number;
+  object_count: number;
+  property_count: number;
+  relation_count: number;
+  skipped_needs_review: number;
+  skipped_non_business: number;
+  skipped_relation_endpoint: number;
+  unresolved_conflicts: number;
 }
 
 export type DraftGenerationScope = "full" | "objects" | "relations";
@@ -1337,12 +1361,13 @@ export interface DataSource {
   tested_at?: string | null;
   created_at: string;
   updated_at: string;
-  // 连接的非机密部分，供编辑弹窗回显（密码不回显，仅 password_set 标志）。
+  // 连接信息回显：密码明文下发供编辑弹窗 Input.Password 预填（眼睛图标控制显隐）；password_set 保留兼容。
   dsn_set?: boolean;
   host?: string | null;
   port?: number | null;
   database?: string | null;
   username?: string | null;
+  password?: string | null;
   password_set?: boolean;
   path?: string | null; // 文件类（sqlite/duckdb）
   url?: string | null; // cube 语义层地址

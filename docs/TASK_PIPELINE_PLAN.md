@@ -1,170 +1,252 @@
-# 多任务编排 · 剩余事项
+# 多任务编排 · 已建成规格与遗留事项
 
-> 目标：「物化之后清洗、清洗完成聚合」这类**前后相继的多个任务**可被编排。
-> 决策已定（2026-08-06）：**分两步做**——第一步落在提案层（已交付），第二步落到执行层（本文主体）；
-> **人工确认按每环单独确认**；**触发方式手动与周期调度都要支持**。
-> 决策补充（2026-08-06）：**同步一律走 SeaTunnel / DataX**（不论是否同源）；**transform / metric
-> 生成 Flink SQL，经 Airflow 触发 Flink 引擎执行**，与 materialize 同构；**离线 / 实时由制品 spec 的
-> `execution_mode`（`batch` / `streaming`）决定**。Flink 由此从「搬运工具」序列退出，专职做计算。
-> 本文是执行计划：拆到文件级任务、验收标准、以及必须守住的不变量。
+> 状态：**P1–P3 已交付（as-built）**  
+> 基线核验：2026-08-22，后端全量 `1542 passed / 3 skipped`，Alembic 单一 head `bacbc3c392ad`。  
+> 本文以当前代码为准；旧版“线性链、SeaTunnel/DataX、DolphinScheduler、无周期调度”的描述已失效。
 
 ---
 
-## 0. 第一步已交付：提案层任务链
+## 0. 一句话结论
 
-对话里说「物化到数仓，然后清洗，再按口径聚合」→ Agent 出一条链 → 点「创建任务链」只建链、
-不起草任何制品 → 逐步点「起草第 N 步」→ 每步照旧在制品抽屉里走
-「校验 → dry-run → 人工确认 → 执行」。上一步执行成功后下一步才解锁，届时目标数据源/库/引擎
-自动接过去。
+对话中的“物化 → 同步 → 清洗 → 聚合”已经可以落成 `GovernanceTaskPipeline`：
 
-| 交付物 | 位置 |
-|---|---|
-| 链与步骤模型 | `app/models/agent.py`（`GovernanceTaskPipeline` / `GovernanceTaskPipelineStep`） |
-| 迁移 | `alembic/versions/c2d3e4f5a6b7_governance_task_pipelines.py` |
-| 编排服务 | `app/services/task_pipeline.py`（`create` / `advance` / `detail`） |
-| API | `POST/GET /api/agents/pipelines`、`GET /{id}`、`POST /{id}/advance` |
-| Agent 工具 | `chat_bi._dispatch_propose_pipeline` + `propose_pipeline` 工具 + `pipeline_proposal` 块 |
-| 前端 | `ChatBiReferences.PipelineProposalBlock` |
-| 测试 | `tests/test_task_pipeline.py`（15）、`test_agent_implementations.py` 末两条端到端 |
+- 步骤支持 `depends_on`，可表达线性、扇出和汇聚；
+- 可逐步起草，也可一次起草全部步骤；
+- 每一步仍是独立 `GovernanceArtifact`，各自经过校验、dry-run、人工确认和执行；
+- 可将整条已走通的链编译成 Airflow DAG 并设置周期调度；
+- transform、metric、sync 的执行统一使用 Flink SQL on YARN，由 Airflow 投递与回读；
+- materialize 只建结构，sync 只搬数据，两者语义分离；
+- 链状态由步骤制品聚合推导，不保存第二份权威状态。
 
-**已经确立、后续不得推翻的三条**：
+当前实际写侧类型：
 
-1. **链不替谁确认**。服务、API、UI 三处都没有「一键跑完整条链」的入口——那必然绕过逐制品的
-   人工确认，而「未确认不得执行」是这条流水线的硬不变量。`test_service_offers_no_way_to_execute_a_whole_chain`
-   钉住这点。
-2. **下游不预先起草**。它的 context 要等上游真跑完才配得齐；提前起草出来的是预测不是事实，
-   而制品一旦落库就会被人当成已经定下的东西。
-3. **链态不落库**，由各步制品的状态聚合推导（`TaskPipelineService._status`）。制品的权威在
-   `governance_artifacts`，另存一份迟早分叉。
-
-**第一步没做的**：链是线性的（不是 DAG）；只能手动逐步推进，**没有周期调度**。
+```text
+materialize / sync / transform / metric
+```
 
 ---
 
-## 1. 还差什么
+## 1. 核心领域对象
 
-两件事，前者是后者的前提：
-
-### 1.1 阻断项：transform / metric 根本不执行
-
-| kind | `Executor.execute` 实际做了什么 | 有没有「完成」信号 |
+| 对象 | 位置 | 责任 |
 |---|---|---|
-| `materialize` | 生成 DAG 落盘 + 触发 Airflow，回执带 `dag_run_id`，状态可回读 | ✅ 有（Airflow DagRun） |
-| `sync` | 只渲染 SeaTunnel 作业配置，`handoff: "SeaTunnel + DolphinScheduler"` | ❌ 无 |
-| `transform` | 只渲染 ETL SQL，`handoff: "DolphinScheduler"` | ❌ 无 |
-| `metric` | 只渲染 DDL + 聚合 SQL，`handoff: "DolphinScheduler"` | ❌ 无 |
+| `GovernanceTaskPipeline` | `app/models/agent.py` | 链级名称、意图、本体、周期 DAG 信息 |
+| `GovernanceTaskPipelineStep` | `app/models/agent.py` | 步序、kind、intent、context、depends_on、artifact_id |
+| `GovernanceArtifact` | `app/models/agent.py` | 每一步的声明式规格、校验、确认、执行和回执权威 |
+| `TaskPipelineService` | `app/services/task_pipeline.py` | 建链、逐步推进、全部起草、状态聚合、上下文继承 |
+| Pipeline Compiler | `app/services/pipeline_compiler.py` | 拓扑校验、编译 Airflow 链 DAG、周期化 |
+| Pipeline Lineage | `app/services/pipeline_lineage.py` | 预览/回写任务链血缘 |
 
-**目标通道（2026-08-06 决策）**：同步（sync）不论是否同源，一律走 **SeaTunnel / DataX**；
-transform（清洗）、metric（聚合）这类计算任务生成 **Flink SQL**，经 Airflow 触发 **Flink 引擎**
-执行——与 materialize「生成 → 落盘 → 触发 → 回读」同构。Flink 因此从**搬运工具**序列退出，
-专职做计算。「清洗完成」的客观信号即 Flink 作业的 DagRun 终态。
+### 1.1 链级事实
 
-即：**「清洗完成」目前没有任何客观信号**。制品 `succeeded` 只表示「SQL 生成成功」，不表示
-那条 SQL 跑过。第一步的链因此是「人看着上一步的产物，自己判断该不该推进」——在提案层这是
-诚实的（我们从没声称跑过），但周期调度必须有真实的完成信号，否则「上游成功才跑下游」无从谈起。
+以下字段确实属于链，故落在 `GovernanceTaskPipeline`：
 
-### 1.2 执行层编排：一条 DAG 串起多个任务
+- `schedule_cron`
+- `compiled_dag_id`
+- `compiled_at`
 
-现有 `AirflowDagBuilder.build()` 与 `materialization_runner._run_orchestrated` 已经具备大半：
+链整体运行状态不落库，由各步骤关联制品的状态聚合得到：
 
-- 入参已有 `schedule`（cron）、`max_active_tasks`、`dag_id_suffix`；
-- DAG 内已有**任务依赖**（`_task_group_order` 按 dim → dwd → dws → ads 串层，`_with_swap` 在搬运后挂切换）；
-- **已经有一条「生成产物 → 落盘 → 触发 Airflow → 回读 DagRun」的完整通道**：materialize 就走它，
-  回执带 `dag_run_id` / `run_url` / `state`，解析等待有 `_wait_for_parse` 兜。
+```text
+全部未起草                      → drafted
+部分已起草或执行中              → running
+任一步 failed                   → failed
+全部 succeeded                  → succeeded
+```
 
-**这是 1.2 可行性的关键**：transform / metric 的 **Flink SQL 作业**与 materialize 的搬运 / DDL 作业
-**共享同一条 Airflow 投递通道**——同样是「产物落盘 + 触发 + 回读」，不需要新的调度器、不需要碰
-sync-runner。差别只在任务体：materialize 落 DDL / 搬运任务，transform / metric 落 Flink SQL 作业任务
-（`flink run -f <job.sql>`）。
+### 1.2 步骤依赖
+
+`depends_on_json` 保存显式上游步序：
+
+- 空/None：回退线性默认，依赖上一步；
+- 一个上游对应多个下游：扇出；
+- 多个上游对应一个下游：汇聚；
+- 编译前使用拓扑排序检测环。
 
 ---
 
-## 2. 分阶段拆解
+## 2. 当前执行架构
 
-### P1 · 让 transform / metric 生成 Flink SQL，经 Airflow 触发 Flink 执行
+```text
+GovernanceArtifact Spec
+        │
+        ├─ materialize ─→ 目标引擎 DDL ───────────────┐
+        ├─ sync ───────→ Flink SQL 数据搬运 ─────────┤
+        ├─ transform ──→ Flink SQL 清洗加工 ─────────┤
+        └─ metric ─────→ Flink SQL 聚合 + 结果表 DDL ┤
+                                                       ▼
+                                                Airflow DAG
+                                                       ▼
+                                           Flink on YARN / 目标库
+                                                       ▼
+                                             DagRun 状态与回执
+```
 
-**做什么**：这两类**计算**任务不再只渲染 SQL 交人，而是生成 **Flink SQL** → 落盘 → 由 Airflow
-触发 `flink run` → 回读作业终态，与 materialize 完全同构。离线 / 实时由制品 spec 的 `execution_mode`
-（`batch` / `streaming`）决定：`batch` 走有界流批，`streaming` 走持续流（CDC 口径的实时清洗 / 聚合）。
+### 2.1 四种制品的边界
 
-| 任务 | 文件 | 说明 |
+| kind | 做什么 | 不做什么 | 主要实现 |
+|---|---|---|---|
+| materialize | 根据本体和契约创建物理表结构 | 不搬数据 | `agents/executors/materialize.py` |
+| sync | 将真实源表数据按本体映射搬到已物化目标表 | 不创建业务表 | `agents/executors/sync.py` |
+| transform | 对本体目标对象生成并执行 Flink SQL 清洗 | 不自行定义目标结构 | `agents/executors/transform.py` |
+| metric | 按已确认 BusinessLogic 编译并执行聚合/标签/规则 SQL | 不替用户发明口径 | `agents/executors/metric.py` |
+
+### 2.2 统一执行通道
+
+- 调度器：Airflow；
+- 计算/搬运执行：Flink SQL on YARN；
+- 目标建表：Warehouse Dialect Adapter 生成 DDL；
+- 凭据：Spec 只保存 `*_ref`/`*_alias`，运行时由受管连接配置解析；
+- 状态：回执中的 `dag_id`/`dag_run_id`/`state` 及 live-state 回读；
+- 未配置外部依赖时必须显式返回“仅产出/未执行”的原因，不得假绿。
+
+---
+
+## 3. 提案、起草与执行流程
+
+```text
+Data Agent propose_pipeline
+  → 用户查看并修改各步参数
+  → 创建 Pipeline（只建链）
+  → advance：上游成功后起草下一步
+     或 draft-all：一次起草全部步骤
+  → 每个 Artifact：validate → dry-run → confirm → execute
+  → 关联步骤状态聚合为链状态
+  → 全部成功后可设置 cron 并 compile 为周期 DAG
+```
+
+### 3.1 上下文继承
+
+`TaskPipelineService.INHERITED_CONTEXT_KEYS` 只继承共同落点：
+
+- `ontology_id`
+- `engine`
+- `database_prefix`
+- `target_datasource_id`
+- `target_database`
+
+使用白名单而不是透传全部 Spec，避免把上一步的局部参数污染下游。当前步骤显式 context 优先于继承值。
+
+### 3.2 为什么链不自动确认
+
+链只管理顺序与上下文，不管理授权。以下不变量不因“批量起草”或“周期 DAG”而改变：
+
+1. 未确认制品不得首次执行；
+2. 确认前必须展示校验报告与 dry-run；
+3. 用户修改 Spec 后，旧确认和旧编译结果必须失效；
+4. 周期调度确认的是“这个已验证版本可以反复执行”，不是永久放弃治理门槛。
+
+---
+
+## 4. API 与前端
+
+### 4.1 API
+
+| 方法 | 路径 | 作用 |
 |---|---|---|
-| P1-0 ✅ | `app/services/sync_tool_resolver.py` | 已交付：`_PRIORITY` 去掉 flink；新增 `_NON_SYNC_TOOLS={flink}`，auto 候选源头剔除 flink，pin flink 两通道都拒。FlinkAdapter 仍留注册表（供计算侧复用、诊断展示）。新增 3 条测试，34+70 既有用例绿 |
-| P1-1 ✅ | `app/services/flink_sql_generator.py`（新） | 已交付：`generate_flink_sql()` 把「源表 + 目标表 + SELECT 体」组装成完整脚本（SET 模式 + CREATE TABLE source/sink + INSERT）。JDBC connector 逐表声明；类型常规映射；batch/streaming 切换（streaming 支持 watermark）；凭据只走占位符。SELECT 体由 executor 生成（FROM 引用 Flink 裸表名）。9 条单测绿 |
-| P1-2 ✅ | `app/services/flink_job_runner.py`（新） | 已交付：`run_flink_sql()` 把一批 Flink SQL 任务打包成一次 Airflow 提交（生成 DAG → 落盘 → 触发 → 回读）。复用 materialize 的 `AirflowClient` / `_wait_for_parse` / `trigger_dag`。未配 SqlRunner JAR 退回「仅产出」；未配 Airflow 报错；触发失败如实记 error。4 条单测绿 |
-| P1-3 ✅ | `app/services/airflow_dag_builder.py` | 已交付：`build_flink_sql_dag()` + `FlinkSqlTask` / `FlinkSubmitConfig`。Flink on YARN 走 BashOperator：`flink run -t yarn-per-job -c <SqlRunner> <jar> --file <job.sql>`。.sql 落 job_files（`write` 支持文本件）；batch attached / streaming detached（-d）；可选 create_sink_tables（metric 的 ads 表）；依赖串联。部署参数进 `config.py`（FLINK_SQL_RUNNER_JAR 等）　11 条单测绿 |
-| P1-4 ✅ | `app/agents/executors/transform.py` | 已交付：`execute` 改为调 `warehouse_generator.build_flink_etl_input`（守住映射逻辑不重写）+ `flink_job_runner.run_flink_sql`；spec 读 `execution_mode`；未配 datasource/SqlRunner JAR 退回「仅产出」并明说原因。4 条集成测试绿 |
-| P1-5 ✅ | `app/agents/executors/metric.py` | 已交付：同 P1-4，metric 的 ads 表先在数仓建（warehouse_ddl），再执行 Flink 聚合。回执带 dag_run_id/run_url。集成测试复用 P1-4 |
-| P1-6 ✅ | `app/api/agents.py` + schema | 已交付：`get_artifact` 加 `live_state` 字段，best-effort 回读 DagRun 实时态（复用 warehouse 的 `_receipt_batches`/`_aggregate_state`）。transform/metric 回执的单 DAG 结构经 fallback 自然支持。136 tests 绿 |
-| P1-7 ✅ | drafter（transform/metric）| 已交付：transform / metric 的 drafter 产出 spec 时带 `execution_mode`（从 context 读，缺省 `batch`；metric 允许 `streaming`）。spec 无独立 Pydantic schema（直接 dict），故落在 drafter 输出层；executor 读同名字段。全套 1079 tests 绿 |
+| POST | `/api/agents/pipelines` | 创建链 |
+| GET | `/api/agents/pipelines` | 列表 |
+| GET | `/api/agents/pipelines/{id}` | 详情与聚合状态 |
+| POST | `/api/agents/pipelines/{id}/advance` | 起草下一可执行步骤 |
+| POST | `/api/agents/pipelines/{id}/draft-all` | 起草全部未起草步骤 |
+| PUT | `/api/agents/pipelines/{id}/schedule` | 设置 cron |
+| POST | `/api/agents/pipelines/{id}/compile` | 编译周期 DAG |
+| DELETE | `/api/agents/pipelines/{id}/schedule` | 下线周期任务记录 |
+| GET/POST | `/api/agents/pipelines/{id}/lineage` | 血缘预览/回写 |
 
-**验收**：
-- 一条 transform 制品执行后回执带 `dag_run_id` 与 `run_url`，Airflow 里能看到该 DAG 触发了 Flink 作业；
-- `execution_mode=streaming` 的制品产出持续流作业，`batch` 产出有界批作业；
-- 未配 Flink / Airflow 时**不报错**，退回「仅产出」并在回执里显式说明——不静默假装执行了；
-- 同步侧确认：`resolve_sync_tool` 在 auto 时只会选出 seatunnel 或 datax，绝不再选 flink。
+整个 `/api/agents` 命名空间需要 publisher。
 
-**已消解的旧风险**：上一版担心 transform 的 ETL SQL「源库与目标仓非同一连接则单连接跑不通」。
-改走 Flink 后，source / sink 由各自的 connector 声明、天然跨源，**不再要求同库跨 schema**，该风险作废。
+### 4.2 前端
 
-### P2 · 把整条链编译成一条 DAG（含周期调度）
+`frontend/src/pages/chat-bi/ChatBiReferences.tsx::PipelineProposalBlock` 已提供：
 
-**做什么**：`GovernanceTaskPipeline` → 一条带依赖的 Airflow DAG，挂 cron 周期跑，
-下游等上游本周期成功。
-
-| 任务 | 文件 | 说明 |
-|---|---|---|
-| P2-1 ✅ | `app/models/agent.py` + 迁移 | 已交付：`GovernanceTaskPipeline` 加 `schedule_cron`、`compiled_dag_id`、`compiled_at` 字段，跟踪已挂成周期任务的 DAG 与时间。迁移 `c1385f0ad1e8` 已生成 |
-| P2-2 ✅ | `app/services/pipeline_compiler.py`（新） | 已交付：`compile_pipeline()` 校验门槛（所有步骤已确认、已执行、spec 未变更）、提取各步 DAG id、生成串联 DAG。**关键修正**：用 `TriggerDagRunOperator(wait_for_completion=True)` 替代 `ExternalTaskSensor`（后者按相同 execution_date 匹配上游、而各步 DAG 是手动触发的、时间戳不对齐会永远等不到）。9 条单测绿 |
-| P2-3 ✅ | `app/api/agents.py` + schema | 已交付：`PUT /agents/pipelines/{id}/schedule`（设 cron）、`POST .../compile`（编译）、`DELETE .../schedule`（下线）。前提不满足时 409，错误说清卡在哪步。1088 tests 绿 |
-| P2-4 ✅ | 前端 `ChatBiReferences.tsx` + types + api | 已交付：`PipelineProposalBlock` 里链走通（status=succeeded）后显示周期任务控件：未编译时显示 CronPicker + 编译按钮；已编译时显示 compiled_dag_id + cron 描述 + 下线按钮。前端 build 通过 |
-| P2-5 ✅ | `app/services/task_pipeline.py` | 已交付：`detail()` 返回加 `schedule_cron`/`compiled_dag_id`/`compiled_at`（P2-1 时已加） |
-
-**必须守住的门槛**（这是本阶段最容易被做坏的地方）：
-
-> **只有每一步都已人工确认过，整条链才可编译成周期任务。**
->
-> 周期调度天然是「无人值守反复执行」，与「每次执行都要人确认」直接冲突。折中不是放宽确认，
-> 而是**把确认前移**：人确认的是「这条链的这个版本可以反复跑」，编译时把各步 spec 快照进 DAG；
-> 任一步的 spec 之后被改动，`compiled_dag_id` 即失效、需重新确认并重编译。
->
-> 因此 P2-3 的 compile 端点必须校验：所有步骤的制品都处于 `succeeded`，且 spec 未在确认后变更。
-
-**验收**：
-- 一条「物化 → 清洗 → 聚合」的链编译出**一条** DAG，Airflow 图上三组任务顺序相连；
-- 挂 `0 2 * * *` 后每天跑一次，上游任务失败时下游不执行（Airflow 默认 `all_success` 即可）；
-- 未全部确认的链请求编译 → 409，并说清卡在哪一步。
-
-### P3 · 收尾
-
-| 任务 | 说明 |
-|---|---|
-| P3-1 ✅ | `app/agents/executors/sync.py` | 已交付：sync = 对单对象跑搬运。有 target_datasource 时复用 `materialization_runner.run(selected_targets=[object_type])`（搬运通道产 dag_id，可被 compiler 串进链）；无则 handoff 降级。4 条测试绿 |
-| P3-2 ✅ | 模型 + 编译器 + 迁移 | 已交付：步骤模型加 `depends_on_json`（显式依赖的上游步序列表，空=沿用线性默认）。`_validate_dag_topology()` 拓扑排序检测环（Kahn 算法）。`_render_chain_dag()` 按 depends_on 串联触发器（而非纯线性）。支持扇出（一上游分叉多下游）、汇聚（多上游汇一下游）。迁移 `d467f452d8b8` 已生成。7 条测试绿（线性/扇出/汇聚/环检测/端到端） |
-| P3-3 ✅ | `app/services/pipeline_lineage.py`（新）+ API | 已交付：`PipelineLineageEmitter` 从链各步回执提取目标表，按 step_index 串成 上一步目标→下一步目标 的血缘边，preview/apply 分离上报 DataHub（复用 `datahub.build_dataset_urn` / `add_lineage_edge`，platform 取各步 spec 的 engine）。未执行的步骤如实 skip。4 条测试绿 |
-| P3-4 ✅ | 失败续跑 | **已天然支持**：链 DAG 用 `TriggerDagRunOperator` 串联，上游失败时下游不触发（Airflow 默认 `all_success`）。断点续跑：在 Airflow UI 对失败的链 DAG run 点 "Clear" 选中失败任务，rerun 即从断点续跑——这是 Airflow 原生能力，无需额外代码。需在 UI/文档说明操作 |
+- 提案步骤和参数编辑；
+- 创建任务链；
+- 逐步起草；
+- 一键起草全部步骤；
+- 打开每一步的治理制品抽屉；
+- 校验、确认、执行和回执；
+- 周期 CronPicker、编译和下线；
+- 会话与制品关联，支持后续回读状态。
 
 ---
 
-## 3. 不变量清单（改动前先读）
+## 5. 已交付里程碑
 
-1. **未确认不得执行**（逐制品）。P2 的周期调度是唯一的例外，且以「确认前移 + spec 快照 + 变更失效」
-   换取，不是简单放宽。
-2. **ontoMeta 只生成产物，不做第二个调度器**。P1 让 transform / metric 生成 Flink SQL 并**经已有的
-   Airflow 通道**触发 Flink 执行——Flink 是执行引擎、Airflow 是调度器，二者都已存在；不要为它们
-   新建执行框架，也不要把 Flink 当第二个调度器用。
-3. **不静默降级**。未配 Airflow 时退回「仅产出」必须在回执里显式说明——回执上写着 `succeeded`
-   而实际没跑过，是这套系统里代价最高的一类谎。
-4. **链态由制品聚合推导**，不落第二份状态。
-5. **凭据不进 Spec**，只传 `*_ref` / `*_alias`。
+| 阶段 | 状态 | 交付内容 |
+|---|:---:|---|
+| P1 | ✅ | Flink SQL 生成、Airflow 投递、transform/metric/sync 执行与 live-state |
+| P2 | ✅ | 链级 schedule、周期 DAG 编译、前端周期任务控件 |
+| P3 | ✅ | `depends_on` DAG、拓扑环检测、扇出/汇聚、Pipeline 血缘、失败续跑 |
+
+测试覆盖主要位于：
+
+- `tests/test_task_pipeline.py`
+- `tests/test_pipeline_compiler.py`
+- `tests/test_pipeline_dag_topology.py`
+- `tests/test_pipeline_lineage.py`
+- `tests/test_agent_pipeline.py`
+- `tests/test_agent_implementations.py`
+- `tests/test_transform_metric_executor_flink.py`
+- `tests/test_sync_executor_chain.py`
 
 ---
 
-## 4. 已知遗留（与本计划相关，但不属于它）
+## 6. 当前遗留
 
-- `transform` 的目标对象在没给 `target_table` 时由 `select_by_intent` **按意图猜**。链上第 2 步若
-  没显式给对象，猜错了要到 dry-run 才看得出来。建链表单应把它做成必填下拉（同物化表单的做法）。
-- `metric` 要求口径已在「业务逻辑」里定义好，否则起草即报错。Agent 侧应在建链时先查一遍，
-  而不是让用户点到第 3 步才发现。
-- 物化的目标表名在建数表单里仍是单个自由文本，而物化弹窗是**逐实体**的表名 + 推荐值 + 「已存在/将新建」
-  标注。两者尚未对齐。
+### 6.1 建模语义缺口
+
+任务链编排的是已知执行步骤，不负责确认业务需求、事实粒度、维度、SCD 或指标包。该缺口由：
+
+- `docs/CONVERSATIONAL_ONTOLOGY_MODELING_OPTIMIZATION_PLAN.md`
+
+中的 ModelingCase、DimensionalModel、LogicBundle 和 DeliveryPlan 方案补齐。
+
+### 6.2 关键源 STG 保全
+
+`SyncDrafter` 会产出 `preservation` 判定，但当前 Flink 搬运路径尚未额外生成 STG 原始副本。执行回执会显式标记 `preservation_pending`，不会静默声称已保全。
+
+### 6.3 部分配置的“仅产出”语义
+
+当缺少目标数据源、Airflow 或 Flink 运行配置时，Executor 可能返回声明式产物而不真实执行。后续建模工单的完成门槛必须区分：
+
+- `artifact generated`
+- `job submitted`
+- `job succeeded`
+- `business result accepted`
+
+### 6.4 周期 DAG 文件下线
+
+当前下线会清理 ontoMeta 的编译记录；Airflow `dags_dir` 中的文件仍需部署侧删除。生产收口时应增加受控的 DAG 文件撤销能力或明确运维动作。
+
+---
+
+## 7. 不变量清单
+
+1. 链不替任何制品确认；
+2. 链状态由制品聚合，不保存第二份；
+3. 依赖环在编译前拒绝；
+4. 上游失败时下游不执行；
+5. 凭据不进入 Spec、DAG 产物和对话；
+6. materialize 只建结构，sync 只搬数据；
+7. transform/metric 的 SQL 结构复用本体、WarehouseGenerator 与 MetricCompiler，不另写第二套权威；
+8. 未真实执行必须在回执中明确，禁止假成功；
+9. 相同制品执行保持幂等；
+10. 任务链未来接入 ModelingCase 时，仍以 GovernanceArtifact 为执行状态权威。
+
+---
+
+## 8. 验收命令
+
+```bash
+cd backend && .venv/bin/pytest -q \
+  tests/test_task_pipeline.py \
+  tests/test_pipeline_compiler.py \
+  tests/test_pipeline_dag_topology.py \
+  tests/test_pipeline_lineage.py \
+  tests/test_agent_pipeline.py \
+  tests/test_transform_metric_executor_flink.py \
+  tests/test_sync_executor_chain.py
+
+cd frontend && npm run lint && npm run build
+```

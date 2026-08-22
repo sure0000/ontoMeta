@@ -50,3 +50,28 @@ def client():
 @pytest.fixture
 def admin_headers():
     return dict(ADMIN_HEADERS)
+
+
+@pytest.fixture
+def db():
+    """每个测试使用独立数据库会话。"""
+    from app.database import SessionLocal
+    
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def llm_ready(monkeypatch):
+    """把「起草前的 LLM 可用性前置校验」置为通过。
+
+    业务命名全靠 LLM，无 LLM 时起草入口直接拒绝（见 DraftTaskService._ensure_llm_ready）。
+    只关心排队/冲突/状态机的用例不需要真 LLM，用这个 fixture 放行前置校验即可——
+    生成器本身仍是 client=None，不会发出任何真实调用。
+    """
+    from app.services.draft_task_service import DraftTaskService
+
+    monkeypatch.setattr(DraftTaskService, "_ensure_llm_ready", lambda self, db: None)

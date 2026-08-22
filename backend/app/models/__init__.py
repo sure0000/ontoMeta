@@ -70,6 +70,15 @@ from app.models.warehouse import (
     ScdType,
     TargetKind,
 )
+from app.models.modeling import (
+    ModelingCase,
+    ModelingCaseLink,
+    ModelingCaseSpec,
+    ModelingCaseSpecKind,
+    ModelingCaseSpecStatus,
+    ModelingCaseStage,
+)
+from app.models.dimensional_model import DimensionalModel
 
 __all__ = [
     "OntologyStatus",
@@ -126,4 +135,11 @@ __all__ = [
     "ArtifactStatus",
     "PipelineStatus",
     "HIGH_RISK_KINDS",
+    "ModelingCase",
+    "ModelingCaseSpec",
+    "ModelingCaseLink",
+    "ModelingCaseStage",
+    "ModelingCaseSpecKind",
+    "ModelingCaseSpecStatus",
+    "DimensionalModel",
 ]

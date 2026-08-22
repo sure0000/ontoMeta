@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import edit_service, provenance_service, revision_service, settings_service, workspace
+from app.api.deps import edit_service, provenance_service, settings_service, workspace
 from app.config import settings
 from app.database import get_db
 from app.models import ObjectType
@@ -26,6 +26,7 @@ from app.schemas import (
     TaskRecordOut,
 )
 from app.services.draft_generation_queue import run_draft_generation_limited
+from app.services.draft_generator import LlmNotConfiguredError
 from app.services.manual_creation import ManualCreationService, ManualPropertyInput
 from app.services.query import DraftGenerationAlreadyRunning, WorkspaceService
 
@@ -206,6 +207,8 @@ async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
             progress, lambda task_id: workspace._run_draft_generation(domain_id, task_id)
         )
         return progress
+    except LlmNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -223,6 +226,8 @@ async def generate_objects(domain_id: str, db: Session = Depends(get_db)):
             progress, lambda task_id: workspace._run_object_generation(domain_id, task_id)
         )
         return progress
+    except LlmNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -240,6 +245,8 @@ async def generate_relations(domain_id: str, db: Session = Depends(get_db)):
             progress, lambda task_id: workspace._run_relation_generation(domain_id, task_id)
         )
         return progress
+    except LlmNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -348,8 +355,21 @@ async def retry_draft_task(domain_id: str, task_id: str, db: Session = Depends(g
         runner = _RETRY_RUNNERS.get(progress.scope, _RETRY_RUNNERS["full"])
         _launch_draft_task(progress, lambda tid: runner(domain_id, tid))
         return progress
+    except LlmNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DraftGenerationAlreadyRunning as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/domains/{domain_id}/discard-unpublished")
+def discard_unpublished(domain_id: str, db: Session = Depends(get_db)):
+    """丢弃工作本体里从未发布过的实体，回到「只剩已发布内容」。已发布内容不动。"""
+    from app.services import ontology_workspace
+
+    try:
+        return ontology_workspace.discard_unpublished(db, domain_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -366,19 +386,3 @@ def get_task_merge_report(domain_id: str, task_id: str, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/domains/{domain_id}/create-revision")
-def create_revision_draft(domain_id: str, db: Session = Depends(get_db)):
-    """从已发布本体派生修订草稿（场景 D），已发布值作为人工权威基线。"""
-    try:
-        ontology = revision_service.create_revision_draft(db, domain_id)
-        return {"ontology_id": ontology.id, "status": ontology.status}
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/domains/{domain_id}/draft-duplicates")
-def get_draft_duplicates(domain_id: str, db: Session = Depends(get_db)):
-    domain = workspace.get_domain(db, domain_id)
-    if not domain:
-        raise HTTPException(status_code=404, detail="Domain not found")
-    return workspace.report_duplicate_drafts(db, domain_id)

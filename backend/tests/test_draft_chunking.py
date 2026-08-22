@@ -18,8 +18,14 @@ from app.schemas import (
     PropertyEvidencePack,
     RelationEvidencePack,
 )
+import pytest
+
 from app.services.draft_checkpoint import DraftCheckpointStore, chunk_key
-from app.services.draft_generator import OntologyDraftGenerator
+from app.services.draft_generator import (
+    LlmNotConfiguredError,
+    ObjectNamingIncompleteError,
+    OntologyDraftGenerator,
+)
 from app.services.evidence_chunker import estimate_size, split_evidence, split_relations
 
 
@@ -70,8 +76,37 @@ def _build_bundle(num_objects: int, fields_per_object: int) -> EvidenceBundle:
 
 
 def _mock_generator() -> OntologyDraftGenerator:
-    # 测试环境无 OPENAI_API_KEY → 实例 client=None，走确定性命名路径。
+    # 测试环境无 OPENAI_API_KEY → 实例 client=None。生成入口会直接抛
+    # LlmNotConfiguredError，因此这个实例只用于直接调 _parse_*/_build_* 等纯函数。
     return OntologyDraftGenerator()
+
+
+def _named_objects(payload: dict) -> list[dict]:
+    """按证据回传**合格**的对象命名（英文 name + 中文 display_name）。
+
+    业务对象中文命名是硬闸(``_assert_object_naming_complete``)，只想验证属性/关系
+    行为的用例得先把对象命名喂齐，否则整批会因缺名失败。
+    """
+    return [
+        {
+            "source_ref": o["source_dataset_urn"],
+            "name": "biz_" + o["candidate_name"],
+            "display_name": "业务" + o["display_name"],
+        }
+        for o in payload.get("object_types", [])
+    ]
+
+
+def _all_named(bundle: EvidenceBundle) -> dict:
+    """为整份证据构造合格的对象命名 overrides（直接喂 _build_* 用）。"""
+    return {
+        ot.candidate_name: {
+            "name": ot.candidate_name.removesuffix("_di_entity"),
+            "display_name": f"业务{ot.candidate_name}",
+            "description": None,
+        }
+        for ot in bundle.object_types
+    }
 
 
 def _summary(draft: OntologyDraftOutput):
@@ -241,29 +276,59 @@ def test_split_relations_uses_settings_default_batch_size(monkeypatch):
 # ---------------------------------------------------------------------------
 # 零丢失:确定性组装
 # ---------------------------------------------------------------------------
-def test_mock_build_preserves_all_structure():
+def test_build_preserves_all_structure():
     bundle = _build_bundle(num_objects=5, fields_per_object=4)
     gen = _mock_generator()
-    draft = gen._build_draft_from_evidence(bundle, {})
+    draft = gen._build_draft_from_evidence(bundle, _all_named(bundle))
     assert len(draft.object_types) == 5
     assert len(draft.properties) == 20
     assert len(draft.relation_types) == 4
-    # 无 override 时回退确定性命名(refine 去掉 _di_entity)。
+    # 标识名取 LLM 给的 name。
     assert {ot.name for ot in draft.object_types} == {f"table_{i}" for i in range(5)}
+    # 业务名全是中文，不是技术表名。
+    assert all(ot.display_name.startswith("业务") for ot in draft.object_types)
     # 属性均有必填字段。
     assert all(p.object_type_name and p.name and p.display_name for p in draft.properties)
+
+
+def test_build_without_object_naming_raises():
+    """没有 LLM 命名就组装 → 抛错，绝不用技术表名顶替（反降级红线）。"""
+    bundle = _build_bundle(num_objects=3, fields_per_object=2)
+    gen = _mock_generator()
+    with pytest.raises(ObjectNamingIncompleteError):
+        gen._build_draft_from_evidence(bundle, {})
+
+
+def test_build_with_english_display_name_raises():
+    """LLM 把表名原样当业务名（英文）→ 视为没完成命名，抛错。"""
+    bundle = _build_bundle(num_objects=2, fields_per_object=2)
+    gen = _mock_generator()
+    overrides = {
+        ot.candidate_name: {
+            "name": "table",
+            "display_name": ot.candidate_name,  # 英文技术名
+            "description": None,
+        }
+        for ot in bundle.object_types
+    }
+    with pytest.raises(ObjectNamingIncompleteError) as ei:
+        gen._build_draft_from_evidence(bundle, overrides)
+    assert "不是中文" in str(ei.value)
 
 
 def test_overrides_applied_and_propagated_to_props_and_relations():
     bundle = _build_bundle(num_objects=3, fields_per_object=2)
     gen = _mock_generator()
-    overrides = {
-        "table_0_di_entity": {"name": "payment", "display_name": "支付", "description": "d"},
+    overrides = _all_named(bundle)
+    overrides["table_0_di_entity"] = {
+        "name": "payment",
+        "display_name": "支付",
+        "description": "d",
     }
     draft = gen._build_draft_from_evidence(bundle, overrides)
     names = {ot.name for ot in draft.object_types}
     assert "payment" in names  # override 生效
-    assert "table_1" in names  # 未覆盖 → 确定性回退
+    assert "table_1" in names  # 其余对象取各自的 LLM 命名
     # table_0 的属性 object_type_name 应同步为 payment。
     assert any(
         p.object_type_name == "payment" for p in draft.properties
@@ -288,11 +353,15 @@ def test_zero_loss_single_shot(monkeypatch):
     assert all(p.object_type_name.startswith("biz_") for p in draft.properties)
 
 
-def test_zero_loss_under_bad_llm(monkeypatch):
-    """LLM 返回垃圾(无对象数组)也不能丢任何对象/属性,退回确定性命名。"""
+def test_bad_llm_response_fails_loudly(monkeypatch):
+    """LLM 返回垃圾(无对象数组)→ 重试后失败并提示，绝不静默落回技术表名。"""
 
     class _BadCompletions:
+        def __init__(self) -> None:
+            self.count = 0
+
         async def create(self, *, model, messages, response_format=None):
+            self.count += 1
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content='{"garbage":true}'))]
             )
@@ -300,15 +369,84 @@ def test_zero_loss_under_bad_llm(monkeypatch):
     bundle = _build_bundle(num_objects=5, fields_per_object=3)
     gen = OntologyDraftGenerator()
     gen.model = "x"
-    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_BadCompletions()))
+    completions = _BadCompletions()
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+    monkeypatch.setattr(settings, "draft_chunk_retry_attempts", 2)
+
+    with pytest.raises(ObjectNamingIncompleteError):
+        asyncio.run(gen.generate(bundle))
+    assert completions.count == 2  # 换采样重问过，仍不合格才失败
+
+
+def test_code_fenced_json_is_parsed(monkeypatch):
+    """回归：模型把 JSON 裹进 ```json 围栏（GLM 实测行为）时仍能解析出中文命名。
+
+    这曾是「业务对象名全是英文表名」的真因——围栏让 json.loads 失败，旧实现
+    回退空字典，整域几十块命名静默落空，任务却显示成功。
+    """
+
+    class _FencedCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            body = json.dumps(
+                {"objectTypes": _named_objects(payload)}, ensure_ascii=False
+            )
+            content = f"```json\n{body}\n```"
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    bundle = _build_bundle(num_objects=3, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.model = "x"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FencedCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
 
     draft = asyncio.run(gen.generate(bundle))
-    assert len(draft.object_types) == 5
-    assert len(draft.properties) == 15
-    assert len(draft.relation_types) == 4
-    assert {ot.name for ot in draft.object_types} == {f"table_{i}" for i in range(5)}
-    assert all(p.display_name for p in draft.properties)
+    assert len(draft.object_types) == 3
+    assert all(ot.display_name.startswith("业务") for ot in draft.object_types)
+
+
+def test_prose_wrapped_json_is_parsed(monkeypatch):
+    """模型在 JSON 前后加解说文字时，截取最外层对象仍能解析。"""
+
+    class _ProseCompletions:
+        async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
+            body = json.dumps(
+                {"objectTypes": _named_objects(payload)}, ensure_ascii=False
+            )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=f"好的，结果如下：\n{body}\n以上。")
+                    )
+                ]
+            )
+
+    bundle = _build_bundle(num_objects=2, fields_per_object=2)
+    gen = OntologyDraftGenerator()
+    gen.model = "x"
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_ProseCompletions()))
+    monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+
+    draft = asyncio.run(gen.generate(bundle))
+    assert all(ot.display_name.startswith("业务") for ot in draft.object_types)
+
+
+def test_generate_without_llm_raises():
+    """未配置 LLM → 三个生成入口都抛 LlmNotConfiguredError，而不是出技术名草稿。"""
+    bundle = _build_bundle(num_objects=2, fields_per_object=2)
+    gen = _mock_generator()
+    assert gen.client is None
+    for coro in (
+        lambda: gen.generate(bundle),
+        lambda: gen.generate_object_types(bundle),
+        lambda: gen.generate_relations(bundle),
+    ):
+        with pytest.raises(LlmNotConfiguredError):
+            asyncio.run(coro())
 
 
 def test_zero_loss_under_top_level_array(monkeypatch):
@@ -323,11 +461,7 @@ def test_zero_loss_under_top_level_array(monkeypatch):
         async def create(self, *, model, messages, response_format=None):
             payload = json.loads(messages[-1]["content"])
             # 裸数组(无 {objectTypes: ...} 包裹),模拟不守规矩的 provider。
-            objs = [
-                {"source_ref": o["source_dataset_urn"], "name": "biz_" + o["candidate_name"]}
-                for o in payload.get("object_types", [])
-            ]
-            content = json.dumps(objs, ensure_ascii=False)
+            content = json.dumps(_named_objects(payload), ensure_ascii=False)
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
             )
@@ -356,11 +490,9 @@ def test_top_level_single_wrapper_array_is_unwrapped(monkeypatch):
     class _WrappedCompletions:
         async def create(self, *, model, messages, response_format=None):
             payload = json.loads(messages[-1]["content"])
-            objs = [
-                {"source_ref": o["source_dataset_urn"], "name": "biz_" + o["candidate_name"]}
-                for o in payload.get("object_types", [])
-            ]
-            content = json.dumps([{"objectTypes": objs}], ensure_ascii=False)
+            content = json.dumps(
+                [{"objectTypes": _named_objects(payload)}], ensure_ascii=False
+            )
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
             )
@@ -378,8 +510,11 @@ def test_top_level_single_wrapper_array_is_unwrapped(monkeypatch):
     }
 
 
-def test_zero_loss_partial_override(monkeypatch):
-    """LLM 只成功命名部分对象,其余退回确定性命名,属性一条不丢。"""
+def test_partial_object_naming_fails(monkeypatch):
+    """LLM 只命名了部分对象（或漏了 display_name）→ 整批判不合格，失败并点名缺谁。
+
+    宁可失败重来，也不让「一半中文名、一半技术表名」的草稿落库。
+    """
 
     class _PartialCompletions:
         async def create(self, *, model, messages, response_format=None):
@@ -399,15 +534,11 @@ def test_zero_loss_partial_override(monkeypatch):
     gen.model = "x"
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_PartialCompletions()))
     monkeypatch.setattr(settings, "llm_context_budget_chars", 10_000_000)
+    monkeypatch.setattr(settings, "draft_chunk_retry_attempts", 1)
 
-    draft = asyncio.run(gen.generate(bundle))
-    assert len(draft.object_types) == 4
-    assert len(draft.properties) == 12  # 零丢失
-    names = {ot.name for ot in draft.object_types}
-    assert "vip" in names  # 部分命中
-    # 省略 display_name 时回退确定性中文名(不为空)。
-    vip = next(ot for ot in draft.object_types if ot.name == "vip")
-    assert vip.display_name
+    with pytest.raises(ObjectNamingIncompleteError) as ei:
+        asyncio.run(gen.generate(bundle))
+    assert "4 张表未拿到业务命名" in str(ei.value)
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +809,7 @@ def test_property_override_rejects_unknown_field_name(monkeypatch):
             obj = payload["object_types"][0]
             content = json.dumps(
                 {
-                    "objectTypes": [],
+                    "objectTypes": _named_objects(payload),
                     "properties": [
                         {
                             "object_source_ref": obj["source_dataset_urn"],
@@ -785,7 +916,10 @@ def test_relation_override_rejects_invalid_term(monkeypatch):
                 {"name": r["name"], "display_name": "这是一段过长且不合法的关系描述句子。"}
                 for r in payload.get("relations", [])
             ]
-            content = json.dumps({"objectTypes": [], "relations": rels}, ensure_ascii=False)
+            content = json.dumps(
+                {"objectTypes": _named_objects(payload), "relations": rels},
+                ensure_ascii=False,
+            )
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
             )
@@ -806,9 +940,10 @@ def test_relation_override_rejects_unknown_name(monkeypatch):
 
     class _FakeRelationCompletions:
         async def create(self, *, model, messages, response_format=None):
+            payload = json.loads(messages[-1]["content"])
             content = json.dumps(
                 {
-                    "objectTypes": [],
+                    "objectTypes": _named_objects(payload),
                     "relations": [{"name": "not_a_real_relation", "display_name": "伪造"}],
                 },
                 ensure_ascii=False,

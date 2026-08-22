@@ -117,5 +117,5 @@ def test_evidence_builder_demotes_isolated_entity_keeps_connected_segment():
 
     region_pack = by_urn["urn:li:dataset:region"]
     assert region_pack.table_role == ROLE_DATA_TABLE
-    assert "待复核" in (region_pack.role_reason or "")
+    assert region_pack.needs_review is True
     assert region_pack.role_signals["signals"]["segment_size"] == 1

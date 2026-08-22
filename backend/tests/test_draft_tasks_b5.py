@@ -74,7 +74,7 @@ def test_recover_stale_draft_tasks(client):
         db.close()
 
 
-def test_start_draft_generation_queued(client):
+def test_start_draft_generation_queued(client, llm_ready):
     db = SessionLocal()
     try:
         domain = DomainContext(
@@ -100,7 +100,7 @@ def test_start_draft_generation_queued(client):
 # ---------------------------------------------------------------------------
 # 「仅生成业务对象」/「仅生成业务关系」独立按钮：范围化并发控制
 # ---------------------------------------------------------------------------
-def test_object_and_relation_generation_can_run_in_parallel(client):
+def test_object_and_relation_generation_can_run_in_parallel(client, llm_ready):
     """对象/关系两个范围互不阻塞：可同时排队，支持并行执行。"""
     db = SessionLocal()
     try:
@@ -137,7 +137,7 @@ def test_object_and_relation_generation_can_run_in_parallel(client):
         db.close()
 
 
-def test_same_scope_generation_conflicts(client):
+def test_same_scope_generation_conflicts(client, llm_ready):
     """同一范围的两个生成任务互斥：第二次触发应报「已有任务进行中」。"""
     db = SessionLocal()
     try:
@@ -156,7 +156,7 @@ def test_same_scope_generation_conflicts(client):
         db.close()
 
 
-def test_full_generation_conflicts_with_scoped_generation(client):
+def test_full_generation_conflicts_with_scoped_generation(client, llm_ready):
     """``full`` 会整体重建草稿本体，与任何范围的进行中任务都冲突。"""
     db = SessionLocal()
     try:
@@ -175,7 +175,7 @@ def test_full_generation_conflicts_with_scoped_generation(client):
         db.close()
 
 
-def test_scoped_generation_conflicts_with_running_full(client):
+def test_scoped_generation_conflicts_with_running_full(client, llm_ready):
     """反向同样成立：``full`` 进行中时，对象/关系范围的生成也应被阻塞。"""
     db = SessionLocal()
     try:
@@ -208,5 +208,52 @@ def test_relation_generation_requires_existing_objects(client):
         svc = DraftTaskService()
         with pytest.raises(ValueError, match="业务对象"):
             svc.start_relation_generation(db, domain_id)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 无 LLM 时的「提示而非降级」：起草入口当场 400，不建任务、不出技术名草稿
+# ---------------------------------------------------------------------------
+def test_generate_without_llm_returns_400(client, admin_headers):
+    """未配置 LLM 时三个生成入口都返回 400 + 中文指引，并且不留下任务记录。"""
+    db = SessionLocal()
+    try:
+        domain = DomainContext(
+            datahub_domain_id="urn:li:domain:b5-no-llm", name="B5 No LLM"
+        )
+        db.add(domain)
+        db.flush()
+        ontology = Ontology(
+            domain_context_id=domain.id, status=OntologyStatus.DRAFT.value
+        )
+        db.add(ontology)
+        db.flush()
+        db.add(
+            ObjectType(
+                ontology_id=ontology.id,
+                name="payment",
+                display_name="支付",
+                source_ref="urn:li:dataset:payment-no-llm",
+            )
+        )
+        db.commit()
+        domain_id = domain.id
+    finally:
+        db.close()
+
+    for scope in ("generate-draft", "generate-objects", "generate-relations"):
+        resp = client.post(f"/api/domains/{domain_id}/{scope}", headers=admin_headers)
+        assert resp.status_code == 400, (scope, resp.text)
+        assert "未配置可用的 LLM 服务" in resp.json()["detail"]
+
+    db = SessionLocal()
+    try:
+        assert (
+            db.query(DraftGenerationTask)
+            .filter(DraftGenerationTask.domain_context_id == domain_id)
+            .count()
+            == 0
+        )
     finally:
         db.close()

@@ -1247,6 +1247,366 @@ _PROPOSE_ONTOLOGY_DRAFT_TOOL: dict[str, Any] = {
     },
 }
 
+# ========== 建模工单工具 ==========
+
+_CREATE_MODELING_CASE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "create_modeling_case",
+        "description": (
+            "创建建模工单，记录用户的分析/建模需求。\n"
+            "当用户明确表达要做一个完整的分析、报表、数据应用，或需要持续跟进的建模任务时使用。\n"
+            "创建后会自动进入需求确认阶段，需要进一步澄清业务目标、分析粒度、主体对象等关键信息。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "工单标题，简明描述建模目标（如：销售延期分析、客户标签体系、渠道绩效看板）",
+                },
+                "business_goal": {
+                    "type": "string",
+                    "description": "业务目标，用户希望通过这次建模解决什么问题",
+                },
+                "primary_domain_id": {
+                    "type": "string",
+                    "description": "主数据域 ID（可选，来自 get_domain_overview 或 list_onboarding_targets）",
+                },
+                "domain_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "涉及的数据域列表（可选）",
+                },
+            },
+            "required": ["title", "business_goal"],
+        },
+    },
+}
+
+_UPDATE_REQUIREMENT_SPEC_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "update_requirement_spec",
+        "description": (
+            "更新建模工单的需求规格。\n"
+            "在需求确认阶段，根据对话逐步完善关键信息：业务目标、分析粒度、主体对象、"
+            "时间范围、度量需求、维度需求、交付形式等。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "工单 ID"},
+                "business_goal": {"type": "string", "description": "业务目标（可选，补充或更新）"},
+                "analysis_scope": {"type": "string", "description": "分析范围（可选，如：全国、华东区、线上渠道）"},
+                "primary_subject": {"type": "string", "description": "主体对象（如：订单、客户、商品）"},
+                "grain": {"type": "string", "description": "分析粒度（如：每笔订单、每个客户每天、每个SKU每月）"},
+                "time_range": {"type": "string", "description": "时间范围（如：近一年、2023年、最近30天）"},
+                "metrics": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                    },
+                    "description": "度量列表（可选，如：[{name: '销售额', description: '订单金额汇总'}]）",
+                },
+                "dimensions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "维度列表（可选，如：['地区', '渠道', '类目']）",
+                },
+                "deliverables": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "交付形式（可选，如：['看板', '定期报表', '标签']）",
+                },
+            },
+            "required": ["case_id"],
+        },
+    },
+}
+
+_CONFIRM_REQUIREMENT_SPEC_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "confirm_requirement_spec",
+        "description": (
+            "确认需求规格，推进工单到下一阶段（本体确认）。\n"
+            "仅当关键信息（业务目标、主体对象、分析粒度）已明确且用户表示确认时调用。\n"
+            "确认后需求规格将被锁定，后续修改需要新版本。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string", "description": "工单 ID"},
+            },
+            "required": ["case_id"],
+        },
+    },
+}
+
+_GET_MODELING_CASE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_modeling_case",
+        "description": (
+            "查询当前会话关联的建模工单详情。\n"
+            "返回工单状态、当前阶段、已确认的规格、待确认的草稿等信息。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+}
+
+_PROPOSE_DIMENSIONAL_MODEL_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_dimensional_model",
+        "description": (
+            "提议一个维度模型（星型/雪花模型）设计方案。\n"
+            "在已确认本体和数据后，基于业务过程和粒度，设计事实表和维度表。\n"
+            "事实表包含度量和维度键；维度表包含代理键、自然键、属性和 SCD 策略。\n"
+            "用户确认后，可以编译为物化契约并生成 DDL/ETL。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "modeling_case_id": {
+                    "type": "string",
+                    "description": "关联的建模工单 ID（可选）",
+                },
+                "domain_id": {
+                    "type": "string",
+                    "description": "数据域 ID",
+                },
+                "ontology_id": {
+                    "type": "string",
+                    "description": "本体 ID",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "模型名称（如：order_star_model）",
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": "显示名称（如：订单分析星型模型）",
+                },
+                "business_process": {
+                    "type": "string",
+                    "description": "业务过程描述（如：客户在线下单购买商品）",
+                },
+                "grain": {
+                    "type": "string",
+                    "description": "粒度声明（如：每笔订单的每个商品明细行）",
+                },
+                "fact_tables": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "事实表名（如：fct_order_line）"},
+                            "display_name": {"type": "string", "description": "显示名称"},
+                            "source_object_id": {"type": "string", "description": "来源本体对象 ID"},
+                            "measures": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "field": {"type": "string"},
+                                        "additive_type": {
+                                            "type": "string",
+                                            "enum": ["additive", "semi_additive", "non_additive"],
+                                            "description": "可加性：additive=完全可加, semi_additive=半可加, non_additive=不可加",
+                                        },
+                                    },
+                                },
+                            },
+                            "dimension_keys": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "维度键列表（如：['customer_key', 'product_key', 'order_date_key']）",
+                            },
+                            "degenerate_dimensions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "退化维度（如：['order_id', 'line_number']）",
+                            },
+                        },
+                    },
+                    "description": "事实表设计列表",
+                },
+                "dimensions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "维度表名（如：dim_customer）"},
+                            "display_name": {"type": "string"},
+                            "source_object_id": {"type": "string", "description": "来源本体对象 ID（可选）"},
+                            "natural_key": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "自然键（如：['customer_code']）",
+                            },
+                            "surrogate_key": {"type": "string", "description": "代理键（如：customer_key）"},
+                            "scd_type": {
+                                "type": "string",
+                                "enum": ["none", "scd1", "scd2"],
+                                "description": "缓慢变化维度类型",
+                            },
+                            "scd_config": {
+                                "type": "object",
+                                "properties": {
+                                    "effective_date": {"type": "string"},
+                                    "expiration_date": {"type": "string"},
+                                    "current_flag": {"type": "string"},
+                                },
+                                "description": "SCD2 配置（仅当 scd_type=scd2 时需要）",
+                            },
+                            "attributes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "field": {"type": "string"},
+                                    },
+                                },
+                                "description": "维度属性列表",
+                            },
+                        },
+                    },
+                    "description": "维度设计列表",
+                },
+                "conformed_dimensions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dimension_name": {"type": "string"},
+                            "shared_across_facts": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "description": {"type": "string"},
+                        },
+                    },
+                    "description": "一致性维度（可选）",
+                },
+                "model_type": {
+                    "type": "string",
+                    "enum": ["star", "snowflake", "constellation"],
+                    "description": "模型类型，默认 star",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "模型描述（可选）",
+                },
+            },
+            "required": [
+                "domain_id",
+                "ontology_id",
+                "name",
+                "display_name",
+                "business_process",
+                "grain",
+                "fact_tables",
+                "dimensions",
+            ],
+        },
+    },
+}
+
+_PROPOSE_LOGIC_BATCH_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "propose_logic_batch",
+        "description": (
+            "批量生成一组指标、标签或规则的形式化表达式。\n"
+            "适用于基于同一业务主体或维度模型生成多个相关口径的场景。\n"
+            "每个口径都会经过独立的编译验证，共享粒度、对象和时间定义。\n"
+            "用户可以一次确认整批口径，系统会分别落成独立可治理制品。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "modeling_case_id": {
+                    "type": "string",
+                    "description": "关联的建模工单 ID（可选）",
+                },
+                "domain_id": {
+                    "type": "string",
+                    "description": "数据域 ID",
+                },
+                "ontology_id": {
+                    "type": "string",
+                    "description": "本体 ID",
+                },
+                "dimensional_model_id": {
+                    "type": "string",
+                    "description": "关联的维度模型 ID（可选，如果基于维度模型生成）",
+                },
+                "business_subject": {
+                    "type": "string",
+                    "description": "业务主体描述（如：订单分析、客户画像）",
+                },
+                "shared_context": {
+                    "type": "object",
+                    "properties": {
+                        "grain": {"type": "string", "description": "共享粒度"},
+                        "primary_object_id": {"type": "string", "description": "主要对象 ID"},
+                        "time_dimension": {"type": "string", "description": "时间维度字段"},
+                        "default_time_range": {"type": "string", "description": "默认时间范围"},
+                    },
+                    "description": "共享上下文：粒度、对象、时间定义等",
+                },
+                "logics": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "口径名称（英文标识）"},
+                            "display_name": {"type": "string", "description": "显示名称（中文）"},
+                            "logic_type": {
+                                "type": "string",
+                                "enum": ["metric", "tag", "rule"],
+                                "description": "口径类型：metric=指标, tag=标签, rule=规则",
+                            },
+                            "summary": {"type": "string", "description": "业务含义说明"},
+                            "fields": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "引用的字段列表（用于编译验证）",
+                            },
+                            "body": {
+                                "type": "object",
+                                "description": "表达式结构（AST），参考 propose_expression 的 body 结构",
+                            },
+                        },
+                        "required": ["name", "display_name", "logic_type", "fields", "body"],
+                    },
+                    "description": "批量口径列表，每个包含名称、类型和表达式",
+                },
+                "deduplication": {
+                    "type": "boolean",
+                    "description": "是否自动查重（默认 true）",
+                },
+            },
+            "required": [
+                "ontology_id",
+                "business_subject",
+                "logics",
+            ],
+        },
+    },
+}
+
 # 基础工具集 = 12 检索/执行工具 + select_skill + 记忆提案 + 交互表单；技能激活后再并上其 extra 工具。
 # read_result 不入基础集（V4 O3 渐进披露）：只在首次 run_sql 取到结果后动态解锁。
 _BASE_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -1274,6 +1634,12 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _LIST_ONBOARDING_TARGETS_TOOL,
         _PROPOSE_DATASOURCE_TOOL,
         _PROPOSE_ONTOLOGY_DRAFT_TOOL,
+        _CREATE_MODELING_CASE_TOOL,
+        _UPDATE_REQUIREMENT_SPEC_TOOL,
+        _CONFIRM_REQUIREMENT_SPEC_TOOL,
+        _GET_MODELING_CASE_TOOL,
+        _PROPOSE_DIMENSIONAL_MODEL_TOOL,
+        _PROPOSE_LOGIC_BATCH_TOOL,
     ]
 }
 # 所有可能出现的工具名——供 FactLedger 登记为可信上下文（工具名非业务实体）。
@@ -1412,6 +1778,10 @@ __all__ = [
     '_LIST_ONBOARDING_TARGETS_TOOL',
     '_PROPOSE_DATASOURCE_TOOL',
     '_PROPOSE_ONTOLOGY_DRAFT_TOOL',
+    '_CREATE_MODELING_CASE_TOOL',
+    '_UPDATE_REQUIREMENT_SPEC_TOOL',
+    '_CONFIRM_REQUIREMENT_SPEC_TOOL',
+    '_GET_MODELING_CASE_TOOL',
     '_BASE_TOOL_SCHEMAS',
     '_TOOL_BY_NAME',
     '_ALL_AGENT_TOOL_NAMES',

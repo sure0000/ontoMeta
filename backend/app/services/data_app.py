@@ -204,9 +204,9 @@ class DataAppService:
 
     @staticmethod
     def _dsn_components(kind: str, dsn: str | None) -> dict:
-        """把存量 DSN 拆成可回显的非机密字段。密码从不返回，只给 password_set。
+        """把存量 DSN 拆成可回显字段。密码明文下发，供前端 Input.Password 预填+眼睛切换显隐。
 
-        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号
+        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号/密码
         - 文件类（sqlite/duckdb）：取文件路径
         - cube：dsn 存的就是 API 地址，原样给 url
         解析失败时静默降级为空，不影响其它字段返回。
@@ -217,6 +217,7 @@ class DataAppService:
             "port": None,
             "database": None,
             "username": None,
+            "password": None,
             "password_set": False,
             "path": None,
             "url": None,
@@ -232,6 +233,7 @@ class DataAppService:
             out["port"] = u.port
             out["database"] = u.database
             out["username"] = u.username
+            out["password"] = u.password  # 明文回显：前端预填进 Input.Password，眼睛图标控制显隐
             out["password_set"] = bool(u.password)
         elif kind in _FILE_DSN_KINDS:
             try:

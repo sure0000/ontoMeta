@@ -81,7 +81,7 @@ ONTOMETA_ADMIN_TOKEN=dev-admin-token-change-me \
 > 避免改动 `tests/` 等误触发重载中断生成。设 `DRAFT_WORKER_SUBPROCESS=false` 可回退进程内执行
 > （测试用）。清端口/重启时注意：分离子进程不随后端退出，`./service.sh stop` 会一并清理。
 
-本地无 DataHub / OpenAI 时，未配置的服务会在调用时显式报错（未配 LLM 时本体草稿以证据确定性命名兽底，不报错）；在【设置页】配齐 DataHub / LLM 即走真实服务。
+本地无 DataHub / OpenAI 时，未配置的服务会在调用时显式报错（含本体草稿生成：业务对象的中文命名靠 LLM，未配则直接提示而**不**退化成技术表名）；在【设置页】配齐 DataHub / LLM 即走真实服务。
 
 **管理鉴权（必填）**：在 `backend/.env` 设置 `ONTOMETA_ADMIN_TOKEN`（见 `.env.example`）。前端打开「设置 → 管理鉴权」填入相同 Token，或设置 `VITE_ONTOMETA_ADMIN_TOKEN`。
 

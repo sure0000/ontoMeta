@@ -2,7 +2,7 @@
 
 覆盖四条改造关键路径（不触真实 SSH/网络，paramiko 与 SSHSession 全 mock）：
 1. schema 自描述：bare_metal 字段已换成 SSH 接入参数，且不再暴露 token/api_version。
-2. deploy_spec 脱敏：SSH 密码/私钥不明文回显；私钥（text 型）连尾 4 位都不回。
+2. deploy_spec 回显：SSH 密码/私钥明文回显供前端预填+显隐切换，*_set/*_hint 保留兼容。
 3. 编辑态 secret-merge：机密留空 = 保留原值。
 4. SSHSession 认证分派（密码 / 私钥 / 缺凭据报错）+ recipe 派发 + start_deploy 同步/后台切分。
 """
@@ -65,7 +65,8 @@ def test_private_key_field_is_text_type(svc):
 
 # --------------------------------------------------------------------- 脱敏
 
-def test_mask_deploy_spec_hides_ssh_secrets():
+def test_mask_deploy_spec_echoes_ssh_secrets_plaintext():
+    """机密字段（SSH 密码/私钥）现在明文回显供前端预填+显隐切换，*_set/*_hint 保留兼容。"""
     spec = {
         "ssh_host": "192.168.1.10",
         "ssh_user": "root",
@@ -75,20 +76,32 @@ def test_mask_deploy_spec_hides_ssh_secrets():
     masked = ds._mask_deploy_spec("airflow", "bare_metal", spec)
     # 非机密原样
     assert masked["ssh_host"] == "192.168.1.10"
-    # 密码：只回 set + 尾4提示，不回明文
+    # 密码：明文回显 + set 标志 + 尾4提示都在
+    assert masked["ssh_password"] == "supersecret"
     assert masked["ssh_password_set"] is True
-    assert "supersecret" not in str(masked)
-    # 私钥：text 型，连尾4都不回（识别价值≈0、敏感度高）
+    assert masked["ssh_password_hint"] == "*******cret"  # mask_secret: len-4 个 * + 尾4
+    # 私钥：text 型，明文回显 + set 标志；hint 仍固定 ****（尾4无识别价值）
+    assert masked["ssh_private_key"] == "-----BEGIN KEY-----\nabcdefXYZ"
     assert masked["ssh_private_key_set"] is True
     assert masked["ssh_private_key_hint"] == "****"
-    assert "XYZ" not in str(masked)
-    assert "ssh_private_key" not in masked  # 明文键不在
 
 
 def test_mask_deploy_spec_unset_secret_returns_none():
     masked = ds._mask_deploy_spec("airflow", "bare_metal", {"ssh_host": "h"})
     assert masked["ssh_password_set"] is False
     assert masked["ssh_password_hint"] is None
+    assert masked["ssh_password"] is None  # 未设也不发明文
+
+
+def test_mask_connection_echoes_secret_plaintext():
+    """连接信息里的 secret 字段（如 LLM api_key）现在明文回显，*_set/*_hint 保留兼容。"""
+    masked = ds._mask_connection("llm", {"api_base_url": "https://x", "api_key": "sk-abc123"})
+    # 非机密原样
+    assert masked["api_base_url"] == "https://x"
+    # 机密明文回显 + set/hint 兼容
+    assert masked["api_key"] == "sk-abc123"
+    assert masked["api_key_set"] is True
+    assert masked["api_key_hint"] == "*****c123"  # mask_secret("sk-abc123") = len9-4=5 个 * + 尾4
 
 
 # --------------------------------------------------------------------- merge

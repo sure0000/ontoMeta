@@ -241,8 +241,8 @@ export function DataSourcesPanel({
     setEditingId(row.id);
     setEditingPwSet(Boolean(row.password_set));
     setRawMode(false);
-    // 回显非机密连接字段：host 类给主机/端口/库/账号，文件类给路径，cube 给地址。
-    // 密码不回显，留空＝保持原密码（后端在 update 时沿用旧密码）。
+    // 回显连接字段：host 类给主机/端口/库/账号，文件类给路径，cube 给地址。
+    // 密码明文回显进 Input.Password（眼睛图标控制显隐）；清空时后端沿用旧密码。
     setInitialVals({
       name: row.name,
       kind: row.kind,
@@ -250,6 +250,7 @@ export function DataSourcesPanel({
       port: row.port ?? undefined,
       database: row.database ?? undefined,
       user: row.username ?? undefined,
+      password: row.password ?? undefined,
       path: row.path ?? undefined,
       url: row.url ?? undefined,
       mapping: row.mapping ? JSON.stringify(row.mapping) : "",
@@ -396,10 +397,10 @@ export function DataSourcesPanel({
         <Form.Item
           name="password"
           label="密码"
-          extra={editingId && editingPwSet ? "已配置密码，留空则保持原密码不变" : undefined}
+          extra={editingId && editingPwSet ? "已回显，清空将保持原密码不变" : undefined}
         >
           <Input.Password
-            placeholder={editingId && editingPwSet ? "留空＝不修改密码" : "数据库密码"}
+            placeholder="数据库密码"
             style={{ width: 160 }}
             autoComplete="new-password"
           />
@@ -450,7 +451,7 @@ export function DataSourcesPanel({
 
           {editingId && (
             <div className="om-muted" style={{ marginBottom: 8 }}>
-              连接字段已回显（密码除外）；密码留空＝保持原密码不变，改动其它字段不会清空密码。
+              连接字段已回显（密码点眼睛图标查看明文）；密码清空＝保持原密码不变，改动其它字段不会清空密码。
             </div>
           )}
 

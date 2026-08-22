@@ -39,13 +39,14 @@ class DataSourceOut(BaseModel):
     updated_at: datetime
     # StarRocks 多目录：NULL/"internal"=warehouse，其他值=源库 catalog 名
     catalog_name: str | None = None
-    # 连接的非机密部分，供编辑弹窗回显（密码从不回显，只给 password_set 标志）。
+    # 连接信息回显：密码明文下发供前端 Input.Password 预填（眼睛图标控制显隐）；password_set 保留兼容。
     # dsn 整体仍不下发；这里由后端从存量 DSN 解析出结构化字段。
     dsn_set: bool = False
     host: str | None = None
     port: int | None = None
     database: str | None = None
     username: str | None = None
+    password: str | None = None  # 明文回显：前端预填进 Input.Password，眼睛图标控制显隐
     password_set: bool = False
     path: str | None = None  # 文件类（sqlite/duckdb）的文件路径
     url: str | None = None  # cube 语义层的 API 地址

@@ -8,8 +8,13 @@ from app.services.object_classifier import (
 )
 
 
-def _ot(role, conf, reason):
-    return SimpleNamespace(table_role=role, role_confidence=conf, role_reason=reason)
+def _ot(role, conf, reason, needs_review=False):
+    return SimpleNamespace(
+        table_role=role,
+        role_confidence=conf,
+        role_reason=reason,
+        needs_review=needs_review,
+    )
 
 
 def test_no_override_keeps_heuristic():
@@ -25,10 +30,10 @@ def test_agreement_keeps_heuristic_unchanged():
     out = OntologyDraftGenerator._resolve_role(
         ot, {"role": ROLE_TECHNICAL, "reason": "看起来像系统表", "evidence_gap": None}
     )
-    # 一致：互证，保留启发式，不改置信度、不加待复核。
+    # 一致：互证，保留启发式，不改置信度、不置复核。
     assert out["table_role"] == ROLE_TECHNICAL
     assert out["role_confidence"] == 0.9
-    assert "[待复核]" not in out["role_reason"]
+    assert out["needs_review"] is False
 
 
 def test_invalid_role_hint_ignored():
@@ -51,7 +56,7 @@ def test_disagreement_flags_needs_review_and_lowers_confidence():
     )
     assert out["table_role"] == ROLE_TECHNICAL  # 展示 LLM 语义判定
     assert out["role_confidence"] == 0.5  # 下调，凸显待复核
-    assert out["role_reason"].startswith("[待复核]")
+    assert out["needs_review"] is True
     assert "LLM 判为技术/系统表" in out["role_reason"]
     assert "启发式判为业务对象" in out["role_reason"]
     assert "证据缺口：无列注释" in out["role_reason"]
@@ -71,7 +76,7 @@ def test_llm_bridge_vote_overrides_business_object():
     )
     assert out["table_role"] == ROLE_BRIDGE
     assert out["role_confidence"] == 0.5
-    assert out["role_reason"].startswith("[待复核]")
+    assert out["needs_review"] is True
     assert "LLM 判为业务事实/关系表" in out["role_reason"]
     assert "启发式判为业务对象" in out["role_reason"]
 
@@ -113,14 +118,16 @@ def test_parse_role_overrides_accepts_bridge():
     assert ov["role"] == ROLE_BRIDGE
 
 
-def test_disagreement_strips_nested_review_prefix():
-    # 启发式原因本就带 [待复核] 前缀时，并陈时不应重复嵌套该前缀。
-    ot = _ot(ROLE_BUSINESS_OBJECT, 0.5, "[待复核] 引用多个实体，疑似关联实体")
+def test_disagreement_keeps_reason_as_plain_prose():
+    # 复核状态已升格为独立布尔（不再是 role_reason 的 [待复核] 前缀）：
+    # 原因文本保持纯描述，两方观点并陈，标记只落在 needs_review 上。
+    ot = _ot(ROLE_BUSINESS_OBJECT, 0.5, "引用多个实体，疑似关联实体", needs_review=True)
     out = OntologyDraftGenerator._resolve_role(
         ot, {"role": ROLE_TECHNICAL, "reason": "系统表"}
     )
-    # 仅开头一个 [待复核]
-    assert out["role_reason"].count("[待复核]") == 1
+    assert "[待复核]" not in out["role_reason"]
+    assert "引用多个实体，疑似关联实体" in out["role_reason"]
+    assert out["needs_review"] is True
 
 
 def test_parse_role_overrides_captures_evidence_gap():

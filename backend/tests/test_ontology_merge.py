@@ -115,6 +115,78 @@ def test_machine_takes_over_unedited_field():
         db.close()
 
 
+def test_rename_chain_uses_temporary_names_before_reusing_released_name():
+    """同批 A 释放名称、B 接管该名称时不能依赖 UPDATE 顺序。
+
+    SQLite 逐条检查唯一约束；这里故意让 B 的主键排在 A 前面。若直接写最终名，
+    SQLAlchemy 会先把 B 改成 A 尚未释放的名称并触发 IntegrityError。
+    """
+    merge = OntologyMergeService()
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        releaser = ObjectType(
+            id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+            ontology_id=ontology.id,
+            name="schema_table_statistics",
+            display_name="原统计表",
+            source_ref="urn:li:dataset:(urn:li:dataPlatform:mysql,sys.schema_table_statistics,PROD)",
+            status=EntityStatus.SUGGESTED.value,
+            machine_baseline=json.dumps(
+                {
+                    "name": "schema_table_statistics",
+                    "display_name": "原统计表",
+                    "description": None,
+                    "table_role": "business_object",
+                    "role_reason": None,
+                }
+            ),
+        )
+        taker = ObjectType(
+            id="00000000-0000-0000-0000-000000000000",
+            ontology_id=ontology.id,
+            name="x_schema_table_statistics",
+            display_name="X 统计表",
+            source_ref="urn:li:dataset:(urn:li:dataPlatform:mysql,sys.x$schema_table_statistics,PROD)",
+            status=EntityStatus.SUGGESTED.value,
+            machine_baseline=json.dumps(
+                {
+                    "name": "x_schema_table_statistics",
+                    "display_name": "X 统计表",
+                    "description": None,
+                    "table_role": "business_object",
+                    "role_reason": None,
+                }
+            ),
+        )
+        db.add_all([releaser, taker])
+        db.commit()
+
+        merge.merge_objects(
+            db,
+            ontology.id,
+            [
+                _obj(releaser.source_ref, "table_statistics", "统计表"),
+                _obj(taker.source_ref, "schema_table_statistics", "表统计信息"),
+            ],
+            [],
+            "g2",
+            MergeReport(),
+        )
+        db.commit()
+
+        db.refresh(releaser)
+        db.refresh(taker)
+        assert releaser.name == "table_statistics"
+        assert taker.name == "schema_table_statistics"
+        assert "__ontometa_tmp__" not in releaser.name
+        assert "__ontometa_tmp__" not in taker.name
+        assert json.loads(taker.machine_baseline)["name"] == "schema_table_statistics"
+    finally:
+        db.rollback()
+        db.close()
+
+
 def test_user_created_object_is_never_touched():
     merge = OntologyMergeService()
     db = SessionLocal()

@@ -359,16 +359,11 @@ class OntologyQueryService:
             published_only=published_only,
         )
         # 组合筛选（AND）：role_in=对象角色多选；needs_review=仅看待复核。
-        # 待复核以 role_reason 带 [待复核] 标记为准。
+        # 复核状态是独立列（此前寄生在 role_reason 的 [待复核] 前缀里，靠全表 LIKE 扫）。
         if role_in:
             query = query.filter(ObjectType.table_role.in_(role_in))
-        if needs_review is True:
-            query = query.filter(ObjectType.role_reason.ilike("%待复核%"))
-        elif needs_review is False:
-            query = query.filter(
-                (ObjectType.role_reason.is_(None))
-                | (~ObjectType.role_reason.ilike("%待复核%"))
-            )
+        if needs_review is not None:
+            query = query.filter(ObjectType.needs_review.is_(bool(needs_review)))
         if q and q.strip():
             like = f"%{q.strip()}%"
             query = query.filter(
@@ -701,7 +696,7 @@ class OntologyQueryService:
                     display_name=obj.display_name,
                     status=obj.status,
                     table_role=obj.table_role,
-                    needs_review="待复核" in (obj.role_reason or ""),
+                    needs_review=bool(obj.needs_review),
                 )
                 for obj in objects
             ]
@@ -766,7 +761,7 @@ class OntologyQueryService:
                 display_name=obj.display_name,
                 status=obj.status,
                 table_role=obj.table_role,
-                needs_review="待复核" in (obj.role_reason or ""),
+                needs_review=bool(obj.needs_review),
             )
             for oid, obj in obj_by_id.items()
             if oid in selected
@@ -1017,7 +1012,7 @@ class OntologyQueryService:
                 display_name=obj_by_id[oid].display_name,
                 status=obj_by_id[oid].status,
                 table_role=obj_by_id[oid].table_role,
-                needs_review="待复核" in (obj_by_id[oid].role_reason or ""),
+                needs_review=bool(obj_by_id[oid].needs_review),
             )
             for oid in members
         ]
