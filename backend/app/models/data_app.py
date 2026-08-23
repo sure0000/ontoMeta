@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -24,19 +24,28 @@ def _uuid() -> str:
 
 
 class DataSource(Base):
-    """物理数据源连接（阶段 1 可为空，preview 走 Mock 造数）。
+    """物理数据源连接。
 
-    统一查询网关重构后，DataSource 语义分为两类：
-    - warehouse 源（catalog_name=NULL/"internal"）：数仓投影，本体物化落这里，agent 默认查这里
-    - 源库 catalog 引用（catalog_name="erp"/"crm"/...）：源系统在 StarRocks 里注册的 JDBC catalog，
-      显式 target 参数才查，实现 warehouse-first 语义
+    ``purpose`` 是路由事实源：业务源和数仓连接不能再通过 catalog_name
+    推断。``catalog_name`` 仅作为外部 catalog 元数据保留。
     """
 
     __tablename__ = "data_sources"
-
+    __table_args__ = (
+        Index(
+            "uq_data_sources_default_warehouse",
+            "is_default_warehouse",
+            unique=True,
+            sqlite_where=text("is_default_warehouse = 1"),
+            postgresql_where=text("is_default_warehouse = true"),
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255))
-    kind: Mapped[str] = mapped_column(String(50))  # postgres/mysql/duckdb/http/mock/starrocks
+    kind: Mapped[str] = mapped_column(String(50))  # postgres/mysql/duckdb/http/mock/doris
+    purpose: Mapped[str] = mapped_column(String(30), default="business_source", server_default="business_source")
+    is_default_warehouse: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     # DSN / 密钥仅存引用或加密串，阶段 1 允许为空
     dsn_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 物理映射：{"tables":{ontologyName:physical}, "columns":{...}}，Text(json)
@@ -50,6 +59,35 @@ class DataSource(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class DorisWarehouseConfig(Base):
+    """Default Doris connection contract, one-to-one with the default DataSource.
+
+    Credentials remain in managed secrets/Airflow connections; this table stores
+    endpoints and stable connection aliases only.
+    """
+
+    __tablename__ = "doris_warehouse_configs"
+    __table_args__ = (UniqueConstraint("warehouse_datasource_id", name="uq_doris_config_datasource"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    warehouse_datasource_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    query_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    query_port: Mapped[int] = mapped_column(Integer, default=9030, server_default="9030")
+    default_catalog: Mapped[str] = mapped_column(String(100), default="internal", server_default="internal")
+    default_database: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    connect_timeout_seconds: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
+    query_timeout_seconds: Mapped[int] = mapped_column(Integer, default=15, server_default="15")
+    ssl_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    fenodes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    airflow_ddl_conn_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    airflow_etl_conn_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    airflow_flink_conn_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reader_dsn_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=True)
 
 
 class DataApp(Base):

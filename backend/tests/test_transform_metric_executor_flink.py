@@ -1,262 +1,172 @@
-"""P1-4/P1-5：transform/metric executor 集成测试。
-
-验收：有 datasource+SqlRunner JAR 时返回 dag_run_id/run_url；无配置时退回「仅产出」。
-"""
+"""Doris-native transform execution and remaining metric compatibility tests."""
 
 from __future__ import annotations
 
-import json
+import inspect
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from app.agents.executors.transform import TransformExecutor
-from app.agents.executors.metric import MetricExecutor
-from app.database import SessionLocal
-from app.models import DataSource
-from tests.support.delivery import LocalTransportDelivery, make_runner_jar
+from app.services.doris_sql_dag_builder import build_doris_sql_dag
+from tests.support.delivery import LocalTransportDelivery
 
 
-def _make_datasource(ds_id: str = "ds-123") -> None:
-    """建一个目标数据源（幂等：已存在则跳过）。"""
-    with SessionLocal() as db:
-        if db.get(DataSource, ds_id):
-            return
-        db.add(DataSource(id=ds_id, name="warehouse", kind="hive", dsn_secret_ref="hive://..."))
-        db.commit()
-
-
-@pytest.fixture
-def transform_spec():
-    return {
-        "ontology_id": "onto-123",
-        "target_table": "customer",
-        "engine": "hive",
-        "database_prefix": "erp",
-        "execution_mode": "batch",
-        "cleansing_rules": [],
-    }
-
-
-@pytest.fixture
-def metric_spec():
-    return {
-        "ontology_id": "onto-123",
-        "metric_name": "gmv",
-        "engine": "hive",
-        "database_prefix": "erp",
-        "target_layer": "ads",
-        "execution_mode": "batch",
-        "subject_objects": ["sales_order"],
-        "group_by": [],
-        "expression": "SUM(amount)",
-    }
-
-
-def test_transform_without_datasource_returns_handoff(transform_spec):
-    """未配 target_datasource_id 退回「仅产出」（不报错）。"""
+def test_transform_without_datasource_returns_doris_handoff():
     executor = TransformExecutor()
-    with patch.object(executor, "_artifacts") as mock_artifacts:
-        mock_artifacts.return_value = {"engine": "hive", "sql": "SELECT 1;", "target_table": "customer"}
-        receipt = executor.execute(transform_spec, context={})
-    assert receipt["handoff"] == "DolphinScheduler"
-    assert "未配置 target_datasource_id" in receipt["note"]
-
-
-def test_metric_without_datasource_returns_handoff(metric_spec):
-    """metric 同上。"""
-    executor = MetricExecutor()
-    with patch.object(executor, "_artifacts") as mock_artifacts:
-        mock_artifacts.return_value = {"engine": "hive", "ddl": "CREATE TABLE ads_gmv (...);", "sql": "INSERT ..."}
-        receipt = executor.execute(metric_spec, context={})
-    assert receipt["handoff"] == "DolphinScheduler"
-    assert "未配置 target_datasource_id" in receipt["note"]
-
-
-def test_transform_with_datasource_but_no_runner_jar_returns_handoff(transform_spec):
-    """有 datasource 但无 SqlRunner JAR 时，run_flink_sql 内部退回「仅产出」。"""
-    _make_datasource("ds-123")
-
-    with patch("app.services.flink_job_runner._settings") as settings:
-        settings.get_airflow_runtime.return_value = MagicMock(
-            available=True, flink_sql_runner_jar=""  # 未配 JAR
-        )
-        with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
-                mock_input.return_value = {
-                    "source_table": MagicMock(name="src_customer", columns=()),
-                    "target_table": MagicMock(name="customer", qualified_name="dim_erp.customer", columns=()),
-                    "source_physical": "erp_ods.tab_customer",
-                    "target_physical": "dim_erp.customer",
-                    "source_platform": "hive",
-                    "target_platform": "hive",
-                    "select_body": "SELECT `cust_id` AS `customer_id` FROM `src_customer`",
-                }
-                executor = TransformExecutor()
-                receipt = executor.execute(
-                    {**transform_spec, "target_datasource_id": "ds-123"},
-                    context={"artifact_id": "artifact-456"},
-                )
-
+    with patch.object(executor, "_artifacts") as artifacts:
+        artifacts.return_value = {
+            "engine": "doris",
+            "compute_engine": "doris",
+            "source_tables": ["ods.customer"],
+            "target_table": "dim.customer",
+            "target_logical_table": MagicMock(),
+            "sql": "INSERT OVERWRITE TABLE `dim`.`customer` SELECT * FROM `ods`.`customer`;",
+            "applied_rules": [],
+            "unapplied_rules": [],
+            "rule_notes": [],
+        }
+        receipt = executor.execute({"ontology_id": "o", "target_table": "customer"}, {})
     assert receipt["execute_mode"] == "handoff"
-    assert "未配置 Flink SqlRunner JAR" in receipt["note"]
+    assert receipt["compute_engine"] == "doris"
+    assert "Doris SQL" in receipt["note"]
 
 
-def test_transform_with_full_config_triggers_flink(transform_spec, tmp_path):
-    """有 datasource+SqlRunner JAR+Airflow 时，返回 dag_run_id/run_url（Airflow mock 解析到 DAG）。"""
-    _make_datasource("ds-123")
+def test_transform_module_has_no_flink_runner_import():
+    import app.agents.executors.transform as module
 
-    with patch("app.services.flink_job_runner._settings") as settings:
-            airflow = MagicMock(
-                available=True,
-                dags_dir=str(tmp_path / "dags"),
-                endpoint="http://airflow",
-                max_active_tasks_per_dag=16,
-                dag_parse_timeout=0.1,
-                # Flink 执行参数现来自 Airflow 运行期配置（DB）。jar 是 ontoMeta 侧
-                # 真实路径（随包分发），指向 /opt 的占位路径现在会被 jar 读取报错。
-                flink_sql_runner_jar=make_runner_jar(tmp_path),
-                flink_sql_runner_class="com.ontometa.flink.SqlRunner",
-                flink_bin="flink",
-                flink_deploy_target="yarn-per-job",
-                flink_parallelism=1,
-                flink_yarn_queue="",
-                flink_checkpoint_dir="",
-            )
-            settings.get_airflow_runtime.return_value = airflow
-            with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
-                client = MagicMock()
-                client_cls.return_value = client
-                client.dag_exists.return_value = True
-                client.trigger_dag.return_value = {"state": "queued"}
-                client.run_url.return_value = "http://airflow/dags/x/grid"
-
-                with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
-                    mock_input.return_value = {
-                        "source_table": MagicMock(name="src_customer", columns=()),
-                        "target_table": MagicMock(name="customer", qualified_name="dim_erp.customer", columns=()),
-                        "source_physical": "erp_ods.tab_customer",
-                        "target_physical": "dim_erp.customer",
-                        "source_platform": "hive",
-                        "target_platform": "hive",
-                        "select_body": "SELECT `cust_id` AS `customer_id` FROM `src_customer`",
-                    }
-                    executor = TransformExecutor()
-                    receipt = executor.execute(
-                        {**transform_spec, "target_datasource_id": "ds-123"},
-                        context={"artifact_id": "artifact-456"},
-                    )
-
-    assert receipt["execute_mode"] == "flink_on_yarn"
-    assert receipt["dag_run_id"] == "ontometa__artifact-456"
-    assert receipt["state"] == "queued"
-    assert "http://airflow" in receipt["run_url"]
+    source = inspect.getsource(module)
+    assert "flink_job_runner" not in source
+    assert "FlinkSqlTask" not in source
+    assert "generate_flink_sql" not in source
 
 
-def test_transform_task_flink_params_reach_command_and_sql(transform_spec, tmp_path):
-    """任务级 Flink 参数逐条落地：并行度进 flink run，checkpoint 进流作业 SQL，流式作业 -d。
+def test_doris_sql_dag_has_quality_gate_and_no_bash_operator():
+    bundle = build_doris_sql_dag(
+        artifact_id="artifact-1",
+        kind="transform",
+        conn_id="ontometa_doris_x_etl",
+        setup_sql=["CREATE TABLE staging LIKE target"],
+        execute_sql=["INSERT INTO staging SELECT * FROM ods.customer"],
+        quality_sql=["SELECT COUNT(*) >= 0 FROM staging"],
+        publish_sql=["ALTER TABLE target REPLACE WITH TABLE staging"],
+    )
+    assert "SQLCheckOperator" in bundle.dag_source
+    assert "BashOperator" not in bundle.dag_source
+    assert bundle.spec["execute_sql"] == ["INSERT INTO staging SELECT * FROM ods.customer"]
+    assert bundle.spec["publish_sql"]
 
-    checkpoint 只塞进提交参数是不够的——读位点靠 ``SET 'state.checkpoints.dir'`` 写在
-    SQL 里，缺它流作业一重启就从头重算。
-    """
-    _make_datasource("ds-123")
 
-    with patch("app.services.flink_job_runner._settings") as settings:
-        airflow = MagicMock(
-            available=True,
-            dags_dir=str(tmp_path / "dags"),
-            endpoint="http://airflow",
-            max_active_tasks_per_dag=16,
-            dag_parse_timeout=0.1,
-            flink_sql_runner_jar=make_runner_jar(tmp_path),
-            flink_sql_runner_class="com.ontometa.flink.SqlRunner",
-            flink_bin="flink",
-            flink_deploy_target="yarn-per-job",
-            flink_parallelism=1,
-            flink_yarn_queue="",
-            flink_checkpoint_dir="",
+def test_doris_job_runner_delivers_and_triggers(tmp_path):
+    from app.services import doris_job_runner as runner
+
+    airflow = MagicMock(
+        available=True,
+        dags_dir=str(tmp_path / "dags"),
+        endpoint="http://airflow",
+        username=None,
+        password=None,
+        dag_parse_timeout=0.1,
+    )
+    airflow.build_delivery.return_value = LocalTransportDelivery()
+    with patch.object(runner._settings, "get_airflow_runtime", return_value=airflow), patch.object(
+        runner, "AirflowClient"
+    ) as client_cls:
+        client = MagicMock()
+        client_cls.return_value = client
+        client.dag_exists.return_value = True
+        client.trigger_dag.return_value = {"state": "queued"}
+        client.run_url.return_value = "http://airflow/dag"
+        receipt = runner.run_doris_sql(
+            MagicMock(),
+            artifact_id="artifact-1",
+            kind="transform",
+            conn_id="ontometa_doris_x_etl",
+            execute_sql=["INSERT INTO target SELECT * FROM source"],
+            source_tables=["ods.customer"],
+            target_tables=["dim.customer"],
         )
-        airflow.build_delivery.return_value = LocalTransportDelivery()
-        settings.get_airflow_runtime.return_value = airflow
-        # streaming 分支要读设置页兜底 checkpoint（任务级没填时）——这里任务级填了，
-        # 但仍会取一次运行期配置，故一并指到同一份替身。
-        with patch("app.services.settings_service.SettingsService.get_airflow_runtime",
-                   return_value=airflow):
-            with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
-                client = MagicMock()
-                client_cls.return_value = client
-                client.dag_exists.return_value = True
-                client.trigger_dag.return_value = {"state": "queued"}
-                with patch("app.agents.executors.transform._generator.build_flink_etl_input") as mock_input:
-                    mock_input.return_value = {
-                        "source_table": MagicMock(name="src_customer", columns=()),
-                        "target_table": MagicMock(
-                            name="customer", qualified_name="dim_erp.customer", columns=()
-                        ),
-                        "source_physical": "erp_ods.tab_customer",
-                        "target_physical": "dim_erp.customer",
-                        "source_platform": "hive",
-                        "target_platform": "hive",
-                        "select_body": "SELECT `cust_id` AS `customer_id` FROM `src_customer`",
-                    }
-                    TransformExecutor().execute(
-                        {
-                            **transform_spec,
-                            "target_datasource_id": "ds-123",
-                            "execution_mode": "streaming",
-                            "flink_parallelism": 6,
-                            "flink_checkpoint_dir": "file:///task/ckpt",
-                        },
-                        context={"artifact_id": "artifact-789"},
-                    )
-
-    spec = json.loads(next((tmp_path / "dags").rglob("*.json")).read_text())
-    task = spec["tasks"][0]
-    assert "-p 6" in task["command"]
-    assert " -d " in f" {task['command']} "  # 流作业提交即 detach，否则 Airflow 永远阻塞
-    assert task["detached"] is True
-    assert "'state.checkpoints.dir' = 'file:///task/ckpt'" in task["sql"]
+    assert receipt["compute_engine"] == "doris"
+    assert receipt["execute_mode"] == "orchestrated"
+    assert receipt["dag_run_id"] == "ontometa__artifact-1"
 
 
-def test_metric_source_table_comes_from_ontology_not_hardcoded_dwd(monkeypatch):
-    """主对象的源表按本体+契约解析，不写死 dwd_ 前缀。
-
-    此前拼的是 f"dwd_{prefix}.{entity}"：prefix 为空就得到 `dwd_.brand` 这种根本不存在
-    的库名，且写死 dwd 层（对象可能物化在 dim/dws），列还照抄了结果表。
-    """
-    from app.agents.executors.metric import MetricExecutor
-    from app.warehouse import LogicalColumn, LogicalTable
-
-    subject = LogicalTable(
-        name="brand", database="dim", layer="dim", entity_name="brand",
-        columns=(LogicalColumn("brand_id", "bigint", "identifier"),
-                 LogicalColumn("amount", "decimal", "amount")),
+def test_transform_reconciliation_opens_projection_only_after_success(db):
+    import uuid
+    from app.models import (
+        DataSource, DomainContext, ObjectType, Ontology,
+        OntologyWarehouseDeployment, WarehouseObjectProjection,
     )
-    monkeypatch.setattr(
-        MetricExecutor, "_subject_table", staticmethod(lambda db, spec, entity: subject)
-    )
-    captured: dict = {}
-    import app.agents.executors.metric as mod
+    from app.services.transform_reconciliation import reconcile_transform_receipt
 
-    monkeypatch.setattr(
-        mod, "generate_flink_sql", lambda **kw: captured.update(kw) or "-- sql --"
+    token = uuid.uuid4().hex[:8]
+    domain = DomainContext(datahub_domain_id=f"urn:li:domain:tr-{token}", name=f"tr-{token}")
+    db.add(domain); db.flush()
+    ontology = Ontology(domain_context_id=domain.id, status="published", version=3)
+    db.add(ontology); db.flush()
+    obj = ObjectType(ontology_id=ontology.id, name="customer", display_name="客户")
+    ds = DataSource(name="Doris", kind="doris", purpose="warehouse", dsn_secret_ref="mysql://d")
+    db.add_all([obj, ds]); db.flush()
+    deployment = OntologyWarehouseDeployment(
+        ontology_id=ontology.id, ontology_version=3, doris_datasource_id=ds.id,
+        status="schema_ready",
     )
-    import app.services.flink_job_runner as runner_mod
+    db.add(deployment); db.flush()
+    projection = WarehouseObjectProjection(
+        deployment_id=deployment.id, object_type_id=obj.id,
+        schema_status="ready", sync_status="ready", transform_status="running",
+        queryable=False,
+    )
+    db.add(projection); db.commit()
+    receipt = {
+        "compute_engine": "doris", "ontology_id": ontology.id,
+        "ontology_version": 3, "datasource_id": ds.id, "object_type_id": obj.id,
+    }
+    reconcile_transform_receipt(db, receipt=receipt, airflow_state="success")
+    db.refresh(projection)
+    assert projection.transform_status == "ready"
+    assert projection.queryable is True
 
-    monkeypatch.setattr(
-        runner_mod, "run_flink_sql", lambda *a, **k: {"execute_mode": "handoff"}
+
+def test_metric_reconciliation_opens_ads_only_after_success(db):
+    import uuid
+    from app.models import (
+        BusinessLogic, DataSource, DomainContext, Ontology,
+        OntologyWarehouseDeployment, WarehouseLogicProjection,
     )
-    with patch.object(mod, "SessionLocal") as session_cls:
-        db = MagicMock()
-        # 口径没有形式化 AST → 走 _build_sql 老路，本用例只关心源表怎么解析
-        db.get.return_value = MagicMock(id="ds1", name="dw", expression_json=None)
-        session_cls.return_value.__enter__.return_value = db
-        MetricExecutor().execute(
-            {"metric_name": "gmv", "business_logic_id": "bl1", "engine": "hive",
-             "subject_objects": ["brand"], "target_datasource_id": "ds1",
-             "expression": "SUM(amount)"},
-            {},
-        )
-    assert captured["source_physical"] == "dim.brand"
-    assert "dwd_." not in captured["source_physical"]
-    # 源表的列来自主对象，不是结果表的 stat_date/metric_value
-    assert [c.name for c in captured["source_table"].columns] == ["brand_id", "amount"]
+    from app.services.metric_reconciliation import reconcile_metric_receipt
+
+    token = uuid.uuid4().hex[:8]
+    domain = DomainContext(datahub_domain_id=f"urn:li:domain:metric-{token}", name=f"metric-{token}")
+    db.add(domain); db.flush()
+    ontology = Ontology(domain_context_id=domain.id, status="published", version=4)
+    db.add(ontology); db.flush()
+    logic = BusinessLogic(
+        ontology_id=ontology.id, name="gmv", display_name="GMV",
+        logic_type="metric", status="published", expression_json="{}",
+    )
+    ds = DataSource(name="Doris", kind="doris", purpose="warehouse", dsn_secret_ref="mysql://d")
+    db.add_all([logic, ds]); db.flush()
+    deployment = OntologyWarehouseDeployment(
+        ontology_id=ontology.id, ontology_version=4,
+        doris_datasource_id=ds.id, status="ready",
+    )
+    db.add(deployment); db.flush()
+    projection = WarehouseLogicProjection(
+        deployment_id=deployment.id, business_logic_id=logic.id,
+        serving_database="ads", serving_table="gmv", status="running",
+    )
+    db.add(projection); db.commit()
+    receipt = {"compute_engine": "doris", "logic_projection_id": projection.id}
+    reconcile_metric_receipt(db, receipt=receipt, airflow_state="success")
+    db.refresh(projection)
+    assert projection.status == "ready"
+    assert projection.queryable is True
+
+
+def test_metric_executor_has_no_flink_dependency():
+    import inspect
+    import app.agents.executors.metric as module
+
+    source = inspect.getsource(module)
+    assert "flink_job_runner" not in source
+    assert "generate_flink_sql" not in source
+    assert "FlinkSqlTask" not in source

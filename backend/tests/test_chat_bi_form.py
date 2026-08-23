@@ -150,8 +150,19 @@ def _materialize_form(
 
     _domain_id, onto_id, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
-        db.add(DataSource(id="ds-tpl", name="仓库", kind="hive", status="ok",
-                          dsn_secret_ref="ref://tpl"))
+        old_defaults = [
+            row.id for row in db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+        ]
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id="ds-tpl", name="默认 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, enabled=True, status="ok",
+            dsn_secret_ref="ref://tpl",
+        ))
         db.commit()
         try:
             MaterializationContractService().sync(db, onto_id)
@@ -163,76 +174,57 @@ def _materialize_form(
                       **({"prefill": prefill} if prefill else {})},
             )
         finally:
-            # 带 dsn 的源会被 run_sql 的数据源解析选走，串到别的用例
             db.query(DataSource).filter(DataSource.id == "ds-tpl").delete()
+            if old_defaults:
+                db.query(DataSource).filter(DataSource.id.in_(old_defaults)).update(
+                    {DataSource.is_default_warehouse: True}, synchronize_session=False
+                )
             db.commit()
     assert is_error is False, result
     return result["form"]
 
 
-def test_materialize_template_asks_every_required_param():
-    """物化表单的必问字段由服务端出——模型漏问装载方式/分区键这件事不该再可能发生。
-
-    这里列不出 ds-tpl 上的库（测试库没有真连接），故走「数据源下拉 + 库名手填」的降级分支。
-    """
+def test_materialize_template_only_asks_effective_fields():
+    """物化只建结构：表单只收执行器真正消费的范围、默认 Doris 和目标库。"""
     form = _materialize_form()
     names = [f["name"] for f in form["fields"]]
     assert names == [
-        "target_datasource_id", "target_database", "target_table",
-        "load_strategy", "partition_key", "refresh_cron",
+        "task_requirement", "selected_targets", "target_datasource_id", "target_database",
     ]
     by_name = {f["name"]: f for f in form["fields"]}
-    # id 放 value、名称放 label：那串 id 不该糊在下拉里给人看，但下一轮模型仍要认得是哪条
+    assert by_name["target_datasource_id"]["type"] == "select"
     assert by_name["target_datasource_id"]["options"] == [
-        {"label": "仓库（hive）", "value": "ds-tpl"}
+        {"label": "默认 Doris（默认 Doris）", "value": "ds-tpl", "disabled": False}
     ]
-    # 唯一可写数据源直接定为默认值，省一次追问
     assert by_name["target_datasource_id"]["default"] == "ds-tpl"
-    assert by_name["target_database"]["type"] == "text"  # 列不出库 → 手填
-    assert by_name["load_strategy"]["options"]  # 装载方式恒有候选
-    # 调度频率是 cron 选择器（与业务对象详情里的「定时策略」同一个控件），不是几个预置项
-    assert by_name["refresh_cron"]["type"] == "cron"
-    assert "options" not in by_name["refresh_cron"]
+    assert by_name["selected_targets"]["type"] == "multiselect"
+    # 物化不搬数据，这些属于同步或旧版无效字段，不能再出现。
+    assert not {"target_table", "load_strategy", "partition_key", "refresh_cron"} & set(names)
+    assert [s["node"] for s in form["confirmation_steps"]] == [
+        "requirement", "ontology", "data"
+    ]
 
 
-def test_materialize_offers_all_three_load_strategies_with_unsupported_disabled():
-    """装载方式**三种都摆出来**，执行侧不支持的置灰并说明原因。
-
-    此前不支持的被直接过滤掉，界面上只剩「全量覆盖」一项——看着像是系统只会全量，而真正
-    的原因（这个目标引擎在执行侧只声明了全量）一个字都没说。与 MaterializeModal 同口径。
-    """
-    from unittest.mock import patch
-
-    with patch("app.services.sync_tool_resolver.engine_modes",
-               return_value=(["full"], "取自 sync-runner 声明的 hive 能力。")):
-        form = _materialize_form()
-    strategy = {f["name"]: f for f in form["fields"]}["load_strategy"]
-    assert [o["value"] for o in strategy["options"]] == ["full", "incremental", "cdc"]
-    assert strategy["options"][0].get("disabled") is not True
-    assert all(o["disabled"] is True for o in strategy["options"][1:])
-    assert "不支持" in strategy["options"][1]["label"]
-    assert strategy["default"] == "full"  # 默认落在**支持**的那一档
-
-
-def test_materialize_partition_key_offers_business_attributes():
-    """分区键从业务属性里选：它必须是这些表上真实存在的列，不该靠手填印象里的字段名。"""
-    form = _materialize_form()
-    pk = {f["name"]: f for f in form["fields"]}["partition_key"]
-    # autocomplete 而不是 select：候选是建议不是闭集，物理表上可能有本体没建模的分区列
-    assert pk["type"] == "autocomplete"
-    assert pk["options"], "本体里有属性时分区键必须有候选"
-    assert all(o["value"] and o["label"] for o in pk["options"])
-    assert any("覆盖" in o["label"] for o in pk["options"])  # 覆盖几个实体要如实标出
-
-
-def test_task_template_appends_model_fields_without_overriding():
-    """模型另给的字段追加在骨架之后；与骨架同名的被丢掉（骨架不被覆盖）。"""
+def test_materialize_ignores_obsolete_model_fields():
+    """模型不能通过 extra fields 把已移除的无效物化字段偷偷加回来。"""
     form = _materialize_form(extra=[
-        {"name": "target_table", "label": "模型想改的表名", "type": "text"},
+        {"name": "target_table", "label": "目标表", "type": "text"},
+        {"name": "load_strategy", "label": "装载方式", "type": "radio", "options": ["full"]},
+        {"name": "partition_key", "label": "分区键", "type": "text"},
+        {"name": "refresh_cron", "label": "调度", "type": "cron"},
+    ])
+    names = {f["name"] for f in form["fields"]}
+    assert not {"target_table", "load_strategy", "partition_key", "refresh_cron"} & names
+
+
+def test_task_template_appends_supported_model_fields_without_overriding():
+    """额外有效字段可追加；骨架同名字段仍不能覆盖。"""
+    form = _materialize_form(extra=[
+        {"name": "target_database", "label": "模型想改的库", "type": "text"},
         {"name": "comment", "label": "备注", "type": "textarea"},
     ])
     by_name = {f["name"]: f for f in form["fields"]}
-    assert by_name["target_table"]["label"] == "目标表名"  # 骨架为准
+    assert by_name["target_database"]["label"] == "目标数据库"
     assert form["fields"][-1]["name"] == "comment"
 
 
@@ -255,77 +247,225 @@ def test_transform_template_offers_cleansing_vocabulary():
     assert all(o["value"] for o in by_name["cleansing_rules"]["options"])
 
 
-def test_task_kind_form_needs_no_model_fields():
-    """带 task_kind 时 fields 可以完全不给——骨架本身就够了，不该再报「表单无字段」。"""
-    form = _materialize_form()
-    assert len(form["fields"]) == 6
+def test_transform_template_uses_default_doris_dropdown():
+    """加工目标不能手填任意 DataSource；默认 Doris 唯一合法并自动选中。"""
+    from uuid import uuid4
+
+    from app.database import SessionLocal
+    from app.models import DataSource
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    target_id = f"doris-transform-{uuid4().hex[:8]}"
+    with SessionLocal() as db:
+        old_defaults = [
+            row.id for row in db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+        ]
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id=target_id, name="分析 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, enabled=True, status="ok", dsn_secret_ref="ref://doris",
+        ))
+        db.commit()
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db, ontology_id=onto_id,
+            args={"title": "加工订单", "task_kind": "transform", "intent": "清洗订单"},
+        )
+        db.query(DataSource).filter(DataSource.id == target_id).delete()
+        if old_defaults:
+            db.query(DataSource).filter(DataSource.id.in_(old_defaults)).update(
+                {DataSource.is_default_warehouse: True}, synchronize_session=False
+            )
+        db.commit()
+    assert is_error is False
+    by_name = {f["name"]: f for f in result["form"]["fields"]}
+    assert by_name["target_datasource_id"]["type"] == "select"
+    assert by_name["target_datasource_id"]["default"] == target_id
+    assert by_name["target_layer"]["default"] == "dim"
+    assert result["form"]["confirmation_id"]
 
 
-def test_target_datasource_and_database_are_one_choice():
-    """能列出库时，「数据源」与「目标库」合并成一次选择。
+def test_metric_template_selects_formal_logic_not_object():
+    """聚合任务选择已形式化业务口径，不复用对象模板。"""
+    from uuid import uuid4
 
-    两者在物化弹窗里本来就是联动的（先选源、再从这个源上列出的库里挑）。表单一次性提交、
-    没有联动，两个独立下拉就会让人选出「A 源 + B 源上的库」这种根本不存在的组合。
+    from app.database import SessionLocal
+    from app.models import DataSource
+
+    _domain_id, onto_id, aliases = _seed_golden_domain()
+    target_id = f"doris-metric-{uuid4().hex[:8]}"
+    with SessionLocal() as db:
+        old_defaults = [
+            row.id for row in db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+        ]
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id=target_id, name="指标 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, enabled=True, status="ok", dsn_secret_ref="ref://doris",
+        ))
+        db.commit()
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db, ontology_id=onto_id,
+            args={"title": "聚合订单总额", "task_kind": "metric", "intent": "计算订单总额"},
+        )
+        db.query(DataSource).filter(DataSource.id == target_id).delete()
+        if old_defaults:
+            db.query(DataSource).filter(DataSource.id.in_(old_defaults)).update(
+                {DataSource.is_default_warehouse: True}, synchronize_session=False
+            )
+        db.commit()
+    assert is_error is False
+    by_name = {f["name"]: f for f in result["form"]["fields"]}
+    assert "business_logic_id" in by_name and "object_type" not in by_name
+    assert by_name["business_logic_id"]["type"] == "select"
+    assert by_name["business_logic_id"]["default"] == aliases["@order_total"]
+    assert by_name["target_datasource_id"]["default"] == target_id
+    assert by_name["target_layer"]["options"] == [{"label": "应用层 ADS", "value": "ads"}]
+
+
+def test_sync_template_recommends_ontology_and_keeps_all_objects_searchable():
+    """同步本体按意图默认推荐，但完整候选仍可搜索和修改。
+
+    工具目录为控制 LLM 上下文只返回前 30 条；人操作的表单不能沿用该截断，否则搜索框
+    永远搜不到排在后面的对象。
     """
+    from uuid import uuid4
+
+    from app.database import SessionLocal
+    from app.models import DataSource, ObjectType
+
+    _domain_id, onto_id, aliases = _seed_golden_domain()
+    pg_id = f"ds-form-pg-{uuid4().hex[:8]}"
+    mysql_id = f"ds-form-mysql-{uuid4().hex[:8]}"
+    with SessionLocal() as db:
+        order = db.get(ObjectType, aliases["@order"])
+        order.source_ref = (
+            "urn:li:dataset:(urn:li:dataPlatform:postgres,erp.public.order,PROD)"
+        )
+        db.add(ObjectType(
+            ontology_id=onto_id,
+            name="sale_order",
+            display_name="销售订单",
+            description="销售订单主表",
+            source_ref=(
+                "urn:li:dataset:(urn:li:dataPlatform:postgres,"
+                "erp.public.sale_order,PROD)"
+            ),
+            status=order.status,
+        ))
+        # 超过工具目录的 30 条，钉住表单不截断以及后排对象可以被前端本地搜索。
+        for i in range(35):
+            db.add(ObjectType(
+                ontology_id=onto_id,
+                name=f"sync_object_{i:02d}",
+                display_name=f"同步对象{i:02d}",
+                source_ref=(
+                    "urn:li:dataset:(urn:li:dataPlatform:postgres,"
+                    f"erp.public.sync_object_{i:02d},PROD)"
+                ),
+                status=order.status,
+            ))
+        db.add_all([
+            DataSource(
+                id=pg_id, name="ERP PostgreSQL", kind="postgres",
+                purpose="business_source", enabled=True, status="ok",
+                dsn_secret_ref="postgresql://reader@db/erp",
+            ),
+            DataSource(
+                id=mysql_id, name="其它 MySQL", kind="mysql",
+                purpose="business_source", enabled=True, status="ok",
+                dsn_secret_ref="mysql://reader@db/other",
+            ),
+        ])
+        db.commit()
+
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db,
+            ontology_id=onto_id,
+            args={
+                "title": "同步参数",
+                "task_kind": "sync",
+                "intent": "同步 sale_order 到数仓",
+            },
+        )
+        db.query(DataSource).filter(DataSource.id.in_([pg_id, mysql_id])).delete(
+            synchronize_session=False
+        )
+        db.commit()
+
+    assert is_error is False
+    field = {f["name"]: f for f in result["form"]["fields"]}["object_type"]
+    assert field["label"] == "确认同步本体"
+    assert field["placeholder"] == "搜索中文名或技术名"
+    assert field["default"] == "sale_order"
+    assert len(field["options"]) == 37
+    sale = next(o for o in field["options"] if o["value"] == "sale_order")
+    assert "销售订单（sale_order）" in sale["label"]
+    assert "erp.public.sale_order" in sale["label"]
+    assert "ods_golden_" in sale["label"] and sale["label"].endswith("_sale_order")
+    assert any(o["value"] == "sync_object_34" for o in field["options"])
+    # 闭环向导：先需求，再本体，再数据；执行方案须等制品 dry-run 后另行确认，不能提前记 plan。
+    assert result["form"]["confirmation_id"]
+    assert [s["node"] for s in result["form"]["confirmation_steps"]] == [
+        "requirement", "ontology", "data"
+    ]
+    by_name = {f["name"]: f for f in result["form"]["fields"]}
+    assert by_name["object_type"]["confirmation_node"] == "ontology"
+    source_field = by_name["source_datasource_id"]
+    assert source_field["confirmation_node"] == "data"
+    assert source_field["depends_on"] == "object_type"
+    assert source_field["default"] == pg_id
+    assert source_field["options_by_value"]["sale_order"] == [
+        {"label": "ERP PostgreSQL（postgres）", "value": pg_id}
+    ]
+    assert all(o["value"] != mysql_id for o in source_field["options_by_value"]["sale_order"])
+    assert by_name["target_datasource_id"]["confirmation_node"] == "data"
+    assert by_name["target_ods_database"]["default"] == "ods"
+    assert by_name["mode"]["default"] == "full"
+
+
+def test_task_kind_form_needs_no_model_fields():
+    """带 task_kind 时 fields 可以完全不给——骨架本身就够了。"""
+    form = _materialize_form()
+    assert len(form["fields"]) == 4
+
+
+def test_materialize_database_is_real_dropdown_when_catalog_available():
+    """默认 Doris 可列库时，目标数据库使用真实候选下拉，不让用户猜。"""
     from unittest.mock import patch
 
     with patch("app.services.data_app.DataAppService.list_databases", return_value=["dw", "ods"]):
         form = _materialize_form()
-    names = [f["name"] for f in form["fields"]]
-    assert "target_location" in names
-    assert "target_datasource_id" not in names and "target_database" not in names
-    loc = {f["name"]: f for f in form["fields"]}["target_location"]
-    assert [o["label"] for o in loc["options"]] == ["仓库（hive） → dw", "仓库（hive） → ods"]
-    # value 自解释成「键=值」：回填是纯文本，模型不必再猜哪一段是数据源 id
-    assert loc["options"][0]["value"] == "target_datasource_id=ds-tpl,target_database=dw"
+    database = {f["name"]: f for f in form["fields"]}["target_database"]
+    assert database["type"] == "select"
+    assert database["options"] == [
+        {"label": "dw", "value": "dw"}, {"label": "ods", "value": "ods"}
+    ]
 
 
-def test_prefill_fills_what_user_already_said():
-    """用户已经说过的取值预填进表单，不再原样问一遍（片段也认，如库名 dw）。"""
+def test_materialize_prefill_uses_real_database_candidate():
     from unittest.mock import patch
 
     with patch("app.services.data_app.DataAppService.list_databases", return_value=["dw", "ods"]):
-        form = _materialize_form(prefill={
-            "target_location": "dw",          # 唯一子串命中「仓库（hive） → dw」
-            "load_strategy": "全量覆盖",       # 按 label 命中
-            "refresh_cron": "0 2 * * *",      # 无候选的字段原样采用
-            "target_table": "dim_customer",
-        })
-    by_name = {f["name"]: f for f in form["fields"]}
-    assert by_name["target_location"]["default"] == "target_datasource_id=ds-tpl,target_database=dw"
-    assert by_name["load_strategy"]["default"] == "full"
-    assert by_name["refresh_cron"]["default"] == "0 2 * * *"
-    assert by_name["target_table"]["default"] == "dim_customer"
+        form = _materialize_form(prefill={"target_database": "dw"})
+    database = {f["name"]: f for f in form["fields"]}["target_database"]
+    assert database["default"] == "dw"
 
 
-def test_prefill_drops_values_that_match_no_real_candidate():
-    """核不上真实候选的预填被丢掉。
-
-    一个听错的库名若原样落进 default，用户看到的是一张「系统已经替我确认过」的表单，
-    而它是错的——错得比空着更贵。
-    """
+def test_materialize_prefill_drops_unknown_database():
     from unittest.mock import patch
 
     with patch("app.services.data_app.DataAppService.list_databases", return_value=["dw", "ods"]):
-        form = _materialize_form(prefill={"target_location": "根本没有这个库"})
-    assert "default" not in {f["name"]: f for f in form["fields"]}["target_location"]
-
-
-def test_prefill_cannot_select_a_disabled_option():
-    """执行侧不支持的装载方式摆出来但选不了——预填也不能把它绕过去。"""
-    from unittest.mock import patch
-
-    with patch("app.services.sync_tool_resolver.engine_modes",
-               return_value=(["full"], "取自 sync-runner 声明的 hive 能力。")):
-        form = _materialize_form(prefill={"load_strategy": "增量追加"})
-    strategy = {f["name"]: f for f in form["fields"]}["load_strategy"]
-    assert strategy["default"] == "full"  # 骨架默认值保持，未被预填改成 incremental
-
-
-def test_prefill_accepts_free_value_for_open_candidate_field():
-    """autocomplete 的候选是**建议不是闭集**：本体没建模的物理列也照填，不该被丢掉。"""
-    form = _materialize_form(prefill={"partition_key": "dt_physical_only"})
-    assert {f["name"]: f for f in form["fields"]}["partition_key"]["default"] == "dt_physical_only"
+        form = _materialize_form(prefill={"target_database": "not_exists"})
+    database = {f["name"]: f for f in form["fields"]}["target_database"]
+    assert "default" not in database
 
 
 def test_scalar_target_database_reaches_the_spec():

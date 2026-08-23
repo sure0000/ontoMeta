@@ -9,13 +9,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.agents.common import require_context, resolve_spec_engine, select_by_intent
+from app.agents.common import require_context, select_by_intent
 from app.agents.drafters.base import Drafter
 from app.database import SessionLocal
 from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
-from app.services import flink_params
-from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 
 # 清洗需求 → 结构化规则。命中不了的原文保留在 notes 里交人处理，不臆造规则。
 _RULE_PATTERNS: tuple[tuple[str, str, str], ...] = (
@@ -43,6 +41,15 @@ class TransformDrafter(Drafter):
         require_context(context, *self.required_context)
         ontology_id = context["ontology_id"]
         with SessionLocal() as db:
+            target_datasource_id = context.get("target_datasource_id")
+            if target_datasource_id:
+                from app.models import DataSource
+                from app.warehouse.policy import require_doris_datasource
+
+                datasource = db.get(DataSource, target_datasource_id)
+                require_doris_datasource(datasource, operation="Doris Transform")
+                if not datasource.is_default_warehouse:
+                    raise ValueError("Transform 只能使用默认 Doris")
             objects = (
                 db.query(ObjectType)
                 .filter(ObjectType.ontology_id == ontology_id)
@@ -73,24 +80,17 @@ class TransformDrafter(Drafter):
                 "ontology_id": ontology_id,
                 # 见 sync.py 同名字段：缺它执行器只渲染 SQL 不落库。
                 "target_datasource_id": context.get("target_datasource_id") or None,
-                # 见 sync.py 同名字段：引擎随目标数据源走，不取契约默认。
-                "engine": resolve_spec_engine(db, context, contract),
                 # 表单显式选的层优先——此前一律取契约（无契约则 dim），用户在表单里
                 # 选的 dwd/dws 被静默丢弃，建出来的表落在错误的层。
                 "target_layer": context.get("target_layer")
                 or (contract.target_layer if contract else "dim"),
                 "database_prefix": context.get("database_prefix"),
-                # 源库连接别名：跨库由 Flink 承担，源表按**源库**的连接器声明，
-                # 不能沿用数仓连接（数仓看不见源表）。凭据不进 Spec，只放别名。
-                "source_ref_alias": context.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS,
-                "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming
+                "engine": "doris",
                 "cleansing_rules": self._rules_from_context(context.get("cleansing_rules"))
                 or self._rules(intent),
                 # 表单填的备注优先；对话路径仍把未匹配成规则的原文留在这里交人处理。
                 "notes": context.get("notes") or intent,
-                # 任务级 Flink 执行参数（并行度/队列/提交目标/checkpoint/额外 -D）。
-                # 只落人真填了的项——留空 = 跟随设置页默认，不在 Spec 里凝固成快照。
-                **flink_params.from_context(context),
+                "schedule": context.get("schedule") or context.get("refresh_cron"),
             }
 
     # code → 描述，用于把表单下拉给的规则码结构化成 {rule, description}。

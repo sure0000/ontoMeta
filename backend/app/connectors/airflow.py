@@ -145,6 +145,12 @@ class AirflowClient:
             "PATCH", f"/dags/{dag_id}", "unpause_dag", json={"is_paused": False}
         )
 
+    def pause_dag(self, dag_id: str) -> dict:
+        """Pause a scheduled DAG during an approved cut-over or rollback."""
+        return self._request(
+            "PATCH", f"/dags/{dag_id}", "pause_dag", json={"is_paused": True}
+        )
+
     def trigger_dag(
         self, dag_id: str, *, dag_run_id: str, conf: dict | None = None
     ) -> dict:

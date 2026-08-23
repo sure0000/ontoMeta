@@ -18,8 +18,8 @@ from app.warehouse.adapters.iceberg import IcebergAdapter
 from app.warehouse.adapters.postgres import PostgresAdapter
 from app.warehouse.adapters.starrocks import StarRocksAdapter
 
-# Hive 是权威写入路径（单一写入路径原则），其余由其派生。
-DEFAULT_ENGINE = "hive"
+# Doris 是唯一新建数仓引擎；历史引擎仅保留用于读取旧制品。
+DEFAULT_ENGINE = "doris"
 
 _ADAPTERS: dict[str, DialectAdapter] = {
     a.name: a

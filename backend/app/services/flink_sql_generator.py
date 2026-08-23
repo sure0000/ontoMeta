@@ -250,6 +250,7 @@ def _connector_props(
     physical_name: str | None = None,
     *,
     cdc: bool = False,
+    delete_policy: str = "ignore",
 ) -> dict[str, str]:
     """按平台产 WITH (...) 的连接属性。凭据一律占位符。
 
@@ -274,13 +275,16 @@ def _connector_props(
 
     connector = _CONNECTORS.get(platform, "jdbc")
     if connector == "doris":
-        return {
+        props = {
             "connector": "doris",
             "fenodes": _placeholder(alias, "FENODES"),
             "table.identifier": physical,
             "username": _placeholder(alias, "USER"),
             "password": _placeholder(alias, "PASSWORD"),
         }
+        if delete_policy == "hard_delete":
+            props["sink.enable-delete"] = "true"
+        return props
     if connector == "starrocks":
         db_name = physical.rsplit(".", 1)[0] if "." in physical else (table.database or "")
         tbl_name = physical.rsplit(".", 1)[-1]
@@ -315,6 +319,7 @@ def render_create_table(
     watermark: tuple[str, str] | None = None,
     is_target: bool = False,
     cdc: bool = False,
+    delete_policy: str = "ignore",
 ) -> str:
     """渲染一张表的 Flink SQL ``CREATE TABLE ... WITH (...)``。
 
@@ -334,7 +339,9 @@ def render_create_table(
         col_lines.append(f"  WATERMARK FOR `{watermark[0]}` AS {watermark[1]}")
     cols = ",\n".join(col_lines)
 
-    props = _connector_props(table, endpoint, physical_name, cdc=cdc)
+    props = _connector_props(
+        table, endpoint, physical_name, cdc=cdc, delete_policy=delete_policy
+    )
     props_str = ",\n  ".join(f"'{k}' = '{v}'" for k, v in props.items())
     return f"CREATE TABLE `{table.name}` (\n{cols}\n) WITH (\n  {props_str}\n);"
 
@@ -384,6 +391,9 @@ def generate_move_sql(
     source_physical: str | None = None,
     target_physical: str | None = None,
     checkpoint_dir: str | None = None,
+    incremental_column: str | None = None,
+    watermark: str | None = None,
+    delete_policy: str = "ignore",
 ) -> str:
     """搬运作业（sync/materialize）的完整 Flink SQL——不含清洗/聚合，只把一张表从源搬到目标。
 
@@ -392,10 +402,9 @@ def generate_move_sql(
 
     Args:
         mode: ``full`` → batch INSERT（有界，跑完即退）；
-            ``incremental`` / ``cdc`` → streaming CDC 作业（mysql-cdc/postgres-cdc 源连接器，
-            读位点靠 checkpoint 续）。二者都用**恒等**体，差别只在源连接器与执行模式。
-        checkpoint_dir: CDC 作业的 checkpoint 目录（``file://…``）。CDC 必给——读位点存这里，
-            重启从最近 checkpoint 续，不重搬也不漏。全量忽略。
+            ``incremental`` → 带增量字段/持久化水位谓词的有界 JDBC batch；
+            ``cdc`` → mysql-cdc/postgres-cdc 常驻流作业。
+        checkpoint_dir: 仅 CDC 作业使用；读位点存这里，重启从最近 checkpoint 续。
 
     与 :func:`generate_flink_sql` 的关系：本函数负责「搬运语义」（恒等体 + 全量/CDC 选择），
     组装仍委托给 generate_flink_sql，不重复 CREATE TABLE / SET 模式那套。
@@ -417,19 +426,43 @@ def generate_move_sql(
             execution_mode="batch",
             source_physical=source_physical,
             target_physical=target_physical,
+            target_delete_policy=delete_policy,
         )
 
-    # incremental / cdc：streaming + CDC 源连接器。二者在搬运语义上一致（都读变更流、
-    # 位点靠 checkpoint 续）——incremental 只是"从头快照后转 binlog"，cdc 同理，故合并处理。
+    if mode == "incremental":
+        if not incremental_column or watermark in (None, ""):
+            raise ValueError(
+                "incremental 搬运必须配置 incremental_column 与成功/初始 watermark"
+            )
+        escaped = str(watermark).replace("'", "''")
+        select_body += (
+            f"\nWHERE {quote_identifier(incremental_column)} >= '{escaped}'"
+        )
+        # Incremental is a bounded JDBC batch. It must finish so Airflow can
+        # quality-check and persist the next successful watermark.
+        return generate_flink_sql(
+            source_table=source_table,
+            target_table=target_table,
+            source=source,
+            target=target,
+            select_body=select_body,
+            execution_mode="batch",
+            source_physical=source_physical,
+            target_physical=target_physical,
+            target_delete_policy=delete_policy,
+        )
+
+    # CDC only: streaming + CDC source connector; position is persisted by
+    # checkpoint/savepoint and the Airflow task submits detached.
     if source.platform.lower() not in _CDC_CONNECTORS:
         raise ValueError(
-            f"源平台 {source.platform!r} 无 Flink CDC 连接器，无法做 {mode} 搬运"
+            f"源平台 {source.platform!r} 无 Flink CDC 连接器，无法做 CDC 搬运"
             f"（支持：{', '.join(sorted(_CDC_CONNECTORS))}）"
         )
     if not checkpoint_dir:
         # 不给 checkpoint 就没有读位点续存，重启即从头快照——违背增量语义，直接拦下。
         raise ValueError(
-            f"{mode} 搬运是 streaming CDC 作业，必须给 checkpoint_dir（file://…）"
+            "CDC 搬运是 streaming 作业，必须给 checkpoint_dir（file://…）"
             "以持久化读位点；否则重启会重搬。"
         )
     return generate_flink_sql(
@@ -443,6 +476,7 @@ def generate_move_sql(
         target_physical=target_physical,
         source_cdc=True,
         checkpoint_dir=checkpoint_dir,
+        target_delete_policy=delete_policy,
     )
 
 
@@ -475,6 +509,7 @@ def generate_flink_sql(
     source_watermark: tuple[str, str] | None = None,
     source_cdc: bool = False,
     checkpoint_dir: str | None = None,
+    target_delete_policy: str = "ignore",
 ) -> str:
     """把「源表 + 目标表 + SELECT 体」组装成完整 Flink SQL 计算作业。
 
@@ -512,7 +547,11 @@ def generate_flink_sql(
         "",
         "-- 目标表",
         render_create_table(
-            target_table, target, physical_name=target_physical, is_target=True
+            target_table,
+            target,
+            physical_name=target_physical,
+            is_target=True,
+            delete_policy=target_delete_policy,
         ),
         "",
         "-- 计算并写入",

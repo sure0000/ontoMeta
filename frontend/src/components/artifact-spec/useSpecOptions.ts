@@ -92,10 +92,19 @@ export function useSpecOptions(
           }
           case "dataSources": {
             const list = await api.listDataSources();
-            next = list.map((d) => ({
-              value: d.id,
-              label: `${d.name}（${d.kind}）`,
-            }));
+            next = list
+              .filter((d) => !optionSource.purpose || d.purpose === optionSource.purpose)
+              .filter((d) => !optionSource.engine || d.kind === optionSource.engine)
+              .filter((d) => !optionSource.defaultOnly || d.is_default_warehouse === true)
+              .filter(
+                (d) =>
+                  !optionSource.executableOnly ||
+                  (d.enabled !== false && d.dsn_set === true),
+              )
+              .map((d) => ({
+                value: d.id,
+                label: `${d.name}（${d.kind}${d.is_default_warehouse ? " · 默认" : ""}）`,
+              }));
             break;
           }
           case "databases": {
@@ -120,7 +129,15 @@ export function useSpecOptions(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [optionSource?.kind, ontologyId, dependsValue]);
+  }, [
+    optionSource?.kind,
+    optionSource?.kind === "dataSources" ? optionSource.purpose : undefined,
+    optionSource?.kind === "dataSources" ? optionSource.engine : undefined,
+    optionSource?.kind === "dataSources" ? optionSource.defaultOnly : undefined,
+    optionSource?.kind === "dataSources" ? optionSource.executableOnly : undefined,
+    ontologyId,
+    dependsValue,
+  ]);
 
   return { options, loading, error };
 }

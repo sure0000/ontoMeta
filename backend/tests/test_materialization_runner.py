@@ -3,7 +3,7 @@
 两者总是交 Airflow 编排（不再有直连落库）。验证：各自只产该产的东西（物化无搬运任务、
 同步无建表且回执 tables 为空）、按勾选/覆盖裁剪与重命名、按 cron 分组分批、触发失败不丢
 产物、前置校验（无数据源/无 dsn/未配 Airflow）报错、dag_id 按制品隔离。
-生成器按 hive 引擎产出真实 DDL。
+生成器按 Doris 引擎产出真实 DDL；非 Doris 只保留历史读取，不可重执行。
 """
 
 from __future__ import annotations
@@ -136,9 +136,15 @@ def _seed(tag: str, *, with_dsn: bool = True, orphan: bool = False) -> dict:
                 structure_type="fact_table",
             )
         )
+        for existing in db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)):
+            existing.is_default_warehouse = False
         ds = DataSource(
             name=f"target-{tag}",
             kind="doris",
+            purpose="warehouse",
+            is_default_warehouse=True,
+            enabled=True,
+            status="ok",
             dsn_secret_ref="sqlite:///unused-stubbed" if with_dsn else None,
         )
         db.add(ds)
@@ -182,7 +188,7 @@ def test_selected_targets_filters_tables(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             selected_targets=["customer"],
             artifact_id="art-filter",
         )
@@ -208,7 +214,7 @@ def test_database_and_table_overrides_rename_targets(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             database_overrides={"dim": "warehouse_prod"},
             table_overrides={customer_contract.id: "dim_customer"},
             selected_targets=["customer"],
@@ -248,7 +254,7 @@ def test_batch_refresh_cron_expands_to_selected_contracts(tmp_path, monkeypatch)
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             refresh_cron="0 2 * * *",
             overrides={customer.id: {"refresh_cron": "0 5 * * *"}},
             artifact_id="art-batchcron",
@@ -277,7 +283,7 @@ def test_no_refresh_cron_leaves_contracts_untouched(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="art-nocron",
         )
         after = {
@@ -368,7 +374,7 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="artifact-1",
         )
 
@@ -410,7 +416,7 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="artifact-r1",
         )
 
@@ -433,6 +439,29 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
     assert "INSERT INTO" in body and "${" in body
 
 
+def test_runner_overrides_custom_ods_table_with_fixed_backend_name(tmp_path, monkeypatch):
+    """绕过 Drafter 直调 runner 也不能自定义 ODS 表名。"""
+    ids = _seed("fixed")
+    monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+
+    with SessionLocal() as db:
+        materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="doris",
+            artifact_id="artifact-fixed",
+            selected_targets=["customer"],
+            target_ods_database="ods_erp",
+            target_ods_tables={"customer": "caller_defined_name"},
+        )
+
+    body = next((tmp_path / "dags").rglob("jobs/*.sql")).read_text(encoding="utf-8")
+    assert "ods_mr_fixed_tab_customer" in body
+    assert "caller_defined_name" not in body
+
+
 def test_sync_task_params_override_global_flink_settings(tmp_path, monkeypatch):
     """**每个任务自己的 Flink 参数**：Spec 里填的并行度/队列进这条任务的 flink run 命令，
     没填的项跟随设置页。搬 300 张表的同步与一条小表同步不该共用一套集群参数。"""
@@ -448,7 +477,7 @@ def test_sync_task_params_override_global_flink_settings(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="artifact-fp",
             flink_task_params={
                 "flink_parallelism": 16,
@@ -526,7 +555,7 @@ def test_orchestrated_reports_trigger_failure_without_losing_artifacts(tmp_path,
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="artifact-2",
         )
 
@@ -560,7 +589,7 @@ def test_cron_grouping_one_dag_per_cron(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="a-cron",
         )
 
@@ -585,7 +614,7 @@ def test_batching_splits_group_over_max_tasks(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="a-split",
         )
 
@@ -614,7 +643,7 @@ def test_tables_without_sync_jobs_still_get_ddl(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="a-orphan",
         )
 
@@ -673,7 +702,7 @@ def test_unparsed_dag_recorded_not_triggered(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="a-noparse",
         )
 
@@ -725,7 +754,7 @@ def test_parse_wait_is_bounded_by_one_timeout_across_batches(tmp_path, monkeypat
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="a-waitbound",
         )
 
@@ -745,7 +774,7 @@ def test_errors_when_airflow_unavailable(entry, monkeypatch):
                 db,
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
-                engine="hive",
+                engine="doris",
             )
 
 
@@ -759,7 +788,7 @@ def test_missing_datasource_raises(entry, monkeypatch):
                 db,
                 ids["ontology_id"],
                 target_datasource_id="does-not-exist",
-                engine="hive",
+                engine="doris",
             )
 
 
@@ -773,7 +802,7 @@ def test_datasource_without_dsn_raises(entry, monkeypatch):
                 db,
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
-                engine="hive",
+                engine="doris",
             )
 
 
@@ -814,7 +843,7 @@ def test_materialize_emits_ddl_only(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="art-emitddl",
         )
 
@@ -847,7 +876,7 @@ def test_sync_emits_dml_only(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             load_strategy="full",
             artifact_id="art-emitdml",
         )
@@ -878,7 +907,7 @@ def test_sync_without_movable_objects_raises(tmp_path, monkeypatch):
                 db,
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
-                engine="hive",
+                engine="doris",
                 selected_targets=["manual_dim"],  # 无 source_ref，搬不了
                 artifact_id="art-nomovable",
             )
@@ -901,7 +930,7 @@ def test_materialize_does_not_require_flink_jar(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="art-nojarddl",
         )
 
@@ -921,7 +950,7 @@ def test_sync_without_flink_jar_handoffs(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="art-nojardml",
         )
 
@@ -944,14 +973,14 @@ def test_dag_id_is_scoped_to_artifact_not_ontology(tmp_path, monkeypatch):
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="art-dagid-materialize",
         )
         dml_receipt = materialization_runner.run_sync(
             db,
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
-            engine="hive",
+            engine="doris",
             artifact_id="art-dagid-sync",
         )
 

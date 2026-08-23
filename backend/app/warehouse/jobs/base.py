@@ -79,6 +79,16 @@ def _endpoint_env(endpoint) -> dict[str, str]:
             f"jdbc:{scheme}://{{{{ {conn}.host }}}}:{{{{ {conn}.port }}}}"
             f"/{{{{ {conn}.schema }}}}"
         )
+    if (endpoint.platform or "").lower() == "doris":
+        # Doris connector writes through FE HTTP (8030), not the SQL port.
+        # Keep it in Airflow Connection.extra; the generated SQL only contains
+        # ${ALIAS_FENODES}, never the endpoint or credentials.
+        env[f"{token}_FENODES"] = (
+            f"{{{{ {conn}.extra_dejson.get('fenodes', '') }}}}"
+        )
+        env[f"{token}_JDBC_URL"] = (
+            f"{{{{ {conn}.extra_dejson.get('jdbc_url', '') }}}}"
+        )
     if (endpoint.platform or "").lower() == "hive":
         env[f"{token}_METASTORE_URI"] = (
             f"{{{{ {conn}.extra_dejson.get('metastore_uri', '') }}}}"
@@ -139,6 +149,9 @@ class JobSpec:
     mode: str = "full"  # LOAD_MODES 之一
     # 分区键；增量装载时同时作为水位列（与 M3 生成 ETL 的口径一致）。
     partition_key: str | None = None
+    incremental_column: str | None = None
+    initial_watermark: str | None = None
+    delete_policy: str = "ignore"
     # 数仓分层，仅用于分组与并发闸门，不表达数据依赖（见下方 note）。
     layer: str = "dim"
     source_urn: str | None = None

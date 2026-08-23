@@ -19,6 +19,19 @@ class ArtifactDraftRequest(BaseModel):
     user_created: bool = False
 
 
+class ConfirmedArtifactDraftRequest(BaseModel):
+    """Data Agent 三步确认表单 → 草稿 + dry-run，不再经过第二轮 LLM。"""
+
+    conversation_id: str
+    confirmation_id: str
+    kind: str
+    intent: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    ontology_id: str
+    message_id: str | None = None
+    block_id: str | None = None
+
+
 class ArtifactEditRequest(BaseModel):
     """编辑草稿/已校验/失败态的制品。给 spec 走直填覆盖，给 intent/context 走
     drafter 重新派生——与 draft() 的两条路径语义一致，不做字段级 patch（制品的

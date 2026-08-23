@@ -40,9 +40,8 @@ SKILLS: dict[str, Skill] = {
         display="域概览",
         when_to_use="用户想了解这个域有哪些对象/指标/业务板块、能查些什么这类结构性问题",
         prompt_overlay=(
-            "【域概览技能】用户想了解这个域有什么。直接依据常驻的域语义卡作答其业务板块、"
-            "核心对象与已发布指标；细节不足时用 search_* 或 get_domain_overview 补齐。"
-            "这类问题通常**无需写 SQL、无需 run_sql**。用显示名，给出有结构的概览而非罗列全部。"
+            "【域概览】使用域语义卡回答业务板块、核心对象和已发布口径。"
+            "需要补充时调用 search_* 或 get_domain_overview。用显示名和分组列表表达。"
         ),
         block_types=("markdown", "mapping"),
     ),
@@ -51,25 +50,11 @@ SKILLS: dict[str, Skill] = {
         display="取数分析",
         when_to_use="用户要具体数据、数量、明细、趋势或对比这类需要实际取数的问题",
         prompt_overlay=(
-            "【取数分析技能】用户要具体数据/趋势/对比。流程：定位实体 → 有现成口径就 "
-            "compile_metric、跨对象先 find_join_path、写死值前先 profile_values → 用 run_sql "
-            "提交只读 SQL 取数。\n"
-            "取**数据样例/明细预览**（无明确排序诉求的『看看有哪些数据』）时，SQL **必须显式带 "
-            "ORDER BY**（优先主键/时间键，拿不到就 `ORDER BY 1`）——否则 `LIMIT` 返回哪几行由引擎"
-            "自由决定，同一份数据两次取样会不一致。\n"
-            "若是开放式/多步分析（如「探索销售数据有没有异常」），**先用 update_plan 列 2-5 步计划**"
-            "让用户看到你的拆解思路，再逐步执行；单值或单步取数不必规划。\n"
-            "跨多个对象、或要先摸好几个字段取值分布才能写对 SQL 时，可用 **scout_query** 把这段探路"
-            "（定位/profile/找 join）扔进隔离子 agent，只拿回候选 SQL——探路过程不占本对话上下文；"
-            "拿回候选 SQL 后仔细看一眼再用 run_sql 提交。单对象、无需探值的取数直接写 SQL 更快。\n"
-            "拿到结果后：找异常/看分布/离群用 **analyze_result** 对结果做统计画像（均值/分位/IQR 离群），"
-            "别口头臆测；若适合可视化就调 **render_chart** 出图：时间/日期维度用 line 或 area，"
-            "类别对比用 bar；x/y 必须照抄结果表里的真实列名。单值或纯明细不必作图。\n"
-            "用户要把这份结果**留下来**（做成面板/图表/看板/大屏、「加到看板上」、「以后天天看」）时，"
-            "用 **propose_panel**（加进某个已有看板，用户确认时选）或 **propose_dashboard**（新建看板）"
-            "出提案。render_chart 只是这一轮的图，关掉就没了；面板才是能发布分享的交付物。"
-            "两者都只需给标题与图型——绑定由服务端复用本轮口径重建；但**提之前必须先对主对象调过 "
-            "get_object**（面板要绑主对象，只搜过或只取过数不算），否则会被判错白费一轮。"
+            "【取数分析】先定位对象或业务口径。已有口径使用 compile_metric；跨对象使用 find_join_path；"
+            "筛选值使用 profile_values。然后用 run_sql 查询默认 Doris。"
+            "多步分析可用 update_plan，复杂探查可用 scout_query。"
+            "结果分析使用 analyze_result，可视化使用 render_chart。"
+            "需要保存结果时使用 propose_panel 或 propose_dashboard。"
         ),
         extra_tool_names=(
             "update_plan", "scout_query", "analyze_result", "render_chart",
@@ -84,11 +69,8 @@ SKILLS: dict[str, Skill] = {
         display="血缘影响",
         when_to_use="用户问某对象/表的血缘、上下游、从哪来、被谁引用、改动影响面这类问题",
         prompt_overlay=(
-            "【血缘影响技能】用户想看某对象的上下游/血缘/影响面。先用 search_objects 定位对象、"
-            "拿到它的 id，再调 **get_lineage(center_id, depth)** 取邻域子图（默认 depth=1，本体大时"
-            "别铺全图，按中心邻域下钻）。\n"
-            "解读：`structure_type=derivation` 的边是**数据加工血缘**（上游加工到下游），其它边是"
-            "业务关系（外键/引用等）。用显示名说明上游从哪来、下游影响谁；边方向即数据流向。"
+            "【血缘影响】先用 search_objects 定位对象，再用 get_lineage 获取邻域。"
+            "按边方向说明上游、下游和业务关系，使用显示名。"
         ),
         extra_tool_names=("get_lineage",),
         block_types=("markdown", "lineage"),
@@ -98,59 +80,33 @@ SKILLS: dict[str, Skill] = {
         display="建数（口径提案）",
         when_to_use="用户想新建一个指标/口径/标签/规则定义（如『建个复购率指标』『加个高价值客户标签』）",
         prompt_overlay=(
-            "【建数技能】用户想新建口径定义（指标 metric / 标签 tag / 规则 rule）。\n"
-            "先用 search_logics 查重——本体里已有同义口径就别重复建，直接指给用户。\n"
-            "确无重复时，两种提法按「口径说得清不清楚」二选一：\n"
-            "1. **用户把算法说清楚了**（哪个字段、怎么聚合、怎么分桶、阈值多少）→ 用 "
-            "**propose_expression** 连表达式一起提。**先 search_objects/get_object 把对象名与"
-            "字段技术名查准**（fields 里写的是技术名如 order/amount，不是中文显示名），"
-            "服务端会当场编译并做语义证明：编不过会把原因和该对象真实有哪些字段返给你，"
-            "照着改一次再提，别原样重发。编过之后用户看到的是**真 SQL**。\n"
-            "2. **口径还没说清**（只说了「加个高价值客户标签」但没说怎么算）→ 用 "
-            "**propose_draft** 只提名字与说明，表达式留给用户自己补。"
-            "**别自己替用户定阈值**：「高价值」是 1 万还是 10 万，猜错了比不猜更糟——"
-            "要么先 ask_clarification 问清楚，要么走 propose_draft。\n"
-            "两种都只是**提案**：创建/修改由用户点击后发生，你不写库。\n"
-            "提案终会过下方治理规约的校验；若提案涉及具体物理表名，先用 **lint_against_standard** "
-            "自检命名是否合规约、按返回的 fix 修正后再提。"
+            "【业务口径】先用 search_logics 查找相近定义。"
+            "需求包含明确对象、字段和算法时，使用 search_objects/get_object 核对技术名，再调用 "
+            "propose_expression。需求只有名称和业务含义时，调用 propose_draft。"
+            "需要补充阈值或算法时使用 ask_clarification。"
         ),
         extra_tool_names=("propose_draft", "propose_expression", "lint_against_standard"),
         block_types=("markdown", "draft_proposal"),
-        attach_governance=True,
     ),
     "task": Skill(
         name="task",
         display="建/管数据任务",
         when_to_use="用户要把本体/数据物化落库、建数据同步/加工任务，或问某个数据任务跑到哪了、成没成功",
         prompt_overlay=(
-            "【建/管数据任务技能】用户想建数据任务（物化 materialize / 同步 sync / 加工 transform）"
-            "或查任务进度。\n"
-            "建任务分三步，**顺序不能颠倒**：\n"
-            "1. **先调 get_task_options(kind)** 拿到可选项（物化：目标数据源/目标库/待物化实体及其"
-            "契约 id、分层、分区键、装载方式、现有调度/装载方式/调度频率预置；同步与加工：候选对象）。"
-            "不先问就不知道有哪些数据源，只能编——而编出来的 id 一定过不了校验。\n"
-            "2. 缺的参数用 **request_form(title, task_kind=该类型)** 一次收齐——带上 task_kind，"
-            "服务端会按该类型补齐必问字段（物化=目标数据源/目标库/表名/装载方式/分区键/调度频率）"
-            "并填入真实候选，你**不用也不该**自己列 fields；确有额外要问的再追加。\n"
-            "   用户填回的选项形如「名称（取值）」：括号里那段才是 context 要的 id/取值；"
-            "形如「target_datasource_id=xxx,target_database=yyy」的直接按等号两边拆成 context 键值。"
-            "用户上一轮已经说过的参数，发表单时用 **prefill** 预填，别原样再问一遍。\n"
-            "3. 参数齐了再用 **propose_action(kind, intent, context)** 产出**提案**（**不执行、不写库**）；"
-            "真正的创建/校验/dry-run/确认/执行由用户在前端点击后走既有治理流程，你不直接建表或跑作业。"
-            "若提案涉及具体物理表名，先用 **lint_against_standard** 自检命名是否合规约、按 fix 修正后再提。\n"
-            "4. **要连着做好几件事**（如「物化到数仓，然后清洗，再按口径聚合」）时改用 "
-            "**propose_pipeline(name, steps)** 出一条任务链，而不是发好几条独立提案：链会记住下一步、"
-            "并把上游定下的数据源/库/引擎接给下游。链上每一步仍各自过校验与人工确认，你同样不执行。"
-            "只有一件事就用 propose_action，别为单步套链。\n"
-            "查进度：用 **get_task_status(artifact_id 或 kind)** 回读任务状态与执行回执，据实回答"
-            "「跑完没/成没成功」；不要臆造状态。"
+            "【数据任务】支持 materialize、sync、transform、metric 和任务状态查询。\n"
+            "单任务流程：get_task_options(kind) → request_form(title, task_kind=kind, intent=需求) → "
+            "收到表单回填后 propose_action。request_form 的 fields 留空，由服务端生成三步确认向导。"
+            "propose_action.context 要包含回填的 task_confirmation_id。\n"
+            "候选含义：materialize 选择物化范围、默认 Doris 和真实数据库；sync 选择本体、匹配的业务源、"
+            "ODS 库和装载模式；transform 选择 ODS ready 对象、规则和分层；metric 选择形式化业务口径。\n"
+            "提案仅创建任务草稿。后续由界面完成校验与 dry-run、方案确认、执行和结果确认。"
+            "多步需求使用 propose_pipeline；任务进度使用 get_task_status。"
         ),
         extra_tool_names=(
             "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
             "lint_against_standard",
         ),
         block_types=("markdown", "action_proposal", "pipeline_proposal", "task_status"),
-        attach_governance=True,
     ),
     "onboard": Skill(
         name="onboard",
@@ -160,26 +116,15 @@ SKILLS: dict[str, Skill] = {
             "（如『把我们的 ERP 库接进来』『给销售域生成一版本体』）"
         ),
         prompt_overlay=(
-            "【接数据技能】用户想把新数据接进来。**第一步必须调 list_onboarding_targets**"
-            "拿到真实落点（DataHub 配没配、有哪些域及其草稿/发布状态、已登记哪些数据源）——"
-            "不先问就只能编域 id，而编出来的一定过不了校验。\n"
-            "接数据分两件独立的事，别混为一谈：\n"
-            "1. **登记数据源**（能取数/能搬数）→ **propose_datasource**。"
-            "**凭据一律不由你给**：用户名/密码/连接串由用户在确认卡里自己填，你只给名称、类型、catalog。"
-            "查重后再提，同名或同 catalog 的源已存在就直接指给用户。\n"
-            "2. **生成本体草稿**（有业务语义）→ **propose_ontology_draft**，domain_id 用真实的。"
-            "该域已有发布本体时先说清楚：重跑产生新草稿并走合并，不是原地覆盖。\n"
-            "**边界要如实说**：ontoMeta 不触发 DataHub 自身的元数据采集——域与表是 DataHub 那边"
-            "爬好后同步过来的。用户问「怎么让系统认识这个库的表」而该库尚未在 DataHub 里时，"
-            "如实告诉他这一步要在 DataHub 侧配采集，别承诺你做不到的事。\n"
-            "两个工具都只出**提案**：真正建源/启动生成由用户点击后触发，你不写库。\n"
-            "接好之后要搬数/物化是**另一件事**，那属于建数任务——切 task 技能。"
+            "【接数据】先用 list_onboarding_targets 查看现有数据源和数据域。"
+            "登记连接使用 propose_datasource；连接信息由确认界面填写。"
+            "生成本体草稿使用 propose_ontology_draft，并使用目录返回的 domain_id。"
+            "DataHub 元数据采集在 DataHub 中配置；同步和物化使用数据任务技能。"
         ),
         extra_tool_names=(
             "list_onboarding_targets", "propose_datasource", "propose_ontology_draft",
         ),
         block_types=("markdown", "onboard_proposal"),
-        attach_governance=True,
     ),
 }
 

@@ -20,6 +20,7 @@ from app.schemas import (
     AgentKindsOut,
     ArtifactConfirmRequest,
     ArtifactDraftRequest,
+    ConfirmedArtifactDraftRequest,
     ArtifactEditRequest,
     ArtifactExecuteRequest,
     GovernanceArtifactOut,
@@ -249,6 +250,62 @@ def draft_artifact(data: ArtifactDraftRequest, db: Session = Depends(get_db)):
             user_created=data.user_created,
         )
     )
+    return _to_out(artifact)
+
+
+@router.post("/agents/draft-confirmed", response_model=GovernanceArtifactOut)
+def draft_confirmed_artifact(
+    data: ConfirmedArtifactDraftRequest,
+    db: Session = Depends(get_db),
+):
+    """三步确认表单直接进入草稿与 dry-run；不再发起第二轮 LLM。
+
+    ``_dispatch_propose_action`` 会核对 confirmation_id 对应的 requirement/ontology/data
+    三条记录，并以人的 chosen 覆盖请求 context。随后建立会话关联，再产出执行方案预览。
+    """
+    from app.api.deps import chat_bi_service
+
+    proposal, _summary, is_error = chat_bi_service._dispatch_propose_action(
+        db,
+        ontology_id=data.ontology_id,
+        domain_id="",
+        conversation_id=data.conversation_id,
+        args={
+            "kind": data.kind,
+            "intent": data.intent,
+            "context": {
+                **data.context,
+                "task_confirmation_id": data.confirmation_id,
+            },
+        },
+    )
+    if is_error:
+        raise HTTPException(status_code=409, detail=proposal.get("error") or "任务确认不完整")
+
+    payload = proposal["draft_payload"]
+    artifact = _guard(
+        lambda: agent_pipeline.draft(
+            db,
+            kind=payload["kind"],
+            intent=payload["intent"],
+            context={
+                "ontology_id": payload["ontology_id"],
+                **payload["context"],
+            },
+            ontology_id=payload["ontology_id"],
+            user_created=True,
+        )
+    )
+    from app.api.deps import chat_bi_service as chat_service
+
+    chat_service.link_conversation_task(
+        db,
+        data.conversation_id,
+        artifact.id,
+        kind=artifact.kind,
+        intent=artifact.intent,
+    )
+    artifact = _guard(lambda: agent_pipeline.validate(db, artifact.id, context={}))
     return _to_out(artifact)
 
 

@@ -66,11 +66,8 @@ def require_context(context: dict[str, Any], *keys: str) -> None:
 def resolve_spec_engine(db, context: dict[str, Any], contract: Any = None) -> str:
     """Spec 该写哪个引擎（DDL/SQL 方言）。
 
-    优先级：**人显式选的 > 目标数据源的类型 > 契约默认 > hive**。
-
-    数据源必须压过契约：引擎决定的是产出什么方言的 DDL/作业，而数据最终落在哪个库是
-    由 ``target_datasource_id`` 说了算的。此前三类任务一律取契约（无契约则 hive），
-    于是选了 postgres 目标仓的同步任务照样产 Hive DDL 与 Hive sink，建表那一步必挂。
+    Phase 6 后引擎与目标数据源必须同时证明为默认 Doris；显式 engine 不能覆盖
+    一个非 Doris 目标。缺目标时可生成 Doris 声明式草稿，但执行前仍要求绑定默认 Doris。
 
     推定口径只有 ``materialization_runner.resolve_engine`` 一处（物化侧早已如此，
     见 materialize drafter 的 "引擎不再进表单"），这里只是把同一口径接到另外三类任务上。
@@ -78,11 +75,15 @@ def resolve_spec_engine(db, context: dict[str, Any], contract: Any = None) -> st
     from app.services.materialization_runner import resolve_engine
 
     explicit = context.get("engine")
-    if explicit:
-        return str(explicit)
     target_datasource_id = context.get("target_datasource_id")
     if target_datasource_id:
-        return resolve_engine(db, str(target_datasource_id), None)
+        return resolve_engine(db, str(target_datasource_id), explicit)
+    if explicit:
+        from app.warehouse.policy import require_doris
+
+        return require_doris(str(explicit), operation="新建数仓 Spec")
     if contract is not None and getattr(contract, "engines", None):
         return contract.engines[0]
-    return "hive"
+    # New executable warehouse work defaults to Doris. Historical artifacts
+    # retain their explicit engine in the Spec and are not rewritten.
+    return "doris"

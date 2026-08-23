@@ -93,6 +93,11 @@ class ChatBiFormField(BaseModel):
     placeholder: str | None = None
     help: str | None = None
     default: Any | None = None
+    # 建数确认向导中的所属环节：ontology / data / plan。通用表单留空。
+    confirmation_node: str | None = None
+    # 级联候选：depends_on 字段当前值 → options_by_value[value]。
+    depends_on: str | None = None
+    options_by_value: dict[str, list[ChatBiFormOption]] = Field(default_factory=dict)
 
     @field_validator("options", mode="before")
     @classmethod
@@ -101,6 +106,14 @@ class ChatBiFormField(BaseModel):
         if not isinstance(v, list):
             return v
         return [{"label": o, "value": o} if isinstance(o, str) else o for o in v]
+
+
+class ChatBiConfirmationStep(BaseModel):
+    """建数表单的人审步骤；node 与决策闭环节点同名。"""
+
+    node: str
+    title: str
+    description: str = ""
 
 
 class ChatBiFormRequest(BaseModel):
@@ -116,6 +129,10 @@ class ChatBiFormRequest(BaseModel):
     intent: str = ""
     submit_label: str = "提交"
     fields: list[ChatBiFormField] = Field(default_factory=list)
+    task_kind: str | None = None
+    ontology_id: str | None = None
+    confirmation_id: str | None = None
+    confirmation_steps: list[ChatBiConfirmationStep] = Field(default_factory=list)
 
 
 class ChatBiBlock(BaseModel):

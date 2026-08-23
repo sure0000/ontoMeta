@@ -132,6 +132,8 @@ _ROLE_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     (r".*", r"^/api/principals(/|$)", "publisher"),
     # 写侧智能体：会改集群、建表、执行 SQL；制品本身也含拓扑与 SQL，读亦敏感。
     (r".*", r"^/api/agents(/|$)", "publisher"),
+    # Phase 6 evidence contains production topology, approvals and cut-over controls.
+    (r".*", r"^/api/warehouse/migrations(/|$)", "publisher"),
     # 发布类：本体发布、预发布、数据应用发布与公开分享
     (r"^(POST|PATCH|PUT|DELETE)$", r"/(pre-)?publish(/|$)", "publisher"),
     (r"^(POST|DELETE)$", r"/share(/|$)", "publisher"),

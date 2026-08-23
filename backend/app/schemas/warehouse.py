@@ -1,6 +1,92 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+class DorisDeploymentPrepareInput(BaseModel):
+    datasource_id: str
+    database_prefix: str | None = None
+    database_overrides: dict[str, str] = Field(default_factory=dict)
+    table_overrides: dict[str, str] = Field(default_factory=dict)
+
+
+class WarehouseMigrationBatchCreate(BaseModel):
+    ontology_id: str
+    approver: str = Field(min_length=1)
+    rollback_owner: str = Field(min_length=1)
+    observation_window_minutes: int = Field(gt=0)
+    legacy_dag_ids: list[str] = Field(default_factory=list)
+    new_dag_ids: list[str] = Field(default_factory=list)
+
+
+class WarehouseMigrationStepInput(BaseModel):
+    step: int = Field(ge=1, le=15)
+    passed: bool
+    report: dict[str, Any] = Field(default_factory=dict)
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+class WarehouseMigrationApprovalInput(BaseModel):
+    approver: str = Field(min_length=1)
+    note: str = Field(min_length=1)
+
+
+class WarehouseMigrationOperatorInput(BaseModel):
+    pass
+
+
+class WarehouseMigrationRollbackInput(BaseModel):
+    reason: str = Field(min_length=1)
+
+
+class WarehouseRollbackDrillInput(BaseModel):
+    report: dict[str, Any]
+
+
+class ShadowDifferenceInput(BaseModel):
+    cases: list[dict[str, Any]] = Field(min_length=1)
+
+
+class IngestionContractInput(BaseModel):
+    object_type_id: str
+    source_datasource_id: str
+    source_physical_table: str
+    source_mapping: dict[str, str] = Field(default_factory=dict)
+    doris_datasource_id: str
+    target_ods_database: str
+    # 兼容旧客户端接收该字段，但服务端会忽略并按 ods_{数据域}_{原始表名} 重算。
+    target_ods_table: str | None = None
+    mode: str = "full"
+    primary_keys: list[str] = Field(default_factory=list)
+    sequence_column: str | None = None
+    incremental_column: str | None = None
+    initial_watermark: str | None = None
+    late_arrival_policy: str = "strict"
+    idempotency_strategy: str = "primary_key_upsert"
+    delete_policy: str = "ignore"
+    refresh_cron: str | None = None
+    flink_params: dict[str, Any] = Field(default_factory=dict)
+    status: str = "draft"
+
+
+class IngestionTaskResultInput(BaseModel):
+    task_state: str
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestionContractOut(IngestionContractInput):
+    target_ods_table: str
+    id: str
+    ontology_id: str
+    ontology_version: int
+    last_success_at: datetime | None = None
+    sync_watermark: str | None = None
+    flink_job_id: str | None = None
+    checkpoint_path: str | None = None
+    savepoint_path: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class MaterializationContractOut(BaseModel):
@@ -57,7 +143,7 @@ class MaterializeRequest(BaseModel):
     """本体一键物化请求：把当前工作本体（草稿或已发布）落到某个目标数据源。"""
 
     target_datasource_id: str = Field(description="目标存储（DataSource）id，其 dsn 即落库连接串")
-    engine: str = Field("hive", description="目标数仓引擎（决定 DDL/ETL 方言）")
+    engine: str = Field("doris", description="目标数仓引擎（固定为 Doris）")
     database_prefix: str | None = Field(
         None, description="库名后缀，如 erp → dim_erp；被 database_overrides 命中的层不受其影响"
     )
@@ -101,7 +187,7 @@ class MaterializePreflightRequest(BaseModel):
     """提交前自检请求：只需目标存储与勾选范围，不写回、不触发。"""
 
     target_datasource_id: str = Field(description="目标存储（DataSource）id")
-    engine: str = Field("hive", description="目标数仓引擎，与物化请求同义")
+    engine: str = Field("doris", description="目标数仓引擎（固定为 Doris）")
     selected_targets: list[str] | None = Field(
         None, description="勾选要物化的实体名；空/None = 全部可物化实体（用于批次规模预警）"
     )

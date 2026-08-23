@@ -1,7 +1,7 @@
 # 多任务编排 · 已建成规格与遗留事项
 
-> 状态：**P1–P3 已交付（as-built）**  
-> 基线核验：2026-08-22，后端全量 `1542 passed / 3 skipped`，Alembic 单一 head `bacbc3c392ad`。  
+> 状态：**P1–P3 已交付（Doris as-built；生产切流尚未完成）**
+> 基线核验：2026-08-22，后端全量 `1572 passed / 3 skipped`，Alembic 单一 head/current `d3e4f5a6b7c8`。
 > 本文以当前代码为准；旧版“线性链、SeaTunnel/DataX、DolphinScheduler、无周期调度”的描述已失效。
 
 ---
@@ -14,7 +14,7 @@
 - 可逐步起草，也可一次起草全部步骤；
 - 每一步仍是独立 `GovernanceArtifact`，各自经过校验、dry-run、人工确认和执行；
 - 可将整条已走通的链编译成 Airflow DAG 并设置周期调度；
-- transform、metric、sync 的执行统一使用 Flink SQL on YARN，由 Airflow 投递与回读；
+- sync 使用 Flink SQL 写默认 Doris ODS；transform 与 metric/tag/rule 使用 Doris 原生 SQL；旧 Flink metric 路径不可用于新任务；
 - materialize 只建结构，sync 只搬数据，两者语义分离；
 - 链状态由步骤制品聚合推导，不保存第二份权威状态。
 
@@ -72,8 +72,8 @@ GovernanceArtifact Spec
         │
         ├─ materialize ─→ 目标引擎 DDL ───────────────┐
         ├─ sync ───────→ Flink SQL 数据搬运 ─────────┤
-        ├─ transform ──→ Flink SQL 清洗加工 ─────────┤
-        └─ metric ─────→ Flink SQL 聚合 + 结果表 DDL ┤
+        ├─ transform ──→ Doris SQL 清洗加工 ─────────┤
+        └─ metric ─────→ Doris SQL 聚合/标签/规则 ──┤
                                                        ▼
                                                 Airflow DAG
                                                        ▼
@@ -88,14 +88,15 @@ GovernanceArtifact Spec
 |---|---|---|---|
 | materialize | 根据本体和契约创建物理表结构 | 不搬数据 | `agents/executors/materialize.py` |
 | sync | 将真实源表数据按本体映射搬到已物化目标表 | 不创建业务表 | `agents/executors/sync.py` |
-| transform | 对本体目标对象生成并执行 Flink SQL 清洗 | 不自行定义目标结构 | `agents/executors/transform.py` |
-| metric | 按已确认 BusinessLogic 编译并执行聚合/标签/规则 SQL | 不替用户发明口径 | `agents/executors/metric.py` |
+| transform | 对 ready Doris ODS Projection 生成并执行 Doris SQL 清洗 | 不直连业务源、不调用 Flink | `agents/executors/transform.py` |
+| metric | MetricCompiler(doris) 编译并执行 ADS 聚合/标签/规则 SQL | 不替用户发明口径、不调用 Flink | `agents/executors/metric.py` |
 
 ### 2.2 统一执行通道
 
 - 调度器：Airflow；
-- 计算/搬运执行：Flink SQL on YARN；
-- 目标建表：Warehouse Dialect Adapter 生成 DDL；
+- 搬运执行：仅 sync 使用 Flink；
+- 计算执行：transform/metric 使用 Doris SQL；
+- 目标建表：Doris Adapter 生成 DDL；
 - 凭据：Spec 只保存 `*_ref`/`*_alias`，运行时由受管连接配置解析；
 - 状态：回执中的 `dag_id`/`dag_run_id`/`state` 及 live-state 回读；
 - 未配置外部依赖时必须显式返回“仅产出/未执行”的原因，不得假绿。

@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings as env_settings
 
-from app.governance import active_standard, lint_against_standard
+from app.governance import lint_against_standard
 from app.models import (
     BusinessLogic,
     ChatBiConversation,
@@ -86,6 +86,7 @@ from app.services.chat_bi_tool_schemas import (  # noqa: F401
     _OVERVIEW_LIST_LIMIT,
     _OVERVIEW_TOP_CONNECTED,
     _AGENT_SYSTEM_PROMPT,
+    _MINIMAL_AGENT_SYSTEM_PROMPT,
     _AGENT_TOOL_SCHEMAS,
     _SELECT_SKILL_TOOL,
     _RENDER_CHART_TOOL,
@@ -108,6 +109,7 @@ from app.services.chat_bi_tool_schemas import (  # noqa: F401
     _AUTO_ACTION_CONTEXT_KEYS,
     _ACTION_CONTEXT_HINT,
     _missing_action_context,
+    _sync_context_errors,
     _action_context_candidates,
     _GET_TASK_STATUS_TOOL,
     _PLAN_STATUSES,
@@ -884,17 +886,18 @@ class ChatBiService:
         prefs = _dedup([r.label for r in rows if r.ref_kind == "preference"])[:limit]
         if not objs and not logs and not prefs:
             return ""
-        out = ""
+        # 记忆属于参考数据，不是模型角色或控制指令；当前请求和工具结果优先。
+        out = "\n\n【会话记忆参考】以下条目用于帮助定位信息，以当前请求和工具结果为准。"
         parts: list[str] = []
         if objs:
             parts.append("常用对象：" + "、".join(objs))
         if logs:
             parts.append("常用口径：" + "、".join(logs))
         if parts:
-            out += "\n\n【高频（历史使用，以检索为准）】" + "；".join(parts) + "。"
+            out += "\n高频条目：" + "；".join(parts) + "。"
         if prefs:
             # 用户立的约定优先级更高：单独一段，作为回答口径/范围时的默认取向。
-            out += "\n\n【约定（用户已确认，遵循）】" + "；".join(prefs) + "。"
+            out += "\n用户约定：" + "；".join(prefs) + "。"
         return out
 
     def record_domain_preference(self, db: Session, domain_id: str, text: str) -> dict:
@@ -965,9 +968,122 @@ class ChatBiService:
         )
 
     @staticmethod
+    def _is_prompt_flag_error(exc: Exception) -> bool:
+        """Whether an upstream gateway rejected the prompt classification.
+
+        This is intentionally narrow: authentication, model availability and
+        context-size errors must not be retried as prompt-policy errors.
+        """
+        text = str(exc).lower()
+        return (
+            "invalid prompt" in text
+            and ("flagged" in text or "usage policy" in text)
+        )
+
+    @staticmethod
+    def _compact_tools_for_prompt_retry(tools: list[dict]) -> list[dict]:
+        """Prompt 分类误判后的工具 schema 精简版。
+
+        保留 function name、参数类型/枚举/必填关系，移除所有自然语言 description/title/example。
+        上游会把 tools 也计入 prompt 分类；只精简 messages 而原样携带几十段长工具说明，实际并
+        没有完成精简。
+        """
+        drop = {"description", "title", "examples", "example", "$comment"}
+
+        def clean(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: clean(item)
+                    for key, item in value.items()
+                    if key not in drop
+                }
+            if isinstance(value, list):
+                return [clean(item) for item in value]
+            return value
+
+        compact: list[dict] = []
+        for tool in tools:
+            function = tool.get("function") or {}
+            name = function.get("name")
+            if not name:
+                continue
+            compact.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": clean(function.get("parameters") or {
+                        "type": "object", "properties": {}
+                    }),
+                },
+            })
+        return compact
+
+    _PROMPT_ERROR_TEXT_RE = re.compile(
+        r"(?:Error:\s*)?Invalid prompt:\s*your prompt was flagged as potentially violating "
+        r"our usage policy\.?",
+        re.IGNORECASE,
+    )
+    _PROMPT_GUIDE_URL_RE = re.compile(
+        r"https://platform\.openai\.com/docs/guides/reasoning(?:#[^\s]*)?",
+        re.IGNORECASE,
+    )
+    _PROMPT_MARKUP_RE = re.compile(
+        r"</?\s*(?:system|assistant|user|tool|invoke|parameter|prompt)\b[^>]*>",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _sanitize_prompt_text(cls, value: Any, *, max_chars: int | None = None) -> str:
+        """发送给模型前的确定性文本审查。
+
+        已知上游错误若被保存进历史，再原样回灌会让后续请求持续命中同一分类。这里只移除
+        错误诊断、文档 URL、角色/XML 标记和控制字符；正常业务文本不改。
+        """
+        text = str(value or "")
+        text = cls._PROMPT_ERROR_TEXT_RE.sub("[上游请求错误已省略]", text)
+        text = cls._PROMPT_GUIDE_URL_RE.sub("", text)
+        text = cls._PROMPT_MARKUP_RE.sub("", text)
+        text = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+        if max_chars is not None and len(text) > max_chars:
+            text = text[:max_chars] + "…"
+        return text
+
+    @classmethod
+    def _audit_prompt_messages(cls, messages: list[dict]) -> list[dict]:
+        """复制并审查 LLM messages；不修改会话存档。"""
+        audited: list[dict] = []
+        for item in messages:
+            msg = dict(item)
+            if msg.get("content") is not None:
+                # 单条上限是额外护栏；跨轮总预算仍由 compact_conversation 管理。
+                msg["content"] = cls._sanitize_prompt_text(
+                    msg.get("content"), max_chars=20_000 if msg.get("role") == "system" else 8_000
+                )
+            calls = msg.get("tool_calls")
+            if isinstance(calls, list):
+                safe_calls: list[dict] = []
+                for call in calls:
+                    copied = dict(call)
+                    function = dict(copied.get("function") or {})
+                    if "arguments" in function:
+                        function["arguments"] = cls._sanitize_prompt_text(
+                            function["arguments"], max_chars=8_000
+                        )
+                    copied["function"] = function
+                    safe_calls.append(copied)
+                msg["tool_calls"] = safe_calls
+            audited.append(msg)
+        return audited
+
+    @staticmethod
     def _friendly_llm_error(exc: Exception) -> str:
         """把常见 LLM 失败翻译成可读提示（不降级，直接报错）。"""
         text = str(exc).lower()
+        if ChatBiService._is_prompt_flag_error(exc):
+            return (
+                "上游模型网关拒绝了本次提示内容。系统已自动尝试精简提示；"
+                "若仍失败，请缩短问题并避免粘贴大段原始日志后重试。"
+            )
         status = getattr(exc, "status_code", None)
         size_signals = (
             "413",
@@ -1003,51 +1119,14 @@ class ChatBiService:
     def _resolve_domain_data_source(
         self, db: Session, target_catalog: str | None = None
     ):
-        """为 run_sql 选执行数据源（warehouse-first）。
+        """Resolve the explicit default Doris warehouse for query execution.
 
-        统一查询网关重构后，选源逻辑收敛到 ``services.data_app.resolve_domain_data_source``
-        一处（chat_bi 与 ontology_ladder 共用）：
-        - 默认查 warehouse 源（catalog_name 为空/"internal"）——数仓投影；
-        - ``target_catalog`` 显式指定（如 "erp"）才精确匹配源库 catalog；
-        - 无可用源返回 None（run_sql 据此优雅降级为「仅建议 SQL」）。
+        ``target_catalog`` is retained only for old internal callers and is
+        rejected by the resolver; it is not a query-routing mechanism.
         """
         from app.services.data_app import resolve_domain_data_source
 
         return resolve_domain_data_source(db, target_catalog=target_catalog)
-
-    def _dispatch_list_catalogs(self, db: Session) -> tuple[Any, str, bool]:
-        """list_catalogs 工具：返回可查询目录清单，供 run_sql 的 target 取值。
-
-        warehouse 恒在（有可用源时）；源库 catalog 按 DataSource.catalog_name 列。
-        只列**可执行**的源（有连接串、非 mock），与选源口径一致。
-        """
-        from app.models import DataSource
-
-        usable = [
-            s
-            for s in db.query(DataSource).all()
-            if (s.dsn_secret_ref or "").strip() and s.kind != "mock"
-        ]
-        catalogs: list[dict[str, str]] = []
-        if usable:
-            catalogs.append(
-                {"name": "warehouse", "kind": "starrocks",
-                 "description": "数仓投影（默认 target，本体物化落这里）"}
-            )
-        for s in usable:
-            cat = (s.catalog_name or "").strip()
-            if cat and cat != "internal":
-                catalogs.append(
-                    {"name": cat, "kind": s.kind,
-                     "description": f"源库实时数据（{s.name}）"}
-                )
-        if not catalogs:
-            return (
-                {"catalogs": [], "note": "当前数据域未配置可执行数据源，run_sql 只能给建议 SQL"},
-                "无可执行目录",
-                False,
-            )
-        return {"catalogs": catalogs}, f"可查询目录：{', '.join(c['name'] for c in catalogs)}", False
 
     # --- 工具结果 compact 化：只保留 LLM 需要的字段，压住回灌体积 ---
 
@@ -1154,26 +1233,76 @@ class ChatBiService:
         if not ok:
             return {"executed": False, "error": f"仅允许只读 SELECT：{reason}", "sql": sql}, "被只读校验拒绝", True
 
-        # 显式 target（warehouse 默认 / 源库 catalog 名如 erp）→ warehouse-first 选源。
-        # target 参数不在 schema 白名单之外的值不做约束，由选源函数按 catalog_name 精确匹配，
-        # 匹配不到即降级「仅建议 SQL」——不让 agent 悄悄换源。
-        target_catalog = str(args.get("target") or "").strip() or None
+        # Query routing is Doris-only.  A legacy target is an explicit attempt
+        # to select a source system and must fail closed.
+        if args.get("target"):
+            return (
+                {"executed": False, "reason": "run_sql 不支持 target；Data Agent 只查询默认 Doris", "sql": sql},
+                "拒绝源库 target",
+                True,
+            )
 
         # 权限不足时不解析数据源——降级为「仅建议 SQL」，而不是硬报错：
         # 检索类工具对低权角色仍合法，问答体验不掉，只是不代跑数。
         may_run = self._may_run_sql(principal_role)
         source = (
-            self._resolve_domain_data_source(db, target_catalog=target_catalog)
+            self._resolve_domain_data_source(db)
             if may_run
             else None
         )
-        mapping = _loads_payload(source.mapping_json) if source is not None else None
+        # DataSource.mapping_json is historical metadata and must not authorize
+        # a query.  Object-level mapping is resolved from current Deployment /
+        # Projection only after semantic proof identifies every referenced object.
+        mapping = None
 
         # ★ SQL 语义证明（F3）：执行/建议前静态证明语义合法，不过则不放行。
         #   即便无可执行数据源（仅建议 SQL），也要证明——臆造字段/JOIN 与是否落库无关。
         rejection, proved = self._prove_sql_or_reject(db, sql, ontology_ids, source, mapping)
         if rejection is not None:
             return rejection
+
+        try:
+            from app.services.query_routing import (
+                projection_mapping,
+                readiness_error,
+                referenced_table_names,
+            )
+
+            object_names = list(proved.get("tables") or referenced_table_names(sql))
+            if source is not None:
+                from app.services.warehouse_migration import cutover_error
+
+                migration_error = cutover_error(db, ontology_ids or [])
+                if migration_error:
+                    return (
+                        {"executed": False, "reason": migration_error, "sql": sql, "proved": proved},
+                        "Phase 6 尚未审批切流",
+                        False,
+                    )
+                ready_error = readiness_error(
+                    db,
+                    datasource=source,
+                    ontology_ids=ontology_ids,
+                    object_names=object_names,
+                )
+                if ready_error:
+                    return (
+                        {"executed": False, "reason": ready_error, "sql": sql, "proved": proved},
+                        "Doris Projection 未就绪",
+                        False,
+                    )
+                mapping = projection_mapping(
+                    db,
+                    datasource=source,
+                    ontology_ids=ontology_ids or [],
+                    object_names=object_names,
+                )
+        except ValueError as exc:
+            return (
+                {"executed": False, "reason": str(exc), "sql": sql, "proved": proved},
+                "Doris Projection 覆盖校验失败",
+                False,
+            )
 
         if not may_run:
             return (
@@ -1190,11 +1319,7 @@ class ChatBiService:
                 False,
             )
         if source is None:
-            reason = (
-                f"目标目录「{target_catalog}」未配置可执行数据源，仅能给出建议 SQL"
-                if target_catalog
-                else "当前数据域未绑定可执行数据源，仅能给出建议 SQL"
-            )
+            reason = "当前未配置可执行的默认 Doris 数仓，仅能给出建议 SQL"
             return (
                 {"executed": False, "reason": reason,
                  "sql": sql, "proved": proved},
@@ -1208,6 +1333,7 @@ class ChatBiService:
                 limit=limit,
                 mapping=mapping or None,
                 timeout_seconds=_SQL_TIMEOUT_SECONDS,
+                dialect="doris",
             )
         except Exception as exc:  # noqa: BLE001
             return {"executed": False, "error": str(exc)[:300], "sql": sql}, "SQL 执行失败", True
@@ -1221,6 +1347,15 @@ class ChatBiService:
             "truncated": truncated,
             "proved": proved,
         }
+        if source is not None and source.purpose == "warehouse":
+            from app.services.query_routing import target_receipt
+
+            result["query_target"] = target_receipt(
+                db,
+                datasource=source,
+                ontology_ids=ontology_ids,
+                object_names=object_names,
+            )
         # 截断 + 无 ORDER BY → 这是一份「无序样本」（执行层虽已自动补 ORDER BY 1
         # 保证可复现，但首列排序无业务含义），明确告知不是全集、非按业务键取样，
         # 避免用户把两次样例当作数据矛盾。
@@ -1268,7 +1403,7 @@ class ChatBiService:
 
         多域：合并所有涉及本体的投影后统一证明，跨域 SQL（JOIN 不同域的表）一次过。
         受 ``settings.agent_soundness`` 开关：off=跳过；warn=只记日志不拦；on=拒绝执行。
-        证明本身出错（解析器异常等）绝不误伤正常查询——降级为放行并记日志。
+        证明本身出错时，若存在可执行 Doris 则 fail-closed；没有执行目标时仍可给建议 SQL。
 
         **证书要带回去**：``SqlCertificate.tables/columns`` 是「这些表/列确实是已发布
         本体成员」的**证明结论**，不是模型的主张。不回传的话，模型写了一条被证明合法的
@@ -1284,13 +1419,28 @@ class ChatBiService:
         try:
             proj = self._build_merged_projection(db, ontology_ids, mapping)
             dialect = (
-                data_app_executor.backend_of(source.dsn_secret_ref)
-                if source is not None
-                else None
+                "doris"
+                if source is not None and getattr(source, "kind", None) == "doris"
+                else (
+                    data_app_executor.backend_of(source.dsn_secret_ref)
+                    if source is not None else None
+                )
             )
             verdict = prove_sql_sound(sql, proj, dialect=dialect)
-        except Exception as exc:  # noqa: BLE001 — 证明器故障不得拖垮问答
-            logger.warning("sql soundness prover error, allowing SQL: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sql soundness prover error: %s", exc)
+            if source is not None:
+                return (
+                    {
+                        "executed": False,
+                        "rejected": True,
+                        "sql": sql,
+                        "reason": "SQL 语义证明器不可用，Doris 查询已 fail-closed",
+                        "code": "soundness_unavailable",
+                    },
+                    "SQL 语义证明不可用",
+                    True,
+                ), {}
             return None, {}
         if not isinstance(verdict, SqlRejection):
             return None, {
@@ -1790,10 +1940,8 @@ class ChatBiService:
                 filters=filters,
                 grain=str(args.get("grain") or "") or None,
                 time_property=str(args.get("time_property") or "") or None,
-                dialect=data_app_executor.backend_of(
-                    source.dsn_secret_ref if source is not None else None
-                ),
-                mapping=_loads_payload(source.mapping_json) if source is not None else None,
+                dialect="doris",
+                mapping=None,
             )
         except MetricCompileError as exc:
             return (
@@ -1858,13 +2006,35 @@ class ChatBiService:
                 False,
             )
 
-        mapping = _loads_payload(source.mapping_json) if source is not None else None
+        mapping = None
         dsn = source.dsn_secret_ref if source is not None else None
+        if source is not None:
+            from app.services.query_routing import projection_mapping, readiness_error
+            from app.services.warehouse_migration import cutover_error
+
+            blocked = cutover_error(db, [ontology_id]) or readiness_error(
+                db,
+                datasource=source,
+                ontology_ids=[ontology_id],
+                object_names=[obj.name],
+            )
+            if blocked:
+                return (
+                    {"object": obj.name, "property": prop.name, "available": False, "note": blocked},
+                    "Doris Projection 未就绪",
+                    False,
+                )
+            mapping = projection_mapping(
+                db,
+                datasource=source,
+                ontology_ids=[ontology_id],
+                object_names=[obj.name],
+            )
         profile = profile_property(
             proj, obj, prop,
             dsn=dsn,
             mapping=mapping,
-            backend=data_app_executor.backend_of(dsn),
+            backend="doris" if source is not None else None,
             scope_key=f"{ontology_id}|{getattr(source, 'id', '')}",
         )
         result = profile.to_dict()
@@ -2048,7 +2218,13 @@ class ChatBiService:
             return items, 0
 
     def _apply_select_skill(
-        self, args: dict, messages: list[dict], base_system: str, governance_card: str = ""
+        self,
+        args: dict,
+        messages: list[dict],
+        base_system: str,
+        governance_card: str = "",
+        *,
+        apply_overlay: bool = True,
     ) -> tuple["Skill | None", dict, str, bool]:
         """V3 S1：切换技能。就地把 messages[0] 重建为 base_system + 技能 overlay。
 
@@ -2065,10 +2241,14 @@ class ChatBiService:
                 f"未知技能「{name}」",
                 True,
             )
-        overlay = skill.prompt_overlay
-        if skill.attach_governance and governance_card:
-            overlay = f"{overlay}\n\n{governance_card}"
-        messages[0]["content"] = f"{base_system}\n\n{overlay}"
+        if apply_overlay:
+            overlay = skill.prompt_overlay
+            if skill.attach_governance and governance_card:
+                overlay = f"{overlay}\n\n{governance_card}"
+            messages[0]["content"] = f"{base_system}\n\n{overlay}"
+        else:
+            # 上游 prompt 分类误判后的安全重试：保留技能路由与工具解锁，不再叠长 overlay。
+            messages[0]["content"] = base_system
         result = {
             "ok": True,
             "skill": skill.name,
@@ -3154,9 +3334,8 @@ class ChatBiService:
     ) -> tuple[dict, str, bool]:
         """P1：建数任务的可选项目录（只读）。
 
-        读的是**物理侧事实**——数据源、目标库、物化契约、执行侧支持的装载方式——而这些
-        此前对模型完全不可见，于是它生成的建数表单只能是一堆文本框。本方法与
-        MaterializeModal 读同一批服务，保证两条路给出的候选一致。
+        读的是**物理侧事实**——默认 Doris、真实数据库、可物化范围、可同步来源、ODS 就绪对象、
+        形式化业务口径——而这些此前对模型不可见。本方法与各专属界面共用服务，保证候选一致。
         """
         kind = str(args.get("kind") or "").strip()
         if kind not in _ACTION_KINDS:
@@ -3174,7 +3353,71 @@ class ChatBiService:
                 datasource_id=str(args.get("target_datasource_id") or "").strip(),
                 keyword=keyword,
             )
+        if kind == "metric":
+            return self._metric_task_options(
+                db, ontology_id=ontology_id, keyword=keyword
+            )
         return self._entity_task_options(db, kind=kind, ontology_id=ontology_id, keyword=keyword)
+
+    @staticmethod
+    def _doris_target_catalog(db: Session) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """任务可选的 Doris warehouse；唯一可执行默认项单独返回。
+
+        所有数仓任务共用这一处，避免 sync/transform/metric/materialize 对“目标能不能选”
+        各持一套条件。非默认/停用/缺连接项仍返回供 UI 置灰说明，但绝不能成为 default。
+        """
+        from app.models import DataSource
+
+        rows = (
+            db.query(DataSource)
+            .filter(
+                DataSource.purpose == "warehouse",
+                DataSource.kind == "doris",
+            )
+            .order_by(DataSource.name, DataSource.id)
+            .all()
+        )
+        items = [
+            {
+                "id": source.id,
+                "name": source.name,
+                "kind": source.kind,
+                "status": source.status,
+                "enabled": source.enabled,
+                "is_default": source.is_default_warehouse,
+                "has_connection": bool((source.dsn_secret_ref or "").strip()),
+                "executable": bool(
+                    source.enabled
+                    and source.is_default_warehouse
+                    and (source.dsn_secret_ref or "").strip()
+                ),
+            }
+            for source in rows
+        ]
+        return items, next((item for item in items if item["executable"]), None)
+
+    @staticmethod
+    def _doris_target_options(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Doris 目录 → 表单下拉候选；非法项可见但置灰。"""
+        options: list[dict[str, Any]] = []
+        for target in items:
+            if target.get("executable"):
+                label = f"{target['name']}（默认 Doris）"
+            else:
+                reason = (
+                    "未启用"
+                    if not target.get("enabled")
+                    else "未设为默认数仓"
+                    if not target.get("is_default")
+                    else "未配置连接"
+                )
+                label = f"{target['name']}（不可选：{reason}）"
+            options.append({
+                "label": label,
+                "value": target["id"],
+                "disabled": not target.get("executable"),
+            })
+        return options
 
     @staticmethod
     def _engine_of_datasource(ds: Any) -> str | None:
@@ -3276,30 +3519,40 @@ class ChatBiService:
         return out
 
     def _materialize_options(
-        self, db: Session, *, ontology_id: str, datasource_id: str, keyword: str
+        self,
+        db: Session,
+        *,
+        ontology_id: str,
+        datasource_id: str,
+        keyword: str,
+        limit: int | None = _TASK_OPTIONS_LIMIT,
     ) -> tuple[dict, str, bool]:
-        from app.models import DataSource
+        from app.models import DataSource, ObjectType
         from app.services.materialization_contract import MaterializationContractService
         from app.warehouse import DEFAULT_ENGINE
 
         contracts_svc = MaterializationContractService()
 
-        sources = db.query(DataSource).order_by(DataSource.name).all()
+        sources = (
+            db.query(DataSource)
+            .filter(DataSource.purpose == "warehouse", DataSource.kind == "doris")
+            .order_by(DataSource.name, DataSource.id)
+            .all()
+        )
+        target_catalog, default_doris = self._doris_target_catalog(db)
         datasources = [
             {
-                "id": s.id,
-                "name": s.name,
-                "kind": s.kind,
-                "status": s.status,
-                "engine": self._engine_of_datasource(s),
-                # 没配连接串的源物化时会被 runner 直接拒——先说出来，别让它进表单当选项。
-                "writable": bool(s.dsn_secret_ref),
+                **target,
+                "engine": "doris",
+                "writable": target["executable"],
             }
-            for s in sources
+            for target in target_catalog
         ]
 
-        chosen = next((s for s in sources if s.id == datasource_id), None) if datasource_id else None
-        engine = (self._engine_of_datasource(chosen) if chosen else None) or DEFAULT_ENGINE
+        # 物化固定写唯一可执行默认 Doris；模型/旧客户端传来的其它 datasource_id 不参与。
+        chosen_id = default_doris["id"] if default_doris else ""
+        chosen = next((s for s in sources if s.id == chosen_id), None)
+        engine = DEFAULT_ENGINE
 
         # 目标库：只有指定了数据源才去连它列库。连不上不是错误——弹窗那边也是降级成手填。
         databases: list[str] | None = None
@@ -3312,76 +3565,149 @@ class ChatBiService:
             except Exception as exc:  # noqa: BLE001 — 列不出库只降级为手填，不该中断建数
                 databases_error = f"列不出该数据源的库（{exc}）；请让用户手填库名"
 
+        # 候选读取保持**纯读**：尚未持久化契约时，用 derive() 的确定性结果补齐；已有契约
+        # （含人工钉住字段）优先。执行入口会按既有流程 sync() 后再生成 DDL。
         rows = contracts_svc.list_contracts(db, ontology_id, materialized_only=True)
-        names = contracts_svc.resolve_target_names(db, rows)
-        partition_candidates = self._partition_key_candidates(db, ontology_id, rows)
+        persisted = {(row.target_kind, row.target_id): row for row in rows}
+        derived = [item for item in contracts_svc.derive(db, ontology_id) if item["materialized"]]
+
+        from app.models import BusinessLogic, RelationType
+
+        object_names = {
+            row.id: (row.name, row.display_name)
+            for row in db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+        }
+        relation_names = {
+            row.id: (row.name, row.display_name)
+            for row in db.query(RelationType).filter(RelationType.ontology_id == ontology_id)
+        }
+        logic_names = {
+            row.id: (row.name, row.display_name)
+            for row in db.query(BusinessLogic).filter(BusinessLogic.ontology_id == ontology_id)
+        }
+        names_by_kind = {
+            "object_type": object_names,
+            "relation_type": relation_names,
+            "business_logic": logic_names,
+        }
         entities: list[dict[str, Any]] = []
-        for c in rows:
-            name, display = names.get(c.target_id, (None, None))
-            label = display or name or c.target_id
+        for item in derived:
+            key = (item["target_kind"], item["target_id"])
+            contract = persisted.get(key)
+            name, display = names_by_kind.get(item["target_kind"], {}).get(
+                item["target_id"], (None, None)
+            )
             if keyword and keyword.lower() not in f"{name or ''}{display or ''}".lower():
                 continue
             entities.append({
-                # contract_id 是 overrides / table_overrides 的键，必须回给模型，
-                # 否则「给这张表设个分区键」在对话里根本无从表达。
-                "contract_id": c.id,
-                "entity": name or c.target_id,
+                "contract_id": contract.id if contract else None,
+                "entity": name or item["target_id"],
                 "display_name": display,
-                "layer": c.target_layer,
-                "partition_key": c.partition_key,
-                "load_strategy": c.load_strategy,
-                "refresh_cron": c.refresh_cron,
+                "layer": contract.target_layer if contract else item["target_layer"],
+                "derived_only": contract is None,
             })
-            if len(entities) >= _TASK_OPTIONS_LIMIT:
+            if limit is not None and len(entities) >= limit:
                 break
 
-        # 执行侧真支持哪些装载方式。问不到（未配 Airflow/runner）返回 null，此时**不设限**：
-        # 凭猜锁死选项比不锁更糟（与物化弹窗同一决策，见 sync_tool_resolver.engine_modes）。
-        supported: list[str] | None = None
-        modes_detail = ""
-        try:
-            from app.services.sync_tool_resolver import engine_modes
+        configured_database = None
+        if default_doris:
+            from app.models import DorisWarehouseConfig
 
-            airflow = self.settings_service.get_airflow_runtime(db)
-            supported, modes_detail = engine_modes(airflow, engine, choice_tool=None)
-        except Exception as exc:  # noqa: BLE001 — 问不到只是不设限，不该中断建数
-            modes_detail = f"问不到执行侧能力（{exc}），装载方式不设限。"
-        load_strategies = [
-            {**s, "supported": (supported is None or s["value"] in supported)}
-            for s in _LOAD_STRATEGIES
-        ]
+            config = (
+                db.query(DorisWarehouseConfig)
+                .filter(DorisWarehouseConfig.warehouse_datasource_id == default_doris["id"])
+                .first()
+            )
+            configured_database = (
+                str(config.default_database).strip()
+                if config and config.default_database else None
+            )
 
         result = {
             "kind": "materialize",
             "engine": engine,
             "datasources": datasources,
+            "default_doris": default_doris,
             "databases": databases,
+            "configured_database": configured_database,
             "databases_error": databases_error,
             "layers": sorted({e["layer"] for e in entities}),
             "entities": entities,
-            "total_entities": len(rows),
+            "total_entities": len(derived),
             "returned": len(entities),
-            "truncated": len(entities) < len(rows),
-            "load_strategies": load_strategies,
-            "load_strategies_detail": modes_detail,
-            # 分区键是**这些表上真实存在的列**，故候选取自本体属性（覆盖面越广越适合整批用）。
-            "partition_key_candidates": partition_candidates,
-            "cron_presets": [dict(p) for p in _CRON_PRESETS],
+            "truncated": len(entities) < len(derived),
             "usage": (
-                "目标库用 target_database（一个库通吃各层，与物化弹窗同口径；要逐层分库才用 "
-                "database_overrides={层: 库名}）；逐实体的分区键/装载方式/调度经 "
-                "overrides={contract_id: {...}}；整批一个调度用 refresh_cron。"
+                "物化只建结构：target_datasource_id 固定为唯一可执行默认 Doris，"
+                "target_database 必须来自真实数据库目录；selected_targets 控制范围，空=全部。"
+                "装载方式、分区键和调度属于后续同步任务，不在物化任务中配置。"
             ),
         }
         summary = (
             f"可选项：{len(datasources)} 个数据源 / "
             f"{len(databases) if databases is not None else '—'} 个库 / "
-            f"{len(rows)} 个待物化实体"
+            f"{len(derived)} 个待物化实体"
         )
         return result, summary, False
 
+    def _metric_task_options(
+        self,
+        db: Session,
+        *,
+        ontology_id: str,
+        keyword: str,
+        limit: int | None = _TASK_OPTIONS_LIMIT,
+    ) -> tuple[dict, str, bool]:
+        from app.models import BusinessLogic, DataSource, EntityStatus
+
+        q = db.query(BusinessLogic).filter(
+            BusinessLogic.ontology_id == ontology_id,
+            BusinessLogic.status == EntityStatus.PUBLISHED.value,
+            BusinessLogic.expression_json.is_not(None),
+        )
+        logics = q.order_by(BusinessLogic.name).all()
+        if keyword:
+            logics = [
+                logic for logic in logics
+                if keyword.lower() in f"{logic.name}{logic.display_name}".lower()
+            ]
+        target_datasources, default_doris = self._doris_target_catalog(db)
+        items = [
+            {
+                "business_logic_id": logic.id,
+                "name": logic.name,
+                "display_name": logic.display_name,
+                "logic_type": logic.logic_type,
+                "suggested_context": (
+                    {
+                        "business_logic_id": logic.id,
+                        "target_datasource_id": default_doris["id"],
+                    }
+                    if default_doris else None
+                ),
+            }
+            for logic in (logics if limit is None else logics[:limit])
+        ]
+        return (
+            {
+                "kind": "metric",
+                "target_datasources": target_datasources,
+                "default_doris": default_doris,
+                "business_logics": items,
+                "required_context": ["business_logic_id", "target_datasource_id"],
+                "note": "只列已发布且 expression_json 完整的 metric/tag/rule；执行固定写 Doris ADS。",
+            },
+            f"可选项：{len(items)} 个已形式化业务逻辑",
+            False,
+        )
+
     def _entity_task_options(
-        self, db: Session, *, kind: str, ontology_id: str, keyword: str
+        self,
+        db: Session,
+        *,
+        kind: str,
+        ontology_id: str,
+        keyword: str,
+        limit: int | None = _TASK_OPTIONS_LIMIT,
     ) -> tuple[dict, str, bool]:
         """同步/加工的候选对象。
 
@@ -3389,13 +3715,56 @@ class ChatBiService:
         一个对象——把候选摆出来让用户选，猜就不必发生了。
         """
         from app.models import ObjectType
+        from app.services.ods_naming import target_ods_table_name
         from app.services.source_ref import has_physical_source, source_table_of
 
         q = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
         rows = q.order_by(ObjectType.name).all()
+        transform_ready: set[str] | None = None
+        if kind == "transform":
+            from app.models import (
+                Ontology,
+                OntologyWarehouseDeployment,
+                WarehouseObjectProjection,
+            )
+
+            _targets, transform_doris = self._doris_target_catalog(db)
+            ontology = db.get(Ontology, ontology_id)
+            transform_ready = set()
+            if transform_doris and ontology is not None:
+                deployment = (
+                    db.query(OntologyWarehouseDeployment)
+                    .filter(
+                        OntologyWarehouseDeployment.ontology_id == ontology_id,
+                        OntologyWarehouseDeployment.ontology_version == ontology.version,
+                        OntologyWarehouseDeployment.doris_datasource_id == transform_doris["id"],
+                    )
+                    .first()
+                )
+                if deployment is not None:
+                    transform_ready = {
+                        name
+                        for (name,) in (
+                            db.query(ObjectType.name)
+                            .join(
+                                WarehouseObjectProjection,
+                                WarehouseObjectProjection.object_type_id == ObjectType.id,
+                            )
+                            .filter(
+                                ObjectType.ontology_id == ontology_id,
+                                WarehouseObjectProjection.deployment_id == deployment.id,
+                                WarehouseObjectProjection.sync_status == "ready",
+                                WarehouseObjectProjection.ods_table.is_not(None),
+                            )
+                            .all()
+                        )
+                    }
+
         objects: list[dict[str, Any]] = []
         for o in rows:
             if keyword and keyword.lower() not in f"{o.name or ''}{o.display_name or ''}".lower():
+                continue
+            if transform_ready is not None and o.name not in transform_ready:
                 continue
             # 同步要从源表搬。没有物理源表的对象（无 source_ref，或人工建模的 manual: 引用）
             # 定位不到源，不该进候选——它们的去处是物化。
@@ -3404,14 +3773,20 @@ class ChatBiService:
             objects.append({
                 "name": o.name,
                 "display_name": o.display_name,
+                "description": o.description,
                 "source_table": source_table_of(o.source_ref),
+                "target_ods_table": (
+                    target_ods_table_name(db, ontology_id, o) if kind == "sync" else None
+                ),
             })
-            if len(objects) >= _TASK_OPTIONS_LIMIT:
+            if limit is not None and len(objects) >= limit:
                 break
 
         eligible = (
             len([o for o in rows if has_physical_source(o.source_ref)])
             if kind == "sync"
+            else len(transform_ready or set())
+            if kind == "transform"
             else len(rows)
         )
         result: dict[str, Any] = {
@@ -3424,24 +3799,98 @@ class ChatBiService:
             "truncated": len(objects) < eligible,
         }
         if kind == "sync":
+            from app.models import DataSource
+            from app.services.source_datasource import source_datasource_candidates
+
+            sources = (
+                db.query(DataSource)
+                .filter(
+                    DataSource.purpose == "business_source",
+                    DataSource.enabled.is_(True),
+                )
+                .order_by(DataSource.name, DataSource.id)
+                .all()
+            )
+            rows_by_name = {o.name: o for o in rows}
+            matched_by_object: dict[str, list[DataSource]] = {}
+            for item in objects:
+                obj = rows_by_name.get(item["name"])
+                matched = (
+                    source_datasource_candidates(db, obj, sources=sources) if obj else []
+                )
+                matched_by_object[item["name"]] = matched
+                item["source_datasources"] = [
+                    {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
+                    for s in matched
+                ]
+            target_datasources, default_doris = self._doris_target_catalog(db)
+            # 顶层保留并集供旧调用方读取；每个对象自己的精确候选在
+            # objects[].source_datasources，表单据此随本体选择联动。
+            matched_ids = {
+                source.id for matched in matched_by_object.values() for source in matched
+            }
+            result["source_datasources"] = [
+                {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
+                for s in sources if s.id in matched_ids
+            ]
+            result["target_datasources"] = target_datasources
+            result["default_doris"] = default_doris
+            result["required_context"] = [
+                "object_type", "source_datasource_id", "target_datasource_id",
+                "target_ods_database", "mode",
+            ]
+            # 每个本体对象单独推导来源；只有该对象唯一命中时才给可直接复制的推荐 context。
+            if default_doris:
+                for item in objects:
+                    matched = matched_by_object.get(item["name"]) or []
+                    if len(matched) != 1:
+                        continue
+                    item["suggested_context"] = {
+                        "object_type": item["name"],
+                        "source_datasource_id": matched[0].id,
+                        "target_datasource_id": default_doris["id"],
+                        "target_ods_database": "ods",
+                        # 表名不进入 context：Drafter 按 ods_{数据域}_{原始表名} 固定生成。
+                        "mode": "full",
+                    }
             result["load_strategies"] = [dict(s) for s in _LOAD_STRATEGIES]
             result["note"] = (
-                "同步的装载方式与分区键取自该对象的物化契约；无 source_ref 的对象定位不到源表，"
-                "已从候选里排除。"
+                "同步只允许 business_source → Flink → 默认 Doris ODS。目标表名固定为 "
+                "ods_{数据域}_{原始表名}；无 source_ref 的对象已排除；incremental/CDC 还必须按 "
+                "load_strategies 的 hint 补齐主键、水位或 sequence/checkpoint。"
             )
         else:
             from app.agents.drafters.transform import SUPPORTED_CLEANSING_RULES
+
+            target_datasources, default_doris = self._doris_target_catalog(db)
+            result["target_datasources"] = target_datasources
+            result["default_doris"] = default_doris
+            if default_doris:
+                for item in objects:
+                    item["suggested_context"] = {
+                        "target_table": item["name"],
+                        "target_datasource_id": default_doris["id"],
+                    }
 
             # 清洗规则是**闭集**：Drafter 只认这几条，说不出的需求会被静默丢掉，
             # 故把词表交给模型，让它当场告诉用户哪些做得了。
             result["cleansing_rules"] = [
                 {"rule": code, "description": desc} for code, desc in SUPPORTED_CLEANSING_RULES
             ]
-            result["note"] = "清洗需求只有落到上述规则才会进 Spec，词表外的需求请如实告诉用户做不了。"
+            result["note"] = (
+                "只列当前默认 Doris 中 ODS Projection 已同步就绪的对象；没有候选时须先物化并同步。"
+                "清洗需求只有落到上述规则才会进 Spec，词表外需求不能假装执行。"
+            )
         return result, f"可选项：{len(objects)}/{eligible} 个候选对象", False
 
     def _dispatch_propose_action(
-        self, db: Session, *, ontology_id: str, domain_id: str, args: dict
+        self,
+        db: Session,
+        *,
+        ontology_id: str,
+        domain_id: str,
+        args: dict,
+        conversation_id: str | None = None,
     ) -> tuple[dict, str, bool]:
         """P0：为新建数据任务（物化/同步/加工）产出**提案**（纯 spec，不写库、不执行）。
 
@@ -3464,9 +3913,74 @@ class ChatBiService:
         intent = str(args.get("intent") or "").strip()
         if not intent:
             return {"error": "需要 intent（任务意图）"}, "提案缺意图", True
-        context = args.get("context")
-        if not isinstance(context, dict):
-            context = {}
+        raw_context = args.get("context")
+        if not isinstance(raw_context, dict):
+            raw_context = {}
+        confirmation_id = str(raw_context.get("task_confirmation_id") or "").strip()
+        confirmed_requirement: str | None = None
+        confirmed_context: dict[str, Any] = {}
+        if conversation_id:
+            # 识别出任务意图不等于需求已确认。四类写侧任务都要先逐步确认需求、本体/口径和
+            # 数据落点，真正执行方案在制品 dry-run 后另行确认。同一会话可能连续建多条任务，
+            # 故还必须按本张表单 confirmation_id 隔离，不能复用旧确认。
+            from app.services.chat_bi_ledger import list_decisions
+
+            latest: dict[str, dict] = {}
+            for record in list_decisions(db, conversation_id):
+                chosen = record.get("chosen") or {}
+                if (
+                    record["node"] in {"requirement", "ontology", "data"}
+                    and confirmation_id
+                    and isinstance(chosen, dict)
+                    and chosen.get("task_confirmation_id") == confirmation_id
+                ):
+                    latest[record["node"]] = record
+            confirmed = {
+                node
+                for node, record in latest.items()
+                if record.get("outcome") in {"accepted", "modified"}
+            }
+            requirement_chosen = (latest.get("requirement") or {}).get("chosen") or {}
+            if isinstance(requirement_chosen, dict):
+                confirmed_requirement = str(
+                    requirement_chosen.get("task_requirement")
+                    or requirement_chosen.get("sync_requirement")
+                    or requirement_chosen.get("intent")
+                    or ""
+                ).strip() or None
+            for node in ("ontology", "data"):
+                chosen = (latest.get(node) or {}).get("chosen") or {}
+                if isinstance(chosen, dict):
+                    confirmed_context.update({
+                        str(key): value
+                        for key, value in chosen.items()
+                        if key != "task_confirmation_id"
+                    })
+            missing_confirmations = [
+                node for node in ("requirement", "ontology", "data") if node not in confirmed
+            ]
+            if missing_confirmations:
+                labels = {"requirement": "任务需求", "ontology": "本体/口径", "data": "数据落点"}
+                return (
+                    {
+                        "error": "数据任务必须先逐步确认需求、本体/口径和数据落点",
+                        "missing_confirmations": missing_confirmations,
+                        "confirmation_id": confirmation_id or None,
+                        "hint": f"请先调用 request_form(task_kind={kind})，并把回填中的 task_confirmation_id 原样放进 context。",
+                    },
+                    "尚未确认：" + "、".join(labels[n] for n in missing_confirmations),
+                    True,
+                )
+        # 人在向导中确认的本体/口径和数据参数是权威值，覆盖模型从回填文本再次解析出的值。
+        # 这样即使模型抄错一个 id，也不会让“确认 A、执行 B”。
+        context = {**dict(raw_context), **confirmed_context}
+        intent = confirmed_requirement or str(context.pop("task_requirement", "") or "").strip() or intent
+        context.pop("sync_requirement", None)  # 兼容上一版同步表单
+        context.pop("task_confirmation_id", None)
+        if kind == "sync":
+            # ODS 表名由 Drafter 按 ods_{数据域}_{原始表名} 固定生成。清掉模型/旧客户端
+            # 传入的值，避免提案卡展示一个执行时必然会被后端覆盖的假配置。
+            context.pop("target_ods_table", None)
         missing = _missing_action_context(kind, context)
         if missing:
             return (
@@ -3479,6 +3993,93 @@ class ChatBiService:
                 f"提案缺上下文：{'、'.join(missing)}",
                 True,
             )
+        # 引用型参数必须来自当前本体/契约的真实可执行目录；前端下拉是体验层，这里才是门禁。
+        from app.models import Ontology
+
+        if db.get(Ontology, ontology_id) is not None:
+            if kind in {"sync", "transform"}:
+                catalog, _summary, _error = self._entity_task_options(
+                    db, kind=kind, ontology_id=ontology_id, keyword="", limit=None
+                )
+                allowed_objects = {item["name"] for item in catalog.get("objects") or []}
+                object_key = "object_type" if kind == "sync" else "target_table"
+                if str(context.get(object_key) or "") not in allowed_objects:
+                    reason = (
+                        "所选同步本体没有可定位的物理源表"
+                        if kind == "sync"
+                        else "所选加工对象在默认 Doris 中没有已同步就绪的 ODS Projection"
+                    )
+                    return ({"error": reason, "available": sorted(allowed_objects)}, reason, True)
+            elif kind == "metric":
+                catalog, _summary, _error = self._metric_task_options(
+                    db, ontology_id=ontology_id, keyword="", limit=None
+                )
+                allowed_logics = {
+                    item["business_logic_id"] for item in catalog.get("business_logics") or []
+                }
+                if str(context.get("business_logic_id") or "") not in allowed_logics:
+                    return (
+                        {"error": "所选业务口径不存在、未发布或尚未形式化"},
+                        "聚合口径不可执行",
+                        True,
+                    )
+            elif kind == "materialize":
+                catalog, _summary, _error = self._materialize_options(
+                    db, ontology_id=ontology_id, datasource_id="", keyword="", limit=None
+                )
+                allowed_targets = {item["entity"] for item in catalog.get("entities") or []}
+                selected = {
+                    str(item) for item in context.get("selected_targets") or []
+                    if str(item) != "__all__"
+                }
+                if "__all__" in {str(item) for item in context.get("selected_targets") or []}:
+                    context["selected_targets"] = []
+                unknown = sorted(selected - allowed_targets)
+                if unknown:
+                    return (
+                        {"error": "物化范围包含非契约实体", "unknown": unknown},
+                        "物化范围不可执行",
+                        True,
+                    )
+                databases = set(catalog.get("databases") or [])
+                configured = catalog.get("configured_database")
+                if configured:
+                    databases.add(configured)
+                wanted_database = str(context.get("target_database") or "")
+                if databases and wanted_database not in databases:
+                    return (
+                        {"error": "目标数据库不在默认 Doris 的真实目录中", "available": sorted(databases)},
+                        "目标数据库不存在",
+                        True,
+                    )
+
+        target_id = str(context.get("target_datasource_id") or "")
+        if target_id:
+            executable_ids = {
+                target["id"] for target in self._doris_target_catalog(db)[0]
+                if target["executable"]
+            }
+            if target_id not in executable_ids:
+                return (
+                    {
+                        "error": "目标数仓不是可执行的默认 Doris",
+                        "issues": ["请选择启用、已配置连接且设为默认的 Doris warehouse"],
+                    },
+                    "目标数仓不可执行",
+                    True,
+                )
+        if kind == "sync":
+            errors = _sync_context_errors(db, context, ontology_id=ontology_id)
+            if errors:
+                return (
+                    {
+                        "error": "同步上下文不符合 Doris ODS 架构",
+                        "issues": errors,
+                        "hint": "重新调用 get_task_options/request_form，按业务源→Flink→默认 Doris ODS 补齐参数。",
+                    },
+                    "同步提案违反 Doris ODS 架构",
+                    True,
+                )
         proposal = {
             "kind": kind,
             "intent": intent,
@@ -3544,6 +4145,10 @@ class ChatBiService:
             context = raw.get("context")
             if not isinstance(context, dict):
                 context = {}
+            else:
+                context = dict(context)
+            if kind == "sync":
+                context.pop("target_ods_table", None)
             missing = [
                 key
                 for key in _missing_action_context(kind, context)
@@ -3562,6 +4167,18 @@ class ChatBiService:
                     f"任务链第 {i + 1} 步缺上下文",
                     True,
                 )
+            if kind == "sync":
+                sync_errors = _sync_context_errors(db, context, ontology_id=ontology_id)
+                if sync_errors:
+                    return (
+                        {
+                            "error": f"第 {i + 1} 步同步上下文不符合 Doris ODS 架构",
+                            "step_index": i,
+                            "issues": sync_errors,
+                        },
+                        "任务链同步步骤违反 Doris ODS 架构",
+                        True,
+                    )
             available |= {k for k, v in context.items() if v}
             # C2：血缘依赖（depends_on 步序列表）。agent 可从 DataHub 血缘/意图推导；
             # 未给则沿用线性默认（依赖上一步），编译期再按血缘边收敛。
@@ -3636,7 +4253,13 @@ class ChatBiService:
         return {"plan": plan}, f"计划 {len(steps)} 步（完成 {done}）", False
 
     def _task_form_template(
-        self, db: Session, *, kind: str, ontology_id: str, datasource_id: str
+        self,
+        db: Session,
+        *,
+        kind: str,
+        ontology_id: str,
+        datasource_id: str,
+        intent: str = "",
     ) -> list[dict]:
         """建数任务的必问字段骨架，候选取自 get_task_options 的同一份目录。
 
@@ -3648,123 +4271,333 @@ class ChatBiService:
         呈现——目标库跟着数据源走、执行侧不支持的装载方式摆出来但置灰、分区键从业务属性里
         选、调度频率用 cron 选择器。对话里配出来的任务与弹窗里配出来的应当没有差别。
         """
+        if kind == "metric":
+            return self._metric_form_template(db, ontology_id=ontology_id, intent=intent)
         if kind != "materialize":
-            return self._entity_form_template(db, kind=kind, ontology_id=ontology_id)
+            return self._entity_form_template(
+                db, kind=kind, ontology_id=ontology_id, intent=intent
+            )
         return self._materialize_form_template(
-            db, ontology_id=ontology_id, datasource_id=datasource_id
+            db, ontology_id=ontology_id, datasource_id=datasource_id, intent=intent
         )
 
-    def _entity_form_template(self, db: Session, *, kind: str, ontology_id: str) -> list[dict]:
-        """同步 / 加工的字段骨架。"""
+    def _entity_form_template(
+        self, db: Session, *, kind: str, ontology_id: str, intent: str = ""
+    ) -> list[dict]:
+        """同步 / 加工的字段骨架。
+
+        ``get_task_options`` 给模型的目录仍限制条数以节省上下文；真正给人操作的表单则必须
+        带上全部候选，否则 Select 虽然有搜索框，也只能搜到按名称排序后的前几十项。
+        """
         opts, _s, err = self._entity_task_options(
-            db, kind=kind, ontology_id=ontology_id, keyword=""
+            db, kind=kind, ontology_id=ontology_id, keyword="", limit=None
         )
         if err:
             return []
+        raw_objects = opts.get("objects") or []
         objects = [
-            {"label": o["display_name"] or o["name"], "value": o["name"]}
-            for o in opts.get("objects") or []
+            {
+                # 中文名和技术名都放进 label，使前端本地搜索两者都能命中；同步还把
+                # 源表→固定 ODS 表摆出来，让“确认本体”同时可核对物理数据映射。
+                "label": (
+                    (
+                        f"{o['display_name']}（{o['name']}）"
+                        if o.get("display_name") and o["display_name"] != o["name"]
+                        else o["name"]
+                    )
+                    + (
+                        f" · {o.get('source_table')} → {o.get('target_ods_table')}"
+                        if kind == "sync" else ""
+                    )
+                ),
+                "value": o["name"],
+            }
+            for o in raw_objects
         ]
+        recommended = None
+        if intent and raw_objects:
+            from app.agents.common import select_by_intent
+
+            recommended = select_by_intent(
+                intent,
+                raw_objects,
+                key=lambda o: (o.get("name"), o.get("display_name"), o.get("description")),
+            )
+        is_sync = kind == "sync"
         fields: list[dict] = [{
-            "name": opts["context_key"],
-            "label": "目标对象" if kind == "sync" else "目标表（业务对象）",
-            "type": "select" if objects else "text",
+            "name": "task_requirement",
+            "label": "同步任务需求" if is_sync else "加工任务需求",
+            "type": "textarea",
             "required": True,
-            "help": "Drafter 不再按意图猜对象——这里选定的就是最终目标",
-            **({"options": objects[:50]} if objects else {}),
+            "default": intent,
+            "confirmation_node": "requirement",
+            "help": "可修改；确认后的版本作为任务 intent，不进入任务 context",
         }]
-        if kind == "sync":
-            fields.append({
-                "name": "load_strategy", "label": "装载方式", "type": "radio",
-                "options": [
-                    {"label": s["label"], "value": s["value"]} for s in _LOAD_STRATEGIES
-                ],
-                "help": "；".join(f"{s['label']}：{s['hint']}" for s in _LOAD_STRATEGIES),
-            })
+        fields.append({
+            "name": opts["context_key"],
+            "label": "确认同步本体" if is_sync else "目标表（业务对象）",
+            "type": "select",
+            "required": True,
+            "placeholder": "搜索中文名或技术名" if is_sync and objects else None,
+            "help": (
+                "已根据需求推荐对应本体；请核对源表与固定 ODS 表，也可以搜索并修改"
+                if is_sync
+                else "Drafter 不再按意图猜对象——这里选定的就是最终目标"
+            ),
+            "confirmation_node": "ontology",
+            **({"options": objects} if objects else {}),
+            **({"default": recommended["name"]} if recommended else {}),
+        })
+        if is_sync:
+            source_options_by_object = {
+                o["name"]: [
+                    {"label": f"{s['name']}（{s['kind']}）", "value": s["id"]}
+                    for s in o.get("source_datasources") or []
+                ]
+                for o in raw_objects
+            }
+            recommended_name = recommended["name"] if recommended else None
+            source_options = source_options_by_object.get(recommended_name or "", [])
+            default_doris = opts.get("default_doris")
+            target_options = self._doris_target_options(
+                opts.get("target_datasources") or []
+            )
+            fields.extend([
+                {
+                    "name": "source_datasource_id", "label": "源数据源",
+                    "type": "select", "required": True,
+                    "placeholder": "由确认同步本体反推可用源",
+                    "confirmation_node": "data",
+                    "depends_on": "object_type",
+                    "options_by_value": source_options_by_object,
+                    "help": "候选由所选本体的 source_ref 平台/库/表映射反推；修改本体后会自动更新。凭据不会进入任务 Spec",
+                    **({"options": source_options} if source_options else {}),
+                    **({"default": source_options[0]["value"]} if len(source_options) == 1 else {}),
+                },
+                {
+                    "name": "target_datasource_id", "label": "目标数仓",
+                    "type": "select", "required": True,
+                    "placeholder": "请选择已登记的默认 Doris 数仓",
+                    "confirmation_node": "data",
+                    "help": (
+                        "同步只允许写入启用、已配置连接的默认 Doris；"
+                        + ("当前没有可执行目标，请先到设置页配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
+                    ),
+                    **({"options": target_options} if target_options else {}),
+                    **({"default": default_doris["id"]} if default_doris else {}),
+                },
+                {
+                    "name": "target_ods_database", "label": "ODS 数据库",
+                    "type": "text", "required": True, "default": "ods",
+                    "confirmation_node": "data",
+                    "help": "表名由后端固定生成：ods_{数据域}_{原始表名}",
+                },
+                {
+                    "name": "mode", "label": "装载方式偏好", "type": "radio",
+                    "required": True, "default": "full", "confirmation_node": "data",
+                    "options": [
+                        {"label": s["label"], "value": s["value"]} for s in _LOAD_STRATEGIES
+                    ],
+                    "help": "；".join(f"{s['label']}：{s['hint']}" for s in _LOAD_STRATEGIES),
+                },
+            ])
         else:
+            target_catalog, default_doris = self._doris_target_catalog(db)
+            target_options = self._doris_target_options(target_catalog)
             rules = opts.get("cleansing_rules") or []
-            fields.append({
-                "name": "cleansing_rules", "label": "清洗规则", "type": "multiselect",
-                "options": [
-                    {"label": r["description"], "value": r["rule"]} for r in rules
-                ],
-                "help": "只有这几条做得了；词表外的清洗需求本任务承载不了",
-            })
+            fields.extend([
+                {
+                    "name": "target_datasource_id", "label": "目标数仓",
+                    "type": "select", "required": True,
+                    "placeholder": "请选择已登记的默认 Doris 数仓",
+                    "confirmation_node": "data",
+                    "options": target_options,
+                    "help": (
+                        "加工只允许在启用、已配置连接的默认 Doris 中执行；"
+                        + ("当前没有可执行目标，请先配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
+                    ),
+                    **({"default": default_doris["id"]} if default_doris else {}),
+                },
+                {
+                    "name": "target_layer", "label": "目标层", "type": "select",
+                    "required": True, "default": "dim", "confirmation_node": "data",
+                    "options": [
+                        {"label": "维度层 DIM", "value": "dim"},
+                        {"label": "明细层 DWD", "value": "dwd"},
+                        {"label": "汇总层 DWS", "value": "dws"},
+                    ],
+                },
+                {
+                    "name": "cleansing_rules", "label": "清洗规则", "type": "multiselect",
+                    "confirmation_node": "data",
+                    "options": [
+                        {"label": r["description"], "value": r["rule"]} for r in rules
+                    ],
+                    "help": "只有这些确定性算子可执行；词表外需求不会被假装实现",
+                },
+                {
+                    "name": "refresh_cron", "label": "调度频率", "type": "cron",
+                    "default": "", "confirmation_node": "data",
+                    "help": "留空表示仅手动触发",
+                },
+            ])
         return fields
 
-    def _materialize_form_template(
-        self, db: Session, *, ontology_id: str, datasource_id: str
+    def _metric_form_template(
+        self, db: Session, *, ontology_id: str, intent: str = ""
     ) -> list[dict]:
-        """物化的字段骨架：目标（数据源+库）/ 表名 / 装载方式 / 分区键 / 调度频率。"""
-        catalog, _summary, err = self._materialize_options(
-            db, ontology_id=ontology_id, datasource_id=datasource_id, keyword=""
+        """聚合任务：确认需求、形式化口径、默认 Doris 和调度。"""
+        catalog, _summary, err = self._metric_task_options(
+            db, ontology_id=ontology_id, keyword="", limit=None
         )
         if err:
             return []
-        writable = [d for d in catalog["datasources"] if d["writable"]]
-        engine = catalog["engine"]
-
-        fields: list[dict] = [
-            *self._target_location_fields(db, writable=writable, datasource_id=datasource_id),
-            {"name": "target_table", "label": "目标表名", "type": "text", "required": True,
-             "help": "物理表名，将按命名规约自检"},
-        ]
-
-        # 装载方式**三种都摆出来**，执行侧不支持的置灰并说明原因——与 MaterializeModal 同一
-        # 决策。此前这里把不支持的直接过滤掉，界面上只剩「全量覆盖」一项，看着像是系统只会
-        # 全量，而真正的原因（这个目标引擎在执行侧只声明了全量）一个字都没说。
-        supported = [s for s in catalog["load_strategies"] if s["supported"]]
-        strategy_options = [
-            {
-                "label": s["label"] if s["supported"] else f"{s['label']}（{engine} 目标不支持）",
-                "value": s["value"],
-                "disabled": not s["supported"],
-            }
-            for s in catalog["load_strategies"]
-        ]
-        strategy_help = "；".join(
-            f"{s['label']}：{s['hint']}" for s in catalog["load_strategies"]
-        )
-        modes_detail = catalog.get("load_strategies_detail") or ""
-        fields.append({
-            "name": "load_strategy", "label": "装载方式", "type": "radio", "required": True,
-            "options": strategy_options,
-            **({"default": supported[0]["value"]} if supported else {}),
-            "help": (strategy_help + ("；" + modes_detail if modes_detail else ""))[:200],
-        })
-
-        # 分区键从**业务属性**里选：它必须是这张表上真实存在的列，凭印象手填过一个
-        # 「账户」根本没有的字段。用 autocomplete 而不是 select——候选是建议不是闭集，
-        # 物理表上可能有本体没建模的分区列。
-        pk_candidates = catalog.get("partition_key_candidates") or []
-        pk_options = [
+        logics = catalog.get("business_logics") or []
+        options = [
             {
                 "label": (
-                    f"{c['name']}（{c['display_name']}）"
-                    if c["display_name"] and c["display_name"] != c["name"]
-                    else c["name"]
-                )
-                + (f" · 覆盖 {c['covers']}/{c['total']} 个实体" if c["total"] else "")
-                + ("｜现用" if c["in_use"] else ""),
-                "value": c["name"],
+                    f"{logic['display_name']}（{logic['name']}） · {logic['logic_type']}"
+                    if logic.get("display_name") and logic["display_name"] != logic["name"]
+                    else f"{logic['name']} · {logic['logic_type']}"
+                ),
+                "value": logic["business_logic_id"],
             }
-            for c in pk_candidates
+            for logic in logics
         ]
-        fields.append({
-            "name": "partition_key", "label": "分区键",
-            "type": "autocomplete" if pk_options else "text",
-            **({"options": pk_options[:50]} if pk_options else {}),
-            "help": "从业务属性里选（也可自填物理列名）；增量追加必须有分区键，"
-                    "否则会退化成无谓词追加。覆盖不全的键只对有这列的表生效",
-        })
+        recommended = None
+        if intent and logics:
+            from app.agents.common import select_by_intent
 
-        # 调度频率用 cron 选择器：与业务对象详情里点「物化」弹出的那个「定时策略」是同一个
-        # 控件（CronPicker），产出的表达式恒定合法。此前这里是六个固定预置项，用户在弹窗里
-        # 能配的频率在对话里配不出来。
-        fields.append({
-            "name": "refresh_cron", "label": "调度频率", "type": "cron", "default": "",
-            "help": "整批调度；留「不定时」则只在你手动触发时跑",
-        })
+            recommended = select_by_intent(
+                intent,
+                logics,
+                key=lambda logic: (logic.get("name"), logic.get("display_name")),
+            )
+        default_doris = catalog.get("default_doris")
+        return [
+            {
+                "name": "task_requirement", "label": "聚合任务需求", "type": "textarea",
+                "required": True, "default": intent, "confirmation_node": "requirement",
+                "help": "可修改；确认后的版本作为任务 intent",
+            },
+            {
+                "name": "business_logic_id", "label": "确认业务口径", "type": "select",
+                "required": True, "placeholder": "搜索已发布且形式化的指标/标签/规则",
+                "confirmation_node": "ontology", "options": options,
+                "help": "只允许选择已有形式化表达式的业务逻辑，不能由任务临时编造口径",
+                **({"default": recommended["business_logic_id"]} if recommended else {}),
+            },
+            {
+                "name": "target_datasource_id", "label": "目标数仓", "type": "select",
+                "required": True, "placeholder": "请选择已登记的默认 Doris 数仓",
+                "confirmation_node": "data",
+                "options": self._doris_target_options(catalog.get("target_datasources") or []),
+                "help": (
+                    "聚合固定写入默认 Doris ADS；"
+                    + ("当前没有可执行目标，请先配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
+                ),
+                **({"default": default_doris["id"]} if default_doris else {}),
+            },
+            {
+                "name": "target_layer", "label": "目标层", "type": "select",
+                "required": True, "default": "ads", "confirmation_node": "data",
+                "options": [{"label": "应用层 ADS", "value": "ads"}],
+                "help": "指标、标签和规则的聚合结果固定进入 ADS",
+            },
+            {
+                "name": "refresh_cron", "label": "调度频率", "type": "cron",
+                "default": "", "confirmation_node": "data",
+                "help": "留空表示仅手动触发",
+            },
+        ]
+
+    def _materialize_form_template(
+        self,
+        db: Session,
+        *,
+        ontology_id: str,
+        datasource_id: str,
+        intent: str = "",
+    ) -> list[dict]:
+        """物化字段：需求 / 契约范围 / 唯一默认 Doris / 真实目标数据库。"""
+        catalog, _summary, err = self._materialize_options(
+            db, ontology_id=ontology_id, datasource_id=datasource_id, keyword="", limit=None
+        )
+        if err:
+            return []
+        default_doris = catalog.get("default_doris")
+        target_options = self._doris_target_options(catalog.get("datasources") or [])
+        entities = catalog.get("entities") or []
+        entity_options = [
+            {"label": f"全部契约实体（{len(entities)} 项）", "value": "__all__"},
+            *[
+            {
+                "label": (
+                    f"{entity.get('display_name')}（{entity['entity']}） · {entity['layer'].upper()}"
+                    if entity.get("display_name") and entity["display_name"] != entity["entity"]
+                    else f"{entity['entity']} · {entity['layer'].upper()}"
+                ),
+                "value": entity["entity"],
+            }
+            for entity in entities
+            ],
+        ] if entities else []
+
+        databases = list(catalog.get("databases") or [])
+        configured_database = catalog.get("configured_database")
+        if configured_database and configured_database not in databases:
+            databases.insert(0, configured_database)
+        database_options = [{"label": name, "value": name} for name in databases]
+        fields: list[dict] = [
+            {
+                "name": "task_requirement", "label": "物化任务需求", "type": "textarea",
+                "required": True, "default": intent or "将本体结构物化到默认 Doris",
+                "confirmation_node": "requirement",
+                "help": "物化只建结构，不搬数据；确认后的版本作为任务 intent",
+            },
+            {
+                "name": "selected_targets", "label": "确认物化范围",
+                "type": "multiselect", "required": True,
+                "confirmation_node": "ontology", "options": entity_options,
+                "help": (
+                    "默认“全部”；若只物化部分，请删除“全部”后选择具体实体"
+                    if entity_options
+                    else "当前本体没有可物化契约实体，请先生成并确认物化契约"
+                ),
+                **({"default": ["__all__"]} if entity_options else {}),
+            },
+            {
+                "name": "target_datasource_id", "label": "目标数仓", "type": "select",
+                "required": True, "placeholder": "请选择已登记的默认 Doris 数仓",
+                "confirmation_node": "data", "options": target_options,
+                "help": (
+                    "物化只允许在启用、已配置连接的默认 Doris 建表；"
+                    + ("当前没有可执行目标，请先配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
+                ),
+                **({"default": default_doris["id"]} if default_doris else {}),
+            },
+            {
+                "name": "target_database", "label": "目标数据库", "type": "select",
+                "required": True, "confirmation_node": "data",
+                "placeholder": "请选择默认 Doris 中已存在的数据库",
+                "help": (
+                    "候选来自默认 Doris 实时目录；各分层表建在这个库中"
+                    if database_options
+                    else "无法读取默认 Doris 数据库目录，请先修复连接或配置默认数据库；禁止手填不存在的库"
+                ),
+                "options": database_options,
+                **(
+                    {"default": configured_database}
+                    if configured_database and configured_database in databases
+                    else {"default": database_options[0]["value"]}
+                    if len(database_options) == 1
+                    else {}
+                ),
+            },
+        ]
+
+        # 物化只建 DDL，不负责装载。load_strategy / partition_key / refresh_cron 属于同步契约，
+        # 不应在物化表单中制造“填了就会生效”的错觉。
         return fields
 
     def _target_location_fields(
@@ -3872,6 +4705,7 @@ class ChatBiService:
                 kind=task_kind,
                 ontology_id=ontology_id,
                 datasource_id=str(args.get("target_datasource_id") or "").strip(),
+                intent=str(args.get("intent") or "").strip(),
             )
         if not title:
             return {"error": "需要 title（表单标题）"}, "表单缺标题", True
@@ -3882,13 +4716,25 @@ class ChatBiService:
 
         fields: list[dict] = list(template)
         seen: set[str] = {f["name"] for f in template}
+        # 这些是旧版表单字段：要么执行器不消费，要么属于后续同步而非本任务。模板移除后，
+        # 也不能让模型通过 extra fields 偷偷加回来制造“填了会生效”的错觉。
+        ignored_task_fields: dict[str, set[str]] = {
+            "materialize": {"target_table", "load_strategy", "partition_key", "refresh_cron"},
+            "sync": {"target_ods_table", "load_strategy", "engine"},
+            "transform": {"engine"},
+            "metric": {"metric_name", "engine"},
+        }
+        ignored = ignored_task_fields.get(task_kind, set())
         for item in raw_fields[:_FORM_MAX_FIELDS]:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
             label = str(item.get("label") or "").strip()
             ftype = str(item.get("type") or "").strip()
-            if not name or not label or ftype not in _FORM_FIELD_TYPES or name in seen:
+            if (
+                not name or not label or ftype not in _FORM_FIELD_TYPES
+                or name in seen or name in ignored
+            ):
                 continue
             seen.add(name)
             field: dict[str, Any] = {"name": name[:64], "label": label[:80], "type": ftype}
@@ -3923,6 +4769,22 @@ class ChatBiService:
         prefilled = _apply_prefill(fields, args.get("prefill"))
 
         form: dict[str, Any] = {"title": title[:120], "fields": fields}
+        if task_kind in _ACTION_KINDS:
+            form["task_kind"] = task_kind
+            form["ontology_id"] = ontology_id
+            labels = {
+                "sync": ("同步本体", "业务源、目标 Doris、ODS 数据库和装载偏好"),
+                "materialize": ("物化范围", "目标 Doris 和目标数据库"),
+                "transform": ("加工对象", "目标 Doris、分层、清洗规则和调度"),
+                "metric": ("业务口径", "目标 Doris、ADS 层和调度"),
+            }
+            ontology_label, data_label = labels.get(task_kind, ("本体/口径", "数据落点"))
+            form["confirmation_id"] = str(uuid.uuid4())
+            form["confirmation_steps"] = [
+                {"node": "requirement", "title": "确认任务需求", "description": "确认任务目标；可修改系统理解的需求"},
+                {"node": "ontology", "title": f"确认{ontology_label}", "description": "只从当前本体和形式化口径的真实候选中选择"},
+                {"node": "data", "title": "确认数据与参数", "description": f"确认{data_label}；真正执行方案将在 dry-run 后另行确认"},
+            ]
         intent = str(args.get("intent") or "").strip()
         if intent:
             form["intent"] = intent[:200]
@@ -4298,8 +5160,6 @@ class ChatBiService:
                 return self._dispatch_run_sql(
                     db, args=args, ontology_ids=ontology_ids, principal_role=principal_role
                 )
-            if name == "list_catalogs":
-                return self._dispatch_list_catalogs(db)
             return {"error": f"未知工具：{name}"}, "未知工具", True
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent tool %s failed: %s", name, exc)
@@ -4476,6 +5336,7 @@ class ChatBiService:
     ) -> AsyncIterator[str]:
         """最终作答轮：不带工具、stream=True 逐 token 产出（真·逐字流式）。"""
         msgs = messages if nudge is None else messages + [{"role": "user", "content": nudge}]
+        msgs = self._audit_prompt_messages(msgs)
         stream = await client.chat.completions.create(model=model, messages=msgs, stream=True)
         async for chunk in stream:
             if not chunk.choices:
@@ -4704,16 +5565,14 @@ class ChatBiService:
                 tools.append(_READ_RESULT_TOOL)
             return tools
 
-        active_tools = _compose_tools(active_skill)
+        # 工具名和 JSON Schema 表达调用契约；运行时移除长描述，降低 prompt 体积。
+        # 参数校验与业务规则由 dispatch/validation gate 执行。
+        active_tools = self._compact_tools_for_prompt_retry(_compose_tools(active_skill))
         # V5 F2：首轮“先搜再拒”守卫——结构性/取数意图下，若模型首轮不调任何工具就
         # 直接拒答（实测：“X 对象有哪些字段” 0 步就拒），先逆一次逗它至少 search 一次再判。只逗一次。
         _search_nudged = False
-        # 规约意识：备好当前生效规约的约束卡；选中带 attach_governance 的技能（建数）时并入 overlay。
-        try:
-            governance_card = active_standard(db).compile_prompt_card()
-        except Exception as exc:  # noqa: BLE001 — 规约取不到只是少一段增强，不该炸循环
-            logger.info("governance card unavailable: %s", exc)
-            governance_card = ""
+        # 治理规则由后端目录、校验和状态机执行，不放入模型提示。
+        governance_card = ""
         charts: list[dict] = []  # render_chart 产出的图表规格（挂到 data_result 上渲染）
         analyses: list[dict] = []  # analyze_result 产出的统计画像/离群（供 insight 块）
         lineage: dict | None = None  # get_lineage 产出的血缘邻域子图（供 lineage 块渲染）
@@ -4729,20 +5588,42 @@ class ChatBiService:
         result_store = RunResultStore()
         _offload_on = (getattr(env_settings, "agent_result_offload", "on") or "on").lower() != "off"
         _sample_rows = int(getattr(env_settings, "agent_result_sample_rows", 5))
+        prompt_retry_used = False
+        prompt_safe_mode = False
 
         for _ in range(_AGENT_MAX_STEPS):
             tel.llm_call()
             # V4 O6.3：量一次发出去的上下文字符数（看 O1/O2 降它）。
             tel.context(sum(len(str(m.get("content") or "")) for m in messages))
-            resp = await client.chat.completions.create(
-                model=runtime.model,
-                messages=messages,
-                tools=active_tools,
-                tool_choice="auto",
-                # 取数/建 SQL 场景下确定性优先：固定 temperature=0，让同一问题两次
-                # 生成同一条 SQL，避免「两次查样例」连 SQL 本身都抄动。
-                temperature=0,
-            )
+            try:
+                request_messages = self._audit_prompt_messages(messages)
+                resp = await client.chat.completions.create(
+                    model=runtime.model,
+                    messages=request_messages,
+                    tools=active_tools,
+                    tool_choice="auto",
+                    # 取数/建 SQL 场景下确定性优先。
+                    temperature=0,
+                )
+            except Exception as exc:
+                if self._is_prompt_flag_error(exc) and not prompt_retry_used:
+                    prompt_retry_used = True
+                    logger.warning(
+                        "LLM gateway flagged composed prompt; retrying once with minimal prompt"
+                    )
+                    # Keep the user's request, remove dynamic cards/history/tool
+                    # outputs that may have caused a gateway false positive.
+                    messages = [
+                        {"role": "system", "content": _MINIMAL_AGENT_SYSTEM_PROMPT},
+                        {"role": "user", "content": self._sanitize_prompt_text(question, max_chars=8_000)},
+                    ]
+                    base_system = _MINIMAL_AGENT_SYSTEM_PROMPT
+                    active_skill = None
+                    governance_card = ""
+                    prompt_safe_mode = True
+                    active_tools = self._compact_tools_for_prompt_retry(_compose_tools(None))
+                    continue
+                raise
             msg = resp.choices[0].message
             tool_calls = msg.tool_calls or []
             if not tool_calls:
@@ -4837,7 +5718,11 @@ class ChatBiService:
                 elif tool_name == "select_skill":
                     # V3 S1：切换技能——叠 prompt overlay + 解锁额外工具。只解锁不收窄。
                     active_skill, result, summary, is_error = self._apply_select_skill(
-                        call_args, messages, base_system, governance_card
+                        call_args,
+                        messages,
+                        base_system,
+                        governance_card,
+                        apply_overlay=not prompt_safe_mode,
                     )
                     # V4 O6.2：记下路由到哪个技能（成功选中才计），供 misroute 度量。
                     if active_skill is not None and not is_error:
@@ -4846,7 +5731,9 @@ class ChatBiService:
                     # 只挡「无意识漂移」，给规则误判留一条可恢复路径。
                     if active_skill is not None and active_skill.name == "query":
                         sql_allowed = True
-                    active_tools = _compose_tools(active_skill)
+                    active_tools = self._compact_tools_for_prompt_retry(
+                        _compose_tools(active_skill)
+                    )
                 elif tool_name == "read_result":
                     # V4 O2：从离场 store 分页取行（大结果不进上下文，模型按需句柄调行）。
                     page = result_store.page(
@@ -4892,6 +5779,17 @@ class ChatBiService:
                         self._dispatch_get_task_status,
                         db,
                         ontology_id=ontologies[0].id,
+                        args=call_args,
+                        conversation_id=conversation_id,
+                    )
+                elif tool_name == "propose_action":
+                    # 同步提案需要读取本会话的需求/本体/数据确认记录；显式注入，不能挂在
+                    # service 实例字段上（并发会话会互相串 conversation_id）。
+                    result, summary, is_error = await asyncio.to_thread(
+                        self._dispatch_propose_action,
+                        db,
+                        ontology_id=ontologies[0].id,
+                        domain_id=domains[0].id,
                         args=call_args,
                         conversation_id=conversation_id,
                     )
@@ -5006,7 +5904,9 @@ class ChatBiService:
                             # V4 O3：首次取到结果 → 解锁 read_result（下一轮工具集才出现它）。
                             if not read_result_unlocked:
                                 read_result_unlocked = True
-                                active_tools = _compose_tools(active_skill)
+                                active_tools = self._compact_tools_for_prompt_retry(
+                                    _compose_tools(active_skill)
+                                )
                     elif tool_name == "get_lineage" and result.get("nodes"):
                         lineage = result
                     elif tool_name == "propose_draft" and result.get("create_payload"):

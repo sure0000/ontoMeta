@@ -42,6 +42,10 @@ class MaterializeDrafter(Drafter):
 
     def draft(self, intent: str, context: dict[str, Any]) -> dict[str, Any]:
         require_context(context, *self.required_context)
+        selected = [
+            str(target) for target in context.get("selected_targets") or []
+            if str(target) and str(target) != "__all__"
+        ]
         return {
             "ontology_id": context["ontology_id"],
             "target_datasource_id": context["target_datasource_id"],
@@ -52,7 +56,7 @@ class MaterializeDrafter(Drafter):
             "database_overrides": _database_overrides(context),
             "table_overrides": dict(context.get("table_overrides") or {}),
             "load_strategy": context.get("load_strategy"),
-            "selected_targets": list(context.get("selected_targets") or []) or None,
+            "selected_targets": selected or None,
             "overrides": dict(context.get("overrides") or {}),
             # 整批调度：弹窗是逐实体配 cron（写进各自契约的 refresh_cron），要求调用方先知道
             # 契约 id。对话里「每天凌晨跑一次」说的是整批，故提到 Spec 顶层，由 Executor 展开

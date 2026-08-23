@@ -1,7 +1,8 @@
 # 本体驱动的智能数仓 · 已建成执行规格
 
-> 状态：**as-built**  
-> 基线核验：2026-08-22，后端全量 `1542 passed / 3 skipped`，Alembic 单一 head `bacbc3c392ad`。  
+> 状态：**as-built（Phase 0–5 与 Phase 6 控制面已落代码；生产迁移在步骤 1 阻断，未切流）**
+> 基线核验：2026-08-22，后端全量 `1572 passed / 3 skipped`，Alembic 单一 head/current `d3e4f5a6b7c8`；前端 lint 0 error / 23 存量 warning，build 成功。
+> 生产执行报告：`DORIS_PHASE6_PRODUCTION_MIGRATION_REPORT.md`。
 > 当前写侧制品只有 `materialize / sync / transform / metric`；已移除的 cluster/Bigtop Manager、SeaTunnel/DataX、DolphinScheduler 路径不属于当前架构。
 
 ---
@@ -421,7 +422,66 @@ cd frontend && npm run lint && npm run build
 
 ---
 
-## 16. 后续主线
+## 16. Doris 重构实施状态（2026-08-23）
+
+已完成的基础收敛：
+
+- `DEFAULT_ENGINE` 与新物化契约默认值已切换为 `doris`；新 materialize/transform/metric/sync 规格默认不再生成 Hive；
+- `DataSource` 增加显式 `purpose`、`is_default_warehouse`、`enabled`，不再把 `catalog_name` 作为新路由事实源；
+- 新增 `DorisWarehouseConfig`、`OntologyWarehouseDeployment`、`WarehouseObjectProjection` 的模型与 Alembic 迁移；
+- 新增 `query_routing.py` 的 Doris-only readiness/receipt 门禁；物化只推进 `schema_ready`，未同步/加工 Projection 保持 `queryable=false`；
+- 增加 Doris warehouse policy 与 Gate 约束；显式默认 Doris 后新 materialize/transform/metric 制品不得使用其他数仓引擎；
+- 前端物化引擎选择已收敛为 Doris，旧引擎保留只用于历史读取/迁移期间审计。
+
+Phase 2 已完成的接入基础：
+
+- 新增版本化 `IngestionContract` 与 API，显式绑定 business-source DataSource、默认 Doris 和 ODS 物理表；
+- 新 Doris sync 只允许写 `ods*` 数据库，Flink Doris Connector 的 `FENODES` 从 Airflow Connection extra 注入；
+- full 使用 ODS 正式表 + staging + Doris atomic replace；incremental 使用有界 JDBC 水位 batch；CDC 使用 detached 流作业、checkpoint/savepoint 与真实 Flink Job ID；
+- IngestionContract/Projection 状态只由 Airflow task 最终态对账推进，提交成功不等于 data ready；ODS 默认不作为 serving，保持 `queryable=false`；
+- detached CDC 的 BashOperator 最终输出结构化真实 Flink Job ID；缺 Job ID 则任务失败。`flink_rest_endpoint` 由 Web/DB 配置，健康 API 查询 Flink REST 并推进 running/failed/stale；
+- reader DSN 不再通过 Doris 配置 API 回显，新增 Doris 时 Web 表单同时配置 9030 SQL 与多 FE 8030 fenodes；
+- Data Agent system prompt、query skill 与任务提案工具已固化 Doris-only 边界；sync 提案缺业务源/默认 Doris/ODS 或 incremental/CDC 必填参数时会在提案阶段被确定性拒绝。
+
+Phase 3 已完成的 Doris Transform：
+
+- 新增 `doris_sql_dag_builder.py` / `doris_job_runner.py`，Airflow DAG 只使用 Doris SQL Operator 与 `SQLCheckOperator`，不含 BashOperator/flink run；
+- TransformExecutor 不再 import Flink runner/generator，只读当前 ontology version 的 ready ODS Projection；
+- 全量 transform 采用 drop/create staging → Doris INSERT SELECT → 主键/非空质量闸门 → `REPLACE WITH TABLE`；
+- Transform dry-run 与执行共享同一份 Doris SELECT/清洗规则编译结果；只有 Airflow 最终 success 才推进 Projection `transform_status=ready/queryable=true`；
+- Transform Spec/前端已移除 streaming、source alias、parallelism、queue、checkpoint 等 Flink 字段。
+
+Phase 4 已完成的 Doris Metric：
+
+- MetricExecutor 不再 import Flink，metric/tag/rule 统一通过 `MetricCompiler(dialect="doris")` 编译；
+- MetricCompiler 的语义对象通过当前 ontology version 的 ready/queryable Object Projection 映射为 Doris serving 表；
+- ADS DDL 与 SQL 结果列共享 `result_column_specs()`，写入 ADS staging，质量检查后 atomic replace；
+- 新增 `WarehouseLogicProjection`，只有 Airflow 最终 success 才进入 ready/queryable；
+- Metric Spec/前端已移除 streaming、parallelism、queue、checkpoint 等 Flink 参数。
+
+能力感知提示词已重新开放 materialize/sync/transform/metric，但 metric 必须引用已发布且形式化的 BusinessLogic。主 system prompt 已精简为中性能力说明；上游网关仅在返回明确 `Invalid prompt ... flagged` 时使用最小 system prompt 单次重试，避免动态本体卡导致误判。
+
+Phase 5 已完成的 Doris-only 查询收敛：
+
+- Data Agent 工具已删除 `list_catalogs` 与 `run_sql.target`；业务源/Cube/catalog/更新时间不参与选源；
+- SQL 语义证明得到的每个对象必须逐一命中当前已发布 ontology version 的唯一 queryable Projection，不能再用“至少一张表 ready”放行整个 SQL；
+- Query Gateway 从 Projection 生成物理表/字段映射，`DataSource.mapping_json` 仅作历史元数据，不再是查询权威；
+- Data Agent 回执包含 Doris datasource、Deployment、物理表、Projection、同步水位和 stale 标识；
+- Data App、Widget/Public preview、画像与 Ontology Ladder 不再执行保存的业务源/Cube DataSource；默认 Doris/Deployment/Projection 不就绪时 `execution_blocked`，不 fallback 到业务源或 Mock；
+- 活跃 Phase 6 批次在步骤 10 审批前只允许 shadow 验证，结果不得进入最终用户答案。
+
+Phase 6 已完成的控制面与运行时清理：
+
+- 新增 `WarehouseMigrationBatch` / `WarehouseMigrationEvidence` 与 Alembic `d3e4f5a6b7c8`；
+- 1–15 步只能顺序推进；失败批次 blocked；步骤 10 审批、步骤 12 pause 旧 DAG 只能走专用动作；
+- 切流前强制回滚演练、指定审批人/回滚负责人和观察窗口；
+- shadow compare 只返回哈希/计数，不保留原始业务结果；
+- 新 materialize/sync Spec 与执行目标一律为唯一默认 Doris，非 Doris 仅可用于历史产物回看；
+- 历史成功 Artifact/receipt 不原地改写，Airflow 最终态以独立迁移证据记录。
+
+尚未完成且禁止宣称完成：独立 CDC 周期健康检查 DAG、Airflow Connection 自动写入、真实生产 Doris/Flink Connector/Airflow 集成验证，以及生产步骤 1–15。当前应用数据库没有默认 Doris，生产切流为 **NO-GO**。
+
+## 17. 后续主线
 
 下一阶段不再扩张零散写侧类型，按以下顺序收敛：
 

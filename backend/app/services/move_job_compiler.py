@@ -72,8 +72,8 @@ def compile_move_task(
     Args:
         job: 搬运声明（planner 产物，须带 ``target_table``）。
         engine: 目标引擎（hive/doris/postgres…），决定目标列类型与 sink 连接器。
-        checkpoint_dir: 增量/CDC 作业的 checkpoint 目录（``file://…``）；全量忽略。
-            增量/CDC 不给会在 generate_move_sql 里报错（读位点无处持久化）。
+        checkpoint_dir: CDC 作业的 checkpoint 目录（``file://…``）；full/incremental 忽略。
+            新 incremental 契约使用持久化水位的有界 batch；历史无水位契约保留 CDC 兼容重放。
 
     Returns:
         FlinkSqlTask：task_id = 作业名；sql = 完整 Flink SQL；env = 两端凭据占位符表达式；
@@ -83,17 +83,35 @@ def compile_move_task(
     target_table = job.target_table
 
     column_map = {c.target: c.source for c in job.columns}
+    # Historical incremental JobSpecs predate IngestionContract and carry no
+    # persisted watermark. Keep their former CDC-streaming behavior for replay;
+    # every new Doris ODS contract supplies incremental_column+initial_watermark
+    # and therefore takes the bounded batch branch.
+    effective_mode = (
+        "cdc"
+        if job.mode == "incremental"
+        and not job.incremental_column
+        and job.initial_watermark in (None, "")
+        else job.mode
+    )
     sql = generate_move_sql(
         source_table=source_table,
         target_table=target_table,
         source=FlinkEndpoint(job.source.alias, job.source.platform),
         target=FlinkEndpoint(job.target.alias, job.target.platform),
         target_engine=engine,
-        mode=job.mode,
+        mode=effective_mode,
         column_map=column_map,
         source_physical=job.source.qualified,
         target_physical=job.target.qualified,
         checkpoint_dir=checkpoint_dir,
+        incremental_column=(
+            column_map.get(job.incremental_column or job.partition_key or "")
+            or job.incremental_column
+            or job.partition_key
+        ),
+        watermark=job.initial_watermark,
+        delete_policy=job.delete_policy,
     )
     # 跨库作业两端各是一个 Airflow Connection，两端凭据都要给（少一端即运行期缺变量）。
     env = {
@@ -121,7 +139,7 @@ def compile_move_task(
     )
     # 全量是有界批作业（跑完即退，SqlRunner await 到结束）；增量/cdc 是常驻流式，
     # 提交即 detach（-d），否则 Airflow 任务会永远阻塞在一个不会结束的流作业上。
-    detached = job.mode in ("incremental", "cdc")
+    detached = effective_mode == "cdc"
     return FlinkSqlTask(
         task_id=job.name,
         sql=sql,

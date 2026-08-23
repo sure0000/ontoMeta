@@ -1,13 +1,8 @@
-"""④ 指标任务 Executor。
+"""Doris-native metric/tag/rule executor.
 
-**ontoMeta 只生成、不执行**——产出建表 DDL 与聚合 SQL，交由 DolphinScheduler
-调度执行；与 ``generate_cube_model_files`` 生成 Cube 文件让 Cube 自己加载同理。
-保持 ontoMeta 是语义层，不变成又一个调度器。
-
-P1-5 执行路径：Flink on YARN（经 flink_job_runner），未配 SqlRunner JAR 退回「仅产出」。
-metric 的 ads 表需先在数仓建（warehouse_ddl），再执行 Flink 聚合。
-
-幂等：产物由 Spec 确定性推导，同一 Spec 反复执行结果逐字节一致。
+BusinessLogic AST is compiled once by MetricCompiler(dialect="doris"), then
+published to Doris ADS through the same SQL DAG/staging/quality/swap boundary as
+transform. This module never imports or invokes Flink.
 """
 
 from __future__ import annotations
@@ -16,9 +11,16 @@ from typing import Any
 
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
-from app.models import BusinessLogic, DataSource
-from app.services import flink_params
-from app.services.flink_sql_generator import FlinkEndpoint, generate_flink_sql
+from app.models import (
+    BusinessLogic,
+    DataSource,
+    DorisWarehouseConfig,
+    ObjectType,
+    Ontology,
+    OntologyWarehouseDeployment,
+    WarehouseLogicProjection,
+    WarehouseObjectProjection,
+)
 from app.services.metric_compiler import (
     LOGIC_TYPES,
     TAG_VALUE_COLUMN,
@@ -26,7 +28,6 @@ from app.services.metric_compiler import (
     result_column_specs,
     value_source_column,
 )
-from app.warehouse.jobs.base import endpoint_credential_env
 from app.warehouse import (
     LogicalColumn,
     LogicalTable,
@@ -174,37 +175,6 @@ def _compiled_sql(spec: dict[str, Any], engine: str) -> str | None:
     )
 
 
-def _compiled_select_body(
-    spec: dict[str, Any], subject: str, group_by: list[str]
-) -> str | None:
-    """形式化口径 → Flink 用的 SELECT 体（结果表形状：统计日 + 维度 + 度量值）。
-
-    没有形式化口径返回 None，由调用方退回旧的字符串拼接。
-
-    **按 hive 方言渲染**：Flink SQL 的标识符引号是反引号，与 hive 同规则；用目标引擎
-    （如 postgres）的方言渲染会得到双引号，Flink 解析不了。
-    """
-    logic_id = spec.get("business_logic_id")
-    if not logic_id:
-        return None
-    with SessionLocal() as db:
-        logic = db.get(BusinessLogic, logic_id)
-        if logic is None or not logic.expression_json:
-            return None
-        compiled = compile_metric(db, logic_id, limit=None, dialect="hive")
-    cols = ["  CURRENT_DATE AS stat_date"]
-    cols += [f"  `{c}` AS `{c}`" for c in group_by]
-    if compiled.logic_type == "tag":
-        cols.append(f"  `{compiled.logic_name}` AS `{TAG_VALUE_COLUMN}`")
-    cols.append(
-        f"  `{value_source_column(compiled.logic_type, compiled.logic_name)}` AS metric_value"
-    )
-    return (
-        "SELECT\n" + ",\n".join(cols)
-        + f"\nFROM (\n{compiled.sql}\n) `metric_src`"
-    )
-
-
 class MetricExecutor(Executor):
     kind = "metric"
 
@@ -228,7 +198,9 @@ class MetricExecutor(Executor):
         )
 
     def _artifacts(self, spec: dict[str, Any]) -> dict[str, Any]:
-        engine = spec.get("engine") or "hive"
+        engine = str(spec.get("engine") or "doris").lower()
+        if engine != "doris":
+            raise ValueError("新 metric/tag/rule 任务只允许 Doris SQL")
         adapter = get_adapter(engine)
         table = _build_table(spec)
         database, name = _qualified(spec)
@@ -254,164 +226,168 @@ class MetricExecutor(Executor):
             "side_effects": "无（dry-run 仅渲染产物）",
         }
 
+    @staticmethod
+    def _deployment_mapping(db, spec: dict[str, Any], ds: DataSource) -> tuple[dict, OntologyWarehouseDeployment]:
+        logic = db.get(BusinessLogic, spec.get("business_logic_id"))
+        if logic is None:
+            raise ValueError("业务逻辑不存在")
+        ontology = db.get(Ontology, logic.ontology_id)
+        if ontology is None or ontology.status != "published":
+            raise ValueError("Metric 只能执行当前已发布本体的业务逻辑")
+        deployment = (
+            db.query(OntologyWarehouseDeployment)
+            .filter(
+                OntologyWarehouseDeployment.ontology_id == logic.ontology_id,
+                OntologyWarehouseDeployment.ontology_version == ontology.version,
+                OntologyWarehouseDeployment.doris_datasource_id == ds.id,
+                OntologyWarehouseDeployment.status.in_(("schema_ready", "ready")),
+            )
+            .first()
+        )
+        if deployment is None:
+            raise ValueError("当前业务逻辑没有可用的 Doris Deployment")
+        projections = (
+            db.query(WarehouseObjectProjection)
+            .filter(WarehouseObjectProjection.deployment_id == deployment.id)
+            .all()
+        )
+        objects = {
+            row.id: row
+            for row in db.query(ObjectType).filter(
+                ObjectType.ontology_id == logic.ontology_id
+            ).all()
+        }
+        tables: dict[str, str] = {}
+        columns: dict[str, str] = {}
+        import json
+        for projection in projections:
+            obj = objects.get(projection.object_type_id)
+            if obj is None or not projection.queryable:
+                continue
+            if not projection.serving_database or not projection.serving_table:
+                continue
+            tables[obj.name] = f"{projection.serving_database}.{projection.serving_table}"
+            try:
+                mapping = json.loads(projection.column_mapping_json or "{}")
+            except (TypeError, ValueError):
+                mapping = {}
+            columns.update(mapping if isinstance(mapping, dict) else {})
+        required = set(spec.get("subject_objects") or spec.get("object_types") or [])
+        missing = sorted(required - set(tables))
+        if missing:
+            raise ValueError(
+                "指标上游 Projection 尚未 ready/queryable：" + ", ".join(missing)
+            )
+        return {"tables": tables, "columns": columns}, deployment
+
+    @staticmethod
+    def _physical_sql(sql: str, mapping: dict) -> str:
+        from app.services.data_app_executor import _apply_mapping
+
+        return _apply_mapping(sql, mapping)
+
     def execute(self, spec: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        # 未配 target_datasource，退回「仅产出」（与 transform 同逻辑）
-        target_datasource_id = spec.get("target_datasource_id") or context.get("target_datasource_id")
-        if not target_datasource_id:
-            artifacts = self._artifacts(spec)
-            return {
-                **artifacts,
-                "handoff": "DolphinScheduler",
-                "note": "未配置 target_datasource_id，ontoMeta 只生成 DDL+SQL，不执行",
-            }
-
-        # Flink on YARN 执行路径（P1-5）
-        try:
-            from app.services.flink_job_runner import run_flink_sql
-            from app.services.airflow_dag_builder import FlinkSqlTask
-        except ImportError as exc:
-            artifacts = self._artifacts(spec)
-            return {
-                **artifacts,
-                "handoff": "import_error",
-                "note": f"Flink 模块导入失败：{exc}，退回仅产出",
-            }
-
         artifacts = self._artifacts(spec)
-        engine = artifacts["engine"]
-        execution_mode = spec.get("execution_mode") or "batch"
-        metric_name = spec.get("metric_name")
-        # 这条指标自己的 Flink 提交参数（并行度/队列/提交目标/checkpoint/额外 -D）：
-        # Spec 优先、context 兜底，留空的项跟随设置页。
-        task_flink = flink_params.from_spec(spec, context)
+        datasource_id = spec.get("target_datasource_id") or context.get("target_datasource_id")
+        if not datasource_id:
+            return {
+                **artifacts,
+                "execute_mode": "handoff",
+                "compute_engine": "doris",
+                "note": "未配置默认 Doris DataSource，只产出 Doris DDL+SQL",
+            }
+        artifact_id = str(context.get("artifact_id") or "manual")
+        adapter = get_adapter("doris")
+        table = _build_table(spec)
+        staging_name = adapter.staging_table_name(table, artifact_id)
+        staging = adapter._qual(table.database, staging_name)
 
         with SessionLocal() as db:
-            ds = db.get(DataSource, target_datasource_id)
-            if not ds:
-                return {
-                    **artifacts,
-                    "handoff": "datasource_not_found",
-                    "note": f"target_datasource_id={target_datasource_id} 不存在，退回仅产出",
-                }
-            warehouse_conn_id = _warehouse_conn_id(ds)
-
-            # metric 的 ads 表构造：源是 dwd/dws（主对象），目标是 ads（结果表）
-            database, name = _qualified(spec)
-            target_table = _build_table(spec)
-            # 源表：主对象的物化表（假设已物化到 dwd/dws）
-            subjects = spec.get("subject_objects") or spec.get("object_types") or []
-            if not subjects:
-                return {
-                    **artifacts,
-                    "handoff": "no_subject",
-                    "note": "指标未绑定主对象，无法生成 Flink 聚合作业",
-                }
-            source_entity = subjects[0]  # 主对象的实体名
-            # 源表 = 主对象**实际物化到的那张表**，按本体+契约解析，不猜层也不猜库名。
-            # 此前这里拼的是 f"dwd_{prefix}.{entity}"：prefix 为空就得到 `dwd_.brand`
-            # 这种根本不存在的库名，且写死 dwd 层——而对象可能物化在 dim/dws。
-            # 列也照抄了结果表（stat_date/metric_value），与源表毫无关系。
-            subject_table = self._subject_table(db, spec, source_entity)
-            if subject_table is None:
-                return {
-                    **artifacts,
-                    "handoff": "subject_not_materialized",
-                    "note": f"主对象 {source_entity} 没有物化表（本体/契约里查不到），"
-                    "无法生成 Flink 聚合作业——请先物化该对象",
-                }
-            source_physical = subject_table.qualified_name
-            # Flink 逻辑表名 = **主对象名**：编译器产的 SQL 按本体对象名引用表
-            # （`FROM \`brand\``），逻辑名叫 src_brand 就对不上。metric 的目标表是指标名，
-            # 与对象名不会撞，故这里不需要 src_ 前缀（transform 才需要，那边源实体与
-            # 目标表同名）。
-            source_table = LogicalTable(
-                name=source_entity,
-                database=None,  # Flink 逻辑表无库名，物理名单独给
-                layer=subject_table.layer,
-                columns=subject_table.columns,
-            )
-
-            # 聚合 SELECT 体：**优先用形式化口径编译**，与 dry_run 同一个来源。
-            # 此前这里另拼一份、直接把 expression（中文口径摘要 "COUNT(品牌.排序号)"）
-            # 塞进 SQL——Flink 报 `Table '品牌' not found`，而 dry_run 看到的却是编译好的
-            # 正确 SQL：界面上是对的，跑起来是错的。
-            group_by = spec.get("group_by") or []
-            filters = spec.get("filters") or []
-            select_body = _compiled_select_body(spec, source_entity, group_by)
-            if select_body is None:
-                expression = (spec.get("expression") or "").strip() or "COUNT(1)"
-                select_cols = ["  CURRENT_DATE AS stat_date"]
-                select_cols += [f"  {c} AS {c}" for c in group_by]
-                select_cols.append(f"  {expression} AS metric_value")
-                select_body = "SELECT\n" + ",\n".join(select_cols) + f"\nFROM `{source_table.name}`"
-                if filters:
-                    select_body += "\nWHERE " + " AND ".join(f"`{f}` IS NOT NULL" for f in filters)
-                if group_by:
-                    select_body += "\nGROUP BY " + ", ".join(f"`{c}`" for c in group_by)
-
-            # streaming 指标的 checkpoint 要写进 SQL（SET 'state.checkpoints.dir'）：
-            # 只放进提交参数不够，没有它流作业重启就从头重算。任务级优先、其次设置页。
-            checkpoint_dir = ""
-            if execution_mode == "streaming":
-                from app.services.settings_service import SettingsService
-
-                checkpoint_dir = flink_params.resolve_checkpoint_dir(
-                    SettingsService().get_airflow_runtime(db), task_flink
-                )
-
-            # 生成完整 Flink SQL
-            flink_sql = generate_flink_sql(
-                source_table=source_table,
-                target_table=target_table,
-                source=FlinkEndpoint(warehouse_conn_id, engine),
-                target=FlinkEndpoint(warehouse_conn_id, engine),
-                select_body=select_body,
-                execution_mode=execution_mode,
-                source_physical=source_physical,
-                target_physical=target_table.qualified_name,
-                checkpoint_dir=checkpoint_dir or None,
-            )
-
-            # L1 血缘：源 = 主对象物化表，目标 = ads 结果表 → inlets/outlets URN。
-            from app.services.flink_sql_lineage import task_lineage_urns
-
-            source_urns, target_urn = task_lineage_urns(
-                sql=flink_sql,
-                source_tables=[source_physical],
-                target_table=target_table.qualified_name,
-                source_platform=engine,
-                target_platform=engine,
-            )
-
-            # 提交 Flink 作业（ads 表 DDL 先在数仓建，再执行聚合）
-            receipt = run_flink_sql(
+            ds = db.get(DataSource, datasource_id)
+            from app.warehouse.policy import require_doris_datasource
+            require_doris_datasource(ds, operation="Doris Metric")
+            if not ds.is_default_warehouse:
+                raise ValueError("Metric 只能使用默认 Doris")
+            mapping, deployment = self._deployment_mapping(db, spec, ds)
+            logic = db.get(BusinessLogic, spec.get("business_logic_id"))
+            compiled = compile_metric(
                 db,
-                base=context.get("artifact_id") or metric_name,
-                tasks=(
-                    FlinkSqlTask(
-                        task_id="aggregate",
-                        sql=flink_sql,
-                        # 见 transform 同处：占位符的运行期取值表。metric 两端同为数仓，
-                        # 但仍要显式给——不给就没有任何凭据注入。
-                        env=endpoint_credential_env(warehouse_conn_id, engine),
-                        # 流式作业提交即 detach（-d），否则 Airflow 任务永远阻塞在一个
-                        # 不会结束的流作业上（与 move_job_compiler 的增量/CDC 同理）。
-                        detached=execution_mode == "streaming",
-                        checkpoint_dir=checkpoint_dir,
-                        # L1 血缘：inlets/outlets
-                        source_urns=source_urns,
-                        target_urn=target_urn,
-                    ),
-                ),
-                warehouse_conn_id=warehouse_conn_id,
-                warehouse_ddl=(artifacts["ddl"],),  # 先建 ads 表
-                artifact_id=context.get("artifact_id"),
-                flink_task_params=task_flink,
+                logic.id,
+                dimensions=spec.get("group_by") or (),
+                filters=(),
+                limit=None,
+                dialect="doris",
+                mapping=mapping,
             )
-            return receipt
-
-
-def _warehouse_conn_id(ds: DataSource) -> str:
-    """目标仓的 Airflow Connection id（复用 materialization_runner 逻辑）。"""
-    slug = "".join(c if c.isalnum() else "_" for c in (ds.name or ds.id)).strip("_").lower()
-    return f"ontometa_ds_{slug or ds.id[:8]}"
+            # Use the same result-shape wrapper as DDL generation, then replace
+            # semantic table identifiers with ready Doris serving projections.
+            wrapped = _compiled_sql(spec, "doris")
+            if wrapped is None:
+                raise ValueError("Metric 必须有已发布的形式化 expression_json")
+            marker = wrapped.find("SELECT\n")
+            if marker < 0:
+                raise ValueError("MetricCompiler 未生成 SELECT")
+            select_sql = self._physical_sql(
+                wrapped[marker:].rstrip().rstrip(";"), mapping
+            )
+            config = (
+                db.query(DorisWarehouseConfig)
+                .filter(DorisWarehouseConfig.warehouse_datasource_id == ds.id)
+                .first()
+            )
+            token = "".join(c for c in ds.id.lower() if c.isalnum())[:12]
+            conn_id = (
+                config.airflow_etl_conn_id
+                if config and config.airflow_etl_conn_id
+                else f"ontometa_doris_{token}_etl"
+            )
+            setup = [
+                artifacts["ddl"],
+                f"DROP TABLE IF EXISTS {staging};",
+                adapter.render_create_staging(table, artifact_id),
+            ]
+            execute_sql = [f"INSERT INTO {staging}\n{select_sql};"]
+            quality_sql = [f"SELECT COUNT(*) >= 0 FROM {staging};"]
+            publish_sql = adapter.render_swap(table, artifact_id)
+            from app.services.doris_job_runner import run_doris_sql
+            receipt = run_doris_sql(
+                db,
+                artifact_id=artifact_id,
+                kind="metric",
+                conn_id=conn_id,
+                setup_sql=setup,
+                execute_sql=execute_sql,
+                quality_sql=quality_sql,
+                publish_sql=publish_sql,
+                schedule=spec.get("schedule") or spec.get("refresh_cron"),
+                source_tables=sorted(mapping["tables"].values()),
+                target_tables=[artifacts["target_table"]],
+            )
+            projection = (
+                db.query(WarehouseLogicProjection)
+                .filter(
+                    WarehouseLogicProjection.deployment_id == deployment.id,
+                    WarehouseLogicProjection.business_logic_id == logic.id,
+                )
+                .first()
+            )
+            if projection is None:
+                projection = WarehouseLogicProjection(
+                    deployment_id=deployment.id,
+                    business_logic_id=logic.id,
+                    serving_database=table.database or "ads",
+                    serving_table=table.name,
+                )
+                db.add(projection)
+            projection.status = "running" if receipt.get("ok") else "failed"
+            projection.queryable = False
+            db.commit()
+            return {
+                **receipt,
+                "ontology_id": logic.ontology_id,
+                "ontology_version": deployment.ontology_version,
+                "datasource_id": ds.id,
+                "business_logic_id": logic.id,
+                "logic_projection_id": projection.id,
+                "logic_type": compiled.logic_type,
+            }

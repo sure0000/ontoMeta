@@ -25,6 +25,8 @@ from app.schemas import (
     DataSourceCreate,
     DataSourceOut,
     DataSourceUpdate,
+    DorisWarehouseConfigOut,
+    DorisWarehouseConfigUpdate,
     GenerateAppFromChatRequest,
     GenerateWidgetFromChatRequest,
     PublicShareRequest,
@@ -44,15 +46,21 @@ def list_data_sources(db: Session = Depends(get_db)):
 
 @router.post("/data-sources", response_model=DataSourceOut)
 def create_data_source(data: DataSourceCreate, db: Session = Depends(get_db)):
-    ds = data_app_service.create_data_source(
-        db,
-        name=data.name,
-        kind=data.kind,
-        dsn_secret_ref=data.dsn_secret_ref,
-        mapping=data.mapping,
-        catalog_name=data.catalog_name,
-    )
-    return data_app_service.serialize_data_source(ds)
+    try:
+        ds = data_app_service.create_data_source(
+            db,
+            name=data.name,
+            kind=data.kind,
+            dsn_secret_ref=data.dsn_secret_ref,
+            mapping=data.mapping,
+            catalog_name=data.catalog_name,
+            purpose=data.purpose,
+            is_default_warehouse=data.is_default_warehouse,
+            enabled=data.enabled,
+        )
+        return data_app_service.serialize_data_source(ds)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/data-sources/{ds_id}", response_model=DataSourceOut)
@@ -117,6 +125,25 @@ def sync_data_source_catalogs(db: Session = Depends(get_db)):
     from app.services.catalog_sync import sync_all_catalogs
 
     return sync_all_catalogs(db)
+
+
+@router.get("/doris-warehouse", response_model=DorisWarehouseConfigOut | None)
+def get_doris_warehouse_config(db: Session = Depends(get_db)):
+    config = data_app_service.get_doris_config(db)
+    return data_app_service.serialize_doris_config(config) if config else None
+
+
+@router.put("/doris-warehouse", response_model=DorisWarehouseConfigOut)
+def update_doris_warehouse_config(
+    data: DorisWarehouseConfigUpdate, db: Session = Depends(get_db)
+):
+    try:
+        config = data_app_service.save_doris_config(
+            db, data.model_dump()
+        )
+        return data_app_service.serialize_doris_config(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ------------------------------------------------------------------ data apps

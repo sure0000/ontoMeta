@@ -336,20 +336,18 @@ def test_generate_move_sql_cdc_is_streaming_with_cdc_connector_and_checkpoint():
     assert "SET 'state.checkpoints.dir' = 'file:///tmp/ckpt';" in sql
 
 
-def test_generate_move_sql_incremental_uses_cdc_connector():
-    """incremental 与 cdc 同走 streaming CDC（位点靠 checkpoint 续）。"""
+def test_generate_move_sql_incremental_is_bounded_jdbc():
+    """incremental uses a bounded JDBC predicate and persisted watermark."""
     sql = generate_move_sql(
         source_table=_source(), target_table=_target(),
         source=FlinkEndpoint("erp_src", "mysql"), target=_hive("dw"),
         target_engine="hive", mode="incremental",
-        source_physical="erp_db.customer", checkpoint_dir="file:///tmp/ckpt",
+        source_physical="erp_db.customer",
+        incremental_column="created_at", watermark="2026-01-01 00:00:00",
     )
-    assert "'connector' = 'mysql-cdc'" in sql
-    assert "'database-name' = '${ERP_SRC_DATABASE}'" in sql
-    assert "'table-name' = 'customer'" in sql
-    # mysql-cdc 不需要 schema-name / slot.name
-    assert "schema-name" not in sql
-    assert "slot.name" not in sql
+    assert "'connector' = 'mysql-cdc'" not in sql
+    assert "SET 'execution.runtime-mode' = 'batch';" in sql
+    assert "WHERE `created_at` >= '2026-01-01 00:00:00'" in sql
 
 
 def test_generate_move_sql_cdc_requires_checkpoint_dir():

@@ -17,6 +17,8 @@ SELECT ... FROM erp_ods.tab_customer``（``warehouse_generator.generate_etl_sql`
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from sqlalchemy.orm import Session
 
 from app.services.source_ref import (
@@ -32,6 +34,7 @@ from app.warehouse.jobs import (
     get_job_adapter,
 )
 from app.services.warehouse_generator import WarehouseGenerator
+from app.warehouse.logical_schema import LogicalConstraint
 
 # 源/目标连接别名的缺省值。**别名不是凭据**：执行侧按别名解析连接串，
 # 沿用 ``agents/drafters/sync.py`` 里 ``source_ref_alias`` 的既有约定。
@@ -108,6 +111,15 @@ class JobPlanner:
         selected_targets: list[str] | None = None,
         runner_capabilities: dict | None = None,
         load_strategy: str | None = None,
+        target_ods_database: str | None = None,
+        target_ods_tables: dict[str, str] | None = None,
+        target_primary_keys: dict[str, list[str]] | None = None,
+        incremental_columns: dict[str, str] | None = None,
+        initial_watermarks: dict[str, str] | None = None,
+        source_physical_tables: dict[str, str] | None = None,
+        source_platforms: dict[str, str] | None = None,
+        source_mappings: dict[str, dict[str, str]] | None = None,
+        delete_policies: dict[str, str] | None = None,
     ) -> JobPlan:
         """产出搬运作业计划。
 
@@ -139,16 +151,32 @@ class JobPlanner:
         selected = set(selected_targets) if selected_targets else None
 
         jobs: list[JobSpec] = []
-        for table in logical.schema.tables:
-            entity = table.source_name
+        for semantic_table in logical.schema.tables:
+            entity = semantic_table.source_name
+            if target_ods_database:
+                requested_keys = tuple((target_primary_keys or {}).get(entity) or ())
+                constraints = tuple(
+                    c for c in semantic_table.constraints if c.kind != "primary_key"
+                )
+                if requested_keys:
+                    constraints += (LogicalConstraint(kind="primary_key", columns=requested_keys),)
+                table = replace(
+                    semantic_table,
+                    database=target_ods_database,
+                    name=(target_ods_tables or {}).get(entity) or semantic_table.source_name,
+                    layer="ods",
+                    constraints=constraints,
+                )
+            else:
+                table = semantic_table
             if selected is not None and entity not in selected:
                 continue
-            if table.layer == "ads":
+            if semantic_table.layer == "ads":
                 # 与 M3 的 ETL 口径一致：ADS 由 MetricSpec 算出，不是字段搬运。
-                plan.note(table.qualified_name, "ADS 指标表由 MetricSpec 生成，不产搬运作业")
+                plan.note(semantic_table.qualified_name, "ADS 指标表由 MetricSpec 生成，不产搬运作业")
                 continue
 
-            source_name = source_refs.get(entity)
+            source_name = (source_physical_tables or {}).get(entity) or source_refs.get(entity)
             if not source_name:
                 # 两种成因合流于此：压根没有 source_ref，或是人工建模对象（``manual:`` 引用）。
                 # 后者此前会漏到下面的平台检查，报「source_ref 未带数据平台信息」——
@@ -156,7 +184,7 @@ class JobPlanner:
                 plan.note(table.qualified_name, NO_PHYSICAL_SOURCE_NOTE)
                 continue
             urn = source_urns.get(entity)
-            platform = source_platform_of(urn)
+            platform = (source_platforms or {}).get(entity) or source_platform_of(urn)
             if not platform:
                 plan.note(
                     table.qualified_name,
@@ -190,7 +218,10 @@ class JobPlanner:
                     "增量装载但契约未配分区键，作业将无水位谓词，可能产生重复",
                 )
 
-            column_map = field_refs.get(entity, {})
+            column_map = {
+                **field_refs.get(entity, {}),
+                **(source_mappings or {}).get(entity, {}),
+            }
             src_db, src_table = _split_qualified(source_name)
             jobs.append(
                 JobSpec(
@@ -214,6 +245,9 @@ class JobPlanner:
                     ),
                     mode=mode,
                     partition_key=table.partition_key,
+                    incremental_column=(incremental_columns or {}).get(entity),
+                    initial_watermark=(initial_watermarks or {}).get(entity),
+                    delete_policy=(delete_policies or {}).get(entity) or "ignore",
                     layer=table.layer,
                     source_urn=urn,
                     entity_name=entity,

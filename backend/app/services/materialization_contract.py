@@ -48,7 +48,7 @@ _PATCH_TO_COLUMN = {
     "materialized": "materialized",
 }
 
-DEFAULT_ENGINES = ["hive"]
+DEFAULT_ENGINES = ["doris"]
 
 # 时间语义字段作为分区键的候选（见 evidence_builder._infer_semantic_type）。
 _TIME_SEMANTIC = "datetime"

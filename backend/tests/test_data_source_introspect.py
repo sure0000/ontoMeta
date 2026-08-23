@@ -90,8 +90,8 @@ def test_api_rejects_source_without_connection(client, admin_headers):
     assert "Mock" in r.json()["detail"]
 
 
-def test_dsn_components_echoes_password_plaintext():
-    """DSN 里的密码现在明文回显（供前端 Input.Password 预填+眼睛切换），password_set 保留兼容。"""
+def test_dsn_components_does_not_echo_password():
+    """连接密码只返回 presence hint，不进入 API/前端回显。"""
     from app.services.data_app import DataAppService
 
     dsn = "postgresql+psycopg://alice:s3cr3t@db.example.com:5432/erp"
@@ -101,9 +101,10 @@ def test_dsn_components_echoes_password_plaintext():
     assert comps["port"] == 5432
     assert comps["database"] == "erp"
     assert comps["username"] == "alice"
-    # 密码明文回显 + set 标志
-    assert comps["password"] == "s3cr3t"
+    # 密码不得明文回显，只返回已配置标志
+    assert comps["password"] is None
     assert comps["password_set"] is True
+    assert comps["password_hint"] == "已配置"
 
 
 def test_dsn_components_no_password_when_absent():

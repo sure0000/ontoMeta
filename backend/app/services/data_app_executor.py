@@ -203,7 +203,13 @@ def _apply_mapping(sql: str, mapping: dict[str, Any] | None) -> str:
         def _sub_tables(m: re.Match) -> str:
             head, ident_list = m.group(1), m.group(2)
             parts = re.split(r"(\s*,\s*)", ident_list)
-            out = [tables.get(p, p) if i % 2 == 0 else p for i, p in enumerate(parts)]
+            out = []
+            for i, part in enumerate(parts):
+                if i % 2:
+                    out.append(part)
+                    continue
+                token = part.strip("`\"[]")
+                out.append(tables.get(part, tables.get(token, part)))
             return head + "".join(out)
 
         sql = _TABLE_POSITION.sub(_sub_tables, sql)
@@ -270,15 +276,22 @@ def execute_sql(
     limit: int = 100,
     mapping: dict[str, Any] | None = None,
     timeout_seconds: int = 15,
+    dialect: str | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-    """在物理数据源上安全执行只读 SQL，返回 (columns, rows)。"""
+    """在物理数据源上安全执行只读 SQL，返回 (columns, rows)。
+
+    ``dialect`` separates SQL semantics from the transport DSN. Doris uses the
+    MySQL wire protocol, so its DSN is commonly ``mysql+pymysql://`` but SQL
+    translation and validation must still use the Doris dialect.
+    """
     ok, reason = is_read_only(sql)
     if not ok:
         raise ExecutionError(f"SQL 未通过只读校验：{reason}")
 
     backend = _backend_of(dsn)
+    sql_dialect = (dialect or backend).lower()
     prepared = _apply_mapping(sql, mapping)
-    prepared = _translate_dialect(prepared, backend)
+    prepared = _translate_dialect(prepared, sql_dialect)
     prepared = _ensure_limit(prepared, limit)
 
     engine = _engine_or_error(dsn)

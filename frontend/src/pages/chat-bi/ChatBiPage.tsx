@@ -971,9 +971,11 @@ const ChatBiMain = memo(function ChatBiMain({
       setSubmitting(true);
 
       try {
+        const requestDomainIds = activeConversation?.domain_ids ?? domainIds;
         await api.askChatBiStream(
           {
-            domain_ids: domainIds,
+            // 续聊以会话创建时的作用域为准；页面筛选可能在填写交互表单期间变化。
+            domain_ids: requestDomainIds,
             question: trimmed,
             history,
             conversation_id: activeConversationId ?? undefined,
@@ -1005,8 +1007,8 @@ const ChatBiMain = memo(function ChatBiMain({
               // 收到任一事件即退出纯 pending（typing dots）态，转为实时展示步骤/答案
               cur.pending = false;
               const payload: ChatBiAnswer = {
-                domain_ids: domainIds,
-                domain_id: domainIds[0],
+                domain_ids: activeConversation?.domain_ids ?? domainIds,
+                domain_id: (activeConversation?.domain_ids ?? domainIds)[0],
                 domain_name: scopeLabel,
                 answer: "",
                 used_mock: false,
@@ -1096,7 +1098,15 @@ const ChatBiMain = memo(function ChatBiMain({
         setSubmitting(false);
       }
     },
-    [domainIds, scopeLabel, activeConversationId, messages, submitting, onConversationActivity],
+    [
+      domainIds,
+      scopeLabel,
+      activeConversationId,
+      activeConversation,
+      messages,
+      submitting,
+      onConversationActivity,
+    ],
   );
 
   return (

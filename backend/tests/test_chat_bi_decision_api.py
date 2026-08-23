@@ -99,8 +99,8 @@ def test_closure_endpoint_returns_six_nodes(client, admin_headers, conversation_
     ]
 
 
-def test_task_link_records_plan_decision(client, admin_headers, conversation_id):
-    """接线点：既有的 tasks 关联请求顺带带回提案 diff，无需额外往返。"""
+def test_task_link_does_not_prematurely_confirm_plan(client, admin_headers, conversation_id):
+    """建立会话→制品关联不等于确认执行方案；plan 只能在 dry-run 后 artifact confirm 到达。"""
     resp = client.post(
         f"/api/chat-bi/conversations/{conversation_id}/tasks",
         headers=admin_headers,
@@ -117,13 +117,7 @@ def test_task_link_records_plan_decision(client, admin_headers, conversation_id)
     items = client.get(
         f"/api/chat-bi/conversations/{conversation_id}/decisions", headers=admin_headers
     ).json()
-    plan = [i for i in items if i["node"] == "plan"]
-    assert len(plan) == 1
-    # agent 提的 vs 人改的，两份都在——这是今天完全不存在的那个 diff
-    assert plan[0]["outcome"] == "modified"
-    assert plan[0]["overridden_fields"] == ["target_database"]
-    assert plan[0]["ref_kind"] == "artifact"
-    assert plan[0]["ref_id"] == "artifact-link-1"
+    assert not [i for i in items if i["node"] == "plan"]
 
 
 def test_task_link_still_works_without_ledger_fields(

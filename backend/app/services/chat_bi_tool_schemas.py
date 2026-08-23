@@ -42,60 +42,23 @@ _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 #                 比反复叮嘱「宁可少答不可编造」有效得多
 # 保留下来的都是**工具选择策略**——这类「该先调谁」的判断，守卫拦得住结果却教不会顺序。
 _AGENT_SYSTEM_PROMPT = (
-    "你是企业数据问答助手（Data Agent），基于**已发布本体**回答业务问题。\n"
-    "可多步调用工具检索本体并执行只读 SQL，像分析师一样先查清口径再作答。\n\n"
-    "若问题明确属于某类任务（了解域结构 / 取数分析），可先调 select_skill 选对应技能，"
-    "它会给出该类任务的专门策略与能力；不确定则直接按下面的通用策略作答。\n\n"
-    "工具选择：\n"
-    "1. 先 search_* 定位实体，再 get_object / get_logic 取细节。"
-    "**若关键词要来回试几次**（域大、说法不确定），改用 locate_entities 整体外包，"
-    "试错过程不占本对话上下文。\n"
-    "2. 【JOIN】SQL 涉及两个及以上对象时先调 **find_join_path**，ON 条件照抄它给的；"
-    "它返回空即表示本体中两者无从关联，如实说明。有扇出风险时改用它建议的安全聚合。\n"
-    "3. 【字面量】WHERE 要写具体值时先调 **profile_values** 看真实取值并照抄；"
-    "猜错的字面量不会报错，只会返回 0 行，让你得出「无数据」这个错误结论。\n"
-    "4. 【口径】问题涉及已有指标/标签/规则时先 search_logics，再用 **compile_metric** 编译出 SQL，"
-    "不要自己照着口径说明重写——口径以本体为准，重写会算出与其它系统不一致的数。"
-    "编译结果的 caliber_trace 即权威口径展开；失败时按 hint 修正。\n"
-    "5. 写了查询 SQL 就必须经 **run_sql** 提交（只读，仅 SELECT）；"
-    "返回「无可执行数据源」时作为建议 SQL 给出并说明未实际执行。\n"
-    "6. 【缺口反问】只有用户能补齐的歧义（多个候选指标/时间字段、口径值不明确），"
-    "调 **ask_clarification** 反问，不要挑一个可能错的解释硬答；"
-    "但「本体里查不到」应如实说明，「你还没查够」应继续检索——都不属于反问。\n"
-    "6b.【多参数收集】若需用户**一次补齐多个**结构化参数（取数的指标+时间范围+分组维度、"
-    "建数任务的目标数据源+目标库+更新策略+调度）才能继续，调 **request_form** 生成可填写表单"
-    "一并收集，比逐条追问高效；候选项须来自真实实体——**先用工具把候选查出来再发表单**"
-    "（建数任务用 get_task_options），别因为没查就把本该是下拉的字段退化成文本框。"
-    "用户在对话里**已经说过**的取值走 prefill 预填进表单，别原样再问一遍。"
-    "仅单个歧义仍用 ask_clarification。\n"
-    "7. 【结构性问题】问对象有哪些属性/字段/关系、口径定义这类元数据问题，"
-    "直接用 get_object/get_logic 的本体元数据作答，**不要取数、不要在正文写取数 SQL**；"
-    "此时取数工具可能不可用。用户确实要据此查数时，再 select_skill('query') 切到取数。\n\n"
-    "作答：中文 Markdown，先口径解读再结论；有数据用表格。"
-    "用对象/关系的**显示名**称呼它们，不要在正文提及工具名。"
-    "本体中确实没有的，如实说明无法回答。"
-    "但对『你能做什么/怎么用/打招呼』这类与具体业务数据无关的一般性问题，"
-    "直接友好作答、简介你的能力即可，无需检索本体、也不受上述『查不到就拒答』约束。"
+    "你是企业数据助手，请用中文简洁回答。"
+    "使用当前已发布本体和工具结果获取信息。"
+    "数据查询使用默认 Doris。元数据问题使用本体工具。"
+    "数据任务使用任务工具和确认表单。"
+    "请清楚标注建议、草稿、查询结果和任务状态。"
+)
+
+# Prompt 被上游网关误判时使用的单次精简重试版本。它不包含动态本体卡、历史记忆或任务细节。
+_MINIMAL_AGENT_SYSTEM_PROMPT = (
+    "你是企业数据助手，请用中文完成用户请求。优先使用工具取得当前信息。"
+    "数据查询使用默认 Doris。数据任务先读取选项，再生成确认表单；表单提交后生成任务提案。"
+    "请区分建议、草稿和实际运行状态。"
 )
 
 # OpenAI 原生 function-calling 工具（自建 GLM 实测支持）。
 # 检索类直呼 OntologyQueryService（带 q 关键词 + limit），避免 MCP 目录“仅按域全返”导致的巨结果。
 _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_catalogs",
-            "description": (
-                "列出当前数据域可查询的数据目录（catalog）。取数前先看这里拿合法 target 值："
-                "warehouse（数仓投影，默认）或各源库 catalog 名（如 erp/crm，实时源数据）。"
-                "run_sql 的 target 参数只收这里返回的名字，别自己编。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -343,23 +306,16 @@ _AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "run_sql",
             "description": (
-                "在当前数据域的物理数据源上执行**只读 SELECT**，返回列与真实数据行。"
-                "表名/字段名必须使用本体标识符。若无可执行数据源会返回提示，此时改为给出建议 SQL。"
-                "默认查数仓投影（warehouse）；确需查源库时才显式传 target（如 \"erp\"），"
-                "不传时绝不直连源库。"
+                "在当前已发布本体对应的默认 Doris 数仓上执行**只读 SELECT**，返回列与真实数据行。"
+                "表名/字段名必须使用本体标识符。Doris 未配置或投影未就绪时 fail-closed，"
+                "只返回建议 SQL，不切换到业务源。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sql": {"type": "string", "description": "单条 SELECT 语句"},
                     "limit": {"type": "integer", "description": f"返回行上限，默认 {_RUN_SQL_LIMIT}"},
-                    "target": {
-                        "type": "string",
-                        "description": (
-                            "目标目录：warehouse（默认，查数仓投影）；或显式源库 catalog 名"
-                            "（如 erp/crm，查源系统实时数据）。默认 warehouse，不传不查源库。"
-                        ),
-                    },
+
                 },
                 "required": ["sql"],
             },
@@ -621,15 +577,12 @@ _LINT_TOOL: dict[str, Any] = {
 
 # 数据任务类型白名单——agent 只在「物化/同步/加工」车道出提案；metric 归 propose_draft、
 # cluster（基建）不开，避免与口径提案重叠混淆。
-_ACTION_KINDS: tuple[str, ...] = ("materialize", "sync", "transform")
+_ACTION_KINDS: tuple[str, ...] = ("materialize", "sync", "transform", "metric")
 _ACTION_KIND_LABEL: dict[str, str] = {
     "materialize": "物化", "sync": "同步", "transform": "加工", "metric": "聚合",
 }
 
-# 任务链上可以出现的环节。比 _ACTION_KINDS 多一个 metric——「物化完清洗、清洗完聚合」里的
-# 聚合就是它（按已定义的业务逻辑口径产聚合 SQL）。单发提案不开 metric 是怕与口径提案
-# （propose_draft 产的是**口径定义**）混淆；在链里它的位置明确，不存在这个歧义。
-# cluster（基建）不进链：它与数据加工不是一条流水线上的事。
+# 当前已落地的 Doris 执行能力。
 _PIPELINE_KINDS: tuple[str, ...] = ("materialize", "sync", "transform", "metric")
 _PIPELINE_MAX_STEPS: int = 8
 
@@ -638,28 +591,23 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
     "function": {
         "name": "propose_action",
         "description": (
-            "为新建一个数据任务（物化 materialize / 同步 sync / 加工 transform）产出**提案**"
-            "（不执行、不写库）。提案由用户在前端点击后走「校验→看 dry-run 差异→人工确认→执行」"
-            "的既有治理流程创建并运行。提案前先把「要对哪张/哪些表做什么」说清楚。\n"
-            "**物化必须在 context 里给 target_datasource_id**（落到哪个数据源，本体推导不出来）。"
-            "不知道选哪个就先调 request_form 让用户选，别自己编 id；缺了会被当场判错并给出真实候选。"
+            "根据已填写的任务确认表单生成任务提案。"
+            "context 包含表单返回的 task_confirmation_id 和字段值。"
+            "materialize 建本体结构；sync 写入 ODS；transform 加工 ODS 数据；metric 生成 ADS 结果。"
+            "返回的是提案，后续状态由任务流水线更新。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "enum": list(_ACTION_KINDS),
-                          "description": "物化 materialize / 同步 sync / 加工 transform"},
+                          "description": "物化 / 同步 / Doris 加工 / Doris metric-tag-rule"},
                 "intent": {"type": "string",
                             "description": "自然语言任务意图，如「把客户主数据物化到数仓 dim_customer」"},
                 "context": {"type": "object",
                              "description": (
-                                 "结构化上下文，取值一律来自 get_task_options 的真实候选。物化常用："
-                                 "target_datasource_id（必填）、target_database（目标库，一个库通吃各层；"
-                                 '要逐层分库才用 database_overrides={"层":"库名"}）、'
-                                 'table_overrides={"契约id":"表名"}、refresh_cron（整批调度）、'
-                                 'selected_targets=["实体名"]（只物化其中几个）、'
-                                 'overrides={"契约id":{"partition_key":"dt","load_strategy":"incremental"}}'
-                                 "（逐实体的分区键/装载方式/调度）。凭据只能传 *_ref/*_alias，勿传明文"
+                                 "结构化上下文；必须包含本次 request_form 回填的 task_confirmation_id。"
+                                 "其余键按任务类型使用服务端表单回填值，禁止自造 id/库名/对象/口径。"
+                                 "凭据不得进入 context；连接只传 DataSource id。"
                              )},
             },
             "required": ["kind", "intent"],
@@ -675,11 +623,13 @@ _PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
             "当用户要的是**前后相继的多个任务**（如「物化到数仓，然后清洗，再按口径聚合」）时，"
             "产出一条**任务链提案**（不执行、不写库）。链上每一步仍是一条独立任务，各自走"
             "「校验→dry-run→人工确认→执行」；链负责的是记住下一步、并把上游已定下的目标数据源/"
-            "目标库/引擎接到下游，用户不必逐步重报。\n"
+            "默认 Doris/本体版本接到下游，用户不必逐步重报。\n"
             "**只有一个任务时用 propose_action**，别为单步套一条链。\n"
-            "**上游给过的选项下游不用再给**：target_datasource_id / target_database / engine 沿链"
-            "继承。第一步是 materialize 时它仍必须自己给 target_datasource_id（不知道就先 "
-            "request_form 问）。metric（聚合）要求口径已在「业务逻辑」里定义好，否则起草时会报错。"
+            "当前标准链是 materialize(Doris 建结构) → sync(业务源经 Flink 写 ODS) → "
+            "transform(Doris ODS→DIM/DWD/DWS) → metric(Doris ADS)。metric 必须引用已发布且形式化的口径。"
+            "sync 的 source_datasource_id、ODS 库、主键/水位/CDC 策略"
+            "不能从 materialize 继承，必须显式给；ODS 表名由后端固定生成，"
+            "target_datasource_id 固定继承默认 Doris。"
         ),
         "parameters": {
             "type": "object",
@@ -694,7 +644,7 @@ _PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
                         "properties": {
                             "kind": {
                                 "type": "string", "enum": list(_PIPELINE_KINDS),
-                                "description": "物化 materialize / 同步 sync / 清洗加工 transform / 聚合 metric",
+                                "description": "当前可执行：materialize / sync / transform / metric",
                             },
                             "intent": {"type": "string", "description": "这一步做什么，一句话"},
                             "depends_on": {
@@ -737,15 +687,14 @@ _CRON_PRESETS: tuple[dict[str, str], ...] = (
     {"expr": "", "label": "不定时（仅手动触发）"},
 )
 
-# 装载方式的中文标签与**实际语义**。语义不能省：CDC 在物化里其实按全量跑，模型若照字面
-# 理解会给用户一个错误的承诺（与 MaterializeModal 的 STRATEGY_HINT 是同一句话）。
+# Flink source→Doris ODS 的三种接入语义。
 _LOAD_STRATEGIES: tuple[dict[str, str], ...] = (
     {"value": "full", "label": "全量覆盖",
-     "hint": "INSERT OVERWRITE：重写整表/分区"},
-    {"value": "incremental", "label": "增量追加",
-     "hint": "INSERT INTO：按分区键追加，水位由调度器注入；未配分区键会退化为无谓词追加"},
+     "hint": "Flink batch 写 ODS staging，质量检查后 Doris atomic replace；失败不影响正式表"},
+    {"value": "incremental", "label": "增量同步",
+     "hint": "按 incremental_column + 成功水位做有界 JDBC batch，Doris Unique Key UPSERT"},
     {"value": "cdc", "label": "CDC 变更捕获",
-     "hint": "物化内不承载变更捕获，本次按全量覆盖执行；要 CDC 请改用同步作业"},
+     "hint": "Flink CDC detached 长期作业；必须配置主键、sequence、checkpoint 与 DELETE 策略"},
 )
 
 # 候选清单的回灌上限。物化契约会有几百条（一个 734 对象的域即如此），整份倒进上下文
@@ -757,12 +706,10 @@ _GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
     "function": {
         "name": "get_task_options",
         "description": (
-            "读取新建数据任务时**可选什么**：物化的目标数据源/目标库/待物化实体（含各自的"
-            "契约 id、分层、分区键、装载方式、现有调度）/装载方式/调度频率预置；同步与加工的"
-            "候选对象。\n"
-            "**建数任务开工第一步就调它**：propose_action 的 context 与 request_form 的 "
-            "options 都必须用这里返回的真实值，不得自己编数据源 id、库名或表名。"
-            "只读，不建任何东西。"
+            "读取数据任务可用选项。"
+            "materialize 返回 Doris、数据库和物化范围；sync 返回本体、业务源和 ODS 信息；"
+            "transform 返回可加工对象和规则；metric 返回形式化业务口径。"
+            "读取后使用 request_form 生成确认表单。"
         ),
         "parameters": {
             "type": "object",
@@ -771,7 +718,7 @@ _GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
                           "description": "要建的任务类型：materialize / sync / transform"},
                 "target_datasource_id": {
                     "type": "string",
-                    "description": "物化专用：给了才会去这个数据源上列库（databases），并按其类型定引擎",
+                    "description": "兼容参数；物化实际固定使用服务端唯一可执行默认 Doris，不能用它覆盖",
                 },
                 "keyword": {"type": "string",
                              "description": "按实体名/显示名过滤候选，候选很多时用它收窄"},
@@ -790,6 +737,56 @@ _ACTION_CONTEXT_HINT = (
 )
 
 
+def _sync_context_errors(
+    db: Session, context: dict[str, Any], *, ontology_id: str | None = None
+) -> list[str]:
+    """Deterministic mirror of the Doris ODS sync prompt contract."""
+    from app.models import DataSource, ObjectType
+
+    errors: list[str] = []
+    source = db.get(DataSource, context.get("source_datasource_id"))
+    target = db.get(DataSource, context.get("target_datasource_id"))
+    if source is not None and (source.purpose != "business_source" or not source.enabled):
+        errors.append("source_datasource_id 必须是启用的 business_source")
+    if source is not None and ontology_id and context.get("object_type"):
+        from app.services.source_datasource import source_datasource_candidates
+
+        obj = (
+            db.query(ObjectType)
+            .filter(
+                ObjectType.ontology_id == ontology_id,
+                ObjectType.name == str(context["object_type"]),
+            )
+            .first()
+        )
+        if obj is not None:
+            allowed = {candidate.id for candidate in source_datasource_candidates(db, obj)}
+            if source.id not in allowed:
+                errors.append(
+                    "source_datasource_id 与所选本体的 source_ref 平台/库/表来源不匹配"
+                )
+    if target is not None and not (
+        target.purpose == "warehouse" and target.kind == "doris"
+        and target.is_default_warehouse and target.enabled
+        and bool((target.dsn_secret_ref or "").strip())
+    ):
+        errors.append("target_datasource_id 必须是启用、已配置连接的默认 Doris")
+    if context.get("target_ods_database") and not str(context["target_ods_database"]).startswith("ods"):
+        errors.append("target_ods_database 必须以 ods 开头")
+    mode = str(context.get("mode") or "full")
+    if mode in {"incremental", "cdc"} and not context.get("primary_keys"):
+        errors.append(f"{mode} 必须配置 primary_keys")
+    if mode == "incremental":
+        for key in ("incremental_column", "initial_watermark"):
+            if context.get(key) in (None, ""):
+                errors.append(f"incremental 必须配置 {key}")
+    if mode == "cdc":
+        for key in ("sequence_column", "delete_policy", "flink_checkpoint_dir"):
+            if context.get(key) in (None, ""):
+                errors.append(f"CDC 必须配置 {key}")
+    return errors
+
+
 def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
     """该类任务起草前还缺哪些 context 键。
 
@@ -806,9 +803,22 @@ def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
         drafter = registry.get_drafter(kind)
     except registry.UnregisteredKindError:
         return []
+    required = list(drafter.required_context)
+    if kind in {"materialize", "transform", "metric"}:
+        required.append("target_datasource_id")
+    if kind == "materialize":
+        required.append("target_database")
+    if kind == "metric":
+        required.append("business_logic_id")
+    if kind == "sync":
+        required.extend((
+            "source_datasource_id",
+            "target_datasource_id",
+            "target_ods_database",
+        ))
     return [
         key
-        for key in drafter.required_context
+        for key in dict.fromkeys(required)
         if key not in _AUTO_ACTION_CONTEXT_KEYS and not context.get(key)
     ]
 
@@ -818,16 +828,23 @@ def _action_context_candidates(db: Session, missing: list[str]) -> dict[str, Any
 
     只返回选项本身（id/名称/类型/连通状态），凭据不出现（DSN 存的本就是 ``dsn_secret_ref``）。
     """
-    if "target_datasource_id" not in missing:
-        return {}
     from app.models import DataSource
 
     rows = db.query(DataSource).order_by(DataSource.name).limit(50).all()
-    return {
-        "target_datasource_id_options": [
-            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status} for s in rows
+    out: dict[str, Any] = {}
+    if "source_datasource_id" in missing:
+        out["source_datasource_id_options"] = [
+            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
+            for s in rows if s.purpose == "business_source" and s.enabled
         ]
-    }
+    if "target_datasource_id" in missing:
+        out["target_datasource_id_options"] = [
+            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
+            for s in rows
+            if s.purpose == "warehouse" and s.kind == "doris"
+            and s.is_default_warehouse and s.enabled
+        ]
+    return out
 
 
 _GET_TASK_STATUS_TOOL: dict[str, Any] = {
@@ -1020,17 +1037,11 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
     "function": {
         "name": "request_form",
         "description": (
-            "当需要用户**一次补齐多个结构化参数**才能继续时，生成一张**可填写表单**收集上下文，"
-            "而不是来回追问多轮。适用：取数需明确「指标+时间范围+分组维度」、"
-            "建数任务需明确「目标表+更新策略+调度」等。"
-            "select/radio/multiselect 的 options **必须来自工具返回的真实实体**；"
-            "无从预置就用 text/number 让用户自填。调用后本轮结束、等用户填完提交再继续。"
-            "只需单个澄清用 ask_clarification；无需用户补参数别乱发表单。\n"
-            "**建数任务（物化/同步/加工）传 task_kind**：服务端会按该类型补齐必问字段并填入真实"
-            "候选（物化=目标数据源与库/表名/装载方式/分区键/调度频率），你只需给 title；"
-            "fields 可留空，给了则作为额外字段追加。这样不会漏问参数。\n"
-            "**用户已经说过的用 prefill 预填**（如「物化到 dw 库、每天凌晨跑」）：服务端会拿真实"
-            "候选核对，对得上就填成默认值、对不上就丢掉。别把已经问到的答案再问一遍。"
+            "生成可填写表单。"
+            "数据任务提供 task_kind 和 intent，服务端生成需求、本体或口径、数据参数三个确认步骤。"
+            "fields 可用于普通分析表单；任务表单可留空。"
+            "prefill 可填写用户已经给出的值。"
+            "表单提交后将 task_confirmation_id 和字段值用于 propose_action。"
         ),
         "parameters": {
             "type": "object",
@@ -1038,7 +1049,7 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
                 "title": {"type": "string", "description": "表单标题：这一步在收集什么（一句话）"},
                 "task_kind": {
                     "type": "string", "enum": list(_ACTION_KINDS),
-                    "description": "建数任务表单填这个（materialize/sync/transform），服务端据此补齐必问字段与真实候选",
+                    "description": "建数任务填 materialize/sync/transform/metric；服务端生成完整确认向导",
                 },
                 "target_datasource_id": {
                     "type": "string",
@@ -1198,7 +1209,8 @@ _PROPOSE_DATASOURCE_TOOL: dict[str, Any] = {
     "function": {
         "name": "propose_datasource",
         "description": (
-            "为**新登记一个数据源连接**产出提案（不写库）。数据源是后续取数与搬运的落点。\n"
+            "为**新登记一个数据源连接**产出提案（不写库）。mysql/postgres 等是 business_source，"
+            "只供 Flink 同步读取；Doris 是唯一 warehouse，Data Agent 只查询默认 Doris。\n"
             "**绝不要在参数里写主机地址以外的凭据**：用户名/密码/DSN 一律由用户在确认卡里自己填，"
             "你给的是名称、类型、catalog 这类非机密骨架。带凭据的字段会被丢弃。\n"
             "先调 list_onboarding_targets 查重——同名或同 catalog 的源已存在就别重复建。"
@@ -1212,8 +1224,7 @@ _PROPOSE_DATASOURCE_TOOL: dict[str, Any] = {
                 "catalog_name": {
                     "type": "string",
                     "description": (
-                        "可选：StarRocks 外部 catalog 名（如 erp/crm），取数时用它选源；"
-                        "留空表示这是数仓内部源"
+                        "可选的外部 catalog 元数据，仅用于元数据登记；不参与 Data Agent 查询路由"
                     ),
                 },
                 "note": {"type": "string", "description": "可选：给用户看的一句话说明（这个源是干什么的）"},
@@ -1733,6 +1744,7 @@ __all__ = [
     '_OVERVIEW_LIST_LIMIT',
     '_OVERVIEW_TOP_CONNECTED',
     '_AGENT_SYSTEM_PROMPT',
+    '_MINIMAL_AGENT_SYSTEM_PROMPT',
     '_AGENT_TOOL_SCHEMAS',
     '_SELECT_SKILL_TOOL',
     '_RENDER_CHART_TOOL',
@@ -1756,6 +1768,7 @@ __all__ = [
     '_AUTO_ACTION_CONTEXT_KEYS',
     '_ACTION_CONTEXT_HINT',
     '_missing_action_context',
+    '_sync_context_errors',
     '_action_context_candidates',
     '_GET_TASK_STATUS_TOOL',
     '_PLAN_STATUSES',

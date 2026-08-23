@@ -42,31 +42,28 @@ def test_registry_has_overview_and_query():
     assert "overview" in skill_choices_text() and "query" in skill_choices_text()
 
 
-def test_create_skill_attaches_governance_and_lint_tool():
-    """建数技能：解锁 lint_against_standard 自检工具 + 标了 attach_governance。"""
+def test_create_skill_unlocks_lint_without_prompt_governance_card():
+    """治理由后端闸门执行；技能只给简短工具流程，不叠加治理规约全文。"""
     create = SKILLS["create"]
-    assert create.attach_governance is True
+    assert create.attach_governance is False
     tools = {t["function"]["name"] for t in c._tools_for_skill(create)}
     assert "lint_against_standard" in tools
-    # 其它技能不带治理卡（scoped，不污染取数/概览）
-    assert SKILLS["query"].attach_governance is False
-    assert SKILLS["overview"].attach_governance is False
-
-
-def test_select_create_skill_appends_governance_card():
     messages = [{"role": "system", "content": "BASE"}]
     skill, _result, _summary, is_error = svc._apply_select_skill(
         {"skill": "create"}, messages, "BASE", "【治理规约】命名 snake_case"
     )
     assert is_error is False and skill.name == "create"
-    assert "【治理规约】命名 snake_case" in messages[0]["content"]
+    assert "【治理规约】" not in messages[0]["content"]
+    assert len(messages[0]["content"]) < 500
 
 
-def test_select_non_governance_skill_ignores_card():
-    """query 未标 attach_governance：即便传了卡也不并入（scoped）。"""
-    messages = [{"role": "system", "content": "BASE"}]
-    svc._apply_select_skill({"skill": "query"}, messages, "BASE", "【治理规约】不该出现")
-    assert "【治理规约】不该出现" not in messages[0]["content"]
+def test_safe_skill_selection_keeps_minimal_system_prompt():
+    messages = [{"role": "system", "content": c._MINIMAL_AGENT_SYSTEM_PROMPT}]
+    svc._apply_select_skill(
+        {"skill": "task"}, messages, c._MINIMAL_AGENT_SYSTEM_PROMPT,
+        "ignored", apply_overlay=False,
+    )
+    assert messages[0]["content"] == c._MINIMAL_AGENT_SYSTEM_PROMPT
 
 
 def test_tools_only_unlock_never_shrink():
@@ -90,7 +87,7 @@ def test_select_skill_appends_overlay_and_unlocks():
     assert is_error is False
     assert skill is not None and skill.name == "query"
     assert messages[0]["content"].startswith("BASE\n\n")
-    assert "取数分析技能" in messages[0]["content"]
+    assert "【取数分析】" in messages[0]["content"]
     assert result["tools_unlocked"] == [
         "update_plan", "scout_query", "analyze_result", "render_chart",
         "propose_panel", "propose_dashboard",
@@ -103,8 +100,8 @@ def test_select_skill_reselect_replaces_not_stacks():
     svc._apply_select_skill({"skill": "query"}, messages, "BASE")
     svc._apply_select_skill({"skill": "overview"}, messages, "BASE")
     assert messages[0]["content"].count("BASE") == 1
-    assert "域概览技能" in messages[0]["content"]
-    assert "取数分析技能" not in messages[0]["content"]
+    assert "【域概览】" in messages[0]["content"]
+    assert "【取数分析】" not in messages[0]["content"]
 
 
 def test_select_skill_unknown_is_error_no_switch():
@@ -382,20 +379,42 @@ def test_create_skill_flow_stays_read_only(client):
 
 
 def test_propose_action_builds_draft_payload():
+    from app.models import DataSource
+
     with SessionLocal() as db:
+        old_defaults = [
+            row.id for row in db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+        ]
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id="ds-action-doris", name="默认 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, enabled=True, status="ok", dsn_secret_ref="ref://doris",
+        ))
+        db.commit()
         r, _summary, is_error = svc._dispatch_propose_action(
             db,
             ontology_id="onto1", domain_id="dom1",
-            args={"kind": "materialize", "intent": "把客户主数据物化到 dim_customer",
-                  "context": {"target_table": "dim_customer",
-                              "target_datasource_id": "ds-1"}},
+            args={"kind": "materialize", "intent": "把客户主数据物化到数仓",
+                  "context": {"target_datasource_id": "ds-action-doris",
+                              "target_database": "dw", "selected_targets": ["customer"]}},
         )
+        db.query(DataSource).filter(DataSource.id == "ds-action-doris").delete()
+        if old_defaults:
+            db.query(DataSource).filter(DataSource.id.in_(old_defaults)).update(
+                {DataSource.is_default_warehouse: True}, synchronize_session=False
+            )
+        db.commit()
     assert is_error is False
     assert r["kind"] == "materialize"
     dp = r["draft_payload"]
     assert dp["kind"] == "materialize" and dp["ontology_id"] == "onto1"
-    assert dp["intent"] == "把客户主数据物化到 dim_customer"
-    assert dp["context"]["target_table"] == "dim_customer"
+    assert dp["intent"] == "把客户主数据物化到数仓"
+    assert dp["context"]["target_database"] == "dw"
+    assert dp["context"]["selected_targets"] == ["customer"]
 
 
 def test_propose_action_rejects_bad_kind_and_missing_intent():
@@ -420,7 +439,13 @@ def test_propose_action_rejects_missing_required_context(client):
     from app.models import DataSource
 
     with SessionLocal() as db:
-        db.add(DataSource(id="ds-hive", name="仓库 Hive", kind="hive", status="ok"))
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id="ds-hive", name="生产 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, status="ok", dsn_secret_ref="mysql://doris",
+        ))
         db.commit()
         r, summary, is_error = svc._dispatch_propose_action(
             db,
@@ -428,28 +453,150 @@ def test_propose_action_rejects_missing_required_context(client):
             args={"kind": "materialize", "intent": "把客户主数据物化到数仓"},
         )
     assert is_error is True
-    assert r["missing"] == ["target_datasource_id"]
-    assert "target_datasource_id" in summary
+    assert r["missing"] == ["target_datasource_id", "target_database"]
+    assert "target_datasource_id" in summary and "target_database" in summary
     # 「怎么补」不能只说缺了什么：附上真实候选，模型才能据此发一张能选的表单。
     options = r["target_datasource_id_options"]
-    assert {"id": "ds-hive", "name": "仓库 Hive", "kind": "hive", "status": "ok"} in options
+    assert {"id": "ds-hive", "name": "生产 Doris", "kind": "doris", "status": "ok"} in options
     # 凭据不出现在候选里
     assert all("dsn" not in k for o in options for k in o)
-
-
-def test_propose_action_allows_kinds_whose_context_is_derivable():
-    """sync/transform 的必填 Spec 字段由 Drafter 从本体推导，不该当成必填 context 拦下。
-
-    判据取 Drafter 的 required_context，而非规约的 required_metadata.per_artifact
-    （后者约束的是 Spec 字段，如 sync 的 source/target）。
-    """
     with SessionLocal() as db:
-        for kind in ("sync", "transform"):
-            _r, _s, is_error = svc._dispatch_propose_action(
-                db, ontology_id="onto1", domain_id="dom1",
-                args={"kind": kind, "intent": "把订单表搬到数仓"},
+        db.query(DataSource).filter(DataSource.id == "ds-hive").delete()
+        db.commit()
+
+
+def test_propose_action_requires_explicit_sync_endpoints_and_transform_doris():
+    """sync 端点与 transform 默认 Doris 都不可由模型猜测。"""
+    with SessionLocal() as db:
+        result, _summary, is_error = svc._dispatch_propose_action(
+            db, ontology_id="onto1", domain_id="dom1",
+            args={"kind": "sync", "intent": "把订单表搬到数仓"},
+        )
+        assert is_error is True
+        assert set(result["missing"]) == {
+            "source_datasource_id", "target_datasource_id", "target_ods_database",
+        }
+        transform, _s, is_error = svc._dispatch_propose_action(
+            db, ontology_id="onto1", domain_id="dom1",
+            args={"kind": "transform", "intent": "清洗订单"},
+        )
+        assert is_error is True
+        assert transform["missing"] == ["target_datasource_id"]
+
+
+def test_sync_proposal_requires_conversation_confirmations(client, admin_headers):
+    """识别出 sync 任务不等于需求已确认；通过后仍校验真实业务源与默认 Doris。"""
+    from uuid import uuid4
+
+    from app.models import DataSource, ObjectType
+    from app.models.chat_bi import ChatBiConversation
+    from app.services.chat_bi_ledger import record_decision
+
+    domain_id, ontology_id, aliases = _seed_golden_domain()
+    source_id = f"source-confirm-{uuid4().hex[:8]}"
+    target_id = f"doris-confirm-{uuid4().hex[:8]}"
+    with SessionLocal() as db:
+        order = db.get(ObjectType, aliases["@order"])
+        order.source_ref = "urn:li:dataset:(urn:li:dataPlatform:postgres,erp.public.order,PROD)"
+        old_defaults = [
+            row.id for row in db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+        ]
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add_all([
+            DataSource(
+                id=source_id, name="ERP PG", kind="postgres", purpose="business_source",
+                enabled=True, status="ok", catalog_name="erp", dsn_secret_ref="postgresql://reader@db/erp",
+            ),
+            DataSource(
+                id=target_id, name="默认 Doris", kind="doris", purpose="warehouse",
+                is_default_warehouse=True, enabled=True, status="ok", dsn_secret_ref="ref://doris",
+            ),
+        ])
+        conv = ChatBiConversation(title="同步闭环门禁")
+        db.add(conv)
+        db.commit()
+        result, _summary, is_error = svc._dispatch_propose_action(
+            db, ontology_id=ontology_id, domain_id=domain_id, conversation_id=conv.id,
+            args={"kind": "sync", "intent": "同步订单到数仓", "context": {
+                "object_type": "order", "source_datasource_id": source_id,
+                "target_datasource_id": target_id, "target_ods_database": "ods", "mode": "full",
+            }},
+        )
+        assert is_error is True
+        assert result["missing_confirmations"] == ["requirement", "ontology", "data"]
+
+        confirmation_id = "sync-confirm-1"
+        for node in ("requirement", "ontology", "data"):
+            record_decision(
+                db, conversation_id=conv.id, node=node,
+                stage=f"task_{node}_confirm", outcome="accepted",
+                chosen={
+                    "task_confirmation_id": confirmation_id,
+                    **({"task_requirement": "同步已确认的订单到数仓"} if node == "requirement" else {}),
+                },
             )
-            assert is_error is False, kind
+        conversation_id = conv.id
+
+    response = client.post(
+        "/api/agents/draft-confirmed",
+        headers=admin_headers,
+        json={
+            "conversation_id": conversation_id,
+            "confirmation_id": confirmation_id,
+            "kind": "sync",
+            "intent": "同步订单到数仓",
+            "ontology_id": ontology_id,
+            "context": {
+                "object_type": "order",
+                "source_datasource_id": source_id,
+                "target_datasource_id": target_id,
+                "target_ods_database": "ods",
+                "target_ods_table": "caller_defined",
+                "mode": "full",
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    artifact = response.json()
+    assert artifact["status"] == "validated"
+    assert artifact["intent"] == "同步已确认的订单到数仓"
+    assert artifact["validation_report"]["dry_run"]["target_ods_table"].endswith("_order")
+    assert artifact["spec"]["target_ods_table"].endswith("_order")
+    assert artifact["spec"]["target_ods_table"] != "caller_defined"
+
+    with SessionLocal() as db:
+        db.query(DataSource).filter(DataSource.id.in_([source_id, target_id])).delete(
+            synchronize_session=False
+        )
+        if old_defaults:
+            db.query(DataSource).filter(DataSource.id.in_(old_defaults)).update(
+                {DataSource.is_default_warehouse: True}, synchronize_session=False
+            )
+        db.commit()
+
+
+def test_all_write_task_proposals_require_three_step_confirmation():
+    """物化/同步/加工/聚合都不能把“识别出任务”当作“用户已确认”。"""
+    from app.models.chat_bi import ChatBiConversation
+
+    with SessionLocal() as db:
+        conv = ChatBiConversation(title="四类任务闭环门禁")
+        db.add(conv)
+        db.commit()
+        for kind in ("materialize", "sync", "transform", "metric"):
+            result, _summary, is_error = svc._dispatch_propose_action(
+                db,
+                ontology_id="onto1",
+                domain_id="dom1",
+                conversation_id=conv.id,
+                args={"kind": kind, "intent": f"新建 {kind} 任务", "context": {}},
+            )
+            assert is_error is True
+            assert result["missing_confirmations"] == ["requirement", "ontology", "data"]
 
 
 def test_materialize_required_context_matches_standard():
@@ -468,13 +615,32 @@ def test_materialize_required_context_matches_standard():
     )
 
 
-def test_task_skill_unlocks_action_tools_and_governance():
+def test_task_skill_unlocks_action_tools():
     task = SKILLS["task"]
-    assert task.attach_governance is True
+    assert task.attach_governance is False
     tools = {t["function"]["name"] for t in c._tools_for_skill(task)}
     base = {t["function"]["name"] for t in c._BASE_TOOL_SCHEMAS}
     assert base <= tools  # 只解锁不收窄
     assert {"propose_action", "get_task_status", "lint_against_standard"} <= tools
+
+
+def test_existing_conversation_uses_its_own_domain_scope(client, admin_headers):
+    """填表期间页面作用域变化时，续聊仍使用会话创建时的数据域。"""
+    domain_a, _onto_a, _aliases_a = _seed_golden_domain()
+    domain_b, _onto_b, _aliases_b = _seed_golden_domain()
+    with SessionLocal() as db:
+        conv = svc.create_conversation(db, domain_ids=[domain_a], title="作用域稳定")
+    response = client.post(
+        "/api/chat-bi/ask",
+        headers=admin_headers,
+        json={
+            "domain_ids": [domain_b],  # 模拟页面筛选在表单填写期间发生变化
+            "conversation_id": conv["id"],
+            "question": "继续确认数据",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["domain_ids"] == [domain_a]
 
 
 def test_get_task_status_reads_and_filters_by_ontology(client):
@@ -515,9 +681,97 @@ def test_get_task_status_reads_and_filters_by_ontology(client):
         assert err3 is True
 
 
+def test_normal_agent_request_uses_compact_tool_schemas(client):
+    """正常路径也只发送工具名和参数结构，不携带长自然语言工具说明。"""
+    domain_id, _onto, aliases = _seed_golden_domain()
+    inner = _StubCompletions([FinalTurn("你好")], aliases)
+    calls: list[dict] = []
+    original_create = inner.create
+
+    async def capture(**kwargs):
+        calls.append(kwargs)
+        return await original_create(**kwargs)
+
+    inner.create = capture  # type: ignore[assignment]
+    orig = c.AsyncOpenAI
+    c.AsyncOpenAI = lambda **_k: _StubClient(inner)  # type: ignore[assignment]
+    service = ChatBiService()
+    service.settings_service = SimpleNamespace(  # type: ignore[assignment]
+        get_llm_runtime=lambda _db: SimpleNamespace(
+            api_key="stub-key", api_base_url="http://stub", model="stub-model"
+        )
+    )
+    try:
+        with SessionLocal() as db:
+            asyncio.run(service.ask(db, domain_ids=[domain_id], question="你好"))
+    finally:
+        c.AsyncOpenAI = orig  # type: ignore[assignment]
+
+    assert calls
+    assert calls[0]["messages"][0]["content"].startswith("你是企业数据助手")
+    for tool in calls[0].get("tools") or []:
+        fn = tool["function"]
+        assert "description" not in fn
+        assert "description" not in json.dumps(fn.get("parameters") or {})
+
+
+def test_flagged_prompt_retries_with_compact_tools_and_no_skill_overlay(client):
+    """上游误判 prompt 后，第二次请求要真的精简 messages + tools，且选技能后不恢复长 overlay。"""
+    domain_id, _onto, aliases = _seed_golden_domain()
+    script = [
+        ToolTurn([("select_skill", {"skill": "task"})]),
+        ToolTurn([("request_form", {
+            "title": "确认同步任务", "task_kind": "sync", "intent": "同步订单到数仓",
+        })]),
+    ]
+    inner = _StubCompletions(script, aliases)
+
+    class _FlagOnce:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise ValueError(
+                    "Invalid prompt: your prompt was flagged as potentially violating our usage policy"
+                )
+            return await inner.create(**kwargs)
+
+    completions = _FlagOnce()
+    orig = c.AsyncOpenAI
+    c.AsyncOpenAI = lambda **_k: _StubClient(completions)  # type: ignore[assignment]
+    service = ChatBiService()
+    service.settings_service = SimpleNamespace(  # type: ignore[assignment]
+        get_llm_runtime=lambda _db: SimpleNamespace(
+            api_key="stub-key", api_base_url="http://stub", model="stub-model"
+        )
+    )
+    try:
+        with SessionLocal() as db:
+            payload = asyncio.run(
+                service.ask(
+                    db, domain_ids=[domain_id], question="同步订单到数仓",
+                    principal_role="publisher",
+                )
+            )
+    finally:
+        c.AsyncOpenAI = orig  # type: ignore[assignment]
+
+    assert payload["form_request"]["confirmation_id"]
+    assert len(completions.calls) >= 3  # 被标记 → 精简后选技能 → request_form
+    for call in completions.calls[1:]:
+        system = call["messages"][0]["content"]
+        assert system == c._MINIMAL_AGENT_SYSTEM_PROMPT
+        assert "【数据任务】" not in system
+        for tool in call.get("tools") or []:
+            fn = tool["function"]
+            assert "description" not in fn
+            assert "description" not in json.dumps(fn.get("parameters") or {})
+
+
 def test_task_skill_flow_stays_read_only(client):
-    """端到端：select_skill(task) → propose_action 穿真实循环；payload 带任务提案，
-    投影出 action_proposal 块，且 **ask() 不新建任何 GovernanceArtifact**（只读边界）。"""
+    """端到端：识别物化任务后先出确认表单，不得跳过需求/本体/数据直接提案。"""
     from app.models.agent import GovernanceArtifact
 
     domain_id, _onto, aliases = _seed_golden_domain()
@@ -529,12 +783,11 @@ def test_task_skill_flow_stays_read_only(client):
     before = _count()
     script = [
         ToolTurn([("select_skill", {"skill": "task"})]),
-        ToolTurn([("propose_action", {"kind": "materialize",
-                                       "intent": "把客户主数据物化到 dim_customer",
-                                       # 物化必须给目标数据源，否则提案在 dispatch 就被判错
-                                       "context": {"target_table": "dim_customer",
-                                                   "target_datasource_id": "ds-1"}})]),
-        FinalTurn("已拟好物化任务提案，确认后即可创建并运行。"),
+        ToolTurn([("request_form", {
+            "title": "确认物化任务",
+            "task_kind": "materialize",
+            "intent": "把客户主数据物化落库",
+        })]),
     ]
     completions = _StubCompletions(script, aliases)
     orig = c.AsyncOpenAI
@@ -556,12 +809,13 @@ def test_task_skill_flow_stays_read_only(client):
         c.AsyncOpenAI = orig  # type: ignore[assignment]
 
     assert payload.get("grounding_refused") is not True, payload.get("answer")
-    assert payload["skill"] == "task"
-    assert payload["action_proposals"]
-    assert payload["action_proposals"][0]["kind"] == "materialize"
-    assert payload["action_proposals"][0]["draft_payload"]["ontology_id"]
-    assert "action_proposal" in [b["type"] for b in answer_to_blocks(payload)]
-    # 只读不变式：propose_action 只出提案，不建制品
+    assert payload["form_request"]
+    assert payload["form_request"]["confirmation_id"]
+    assert [s["node"] for s in payload["form_request"]["confirmation_steps"]] == [
+        "requirement", "ontology", "data"
+    ]
+    assert "form" in [b["type"] for b in answer_to_blocks(payload)]
+    assert not payload.get("action_proposals")
     assert _count() == before
 
 
@@ -579,7 +833,11 @@ def test_task_options_materialize_lists_real_datasources_and_entities(client):
 
     _domain_id, onto_id, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
-        db.add(DataSource(id="ds-dw", name="数仓 Hive", kind="hive", status="ok",
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(id="ds-dw", name="生产 Doris", kind="doris", purpose="warehouse",
+                          is_default_warehouse=True, status="ok",
                           dsn_secret_ref="ref://dw"))
         db.commit()
         try:
@@ -597,16 +855,19 @@ def test_task_options_materialize_lists_real_datasources_and_entities(client):
             db.commit()
 
     assert is_error is False
-    assert {"id": "ds-dw", "name": "数仓 Hive", "kind": "hive", "status": "ok",
-            "engine": "hive", "writable": True} in r["datasources"]
-    assert r["engine"] == "hive"
-    # 实体候选带得出 overrides 的键，否则「给这张表设分区键」在对话里无从表达
+    target = next(d for d in r["datasources"] if d["id"] == "ds-dw")
+    assert target["name"] == "生产 Doris"
+    assert target["engine"] == "doris"
+    assert target["writable"] is True and target["executable"] is True
+    assert r["engine"] == "doris"
     assert r["entities"] and all(
-        {"contract_id", "entity", "layer", "partition_key", "load_strategy", "refresh_cron"}
-        <= set(e) for e in r["entities"]
+        {"contract_id", "entity", "display_name", "layer", "derived_only"} <= set(e)
+        for e in r["entities"]
     )
-    assert [s["value"] for s in r["load_strategies"]] == ["full", "incremental", "cdc"]
-    assert any(p["expr"] == "0 2 * * *" for p in r["cron_presets"])
+    # 物化只建结构；装载/分区/调度属于同步，不能再误导模型。
+    assert "load_strategies" not in r
+    assert "partition_key_candidates" not in r
+    assert "cron_presets" not in r
     assert "个数据源" in summary
 
 

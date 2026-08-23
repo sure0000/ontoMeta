@@ -44,6 +44,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { ApiError, api } from "../api";
 import type { DependencyComponent, DependencySchema } from "../types";
+import { DorisWarehouseDrawer, useDorisWarehouseController } from "./DorisWarehousePanel";
 
 const { Text } = Typography;
 
@@ -74,6 +75,7 @@ const AIRFLOW_EXTRA_FIELDS = [
   "flink_parallelism",
   "flink_yarn_queue",
   "flink_checkpoint_dir",
+  "flink_rest_endpoint",
 ] as const;
 
 // 连接字段的中文名：schema 回的是后端字段名，直接当 label 会让表单变成一串英文。
@@ -110,11 +112,7 @@ function SecretTextArea(props: {
           placeholder={placeholder}
           onChange={(e) => onChange?.(e.target.value)}
         />
-        <Button
-          size="small"
-          icon={<EyeInvisibleOutlined />}
-          onClick={() => setVisible(false)}
-        >
+        <Button size="small" icon={<EyeInvisibleOutlined />} onClick={() => setVisible(false)}>
           隐藏
         </Button>
       </Space>
@@ -168,6 +166,7 @@ export function DependencyPanel() {
   const [probing, setProbing] = useState<Record<string, boolean>>({});
   const [deploying, setDeploying] = useState<Record<string, boolean>>({});
   const [logRow, setLogRow] = useState<DependencyComponent | null>(null);
+  const doris = useDorisWarehouseController();
 
   // 组件类型/部署方式切换时，上一组 conn_*/spec_* 字段靠 antd preserve 留在 store 里，
   // 同名字段（如 conn_endpoint、conn_token 在 airflow/datahub 都存在）会把
@@ -456,6 +455,31 @@ export function DependencyPanel() {
     }
   };
 
+  const dorisRow: DependencyComponent = {
+    id: "__doris_warehouse__",
+    key: "doris",
+    name: doris.source?.name ?? "默认 Doris 数仓",
+    deploy_mode: "external",
+    deploy_spec: {},
+    deploy_status:
+      doris.config && doris.source?.status === "ok"
+        ? "connected"
+        : doris.config && doris.source?.status === "error"
+          ? "failed"
+          : "not_deployed",
+    deploy_error: doris.config
+      ? `${doris.config.query_host ?? "未填写主机"}:${doris.config.query_port} · ${
+          doris.config.fenodes.length
+        } 个 FE HTTP 节点`
+      : "尚未配置 Doris FE SQL/HTTP 端点和连接凭据",
+    connection: {},
+    enabled: doris.config?.enabled ?? false,
+    is_default: true,
+    created_at: doris.config?.created_at ?? "",
+    updated_at: doris.config?.updated_at ?? "",
+  };
+  const infrastructureRows = [dorisRow, ...rows];
+
   const columns: ColumnsType<DependencyComponent> = [
     {
       title: "组件",
@@ -463,7 +487,7 @@ export function DependencyPanel() {
       width: 160,
       render: (k: string) => {
         const meta = schema?.components.find((c) => c.key === k);
-        return <Tag>{meta?.label ?? k}</Tag>;
+        return <Tag>{k === "doris" ? "Apache Doris" : (meta?.label ?? k)}</Tag>;
       },
     },
     {
@@ -493,9 +517,8 @@ export function DependencyPanel() {
       width: 190,
       render: (s: string, r) => {
         // external 模式的 not_deployed 显示"未拨测"而非"未部署"
-        const label = s === "not_deployed" && r.deploy_mode === "external"
-          ? "未拨测"
-          : (STATUS_LABEL[s] ?? s);
+        const label =
+          s === "not_deployed" && r.deploy_mode === "external" ? "未拨测" : (STATUS_LABEL[s] ?? s);
         // 多条连接的组件（airflow = 调度 API + DAG 投递）逐条显示最近一次拨测结果：
         // 总状态只说"失败"，说不出是哪条断了。
         const groups = schema?.connection_groups?.[r.key] ?? [];
@@ -527,37 +550,58 @@ export function DependencyPanel() {
     {
       title: "操作",
       width: 280,
-      render: (_: unknown, r: DependencyComponent) => (
-        <Space size="small">
-          <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
-          {r.deploy_log ? (
-            <Button size="small" onClick={() => setLogRow(r)}>
-              日志
-            </Button>
-          ) : null}
-          <Button size="small" onClick={() => void handleProbe(r.id)} loading={probing[r.id]}>
-            拨测
-          </Button>
-          {r.deploy_mode !== "external" ? (
-            <>
+      render: (_: unknown, r: DependencyComponent) => {
+        if (r.key === "doris") {
+          return (
+            <Space size="small">
               <Button
                 size="small"
-                type="primary"
-                loading={deploying[r.id]}
-                onClick={() => void handleDeploy(r.id)}
+                icon={<EditOutlined />}
+                onClick={() => doris.setDrawerOpen(true)}
+              />
+              <Button
+                size="small"
+                disabled={!doris.source}
+                loading={doris.testing}
+                onClick={() => void doris.handleTest()}
               >
-                部署
+                拨测
               </Button>
-              <Popconfirm title="卸载该组件？" onConfirm={() => void handleTeardown(r.id)}>
-                <Button size="small">卸载</Button>
-              </Popconfirm>
-            </>
-          ) : null}
-          <Popconfirm title="删除该组件？" onConfirm={() => void handleDelete(r.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
+            </Space>
+          );
+        }
+        return (
+          <Space size="small">
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
+            {r.deploy_log ? (
+              <Button size="small" onClick={() => setLogRow(r)}>
+                日志
+              </Button>
+            ) : null}
+            <Button size="small" onClick={() => void handleProbe(r.id)} loading={probing[r.id]}>
+              拨测
+            </Button>
+            {r.deploy_mode !== "external" ? (
+              <>
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={deploying[r.id]}
+                  onClick={() => void handleDeploy(r.id)}
+                >
+                  部署
+                </Button>
+                <Popconfirm title="卸载该组件？" onConfirm={() => void handleTeardown(r.id)}>
+                  <Button size="small">卸载</Button>
+                </Popconfirm>
+              </>
+            ) : null}
+            <Popconfirm title="删除该组件？" onConfirm={() => void handleDelete(r.id)}>
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -569,9 +613,12 @@ export function DependencyPanel() {
   return (
     <>
       <Space style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
-        <Text type="secondary">共 {rows.length} 个组件</Text>
+        <Text type="secondary">共 {infrastructureRows.length} 个组件</Text>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => void Promise.all([load(), doris.load()])}
+          >
             刷新
           </Button>
           <Button
@@ -587,14 +634,15 @@ export function DependencyPanel() {
       <Table
         rowKey="id"
         columns={columns}
-        dataSource={rows}
-        loading={loading}
+        dataSource={infrastructureRows}
+        loading={loading || doris.loading}
         pagination={false}
         locale={{ emptyText: "暂无组件，点击「新增」" }}
         className="om-table"
         size="middle"
-        scroll={{ x: 'max-content' }}
+        scroll={{ x: "max-content" }}
       />
+      <DorisWarehouseDrawer controller={doris} />
       <Drawer
         title={editing ? "编辑依赖组件" : "新增依赖组件"}
         open={drawerOpen}
@@ -765,9 +813,7 @@ export function DependencyPanel() {
                         ) : f.secret ? (
                           <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
                         ) : f.type === "int" ? (
-                          <InputNumber
-                            style={{ width: "100%" }}
-                          />
+                          <InputNumber style={{ width: "100%" }} />
                         ) : (
                           <Input />
                         )}
@@ -899,7 +945,10 @@ export function DependencyPanel() {
                             </Form.Item>
                             <Space align="start" wrap>
                               <Form.Item label="flink 命令路径" name="extra_flink_bin">
-                                <Input placeholder="flink（在 PATH 上）或绝对路径" style={{ width: 260 }} />
+                                <Input
+                                  placeholder="flink（在 PATH 上）或绝对路径"
+                                  style={{ width: 260 }}
+                                />
                               </Form.Item>
                               <Form.Item label="提交目标" name="extra_flink_deploy_target">
                                 <Select
@@ -925,15 +974,25 @@ export function DependencyPanel() {
                                 label="SqlRunner main class"
                                 name="extra_flink_sql_runner_class"
                               >
-                                <Input placeholder="com.ontometa.flink.SqlRunner" style={{ width: 280 }} />
+                                <Input
+                                  placeholder="com.ontometa.flink.SqlRunner"
+                                  style={{ width: 280 }}
+                                />
                               </Form.Item>
                             </Space>
                             <Form.Item
                               label="Checkpoint 目录"
                               name="extra_flink_checkpoint_dir"
-                              extra="增量/CDC 流式作业持久化读位点用；file://… 本地 或 hdfs://… 集群。全量搬运不需要"
+                              extra="CDC 流式作业持久化读位点用；incremental 是有界水位 batch，不依赖 checkpoint"
                             >
                               <Input placeholder="file:///var/flink/checkpoints 或 hdfs://…" />
+                            </Form.Item>
+                            <Form.Item
+                              label="Flink REST Endpoint"
+                              name="extra_flink_rest_endpoint"
+                              extra="CDC 健康检查使用，如 http://flink-jobmanager:8081；配置落数据库"
+                            >
+                              <Input placeholder="http://flink-jobmanager:8081" />
                             </Form.Item>
                           </>
                         ),

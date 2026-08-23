@@ -8,6 +8,7 @@ import {
   Radio,
   Select,
   Space,
+  Steps,
   Switch,
   Tag,
   message,
@@ -374,6 +375,7 @@ export function ChatBubble({
                   question={question}
                   conversationId={conversationId}
                   messageId={message.id}
+                  ontologyId={message.payload?.ontology_id}
                   onClarify={onClarify}
                   onProposeApp={
                     onProposeApp
@@ -431,6 +433,7 @@ function BlockRenderer({
   question,
   conversationId,
   messageId,
+  ontologyId,
   onClarify,
   onProposeApp,
 }: {
@@ -440,6 +443,7 @@ function BlockRenderer({
   conversationId?: string;
   /** 决策留痕的消息锚。流式刚产出的消息尚未落库、拿不到 id，故可空。 */
   messageId?: string;
+  ontologyId?: string | null;
   onClarify?: (text: string) => void;
   onProposeApp?: (proposal: Extract<ChatBiBlock, { type: "app_proposal" }>["proposal"]) => void;
 }) {
@@ -570,6 +574,7 @@ function BlockRenderer({
           conversationId={conversationId}
           messageId={messageId}
           blockId={block.id}
+          ontologyId={ontologyId}
         />
       );
     default:
@@ -767,6 +772,9 @@ function formatFieldValue(field: ChatBiFormField, raw: unknown): string {
 /** 把填好的表单值拼成既可读、又便于 LLM 解析的结构化回填文本。 */
 function composeFormReply(form: ChatBiFormRequest, values: Record<string, unknown>): string {
   const lines = form.fields.map((f) => `- ${f.label}：${formatFieldValue(f, values[f.name])}`);
+  if (form.confirmation_id) {
+    lines.unshift(`- task_confirmation_id：${form.confirmation_id}`);
+  }
   return `【已填写：${form.title}】\n${lines.join("\n")}`;
 }
 
@@ -864,9 +872,8 @@ function CronPickerControl({
 }
 
 /**
- * 交互表单块（P6）：Agent 用 request_form 动态生成的可填写表单，一次收集多个结构化参数。
- * 提交后把「字段=值」拼成结构化回填文本，经澄清通道（onSubmit=submit）作为新一轮问题带回，
- * Agent 从 history 读到后继续——无需后端会话态，与既有单发澄清同构，天然支持多轮需求探索。
+ * 交互表单块（P6）。普通分析表单提交后继续对话；数据任务三步确认完成后直接创建草稿并
+ * 生成 dry-run 执行方案，不再把表单文本交给 LLM 二次解释。
  */
 function FormBlock({
   form,
@@ -874,16 +881,44 @@ function FormBlock({
   conversationId,
   messageId,
   blockId,
+  ontologyId,
 }: {
   form: ChatBiFormRequest;
   onSubmit?: (text: string) => void;
   conversationId?: string;
   messageId?: string;
   blockId?: string;
+  ontologyId?: string | null;
 }) {
   const [antForm] = Form.useForm();
   const [submitted, setSubmitted] = useState(false);
-  const disabled = !onSubmit || submitted;
+  const [submittingTask, setSubmittingTask] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
+  const { notifyWritten } = useDecisionLedger();
+  const confirmationSteps = form.confirmation_steps ?? [];
+  const staged = confirmationSteps.length > 0;
+  const inferredTaskKind = form.fields.some((field) => field.name === "object_type")
+    ? "sync"
+    : form.fields.some((field) => field.name === "business_logic_id")
+      ? "metric"
+      : form.fields.some((field) => field.name === "cleansing_rules")
+        ? "transform"
+        : form.fields.some((field) => field.name === "selected_targets")
+          ? "materialize"
+          : undefined;
+  const taskKind = form.task_kind ?? inferredTaskKind;
+  const effectiveOntologyId = form.ontology_id ?? ontologyId ?? undefined;
+  const deterministicTaskSubmit = Boolean(
+    staged && form.confirmation_id && taskKind && effectiveOntologyId && conversationId,
+  );
+  const { open: openArtifact, node: artifactDrawer } = useArtifactDrawer(
+    undefined,
+    conversationId,
+    messageId,
+    blockId,
+  );
+  const activeStep = confirmationSteps[currentStep];
+  const disabled = submitted || submittingTask || (!onSubmit && !deterministicTaskSubmit);
   const initialValues = useMemo(() => {
     const iv: Record<string, unknown> = {};
     for (const f of form.fields) {
@@ -895,12 +930,139 @@ function FormBlock({
     }
     return iv;
   }, [form]);
-  const handleFinish = (values: Record<string, unknown>) => {
+  const fieldsOfStep = (node: string) =>
+    form.fields.filter(
+      (f) => f.confirmation_node === node || (node === "plan" && !f.confirmation_node),
+    );
+  const visibleFields = staged ? fieldsOfStep(activeStep?.node ?? "") : form.fields;
+  const [liveValues, setLiveValues] = useState<Record<string, unknown>>(initialValues);
+  // DataSource 是可变设置，不能永久使用消息生成时的静态 options 快照。尤其是用户先收到
+  // 空表单、再去设置页配置默认 Doris 后，返回历史消息时应立即看到新目标，无需重开对话。
+  const [runtimeOptions, setRuntimeOptions] = useState<Record<string, ChatBiFormField["options"]>>({});
+  const [runtimeHelp, setRuntimeHelp] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const targetField = form.fields.find((field) => field.name === "target_datasource_id");
+    if (!targetField) return;
+    let cancelled = false;
+    api
+      .listDataSources()
+      .then((sources) => {
+        if (cancelled) return;
+        const targets = sources
+          .filter(
+            (source) =>
+              source.purpose === "warehouse" &&
+              source.kind === "doris" &&
+              source.is_default_warehouse === true &&
+              source.enabled !== false &&
+              source.dsn_set === true,
+          )
+          .map((source) => ({
+            label: `${source.name}（默认 Doris）`,
+            value: source.id,
+          }));
+        setRuntimeOptions((prev) => ({ ...prev, target_datasource_id: targets }));
+        setRuntimeHelp((prev) => ({
+          ...prev,
+          target_datasource_id: targets.length
+            ? "候选已按当前设置实时刷新；同步、加工、聚合和物化使用默认 Doris"
+            : "当前设置中没有启用且已配置连接的默认 Doris",
+        }));
+        const current = antForm.getFieldValue("target_datasource_id");
+        if (targets.length === 1 && !current) {
+          antForm.setFieldValue("target_datasource_id", targets[0].value);
+          setLiveValues((prev) => ({ ...prev, target_datasource_id: targets[0].value }));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRuntimeHelp((prev) => ({
+            ...prev,
+            target_datasource_id: "目标数仓候选刷新失败，请检查设置或稍后重试",
+          }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.fields, antForm]);
+  const resolvedField = (field: ChatBiFormField): ChatBiFormField => {
+    const liveOptions = runtimeOptions[field.name];
+    if (liveOptions) {
+      return {
+        ...field,
+        type: field.name === "target_datasource_id" ? "select" : field.type,
+        options: liveOptions,
+        help: runtimeHelp[field.name] ?? field.help,
+      };
+    }
+    if (!field.depends_on || !field.options_by_value) {
+      return { ...field, help: runtimeHelp[field.name] ?? field.help };
+    }
+    const upstream = String(liveValues[field.depends_on] ?? "");
+    return {
+      ...field,
+      options: field.options_by_value[upstream] ?? [],
+      help: runtimeHelp[field.name] ?? field.help,
+    };
+  };
+  const handleValuesChange = (
+    changed: Record<string, unknown>,
+    all: Record<string, unknown>,
+  ) => {
+    const next = { ...all };
+    for (const field of form.fields) {
+      if (!field.depends_on || !(field.depends_on in changed)) continue;
+      const upstream = String(all[field.depends_on] ?? "");
+      const options = field.options_by_value?.[upstream] ?? [];
+      const current = all[field.name];
+      const stillValid = options.some((option) => option.value === current);
+      const replacement = stillValid ? current : options.length === 1 ? options[0].value : undefined;
+      antForm.setFieldValue(field.name, replacement);
+      next[field.name] = replacement;
+    }
+    setLiveValues(next);
+  };
+  const handleFinish = async (values: Record<string, unknown>) => {
+    if (deterministicTaskSubmit) {
+      setSubmittingTask(true);
+      try {
+        const context = { ...values };
+        const intent = String(
+          context.task_requirement ?? context.sync_requirement ?? form.intent ?? form.title,
+        ).trim();
+        delete context.task_requirement;
+        delete context.sync_requirement;
+        const artifact = await api.draftConfirmedArtifact({
+          conversation_id: conversationId!,
+          confirmation_id: form.confirmation_id!,
+          kind: taskKind!,
+          intent,
+          context: toJsonSafe(context) as Record<string, unknown>,
+          ontology_id: effectiveOntologyId!,
+          message_id: messageId,
+          block_id: blockId,
+        });
+        setSubmitted(true);
+        openArtifact(artifact);
+        notifyWritten();
+        if (artifact.status === "validated") {
+          message.success("任务草稿已创建，执行方案已生成，请确认后再执行");
+        } else {
+          message.warning("任务草稿已创建，执行方案存在阻断项，请查看详情");
+        }
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "创建任务草稿失败，请重试");
+      } finally {
+        setSubmittingTask(false);
+      }
+      return;
+    }
+
     setSubmitted(true);
-    // 回填文本照发：Agent 靠它在 history 里续多轮，这条链路不能动。
     onSubmit?.(composeFormReply(form, values));
-    // 并行留痕：把**结构化原值**单独存一份。回填文本是给模型读的散文，
-    // 里面没有「哪个字段被填了什么」的机器可解析结构，事后追溯只能靠这份。
+    if (staged) return;
+    // 通用单页表单仍按原逻辑记为需求确认。
     recordDecisionQuietly(conversationId, {
       node: "requirement",
       stage: "form",
@@ -914,11 +1076,72 @@ function FormBlock({
         ? `${conversationId}:requirement:form:${messageId ?? ""}:${blockId}`
         : undefined,
     });
+    notifyWritten();
+  };
+  const confirmCurrentStep = async () => {
+    if (!activeStep) return;
+    const stepFields = fieldsOfStep(activeStep.node);
+    const names = stepFields.map((f) => f.name);
+    try {
+      if (names.length) await antForm.validateFields(names);
+    } catch {
+      return;
+    }
+    const allValues = antForm.getFieldsValue(true) as Record<string, unknown>;
+    const chosen = {
+      ...(names.length
+        ? Object.fromEntries(names.map((name) => [name, allValues[name]]))
+        : { intent: form.intent ?? form.title }),
+      ...(form.confirmation_id ? { task_confirmation_id: form.confirmation_id } : {}),
+    };
+    const proposed = names.length
+      ? Object.fromEntries(
+          stepFields
+            .filter((f) => f.default !== undefined && f.default !== null)
+            .map((f) => [f.name, f.default]),
+        )
+      : { intent: form.intent ?? form.title };
+    const decision = {
+      node: activeStep.node,
+      stage: `task_${activeStep.node}_confirm`,
+      trigger: "step_confirm",
+      message_id: messageId,
+      block_id: blockId,
+      summary: `${activeStep.title}：${form.intent ?? form.title}`,
+      proposed: toJsonSafe(proposed),
+      chosen: toJsonSafe(chosen),
+    };
+    // 最后一步确认后会立刻把表单作为下一轮消息提交。这里必须等账本提交完成，
+    // 否则 propose_action 的服务端闭环门禁可能先到，看不到刚确认的数据环。
+    if (conversationId) {
+      const saved = await api.recordChatBiDecision(conversationId, decision).catch(() => null);
+      if (!saved?.recorded) {
+        message.error("确认记录未保存，请重试；为避免跳过人审，本步不会继续");
+        return;
+      }
+    }
+    notifyWritten();
+    if (currentStep < confirmationSteps.length - 1) {
+      setCurrentStep((i) => i + 1);
+    } else {
+      antForm.submit();
+    }
   };
   return (
     <div className="chatbi-form">
       <div className="chatbi-form-title">{form.title}</div>
       {form.intent && <div className="chatbi-form-intent">{form.intent}</div>}
+      {staged && (
+        <Steps
+          size="small"
+          current={currentStep}
+          items={confirmationSteps.map((step) => ({ title: step.title }))}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {staged && activeStep?.description && (
+        <div className="chatbi-form-intent">{activeStep.description}</div>
+      )}
       <Form
         form={antForm}
         layout="vertical"
@@ -926,27 +1149,55 @@ function FormBlock({
         disabled={disabled}
         initialValues={initialValues}
         onFinish={handleFinish}
+        onValuesChange={handleValuesChange}
         className="chatbi-form-body"
         requiredMark="optional"
       >
-        {form.fields.map((f) => (
-          <Form.Item
-            key={f.name}
-            name={f.name}
-            label={f.label}
-            extra={f.help}
-            valuePropName={f.type === "boolean" ? "checked" : undefined}
-            rules={f.required ? [{ required: true, message: `请填写${f.label}` }] : undefined}
-          >
-            <FormControl field={f} />
-          </Form.Item>
-        ))}
+        {visibleFields.map((rawField) => {
+          const f = resolvedField(rawField);
+          return (
+            <Form.Item
+              key={f.name}
+              name={f.name}
+              label={f.label}
+              extra={f.help}
+              valuePropName={f.type === "boolean" ? "checked" : undefined}
+              rules={f.required ? [{ required: true, message: `请填写${f.label}` }] : undefined}
+            >
+              <FormControl field={f} />
+            </Form.Item>
+          );
+        })}
+        {staged && activeStep?.node === "requirement" && visibleFields.length === 0 && form.intent && (
+          <div className="chatbi-proposal-param-ro">{form.intent}</div>
+        )}
         <div className="chatbi-form-actions">
-          <Button type="primary" size="small" htmlType="submit" disabled={disabled}>
-            {submitted ? "已提交" : form.submit_label || "提交"}
+          {staged && currentStep > 0 && (
+            <Button size="small" disabled={disabled} onClick={() => setCurrentStep((i) => i - 1)}>
+              上一步
+            </Button>
+          )}
+          <Button
+            type="primary"
+            size="small"
+            htmlType={staged ? "button" : "submit"}
+            disabled={disabled}
+            loading={submittingTask}
+            onClick={staged ? () => void confirmCurrentStep() : undefined}
+          >
+            {submitted
+              ? "已提交"
+              : staged
+                ? currentStep === confirmationSteps.length - 1
+                  ? deterministicTaskSubmit
+                    ? "确认数据并生成执行方案"
+                    : "确认并提交"
+                  : `确认${activeStep?.title.replace(/^确认/, "") ?? "本步"}`
+                : form.submit_label || "提交"}
           </Button>
         </div>
       </Form>
+      {artifactDrawer}
     </div>
   );
 }
@@ -1491,9 +1742,25 @@ function PlanBlock({
  * 任务制品抽屉（P0）：复用治理面板的 ArtifactDetail（已含 dry-run 差异 + 校验/确认/执行 + 回执）。
  * agent 只出提案，人在此抽屉里过既有人审门；写全部落在 publisher 门控之后。
  */
-function useArtifactDrawer(onClose?: () => void) {
+function useArtifactDrawer(
+  onClose?: () => void,
+  conversationId?: string,
+  messageId?: string,
+  blockId?: string,
+) {
   const [detail, setDetail] = useState<GovernanceArtifact | null>(null);
   const [busy, setBusy] = useState(false);
+  const { closure, notifyWritten } = useDecisionLedger();
+  const resultConfirmed = Boolean(
+    detail &&
+      closure?.records.some(
+        (record) =>
+          record.node === "result" &&
+          record.ref_kind === "artifact" &&
+          record.ref_id === detail.id &&
+          ["accepted", "modified"].includes(record.outcome),
+      ),
+  );
   const STEP_LABEL: Record<string, string> = { validate: "校验", confirm: "确认", execute: "执行" };
   const onStep = async (step: "validate" | "confirm" | "execute", artifact: GovernanceArtifact) => {
     setBusy(true);
@@ -1518,6 +1785,24 @@ function useArtifactDrawer(onClose?: () => void) {
       setBusy(false);
     }
   };
+  const confirmResult = (artifact: GovernanceArtifact) => {
+    recordDecisionQuietly(conversationId, {
+      node: "result",
+      stage: "artifact_result_confirm",
+      trigger: "result_confirm",
+      message_id: messageId,
+      block_id: blockId,
+      summary: `确认「${artifact.name}」执行结果：${artifact.status}`,
+      chosen: {
+        status: artifact.status,
+        receipt: artifact.execution_receipt ?? null,
+      },
+      ref_kind: "artifact",
+      ref_id: artifact.id,
+      dedup_key: `${conversationId}:result:artifact:${artifact.id}`,
+    });
+    notifyWritten();
+  };
   const node = (
     <ArtifactDetail
       artifact={detail}
@@ -1528,6 +1813,8 @@ function useArtifactDrawer(onClose?: () => void) {
         onClose?.();
       }}
       onStep={onStep}
+      onConfirmResult={conversationId ? confirmResult : undefined}
+      resultConfirmed={resultConfirmed}
     />
   );
   return { open: setDetail, node };
@@ -1643,11 +1930,13 @@ function ProposalContextForm({
   context,
   ontologyId,
   onChange,
+  readOnly = false,
 }: {
   kind: string;
   context: Record<string, unknown>;
   ontologyId?: string | null;
   onChange: (key: string, value: unknown) => void;
+  readOnly?: boolean;
 }) {
   // 契约 id → 实体显示名。只有确实出现了按契约 id 索引的覆盖才去拉清单。
   const [contractNames, setContractNames] = useState<Record<string, string> | null>(null);
@@ -1684,6 +1973,7 @@ function ProposalContextForm({
         value={context}
         ontologyId={ontologyId}
         onChange={onChange}
+        disabled={readOnly}
       />
       {extraKeys.map((key) => {
         const value = context[key];
@@ -1719,9 +2009,9 @@ function ProposalContextForm({
 }
 
 /**
- * 数据任务提案块（P0）：Data Agent 只出提案（不执行、不写库）；点「去校验并执行」才由用户动作
- * POST /api/agents/draft 建一条治理制品，随后在复用的 ArtifactDetail 抽屉里走
- * 校验→看 dry-run 差异→确认→执行。写侧全程 publisher 门控 + 人工确认，agent 不碰。
+ * 数据任务提案块（P0）：Data Agent 只出提案（不执行、不写库）；用户已在前一张向导中逐步
+ * 确认需求、本体和数据后，这里只创建任务草稿。随后在 ArtifactDetail 中生成并查看 dry-run，
+ * 再明确确认执行方案、执行和验收结果。写侧全程 publisher 门控，agent 不碰。
  *
  * P2：参数不再是一行 JSON——摊成可改的表，用户点之前看得见、也改得动。
  */
@@ -1740,7 +2030,12 @@ function ActionProposalBlock({
   const [context, setContext] = useState<Record<string, unknown>>(() => ({
     ...(proposal.context ?? {}),
   }));
-  const { open, node } = useArtifactDrawer();
+  const { open, node } = useArtifactDrawer(
+    undefined,
+    conversationId,
+    messageId,
+    blockId,
+  );
   const kindLabel = ACTION_KIND_LABEL[proposal.kind] ?? proposal.kind;
   const onConfirm = async () => {
     setDrafting(true);
@@ -1751,8 +2046,10 @@ function ActionProposalBlock({
       // 顺带带上「提案原样」与「人改后」两份 context——服务端据此留痕出人改了哪些参数。
       // 这个 diff 此前只存在于浏览器内存里，确认完就没了。
       if (conversationId) {
-        void api
-          .linkChatBiTask(conversationId, {
+        try {
+          // 必须先建立会话→制品关联，再开放校验/确认/执行；后续三个动作靠这条关联
+          // 把方案、执行和结果记回同一闭环。此前 fire-and-forget 存在确认先于关联的竞态。
+          await api.linkChatBiTask(conversationId, {
             artifact_id: artifact.id,
             kind: proposal.kind,
             intent: proposal.intent,
@@ -1760,10 +2057,26 @@ function ActionProposalBlock({
             chosen_context: toJsonSafe(context) as Record<string, unknown>,
             message_id: messageId,
             block_id: blockId,
-          })
-          .catch(() => {});
+          });
+        } catch {
+          message.warning("任务草稿已创建，但未能关联当前会话；请重试打开任务后再执行");
+          return;
+        }
       }
-      open(artifact);
+      // 创建草稿后立即运行无副作用校验和 dry-run，直接展示“执行方案预览”。
+      // 人工确认与执行仍是后续独立动作，不会因自动校验而越过门禁。
+      try {
+        const validated = await api.validateArtifact(artifact.id);
+        open(validated);
+        if (validated.status === "validated") {
+          message.success("任务草稿已创建，执行方案已生成，请确认后再执行");
+        } else {
+          message.warning("任务草稿已创建，执行方案存在阻断项，请在抽屉中查看");
+        }
+      } catch {
+        open(artifact);
+        message.warning("任务草稿已创建，执行方案生成失败，请在抽屉中点击“生成执行方案”重试");
+      }
     } catch (err) {
       message.error(
         err instanceof ApiError && err.status === 403
@@ -1790,14 +2103,16 @@ function ActionProposalBlock({
         context={context}
         ontologyId={proposal.ontology_id}
         onChange={(key, value) => setContext((prev) => ({ ...prev, [key]: value }))}
+        readOnly
       />
       <div className="chatbi-draft-note">
-        点击后创建治理制品，并在弹窗里过「校验 → dry-run 差异 → 人工确认 →
-        执行」；不会自动执行，也不直接改动数据。
+        参数来自刚完成的确认向导，已锁定；如需修改请重新发起任务确认。点击后只创建任务草稿；
+        接下来需「生成执行方案 → 查看 dry-run → 确认执行方案 →
+        执行 → 确认结果」，不会自动执行或直接改动数据。
       </div>
       <Space>
         <Button type="primary" size="small" loading={drafting} onClick={() => void onConfirm()}>
-          去校验并执行
+          创建任务草稿
         </Button>
       </Space>
       {node}
@@ -1854,9 +2169,12 @@ function PipelineProposalBlock({
     }
   }, []);
   // 抽屉里刚走完的那一步可能已经成功，下一步随之解锁——关掉抽屉就回读一次链态。
-  const { open, node } = useArtifactDrawer(() => {
-    if (pipeline) void refresh(pipeline.id);
-  });
+  const { open, node } = useArtifactDrawer(
+    () => {
+      if (pipeline) void refresh(pipeline.id);
+    },
+    conversationId,
+  );
 
   const create = async () => {
     setBusy(true);
@@ -2168,7 +2486,12 @@ function TaskStatusBlock({
   blockId?: string;
 }) {
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const { open, node } = useArtifactDrawer();
+  const { open, node } = useArtifactDrawer(
+    undefined,
+    conversationId,
+    messageId,
+    blockId,
+  );
   const tasks = status.tasks ?? [];
   // L4 血缘：status.lineage = { tasks, dependencies }（谁产出谁消费）。
   // dependencies: [{ upstream: task_id, downstream: task_id }]

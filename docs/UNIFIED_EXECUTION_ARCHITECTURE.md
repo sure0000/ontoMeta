@@ -1,8 +1,25 @@
-# 统一执行架构（Flink SQL on YARN）
+# 统一执行架构（历史：Flink SQL on YARN）
 
-**状态**：已实施（2025-01 refactor/unify-query-gateway 分支）
+> **状态：已被 Doris 统一数仓架构替代，仅供历史审计。**
+> 当前 as-built：sync 使用 Flink 写 Doris ODS；materialize/transform/metric 使用 Doris SQL；所有查询使用 Doris Query Gateway。
+> 当前依据：`DORIS_WAREHOUSE_REFACTOR_PLAN.md`、`DW_IMPLEMENTATION.md`；生产迁移状态见 `DORIS_PHASE6_PRODUCTION_MIGRATION_REPORT.md`。
+> 下文“搬运/transform/metric 全部 Flink”不再是新实现依据，不得据此恢复 transform/metric 的 Flink 路径。
 
-## 概述
+**历史状态**：已实施（2025-01 refactor/unify-query-gateway 分支）
+
+## 当前替代矩阵（2026-08-22）
+
+| 能力 | 当前引擎 | 编排/执行 |
+|---|---|---|
+| materialize | Doris DDL | Airflow |
+| sync | Flink → Doris ODS | Airflow |
+| transform | Doris SQL | Airflow |
+| metric/tag/rule | Doris SQL | Airflow |
+| Data Agent/Data App/profiling | Doris SELECT | 只读 Query Gateway |
+
+生产尚未切流：默认 Doris 未配置，严格停在 Phase 6 步骤 1。
+
+## 历史概述
 
 统一执行架构将 ontoMeta 的三条执行路径（搬运 / transform / metric）收敛为单一 Flink SQL on YARN 路径，废除多通道（runner/docker）与多工具（SeaTunnel/DataX）选择。
 

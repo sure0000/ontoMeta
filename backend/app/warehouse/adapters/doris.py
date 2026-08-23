@@ -126,6 +126,12 @@ class DorisAdapter(DialectAdapter):
         self.guard(table)
         columns = self._ordered_columns(table)
         keys = self._key_columns(table)
+        # Doris requires at least one physical column.  An empty ontology object
+        # is still materializable as a schema placeholder; later schema change
+        # can replace it once properties are confirmed.
+        if not columns:
+            from app.warehouse.logical_schema import LogicalColumn
+            columns = [LogicalColumn(name="__ontometa_placeholder", data_type="varchar")]
         lines = [
             f"CREATE TABLE IF NOT EXISTS {self._qualified(table)} (",
             ",\n".join(self._render_column(c) for c in columns),
@@ -144,6 +150,31 @@ class DorisAdapter(DialectAdapter):
         bucket = keys[0] if keys else columns[0].name
         lines.append(f"DISTRIBUTED BY HASH({_q(bucket)}) BUCKETS {_BUCKETS}")
         return "\n".join(lines) + ";"
+
+    def render_ingestion_table(
+        self, table: LogicalTable, *, sequence_column: str | None = None
+    ) -> str:
+        """Render a Doris ODS table for Flink ingestion.
+
+        Unique-key ODS tables explicitly enable Merge-on-Write. CDC sequence
+        ordering is a physical Doris property and therefore belongs here, not
+        in Flink SQL or an LLM-produced Spec.
+        """
+        keys = self._key_columns(table)
+        if sequence_column and table.column(sequence_column) is None:
+            raise ValueError(f"sequence column {sequence_column!r} 不在 ODS 列清单中")
+        sql = self.render_create_table(table).rstrip().rstrip(";")
+        props: list[tuple[str, str]] = []
+        if keys:
+            props.append(("enable_unique_key_merge_on_write", "true"))
+        if sequence_column:
+            if not keys:
+                raise ValueError("sequence column 只能用于 Doris Unique Key ODS 表")
+            props.append(("function_column.sequence_col", sequence_column))
+        if not props:
+            return sql + ";"
+        rendered = ",\n  ".join(f'"{key}" = "{value}"' for key, value in props)
+        return f"{sql}\nPROPERTIES (\n  {rendered}\n);"
 
     def render_alter(self, before: LogicalTable, after: LogicalTable) -> list[str]:
         """本体变更 → ALTER。Doris 支持逐列增/删/改（值列为 light schema change）。"""

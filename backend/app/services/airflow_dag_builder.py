@@ -201,7 +201,23 @@ def _flink_run_command(
         parts.append(f"-Dyarn.application.queue={config.yarn_queue}")
     parts.extend(config.extra_args)
     parts.extend(["-c", config.runner_class, jar_file, "--file", sql_file])
-    return " ".join(parts)
+    command = " ".join(parts)
+    if not task.detached:
+        return command
+    # BashOperator pushes its final stdout line to XCom. Normalize Flink's
+    # detached submission text into JSON and fail if no real JobID is present.
+    # Never substitute DagRun/task ids for the Flink runtime identity.
+    return (
+        "set -o pipefail; "
+        f"_ontometa_out=$({command} 2>&1); "
+        "_ontometa_rc=$?; printf '%s\\n' \"$_ontometa_out\"; "
+        "[ $_ontometa_rc -eq 0 ] || exit $_ontometa_rc; "
+        "_ontometa_job_id=$(printf '%s\\n' \"$_ontometa_out\" | "
+        "sed -nE 's/.*(JobID|Job ID)[^0-9a-fA-F]*([0-9a-fA-F]{16,64}).*/\\2/p' | tail -1); "
+        "[ -n \"$_ontometa_job_id\" ] || "
+        "{ echo 'Flink detached submission returned no JobID' >&2; exit 42; }; "
+        "printf '{\"flink_job_id\":\"%s\"}\\n' \"$_ontometa_job_id\""
+    )
 
 
 def build_flink_sql_dag(

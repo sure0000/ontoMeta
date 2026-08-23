@@ -152,7 +152,7 @@ def test_cube_model_endpoint(client, admin_headers):
     assert "amount_sum" in orders["measures"]
 
 
-def test_preview_via_cube_source(client, admin_headers, monkeypatch):
+def test_preview_does_not_execute_historical_cube_binding(client, admin_headers, monkeypatch):
     from app.connectors.cube import CubeConnector
     from app.services.data_app import DataAppService
 
@@ -207,11 +207,10 @@ def test_preview_via_cube_source(client, admin_headers, monkeypatch):
     )
     assert res.status_code == 200, res.text
     body = res.json()
-    # Cube 列名形如 Orders.channel / Orders.amount_sum
-    keys = {c["key"] for c in body["columns"]}
-    assert "Orders.channel" in keys
-    assert "Orders.amount_sum" in keys
-    assert body["rows"]
+    assert body["columns"] == []
+    assert body["rows"] == []
+    assert body["execution_blocked"] is True
+    assert body["used_mock"] is False
 
 
 # ---------------------------------------------- 生产级：预聚合 / joins / RLS / files

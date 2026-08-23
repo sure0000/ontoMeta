@@ -654,6 +654,7 @@ export interface AirflowSettings {
   flink_parallelism?: number;
   flink_yarn_queue?: string;
   flink_checkpoint_dir?: string;
+  flink_rest_endpoint?: string;
   updated_at: string;
 }
 
@@ -885,6 +886,12 @@ export interface ChatBiFormField {
   placeholder?: string;
   help?: string;
   default?: string | number | boolean | string[] | null;
+  /** 建数确认向导中的所属环节；通用表单留空。 */
+  confirmation_node?: "ontology" | "data" | "plan" | string;
+  /** 级联候选：监听该字段（同步源数据源监听 object_type）。 */
+  depends_on?: string;
+  /** 上游字段值 → 本字段候选。 */
+  options_by_value?: Record<string, ChatBiFormOption[]>;
 }
 
 /**
@@ -896,6 +903,17 @@ export interface ChatBiFormRequest {
   intent?: string;
   submit_label?: string;
   fields: ChatBiFormField[];
+  /** 数据任务表单元数据；存在时提交直接进入草稿+dry-run，不再续问 LLM。 */
+  task_kind?: string;
+  ontology_id?: string;
+  /** 一张任务确认单的隔离 id；防止复用同会话旧确认。 */
+  confirmation_id?: string;
+  /** 同步任务按需求→本体→数据逐步确认；没有则按普通单页表单渲染。 */
+  confirmation_steps?: Array<{
+    node: "requirement" | "ontology" | "data" | "plan" | string;
+    title: string;
+    description?: string;
+  }>;
 }
 
 export interface ChatBiDataResult {
@@ -1352,16 +1370,57 @@ export interface DataAppDatasetInput {
   data_source_id?: string | null;
 }
 
+export interface DorisWarehouseConfig {
+  id: string;
+  warehouse_datasource_id: string;
+  enabled: boolean;
+  query_host?: string | null;
+  query_port: number;
+  default_catalog: string;
+  default_database?: string | null;
+  connect_timeout_seconds: number;
+  query_timeout_seconds: number;
+  ssl_enabled: boolean;
+  fenodes: string[];
+  airflow_ddl_conn_id?: string | null;
+  airflow_etl_conn_id?: string | null;
+  airflow_flink_conn_id?: string | null;
+  reader_dsn_set: boolean;
+  reader_dsn_hint?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface DorisWarehouseConfigInput {
+  warehouse_datasource_id: string;
+  enabled?: boolean;
+  query_host?: string | null;
+  query_port?: number;
+  default_catalog?: string;
+  default_database?: string | null;
+  connect_timeout_seconds?: number;
+  query_timeout_seconds?: number;
+  ssl_enabled?: boolean;
+  fenodes?: string[];
+  airflow_ddl_conn_id?: string | null;
+  airflow_etl_conn_id?: string | null;
+  airflow_flink_conn_id?: string | null;
+  reader_dsn_secret_ref?: string | null;
+}
+
 export interface DataSource {
   id: string;
   name: string;
-  kind: string; // sqlite / duckdb / postgres / mysql / mock
+  kind: string; // sqlite / duckdb / postgres / mysql / mock / doris
+  purpose?: "business_source" | "warehouse";
+  is_default_warehouse?: boolean;
+  enabled?: boolean;
   status: string; // untested / ok / error
   mapping?: { tables?: Record<string, string>; columns?: Record<string, string> } | null;
   tested_at?: string | null;
   created_at: string;
   updated_at: string;
-  // 连接信息回显：密码明文下发供编辑弹窗 Input.Password 预填（眼睛图标控制显隐）；password_set 保留兼容。
+  // 连接信息回显：只返回 password_set/password_hint，不返回密码明文。
   dsn_set?: boolean;
   host?: string | null;
   port?: number | null;
@@ -1369,6 +1428,7 @@ export interface DataSource {
   username?: string | null;
   password?: string | null;
   password_set?: boolean;
+  password_hint?: string | null;
   path?: string | null; // 文件类（sqlite/duckdb）
   url?: string | null; // cube 语义层地址
 }
@@ -1465,6 +1525,52 @@ export interface SyncToolPlan {
   default: SyncTool;
 }
 export type MaterializationScdType = "none" | "scd1" | "scd2";
+
+export interface IngestionContract {
+  id: string;
+  ontology_id: string;
+  ontology_version: number;
+  object_type_id: string;
+  source_datasource_id: string;
+  source_physical_table: string;
+  source_mapping: Record<string, string>;
+  doris_datasource_id: string;
+  target_ods_database: string;
+  target_ods_table: string;
+  mode: MaterializationLoadStrategy;
+  primary_keys: string[];
+  sequence_column?: string | null;
+  incremental_column?: string | null;
+  initial_watermark?: string | null;
+  late_arrival_policy: string;
+  idempotency_strategy: string;
+  delete_policy: "ignore" | "soft_delete" | "hard_delete";
+  refresh_cron?: string | null;
+  flink_params: Record<string, unknown>;
+  status: string;
+  last_success_at?: string | null;
+  sync_watermark?: string | null;
+  flink_job_id?: string | null;
+  checkpoint_path?: string | null;
+  savepoint_path?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export type IngestionContractInput = Omit<
+  IngestionContract,
+  | "id"
+  | "target_ods_table"
+  | "ontology_id"
+  | "ontology_version"
+  | "last_success_at"
+  | "sync_watermark"
+  | "flink_job_id"
+  | "checkpoint_path"
+  | "savepoint_path"
+  | "created_at"
+  | "updated_at"
+>;
 
 export interface MaterializationContract {
   id: string;
@@ -1575,6 +1681,8 @@ export interface MaterializeStatus {
 export interface MaterializeTaskResult {
   task_id: string;
   dag_id: string | null;
+  task_state?: string | null;
+  ingestion_status?: string | null;
   backend?: string | null;
   job_id?: string | null;
   rows_read?: number | null;

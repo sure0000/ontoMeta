@@ -52,8 +52,13 @@ def _chain(db, onto_id: str, *, datasource_id: str = "ds-chain"):
 def domain():
     _domain_id, onto_id, _aliases = _seed_golden_domain()
     with SessionLocal() as db:
-        db.add(DataSource(id="ds-chain", name="数仓", kind="hive", status="ok",
-                          dsn_secret_ref="ref://chain"))
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id="ds-chain", name="生产 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, status="ok", dsn_secret_ref="mysql://doris",
+        ))
         db.commit()
         try:
             yield db, onto_id
@@ -182,7 +187,7 @@ def test_unregistered_kind_rejected_at_create_time(domain):
             db, name="坏链", intent=None, ontology_id=onto_id,
             steps=[
                 {"kind": "materialize", "intent": "物化",
-                 "context": {"target_datasource_id": "ds-chain"}},
+                 "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
                 {"kind": "nonexistent", "intent": "不存在的任务"},
             ],
         )
@@ -233,15 +238,14 @@ def test_propose_pipeline_emits_create_payload(domain):
             {"kind": "materialize", "intent": "物化到数仓",
              "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
             {"kind": "transform", "intent": "去重清洗"},
-            {"kind": "metric", "intent": "按口径聚合"},
         ],
     })
     assert is_error is False
     assert [s["kind"] for s in result["create_payload"]["steps"]] == [
-        "materialize", "transform", "metric"
+        "materialize", "transform"
     ]
     assert result["create_payload"]["ontology_id"] == onto_id
-    assert "物化 → 加工 → 聚合" in summary
+    assert "物化 → 加工" in summary
     # 提案阶段一条链都不该落库
     assert TaskPipelineService().list_pipelines(db, ontology_id=onto_id) == []
 
@@ -256,8 +260,8 @@ def test_downstream_need_not_repeat_upstream_context(domain):
         "name": "链",
         "steps": [
             {"kind": "materialize", "intent": "物化",
-             "context": {"target_datasource_id": "ds-chain"}},
-            # 第 2 步若也是物化，仍不必重给 target_datasource_id——上游已经定下了
+             "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
+            # 第 2 步若也是物化，仍不必重给目标数据源和数据库——上游已经定下了
             {"kind": "materialize", "intent": "再物化一批"},
         ],
     })
@@ -275,7 +279,7 @@ def test_first_step_still_needs_its_own_required_context(domain):
         ],
     })
     assert is_error is True
-    assert result["missing"] == ["target_datasource_id"]
+    assert result["missing"] == ["target_datasource_id", "target_database"]
     assert result["step_index"] == 0
     assert any(o["id"] == "ds-chain" for o in result["target_datasource_id_options"])
 
@@ -297,7 +301,7 @@ def test_cluster_cannot_enter_a_data_pipeline(domain):
         "name": "链",
         "steps": [
             {"kind": "materialize", "intent": "物化",
-             "context": {"target_datasource_id": "ds-chain"}},
+             "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
             {"kind": "cluster", "intent": "扩个节点"},
         ],
     })

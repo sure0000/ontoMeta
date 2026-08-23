@@ -142,6 +142,23 @@ def test_unimplemented_base_still_guards_future_engines():
         _Future().render_create_table(_customer_table())
 
 
+def test_doris_ingestion_table_enables_mow_and_sequence():
+    table = LogicalTable(
+        name="customer", database="ods_erp", layer="ods",
+        columns=(
+            LogicalColumn("customer_id", "bigint", "identifier"),
+            LogicalColumn("modified_at", "timestamp", "datetime"),
+        ),
+        constraints=(LogicalConstraint("primary_key", ("customer_id",)),),
+    )
+    ddl = get_adapter("doris").render_ingestion_table(
+        table, sequence_column="modified_at"
+    )
+    assert "UNIQUE KEY(`customer_id`)" in ddl
+    assert '"enable_unique_key_merge_on_write" = "true"' in ddl
+    assert '"function_column.sequence_col" = "modified_at"' in ddl
+
+
 # ---------- Hive 类型映射 ----------
 
 

@@ -21,10 +21,11 @@ from sqlalchemy.orm import Session
 
 from app.governance import GovernanceStandard, active_standard
 from app.governance.lint import lint_spec
-from app.models import ObjectType, Ontology, Property
+from app.models import DataSource, ObjectType, Ontology, Property
 from app.services import flink_params
 from app.services.draft_consistency import ValidationIssue, validate_ontology
 from app.warehouse import UnknownEngineError, get_adapter
+from app.warehouse.policy import ALLOWED_EXECUTION_ENGINES, WAREHOUSE_ENGINE, require_doris
 
 # 与规约无关的结构性 warning（引擎未核实、本体一致性）。规约条款的 error/warning
 # 由其自身 severity 决定，不在这里维护——见 is_blocking。
@@ -68,13 +69,19 @@ def validate_spec(
         return issues
 
     standard = active_standard(db)
-    issues.extend(_check_engines(spec))
+    issues.extend(_check_engines(db, kind, spec))
     issues.extend(_check_flink_params(spec))
     issues.extend(_check_ontology_refs(db, spec, ontology_id))
     issues.extend(_check_required_metadata(kind, spec, standard))
     issues.extend(_check_standard(kind, spec, standard))
     if kind == "materialize":
         issues.extend(_check_materialize_preflight(db, spec, ontology_id))
+    if kind == "sync":
+        issues.extend(_check_doris_ingestion(db, spec))
+    if kind == "transform":
+        issues.extend(_check_doris_transform(db, spec))
+    if kind == "metric":
+        issues.extend(_check_doris_metric(db, spec))
 
     # 本体范围的制品：连带跑既有的发布前一致性校验（warning 级，不阻断制品本身）。
     if ontology_id and db.query(Ontology).filter(Ontology.id == ontology_id).first():
@@ -158,13 +165,33 @@ def _check_flink_params(spec: dict[str, Any]) -> list[ValidationIssue]:
     return []
 
 
-def _check_engines(spec: dict[str, Any]) -> list[ValidationIssue]:
+def _check_engines(db: Session, kind: str, spec: dict[str, Any]) -> list[ValidationIssue]:
     """目标引擎必须存在；未核实能力矩阵的引擎给 warning。"""
     issues: list[ValidationIssue] = []
     engines = spec.get("engines") or ([spec["engine"]] if spec.get("engine") else [])
+    # Historical artifacts remain readable until an explicit default Doris is
+    # configured. That configuration is the migration cut-over switch for the
+    # validation gate; after it, new warehouse work is Doris-only.
+    target = db.get(DataSource, spec.get("target_datasource_id")) if spec.get("target_datasource_id") else None
+    doris_only = bool(
+        (target is not None and target.purpose == "warehouse"
+         and target.kind == WAREHOUSE_ENGINE and target.is_default_warehouse and target.enabled)
+        or db.query(DataSource).filter(
+            DataSource.purpose == "warehouse",
+            DataSource.kind == WAREHOUSE_ENGINE,
+            DataSource.is_default_warehouse.is_(True),
+            DataSource.enabled.is_(True),
+        ).first()
+    )
+    if kind in {"materialize", "transform", "metric"} and not engines and doris_only:
+        engines = [WAREHOUSE_ENGINE]
+    allowed = ALLOWED_EXECUTION_ENGINES.get(kind) if doris_only else None
+    if kind == "sync" and doris_only:
+        allowed = frozenset({"doris", "flink"})
     for engine in engines:
+        engine_name = str(engine).lower()
         try:
-            adapter = get_adapter(str(engine))
+            adapter = get_adapter(engine_name)
         except UnknownEngineError as exc:
             issues.append(
                 ValidationIssue(
@@ -172,6 +199,16 @@ def _check_engines(spec: dict[str, Any]) -> list[ValidationIssue]:
                     message=str(exc),
                     entity_type="engine",
                     entity_name=str(engine),
+                )
+            )
+            continue
+        if allowed and engine_name not in allowed:
+            issues.append(
+                ValidationIssue(
+                    code="engine_forbidden",
+                    message=f"{kind} 制品只允许引擎：{', '.join(sorted(allowed))}；收到 {engine_name}",
+                    entity_type="engine",
+                    entity_name=engine_name,
                 )
             )
             continue
@@ -184,6 +221,122 @@ def _check_engines(spec: dict[str, Any]) -> list[ValidationIssue]:
                     entity_name=str(engine),
                 )
             )
+    return issues
+
+
+def _check_doris_metric(
+    db: Session, spec: dict[str, Any]
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    target = db.get(DataSource, spec.get("target_datasource_id")) if spec.get("target_datasource_id") else None
+    if target is not None and not (
+        target.kind == "doris" and target.purpose == "warehouse"
+        and target.is_default_warehouse and target.enabled
+    ):
+        issues.append(ValidationIssue(
+            code="metric_target_not_default_doris",
+            message="metric/tag/rule 只能在启用的默认 Doris 内执行",
+            entity_type="datasource",
+            entity_id=str(target.id),
+        ))
+    forbidden = sorted(key for key in spec if key.startswith("flink_") or key == "execution_mode")
+    if forbidden:
+        issues.append(ValidationIssue(
+            code="metric_flink_params_forbidden",
+            message="Doris metric 不接受 Flink/streaming 参数：" + ", ".join(forbidden),
+            entity_type="artifact",
+        ))
+    return issues
+
+
+def _check_doris_transform(
+    db: Session, spec: dict[str, Any]
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    target = db.get(DataSource, spec.get("target_datasource_id")) if spec.get("target_datasource_id") else None
+    if target is not None and not (
+        target.kind == "doris" and target.purpose == "warehouse"
+        and target.is_default_warehouse and target.enabled
+    ):
+        issues.append(ValidationIssue(
+            code="transform_target_not_default_doris",
+            message="transform 只能在启用的默认 Doris 内执行",
+            entity_type="datasource",
+            entity_id=str(target.id),
+        ))
+    flink_keys = sorted(key for key in spec if key.startswith("flink_") or key in {
+        "execution_mode", "source_ref_alias"
+    })
+    if flink_keys:
+        issues.append(ValidationIssue(
+            code="transform_flink_params_forbidden",
+            message="Doris transform 不接受 Flink/streaming 参数：" + ", ".join(flink_keys),
+            entity_type="artifact",
+        ))
+    return issues
+
+
+def _check_doris_ingestion(
+    db: Session, spec: dict[str, Any]
+) -> list[ValidationIssue]:
+    """New sync contracts must be business-source → default Doris ODS."""
+    target_id = spec.get("target_datasource_id")
+    if not target_id:
+        return []  # required-metadata policy reports the missing target
+    target = db.get(DataSource, str(target_id))
+    if target is None or target.purpose != "warehouse":
+        return []  # compatibility artifact; execution cannot create a Doris query route
+    issues: list[ValidationIssue] = []
+    if target.kind != WAREHOUSE_ENGINE or not target.is_default_warehouse or not target.enabled:
+        issues.append(ValidationIssue(
+            code="sync_target_not_default_doris",
+            message="sync 只能写入启用的默认 Doris",
+            entity_type="datasource",
+            entity_id=str(target_id),
+        ))
+    source = db.get(DataSource, str(spec.get("source_datasource_id"))) if spec.get("source_datasource_id") else None
+    if source is None or source.purpose != "business_source" or not source.enabled:
+        issues.append(ValidationIssue(
+            code="sync_source_invalid",
+            message="sync 必须绑定启用的 business_source DataSource",
+            entity_type="datasource",
+            entity_id=str(spec.get("source_datasource_id") or ""),
+        ))
+    target_db = str(spec.get("target_ods_database") or "")
+    if not target_db.startswith("ods"):
+        issues.append(ValidationIssue(
+            code="sync_target_not_ods",
+            message="Flink sync 目标必须是 Doris ODS 数据库（名称以 ods 开头）",
+            entity_type="artifact",
+            entity_name=target_db,
+        ))
+    mode = str(spec.get("mode") or "full")
+    pks = spec.get("primary_keys") or []
+    if mode in {"incremental", "cdc"} and not pks:
+        issues.append(ValidationIssue(
+            code="sync_primary_key_missing",
+            message=f"{mode} 同步必须配置 primary_keys",
+            entity_type="artifact",
+        ))
+    if mode == "incremental":
+        if not spec.get("incremental_column"):
+            issues.append(ValidationIssue(
+                code="sync_incremental_column_missing",
+                message="incremental 同步必须配置 incremental_column",
+                entity_type="artifact",
+            ))
+        if spec.get("initial_watermark") in (None, ""):
+            issues.append(ValidationIssue(
+                code="sync_initial_watermark_missing",
+                message="incremental 同步必须配置 initial_watermark",
+                entity_type="artifact",
+            ))
+    if mode == "cdc" and not spec.get("sequence_column"):
+        issues.append(ValidationIssue(
+            code="sync_sequence_column_missing",
+            message="CDC 同步必须配置 sequence_column",
+            entity_type="artifact",
+        ))
     return issues
 
 

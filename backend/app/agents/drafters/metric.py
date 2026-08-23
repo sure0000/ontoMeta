@@ -16,7 +16,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.agents.common import require_context, resolve_spec_engine, select_by_intent
+from app.agents.common import require_context, select_by_intent
 from app.agents.drafters.base import Drafter
 from app.database import SessionLocal
 from app.models import (
@@ -28,7 +28,6 @@ from app.models import (
     Property,
 )
 from app.models.warehouse import TargetKind
-from app.services import flink_params
 from app.services.metric_compiler import effective_logic_type
 
 
@@ -207,18 +206,14 @@ class MetricDrafter(Drafter):
             "logic_type": effective_logic_type(logic),
             "expression": logic.expression_summary or "",
             **roles,
-            # 见 sync.py 同名字段：引擎随目标数据源走，不取契约默认。
-            "engine": resolve_spec_engine(db, context, contract),
+            "engine": "doris",
             # 见 sync.py 同名字段：缺它执行器只渲染 DDL+SQL 不落库。
             "target_datasource_id": context.get("target_datasource_id") or None,
             # 表单显式选的层优先（此前一律取契约，表单里选的层被静默丢弃）。
             "target_layer": context.get("target_layer")
             or (contract.target_layer if contract else "ads"),
             "database_prefix": context.get("database_prefix"),
-            "execution_mode": context.get("execution_mode") or "batch",  # P1-7: batch/streaming（metric 允许 streaming）
-            # 任务级 Flink 执行参数（并行度/队列/提交目标/checkpoint/额外 -D）。
-            # 只落人真填了的项——留空 = 跟随设置页默认。
-            **flink_params.from_context(context),
+            "schedule": context.get("schedule") or context.get("refresh_cron"),
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

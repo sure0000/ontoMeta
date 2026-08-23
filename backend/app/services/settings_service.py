@@ -121,6 +121,7 @@ class AirflowRuntimeConfig:
     flink_parallelism: int = 1
     flink_yarn_queue: str = ""
     flink_checkpoint_dir: str = ""
+    flink_rest_endpoint: str = ""
 
     @property
     def available(self) -> bool:
@@ -282,6 +283,7 @@ class SettingsService:
             flink_parallelism=int(a.get("flink_parallelism") or 1),
             flink_yarn_queue=a.get("flink_yarn_queue") or "",
             flink_checkpoint_dir=a.get("flink_checkpoint_dir") or "",
+            flink_rest_endpoint=a.get("flink_rest_endpoint") or "",
         )
 
     # Cube（保留用于向后兼容，但不再作为可部署组件）

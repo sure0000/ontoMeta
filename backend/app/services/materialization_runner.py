@@ -29,15 +29,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
+from dataclasses import replace
 from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.connectors.datahub import build_dataset_urn
-from app.models.data_app import DataSource
+from app.models import IngestionContract, ObjectType, Ontology
+from app.models.data_app import DataSource, DorisWarehouseConfig
 from app.services.airflow_dag_builder import (
     _plan_staging,
     build_flink_sql_dag,
@@ -45,11 +48,15 @@ from app.services.airflow_dag_builder import (
 from app.services.job_planner import JobPlanner
 from app.services.materialization_contract import MaterializationContractService
 from app.services.move_job_compiler import compile_move_task
+from app.services.ods_naming import target_ods_table_name
+from app.services.source_ref import has_physical_source
 from app.services import flink_params
 from app.services.settings_service import SettingsService
 from app.services.warehouse_generator import WarehouseGenerator
-from app.warehouse import DEFAULT_ENGINE, list_engines
+from app.warehouse import DEFAULT_ENGINE, get_adapter
 from app.warehouse.jobs import JobPlan
+from app.warehouse.logical_schema import LogicalConstraint
+from app.warehouse.policy import require_doris, require_doris_datasource
 
 # 统一执行架构：搬运一律走 Flink SQL on YARN（与 transform/metric 同一执行路径），
 # 不再有 seatunnel/datax/docker/runner 多通道。工具恒为 flink。
@@ -67,19 +74,20 @@ _settings = SettingsService()
 def resolve_engine(
     db: Session, target_datasource_id: str | None, spec_engine: Any = None
 ) -> str:
-    """物化引擎（DDL/ETL 方言）的唯一推定口径。
+    """Resolve an executable warehouse target; Phase 6 has no legacy fallback.
 
-    引擎信息就在目标数据源里（``DataSource.kind``），不再让用户/表单单独选。
-    与前端 ``MaterializeModal.engineOfKind`` 同口径：数据源 kind 命中已注册引擎即用它，
-    否则回退 ``DEFAULT_ENGINE``。显式传入的 ``spec_engine``（旧制品/对话链路）优先。
+    Historical non-Doris Artifact/receipt rows remain readable, but no runtime
+    path may submit them again. Engine, datasource role and default identity are
+    all explicit and must agree on the one enabled Doris warehouse.
     """
-    if spec_engine:
-        return str(spec_engine)
     ds = db.get(DataSource, target_datasource_id) if target_datasource_id else None
-    if ds is not None:
-        key = (ds.kind or "").lower()
-        if key in set(list_engines()):
-            return key
+    try:
+        require_doris_datasource(ds, operation="数仓执行")
+        require_doris(spec_engine or DEFAULT_ENGINE, operation="数仓执行")
+    except ValueError as exc:
+        raise MaterializationError(str(exc)) from exc
+    if not ds.is_default_warehouse:
+        raise MaterializationError("数仓执行目标必须是唯一启用的默认 Doris")
     return DEFAULT_ENGINE
 
 
@@ -93,8 +101,30 @@ def _warehouse_conn_id(ds: DataSource) -> str:
     目标仓就是弹窗里选的 target DataSource，故 conn_id 与数据源 1:1（不同目标需不同
     连接），不再放全局设置。部署方在 Airflow 建一个此 id 的 Connection 指向该仓即可。
     """
-    slug = "".join(c if c.isalnum() else "_" for c in (ds.name or ds.id)).strip("_").lower()
-    return f"ontometa_ds_{slug or ds.id[:8]}"
+    # Stable across renames: DataSource id is the connection identity.
+    token = "".join(c for c in ds.id.lower() if c.isalnum())[:12]
+    return (
+        f"ontometa_doris_{token}_ddl"
+        if getattr(ds, "kind", None) == "doris"
+        else f"ontometa_ds_{token}"
+    )
+
+
+def _warehouse_flink_conn_id(db: Session, ds: DataSource) -> str:
+    config = (
+        db.query(DorisWarehouseConfig)
+        .filter(DorisWarehouseConfig.warehouse_datasource_id == ds.id)
+        .first()
+    )
+    if config and config.airflow_flink_conn_id:
+        return config.airflow_flink_conn_id
+    token = "".join(c for c in ds.id.lower() if c.isalnum())[:12]
+    return f"ontometa_doris_{token}_flink"
+
+
+def _source_conn_id(ds: DataSource) -> str:
+    token = "".join(c for c in ds.id.lower() if c.isalnum())[:12]
+    return f"ontometa_source_{token}"
 
 
 def _bare_name(qualified: str) -> str:
@@ -113,6 +143,79 @@ def _select(
     if selected is None:
         return items
     return [(q, s) for q, s in items if _bare_name(q) in selected]
+
+
+def _ods_ddl_items(
+    db: Session,
+    ontology_id: str,
+    *,
+    database_prefix: str | None,
+    database_overrides: dict[str, str] | None,
+    table_overrides: dict[str, str] | None,
+    selected_targets: list[str] | None,
+) -> list[tuple[str, str]]:
+    """Render ODS tables from current-version IngestionContracts for materialize.
+
+    Sync may create staging tables but Phase 6 requires the formal ODS tables to
+    exist before full ingestion.  Only contracted source objects are included;
+    artificial semantic objects do not get invented ODS tables.
+    """
+    ontology = db.get(Ontology, ontology_id)
+    if ontology is None:
+        return []
+    contracts = db.query(IngestionContract).filter(
+        IngestionContract.ontology_id == ontology_id,
+        IngestionContract.ontology_version == ontology.version,
+    ).all()
+    if not contracts:
+        return []
+    selected = set(selected_targets or [])
+    objects = {
+        row.id: row
+        for row in db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+    }
+    logical = _generator.build_logical_schema(
+        db,
+        ontology_id,
+        database_prefix=database_prefix,
+        database_overrides=database_overrides,
+        table_overrides=table_overrides,
+    ).schema
+    by_entity = {table.source_name: table for table in logical.tables}
+    adapter = get_adapter("doris")
+    items: list[tuple[str, str]] = []
+    for contract in sorted(contracts, key=lambda row: (row.target_ods_database, row.target_ods_table)):
+        obj = objects.get(contract.object_type_id)
+        if obj is None or (selected and obj.name not in selected):
+            continue
+        source_table = by_entity.get(obj.name)
+        if source_table is None:
+            continue
+        try:
+            primary_keys = json.loads(contract.primary_keys_json or "[]")
+        except (TypeError, ValueError):
+            primary_keys = []
+        primary_keys = [str(key) for key in primary_keys if str(key)]
+        # 即便库中留有旧契约名，物化 DDL 也只认后端固定规则；同步执行时 upsert 会把
+        # 契约行同步为同一个名字。
+        ods_table = replace(
+            source_table,
+            name=target_ods_table_name(db, ontology_id, obj),
+            database=contract.target_ods_database,
+            layer="ods",
+            constraints=(
+                (LogicalConstraint("primary_key", tuple(primary_keys)),)
+                if primary_keys else ()
+            ),
+            partition_key=None,
+        )
+        items.append((
+            ods_table.qualified_name,
+            adapter.render_ingestion_table(
+                ods_table, sequence_column=contract.sequence_column
+            ),
+        ))
+    return items
 
 
 def _select_constraints(
@@ -318,6 +421,17 @@ def _run_orchestrated(
     artifact_id: str | None,
     load_strategy: str | None = None,
     flink_task_params: dict[str, Any] | None = None,
+    source_alias: str | None = None,
+    target_ods_database: str | None = None,
+    target_ods_tables: dict[str, str] | None = None,
+    target_primary_keys: dict[str, list[str]] | None = None,
+    sequence_columns: dict[str, str] | None = None,
+    incremental_columns: dict[str, str] | None = None,
+    initial_watermarks: dict[str, str] | None = None,
+    source_physical_tables: dict[str, str] | None = None,
+    source_platforms: dict[str, str] | None = None,
+    source_mappings: dict[str, dict[str, str]] | None = None,
+    delete_policies: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """产出 DAG → 投递 → 触发一次运行。**不在本进程里落库**。
 
@@ -343,7 +457,11 @@ def _run_orchestrated(
             ontology_id,
             engine=engine,
             tool=_SYNC_TOOL,
-            target_alias=_warehouse_conn_id(ds),
+            target_alias=(
+                _warehouse_flink_conn_id(db, ds)
+                if target_ods_database
+                else _warehouse_conn_id(ds)
+            ),
             database_prefix=database_prefix,
             database_overrides=database_overrides,
             table_overrides=table_overrides,
@@ -351,11 +469,24 @@ def _run_orchestrated(
             runner_capabilities=None,
             # 本次运行的装载方式覆盖（Spec 里选的「全量/增量」），缺省 None = 逐表按契约。
             load_strategy=load_strategy,
+            source_alias=source_alias or "erp_readonly",
+            target_ods_database=target_ods_database,
+            target_ods_tables=target_ods_tables,
+            target_primary_keys=target_primary_keys,
+            incremental_columns=incremental_columns,
+            initial_watermarks=initial_watermarks,
+            source_physical_tables=source_physical_tables,
+            source_platforms=source_platforms,
+            source_mappings=source_mappings,
+            delete_policies=delete_policies,
         )
         if not plan.jobs:
             # 一个作业都编不出来 = 没有任何数据会被搬。此前这里静默回 ok: True，
             # 而拆分后这是最可能的失败形态（选中的对象全是人工建模的，压根没有源表）。
             raise MaterializationError(_no_movable_objects_message(plan))
+        # Formal ODS tables are created by materialize from IngestionContracts.
+        # Sync may create run-scoped staging only; CREATE TABLE LIKE therefore
+        # also proves that the formal ODS table already exists.
     else:
         plan = JobPlan()
 
@@ -568,7 +699,10 @@ def _run_orchestrated(
         "batches": batch_results,
         # 本次会**建**的表。同步侧恒为空：前端（MaterializationContractPanel）拿历史回执的
         # tables 做字符串匹配来判「这张表已物化」，同步若填了表名就会让一次搬运冒充成物化。
-        "tables": [q for q, _ in ddl_items],
+        "tables": [q for q, _ in ddl_items] if emit == "ddl" else [],
+        "ods_tables": (
+            sorted({job.target.qualified for job in plan.jobs}) if emit == "dml" else []
+        ),
         "jobs": [job.name for job in plan.jobs],
         "unsupported": plan.unsupported,
         "schema_notes": plan.schema_notes,
@@ -628,7 +762,10 @@ def _handoff_receipt(
         "database_prefix": database_prefix,
         "database_overrides": dict(database_overrides or {}),
         "table_overrides": dict(table_overrides or {}),
-        "tables": [q for q, _ in ddl_items],
+        "tables": [q for q, _ in ddl_items] if emit == "ddl" else [],
+        "ods_tables": (
+            sorted({job.target.qualified for job in plan.jobs}) if emit == "dml" else []
+        ),
         "jobs": [job.name for job in plan.jobs],
         "unsupported": plan.unsupported,
         "schema_notes": plan.schema_notes,
@@ -654,6 +791,17 @@ def _orchestrate(
     sync_contracts: bool,
     artifact_id: str | None,
     flink_task_params: dict[str, Any] | None = None,
+    source_alias: str | None = None,
+    target_ods_database: str | None = None,
+    target_ods_tables: dict[str, str] | None = None,
+    target_primary_keys: dict[str, list[str]] | None = None,
+    sequence_columns: dict[str, str] | None = None,
+    incremental_columns: dict[str, str] | None = None,
+    initial_watermarks: dict[str, str] | None = None,
+    source_physical_tables: dict[str, str] | None = None,
+    source_platforms: dict[str, str] | None = None,
+    source_mappings: dict[str, dict[str, str]] | None = None,
+    delete_policies: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """物化与同步共用的编排骨架：前置校验 → 契约对齐 → 生成 DDL → 交 ``_run_orchestrated``。
 
@@ -665,8 +813,7 @@ def _orchestrate(
     生成是判定「本次选中的对象要落到哪张表」的同一套推导，同步的搬运目标就来自它。
     """
     ds = db.get(DataSource, target_datasource_id)
-    if ds is None:
-        raise MaterializationError("目标数据源不存在")
+    engine = resolve_engine(db, target_datasource_id, engine)
     if not ds.dsn_secret_ref:
         raise MaterializationError(
             f"目标数据源「{ds.name}」未配置连接串（dsn），无法执行"
@@ -708,11 +855,32 @@ def _orchestrate(
     selected = _selected_names(db, ontology_id, selected_targets, table_overrides)
     if emit == "ddl":
         ddl_items = _select(ddl["statements"], selected)
+        ddl_items = _ods_ddl_items(
+            db,
+            ontology_id,
+            database_prefix=database_prefix,
+            database_overrides=database_overrides,
+            table_overrides=table_overrides,
+            selected_targets=selected_targets,
+        ) + ddl_items
         constraint_items = _select_constraints(ddl.get("constraints"), ddl_items)
     else:
         # 同步只搬数据：一条建表语句都不下发。目标表必须已由物化建好——除了「物化在先」
         # 这条策略，staging 的 CREATE TABLE … LIKE <正式表> 结构上也要求它先存在。
         ddl_items, constraint_items = [], {}
+        # Runner 是最后一道边界：即使调用方绕过 Drafter/IngestionContract 直接传了
+        # target_ods_tables，也按后端唯一规则覆盖，绝不接受自定义 ODS 表名。同步落点恒为
+        # ODS；未显式给库时沿用既有 ods[_prefix] 规则。
+        target_ods_database = target_ods_database or (
+            f"ods_{database_prefix}" if database_prefix else "ods"
+        )
+        selected_entities = set(selected_targets or [])
+        target_ods_tables = {
+            obj.name: target_ods_table_name(db, ontology_id, obj)
+            for obj in db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+            if has_physical_source(obj.source_ref)
+            and (not selected_entities or obj.name in selected_entities)
+        }
 
     return _run_orchestrated(
         db,
@@ -730,6 +898,17 @@ def _orchestrate(
         artifact_id=artifact_id,
         load_strategy=load_strategy,
         flink_task_params=flink_task_params,
+        source_alias=source_alias,
+        target_ods_database=target_ods_database,
+        target_ods_tables=target_ods_tables,
+        target_primary_keys=target_primary_keys,
+        sequence_columns=sequence_columns,
+        incremental_columns=incremental_columns,
+        initial_watermarks=initial_watermarks,
+        source_physical_tables=source_physical_tables,
+        source_platforms=source_platforms,
+        source_mappings=source_mappings,
+        delete_policies=delete_policies,
     )
 
 
@@ -814,6 +993,17 @@ def run_sync(
     sync_contracts: bool = True,
     artifact_id: str | None = None,
     flink_task_params: dict[str, Any] | None = None,
+    source_alias: str | None = None,
+    target_ods_database: str | None = None,
+    target_ods_tables: dict[str, str] | None = None,
+    target_primary_keys: dict[str, list[str]] | None = None,
+    sequence_columns: dict[str, str] | None = None,
+    incremental_columns: dict[str, str] | None = None,
+    initial_watermarks: dict[str, str] | None = None,
+    source_physical_tables: dict[str, str] | None = None,
+    source_platforms: dict[str, str] | None = None,
+    source_mappings: dict[str, dict[str, str]] | None = None,
+    delete_policies: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """**同步 = 搬数据**：把源表的数据搬进目标表，返回回执 dict。
 
@@ -856,4 +1046,15 @@ def run_sync(
         sync_contracts=sync_contracts,
         artifact_id=artifact_id,
         flink_task_params=flink_task_params,
+        source_alias=source_alias,
+        target_ods_database=target_ods_database,
+        target_ods_tables=target_ods_tables,
+        target_primary_keys=target_primary_keys,
+        sequence_columns=sequence_columns,
+        incremental_columns=incremental_columns,
+        initial_watermarks=initial_watermarks,
+        source_physical_tables=source_physical_tables,
+        source_platforms=source_platforms,
+        source_mappings=source_mappings,
+        delete_policies=delete_policies,
     )

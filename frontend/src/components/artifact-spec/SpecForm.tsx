@@ -19,6 +19,7 @@ export function SpecForm({
   onChange,
   mode,
   skipKeys,
+  disabled = false,
 }: {
   kind: string;
   value: Record<string, unknown>;
@@ -27,6 +28,8 @@ export function SpecForm({
   mode: "manual" | "proposal";
   /** 要跳过不渲染的字段 key 集合——由外层级联选择接管的字段不在此重复出现。 */
   skipKeys?: Set<string>;
+  /** 已确认的对话提案锁定参数；修改必须重新走确认向导。 */
+  disabled?: boolean;
 }) {
   const fields = SPEC_FIELDS[kind] ?? [];
   const visible = skipKeys ? fields.filter((f) => !skipKeys.has(f.key)) : fields;
@@ -45,6 +48,7 @@ export function SpecForm({
       allValues={value}
       onChange={(next) => onChange(field.key, next)}
       requiredMark={mode === "manual"}
+      disabled={disabled}
     />
   );
   // 已经填过的（编辑模式回填 / 上一步填过）默认展开——折叠起来会让人以为自己没填。
@@ -81,6 +85,7 @@ function SpecFieldControl({
   allValues,
   onChange,
   requiredMark,
+  disabled,
 }: {
   def: SpecFieldDef;
   value: unknown;
@@ -88,6 +93,7 @@ function SpecFieldControl({
   allValues: Record<string, unknown>;
   onChange: (next: unknown) => void;
   requiredMark: boolean;
+  disabled: boolean;
 }) {
   const { options, loading, error } = useSpecOptions(def.optionSource, ontologyId, allValues);
 
@@ -107,7 +113,7 @@ function SpecFieldControl({
       // 有说明文字的项要留出说明那一行的高度，否则它会压到下一项的标签上。
       style={{ marginBottom: help ? 28 : 12 }}
     >
-      {renderControl(def, value, options, loading, onChange)}
+      {renderControl(def, value, options, loading, onChange, disabled)}
     </Form.Item>
   );
 }
@@ -118,12 +124,14 @@ function renderControl(
   options: { value: string; label: string }[],
   loading: boolean,
   onChange: (next: unknown) => void,
+  disabled: boolean,
 ) {
   switch (def.control) {
     case "text":
       return (
         <Input
           value={(value as string) ?? ""}
+          disabled={disabled}
           placeholder={def.default ? `默认 ${String(def.default)}` : undefined}
           onChange={(e) => onChange(e.target.value)}
         />
@@ -132,6 +140,7 @@ function renderControl(
       return (
         <InputNumber
           value={(value as number) ?? null}
+          disabled={disabled}
           min={def.min}
           max={def.max}
           style={{ width: 200 }}
@@ -145,6 +154,7 @@ function renderControl(
       return (
         <Input.TextArea
           rows={2}
+          disabled={disabled}
           value={(value as string) ?? ""}
           onChange={(e) => onChange(e.target.value)}
         />
@@ -156,6 +166,7 @@ function renderControl(
         <Select
           value={(value as string) ?? undefined}
           loading={loading}
+          disabled={disabled}
           allowClear
           showSearch
           optionFilterProp="label"
@@ -170,6 +181,7 @@ function renderControl(
         <Select
           value={(value as string) ?? undefined}
           loading={loading}
+          disabled={disabled}
           allowClear
           showSearch
           optionFilterProp="label"
@@ -186,6 +198,7 @@ function renderControl(
           mode="multiple"
           value={(value as string[]) ?? []}
           loading={loading}
+          disabled={disabled}
           allowClear
           showSearch
           optionFilterProp="label"
@@ -199,6 +212,7 @@ function renderControl(
         <Select
           mode="tags"
           value={(value as string[]) ?? []}
+          disabled={disabled}
           placeholder="输入后回车添加"
           open={false}
           onChange={(v) => onChange(v)}
@@ -206,7 +220,12 @@ function renderControl(
       );
     case "cron":
       return (
-        <CronPicker value={(value as string) ?? ""} size="middle" onChange={(v) => onChange(v)} />
+        <CronPicker
+          value={(value as string) ?? ""}
+          size="middle"
+          disabled={disabled}
+          onChange={(v) => onChange(v)}
+        />
       );
     default:
       return null;

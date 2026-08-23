@@ -17,6 +17,7 @@ from app.api import (
     public_routes,
     settings,
     warehouse,
+    warehouse_migration,
     workspace,
 )
 
@@ -30,6 +31,7 @@ router.include_router(confirmations.router)
 router.include_router(chat_bi.router)
 router.include_router(data_app.router)
 router.include_router(warehouse.router)
+router.include_router(warehouse_migration.router)
 router.include_router(principals.router)
 router.include_router(agents.router)
 router.include_router(governance.router)

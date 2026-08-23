@@ -562,9 +562,27 @@ class OntologyLadderLoader:
             if objv is None:
                 return out
 
-            mapping = _loads(source.mapping_json)
+            from app.services.query_routing import projection_mapping, readiness_error
+            from app.services.warehouse_migration import cutover_error
+
+            blocked = cutover_error(db, [ontology_id]) or readiness_error(
+                db,
+                datasource=source,
+                ontology_ids=[ontology_id],
+                object_names=[obj.name],
+            )
+            if blocked:
+                if not out:
+                    return [{"available": False, "note": blocked}]
+                return out
+            mapping = projection_mapping(
+                db,
+                datasource=source,
+                ontology_ids=[ontology_id],
+                object_names=[obj.name],
+            )
             dsn = source.dsn_secret_ref
-            backend = data_app_executor.backend_of(dsn)
+            backend = "doris"
 
             for p in missing_profiling:
                 propv = objv.resolve_property(p["name"])

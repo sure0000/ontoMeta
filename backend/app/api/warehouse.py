@@ -23,6 +23,9 @@ from app.models import MaterializationContract, Ontology
 from app.models.agent import ArtifactStatus
 from app.models.ontology import OntologyStatus
 from app.schemas import (
+    IngestionContractInput,
+    IngestionContractOut,
+    IngestionTaskResultInput,
     MaterializationContractOut,
     MaterializationContractSyncResult,
     MaterializationContractUpdate,
@@ -39,6 +42,7 @@ from app.warehouse import (
     list_engines,
 )
 from app.warehouse.adapters.base import UnimplementedAdapter
+from app.warehouse.policy import WAREHOUSE_ENGINE, require_doris
 
 router = APIRouter()
 
@@ -51,6 +55,12 @@ def _require_ontology(db: Session, ontology_id: str) -> Ontology:
 
 
 def _require_engine(engine: str) -> str:
+    """Validate an engine for historical read/generation endpoints.
+
+    New write work uses ``_require_new_warehouse_engine``; keeping this helper
+    compatible lets operators inspect old Hive/StarRocks artifacts during the
+    migration window without making them executable as new Doris work.
+    """
     try:
         get_adapter(engine)
     except UnknownEngineError:
@@ -59,6 +69,16 @@ def _require_engine(engine: str) -> str:
             detail=f"未知引擎 {engine}，可选：{', '.join(list_engines())}",
         ) from None
     return engine
+
+
+def _require_new_warehouse_engine(engine: str) -> str:
+    try:
+        return require_doris(engine, operation="新建数仓任务")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"数仓新任务只允许 Doris；收到引擎 {engine!r}",
+        ) from None
 
 
 def _to_out(
@@ -240,6 +260,81 @@ def update_materialization_contract(
         raise HTTPException(status_code=404, detail="物化契约不存在")
     names = materialization_contract_service.resolve_target_names(db, [contract])
     return _to_out(contract, names)
+
+
+# ---------- Phase 2：业务源 → Flink → Doris ODS 接入契约 ----------
+
+
+@router.get(
+    "/ontologies/{ontology_id}/ingestion-contracts",
+    response_model=list[IngestionContractOut],
+)
+def list_ingestion_contracts(ontology_id: str, db: Session = Depends(get_db)):
+    _require_ontology(db, ontology_id)
+    from app.services.ingestion_contract import IngestionContractService
+
+    service = IngestionContractService()
+    return [service.serialize(row) for row in service.list(db, ontology_id)]
+
+
+@router.put(
+    "/ontologies/{ontology_id}/ingestion-contracts",
+    response_model=IngestionContractOut,
+)
+def upsert_ingestion_contract(
+    ontology_id: str,
+    payload: IngestionContractInput,
+    db: Session = Depends(get_db),
+):
+    _require_ontology(db, ontology_id)
+    from app.services.ingestion_contract import (
+        IngestionContractError,
+        IngestionContractService,
+    )
+
+    service = IngestionContractService()
+    try:
+        row = service.upsert(db, ontology_id, payload.model_dump())
+    except IngestionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return service.serialize(row)
+
+
+@router.get("/ingestion-contracts/{contract_id}/health")
+def ingestion_contract_health(contract_id: str, db: Session = Depends(get_db)):
+    from app.services.flink_health import FlinkHealthError, check_ingestion_job
+
+    try:
+        return check_ingestion_job(db, contract_id)
+    except FlinkHealthError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/ingestion-contracts/{contract_id}/reconcile",
+    response_model=IngestionContractOut,
+)
+def reconcile_ingestion_contract(
+    contract_id: str,
+    payload: IngestionTaskResultInput,
+    db: Session = Depends(get_db),
+):
+    from app.services.ingestion_contract import (
+        IngestionContractError,
+        IngestionContractService,
+    )
+
+    service = IngestionContractService()
+    try:
+        row = service.reconcile_task_result(
+            db,
+            contract_id,
+            task_state=payload.task_state,
+            result=payload.result,
+        )
+    except IngestionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return service.serialize(row)
 
 
 # ---------- M3：本体 → 物理正向生成 ----------
@@ -485,6 +580,9 @@ def materialize_ontology(
     ontology = _require_ontology(db, ontology_id)
     if ontology.status == OntologyStatus.ARCHIVED.value:
         raise HTTPException(status_code=400, detail="归档本体不可物化")
+    # The UI submits Doris for new work.  Keep the legacy HTTP shape readable
+    # during migration; the Gate and runner reject non-Doris once an explicit
+    # default warehouse is configured.
     _require_engine(payload.engine)
 
     context = {
@@ -566,6 +664,15 @@ def get_materialize_task_result(
     from app.connectors.airflow import AirflowClient, AirflowError
 
     batches = _receipt_batches(db, artifact_id)
+    import json
+    from app.models.agent import GovernanceArtifact
+
+    artifact = db.get(GovernanceArtifact, artifact_id)
+    try:
+        artifact_receipt = json.loads(artifact.execution_receipt_json or "{}") if artifact else {}
+    except (TypeError, ValueError):
+        artifact_receipt = {}
+    ingestion_contract_id = artifact_receipt.get("ingestion_contract_id")
     airflow = settings_service.get_airflow_runtime(db)
     client = AirflowClient(
         airflow.endpoint,
@@ -584,14 +691,43 @@ def get_materialize_task_result(
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
             if value is None:
                 continue
+            task_state = None
+            try:
+                task_state = next(
+                    (
+                        item.get("state")
+                        for item in client.list_task_instances(bid, brun)
+                        if item.get("task_id") == task_id
+                    ),
+                    None,
+                )
+            except (AirflowError, AttributeError):
+                task_state = None
             if not isinstance(value, dict):
-                # 非预期形状原样带出，不硬套字段——回执宁可显示原文也别假装读懂了。
-                return {"task_id": task_id, "dag_id": bid, "raw": value}
+                return {
+                    "task_id": task_id,
+                    "dag_id": bid,
+                    "task_state": task_state,
+                    "raw": value,
+                }
+            ingestion_status = None
+            if ingestion_contract_id and task_state:
+                from app.services.ingestion_contract import IngestionContractService
+
+                contract = IngestionContractService().reconcile_task_result(
+                    db,
+                    ingestion_contract_id,
+                    task_state=task_state,
+                    result=value,
+                )
+                ingestion_status = contract.status
             return {
                 "task_id": task_id,
                 "dag_id": bid,
+                "task_state": task_state,
+                "ingestion_status": ingestion_status,
                 "backend": value.get("backend"),
-                "job_id": value.get("job_id"),
+                "job_id": value.get("flink_job_id") or value.get("job_id"),
                 "rows_read": value.get("rows_read"),
                 "rows_written": value.get("rows_written"),
                 "watermark_after": value.get("watermark_after"),

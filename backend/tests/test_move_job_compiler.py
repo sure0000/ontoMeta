@@ -41,6 +41,8 @@ def _job(mode: str = "full", *, with_types: bool = True) -> JobSpec:
         ),
         mode=mode,
         partition_key="created_at" if mode != "full" else None,
+        incremental_column="created_at" if mode == "incremental" else None,
+        initial_watermark="2026-01-01 00:00:00" if mode == "incremental" else None,
         layer="dim",
         entity_name="customer",
         target_table=_target_table() if with_types else None,
@@ -77,14 +79,28 @@ def test_move_carries_both_endpoints_credentials():
     assert "ERP_READONLY_HOSTNAME" in task.env
 
 
-def test_incremental_move_is_streaming_detached_cdc():
-    task = compile_move_task(
-        _job("incremental"), engine="postgres", checkpoint_dir="file:///tmp/ckpt"
+def test_doris_sink_injects_fenodes_from_airflow_extra():
+    from dataclasses import replace
+    job = _job("full")
+    job = replace(
+        job,
+        target=JobEndpoint(
+            alias="ontometa_doris_abc_flink", platform="doris",
+            database="ods_erp", table="customer",
+        ),
     )
-    assert task.detached is True
-    assert "SET 'execution.runtime-mode' = 'streaming';" in task.sql
-    assert "'connector' = 'postgres-cdc'" in task.sql
-    assert "SET 'state.checkpoints.dir' = 'file:///tmp/ckpt';" in task.sql
+    task = compile_move_task(job, engine="doris")
+    assert "ONTOMETA_DORIS_ABC_FLINK_FENODES" in task.env
+    assert "extra_dejson.get('fenodes'" in task.env["ONTOMETA_DORIS_ABC_FLINK_FENODES"]
+    assert "${ONTOMETA_DORIS_ABC_FLINK_FENODES}" in task.sql
+
+
+def test_incremental_move_is_bounded_jdbc_batch():
+    task = compile_move_task(_job("incremental"), engine="postgres")
+    assert task.detached is False
+    assert "SET 'execution.runtime-mode' = 'batch';" in task.sql
+    assert "'connector' = 'postgres-cdc'" not in task.sql
+    assert "WHERE `created_at` >= '2026-01-01 00:00:00'" in task.sql
 
 
 def test_cdc_move_is_streaming_detached():
@@ -95,9 +111,26 @@ def test_cdc_move_is_streaming_detached():
     assert "'connector' = 'postgres-cdc'" in task.sql
 
 
-def test_incremental_without_checkpoint_raises():
-    with pytest.raises(ValueError, match="checkpoint"):
-        compile_move_task(_job("incremental"), engine="postgres")
+def test_doris_cdc_hard_delete_enables_sink_delete():
+    from dataclasses import replace
+    job = _job("cdc")
+    job = replace(
+        job,
+        target=JobEndpoint(
+            alias="ontometa_doris_abc_flink", platform="doris",
+            database="ods_erp", table="customer",
+        ),
+        delete_policy="hard_delete",
+    )
+    task = compile_move_task(job, engine="doris", checkpoint_dir="file:///tmp/ckpt")
+    assert "'sink.enable-delete' = 'true'" in task.sql
+
+
+def test_incremental_without_watermark_raises():
+    job = _job("incremental")
+    from dataclasses import replace
+    with pytest.raises(ValueError, match="watermark"):
+        compile_move_task(replace(job, initial_watermark=None), engine="postgres")
 
 
 def test_missing_target_table_raises():

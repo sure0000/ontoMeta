@@ -32,7 +32,13 @@ export type OptionSource =
   | { kind: "properties" }
   | { kind: "businessLogics" }
   | { kind: "engines" }
-  | { kind: "dataSources" }
+  | {
+      kind: "dataSources";
+      purpose?: "business_source" | "warehouse";
+      engine?: string;
+      defaultOnly?: boolean;
+      executableOnly?: boolean;
+    }
   | { kind: "databases"; dependsOn: string }
   | { kind: "cleansingRules" };
 
@@ -84,19 +90,6 @@ const DEPLOY_TARGET_OPTIONS = [
   { value: "local", label: "local" },
 ];
 
-const EXEC_MODE_OPTIONS = [
-  { value: "batch", label: "批处理" },
-  { value: "streaming", label: "流处理" },
-];
-
-const engineField = (): SpecFieldDef => ({
-  key: "engine",
-  label: "引擎",
-  control: "engineSelect",
-  optionSource: { kind: "engines" },
-  default: "hive",
-});
-
 /**
  * 目标数据源。**四种任务都要**——执行器一律 `spec.get("target_datasource_id") or
  * context.get(...)`，缺它时 materialize 连起草都过不去（drafter 的 required_context），
@@ -105,10 +98,16 @@ const engineField = (): SpecFieldDef => ({
  */
 const targetDatasourceField = (note: string): SpecFieldDef => ({
   key: "target_datasource_id",
-  label: "目标数据源",
+  label: "目标数仓",
   control: "select",
   required: true,
-  optionSource: { kind: "dataSources" },
+  optionSource: {
+    kind: "dataSources",
+    purpose: "warehouse",
+    engine: "doris",
+    defaultOnly: true,
+    executableOnly: true,
+  },
   help: note,
 });
 
@@ -178,8 +177,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       optionSource: { kind: "businessLogics" },
       help: "选一个已定义的业务逻辑，指标口径与绑定的对象/字段由它推导",
     },
-    targetDatasourceField("指标聚合表要建到哪个仓；不选则只生成 DDL+SQL，不落库"),
-    engineField(),
+    targetDatasourceField("固定使用默认 Doris；不选则只生成 Doris DDL+SQL，不落库"),
     {
       key: "target_layer",
       label: "目标层",
@@ -188,14 +186,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       default: "ads",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
-    {
-      key: "execution_mode",
-      label: "执行模式",
-      control: "select",
-      optionSource: { kind: "static", options: EXEC_MODE_OPTIONS },
-      default: "batch",
-    },
-    ...flinkFields(),
+    { key: "schedule", label: "Airflow 调度", control: "cron" },
   ],
   transform: [
     {
@@ -205,8 +196,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       required: true,
       optionSource: { kind: "objectTypes" },
     },
-    targetDatasourceField("清洗后的表写到哪个仓；不选则只生成 SQL，不执行"),
-    engineField(),
+    targetDatasourceField("固定使用默认 Doris；未配置时只生成 Doris SQL，不执行"),
     {
       key: "target_layer",
       label: "目标层",
@@ -222,15 +212,8 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       help: "可多选；每条对应一个确定性清洗算子",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
-    {
-      key: "execution_mode",
-      label: "执行模式",
-      control: "select",
-      optionSource: { kind: "static", options: EXEC_MODE_OPTIONS },
-      default: "batch",
-    },
+    { key: "schedule", label: "Airflow 调度", control: "cron" },
     { key: "notes", label: "备注", control: "textarea" },
-    ...flinkFields(),
   ],
   sync: [
     {
@@ -241,7 +224,16 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       optionSource: { kind: "objectTypes" },
       help: "选它后由 drafter 自动带出 source/target，无需手填",
     },
-    targetDatasourceField("数据搬到哪个仓；不选则只生成搬运作业配置，不真正搬运"),
+    {
+      key: "source_datasource_id",
+      label: "业务源 DataSource",
+      control: "select",
+      required: true,
+      optionSource: { kind: "dataSources", purpose: "business_source", executableOnly: true },
+      help: "候选仅含启用且已配置连接的 business_source；最终还须与本体 source_ref 匹配",
+    },
+    targetDatasourceField("固定选择启用的默认 Doris；同步只写其 ODS 层"),
+    { key: "target_ods_database", label: "ODS 数据库", control: "text", required: true, default: "ods" },
     {
       key: "mode",
       label: "装载方式",
@@ -250,38 +242,51 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       default: "full",
     },
     {
-      key: "partition_key",
-      label: "分区键",
+      key: "primary_keys",
+      label: "业务主键",
+      control: "propertyMultiSelect",
+      optionSource: { kind: "properties" },
+      help: "incremental/CDC 必填；用于 Doris Unique Key UPSERT",
+    },
+    {
+      key: "incremental_column",
+      label: "增量字段",
       control: "propertySingle",
       optionSource: { kind: "properties" },
-      help: "增量/CDC 装载时的分区列；从本体字段中选",
+      help: "incremental 模式必填",
     },
-    engineField(),
+    { key: "initial_watermark", label: "初始水位", control: "text", help: "incremental 模式必填" },
     {
-      key: "source_ref_alias",
-      label: "源连接别名",
-      control: "text",
-      help: "连接别名（=Airflow conn_id），不是凭据本身",
+      key: "sequence_column",
+      label: "CDC Sequence 列",
+      control: "propertySingle",
+      optionSource: { kind: "properties" },
+      help: "CDC 必填，保证 UPDATE 顺序",
+    },
+    {
+      key: "delete_policy",
+      label: "DELETE 策略",
+      control: "select",
+      optionSource: { kind: "static", options: [
+        { value: "ignore", label: "忽略删除" },
+        { value: "soft_delete", label: "软删除" },
+        { value: "hard_delete", label: "传播删除（仅 CDC）" },
+      ] },
+      default: "ignore",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
     ...flinkFields(),
   ],
   materialize: [
-    targetDatasourceField("本体要物化到哪个仓。materialize 的 drafter 强制要求此项，缺它无法起草"),
+    targetDatasourceField("固定使用启用、已配置连接的默认 Doris；物化只建结构"),
     {
       key: "target_database",
       label: "目标数据库",
       control: "select",
+      required: true,
       optionSource: { kind: "databases", dependsOn: "target_datasource_id" },
-      help: "留空则各层落到默认库（dim/dwd/dws/ads）",
+      help: "选择 Doris 中已存在的数据库；系统不会自动创建数据库",
     },
-    {
-      key: "load_strategy",
-      label: "装载方式",
-      control: "select",
-      optionSource: { kind: "static", options: LOAD_STRATEGY_OPTIONS },
-    },
-    { key: "refresh_cron", label: "调度频率", control: "cron" },
   ],
 };
 

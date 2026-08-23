@@ -123,6 +123,7 @@ def run_preflight(
         _check_api_auth(report, client)
         _check_api_version(report, client)
         _check_warehouse_conn(report, client, ds)
+        _check_doris_flink_conn(report, db, client, ds)
         _check_dag_dir_visible(report, client, airflow)
     finally:
         client.close()
@@ -361,6 +362,62 @@ def probe_ssh_pipeline(airflow) -> tuple[bool, str]:
     return True, f"{delivery.target}:{airflow.dags_dir} 可写，投递管道连通。"
 
 
+def _check_doris_flink_conn(
+    report: PreflightReport, db: Session, client: AirflowClient, ds: DataSource | None
+) -> None:
+    """Verify the separate Doris Connector connection (FE HTTP/fenodes)."""
+    if ds is None or getattr(ds, "kind", None) != "doris" or not hasattr(db, "query"):
+        return
+    from app.models import DorisWarehouseConfig
+
+    config = (
+        db.query(DorisWarehouseConfig)
+        .filter(DorisWarehouseConfig.warehouse_datasource_id == ds.id)
+        .first()
+    )
+    if config is None or not config.airflow_flink_conn_id:
+        report.add(PreflightItem(
+            key="doris_flink_conn",
+            label="Doris Flink 写入连接",
+            status=FAIL,
+            blocking=True,
+            detail="未配置 DorisWarehouseConfig/Flink Connection ID。",
+            next_step="在数据源设置中保存 8030 fenodes，并创建确定性的 *_flink Airflow Connection。",
+        ))
+        return
+    try:
+        connection = client.get_connection(config.airflow_flink_conn_id)
+    except AirflowError as exc:
+        report.add(PreflightItem(
+            key="doris_flink_conn",
+            label="Doris Flink 写入连接",
+            status=FAIL,
+            blocking=True,
+            detail=f"Airflow Connection {config.airflow_flink_conn_id} 不可用：{exc}",
+            next_step="创建/修复该 Connection，并在 extra 中配置 fenodes 与 jdbc_url。",
+        ))
+        return
+    extra = connection.get("extra") or connection.get("extra_dejson") or {}
+    if isinstance(extra, str):
+        import json
+        try:
+            extra = json.loads(extra)
+        except ValueError:
+            extra = {}
+    missing = [key for key in ("fenodes", "jdbc_url") if not (extra or {}).get(key)]
+    report.add(PreflightItem(
+        key="doris_flink_conn",
+        label="Doris Flink 写入连接",
+        status=FAIL if missing else PASS,
+        blocking=True,
+        detail=(
+            f"Connection extra 缺少：{', '.join(missing)}"
+            if missing else f"{config.airflow_flink_conn_id} 已配置 fenodes/jdbc_url。"
+        ),
+        next_step=("补齐 Connection extra 后重试。" if missing else None),
+    ))
+
+
 def _check_dag_dir_visible(
     report: PreflightReport, client: AirflowClient, airflow
 ) -> None:
@@ -505,9 +562,8 @@ def _check_execution_channel(
 
     - **flink_sql_runner_jar**：缺它**同步**退回「仅产出」（不执行），preflight 标 WARN
       提醒。物化不受影响——建表是 ``SQLExecuteQueryOperator`` 直连目标仓，与 Flink 无关。
-    - **flink_checkpoint_dir**：增量/CDC 是流式作业需要它持久化读位点；含 timestamp 分区键
-      的表默认 incremental，缺 checkpoint 会在编译期硬失败。这里先验可搬性，若有增量表
-      但无 checkpoint，标 FAIL。全量搬运不需要 checkpoint。
+    - **flink_checkpoint_dir**：仅长期 CDC 流作业需要它持久化读位点；incremental
+      是带水位谓词的有界 JDBC batch，不依赖 checkpoint。
 
     不再有 sync_channel/runner/docker 多通道——那套已废除，preflight 不再探 runner probe。
     """
@@ -545,11 +601,13 @@ def _check_execution_channel(
         # 计划失败（本体不存在/无契约）不在 execution_channel 检查范围，别的项会报。
         return
 
-    incremental_or_cdc = [
-        j.name for j in plan.jobs if j.mode in ("incremental", "cdc")
+    cdc_jobs = [
+        j.name for j in plan.jobs
+        if j.mode == "cdc"
+        or (j.mode == "incremental" and not getattr(j, "initial_watermark", None))
     ]
     checkpoint_dir = (airflow.flink_checkpoint_dir or "").strip()
-    if incremental_or_cdc and not checkpoint_dir:
+    if cdc_jobs and not checkpoint_dir:
         report.add(
             PreflightItem(
                 key="flink_checkpoint",
@@ -557,8 +615,8 @@ def _check_execution_channel(
                 status=FAIL,
                 blocking=True,
                 detail=(
-                    f"本次有 {len(incremental_or_cdc)} 张增量/CDC 表（如 {incremental_or_cdc[0]}），"
-                    "但未配置 Flink Checkpoint 目录。增量/CDC 是流式作业、需 checkpoint 持久化读位点，"
+                    f"本次有 {len(cdc_jobs)} 张 CDC 表（如 {cdc_jobs[0]}），"
+                    "但未配置 Flink Checkpoint 目录。CDC 是流式作业、需 checkpoint 持久化读位点，"
                     "否则重启会重搬。编译期会直接报错，提交无法成功。"
                 ),
                 next_step=(
@@ -567,14 +625,14 @@ def _check_execution_channel(
                 ),
             )
         )
-    elif incremental_or_cdc and checkpoint_dir:
+    elif cdc_jobs and checkpoint_dir:
         report.add(
             PreflightItem(
                 key="flink_checkpoint",
                 label="Flink Checkpoint 目录",
                 status=PASS,
                 blocking=False,
-                detail=f"checkpoint 目录已配置：{checkpoint_dir[:60]}…（增量/CDC 可用）",
+                detail=f"checkpoint 目录已配置：{checkpoint_dir[:60]}…（CDC 可用）",
                 next_step=None,
             )
         )

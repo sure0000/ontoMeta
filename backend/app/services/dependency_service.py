@@ -795,7 +795,7 @@ class DependencyComponentService:
         # Airflow 主机的 ontometa/_lib/，不再要求预先摆在 Airflow 机器上。
         "flink_sql_runner_jar", "flink_sql_runner_class", "flink_bin",
         "flink_deploy_target", "flink_parallelism", "flink_yarn_queue",
-        "flink_checkpoint_dir",
+        "flink_checkpoint_dir", "flink_rest_endpoint",
     )
 
     def get_airflow(self, db: Session) -> dict[str, Any]:

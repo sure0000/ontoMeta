@@ -139,7 +139,7 @@ export function SettingsPage() {
       <PageHeader
         icon={<SettingOutlined />}
         title="系统设置"
-        description="管理依赖组件部署、生成配置、数据源与鉴权。LLM / DataHub / Cube 等依赖组件统一在「基础设施」中管理。"
+        description="管理依赖组件、Doris 统一数仓、业务数据源、生成配置与鉴权。LLM / DataHub / Cube 等依赖组件统一在「基础设施」中管理。"
       />
 
       {error && (
@@ -171,7 +171,7 @@ export function SettingsPage() {
             ),
             children: (
               <div className="om-tab-stack">
-                <SectionCard title="依赖组件部署管理" icon={<ApiOutlined />} bodyFlush>
+                <SectionCard title="基础设施组件管理" icon={<ApiOutlined />} bodyFlush>
                   <DependencyPanel />
                 </SectionCard>
               </div>
@@ -250,14 +250,12 @@ export function SettingsPage() {
               </span>
             ),
             children: (
-              <SectionCard title="数据源管理" icon={<DatabaseOutlined />}>
+              <SectionCard title="业务数据源管理" icon={<DatabaseOutlined />}>
                 <Text type="secondary" style={{ display: "block", marginBottom: 16, fontSize: 13 }}>
-                  这里登记的是「可写连接凭据」（SQLAlchemy
-                  连接串），用于本体物化落库与数据应用取数。 DataHub
-                  等依赖组件的连接配置已移至「基础设施」统一管理；此处只管目标仓/源库的可写凭据。
-                  物化弹窗里也能对未绑定平台就地补录一次凭据，登记后即可在此统一管理与测试。
+                  这里登记 MySQL、PostgreSQL 等业务源连接，用于源数据接入。默认数仓的 SQL 端点、FE
+                  HTTP 节点和凭据请在「基础设施」中统一配置。
                 </Text>
-                <DataSourcesPanel />
+                <DataSourcesPanel includeDoris={false} />
               </SectionCard>
             ),
           },

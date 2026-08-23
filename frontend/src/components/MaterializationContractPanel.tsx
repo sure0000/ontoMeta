@@ -32,11 +32,8 @@ const SCD_OPTIONS: { value: MaterializationScdType; label: string }[] = [
   { value: "scd2", label: "SCD2 拉链" },
 ];
 
-// 完整适配层的目标引擎。Hive 为权威写入路径，其余由其派生。
-const ENGINE_OPTIONS = ["hive", "doris", "iceberg", "starrocks", "clickhouse"].map((e) => ({
-  value: e,
-  label: e,
-}));
+// 新建物化契约固定使用 Doris；历史契约的引擎仅用于审计展示。
+const ENGINE_OPTIONS = [{ value: "doris", label: "Doris（统一数仓）" }];
 
 interface Props {
   ontologyId?: string;

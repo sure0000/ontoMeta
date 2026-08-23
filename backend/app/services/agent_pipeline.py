@@ -467,6 +467,20 @@ class AgentPipelineService:
             # 聚合多批状态：任一 failed → failed；全 success → success；否则 running/queued
             from app.api.warehouse import _aggregate_state
             agg = _aggregate_state(states)
+            if artifact.kind == "materialize" and agg == "success":
+                params = receipt.get("deployment_reconciliation") or {}
+                if params:
+                    from app.services.doris_deployment import publish_schema_ready
+
+                    publish_schema_ready(db, **params)
+            if artifact.kind == "transform" and agg:
+                from app.services.transform_reconciliation import reconcile_transform_receipt
+
+                reconcile_transform_receipt(db, receipt=receipt, airflow_state=agg)
+            if artifact.kind == "metric" and agg:
+                from app.services.metric_reconciliation import reconcile_metric_receipt
+
+                reconcile_metric_receipt(db, receipt=receipt, airflow_state=agg)
             if not agg or not is_terminal(agg):
                 return  # 非终态或读不到 → 保持 SUCCEEDED，前端读 live_state
 

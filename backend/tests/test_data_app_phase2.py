@@ -187,16 +187,17 @@ def test_preview_runtime_filter_real_source(client, admin_headers, tmp_path):
     detail = client.get(f"/api/data-apps/{app_id}", headers=admin_headers).json()
     ds_id = detail["datasets"][0]["id"]
 
-    # 不带参数：A、B 两组
+    # 历史保存的 SQLite/业务源绑定不参与执行；未配置 Doris 时 fail-closed。
     res = client.post(
         f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
         headers=admin_headers,
         json={"limit": 100, "runtime_filters": []},
     )
     assert res.status_code == 200, res.text
-    assert {r["channel"] for r in res.json()["rows"]} == {"A", "B"}
+    assert res.json()["rows"] == []
+    assert res.json()["execution_blocked"] is True
 
-    # 下钻 channel=A：只剩 A（sum=150）
+    # 带下钻参数仍不得 fallback 到保存的 SQLite 数据源。
     res = client.post(
         f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
         headers=admin_headers,
@@ -208,10 +209,8 @@ def test_preview_runtime_filter_real_source(client, admin_headers, tmp_path):
         },
     )
     assert res.status_code == 200, res.text
-    rows = res.json()["rows"]
-    assert len(rows) == 1
-    assert rows[0]["channel"] == "A"
-    assert rows[0]["sum_amount"] == 150
+    assert res.json()["rows"] == []
+    assert res.json()["execution_blocked"] is True
 
 
 def test_preview_runtime_filter_mock(client, admin_headers):
@@ -224,9 +223,10 @@ def test_preview_runtime_filter_mock(client, admin_headers):
         headers=admin_headers,
         json={"limit": 20, "runtime_filters": []},
     ).json()
-    assert full["used_mock"] is True
-    assert full["rows"]
-    sample_channel = full["rows"][0]["channel"]
+    assert full["used_mock"] is False
+    assert full["execution_blocked"] is True
+    assert full["rows"] == []
+    sample_channel = "A"
 
     drilled = client.post(
         f"/api/data-apps/{app_id}/datasets/{ds_id}/preview",
@@ -238,6 +238,5 @@ def test_preview_runtime_filter_mock(client, admin_headers):
             ],
         },
     ).json()
-    # Mock 下钻后仅保留匹配行
-    assert all(r["channel"] == sample_channel for r in drilled["rows"])
-    assert len(drilled["rows"]) <= len(full["rows"])
+    assert drilled["execution_blocked"] is True
+    assert drilled["rows"] == []

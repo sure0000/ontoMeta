@@ -19,6 +19,7 @@ from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
 from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
+from app.services.ods_naming import target_ods_table_name
 from app.services.source_ref import (
     has_physical_source,
     is_manual_source_ref,
@@ -90,25 +91,42 @@ class SyncDrafter(Drafter):
             )
             # 严格解析：上面的 has_physical_source 已保证解得出，这里不会是 None。
             source_table = source_table_of(target.source_ref)
-            layer = contract.target_layer if contract else "dim"
             prefix = context.get("database_prefix")
-            database = f"{layer}_{prefix}" if prefix else layer
+            ods_database = str(context.get("target_ods_database") or (
+                f"ods_{prefix}" if prefix else "ods"
+            ))
+            # ODS 表名由后端唯一规则生成，调用方传入的 target_ods_table 不参与：
+            # ods_{数据域}_{source_ref 中的原始表名}。
+            ods_table = target_ods_table_name(db, ontology_id, target)
 
             return {
                 "source": source_table,
-                "target": f"{database}.{target.name}",
+                "target": f"{ods_database}.{ods_table}",
                 "object_type": target.name,
                 "ontology_id": ontology_id,
                 # 目标数据源：执行器缺它就退回「只渲染作业配置、不真跑」。链上游会在
                 # execute 的 context 里传，但手工建的独立任务没有上游——不带进 Spec 的话
                 # 人在界面上选了目标仓也白选，任务会「成功」却什么都没搬。
+                "source_datasource_id": context.get("source_datasource_id") or None,
                 "target_datasource_id": context.get("target_datasource_id") or None,
+                "target_ods_database": ods_database,
+                "target_ods_table": ods_table,
                 "database_prefix": prefix,
                 # 表单显式选的装载方式/分区键优先；否则回退契约，再回退默认。
                 "mode": context.get("mode")
                 or (contract.load_strategy if contract else "full"),
+                "primary_keys": list(context.get("primary_keys") or []),
+                "sequence_column": context.get("sequence_column"),
+                "incremental_column": context.get("incremental_column")
+                or context.get("partition_key")
+                or (contract.partition_key if contract else None),
+                "initial_watermark": context.get("initial_watermark"),
+                "late_arrival_policy": context.get("late_arrival_policy") or "strict",
+                "idempotency_strategy": context.get("idempotency_strategy")
+                or "primary_key_upsert",
                 "partition_key": context.get("partition_key")
                 or (contract.partition_key if contract else None),
+                "delete_policy": context.get("delete_policy") or "ignore",
                 # 引擎随目标数据源走（人显式选的除外）：选了 postgres 目标仓却产
                 # Hive DDL/sink，建表那一步必挂。
                 "engine": resolve_spec_engine(db, context, contract),

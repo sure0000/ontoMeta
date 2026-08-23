@@ -144,4 +144,4 @@ def test_sync_honors_mode_and_partition_key_overrides(ontology_with_source_objec
     assert spec["partition_key"] == "created_at"
     # source/target 由 drafter 派生（表单不收）——正是此前直填缺的必填字段。
     assert spec["source"] == "erp.orders"
-    assert spec["target"].endswith(".orders")
+    assert spec["target"] == "ods.ods_sync_domain_orders"

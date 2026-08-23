@@ -153,14 +153,17 @@ def test_materialize_preflight_blocks_when_airflow_unavailable(db):
     """
     from app.models import DataSource
 
-    db.add(DataSource(id="ds-pf", name="仓库", kind="hive", status="ok",
-                      dsn_secret_ref="ref://pf"))
+    db.add(DataSource(
+        id="ds-pf", name="仓库", kind="doris", purpose="warehouse",
+        is_default_warehouse=True, enabled=True, status="ok",
+        dsn_secret_ref="mysql+pymysql://reader@fe:9030",
+    ))
     db.commit()
     try:
         issues = validate_spec(
             db,
             kind="materialize",
-            spec={"ontology_id": "onto-pf", "target_datasource_id": "ds-pf", "engine": "hive"},
+            spec={"ontology_id": "onto-pf", "target_datasource_id": "ds-pf", "engine": "doris"},
             ontology_id="onto-pf",
         )
     finally:

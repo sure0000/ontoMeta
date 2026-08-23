@@ -108,10 +108,10 @@ def chat_bi_link_conversation_task(
 ):
     """P1：记录「本会话催生了某数据任务（治理制品）」。
 
-    前端在用户对任务提案点「去校验并执行」建出制品后调用；使该会话后续能免 id 追踪任务。
+    前端在用户确认需求/本体/数据并创建任务草稿后调用；使该会话后续能免 id 追踪任务。
 
-    顺带记一条「执行方案确认」决策留痕：提案原样 vs 人改后的参数都在这一次请求里，
-    不必再多一次往返。留痕失败不影响关联本身（record_decision 自身吞异常）。
+    这里只建立关联，**不记执行方案确认**：草稿参数还没有经过校验与 dry-run，把它记为已确认
+    会让闭环提前到达 plan。真正的执行方案确认只在 ``/agents/artifacts/{id}/confirm`` 落账。
     """
     try:
         result = chat_bi_service.link_conversation_task(
@@ -120,23 +120,6 @@ def chat_bi_link_conversation_task(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    chat_bi_ledger.safe_record(
-        db,
-        conversation_id=conversation_id,
-        node="plan",
-        stage="proposal_draft",
-        trigger="action_proposal_draft",
-        message_id=data.message_id,
-        block_id=data.block_id,
-        summary=data.intent or f"确认{data.kind or ''}任务方案",
-        proposed=data.proposed_context,
-        chosen=data.chosen_context,
-        ref_kind="artifact",
-        ref_id=data.artifact_id,
-        subject_id=_principal_id(request),
-        subject_role=_principal_role(request),
-        dedup_key=f"{conversation_id}:plan:draft:{data.artifact_id}",
-    )
     return result
 
 
@@ -310,15 +293,14 @@ async def chat_bi_ask(
             conv = chat_bi_service.get_conversation(db, conversation_id)
             if not conv:
                 raise HTTPException(status_code=404, detail="对话不存在")
-            if set(conv.domain_ids) != set(data.domain_ids):
-                raise HTTPException(
-                    status_code=400,
-                    detail="会话不属于当前数据域作用域，请切换到正确作用域或新建会话",
-                )
+            # 会话创建时的数据域是后续消息的权威作用域。页面筛选可能在填表期间变化，
+            # 请求体中的瞬时 domain_ids 不应打断既有会话。
+            effective_domain_ids = list(conv.domain_ids)
             conversation_title = conv.title
         else:
+            effective_domain_ids = list(data.domain_ids)
             conv_dict = chat_bi_service.create_conversation(
-                db, domain_ids=data.domain_ids, title=data.question[:50]
+                db, domain_ids=effective_domain_ids, title=data.question[:50]
             )
             conversation_id = conv_dict["id"]
             conversation_title = conv_dict["title"]
@@ -329,7 +311,7 @@ async def chat_bi_ask(
 
         payload = await chat_bi_service.ask(
             db,
-            domain_ids=data.domain_ids,
+            domain_ids=effective_domain_ids,
             question=data.question,
             history=data.history,
             principal_role=_principal_role(request),
@@ -352,7 +334,7 @@ async def chat_bi_ask(
         )
 
         # P3：跨会话记忆——把本次已接地命中的对象/口径按各涉及域累加使用度（best-effort）。
-        chat_bi_service.record_domain_memory(db, data.domain_ids, payload)
+        chat_bi_service.record_domain_memory(db, effective_domain_ids, payload)
 
         payload["conversation_id"] = conversation_id
         payload["conversation_title"] = conversation_title
@@ -377,15 +359,12 @@ async def chat_bi_ask_stream(
         conv = chat_bi_service.get_conversation(db, conversation_id)
         if not conv:
             raise HTTPException(status_code=404, detail="对话不存在")
-        if set(conv.domain_ids) != set(data.domain_ids):
-            raise HTTPException(
-                status_code=400,
-                detail="会话不属于当前数据域作用域，请切换到正确作用域或新建会话",
-            )
+        effective_domain_ids = list(conv.domain_ids)
         conversation_title = conv.title
     else:
+        effective_domain_ids = list(data.domain_ids)
         conv_dict = chat_bi_service.create_conversation(
-            db, domain_ids=data.domain_ids, title=data.question[:50]
+            db, domain_ids=effective_domain_ids, title=data.question[:50]
         )
         conversation_id = conv_dict["id"]
         conversation_title = conv_dict["title"]
@@ -404,7 +383,7 @@ async def chat_bi_ask_stream(
         try:
             async for ev in chat_bi_service.ask_stream(
                 db,
-                domain_ids=data.domain_ids,
+                domain_ids=effective_domain_ids,
                 question=data.question,
                 history=data.history,
                 principal_role=_principal_role(request),
@@ -428,7 +407,7 @@ async def chat_bi_ask_stream(
                         },
                     )
                     # P3：跨会话记忆——本次已接地命中的对象/口径按各涉及域累加使用度（best-effort）。
-                    chat_bi_service.record_domain_memory(db, data.domain_ids, payload)
+                    chat_bi_service.record_domain_memory(db, effective_domain_ids, payload)
                 else:
                     yield sse(ev)
         except ValueError as exc:

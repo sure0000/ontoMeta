@@ -302,11 +302,20 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
     try {
       const list = await api.listDataSources();
       setDbCascadeOptions(
-        list.map((d) => ({
-          value: d.id,
-          label: `${d.name}（${d.kind}）`,
-          isLeaf: false,
-        })),
+        list
+          .filter(
+            (d) =>
+              d.purpose === "warehouse" &&
+              d.kind === "doris" &&
+              d.is_default_warehouse === true &&
+              d.enabled !== false &&
+              d.dsn_set === true,
+          )
+          .map((d) => ({
+            value: d.id,
+            label: `${d.name}（默认 Doris）`,
+            isLeaf: false,
+          })),
       );
     } catch {
       /* 拉不到数据源不阻断 */
@@ -1188,6 +1197,8 @@ export function ArtifactDetail({
   onStep,
   onEdit,
   ontologyName,
+  onConfirmResult,
+  resultConfirmed = false,
 }: {
   artifact: GovernanceArtifact | null;
   busy: boolean;
@@ -1197,12 +1208,16 @@ export function ArtifactDetail({
   onEdit?: (artifact: GovernanceArtifact) => void;
   /** 本体 ID → 展示名（数据域名 + 版本）。不传则退回原始 UUID。 */
   ontologyName?: (id: string) => string;
+  /** 对话入口可提供结果验收；治理列表无会话上下文时不显示。 */
+  onConfirmResult?: (artifact: GovernanceArtifact) => void;
+  resultConfirmed?: boolean;
 }) {
   if (!artifact) return null;
   const report = artifact.validation_report;
   const status = artifact.status;
   const hasReceipt = Boolean(artifact.execution_receipt);
   const hasLive = Boolean(artifact.live_state?.live_state);
+  const terminal = ["succeeded", "failed"].includes(status);
   const preflight = preflightIssues(report?.issues);
 
   return (
@@ -1230,13 +1245,13 @@ export function ArtifactDetail({
               loading={busy}
               onClick={() => onStep("validate", artifact)}
             >
-              校验
+              生成执行方案
             </Button>
           )}
           {status === "validated" && (
             <>
               <Button loading={busy} onClick={() => onStep("validate", artifact)}>
-                重新校验
+                重新生成方案
               </Button>
               <Button
                 type="primary"
@@ -1244,7 +1259,7 @@ export function ArtifactDetail({
                 loading={busy}
                 onClick={() => onStep("confirm", artifact)}
               >
-                确认
+                确认执行方案
               </Button>
             </>
           )}
@@ -1356,7 +1371,7 @@ export function ArtifactDetail({
         )}
 
         {/* ---- 执行结果（含 Airflow 实时状态） ---- */}
-        {(hasReceipt || hasLive) && (
+        {(hasReceipt || hasLive || (onConfirmResult && terminal)) && (
           <div>
             <SectionTitle>执行结果</SectionTitle>
             {hasReceipt ? (
@@ -1364,7 +1379,7 @@ export function ArtifactDetail({
                 receipt={artifact.execution_receipt as Record<string, unknown>}
                 liveState={artifact.live_state}
               />
-            ) : (
+            ) : hasLive ? (
               /* 有 live_state 但还没回执（DAG 已触发但回执未落盘的窗口期） */
               <Space align="center">
                 <Tag color={STATUS_COLOR[artifact.live_state!.live_state] ?? "default"}>
@@ -1383,6 +1398,24 @@ export function ArtifactDetail({
                   </Button>
                 )}
               </Space>
+            ) : (
+              <Alert
+                type={status === "failed" ? "error" : "info"}
+                showIcon
+                message={status === "failed" ? "任务执行失败，未返回结构化回执" : "任务已结束，未返回结构化回执"}
+              />
+            )}
+            {onConfirmResult && terminal && (
+              <div style={{ marginTop: 12 }}>
+                <Button
+                  type={resultConfirmed ? "default" : "primary"}
+                  icon={<CheckCircleOutlined />}
+                  disabled={resultConfirmed}
+                  onClick={() => onConfirmResult(artifact)}
+                >
+                  {resultConfirmed ? "执行结果已确认" : "确认执行结果"}
+                </Button>
+              </div>
             )}
           </div>
         )}

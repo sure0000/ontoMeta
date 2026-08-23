@@ -13,7 +13,10 @@ from pydantic import BaseModel, Field
 
 class DataSourceCreate(BaseModel):
     name: str
-    kind: str = "mock"  # postgres/mysql/duckdb/sqlite/http/mock/starrocks
+    kind: str = "mock"  # postgres/mysql/duckdb/sqlite/http/mock/doris
+    purpose: str = "business_source"  # business_source / warehouse
+    is_default_warehouse: bool = False
+    enabled: bool = True
     dsn_secret_ref: str | None = None
     mapping: dict[str, Any] | None = None
     # StarRocks 多目录：NULL/"internal"=warehouse；其他值=源库 catalog 名
@@ -23,6 +26,9 @@ class DataSourceCreate(BaseModel):
 class DataSourceUpdate(BaseModel):
     name: str | None = None
     kind: str | None = None
+    purpose: str | None = None
+    is_default_warehouse: bool | None = None
+    enabled: bool | None = None
     dsn_secret_ref: str | None = None
     mapping: dict[str, Any] | None = None
     catalog_name: str | None = None
@@ -32,6 +38,9 @@ class DataSourceOut(BaseModel):
     id: str
     name: str
     kind: str
+    purpose: str = "business_source"
+    is_default_warehouse: bool = False
+    enabled: bool = True
     status: str
     mapping: dict[str, Any] | None = None
     tested_at: datetime | None = None
@@ -39,15 +48,15 @@ class DataSourceOut(BaseModel):
     updated_at: datetime
     # StarRocks 多目录：NULL/"internal"=warehouse，其他值=源库 catalog 名
     catalog_name: str | None = None
-    # 连接信息回显：密码明文下发供前端 Input.Password 预填（眼睛图标控制显隐）；password_set 保留兼容。
-    # dsn 整体仍不下发；这里由后端从存量 DSN 解析出结构化字段。
+    # 连接信息回显：只返回 password_set/password_hint，不返回密码明文；dsn 整体仍不下发。
     dsn_set: bool = False
     host: str | None = None
     port: int | None = None
     database: str | None = None
     username: str | None = None
-    password: str | None = None  # 明文回显：前端预填进 Input.Password，眼睛图标控制显隐
+    password: str | None = None  # 始终为 None；密码只保存在受管 secret/DSN 引用中
     password_set: bool = False
+    password_hint: str | None = None
     path: str | None = None  # 文件类（sqlite/duckdb）的文件路径
     url: str | None = None  # cube 语义层的 API 地址
 
@@ -179,6 +188,8 @@ class DataAppPreviewResult(BaseModel):
     columns: list[DataAppColumn] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
     used_mock: bool = True
+    execution_blocked: bool = False
+    query_target: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
 
 

@@ -25,6 +25,8 @@ type ConnField = "path" | "host" | "port" | "database" | "user" | "password" | "
 interface ConnFormValues {
   name: string;
   kind: string;
+  purpose?: "business_source" | "warehouse";
+  is_default_warehouse?: boolean;
   path?: string;
   host?: string;
   port?: number;
@@ -34,6 +36,7 @@ interface ConnFormValues {
   url?: string;
   raw_dsn?: string;
   mapping?: string;
+  fenodes?: string;
   /** StarRocks 多目录：源库注册成的 catalog 名；留空=数仓内部源。 */
   catalog_name?: string;
 }
@@ -74,7 +77,7 @@ const KIND_PROFILES: Record<
     defaultPort: 10000,
   },
   doris: {
-    label: "Doris（数仓）",
+    label: "Doris（统一数仓）",
     fields: ["host", "port", "database", "user", "password"],
     scheme: "mysql+pymysql", // Doris 走 MySQL 线协议
     defaultPort: 9030,
@@ -179,10 +182,13 @@ export function DataSourcesModal({
 export function DataSourcesPanel({
   prefill,
   onCreated,
+  includeDoris = true,
 }: {
   prefill?: DataSourcePrefill;
   /** 新建成功后的回调（仅新建，不含编辑）。默认无——三个既有调用点行为不变。 */
   onCreated?: (source: { id: string; name: string; kind: string }) => void;
+  /** 设置页已有独立 Doris 数仓入口时，业务源列表不再重复展示 Doris。 */
+  includeDoris?: boolean;
 } = {}) {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(false);
@@ -204,7 +210,9 @@ export function DataSourcesPanel({
     setLoading(true);
     api
       .listDataSources()
-      .then(setSources)
+      .then((items) =>
+        setSources(includeDoris ? items : items.filter((item) => item.kind !== "doris")),
+      )
       .catch(() => setSources([]))
       .finally(() => setLoading(false));
   };
@@ -304,11 +312,27 @@ export function DataSourcesPanel({
         const created = await api.createDataSource({
           name: values.name,
           kind: values.kind,
+          purpose: values.kind === "doris" ? "warehouse" : "business_source",
+          is_default_warehouse: values.kind === "doris",
           dsn_secret_ref: dsn,
           mapping,
-          catalog_name: values.catalog_name?.trim() || undefined,
+          catalog_name:
+            values.kind === "doris" ? undefined : values.catalog_name?.trim() || undefined,
         });
-        message.success("已添加数据源");
+        if (values.kind === "doris") {
+          await api.saveDorisWarehouseConfig({
+            warehouse_datasource_id: created.id,
+            query_host: values.host?.trim() || null,
+            query_port: values.port ?? 9030,
+            default_database: values.database?.trim() || null,
+            fenodes: (values.fenodes ?? "")
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean),
+            reader_dsn_secret_ref: dsn,
+          });
+        }
+        message.success(values.kind === "doris" ? "已配置默认 Doris 数仓" : "已添加数据源");
         // 只在**真的建成**之后才回调：调用方据此留痕，打开表单又取消不该留下记录。
         // 只传 id/name/kind——凭据绝不外泄给回调方。
         onCreated?.({ id: created.id, name: created.name, kind: created.kind });
@@ -436,23 +460,42 @@ export function DataSourcesPanel({
               <Input placeholder="如 生产库-只读" style={{ width: 220 }} />
             </Form.Item>
             <Form.Item name="kind" label="类型">
-              <Select options={KIND_OPTIONS} style={{ width: 180 }} />
+              <Select
+                options={
+                  includeDoris
+                    ? KIND_OPTIONS
+                    : KIND_OPTIONS.filter((item) => item.value !== "doris")
+                }
+                style={{ width: 180 }}
+              />
             </Form.Item>
-            {!editingId && (
+            {!editingId && kind !== "doris" && (
               <Form.Item
                 name="catalog_name"
-                label="Catalog 名（可选）"
-                tooltip="源库在 StarRocks 里注册成的外部 catalog 名（如 erp/crm），取数时用它显式选源；留空＝数仓内部源"
+                label="外部 Catalog 元数据（可选）"
+                tooltip="仅用于外部元数据记录，不参与 Data Agent 查询路由"
               >
                 <Input placeholder="如 erp" style={{ width: 160 }} />
               </Form.Item>
             )}
+            {kind === "doris" && <Tag color="blue">默认 Doris 数仓（Data Agent 仅查询此处）</Tag>}
           </Space>
 
           {editingId && (
             <div className="om-muted" style={{ marginBottom: 8 }}>
               连接字段已回显（密码点眼睛图标查看明文）；密码清空＝保持原密码不变，改动其它字段不会清空密码。
             </div>
+          )}
+
+          {kind === "doris" && (
+            <Form.Item
+              name="fenodes"
+              label="FE HTTP 节点（8030）"
+              rules={[{ required: true, message: "请填写至少一个 FE HTTP 节点" }]}
+              extra="多个节点用逗号分隔，如 fe-1:8030,fe-2:8030；Flink Doris Connector 使用"
+            >
+              <Input placeholder="fe-1:8030,fe-2:8030" />
+            </Form.Item>
           )}
 
           {rawMode ? (

@@ -40,8 +40,12 @@ import type {
   DataAppWidget,
   PublicShareStatus,
   DataSource,
+  DorisWarehouseConfig,
+  DorisWarehouseConfigInput,
   LlmModelOption,
   LlmServiceConfig,
+  IngestionContract,
+  IngestionContractInput,
   MaterializationContract,
   MaterializationContractSyncResult,
   MaterializationContractUpdateInput,
@@ -1079,9 +1083,12 @@ export const api = {
   createDataSource: (body: {
     name: string;
     kind: string;
+    purpose?: "business_source" | "warehouse";
+    is_default_warehouse?: boolean;
+    enabled?: boolean;
     dsn_secret_ref?: string;
     mapping?: Record<string, unknown>;
-    /** StarRocks 多目录：源库注册成的 catalog 名；留空=数仓内部源。 */
+    /** 外部 catalog 元数据，不参与数仓查询路由。 */
     catalog_name?: string;
   }) =>
     request<DataSource>(`/api/data-sources`, {
@@ -1093,6 +1100,9 @@ export const api = {
     body: {
       name?: string;
       kind?: string;
+      purpose?: "business_source" | "warehouse";
+      is_default_warehouse?: boolean;
+      enabled?: boolean;
       dsn_secret_ref?: string;
       mapping?: Record<string, unknown>;
     },
@@ -1112,6 +1122,14 @@ export const api = {
     const qs = database ? `?database=${encodeURIComponent(database)}` : "";
     return request<{ tables: string[] }>(`/api/data-sources/${id}/tables${qs}`);
   },
+
+  getDorisWarehouseConfig: () =>
+    request<DorisWarehouseConfig | null>(`/api/doris-warehouse`),
+  saveDorisWarehouseConfig: (body: DorisWarehouseConfigInput) =>
+    request<DorisWarehouseConfig>(`/api/doris-warehouse`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 
   // Widgets（可复用图表资产）
   listWidgets: (params?: { domainId?: string; q?: string; widgetType?: string }) => {
@@ -1212,6 +1230,32 @@ export const api = {
     }>(`/api/data-apps/${appId}/lineage`),
 
   // ---- 物化契约（M1）----
+  listIngestionContracts: (ontologyId: string) =>
+    request<IngestionContract[]>(`/api/ontologies/${ontologyId}/ingestion-contracts`),
+  saveIngestionContract: (ontologyId: string, body: IngestionContractInput) =>
+    request<IngestionContract>(`/api/ontologies/${ontologyId}/ingestion-contracts`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  getIngestionContractHealth: (contractId: string) =>
+    request<{
+      contract_id: string;
+      flink_job_id: string;
+      state: string;
+      healthy: boolean;
+      status: string;
+      start_time?: number | null;
+      duration?: number | null;
+    }>(`/api/ingestion-contracts/${contractId}/health`),
+  reconcileIngestionContract: (
+    contractId: string,
+    body: { task_state: string; result?: Record<string, unknown> },
+  ) =>
+    request<IngestionContract>(`/api/ingestion-contracts/${contractId}/reconcile`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   listMaterializationContracts: (
     ontologyId: string,
     params?: { target_kind?: MaterializationTargetKind; materialized_only?: boolean },
@@ -1324,6 +1368,21 @@ export const api = {
     request<{ name: string; display_name: string; object_type_name: string }[]>(
       `/api/ontologies/${ontologyId}/properties`,
     ),
+
+  draftConfirmedArtifact: (body: {
+    conversation_id: string;
+    confirmation_id: string;
+    kind: string;
+    intent: string;
+    context: Record<string, unknown>;
+    ontology_id: string;
+    message_id?: string;
+    block_id?: string;
+  }) =>
+    request<GovernanceArtifact>("/api/agents/draft-confirmed", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   draftArtifact: (body: {
     kind: string;

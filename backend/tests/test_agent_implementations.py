@@ -99,7 +99,7 @@ def seeded(client, admin_headers) -> dict:
             ),
         ])
         db.commit()
-        ids = {"ontology_id": onto.id, "customer_id": customer.id}
+        ids = {"ontology_id": onto.id, "customer_id": customer.id, "domain_code": f"m6_{tag}"}
 
     client.post(
         f"/api/ontologies/{ids['ontology_id']}/materialization-contracts/sync",
@@ -137,7 +137,8 @@ def test_metric_executor_renders_ddl_and_sql(seeded):
     assert "`region`" in out["ddl"]
     assert "SUM(amount) AS metric_value" in out["sql"]
     assert "GROUP BY region" in out["sql"]
-    assert out["handoff"] == "DolphinScheduler"
+    assert out["execute_mode"] == "handoff"
+    assert out["compute_engine"] == "doris"
 
 
 def test_metric_dry_run_has_no_side_effects(seeded):
@@ -239,6 +240,71 @@ def test_metric_executor_compiles_formal_caliber(formal_logic):
     assert "LIMIT" not in sql.upper()
 
 
+def test_doris_metric_execution_uses_ready_physical_projection(formal_logic, monkeypatch):
+    from app.models import (
+        DataSource, ObjectType, Ontology, OntologyWarehouseDeployment,
+        WarehouseObjectProjection, WarehouseLogicProjection,
+    )
+    from app.services import doris_job_runner
+
+    with SessionLocal() as db:
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        ontology = db.get(Ontology, formal_logic["ontology_id"])
+        obj = db.query(ObjectType).filter(
+            ObjectType.ontology_id == ontology.id, ObjectType.name == "order"
+        ).one()
+        ds = DataSource(
+            name="Doris metric", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, dsn_secret_ref="mysql://doris",
+        )
+        db.add(ds); db.flush()
+        deployment = OntologyWarehouseDeployment(
+            ontology_id=ontology.id, ontology_version=ontology.version,
+            doris_datasource_id=ds.id, status="ready",
+        )
+        db.add(deployment); db.flush()
+        db.add(WarehouseObjectProjection(
+            deployment_id=deployment.id, object_type_id=obj.id,
+            serving_layer="dwd", serving_database="dwd", serving_table="sales_order",
+            schema_status="ready", sync_status="ready", transform_status="ready",
+            queryable=True,
+        ))
+        db.commit()
+        ds_id = ds.id
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        doris_job_runner,
+        "run_doris_sql",
+        lambda db, **kwargs: captured.update(kwargs) or {
+            "ok": True, "execute_mode": "orchestrated", "compute_engine": "doris",
+        },
+    )
+    spec = MetricDrafter().draft(
+        "订单总额",
+        {
+            "ontology_id": formal_logic["ontology_id"],
+            "business_logic_id": formal_logic["logic_id"],
+            "target_datasource_id": ds_id,
+        },
+    )
+    receipt = MetricExecutor().execute(spec, {"artifact_id": "metric-artifact"})
+    assert captured["kind"] == "metric"
+    assert captured["source_tables"] == ["dwd.sales_order"]
+    assert "FROM dwd.sales_order" in captured["execute_sql"][0]
+    assert "flink" not in captured["execute_sql"][0].lower()
+    assert receipt["logic_projection_id"]
+    with SessionLocal() as db:
+        projection = db.get(WarehouseLogicProjection, receipt["logic_projection_id"])
+        assert projection.status == "running"
+        assert projection.queryable is False
+        ds = db.get(DataSource, ds_id)
+        ds.is_default_warehouse = False
+        db.commit()
+
+
 # ---------- ③ ETL ----------
 
 
@@ -270,9 +336,9 @@ def test_transform_executor_reuses_m3_generator(seeded):
     )
     out = TransformExecutor().execute(spec, {})
     assert out["target_table"] == "dim_erp.customer"
-    assert "INSERT OVERWRITE TABLE dim_erp.customer" in out["sql"]
-    # 源表名逐段引用（真实源里带空格的表名不引用就是废 SQL）
-    assert "FROM `erp_ods`.`tab_customer`" in out["sql"]
+    assert "INSERT OVERWRITE TABLE `dim_erp`.`customer`" in out["sql"]
+    # Transform 只读 Doris ODS，不再直连业务源表。
+    assert f"FROM `ods_erp`.`ods_{seeded['domain_code']}_tab_customer`" in out["sql"]
     assert out["applied_rules"] == ["deduplicate"]
     # 该本体没声明主键 → 退回整行去重，且**明说**是整行，不冒充按主键
     assert "SELECT DISTINCT" in out["sql"]
@@ -370,7 +436,7 @@ def test_sync_drafter_maps_via_ontology_not_raw_copy(seeded):
     )
     # 源由 source_ref 定位，目标结构由本体决定
     assert spec["source"] == "erp_ods.tab_customer"
-    assert spec["target"] == "dim_erp.customer"
+    assert spec["target"] == f"ods_erp.ods_{seeded['domain_code']}_tab_customer"
     assert spec["mode"] == "incremental"  # 有 datetime 字段
     assert spec["partition_key"] == "created_at"
     assert spec["preservation"]["preserve"] is False
@@ -407,16 +473,19 @@ def test_sync_mode_carried_into_plan(seeded):
     assert SyncExecutor().dry_run(full, {})["mode"] == "full"
 
 
-def test_sync_engine_carried_into_plan(seeded):
-    """目标引擎贯穿到计划（sink 连接器选择已下沉到 flink_sql_generator，另测）。"""
+def test_sync_engine_is_doris_only(seeded):
+    """Phase 6 prevents a new sync spec from carrying a non-Doris target engine."""
+    with pytest.raises(ValueError, match="只允许使用 Doris"):
+        SyncDrafter().draft(
+            "同步客户",
+            {"ontology_id": seeded["ontology_id"], "object_type": "customer",
+             "engine": "postgres"},
+        )
     spec = SyncDrafter().draft(
         "同步客户",
-        {"ontology_id": seeded["ontology_id"], "object_type": "customer",
-         "engine": "postgres"},
+        {"ontology_id": seeded["ontology_id"], "object_type": "customer", "engine": "doris"},
     )
-    assert SyncExecutor().dry_run(spec, {})["engine"] == "postgres"
-    doris = dict(spec, engine="doris")
-    assert SyncExecutor().dry_run(doris, {})["engine"] == "doris"
+    assert SyncExecutor().dry_run(spec, {})["engine"] == "doris"
 
 
 def test_sync_plan_carries_alias_not_credentials(seeded):
@@ -629,131 +698,54 @@ def test_materialize_executor_proceeds_when_preflight_ok(monkeypatch, seeded):
         mock_run.assert_called_once()
 
 
-def test_engine_follows_target_datasource_not_contract(seeded):
-    """选了 postgres 目标仓，产出的就该是 postgres 方言——此前一律取契约默认 hive，
-    于是同步/清洗任务对着 postgres 连接产 Hive DDL 与 Hive sink，建表那步必挂。"""
+def test_non_doris_target_cannot_create_executable_spec(seeded):
+    """Phase 6 removes runtime Hive/Postgres/StarRocks target compatibility."""
     from app.models import DataSource
+    from app.services.materialization_runner import MaterializationError
 
     with SessionLocal() as db:
         db.add(DataSource(id="ds-pg-eng", name="pg-eng", kind="postgres",
-                          dsn_secret_ref="postgresql://x/y"))
+                          purpose="business_source", dsn_secret_ref="postgresql://x/y"))
         db.commit()
     try:
         ctx = {"ontology_id": seeded["ontology_id"], "object_type": "customer",
                "target_datasource_id": "ds-pg-eng"}
-        assert SyncDrafter().draft("同步客户", ctx)["engine"] == "postgres"
-        assert TransformDrafter().draft(
-            "清洗客户", {**ctx, "target_table": "customer"}
-        )["engine"] == "postgres"
-        # 人显式选的仍然优先
-        assert SyncDrafter().draft("同步客户", {**ctx, "engine": "doris"})["engine"] == "doris"
-        # 没选目标数据源时行为不变（回退契约/缺省）
+        with pytest.raises(MaterializationError, match="必须是 Doris"):
+            SyncDrafter().draft("同步客户", ctx)
+        with pytest.raises(ValueError, match="必须是 Doris"):
+            TransformDrafter().draft("清洗客户", {**ctx, "target_table": "customer"})
+        # Explicit engine cannot override an incompatible target datasource.
+        with pytest.raises(MaterializationError, match="必须是 Doris"):
+            SyncDrafter().draft("同步客户", {**ctx, "engine": "doris"})
         assert SyncDrafter().draft(
             "同步客户", {"ontology_id": seeded["ontology_id"], "object_type": "customer"}
-        )["engine"] == "hive"
+        )["engine"] == "doris"
     finally:
         with SessionLocal() as db:
             db.query(DataSource).filter(DataSource.id == "ds-pg-eng").delete()
             db.commit()
 
 
-def test_transform_flink_declares_source_and_target_separately(seeded, monkeypatch):
-    """跨库由 Flink 承担：源表按**源库**声明、目标表按数仓声明，两个端点不能同一个别名。
+def test_transform_executor_has_no_flink_dependency():
+    """Architecture guard: transform cannot regress to the Flink execution path."""
+    import inspect
+    import app.agents.executors.transform as module
 
-    此前两端都写死 warehouse_conn_id，背后是「sync 已把源搬进数仓 ODS 层」的假设，
-    而生成的 SQL 明明 FROM 原始源表——数仓根本看不见它，配上 Flink 也搬不动。
-    """
-    from app.models import DataSource
+    source = inspect.getsource(module)
+    assert "flink_job_runner" not in source
+    assert "generate_flink_sql" not in source
+    assert "FlinkSqlTask" not in source
 
-    with SessionLocal() as db:
-        db.add(DataSource(id="ds-flink", name="pg-flink", kind="postgres",
-                          dsn_secret_ref="postgresql://x/y"))
-        db.commit()
-    captured: dict = {}
 
-    def _spy(**kwargs):
-        captured.update(kwargs)
-        return "-- flink sql --"
-
-    import app.agents.executors.transform as mod
-
-    monkeypatch.setattr(mod, "generate_flink_sql", _spy)
-    # 执行器在函数体内 import run_flink_sql，故要打在它的**定义处**
-    import app.services.flink_job_runner as runner_mod
-
-    monkeypatch.setattr(
-        runner_mod, "run_flink_sql", lambda *a, **k: {"execute_mode": "handoff"}
+def test_transform_spec_contains_no_flink_fields(seeded):
+    spec = TransformDrafter().draft(
+        "客户表去重",
+        {"ontology_id": seeded["ontology_id"], "target_table": "customer"},
     )
-    try:
-        spec = TransformDrafter().draft(
-            "客户表去重",
-            {"ontology_id": seeded["ontology_id"], "target_table": "customer",
-             "target_datasource_id": "ds-flink"},
-        )
-        assert spec["source_ref_alias"] == "erp_readonly"
-        TransformExecutor().execute(spec, {})
-    finally:
-        with SessionLocal() as db:
-            db.query(DataSource).filter(DataSource.id == "ds-flink").delete()
-            db.commit()
-
-    assert captured, "generate_flink_sql 未被调用"
-    source, target = captured["source"], captured["target"]
-    assert source.alias == "erp_readonly"          # 源库别名
-    assert target.alias == "ontometa_ds_pg_flink"  # 数仓别名
-    assert source.alias != target.alias
-    # 两侧平台各归各的：源是源库的平台，目标是数仓引擎
-    assert source.platform == "mysql"
-    assert target.platform == "postgres"
-
-
-def test_transform_flink_task_carries_lineage_urns(seeded, monkeypatch):
-    """L1：transform 提交的 FlinkSqlTask 带 inlets/outlets URN（血缘）。
-
-    源 = 源库物理表（erp_readonly 的源平台 mysql），目标 = 数仓物理表。
-    URN 由 task_lineage_urns 从 executor 算好的物理名构造。
-    """
-    from app.models import DataSource
-
-    with SessionLocal() as db:
-        db.add(DataSource(id="ds-flink2", name="pg-flink2", kind="postgres",
-                          dsn_secret_ref="postgresql://x/y"))
-        db.commit()
-    captured: dict = {}
-
-    def _spy(**kwargs):
-        return "-- flink sql --"
-
-    def _capture_run_flink_sql(*args, **kwargs):
-        captured["tasks"] = kwargs.get("tasks")
-        return {"execute_mode": "handoff"}
-
-    import app.agents.executors.transform as mod
-
-    monkeypatch.setattr(mod, "generate_flink_sql", _spy)
-    import app.services.flink_job_runner as runner_mod
-
-    monkeypatch.setattr(runner_mod, "run_flink_sql", _capture_run_flink_sql)
-    try:
-        spec = TransformDrafter().draft(
-            "客户表去重",
-            {"ontology_id": seeded["ontology_id"], "target_table": "customer",
-             "target_datasource_id": "ds-flink2"},
-        )
-        TransformExecutor().execute(spec, {})
-    finally:
-        with SessionLocal() as db:
-            db.query(DataSource).filter(DataSource.id == "ds-flink2").delete()
-            db.commit()
-
-    task = captured["tasks"][0]
-    assert task.source_urns, "transform 任务应有源 URN（inlets）"
-    assert task.target_urn, "transform 任务应有目标 URN（outlets）"
-    # 源 URN 指向源库平台（mysql 源表），目标指向数仓
-    assert "dataPlatform:mysql" in task.source_urns[0]
-    assert "dataPlatform:postgres" in task.target_urn
-    # 物理表名含在 URN 里（库.表 或表名）
-    assert "customer" in task.target_urn
+    assert spec["engine"] == "doris"
+    assert not any(key.startswith("flink_") for key in spec)
+    assert "execution_mode" not in spec
+    assert "source_ref_alias" not in spec
 
 
 # ---------- ④ 标签 / 规则走同一条指标任务链 ----------
@@ -856,7 +848,7 @@ def test_tag_task_keeps_label_and_count_in_separate_columns(tag_logic):
     out = MetricExecutor().execute(_draft(tag_logic), {})
     ddl, sql = out["ddl"], out["sql"]
     # 结果表：标签取值是可分组的字符串列，值列是计数（不是金额类型）
-    assert "`tag_value` STRING" in ddl
+    assert ("`tag_value` VARCHAR" in ddl or "`tag_value` STRING" in ddl)
     assert "`metric_value` INT" in ddl
     assert "DECIMAL" not in ddl.split("metric_value")[1].split("\n")[0]
     # SQL：标签列 → tag_value；row_count → metric_value
@@ -943,7 +935,7 @@ def test_tag_walks_the_same_governance_pipeline(client, admin_headers, tag_logic
     assert a["status"] == "succeeded", a
     receipt = a["execution_receipt"]
     assert "`row_count` AS metric_value" in receipt["sql"]
-    assert "`tag_value` STRING" in receipt["ddl"]
+    assert ("`tag_value` VARCHAR" in receipt["ddl"] or "`tag_value` STRING" in receipt["ddl"])
 
 
 def test_materialize_and_metric_task_agree_on_tag_table_shape(tag_logic):

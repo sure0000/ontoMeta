@@ -288,6 +288,7 @@ def profile_property(
         cols, rows = data_app_executor.execute_sql(
             dsn=dsn, sql=summary_sql, limit=_PROFILE_ROW_LIMIT,
             mapping=mapping or None, timeout_seconds=_SQL_TIMEOUT,
+            dialect=backend,
         )
     except Exception as exc:  # noqa: BLE001 — 画像失败不得拖垮问答
         logger.info("column profile query failed (%s.%s): %s", obj.name, prop.name, exc)
@@ -321,6 +322,7 @@ def profile_property(
                 tcols, trows = data_app_executor.execute_sql(
                     dsn=dsn, sql=top_sql, limit=max(top_n, 1),
                     mapping=mapping or None, timeout_seconds=_SQL_TIMEOUT,
+                    dialect=backend,
                 )
                 vkey = tcols[0]["key"] if tcols else None
                 fkey = tcols[1]["key"] if len(tcols) > 1 else None

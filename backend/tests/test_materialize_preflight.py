@@ -191,7 +191,7 @@ def test_missing_warehouse_connection_blocks(monkeypatch, tmp_path):
     conn = _by_key(report)["warehouse_conn"]
     assert conn.status == pf.FAIL and conn.blocking is True
     # 下一步要能直接照做：给出该建的 conn_id。
-    assert "ontometa_ds_dw" in (conn.next_step or "")
+    assert "ontometa_ds_ds1" in (conn.next_step or "")
 
 
 def test_readonly_connection_403_is_non_blocking_warn(monkeypatch, tmp_path):

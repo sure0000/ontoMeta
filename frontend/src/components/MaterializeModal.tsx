@@ -38,16 +38,14 @@ import type {
 import { LABELS, StatusBadge } from "./StatusBadge";
 
 // 目标数仓引擎（决定 DDL/ETL 方言）——与后端 app/warehouse/adapters 对齐。
-const ENGINE_OPTIONS = ["hive", "doris", "starrocks", "clickhouse", "iceberg", "postgres"].map(
-  (e) => ({ value: e, label: e }),
-);
+const ENGINE_OPTIONS = [{ value: "doris", label: "Doris（统一数仓）" }];
 // 引擎名集合：选中数据源时其 kind 命中则据此推导引擎。
 const ENGINE_VALUES = new Set(ENGINE_OPTIONS.map((e) => e.value));
 // 推导不出引擎时的回退（与后端 DEFAULT_ENGINE 对齐）。
-const DEFAULT_ENGINE = "hive";
+const DEFAULT_ENGINE = "doris";
 
 // 数仓分层（阶段）顺序与展示名。
-const LAYER_ORDER = ["dim", "dwd", "ads"];
+const LAYER_ORDER = ["dim", "dwd", "dws", "ads"];
 const LAYER_LABEL: Record<string, string> = {
   dim: "维度层 DIM",
   dwd: "明细层 DWD",

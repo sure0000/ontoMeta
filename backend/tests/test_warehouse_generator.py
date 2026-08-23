@@ -162,7 +162,13 @@ def test_foreign_key_declared_from_source_evidence(client, admin_headers):
         f"/api/ontologies/{ids['ontology_id']}/warehouse/ddl",
         headers=admin_headers, params={"database_prefix": "erp"},
     ).json()["statements"]["dim_erp.sales_order"]
-    assert "'ontometa.foreign_key.customer_id'='dim_erp.customer(customer_id)'" in ddl
+    # Doris does not emit declarative foreign-key clauses; the capability gap is explicit.
+    body = client.get(
+        f"/api/ontologies/{ids['ontology_id']}/warehouse/ddl",
+        headers=admin_headers, params={"database_prefix": "erp"},
+    ).json()
+    assert "ontometa.foreign_key.customer_id" not in ddl
+    assert any(w["feature"] == "foreign_key" for w in body["warnings"])
 
 
 def test_fact_relation_materialized_via_mapping_table(client, admin_headers):
@@ -410,7 +416,7 @@ def test_generation_is_idempotent(client, admin_headers):
 
 def test_engines_endpoint_exposes_capability_matrix(client, admin_headers):
     body = client.get("/api/warehouse/engines", headers=admin_headers).json()
-    assert body["default"] == "hive"
+    assert body["default"] == "doris"
     by_name = {e["name"]: e for e in body["engines"]}
     # M8：四个引擎全部实现且能力矩阵已逐项核实。
     for engine in ("hive", "doris", "iceberg", "starrocks", "clickhouse"):
@@ -418,44 +424,30 @@ def test_engines_endpoint_exposes_capability_matrix(client, admin_headers):
         assert by_name[engine]["capabilities"]["verified"] is True, engine
 
 
-def test_derivation_reads_from_authoritative_hive(client, admin_headers):
-    """单一写入路径：非 hive 引擎从 Hive 权威副本派生，而非各自从 ODS 双写。"""
+def test_derivation_is_not_a_new_doris_path(client, admin_headers):
+    """Doris is the physical authority; legacy derivation is not a new path."""
     ids = _seed("deriv")
     oid = ids["ontology_id"]
     _sync(client, admin_headers, oid)
-
-    # hive 是权威源 → 无需派生
-    hive = client.get(
-        f"/api/ontologies/{oid}/warehouse/derivation",
-        headers=admin_headers, params={"engine": "hive"},
-    ).json()
-    assert hive["authoritative"] is True
-    assert hive["derivations"] == {}
 
     doris = client.get(
         f"/api/ontologies/{oid}/warehouse/derivation",
         headers=admin_headers, params={"engine": "doris", "database_prefix": "erp"},
     ).json()
-    assert doris["authoritative"] is False
-    entry = doris["derivations"]["dim_erp.customer"]
-    assert entry["source_table"] == "hive.dim_erp.customer"
-    assert "FROM hive.dim_erp.customer" in entry["load_sql"]
-    assert "CREATE TABLE IF NOT EXISTS `dim_erp`.`customer`" in entry["target_ddl"]
+    assert doris["authoritative"] is True
+    assert doris["derivations"] == {}
 
 
-def test_bundle_uses_derivation_for_non_hive(client, admin_headers):
+def test_bundle_uses_doris_as_the_only_new_write_path(client, admin_headers):
     ids = _seed("bundle")
     oid = ids["ontology_id"]
     _sync(client, admin_headers, oid)
     bundle = client.get(
         f"/api/ontologies/{oid}/warehouse/bundle",
-        headers=admin_headers, params={"engines": "hive,doris", "database_prefix": "erp"},
+        headers=admin_headers, params={"engines": "doris", "database_prefix": "erp"},
     ).json()
-    assert bundle["write_path"]["authoritative"] == "hive"
-    # hive 走 ODS→Hive 的 ETL；doris 走 Hive→doris 的派生
-    assert "etl" in bundle["engines"]["hive"]
-    assert "derivation" in bundle["engines"]["doris"]
-    assert "etl" not in bundle["engines"]["doris"]
+    assert bundle["write_path"]["authoritative"] == "doris"
+    assert "etl" in bundle["engines"]["doris"]
 
 
 def test_unknown_engine_returns_400(client, admin_headers):

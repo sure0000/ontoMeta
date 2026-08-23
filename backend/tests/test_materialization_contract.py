@@ -145,7 +145,7 @@ def test_sync_derives_defaults_by_role_and_structure(client, admin_headers):
     # 有 datetime 字段 → 增量 + 该字段做分区键
     assert customer.load_strategy == "incremental"
     assert customer.partition_key == "created_at"
-    assert customer.engines == ["hive"]
+    assert customer.engines == ["doris"]
 
     # 无时间语义字段 → 全量、无分区键
     order = by_target[ids["order_id"]]

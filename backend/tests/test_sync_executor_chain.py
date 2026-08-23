@@ -80,6 +80,81 @@ def test_sync_with_target_datasource_calls_run_sync(monkeypatch):
     assert "dag_run_id" in receipt
 
 
+def test_new_doris_sync_persists_contract_and_targets_only_ods(monkeypatch):
+    from app.database import SessionLocal
+    from app.models import (
+        DataSource, DomainContext, IngestionContract, ObjectType, Ontology, Property
+    )
+    import uuid
+
+    with SessionLocal() as db:
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        token = uuid.uuid4().hex[:8]
+        domain = DomainContext(datahub_domain_id=f"urn:li:domain:sync-{token}", name=f"sync-{token}")
+        db.add(domain); db.flush()
+        ontology = Ontology(domain_context_id=domain.id, status="published", version=2)
+        db.add(ontology); db.flush()
+        obj = ObjectType(
+            ontology_id=ontology.id, name="Customer", display_name="客户",
+            source_ref="urn:li:dataset:(urn:li:dataPlatform:mysql,erp.customer,PROD)",
+        )
+        db.add(obj); db.flush()
+        db.add_all([
+            Property(object_type_id=obj.id, name="customer_id", display_name="ID", data_type="bigint"),
+            Property(object_type_id=obj.id, name="modified_at", display_name="修改时间", data_type="timestamp"),
+        ])
+        source = DataSource(
+            name="ERP", kind="mysql", purpose="business_source",
+            catalog_name="erp", dsn_secret_ref="mysql://x",
+        )
+        doris = DataSource(
+            name="Doris", kind="doris", purpose="warehouse", is_default_warehouse=True,
+            dsn_secret_ref="mysql://doris",
+        )
+        db.add_all([source, doris]); db.commit()
+        oid, source_id, doris_id = ontology.id, source.id, doris.id
+
+    from app.services import materialization_runner
+    mock_run = MagicMock(return_value={"ok": True, "dag_id": "d1", "dag_run_id": "r1"})
+    monkeypatch.setattr(materialization_runner, "run_sync", mock_run)
+    spec = {
+        "ontology_id": oid,
+        "object_type": "Customer",
+        "source": "erp.customer",
+        "source_datasource_id": source_id,
+        "target_datasource_id": doris_id,
+        "target_ods_database": "ods_erp",
+        "target_ods_table": "customer",
+        "engine": "doris",
+        "mode": "incremental",
+        "primary_keys": ["customer_id"],
+        "incremental_column": "modified_at",
+        "initial_watermark": "2026-01-01 00:00:00",
+        "delete_policy": "ignore",
+    }
+    receipt = SyncExecutor().execute(spec, {"artifact_id": "a1"})
+    kwargs = mock_run.call_args.kwargs
+    expected_table = f"ods_sync_{token}_customer"
+    assert kwargs["target_ods_database"] == "ods_erp"
+    # Spec 传入的 customer 被忽略：表名只由后端规则生成。
+    assert kwargs["target_ods_tables"] == {"Customer": expected_table}
+    assert kwargs["source_platforms"] == {"Customer": "mysql"}
+    assert kwargs["initial_watermarks"] == {"Customer": "2026-01-01 00:00:00"}
+    assert receipt["target_tables"] == [f"ods_erp.{expected_table}"]
+    assert receipt["watermark_after"] is None
+    with SessionLocal() as db:
+        row = db.query(IngestionContract).filter(IngestionContract.ontology_id == oid).one()
+        assert row.status == "submitted"
+        assert row.target_ods_database == "ods_erp"
+        assert row.target_ods_table == expected_table
+        db.query(DataSource).filter(DataSource.id == doris_id).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.commit()
+
+
 def test_sync_handles_materialization_error_gracefully(monkeypatch):
     """run_sync 失败时（未配 Airflow / 无可搬对象…）退回「仅产出」，不静默假装执行了。"""
     from app.services.materialization_runner import MaterializationError

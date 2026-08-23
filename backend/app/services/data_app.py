@@ -32,10 +32,12 @@ from app.models import (
     DataAppVersion,
     DataAppWidget,
     DataSource,
+    DorisWarehouseConfig,
     DomainContext,
     ObjectType,
     Property,
 )
+from app.warehouse.policy import WAREHOUSE_ENGINE, require_doris_datasource
 from app.services.common import log_change
 from app.auth import hash_api_key
 from app.services.data_app_executor import (
@@ -107,46 +109,37 @@ def _dumps(value: Any) -> str | None:
 def resolve_domain_data_source(
     db: Session, target_catalog: str | None = None
 ) -> DataSource | None:
-    """统一选源（warehouse-first）。查询侧唯一入口，chat_bi / ontology_ladder 共用。
+    """Resolve the explicit default Doris warehouse, fail-closed.
 
-    StarRocks 多目录架构下，DataSource 分两类：
-    - warehouse 源（catalog_name 为 NULL/"internal"）：数仓投影，本体物化落这里，默认查这里
-    - 源库 catalog 引用（catalog_name="erp"/"crm"/...）：源系统在 StarRocks 里注册的 JDBC
-      catalog，**显式 target_catalog 才查**——查源库成为可审计的显式动作，而非「取最新」碰运气。
-
-    策略：
-    - ``target_catalog`` 指定：精确匹配该 catalog 名的可用源；匹配不到返回 None
-      （run_sql 据此降级为「仅建议 SQL」，不让 agent 悄悄换源）
-    - 未指定：优先 warehouse 源（catalog_name 为空/"internal"）；
-      无显式 warehouse 源时退化为取最新可用的源（兼容存量库无 catalog_name 的过渡期）
-    - 同组多候选时按更新时间取最新（与存量行为一致，避免行序不确定导致的选择漂移）
+    ``target_catalog`` remains in the internal signature only while old callers
+    are being removed. It is never a routing hint: business sources, catalog
+    names, timestamps and row order cannot affect a query target.
     """
-    usable = [
-        s
-        for s in db.query(DataSource).all()
-        if (s.dsn_secret_ref or "").strip() and s.kind != "mock"
-    ]
-    if not usable:
+    if target_catalog:
+        logger.warning("query target is unsupported; refusing %r", target_catalog)
         return None
-
-    def _latest(candidates: list[DataSource]) -> DataSource | None:
-        if not candidates:
+    explicit = db.query(DataSource).filter(
+        (DataSource.purpose == "warehouse") | DataSource.is_default_warehouse.is_(True)
+    ).all()
+    if explicit:
+        candidates = [
+            s for s in explicit
+            if s.kind == WAREHOUSE_ENGINE
+            and s.is_default_warehouse
+            and s.enabled
+            and (s.dsn_secret_ref or "").strip()
+            and s.status != "error"
+        ]
+        if len(candidates) != 1:
             return None
-        candidates.sort(key=lambda s: (s.updated_at or s.created_at), reverse=True)
-        return candidates[0]
+        try:
+            return require_doris_datasource(candidates[0], operation="查询")
+        except ValueError:
+            return None
 
-    if target_catalog and target_catalog != "warehouse":
-        return _latest(
-            [s for s in usable if (s.catalog_name or "") == target_catalog]
-        )
-    # warehouse 源：catalog_name 为空或 "internal"（两种标记等价）
-    warehouse = [s for s in usable if (s.catalog_name or "").strip() in ("", "internal")]
-    if warehouse:
-        return _latest(warehouse)
-    if target_catalog == "warehouse":
-        return None
-    # 退化：存量库全部带 catalog_name 标记时取最新可用（兼容过渡期）
-    return _latest(usable)
+    # No explicit warehouse means no executable query target. Business sources
+    # are never promoted implicitly by recency or catalog markers.
+    return None
 
 
 class DataAppService:
@@ -172,12 +165,26 @@ class DataAppService:
     def create_data_source(
         self, db: Session, *, name: str, kind: str, dsn_secret_ref: str | None,
         mapping: dict | None = None, catalog_name: str | None = None,
+        purpose: str = "business_source", is_default_warehouse: bool = False,
+        enabled: bool = True,
     ) -> DataSource:
+        kind = kind.lower().strip()
+        if purpose not in {"business_source", "warehouse"}:
+            raise ValueError("数据源 purpose 只能是 business_source 或 warehouse")
+        if purpose == "warehouse" and kind != WAREHOUSE_ENGINE:
+            raise ValueError("warehouse 数据源必须使用 Doris")
+        if is_default_warehouse and purpose != "warehouse":
+            raise ValueError("只有 warehouse 数据源可以设为默认数仓")
+        if is_default_warehouse:
+            existing = db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+            for row in existing:
+                row.is_default_warehouse = False
         ds = DataSource(
-            name=name,
-            kind=kind,
-            dsn_secret_ref=dsn_secret_ref,
-            mapping_json=_dumps(mapping),
+            name=name, kind=kind, purpose=purpose,
+            is_default_warehouse=is_default_warehouse, enabled=enabled,
+            dsn_secret_ref=dsn_secret_ref, mapping_json=_dumps(mapping),
             catalog_name=catalog_name,
         )
         db.add(ds)
@@ -195,6 +202,19 @@ class DataAppService:
             fields["dsn_secret_ref"] = _merge_dsn_password(new_dsn, ds.dsn_secret_ref)
         if "mapping" in fields:
             ds.mapping_json = _dumps(fields.pop("mapping"))
+        next_purpose = fields.get("purpose", ds.purpose)
+        next_kind = str(fields.get("kind", ds.kind)).lower().strip()
+        next_default = fields.get("is_default_warehouse", ds.is_default_warehouse)
+        if next_purpose not in {"business_source", "warehouse"}:
+            raise ValueError("数据源 purpose 只能是 business_source 或 warehouse")
+        if next_purpose == "warehouse" and next_kind != WAREHOUSE_ENGINE:
+            raise ValueError("warehouse 数据源必须使用 Doris")
+        if next_default and next_purpose != "warehouse":
+            raise ValueError("只有 warehouse 数据源可以设为默认数仓")
+        if next_default:
+            for row in db.query(DataSource).filter(DataSource.id != ds.id).all():
+                if row.is_default_warehouse:
+                    row.is_default_warehouse = False
         for key, value in fields.items():
             if value is not None and hasattr(ds, key):
                 setattr(ds, key, value)
@@ -204,9 +224,9 @@ class DataAppService:
 
     @staticmethod
     def _dsn_components(kind: str, dsn: str | None) -> dict:
-        """把存量 DSN 拆成可回显字段。密码明文下发，供前端 Input.Password 预填+眼睛切换显隐。
+        """把存量 DSN 拆成可安全回显的非机密字段，密码只返回是否已设置。
 
-        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号/密码
+        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号
         - 文件类（sqlite/duckdb）：取文件路径
         - cube：dsn 存的就是 API 地址，原样给 url
         解析失败时静默降级为空，不影响其它字段返回。
@@ -219,6 +239,7 @@ class DataAppService:
             "username": None,
             "password": None,
             "password_set": False,
+            "password_hint": None,
             "path": None,
             "url": None,
         }
@@ -233,8 +254,12 @@ class DataAppService:
             out["port"] = u.port
             out["database"] = u.database
             out["username"] = u.username
-            out["password"] = u.password  # 明文回显：前端预填进 Input.Password，眼睛图标控制显隐
+            # Password is a secret: only expose the presence hint.  The UI must
+            # ask the user to re-enter it; PATCH with an empty password keeps the
+            # managed value via _merge_dsn_password.
+            out["password"] = None
             out["password_set"] = bool(u.password)
+            out["password_hint"] = "已配置" if u.password else None
         elif kind in _FILE_DSN_KINDS:
             try:
                 out["path"] = make_url(dsn).database
@@ -250,6 +275,9 @@ class DataAppService:
             "id": ds.id,
             "name": ds.name,
             "kind": ds.kind,
+            "purpose": ds.purpose,
+            "is_default_warehouse": ds.is_default_warehouse,
+            "enabled": ds.enabled,
             "status": ds.status,
             "mapping": _loads(ds.mapping_json, None),
             "catalog_name": ds.catalog_name,
@@ -259,6 +287,67 @@ class DataAppService:
         }
         base.update(DataAppService._dsn_components(ds.kind, ds.dsn_secret_ref))
         return base
+
+    def get_doris_config(self, db: Session) -> DorisWarehouseConfig | None:
+        return db.query(DorisWarehouseConfig).first()
+
+    def save_doris_config(self, db: Session, data: dict[str, Any]) -> DorisWarehouseConfig:
+        ds = db.get(DataSource, data.get("warehouse_datasource_id"))
+        if not ds:
+            raise ValueError("Doris 数仓数据源不存在")
+        require_doris_datasource(ds, operation="Doris 配置")
+        if not ds.is_default_warehouse:
+            raise ValueError("Doris 配置必须绑定默认 warehouse DataSource")
+        if data.get("enabled", True):
+            if not str(data.get("query_host") or "").strip():
+                raise ValueError("启用 Doris 必须配置 FE SQL query_host")
+            if not [str(x).strip() for x in data.get("fenodes") or [] if str(x).strip()]:
+                raise ValueError("启用 Doris 必须配置至少一个 FE HTTP fenode")
+        config = self.get_doris_config(db)
+        token = "".join(c for c in ds.id.lower() if c.isalnum())[:12]
+        if config is None:
+            config = DorisWarehouseConfig(
+                id="default",
+                warehouse_datasource_id=ds.id,
+                airflow_ddl_conn_id=f"ontometa_doris_{token}_ddl",
+                airflow_etl_conn_id=f"ontometa_doris_{token}_etl",
+                airflow_flink_conn_id=f"ontometa_doris_{token}_flink",
+            )
+            db.add(config)
+        for key, value in data.items():
+            if key == "fenodes":
+                value = _dumps(value)
+                key = "fenodes_json"
+            if key == "reader_dsn_secret_ref":
+                if not value:
+                    continue  # blank means keep existing secret
+                # 设置页不回显密码；编辑主机/端口/库时，用原 reader DSN（首配时用
+                # DataSource DSN）补回密码，避免一次普通保存把受管凭据清空。
+                # reader_dsn_secret_ref 也允许 secret://alias 这类不透明引用；只有设置页
+                # 提交的是实际 Doris SQLAlchemy DSN 时才做密码合并，不能改写 secret 引用。
+                if str(value).startswith(("mysql://", "mysql+pymysql://")):
+                    value = _merge_dsn_password(
+                        value,
+                        config.reader_dsn_secret_ref or ds.dsn_secret_ref,
+                    )
+            if key in {
+                "airflow_ddl_conn_id", "airflow_etl_conn_id", "airflow_flink_conn_id"
+            } and not value:
+                continue  # keep deterministic ids unless explicitly overridden
+            if hasattr(config, key):
+                setattr(config, key, value)
+        db.commit()
+        db.refresh(config)
+        return config
+
+    @staticmethod
+    def serialize_doris_config(config: DorisWarehouseConfig) -> dict[str, Any]:
+        out = {c.name: getattr(config, c.name) for c in config.__table__.columns}
+        out["fenodes"] = _loads(out.pop("fenodes_json"), [])
+        secret = out.pop("reader_dsn_secret_ref", None)
+        out["reader_dsn_set"] = bool(secret)
+        out["reader_dsn_hint"] = "已配置" if secret else None
+        return out
 
     def delete_data_source(self, db: Session, ds_id: str) -> None:
         ds = db.get(DataSource, ds_id)
@@ -650,9 +739,10 @@ class DataAppService:
         runtime_filters: list[dict] | None = None,
         security_context: dict | None = None,
     ) -> dict:
-        """通用执行核：编译绑定(含运行时筛选) → Cube/真实源/Mock 执行 → columns/rows。
+        """通用执行核：编译绑定 → 当前版本 Doris Projection → columns/rows。
 
-        被数据集预览与图表(Widget)预览共用。
+        被数据集与 Widget/Public preview 共用。保存的 data_source_id 仅作历史审计，
+        不参与执行路由；未绑定本体的设计态草稿才允许生成明确标识的 Mock 示例。
         """
         effective = dict(binding)
         rt = [f for f in (runtime_filters or []) if isinstance(f, dict) and f.get("ref")]
@@ -660,43 +750,80 @@ class DataAppService:
             effective["filters"] = list(binding.get("filters") or []) + rt
         result = self._compile_sql(db, effective, ontology_id=ontology_id)
         warnings = list(result.get("warnings", []))
-        source = db.get(DataSource, data_source_id) if data_source_id else None
+        # Phase 6 query execution ignores a saved data_source_id. It may be a
+        # historical ERP/Cube binding and must never become a source fallback.
+        # Current ontology/version Projection metadata is the only authority.
+        if ontology_id and result.get("sql"):
+            from app.services.query_routing import (
+                projection_mapping,
+                readiness_error,
+                resolve_default_doris,
+                referenced_table_names,
+                target_receipt,
+            )
+            from app.services.warehouse_migration import cutover_error
 
-        # 路径一：Cube 语义层
-        if source and source.kind == "cube":
-            try:
-                columns, rows = self._cube_execute(
-                    db, effective, source, security_context=security_context
+            source = resolve_default_doris(db)
+            object_names = referenced_table_names(result["sql"])
+            blocked = (
+                "当前未配置唯一可执行的默认 Doris"
+                if source is None else cutover_error(db, [ontology_id])
+            )
+            if source is not None and not blocked:
+                blocked = readiness_error(
+                    db,
+                    datasource=source,
+                    ontology_ids=[ontology_id],
+                    object_names=object_names,
                 )
+            if blocked:
                 return {
                     "compiled_sql": result.get("sql"),
-                    "columns": columns,
-                    "rows": rows,
+                    "columns": [],
+                    "rows": [],
                     "used_mock": False,
-                    "warnings": warnings,
+                    "execution_blocked": True,
+                    "warnings": warnings + [blocked],
                 }
-            except CubeExecutionError as exc:
-                warnings.append(f"Cube 执行失败，已降级为示例数据：{exc}")
-
-        # 路径二：真实关系型数据源直连
-        if source and source.kind not in ("mock", "cube") and source.dsn_secret_ref and result.get("sql"):
+            mapping = projection_mapping(
+                db,
+                datasource=source,
+                ontology_ids=[ontology_id],
+                object_names=object_names,
+            )
             try:
                 columns, rows = execute_sql(
                     dsn=source.dsn_secret_ref,
                     sql=result["sql"],
                     limit=limit,
-                    mapping=_loads(source.mapping_json, None),
+                    mapping=mapping,
+                    dialect="doris",
                 )
+            except ExecutionError as exc:
                 return {
                     "compiled_sql": result.get("sql"),
-                    "columns": columns,
-                    "rows": rows,
+                    "columns": [],
+                    "rows": [],
                     "used_mock": False,
-                    "warnings": warnings,
+                    "execution_blocked": True,
+                    "warnings": warnings + [f"Doris 查询失败（未 fallback）：{exc}"],
                 }
-            except ExecutionError as exc:
-                warnings.append(f"真实数据源执行失败，已降级为示例数据：{exc}")
+            return {
+                "compiled_sql": result.get("sql"),
+                "columns": columns,
+                "rows": rows,
+                "used_mock": False,
+                "warnings": warnings,
+                "query_target": target_receipt(
+                    db,
+                    datasource=source,
+                    ontology_ids=[ontology_id],
+                    object_names=object_names,
+                ),
+            }
 
+        # Unbound design-time drafts may still render deterministic sample data;
+        # this is never used as a fallback for an ontology-bound query.
         columns, rows = self._mock_execute(db, effective, limit=limit)
         rows = self._apply_runtime_filters_to_mock(db, rows, rt)
         return {

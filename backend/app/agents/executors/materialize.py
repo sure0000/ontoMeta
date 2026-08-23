@@ -15,6 +15,7 @@ from typing import Any
 
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
+from app.models import DataSource
 from app.services import flink_params, materialization_runner
 
 
@@ -113,4 +114,17 @@ class MaterializeExecutor(Executor):
                 # 里的参数只有一处口径，别让「物化时填的和同步时填的」变成两回事。
                 flink_task_params=flink_params.from_spec(spec, context),
             )
+            # Submission is not schema readiness. Persist only credential-free
+            # reconciliation inputs in the receipt; Airflow final-success later
+            # calls publish_schema_ready().
+            target = db.get(DataSource, spec["target_datasource_id"])
+            if target is not None:
+                receipt["deployment_reconciliation"] = {
+                    "ontology_id": ontology_id,
+                    "datasource_id": target.id,
+                    "artifact_id": context.get("artifact_id"),
+                    "database_prefix": spec.get("database_prefix"),
+                    "database_overrides": spec.get("database_overrides") or {},
+                    "table_overrides": spec.get("table_overrides") or {},
+                }
         return receipt

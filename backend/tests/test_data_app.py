@@ -112,16 +112,18 @@ def test_data_app_full_flow(client, admin_headers):
     assert "GROUP BY channel" in dataset["compiled_sql"]
     dataset_id = dataset["id"]
 
-    # 2) 预览（Mock 数据）
+    # 2) 本体绑定预览在默认 Doris/Projection 未就绪时 fail-closed，不回退 Mock
     res = client.post(
         f"/api/data-apps/{app_id}/datasets/{dataset_id}/preview",
         headers=admin_headers,
     )
     assert res.status_code == 200, res.text
     preview = res.json()
-    assert preview["used_mock"] is True
-    assert len(preview["columns"]) == 2  # channel + sum_amount
-    assert len(preview["rows"]) > 0
+    assert preview["used_mock"] is False
+    assert preview["execution_blocked"] is True
+    assert preview["columns"] == []
+    assert preview["rows"] == []
+    assert any("Doris" in warning for warning in preview["warnings"])
 
     # 3) 发布
     res = client.post(
@@ -351,7 +353,8 @@ def test_widget_crud_and_add_to_dashboard(client, admin_headers):
     # 3) 图表预览
     res = client.post(f"/api/data-app-widgets/{widget_id}/preview", headers=admin_headers, json={"limit": 20})
     assert res.status_code == 200, res.text
-    assert len(res.json()["columns"]) == 2
+    assert res.json()["columns"] == []
+    assert res.json()["execution_blocked"] is True
 
     # 4) 新建看板并把图表加入为 tile
     res = client.post(
@@ -551,11 +554,11 @@ def test_version_lock_widget_snapshot(client, admin_headers):
         json={"name": "改过的图表", "binding": {"primary_object_type_id": obj_id, "measures": [], "dimensions": [], "filters": [], "row_limit": 5}},
     )
 
-    # 对外渲染仍用发布快照 → 仍有 sum_amount 列
+    # 对外渲染仍用发布快照；未就绪 Doris 路径 fail-closed，不回退样例数据。
     body = client.get(f"/api/public/data-apps/{token}").json()
     wprev = body["render"]["widgets"][wid]
-    keys = {c["key"] for c in wprev["columns"]}
-    assert "sum_amount" in keys  # 锁定的是发布时口径
+    assert wprev["columns"] == []
+    assert wprev["execution_blocked"] is True
 
 
 def test_lineage(client, admin_headers):

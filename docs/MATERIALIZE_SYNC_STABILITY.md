@@ -1,6 +1,10 @@
-# 同步执行稳定化方案：把失败从「运行三分钟后」提到「点提交之前」
+# 同步执行稳定化方案（历史归档）
 
-> **本文是 `MATERIALIZE_ORCHESTRATION.md` 的修订，不是替代。**
+> **状态：已被“业务源 → Flink → Doris ODS”架构替代，仅供审计。**
+> Hive、SeaTunnel、sync-runner、DockerOperator 和多通道设计不得继续作为新实现依据。当前 sync 只允许 Flink 写默认 Doris ODS；full 使用 staging + Doris atomic replace；incremental/CDC 使用 IngestionContract、水位和 Job ID。
+> 当前依据：`DORIS_WAREHOUSE_REFACTOR_PLAN.md`、`DW_IMPLEMENTATION.md`；生产状态见 `DORIS_PHASE6_PRODUCTION_MIGRATION_REPORT.md`。
+
+> **以下为历史正文。本文曾是 `MATERIALIZE_ORCHESTRATION.md` 的修订。**
 > 那份文档定下的分工全部保留：ontoMeta 只产作业定义与依赖图、Airflow 负责编排调度、
 > 搬运交专业工具、**建表固定走本体生成的 DDL**、凭据不进产物。
 > 本文只改两件事——**搬运任务用什么通道落到执行侧**，以及**失败在什么时刻暴露**。

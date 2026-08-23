@@ -45,7 +45,12 @@ def _seed(tag: str, dsn: str | None) -> dict:
                 table_role="business_object",
             )
         )
-        ds = DataSource(name=f"tgt-{tag}", kind="doris", dsn_secret_ref=dsn)
+        for existing in db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)):
+            existing.is_default_warehouse = False
+        ds = DataSource(
+            name=f"tgt-{tag}", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, enabled=True, status="ok", dsn_secret_ref=dsn,
+        )
         db.add(ds)
         db.commit()
         return {"ontology_id": ontology.id, "datasource_id": ds.id}
@@ -120,7 +125,7 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
         resp = client.post(
             f"/api/ontologies/{ids['ontology_id']}/warehouse/materialize",
             headers=admin_headers,
-            json={"target_datasource_id": ids["datasource_id"], "engine": "hive"},
+            json={"target_datasource_id": ids["datasource_id"], "engine": "doris"},
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -152,7 +157,7 @@ def test_materialize_bad_datasource_returns_400(client, admin_headers):
     resp = client.post(
         f"/api/ontologies/{ids['ontology_id']}/warehouse/materialize",
         headers=admin_headers,
-        json={"target_datasource_id": ids["datasource_id"], "engine": "hive"},
+        json={"target_datasource_id": ids["datasource_id"], "engine": "doris"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -165,7 +170,7 @@ def test_materialize_unknown_datasource_id(client, admin_headers):
     resp = client.post(
         f"/api/ontologies/{ids['ontology_id']}/warehouse/materialize",
         headers=admin_headers,
-        json={"target_datasource_id": "no-such-id", "engine": "hive"},
+        json={"target_datasource_id": "no-such-id", "engine": "doris"},
     )
     # 执行期 MaterializationError → failed 回执（非 5xx）
     assert resp.status_code == 200, resp.text

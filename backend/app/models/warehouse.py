@@ -65,6 +65,204 @@ class ScdType(str, enum.Enum):
     SCD2 = "scd2"
 
 
+class OntologyWarehouseDeployment(Base):
+    """Auditable deployment of one published ontology version to Doris."""
+
+    __tablename__ = "ontology_warehouse_deployments"
+    __table_args__ = (
+        UniqueConstraint("ontology_id", "ontology_version", name="uq_ontology_warehouse_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"))
+    ontology_version: Mapped[int] = mapped_column()
+    doris_datasource_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"))
+    status: Mapped[str] = mapped_column(String(30), default="pending", server_default="pending")
+    materialization_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=True)
+
+
+class WarehouseObjectProjection(Base):
+    """Object-level logical-to-physical mapping for a deployment version."""
+
+    __tablename__ = "warehouse_object_projections"
+    __table_args__ = (
+        UniqueConstraint("deployment_id", "object_type_id", name="uq_warehouse_projection_object"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    deployment_id: Mapped[str] = mapped_column(ForeignKey("ontology_warehouse_deployments.id"))
+    object_type_id: Mapped[str] = mapped_column(ForeignKey("object_types.id"))
+    ods_database: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ods_table: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    serving_layer: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    serving_database: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    serving_table: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    column_mapping_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
+    sync_status: Mapped[str] = mapped_column(String(20), default="empty", server_default="empty")
+    transform_status: Mapped[str] = mapped_column(String(20), default="not_required", server_default="not_required")
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sync_watermark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    queryable: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=True)
+
+
+class WarehouseLogicProjection(Base):
+    """BusinessLogic metric/tag/rule projection in Doris ADS."""
+
+    __tablename__ = "warehouse_logic_projections"
+    __table_args__ = (
+        UniqueConstraint(
+            "deployment_id", "business_logic_id",
+            name="uq_warehouse_logic_projection",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    deployment_id: Mapped[str] = mapped_column(
+        ForeignKey("ontology_warehouse_deployments.id"), index=True
+    )
+    business_logic_id: Mapped[str] = mapped_column(
+        ForeignKey("business_logics.id"), index=True
+    )
+    serving_database: Mapped[str] = mapped_column(String(255))
+    serving_table: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending"
+    )
+    queryable: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", index=True
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
+class IngestionContract(Base):
+    """Source table → default Doris ODS ingestion contract."""
+
+    __tablename__ = "ingestion_contracts"
+    __table_args__ = (
+        UniqueConstraint(
+            "ontology_id", "ontology_version", "object_type_id",
+            name="uq_ingestion_contract_object_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    ontology_version: Mapped[int] = mapped_column()
+    object_type_id: Mapped[str] = mapped_column(ForeignKey("object_types.id"), index=True)
+    source_datasource_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"), index=True)
+    source_physical_table: Mapped[str] = mapped_column(String(512))
+    source_mapping_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doris_datasource_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id"), index=True)
+    target_ods_database: Mapped[str] = mapped_column(String(255))
+    target_ods_table: Mapped[str] = mapped_column(String(255))
+    mode: Mapped[str] = mapped_column(String(20), default="full", server_default="full")
+    primary_keys_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sequence_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    incremental_column: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    initial_watermark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    late_arrival_policy: Mapped[str] = mapped_column(
+        String(30), default="strict", server_default="strict"
+    )
+    idempotency_strategy: Mapped[str] = mapped_column(
+        String(50), default="primary_key_upsert", server_default="primary_key_upsert"
+    )
+    delete_policy: Mapped[str] = mapped_column(String(30), default="ignore", server_default="ignore")
+    refresh_cron: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    flink_params_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="draft", server_default="draft")
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sync_watermark: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    flink_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    checkpoint_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    savepoint_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
+class WarehouseMigrationBatch(Base):
+    """Auditable Phase 6 production migration/cut-over batch.
+
+    The batch is a control-plane record only: write-side execution remains in
+    GovernanceArtifact/Airflow/Flink.  It stores approvals and evidence without
+    rewriting historical artifacts or receipts.
+    """
+
+    __tablename__ = "warehouse_migration_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    ontology_version: Mapped[int] = mapped_column()
+    doris_datasource_id: Mapped[str | None] = mapped_column(
+        ForeignKey("data_sources.id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), default="preparing", server_default="preparing", index=True
+    )
+    current_step: Mapped[int] = mapped_column(default=0, server_default="0")
+    approver: Mapped[str] = mapped_column(String(255))
+    rollback_owner: Mapped[str] = mapped_column(String(255))
+    observation_window_minutes: Mapped[int] = mapped_column()
+    legacy_dag_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_dag_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    approval_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cutover_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    observation_ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    legacy_stopped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rollback_drill_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    compatibility_items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
+class WarehouseMigrationEvidence(Base):
+    """Immutable evidence attempt for one ordered Phase 6 step."""
+
+    __tablename__ = "warehouse_migration_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id", "step", "attempt", name="uq_warehouse_migration_step_attempt"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("warehouse_migration_batches.id"), index=True
+    )
+    step: Mapped[int] = mapped_column()
+    attempt: Mapped[int] = mapped_column(default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(20))  # pass / fail
+    report_json: Mapped[str] = mapped_column(Text)
+    artifact_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str] = mapped_column(String(64))
+    recorded_by: Mapped[str] = mapped_column(String(255))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=True
+    )
+
+
 class MaterializationContract(Base, ProvenanceMixin):
     __tablename__ = "materialization_contracts"
     __table_args__ = (
@@ -85,7 +283,7 @@ class MaterializationContract(Base, ProvenanceMixin):
     target_layer: Mapped[str] = mapped_column(
         String(20), default=MaterializationLayer.DIM.value
     )
-    # JSON 文本的引擎列表，如 ["hive","doris"]。Hive 为权威写入路径，其余由其派生。
+    # JSON 文本的历史字段；新契约固定为 ["doris"]。旧值只供审计，不参与新执行路由。
     target_engines: Mapped[str | None] = mapped_column(Text, nullable=True)
     load_strategy: Mapped[str] = mapped_column(
         String(20), default=LoadStrategy.FULL.value
