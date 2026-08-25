@@ -96,10 +96,8 @@ def _unique_name(db: Session, kind: str, name: str) -> str:
 def _receipt_failure(receipt: Any) -> str | None:
     """回执自陈的失败原因；None = 未自陈失败。
 
-    只认**显式**的失败信号（``ok is False`` / ``state == "failed"``），不把「字段缺失」
-    当失败——sync/transform/metric 的「仅产出」回执既没有 ok 也没有 state，那是正常产出，
-    不是失败。多批（materialize 按 cron 分组）里任一批投递失败即整体失败，与
-    ``_aggregate_state`` 的口径一致。
+    多批里任一批投递失败即整体失败。同步任务的「只生成计划、未执行」由 execute 按
+    kind 单独判定；其它类型保留既有的产物交付语义。
     """
     if not isinstance(receipt, dict):
         return None
@@ -279,7 +277,13 @@ class AgentPipelineService:
 
         artifact.validation_report_json = _dumps(
             {
-                "issues": [i.to_dict() for i in _rank_issues(issues)],
+                # 逐条带上 blocking：判据只有 is_blocking 一处，前端不必再维护一份
+                # 「哪些码是 warning」的镜像——那份镜像已经漂过一次，把提交前自检的
+                # **提醒项**画成红色「阻断」，人照着去查一件根本不拦提交的事。
+                "issues": [
+                    {**i.to_dict(), "blocking": is_blocking(i)}
+                    for i in _rank_issues(issues)
+                ],
                 "blocking_count": len(blocking),
                 "dry_run": dry_run,
                 "dry_run_error": dry_run_error,
@@ -363,9 +367,20 @@ class AgentPipelineService:
         # 此前这里一律置 SUCCEEDED，于是「Airflow 根本没解析到 DAG」的任务在列表里显示成功。
         # 而 _reconcile_orchestrated_status 只在有真实 DagRun 时才对账，救不回这种投递期失败。
         failure = _receipt_failure(receipt)
-        artifact.status = (
-            ArtifactStatus.FAILED.value if failure else ArtifactStatus.SUCCEEDED.value
-        )
+        if artifact.kind == "sync" and (
+            receipt.get("execute_mode") == "handoff" or receipt.get("handoff")
+        ):
+            failure = str(
+                receipt.get("note") or "同步任务只生成了执行计划，未实际搬运数据"
+            )
+        if failure:
+            artifact.status = ArtifactStatus.FAILED.value
+        elif receipt.get("execute_mode") == "orchestrated":
+            # DAG 已提交不等于业务执行成功。终态由 Airflow 对账；sync 还必须通过
+            # Doris 目标表验证后才能进入 succeeded。
+            artifact.status = ArtifactStatus.EXECUTING.value
+        else:
+            artifact.status = ArtifactStatus.SUCCEEDED.value
         artifact.execution_receipt_json = _dumps(receipt)
         artifact.executed_at = datetime.now(timezone.utc)
         db.commit()
@@ -408,11 +423,13 @@ class AgentPipelineService:
         实时权威在 Airflow。此函数惰性对账：读到 SUCCEEDED 制品时查 Airflow，若 DagRun 报终态
         （success/failed）且与制品 status 不一致，回写制品并 commit。
 
-        只对 execute_mode=orchestrated 的制品做（目前只有 materialize），且只在 SUCCEEDED 时查——
-        FAILED/EXECUTING 已是明确态，不浪费 Airflow 调用。读不到/报错则静默跳过（best-effort）。
+        只对 execute_mode=orchestrated 且处于 EXECUTING/SUCCEEDED 的制品做。
+        sync 在 Airflow success 后还要验证 Doris 目标表，验证失败会回写 FAILED。
         """
-        # 只对账 SUCCEEDED 的 orchestrated 制品（避免反复查已知终态）
-        if artifact.status != ArtifactStatus.SUCCEEDED.value:
+        if artifact.status not in {
+            ArtifactStatus.EXECUTING.value,
+            ArtifactStatus.SUCCEEDED.value,
+        }:
             return
         receipt = _loads(artifact.execution_receipt_json, {})
         if receipt.get("execute_mode") != "orchestrated":
@@ -481,14 +498,28 @@ class AgentPipelineService:
                 from app.services.metric_reconciliation import reconcile_metric_receipt
 
                 reconcile_metric_receipt(db, receipt=receipt, airflow_state=agg)
-            if not agg or not is_terminal(agg):
-                return  # 非终态或读不到 → 保持 SUCCEEDED，前端读 live_state
+            sync_verification = None
+            if artifact.kind == "sync" and agg:
+                from app.services.sync_reconciliation import reconcile_sync_receipt
 
-            # Airflow 已终态 → 回写制品 status（success → SUCCEEDED 保持不变；failed → FAILED）
-            if agg == "failed" and artifact.status != ArtifactStatus.FAILED.value:
-                artifact.status = ArtifactStatus.FAILED.value
+                sync_verification = reconcile_sync_receipt(
+                    db, receipt=receipt, airflow_state=agg
+                )
+                if sync_verification is not None:
+                    receipt["doris_verification"] = sync_verification
+                    artifact.execution_receipt_json = _dumps(receipt)
+            if not agg or not is_terminal(agg):
+                artifact.status = ArtifactStatus.EXECUTING.value
                 db.commit()
-            # agg == "success" 时制品已是 SUCCEEDED，无需动作
+                return
+
+            verified = not sync_verification or sync_verification.get("verified") is True
+            artifact.status = (
+                ArtifactStatus.SUCCEEDED.value
+                if agg == "success" and verified
+                else ArtifactStatus.FAILED.value
+            )
+            db.commit()
         except Exception:  # noqa: BLE001
             # best-effort：任何异常都静默吞掉，不炸查询路径
             pass

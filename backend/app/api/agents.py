@@ -16,6 +16,7 @@ from app.agents import registry
 from app.api.deps import agent_pipeline, task_pipeline
 from app.database import get_db
 from app.models.agent import HIGH_RISK_KINDS, ArtifactStatus, GovernanceArtifact
+from app.schemas.chat_bi import ChatBiFormRequest
 from app.schemas import (
     AgentKindsOut,
     ArtifactConfirmRequest,
@@ -24,14 +25,17 @@ from app.schemas import (
     ArtifactEditRequest,
     ArtifactExecuteRequest,
     GovernanceArtifactOut,
+    PipelineAdvanceConfirmedRequest,
     PipelineCompileOut,
     PipelineScheduleRequest,
+    TaskFormRequest,
     TaskPipelineAdvanceOut,
     TaskPipelineCreateRequest,
     TaskPipelineDraftAllOut,
     TaskPipelineOut,
 )
 from app.services.agent_pipeline import PipelineError
+from app.services.chat_bi_tool_schemas import _ACTION_KIND_LABEL
 from app.services import chat_bi_ledger
 
 router = APIRouter()
@@ -180,8 +184,8 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db)):
 def _try_live_state(db: Session, artifact: GovernanceArtifact) -> dict | None:
     """尽力回读一个制品的 Airflow 实时态（多批 DagRun 聚合）。从不抛异常。
 
-    制品状态在 execute() 提交 DAG 后即置 succeeded，但 DAG 在 Airflow 里可能还在跑——
-    故实时权威是 Airflow。复用 warehouse 的批次解析 + 状态聚合，读不到就返回 None。
+    制品提交 DAG 后保持 executing；Airflow 终态是编排事实，sync 还要继续验证 Doris
+    目标表。复用 warehouse 的批次解析 + 状态聚合，读不到就返回 None。
 
     **状态回写**：当 Airflow DagRun 已达终态时，把制品 status 同步到与 Airflow 一致
     (success→succeeded, failed→failed)。这样即使后续 Airflow 不可达，制品状态也是对的。
@@ -220,17 +224,45 @@ def _try_live_state(db: Session, artifact: GovernanceArtifact) -> dict | None:
         if not agg:
             return None
         terminal = is_terminal(agg)
-        # 终态回写：让制品 status 与 Airflow 保持一致
-        if terminal and artifact.status == "succeeded":
+        verification = None
+        # 终态回写：同步任务还须通过 Doris 结果验证，不能只认 Airflow success。
+        if terminal and artifact.status in {"executing", "succeeded"}:
             from app.models.agent import ArtifactStatus
+
+            if artifact.kind == "sync" and agg == "success":
+                from app.services.sync_reconciliation import reconcile_sync_receipt
+
+                try:
+                    receipt = json.loads(artifact.execution_receipt_json or "{}")
+                except (TypeError, ValueError):
+                    receipt = {}
+                verification = reconcile_sync_receipt(
+                    db, receipt=receipt, airflow_state=agg
+                )
+                if verification is not None:
+                    receipt["doris_verification"] = verification
+                    artifact.execution_receipt_json = json.dumps(
+                        receipt, ensure_ascii=False, default=str
+                    )
+            verified = not verification or verification.get("verified") is True
             new_status = (
-                ArtifactStatus.SUCCEEDED.value if agg == "success"
+                ArtifactStatus.SUCCEEDED.value
+                if agg == "success" and verified
                 else ArtifactStatus.FAILED.value
             )
             if new_status != artifact.status:
                 artifact.status = new_status
-                db.commit()
-        return {"live_state": agg, "terminal": terminal, "run_url": run_url}
+            db.commit()
+        elif not terminal and artifact.status != "executing":
+            artifact.status = "executing"
+            db.commit()
+        display_state = "failed" if verification and not verification.get("verified") else agg
+        return {
+            "live_state": display_state,
+            "airflow_state": agg,
+            "terminal": terminal,
+            "run_url": run_url,
+        }
     except Exception:  # noqa: BLE001 — 实时态是增强，读不到退回制品态，绝不炸 API
         return None
 
@@ -253,22 +285,66 @@ def draft_artifact(data: ArtifactDraftRequest, db: Session = Depends(get_db)):
     return _to_out(artifact)
 
 
+@router.post("/agents/task-form", response_model=ChatBiFormRequest)
+def task_confirmation_form(data: TaskFormRequest, db: Session = Depends(get_db)):
+    """按任务类型现取一张**六环确认表单**（字段骨架 + 真实候选 + 本次 confirmation_id）。
+
+    对话里的 ``request_form`` 是模型触发的同一张表；这个端点给**非模型触发**的入口用
+    ——任务链要逐步确认时，第 N 步也得拿到和单发任务一模一样的向导，否则「链上的任务
+    可以少确认几环」就成了事实上的旁路。
+    """
+    from app.api.deps import chat_bi_service
+    from app.models import Ontology
+
+    if data.kind not in registry.registered_kinds():
+        raise HTTPException(status_code=400, detail=f"未知任务类型：{data.kind}")
+    if db.get(Ontology, data.ontology_id) is None:
+        raise HTTPException(status_code=404, detail="本体不存在")
+    form = _guard(
+        lambda: chat_bi_service.build_task_form(
+            db,
+            kind=data.kind,
+            ontology_id=data.ontology_id,
+            title=data.title or f"确认{_ACTION_KIND_LABEL.get(data.kind, data.kind)}任务",
+            intent=data.intent,
+            prefill=data.prefill,
+        )
+    )
+    return ChatBiFormRequest(**{k: v for k, v in form.items() if k != "prefilled"})
+
+
 @router.post("/agents/draft-confirmed", response_model=GovernanceArtifactOut)
 def draft_confirmed_artifact(
     data: ConfirmedArtifactDraftRequest,
     db: Session = Depends(get_db),
 ):
-    """三步确认表单直接进入草稿与 dry-run；不再发起第二轮 LLM。
+    """前三环确认（需求/本体/数据）走完 → 草稿 + dry-run；不再发起第二轮 LLM。
 
     ``_dispatch_propose_action`` 会核对 confirmation_id 对应的 requirement/ontology/data
-    三条记录，并以人的 chosen 覆盖请求 context。随后建立会话关联，再产出执行方案预览。
+    三条记录，并以人的 chosen 覆盖请求 context。随后建立会话关联，再产出执行方案预览——
+    后三环（执行方案 / 执行 / 结果）由人在任务详情里各自确认。
     """
     from app.api.deps import chat_bi_service
+    from app.models import Ontology
+
+    conversation = chat_bi_service.get_conversation(db, data.conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+    ontology = db.get(Ontology, data.ontology_id)
+    if ontology is None:
+        raise HTTPException(status_code=404, detail="本体不存在")
+    conversation_domain_ids = set(conversation.domain_ids)
+    if (
+        conversation_domain_ids
+        and ontology.domain_context_id not in conversation_domain_ids
+    ):
+        raise HTTPException(status_code=409, detail="本体不属于当前会话的数据域作用域")
 
     proposal, _summary, is_error = chat_bi_service._dispatch_propose_action(
         db,
         ontology_id=data.ontology_id,
-        domain_id="",
+        domain_id=ontology.domain_context_id,
         conversation_id=data.conversation_id,
         args={
             "kind": data.kind,
@@ -395,7 +471,10 @@ def execute_artifact(
         ),
         chosen={"status": artifact.status},
     )
-    return _to_out(artifact)
+    live_state = _try_live_state(db, artifact)
+    out = _to_out(artifact, live_state=live_state)
+    out.live_state = live_state
+    return out
 
 
 # ---------------- 任务链（多任务编排） ----------------
@@ -448,6 +527,70 @@ def advance_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
 
 
 @router.post(
+    "/agents/pipelines/{pipeline_id}/advance-confirmed",
+    response_model=TaskPipelineAdvanceOut,
+)
+def advance_pipeline_confirmed(
+    pipeline_id: str,
+    data: PipelineAdvanceConfirmedRequest,
+    db: Session = Depends(get_db),
+):
+    """确认过前三环后起草链上的下一步，并直接产出执行方案预览（validate + dry-run）。
+
+    与单发任务的 ``/agents/draft-confirmed`` 是同一条规矩：**链不替谁确认**。第 N 步同样
+    要人分别确认需求 / 本体 / 数据，才允许起草；执行方案 / 执行 / 结果三环再在任务详情里
+    各自确认。缺任何一环都 409 并说清缺哪环——含糊成"不能推进"等于没说。
+    """
+    from app.api.deps import chat_bi_service
+
+    conversation = chat_bi_service.get_conversation(db, data.conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+    missing = chat_bi_ledger.missing_task_confirmations(
+        db, data.conversation_id, data.confirmation_id
+    )
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "任务链的这一步必须先逐环确认需求、本体/口径和数据落点",
+                "missing_confirmations": missing,
+                "missing_labels": [chat_bi_ledger.node_label(n) for n in missing],
+            },
+        )
+
+    # 人在向导里定下的是权威值：写回该步的 context 后再起草，链的继承只补没填的。
+    context = {
+        str(k): v
+        for k, v in (data.context or {}).items()
+        if k != "task_confirmation_id" and v is not None
+    }
+    artifact = _guard(
+        lambda: task_pipeline.advance(
+            db,
+            pipeline_id,
+            context=context,
+            intent=(data.intent or "").strip() or None,
+            user_created=True,
+        )
+    )
+    # 关联必须先建：后三环（plan/execute/result）靠 (会话, 制品) 这条关联记回同一闭环。
+    chat_bi_service.link_conversation_task(
+        db,
+        data.conversation_id,
+        artifact.id,
+        kind=artifact.kind,
+        intent=artifact.intent,
+    )
+    artifact = _guard(lambda: agent_pipeline.validate(db, artifact.id, context={}))
+    return TaskPipelineAdvanceOut(
+        pipeline=TaskPipelineOut(**task_pipeline.detail(db, pipeline_id)),
+        artifact=_to_out(artifact),
+    )
+
+
+@router.post(
     "/agents/pipelines/{pipeline_id}/draft-all", response_model=TaskPipelineDraftAllOut
 )
 def draft_all_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
@@ -456,6 +599,11 @@ def draft_all_pipeline(pipeline_id: str, db: Session = Depends(get_db)):
     与 advance 的区别：不再要求上游执行成功才起草下一步——血缘驱动的依赖
     由各步骤的 depends_on 表达，起草阶段不阻塞（所有制品先落地，人再逐个
     校验/确认/执行；执行顺序由血缘决定）。「未确认不得执行」不变量不变。
+
+    **Data Agent 不再暴露这条路径**：它会让链上每一步都跳过需求/本体/数据三环确认，
+    与「所有任务逐环确认」冲突。对话入口一律走
+    ``/agents/pipelines/{id}/advance-confirmed``（逐步确认后起草）。此端点保留给
+    没有对话上下文的运维/编排调用方。
     """
     artifacts = _guard(lambda: task_pipeline.draft_all(db, pipeline_id))
     return TaskPipelineDraftAllOut(

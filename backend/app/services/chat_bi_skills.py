@@ -94,13 +94,20 @@ SKILLS: dict[str, Skill] = {
         when_to_use="用户要把本体/数据物化落库、建数据同步/加工任务，或问某个数据任务跑到哪了、成没成功",
         prompt_overlay=(
             "【数据任务】支持 materialize、sync、transform、metric 和任务状态查询。\n"
+            "**所有数据任务都按六环分别确认**：需求 → 本体 → 数据 → 执行方案 → 执行 → 结果。"
+            "前三环由用户在表单向导里逐环确认，后三环在任务详情里逐环确认。任何一环都不能替"
+            "用户跳过，也不要在回答里说任务「已创建/已执行」——那要等人确认到那一环。\n"
             "单任务流程：get_task_options(kind) → request_form(title, task_kind=kind, intent=需求) → "
-            "收到表单回填后 propose_action。request_form 的 fields 留空，由服务端生成三步确认向导。"
+            "收到表单回填后 propose_action。request_form 的 fields 留空，由服务端生成六环确认向导。"
             "propose_action.context 要包含回填的 task_confirmation_id。\n"
-            "候选含义：materialize 选择物化范围、默认 Doris 和真实数据库；sync 选择本体、匹配的业务源、"
-            "ODS 库和装载模式；transform 选择 ODS ready 对象、规则和分层；metric 选择形式化业务口径。\n"
-            "提案仅创建任务草稿。后续由界面完成校验与 dry-run、方案确认、执行和结果确认。"
-            "多步需求使用 propose_pipeline；任务进度使用 get_task_status。"
+            "候选含义：materialize 选择物化范围、默认 Doris 和真实数据库；sync 选择本体、匹配的业务源"
+            "和装载模式（落点恒为 ODS 库，不给选）；transform 选择 ODS ready 对象、规则和分层；"
+            "metric 选择形式化业务口径。\n"
+            "**同步不需要先物化**：sync 自己会对目标 ODS 表下幂等 CREATE TABLE IF NOT EXISTS"
+            "（落点恒为 ODS 层），所以「先物化再同步」只建一个 sync 任务即可，不要多出一步让用户"
+            "确认物化范围。materialize 只用于没有物理源表的人工建模对象。\n"
+            "提案仅创建任务草稿。多步需求使用 propose_pipeline——链上每一步同样逐环确认，"
+            "链只把上游落点接成默认值。任务进度使用 get_task_status。"
         ),
         extra_tool_names=(
             "get_task_options", "propose_action", "propose_pipeline", "get_task_status",

@@ -117,8 +117,12 @@ def test_new_doris_sync_persists_contract_and_targets_only_ods(monkeypatch):
         oid, source_id, doris_id = ontology.id, source.id, doris.id
 
     from app.services import materialization_runner
+    from app.services import materialize_preflight
+    from app.services.materialize_preflight import PreflightReport
+
     mock_run = MagicMock(return_value={"ok": True, "dag_id": "d1", "dag_run_id": "r1"})
     monkeypatch.setattr(materialization_runner, "run_sync", mock_run)
+    monkeypatch.setattr(materialize_preflight, "run_preflight", lambda *a, **k: PreflightReport())
     spec = {
         "ontology_id": oid,
         "object_type": "Customer",
@@ -137,20 +141,26 @@ def test_new_doris_sync_persists_contract_and_targets_only_ods(monkeypatch):
     receipt = SyncExecutor().execute(spec, {"artifact_id": "a1"})
     kwargs = mock_run.call_args.kwargs
     expected_table = f"ods_sync_{token}_customer"
-    assert kwargs["target_ods_database"] == "ods_erp"
+    # 落点不是配置项：存量 Spec 里写着 ods_erp，执行时照样落到唯一的 ODS 库。
+    assert kwargs["target_ods_database"] == "ods"
+    assert kwargs["database_prefix"] is None
     # Spec 传入的 customer 被忽略：表名只由后端规则生成。
     assert kwargs["target_ods_tables"] == {"Customer": expected_table}
     assert kwargs["source_platforms"] == {"Customer": "mysql"}
+    assert kwargs["source_datasource_id"] == source_id
     assert kwargs["initial_watermarks"] == {"Customer": "2026-01-01 00:00:00"}
-    assert receipt["target_tables"] == [f"ods_erp.{expected_table}"]
+    assert receipt["target_tables"] == [f"ods.{expected_table}"]
     assert receipt["watermark_after"] is None
     with SessionLocal() as db:
         row = db.query(IngestionContract).filter(IngestionContract.ontology_id == oid).one()
         assert row.status == "submitted"
-        assert row.target_ods_database == "ods_erp"
+        assert row.target_ods_database == "ods"
         assert row.target_ods_table == expected_table
-        db.query(DataSource).filter(DataSource.id == doris_id).update(
-            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        db.query(IngestionContract).filter(IngestionContract.ontology_id == oid).delete(
+            synchronize_session=False
+        )
+        db.query(DataSource).filter(DataSource.id.in_([source_id, doris_id])).delete(
+            synchronize_session=False
         )
         db.commit()
 

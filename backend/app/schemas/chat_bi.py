@@ -93,7 +93,7 @@ class ChatBiFormField(BaseModel):
     placeholder: str | None = None
     help: str | None = None
     default: Any | None = None
-    # 建数确认向导中的所属环节：ontology / data / plan。通用表单留空。
+    # 建数确认向导中的所属环节：requirement / ontology / data。通用表单留空。
     confirmation_node: str | None = None
     # 级联候选：depends_on 字段当前值 → options_by_value[value]。
     depends_on: str | None = None
@@ -109,11 +109,17 @@ class ChatBiFormField(BaseModel):
 
 
 class ChatBiConfirmationStep(BaseModel):
-    """建数表单的人审步骤；node 与决策闭环节点同名。"""
+    """一个数据任务的一环人审；node 与决策闭环的六环同名。
+
+    ``phase`` 说明这一环在**哪儿**确认：``form`` = 对话内的表单向导（需求/本体/数据），
+    ``artifact`` = 任务详情抽屉（执行方案/执行/结果）。表单一次给全六环，前端据此把
+    「还剩几环、下一环在哪确认」画在同一条进度上，而不是让人以为填完表单就完事了。
+    """
 
     node: str
     title: str
     description: str = ""
+    phase: str = "form"
 
 
 class ChatBiFormRequest(BaseModel):
@@ -127,6 +133,9 @@ class ChatBiFormRequest(BaseModel):
 
     title: str
     intent: str = ""
+    #: 服务端改判/合并了这次请求时给人的一句解释（如「同步自带建表，已省掉物化那一步」）。
+    #: 空 = 没有可说的。改判不能只在后台发生——人得知道自己拿到的为什么是这张表单。
+    notice: str = ""
     submit_label: str = "提交"
     fields: list[ChatBiFormField] = Field(default_factory=list)
     task_kind: str | None = None

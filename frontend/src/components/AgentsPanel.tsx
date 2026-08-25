@@ -1,5 +1,6 @@
 import {
   CheckCircleOutlined,
+  CloseCircleOutlined,
   EditOutlined,
   LinkOutlined,
   PlusOutlined,
@@ -31,6 +32,7 @@ import { SectionCard } from "./SectionCard";
 import { SpecForm } from "./artifact-spec/SpecForm";
 import { CLEANSING_RULES, SPEC_FIELDS } from "./artifact-spec/specFields";
 import { useSpecOptions } from "./artifact-spec/useSpecOptions";
+import { TaskRingSteps, ringIndexForArtifact, ringsForKind } from "./TaskRingSteps";
 import type {
   AgentKinds,
   AgentValidationIssue,
@@ -84,8 +86,23 @@ const STATUS_COLOR: Record<string, string> = {
   upstream_failed: "red",
 };
 
-// 与后端 validation._WARNING_CODES 对齐：这些是 warning 级，其余为阻断级。
-const WARNING_CODES = new Set(["engine_unverified", "ontology_issue"]);
+/**
+ * 旧报告的兜底码表（与后端 validation._WARNING_CODES 对齐）。
+ *
+ * 新报告逐条带 `blocking`，判据只在后端一处；这份镜像只用于校验时间早于该字段的报告。
+ * 它漂过一次——少了 preflight_* 两项，于是「不拦提交的提醒」被画成红色「阻断」。
+ */
+const WARNING_CODES = new Set([
+  "engine_unverified",
+  "ontology_issue",
+  "preflight_warning",
+  "preflight_unavailable",
+]);
+
+/** 这条问题是否阻断确认：后端判据优先，旧报告回落到码表。 */
+function issueBlocks(issue: AgentValidationIssue): boolean {
+  return issue.blocking ?? !WARNING_CODES.has(issue.code);
+}
 
 function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -222,6 +239,28 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
       /* 详情刷新失败不打断主流程 */
     }
   }, []);
+
+  const pollingDetailId = detail?.id;
+  const pollingDetailStatus = detail?.status;
+  useEffect(() => {
+    if (!pollingDetailId || pollingDetailStatus !== "executing") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const next = await api.getArtifact(pollingDetailId);
+        if (cancelled) return;
+        setDetail(next);
+        if (["succeeded", "failed"].includes(next.status)) await load();
+      } catch {
+        // 短暂读不到状态时保留当前详情，下一轮继续。
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pollingDetailId, pollingDetailStatus, load]);
 
   const openCreate = useCallback(() => {
     // 重置表单到初始态，并按需拉本体下拉数据
@@ -532,7 +571,11 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
       setDetail(next);
       await load();
       const label = { validate: "校验", confirm: "确认", execute: "执行" }[step];
-      message.success(`${label}完成：${next.status}`);
+      message.success(
+        step === "execute" && next.status === "executing"
+          ? "执行已提交，正在等待 Airflow 与 Doris 结果验证"
+          : `${label}完成：${STATUS_LABEL[next.status] ?? next.status}`,
+      );
     } catch (err) {
       handleError(err, "操作失败");
       void refreshDetail(artifact.id);
@@ -899,10 +942,37 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
   // 数据源在 spec 里只存 id（凭据不进 spec）。详情页直接印 uuid 的话，人根本看不出
   // 这个任务落到哪个仓——排查「数据没进去」时这恰恰是第一个要确认的事。
   const { options: dataSources } = useSpecOptions({ kind: "dataSources" }, null, {});
+  const ontologyId = typeof spec.ontology_id === "string" ? spec.ontology_id : null;
+  const { options: objectTypes } = useSpecOptions({ kind: "objectTypes" }, ontologyId, {});
+  const { options: properties } = useSpecOptions({ kind: "properties" }, ontologyId, {});
+  const { options: businessLogics } = useSpecOptions(
+    { kind: "businessLogics" },
+    ontologyId,
+    {},
+  );
+  const resolveOptions = (
+    options: { value: string; label: string }[],
+    value: unknown,
+  ): string => {
+    const one = (item: unknown) => {
+      const raw = String(item ?? "");
+      return options.find((o) => o.value === raw)?.label ?? raw;
+    };
+    return Array.isArray(value) ? value.map(one).join("、") : one(value);
+  };
   const resolve = (key: string, value: unknown): string => {
     if (key.endsWith("datasource_id") && typeof value === "string") {
       return dataSources.find((o) => o.value === value)?.label ?? value;
     }
+    if (
+      ["object_type", "target_table", "selected_targets", "object_types", "subject_objects", "dimension_objects"].includes(key)
+    ) {
+      return resolveOptions(objectTypes, value);
+    }
+    if (["primary_keys", "incremental_column", "sequence_column", "properties", "group_by", "filters", "inputs"].includes(key)) {
+      return resolveOptions(properties, value);
+    }
+    if (key === "business_logic_id") return resolveOptions(businessLogics, value);
     return specValueToText(key, value);
   };
   const entries: { label: string; text: string }[] = [];
@@ -933,6 +1003,10 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
     inputs: "输入字段",
     notes: "备注",
     refresh_cron: "调度频率",
+    target_ods_table: "ODS 物理表",
+    action: "执行动作",
+    side_effects: "副作用",
+    engine: "执行引擎",
   };
   for (const [k, v] of Object.entries(spec)) {
     if (covered.has(k) || INTERNAL_SPEC_KEYS.has(k)) continue;
@@ -966,10 +1040,17 @@ function ExecutionReceiptDetail({
   const topDagId = receipt.dag_id as string | undefined;
   const receiptState = (receipt.state as string | undefined) ?? liveState?.live_state;
   const tables = (receipt.tables as string[]) ?? [];
+  const targetTables = ((receipt.target_tables as string[]) ?? (receipt.ods_tables as string[]) ?? []);
   const jobs = (receipt.jobs as string[]) ?? [];
   const unsupported = (receipt.unsupported as Record<string, string>[]) ?? [];
   const receiptError = receipt.error as string | undefined;
   const isRunning = liveState && !liveState.terminal;
+  const object = receipt.object as { name?: string; display_name?: string } | undefined;
+  const sourceDatasource = receipt.source_datasource as { name?: string; kind?: string } | undefined;
+  const targetDatasource = receipt.target_datasource as { name?: string; kind?: string } | undefined;
+  const verification = receipt.doris_verification as
+    | { status?: string; verified?: boolean; target_table?: string; row_count?: number; error?: string }
+    | undefined;
 
   // 合并 live_state 与回执的状态：live_state 更权威（实时回读 Airflow）
   const displayState = liveState?.live_state ?? receiptState;
@@ -977,6 +1058,49 @@ function ExecutionReceiptDetail({
 
   return (
     <Space direction="vertical" size="small" style={{ width: "100%" }}>
+      {(object || sourceDatasource || targetDatasource || targetTables.length > 0) && (
+        <Descriptions size="small" column={1} bordered>
+          {object && (
+            <Descriptions.Item label="业务对象">
+              {object.display_name || object.name || "—"}
+            </Descriptions.Item>
+          )}
+          {sourceDatasource && (
+            <Descriptions.Item label="业务源">
+              {sourceDatasource.name || "—"}
+              {sourceDatasource.kind ? `（${sourceDatasource.kind}）` : ""}
+            </Descriptions.Item>
+          )}
+          {targetDatasource && (
+            <Descriptions.Item label="目标数仓">
+              {targetDatasource.name || "—"}
+              {targetDatasource.kind ? `（${targetDatasource.kind}）` : ""}
+            </Descriptions.Item>
+          )}
+          {targetTables.length > 0 && (
+            <Descriptions.Item label="Doris 目标表">
+              {targetTables.join("、")}
+            </Descriptions.Item>
+          )}
+          {verification?.row_count != null && (
+            <Descriptions.Item label="验证行数">{verification.row_count}</Descriptions.Item>
+          )}
+        </Descriptions>
+      )}
+
+      {verification && (
+        <Alert
+          type={verification.verified ? "success" : "error"}
+          showIcon
+          message={verification.verified ? "Doris 落数验证通过" : "Doris 落数验证失败"}
+          description={
+            verification.verified
+              ? `${verification.target_table ?? "目标表"} 共 ${verification.row_count ?? 0} 行`
+              : verification.error ?? "目标表未产生可验证的数据"
+          }
+        />
+      )}
+
       {/* Airflow 链接区——这是执行后用户最需要的东西 */}
       {(displayState || topDagId || batches.length > 0) && (
         <div>
@@ -986,11 +1110,7 @@ function ExecutionReceiptDetail({
                 {STATUS_LABEL[displayState ?? ""] ?? displayState ?? "—"}
               </Tag>
               {isRunning && <Tag color="processing">运行中</Tag>}
-              {topDagId && (
-                <Text code style={{ fontSize: 12 }}>
-                  {topDagId}
-                </Text>
-              )}
+              {topDagId && <Text type="secondary">Airflow 编排任务</Text>}
               {displayUrl && (
                 <Button
                   size="small"
@@ -1007,8 +1127,6 @@ function ExecutionReceiptDetail({
           ) : (
             <Space direction="vertical" size={6} style={{ width: "100%" }}>
               {batches.map((b, i) => {
-                const bid = b.dag_id as string | undefined;
-                const brun = b.dag_run_id as string | undefined;
                 const bstate = b.state as string | undefined;
                 const burl = b.run_url as string | undefined;
                 const btables = (b.tables as string[]) ?? [];
@@ -1025,14 +1143,7 @@ function ExecutionReceiptDetail({
                       <Tag color={STATUS_COLOR[bstate ?? ""] ?? "default"} style={{ margin: 0 }}>
                         {STATUS_LABEL[bstate ?? ""] ?? bstate ?? "—"}
                       </Tag>
-                      <Text code style={{ fontSize: 12 }}>
-                        {bid}
-                      </Text>
-                      {brun && (
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {brun}
-                        </Text>
-                      )}
+                      <Text>执行批次 {i + 1}</Text>
                       {burl && (
                         <Button
                           size="small"
@@ -1152,20 +1263,32 @@ function preflightIssues(issues: AgentValidationIssue[] | undefined): AgentValid
 
 function PreflightAlert({ issues }: { issues: AgentValidationIssue[] }) {
   if (!issues.length) return null;
-  const blocked = issues.some((i) => i.code === "preflight_blocked");
+  const blockingCount = issues.filter(issueBlocks).length;
+  const noticeCount = issues.length - blockingCount;
+  // 逐条标出阻断/提醒：这份列表里「不解决就交不上去」和「知道就行」混在一起，标题又只说
+  // 阻断，于是一条 expose_config 读不到 dags_folder 的提醒也被当成拦路石去查。
   return (
     <Alert
-      type={blocked ? "error" : "warning"}
+      type={blockingCount ? "error" : "warning"}
       showIcon
       style={{ marginBottom: 8 }}
       message={
-        blocked ? "提交前自检发现阻断项，执行大概率失败" : "提交前自检有提醒项，执行可能失败"
+        blockingCount
+          ? `提交前自检发现 ${blockingCount} 项阻断，执行大概率失败` +
+            (noticeCount ? `（另有 ${noticeCount} 项提醒，不拦提交）` : "")
+          : `提交前自检有 ${noticeCount} 项提醒，不拦提交`
       }
       description={
         <Space direction="vertical" size={4} style={{ width: "100%" }}>
-          {issues.map((issue, idx) => (
-            <div key={`${issue.code}-${idx}`}>{issue.message}</div>
-          ))}
+          {issues.map((issue, idx) => {
+            const blocking = issueBlocks(issue);
+            return (
+              <div key={`${issue.code}-${idx}`}>
+                <Tag color={blocking ? "red" : "gold"}>{blocking ? "阻断" : "提醒"}</Tag>
+                {issue.message}
+              </div>
+            );
+          })}
         </Space>
       }
     />
@@ -1177,10 +1300,10 @@ function IssueList({ issues }: { issues: AgentValidationIssue[] }) {
   return (
     <Space direction="vertical" size={4} style={{ width: "100%" }}>
       {issues.map((issue, idx) => {
-        const warning = WARNING_CODES.has(issue.code);
+        const warning = !issueBlocks(issue);
         return (
           <div key={`${issue.code}-${idx}`}>
-            <Tag color={warning ? "gold" : "red"}>{warning ? "warning" : "阻断"}</Tag>
+            <Tag color={warning ? "gold" : "red"}>{warning ? "提醒" : "阻断"}</Tag>
             <Text code>{issue.code}</Text> {issue.message}
             {issue.entity_name && <Text type="secondary">（{issue.entity_name}）</Text>}
           </div>
@@ -1198,7 +1321,7 @@ export function ArtifactDetail({
   onEdit,
   ontologyName,
   onConfirmResult,
-  resultConfirmed = false,
+  resultOutcome,
 }: {
   artifact: GovernanceArtifact | null;
   busy: boolean;
@@ -1209,9 +1332,35 @@ export function ArtifactDetail({
   /** 本体 ID → 展示名（数据域名 + 版本）。不传则退回原始 UUID。 */
   ontologyName?: (id: string) => string;
   /** 对话入口可提供结果验收；治理列表无会话上下文时不显示。 */
-  onConfirmResult?: (artifact: GovernanceArtifact) => void;
-  resultConfirmed?: boolean;
+  onConfirmResult?: (artifact: GovernanceArtifact, outcome: "accepted" | "rejected") => void;
+  resultOutcome?: "accepted" | "rejected";
 }) {
+  const [resolvedOntologyName, setResolvedOntologyName] = useState<string | null>(null);
+  useEffect(() => {
+    const ontologyId = artifact?.ontology_id;
+    if (!ontologyId || ontologyName) {
+      setResolvedOntologyName(null);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([api.listOntologies(), api.listDomains()])
+      .then(([ontologies, domains]) => {
+        if (cancelled) return;
+        const ontology = ontologies.find((item) => item.id === ontologyId);
+        const domain = ontology
+          ? domains.find((item) => item.id === ontology.domain_context_id)
+          : undefined;
+        setResolvedOntologyName(
+          ontology ? `${domain?.name ?? "数据域"} v${ontology.version}` : "当前任务本体",
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedOntologyName("当前任务本体");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [artifact?.ontology_id, ontologyName]);
   if (!artifact) return null;
   const report = artifact.validation_report;
   const status = artifact.status;
@@ -1283,7 +1432,7 @@ export function ArtifactDetail({
                 onConfirm={() => onStep("execute", artifact)}
               >
                 <Button type="primary" danger icon={<ThunderboltOutlined />} loading={busy}>
-                  执行
+                  执行任务
                 </Button>
               </Popconfirm>
             ) : (
@@ -1294,13 +1443,25 @@ export function ArtifactDetail({
                 loading={busy}
                 onClick={() => onStep("execute", artifact)}
               >
-                执行
+                执行任务
               </Button>
             ))}
         </Space>
       }
     >
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+        {/* ---- 六环确认进度 ----
+            与对话里的表单向导画的是同一条进度：人在那边确认完前三环（需求/本体/数据）后
+            来到这里，剩下的执行方案 / 执行 / 结果三环在此逐环确认。少了这条，填完表单的人
+            只看到几个按钮，不知道自己还差三环没确认。 */}
+        <TaskRingSteps
+          rings={ringsForKind(artifact.kind)}
+          {...ringIndexForArtifact(
+            status,
+            resultOutcome === "accepted" || resultOutcome === "rejected",
+          )}
+        />
+
         {/* ---- 基本信息 ---- */}
         <Descriptions size="small" column={1} bordered>
           <Descriptions.Item label="任务名称">{artifact.name}</Descriptions.Item>
@@ -1309,7 +1470,7 @@ export function ArtifactDetail({
           )}
           <Descriptions.Item label="本体">
             {artifact.ontology_id
-              ? (ontologyName?.(artifact.ontology_id) ?? artifact.ontology_id)
+              ? (ontologyName?.(artifact.ontology_id) ?? resolvedOntologyName ?? "当前任务本体")
               : "—"}
           </Descriptions.Item>
           <Descriptions.Item label="来源">
@@ -1320,7 +1481,10 @@ export function ArtifactDetail({
         {/* ---- 任务配置 ---- */}
         <div>
           <SectionTitle>任务配置</SectionTitle>
-          <SpecDescriptions kind={artifact.kind} spec={artifact.spec ?? {}} />
+          <SpecDescriptions
+            kind={artifact.kind}
+            spec={{ ontology_id: artifact.ontology_id, ...(artifact.spec ?? {}) }}
+          />
         </div>
 
         {/* ---- 校验报告 ---- */}
@@ -1361,7 +1525,12 @@ export function ArtifactDetail({
                       {
                         key: "dry_run",
                         label: "执行计划预览",
-                        children: <pre style={PRE_STYLE}>{prettyJson(report.dry_run)}</pre>,
+                        children: (
+                          <SpecDescriptions
+                            kind={artifact.kind}
+                            spec={{ ontology_id: artifact.ontology_id, ...report.dry_run }}
+                          />
+                        ),
                       },
                     ]
                   : []),
@@ -1405,17 +1574,35 @@ export function ArtifactDetail({
                 message={status === "failed" ? "任务执行失败，未返回结构化回执" : "任务已结束，未返回结构化回执"}
               />
             )}
+            {onConfirmResult && terminal && !resultOutcome && (
+              <Alert
+                style={{ marginTop: 12 }}
+                type="info"
+                showIcon
+                message="还差最后一环：确认执行结果"
+                description="核对回执与实际落库结果后给出反馈；没有这一步，闭环会一直停在「已执行但结果未确认」。"
+              />
+            )}
             {onConfirmResult && terminal && (
-              <div style={{ marginTop: 12 }}>
+              <Space style={{ marginTop: 12 }}>
                 <Button
-                  type={resultConfirmed ? "default" : "primary"}
+                  type={resultOutcome === "accepted" ? "primary" : "default"}
                   icon={<CheckCircleOutlined />}
-                  disabled={resultConfirmed}
-                  onClick={() => onConfirmResult(artifact)}
+                  disabled={resultOutcome === "accepted"}
+                  onClick={() => onConfirmResult(artifact, "accepted")}
                 >
-                  {resultConfirmed ? "执行结果已确认" : "确认执行结果"}
+                  结果成功
                 </Button>
-              </div>
+                <Button
+                  danger
+                  type={resultOutcome === "rejected" ? "primary" : "default"}
+                  icon={<CloseCircleOutlined />}
+                  disabled={resultOutcome === "rejected"}
+                  onClick={() => onConfirmResult(artifact, "rejected")}
+                >
+                  结果失败
+                </Button>
+              </Space>
             )}
           </div>
         )}

@@ -130,14 +130,14 @@ const flinkFields = (): SpecFieldDef[] => [
     min: 1,
     max: 512,
     advanced: true,
-    help: "这个任务的 flink run -p；留空跟随设置页。大表搬运调高，小任务别占满集群",
+    help: "flink run -p；留空跟随设置页",
   },
   {
     key: "flink_yarn_queue",
     label: "YARN 队列",
     control: "text",
     advanced: true,
-    help: "提交到哪个队列（-Dyarn.application.queue）；留空跟随设置页",
+    help: "-Dyarn.application.queue；留空跟随设置页",
   },
   {
     key: "flink_deploy_target",
@@ -152,14 +152,14 @@ const flinkFields = (): SpecFieldDef[] => [
     label: "Checkpoint 目录",
     control: "text",
     advanced: true,
-    help: "流式/CDC 作业的读位点目录，file:///var/… 或 hdfs://…；批作业不需要，留空跟随设置页",
+    help: "流式 / CDC 作业的读位点目录（file:/// 或 hdfs://）；批作业不需要",
   },
   {
     key: "flink_extra_args",
     label: "额外 flink run 参数",
     control: "stringList",
     advanced: true,
-    help: "如 -Dtaskmanager.memory.process.size=2g，输入后回车添加；不接受空白与 shell 元字符",
+    help: "如 -Dtaskmanager.memory.process.size=2g，回车添加",
   },
 ];
 
@@ -175,9 +175,9 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       control: "businessLogicSelect",
       required: true,
       optionSource: { kind: "businessLogics" },
-      help: "选一个已定义的业务逻辑，指标口径与绑定的对象/字段由它推导",
+      help: "口径与绑定的对象/字段由它推导",
     },
-    targetDatasourceField("固定使用默认 Doris；不选则只生成 Doris DDL+SQL，不落库"),
+    targetDatasourceField("聚合结果写入默认 Doris 的 ads 层"),
     {
       key: "target_layer",
       label: "目标层",
@@ -196,7 +196,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       required: true,
       optionSource: { kind: "objectTypes" },
     },
-    targetDatasourceField("固定使用默认 Doris；未配置时只生成 Doris SQL，不执行"),
+    targetDatasourceField("加工结果写入默认 Doris"),
     {
       key: "target_layer",
       label: "目标层",
@@ -209,7 +209,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       label: "清洗规则",
       control: "multiSelect",
       optionSource: { kind: "cleansingRules" },
-      help: "可多选；每条对应一个确定性清洗算子",
+      help: "每条对应一个确定性清洗算子",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
     { key: "schedule", label: "Airflow 调度", control: "cron" },
@@ -222,18 +222,20 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       control: "objectSingle",
       required: true,
       optionSource: { kind: "objectTypes" },
-      help: "选它后由 drafter 自动带出 source/target，无需手填",
     },
+    // ── 连接步骤 ──────────────────────────────────────────────────────────────
     {
       key: "source_datasource_id",
-      label: "业务源 DataSource",
+      label: "业务源",
       control: "select",
       required: true,
       optionSource: { kind: "dataSources", purpose: "business_source", executableOnly: true },
-      help: "候选仅含启用且已配置连接的 business_source；最终还须与本体 source_ref 匹配",
+      help: "须与所选对象的来源匹配",
     },
-    targetDatasourceField("固定选择启用的默认 Doris；同步只写其 ODS 层"),
-    { key: "target_ods_database", label: "ODS 数据库", control: "text", required: true, default: "ods" },
+    // 同步的落点不给选：库恒为 ods、表名恒为 ods_{数据域}_{原始表名}（后端 ods_naming）。
+    // 分层（dim/dwd/dws/ads）是加工与聚合任务的事，同步表单里不该出现层或库名前缀。
+    targetDatasourceField("数据落到默认 Doris 的 ods 库"),
+    // ── 策略步骤 ──────────────────────────────────────────────────────────────
     {
       key: "mode",
       label: "装载方式",
@@ -246,7 +248,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       label: "业务主键",
       control: "propertyMultiSelect",
       optionSource: { kind: "properties" },
-      help: "incremental/CDC 必填；用于 Doris Unique Key UPSERT",
+      help: "incremental / CDC 必填",
     },
     {
       key: "incremental_column",
@@ -261,34 +263,42 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       label: "CDC Sequence 列",
       control: "propertySingle",
       optionSource: { kind: "properties" },
-      help: "CDC 必填，保证 UPDATE 顺序",
+      help: "CDC 必填",
     },
     {
       key: "delete_policy",
       label: "DELETE 策略",
       control: "select",
-      optionSource: { kind: "static", options: [
-        { value: "ignore", label: "忽略删除" },
-        { value: "soft_delete", label: "软删除" },
-        { value: "hard_delete", label: "传播删除（仅 CDC）" },
-      ] },
+      optionSource: {
+        kind: "static",
+        options: [
+          { value: "ignore", label: "忽略删除" },
+          { value: "soft_delete", label: "软删除" },
+          { value: "hard_delete", label: "传播删除（仅 CDC）" },
+        ],
+      },
       default: "ignore",
     },
-    { key: "database_prefix", label: "库名前缀", control: "text" },
     ...flinkFields(),
   ],
   materialize: [
-    targetDatasourceField("固定使用启用、已配置连接的默认 Doris；物化只建结构"),
+    targetDatasourceField("物化只建结构，不搬数据"),
     {
       key: "target_database",
       label: "目标数据库",
       control: "select",
       required: true,
       optionSource: { kind: "databases", dependsOn: "target_datasource_id" },
-      help: "选择 Doris 中已存在的数据库；系统不会自动创建数据库",
+      help: "只能选已存在的库，物化不会自动建库",
     },
   ],
 };
+
+/** sync 连接步骤字段键（第 2 步：选数据源）。 */
+export const SYNC_CONN_KEYS = new Set(["source_datasource_id", "target_datasource_id"]);
+
+/** sync 策略步骤需要跳过的键（已在连接步骤展示）。 */
+export const SYNC_STRATEGY_SKIP_KEYS: Set<string> = SYNC_CONN_KEYS;
 
 /** 表单里标了 required 的字段——向导提交前据此做真校验（不只是画个星号）。 */
 export function requiredSpecKeys(kind: string, skipKeys?: Set<string>): SpecFieldDef[] {

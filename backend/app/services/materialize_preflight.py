@@ -22,6 +22,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -33,8 +34,14 @@ from app.services.job_planner import (
     JobPlan,
     JobPlanner,
 )
+from app.services import flink_params
 from app.services.materialization_contract import MaterializationContractService
-from app.services.materialization_runner import _warehouse_conn_id
+from app.services.materialization_runner import (
+    Emit,
+    _source_conn_id,
+    _warehouse_conn_id,
+    build_embedded_airflow_connections,
+)
 from app.services.settings_service import SettingsService
 from app.services.sync_tool_resolver import (
     SyncToolResolutionError,
@@ -88,11 +95,31 @@ def run_preflight(
     target_datasource_id: str,
     engine: str,
     selected_targets: list[str] | None = None,
+    source_datasource_id: str | None = None,
+    source_database: str | None = None,
+    managed_connections: bool = False,
+    emit: Emit = "ddl",
+    load_strategy: str | None = None,
+    incremental_column: str | None = None,
+    initial_watermark: str | None = None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> PreflightReport:
-    """跑一遍提交前自检，返回逐项结构化结果。**不落产物、不触发运行。**"""
+    """跑一遍提交前自检，返回逐项结构化结果。**不落产物、不触发运行。**
+
+    自检要有意义，预演的就必须是**本次真会提交的那个作业**，所以搬运侧的几个参数要跟着
+    任务走，而不是回头去读契约（契约是「这张表平时怎么搬」，Spec 是「这一次怎么搬」）：
+
+    Args:
+        emit: ``"ddl"`` = 物化（只建表，不产 Flink 作业）；``"dml"`` = 同步（搬运）。
+            决定是否做 Flink 前置条件那一组检查，与 ``materialization_runner`` 同义。
+        load_strategy: 本次同步的装载方式（Spec 的 ``mode``），压过契约。
+        incremental_column / initial_watermark: 本次同步的增量字段与水位。
+        flink_task_params: 本任务的 Flink 覆盖（含 checkpoint 目录），优先于设置页默认。
+    """
     report = PreflightReport()
 
     ds = db.get(DataSource, target_datasource_id)
+    source_ds = db.get(DataSource, source_datasource_id) if source_datasource_id else None
     airflow = _settings.get_airflow_runtime(db)
 
     # 1) Airflow 是否配置可用 + /health 连通。不通则后续 Airflow 相关项全无意义，
@@ -110,7 +137,18 @@ def run_preflight(
             )
         )
         _add_conn_and_batch(
-            report, db, ontology_id, ds, selected_targets, airflow, engine
+            report,
+            db,
+            ontology_id,
+            ds,
+            selected_targets,
+            airflow,
+            engine,
+            emit=emit,
+            load_strategy=load_strategy,
+            incremental_column=incremental_column,
+            initial_watermark=initial_watermark,
+            flink_task_params=flink_task_params,
         )
         return report
 
@@ -122,14 +160,36 @@ def run_preflight(
     try:
         _check_api_auth(report, client)
         _check_api_version(report, client)
-        _check_warehouse_conn(report, client, ds)
-        _check_doris_flink_conn(report, db, client, ds)
+        if managed_connections:
+            _check_managed_connections(
+                report,
+                db,
+                ds,
+                source_ds=source_ds,
+                source_database=source_database,
+            )
+        else:
+            _check_warehouse_conn(report, client, ds)
+            _check_doris_flink_conn(report, db, client, ds)
+            if source_datasource_id:
+                _check_source_conn(report, client, source_ds, source_datasource_id)
         _check_dag_dir_visible(report, client, airflow)
     finally:
         client.close()
 
     _check_execution_channel(
-        report, db, ontology_id, airflow, ds, engine, selected_targets
+        report,
+        db,
+        ontology_id,
+        airflow,
+        ds,
+        engine,
+        selected_targets,
+        emit=emit,
+        load_strategy=load_strategy,
+        incremental_column=incremental_column,
+        initial_watermark=initial_watermark,
+        flink_task_params=flink_task_params,
     )
     _check_batch_size(report, db, ontology_id, selected_targets, airflow.max_tasks_per_dag)
     return report
@@ -323,6 +383,124 @@ def _check_warehouse_conn(
     )
 
 
+def _check_source_conn(
+    report: PreflightReport,
+    client: AirflowClient,
+    ds: DataSource | None,
+    datasource_id: str,
+) -> None:
+    """同步任务的源库凭据必须在 Airflow 中以确定性 conn_id 存在。"""
+    if ds is None:
+        report.add(
+            PreflightItem(
+                key="source_conn",
+                label="源库连接",
+                status=FAIL,
+                blocking=True,
+                detail=f"源数据源 {datasource_id} 不存在，无法推导 Airflow Connection。",
+                next_step="重新选择一个有效且已启用的业务源数据源。",
+            )
+        )
+        return
+
+    conn_id = _source_conn_id(ds)
+    try:
+        client.get_connection(conn_id)
+    except AirflowError as exc:
+        text = str(exc)
+        if "403" in text:
+            report.add(
+                PreflightItem(
+                    key="source_conn",
+                    label="源库连接",
+                    status=WARN,
+                    blocking=False,
+                    detail=f"无权读取 Connection（403），无法确认「{conn_id}」是否存在。",
+                    next_step=f"用有 Connections 读权限的账号核对 conn_id={conn_id}。",
+                )
+            )
+        else:
+            report.add(
+                PreflightItem(
+                    key="source_conn",
+                    label="源库连接",
+                    status=FAIL,
+                    blocking=True,
+                    detail=f"Airflow 源库 Connection「{conn_id}」不可用：{exc}",
+                    next_step=(
+                        f"在 Airflow 创建 conn_id={conn_id}，并配置源库「{ds.name}」"
+                        "的类型、主机、端口、数据库和账号密码。"
+                    ),
+                )
+            )
+        return
+
+    report.add(
+        PreflightItem(
+            key="source_conn",
+            label="源库连接",
+            status=PASS,
+            blocking=True,
+            detail=f"Connection「{conn_id}」存在，Flink 可读取源库。",
+        )
+    )
+
+
+def _check_managed_connections(
+    report: PreflightReport,
+    db: Session,
+    target_ds: DataSource | None,
+    *,
+    source_ds: DataSource | None,
+    source_database: str | None,
+) -> None:
+    """自包含 DAG 只校验本地连接参数是否足够，运行首任务会负责注册。"""
+    if target_ds is None:
+        report.add(PreflightItem(
+            key="warehouse_conn",
+            label="建表连接",
+            status=FAIL,
+            blocking=True,
+            detail="目标数据源不存在，无法生成 DAG 内置 Connection。",
+            next_step="重新选择有效的目标数据源。",
+        ))
+        return
+    try:
+        payloads = build_embedded_airflow_connections(
+            db,
+            target_ds,
+            source_ds=source_ds,
+            source_alias=_source_conn_id(source_ds) if source_ds else None,
+            source_database=source_database,
+        )
+    except Exception as exc:  # noqa: BLE001 - 转成结构化 preflight 结果
+        report.add(PreflightItem(
+            key="managed_connections",
+            label="DAG 内置连接",
+            status=FAIL,
+            blocking=True,
+            detail=str(exc),
+            next_step="补齐数据源 DSN、账号密码、默认数据库与 Doris fenodes 后重试。",
+        ))
+        return
+
+    labels = ["建表连接"]
+    if source_ds is not None:
+        labels.extend(["Doris Flink 写入连接", "源库连接"])
+    for payload, label in zip(payloads, labels):
+        report.add(PreflightItem(
+            key=(
+                "warehouse_conn" if label == "建表连接"
+                else "doris_flink_conn" if label.startswith("Doris")
+                else "source_conn"
+            ),
+            label=label,
+            status=PASS,
+            blocking=True,
+            detail=f"Connection「{payload['conn_id']}」将由 DAG 首任务自动创建或更新。",
+        ))
+
+
 def probe_ssh_pipeline(airflow) -> tuple[bool, str]:
     """探 SSH 投递管道：能连上 Airflow 主机、且 DAG 目录可写吗？
 
@@ -454,7 +632,7 @@ def _check_dag_dir_visible(
                 detail=detail,
             )
         )
-        _check_dag_dir_matches_instance(report, client, airflow)
+        _check_dag_dir_matches_instance(report, client, airflow, ssh_ok=True)
         return
     report.add(
         PreflightItem(
@@ -471,15 +649,50 @@ def _check_dag_dir_visible(
             ),
         )
     )
-    _check_dag_dir_matches_instance(report, client, airflow)
+    _check_dag_dir_matches_instance(report, client, airflow, ssh_ok=False)
 
 
 def dags_folder_of(client: AirflowClient) -> str | None:
     """问 Airflow 自己：你在扫哪个目录（``core.dags_folder``）。
 
-    ``expose_config=False`` 时读不到，返回 None——这不是错误，只是没法对账。
+    ``expose_config=False`` 时读不到，返回 None——这不是错误，只是 REST 这条路没法对账，
+    还可以走 SSH 那条（见 :func:`dags_folder_via_ssh`）。
     """
     return client.get_config_option("core", "dags_folder")
+
+
+def dags_folder_via_ssh(airflow) -> str | None:
+    """REST 不肯说时，改在那台机器上问它自己。
+
+    ``expose_config=False`` 是默认配置，不是异常状态，所以「读不到就让人自己去核对」
+    等于把最常见的一种失败（投递目录压根不是 Airflow 扫的那个）永久留在盲区里。而投递
+    本来就走 SSH——同一台主机、同一把钥匙，这里不新增任何信任面：
+    ``airflow config get-value core dags_folder`` 既认 airflow.cfg，也认
+    ``AIRFLOW__CORE__DAGS_FOLDER``。
+
+    读不到就返回 None（没装 airflow / 非交互 shell 的 PATH 上没有 / AIRFLOW_HOME 不同），
+    退回「无法对账」的提醒——拿一个未必是那台调度器在用的路径去对账，比不对账更糟。
+
+    模块级函数是为了可注入：单测覆盖它即可，不必真起 ssh（同 :func:`probe_ssh_pipeline`）。
+    """
+    if not getattr(airflow, "ssh_host", ""):
+        return None
+    from app.services.dag_delivery import get_delivery
+
+    try:
+        delivery = get_delivery(
+            airflow.ssh_host,
+            user=airflow.ssh_user or None,
+            port=airflow.ssh_port,
+            password=airflow.ssh_password or None,
+        )
+        proc = delivery._ssh("airflow config get-value core dags_folder")
+    except Exception:  # noqa: BLE001 — 旁路对账失败不该带走整份自检
+        return None
+    # airflow CLI 常在 stdout 里夹带 deprecation 警告，取最后一行；不是绝对路径就当没读到。
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    tail = lines[-1] if lines else ""
+    return tail if tail.startswith("/") else None
 
 
 def _within(child: str, parent: str) -> bool:
@@ -490,7 +703,7 @@ def _within(child: str, parent: str) -> bool:
 
 
 def _check_dag_dir_matches_instance(
-    report: PreflightReport, client: AirflowClient, airflow
+    report: PreflightReport, client: AirflowClient, airflow, *, ssh_ok: bool
 ) -> None:
     """把投递目录和实例自报的 ``core.dags_folder`` 对一次账。
 
@@ -503,6 +716,11 @@ def _check_dag_dir_matches_instance(
     不是"必错"。软链接同理。
     """
     folder = dags_folder_of(client)
+    reading = "REST /config"
+    if not folder and ssh_ok:
+        # expose_config 关着不等于查不到：投递管道刚验通，就用它去问那台机器本人。
+        folder = dags_folder_via_ssh(airflow)
+        reading = "SSH 在主机上读取"
     if not folder:
         report.add(
             PreflightItem(
@@ -510,10 +728,15 @@ def _check_dag_dir_matches_instance(
                 label="DAG 目录与实例一致",
                 status=WARN,
                 blocking=False,
-                detail="该实例关掉了 expose_config，读不到 core.dags_folder，无法对账。",
+                detail=(
+                    "该实例关掉了 expose_config，读不到 core.dags_folder"
+                    + ("，SSH 上也没问出来（远端没有 airflow 命令或 AIRFLOW_HOME 不同）" if ssh_ok else "")
+                    + "，无法对账。"
+                ),
                 next_step=(
                     f"手动核对 Airflow 主机上的 dags_folder 是否就是 {airflow.dags_dir}"
-                    "（airflow.cfg 的 [core] dags_folder，或 AIRFLOW__CORE__DAGS_FOLDER）。"
+                    "（在那台机器上跑 `airflow config get-value core dags_folder`，"
+                    "或看 airflow.cfg 的 [core] dags_folder / AIRFLOW__CORE__DAGS_FOLDER）。"
                 ),
             )
         )
@@ -525,7 +748,7 @@ def _check_dag_dir_matches_instance(
                 label="DAG 目录与实例一致",
                 status=PASS,
                 blocking=False,
-                detail=f"实例扫描 {folder}，投递目录 {airflow.dags_dir} 在其中。",
+                detail=f"实例扫描 {folder}（{reading}），投递目录 {airflow.dags_dir} 在其中。",
             )
         )
         return
@@ -536,7 +759,7 @@ def _check_dag_dir_matches_instance(
             status=WARN,
             blocking=False,
             detail=(
-                f"实例扫描的是 {folder}，投递目录配的是 {airflow.dags_dir}，两者不一致。"
+                f"实例扫描的是 {folder}（{reading}），投递目录配的是 {airflow.dags_dir}，两者不一致。"
             ),
             next_step=(
                 f"若 Airflow 是**直接装在这台机器上**：把 DAG 目录改成 {folder}"
@@ -557,16 +780,33 @@ def _check_execution_channel(
     ds,
     engine: str,
     selected_targets: list[str] | None,
+    *,
+    emit: Emit,
+    load_strategy: str | None,
+    incremental_column: str | None,
+    initial_watermark: str | None,
+    flink_task_params: dict[str, Any] | None,
 ) -> None:
     """统一执行架构：搬运一律走 Flink SQL on YARN。前置条件只两件：JAR 与 checkpoint_dir。
 
-    - **flink_sql_runner_jar**：缺它**同步**退回「仅产出」（不执行），preflight 标 WARN
-      提醒。物化不受影响——建表是 ``SQLExecuteQueryOperator`` 直连目标仓，与 Flink 无关。
-    - **flink_checkpoint_dir**：仅长期 CDC 流作业需要它持久化读位点；incremental
-      是带水位谓词的有界 JDBC batch，不依赖 checkpoint。
+    **只对搬运（``emit="dml"``，即同步）体检。** 物化（``emit="ddl"``）压根不调 JobPlanner、
+    不产 Flink 作业——建表是 ``SQLExecuteQueryOperator`` 直连目标仓（见
+    ``materialization_runner._run_orchestrated``）。此前不分 emit 一律预演搬运，物化于是会
+    被别人契约上的装载方式判出「缺 checkpoint」而拒绝提交，人还查不到那张表是谁。
 
-    不再有 sync_channel/runner/docker 多通道——那套已废除，preflight 不再探 runner probe。
+    - **flink_sql_runner_jar**：缺它同步退回「仅产出」（不执行），标 WARN 提醒。
+    - **flink_checkpoint_dir**：**只有 CDC** 这种常驻流作业需要它持久化读位点。
+      ``incremental`` 是带水位谓词的**有界 batch**（见 ``generate_move_sql``），跑完即退，
+      不碰 checkpoint；它的编译期硬条件是主键 + 增量字段 + 初始水位，那三项由
+      ``_check_sync_spec`` 按**本任务的** Spec 直接判，不在这里借 checkpoint 之名喊话。
+
+    **预演必须与真跑同参**：``load_strategy``（Spec 里选的全量/增量）、落点恒为 ODS、增量
+    字段与水位都按本次任务传入。否则一条「全量」同步会因为该对象**契约**上写着 incremental
+    而被预演成流式作业，报一个它根本不会遇到的阻断——而人在表单上从没选过 CDC。
     """
+    if emit != "dml":
+        return
+
     runner_jar = (airflow.flink_sql_runner_jar or "").strip()
     if not runner_jar:
         report.add(
@@ -583,9 +823,11 @@ def _check_execution_channel(
             )
         )
 
-    # 可搬性预演：本次有几张表、各是什么装载方式（含增量/CDC 与否）。
+    # 可搬性预演：本次有几张表、各是什么装载方式。参数与 ``run_sync`` 一一对应。
     from app.services.job_planner import JobPlanner
+    from app.services.ods_naming import ODS_DATABASE
 
+    entities = list(selected_targets or [])
     planner = JobPlanner()
     try:
         plan = planner.build(
@@ -596,17 +838,27 @@ def _check_execution_channel(
             target_alias=_warehouse_conn_id(ds) if ds is not None else DEFAULT_TARGET_ALIAS,
             selected_targets=selected_targets,
             runner_capabilities=None,
+            # 本次运行的装载方式覆盖：人在表单上选的「全量」必须压过契约上的 incremental/cdc，
+            # 与 ``materialization_runner.run_sync`` 传的是同一个值。
+            load_strategy=load_strategy,
+            # 同步落点恒为 ODS 库（见 ods_naming）。不传它，预演出来的是分层库表，作业名
+            # 都写着 sync_dim_xxx——而同步从不写 dim，只是把预演结果说成了另一件事。
+            target_ods_database=ODS_DATABASE,
+            incremental_columns=(
+                {e: incremental_column for e in entities} if incremental_column else None
+            ),
+            initial_watermarks=(
+                {e: initial_watermark for e in entities} if initial_watermark else None
+            ),
         )
     except Exception:
         # 计划失败（本体不存在/无契约）不在 execution_channel 检查范围，别的项会报。
         return
 
-    cdc_jobs = [
-        j.name for j in plan.jobs
-        if j.mode == "cdc"
-        or (j.mode == "incremental" and not getattr(j, "initial_watermark", None))
-    ]
-    checkpoint_dir = (airflow.flink_checkpoint_dir or "").strip()
+    # 任务级 checkpoint 目录优先于设置页（与 flink_params.resolve_config 同一口径）：
+    # 只看全局的话，人在这条任务上填了目录仍会被拦。
+    checkpoint_dir = flink_params.resolve_checkpoint_dir(airflow, flink_task_params)
+    cdc_jobs = [j.name for j in plan.jobs if j.mode == "cdc"]
     if cdc_jobs and not checkpoint_dir:
         report.add(
             PreflightItem(
@@ -620,12 +872,13 @@ def _check_execution_channel(
                     "否则重启会重搬。编译期会直接报错，提交无法成功。"
                 ),
                 next_step=(
-                    "在 设置 → Airflow/Flink 填写「Flink Checkpoint 目录」（file://… 本地 或 "
-                    "hdfs://… 集群）；或把这批表的契约改为全量（mode=full），全量不需要 checkpoint。"
+                    "在本任务的「Checkpoint 目录」填写（file://… 本地 或 hdfs://… 集群），"
+                    "或到 设置 → Airflow/Flink 配一个全局默认；"
+                    "也可把装载方式改为全量/增量，两者都是有界批作业，不需要 checkpoint。"
                 ),
             )
         )
-    elif cdc_jobs and checkpoint_dir:
+    elif cdc_jobs:
         report.add(
             PreflightItem(
                 key="flink_checkpoint",
@@ -636,10 +889,6 @@ def _check_execution_channel(
                 next_step=None,
             )
         )
-
-
-
-
 
 
 def _check_batch_size(
@@ -686,6 +935,12 @@ def _add_conn_and_batch(
     selected_targets: list[str] | None,
     airflow,
     engine: str,
+    *,
+    emit: Emit = "ddl",
+    load_strategy: str | None = None,
+    incremental_column: str | None = None,
+    initial_watermark: str | None = None,
+    flink_task_params: dict[str, Any] | None = None,
 ) -> None:
     """Airflow 不可达时的补充项。
 
@@ -704,6 +959,17 @@ def _add_conn_and_batch(
         )
     )
     _check_execution_channel(
-        report, db, ontology_id, airflow, ds, engine, selected_targets
+        report,
+        db,
+        ontology_id,
+        airflow,
+        ds,
+        engine,
+        selected_targets,
+        emit=emit,
+        load_strategy=load_strategy,
+        incremental_column=incremental_column,
+        initial_watermark=initial_watermark,
+        flink_task_params=flink_task_params,
     )
     _check_batch_size(report, db, ontology_id, selected_targets, airflow.max_tasks_per_dag)

@@ -364,12 +364,17 @@ class OntologyQueryService:
             query = query.filter(ObjectType.table_role.in_(role_in))
         if needs_review is not None:
             query = query.filter(ObjectType.needs_review.is_(bool(needs_review)))
-        if q and q.strip():
-            like = f"%{q.strip()}%"
+        normalized_q = (q or "").strip()
+        # Agent/搜索框约定 ``*`` 表示不限定关键词，不能把它当成字面星号去做 ILIKE。
+        if normalized_q and normalized_q != "*":
+            like = f"%{normalized_q}%"
             query = query.filter(
                 (ObjectType.name.ilike(like))
                 | (ObjectType.display_name.ilike(like))
                 | (ObjectType.description.ilike(like))
+                # 用户经常拿物理表名（如 ``tabCode List``）找业务对象；该信息只在
+                # DataHub URN/source_ref 中，遗漏它会让已绑定对象看起来像不存在。
+                | (ObjectType.source_ref.ilike(like))
             )
         total = query.count()
         query = query.order_by(ObjectType.updated_at.desc())

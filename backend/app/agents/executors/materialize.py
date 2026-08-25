@@ -81,6 +81,7 @@ class MaterializeExecutor(Executor):
                 target_datasource_id=spec["target_datasource_id"],
                 engine=engine,
                 selected_targets=spec.get("selected_targets"),
+                managed_connections=True,
             )
             if not preflight.ok:
                 blocking = [

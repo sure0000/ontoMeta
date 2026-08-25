@@ -138,7 +138,6 @@ class TransformExecutor(Executor):
         ontology: Ontology,
         obj: ObjectType,
         datasource_id: str | None,
-        prefix: str | None,
     ) -> str:
         if datasource_id:
             deployment = (
@@ -166,9 +165,11 @@ class TransformExecutor(Executor):
                         )
                     return f"{projection.ods_database}.{projection.ods_table}"
             raise ValueError("当前本体版本没有可用的 Doris Deployment/ODS Projection")
-        database = f"ods_{prefix}" if prefix else "ods"
-        from app.services.ods_naming import target_ods_table_name
+        # 读的库必须和同步写的库是同一个：ODS 落点不给选，这里也不能按前缀另拼一个。
+        from app.services.ods_naming import ODS_DATABASE, target_ods_table_name
         from app.services.source_ref import has_physical_source
+
+        database = ODS_DATABASE
 
         table = (
             target_ods_table_name(db, ontology.id, obj)
@@ -199,7 +200,7 @@ class TransformExecutor(Executor):
             if obj is None:
                 raise ValueError(f"目标对象 {target} 不在本体中")
             table = self._logical_table(db, ontology.id, target, prefix)
-            source = self._ods_source(db, ontology, obj, datasource_id, prefix)
+            source = self._ods_source(db, ontology, obj, datasource_id)
 
         q = adapter.quote_identifier
         select_body = (

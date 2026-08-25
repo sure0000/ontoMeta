@@ -19,7 +19,7 @@ from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
 from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
-from app.services.ods_naming import target_ods_table_name
+from app.services.ods_naming import ODS_DATABASE, target_ods_table_name
 from app.services.source_ref import (
     has_physical_source,
     is_manual_source_ref,
@@ -91,12 +91,10 @@ class SyncDrafter(Drafter):
             )
             # 严格解析：上面的 has_physical_source 已保证解得出，这里不会是 None。
             source_table = source_table_of(target.source_ref)
-            prefix = context.get("database_prefix")
-            ods_database = str(context.get("target_ods_database") or (
-                f"ods_{prefix}" if prefix else "ods"
-            ))
-            # ODS 表名由后端唯一规则生成，调用方传入的 target_ods_table 不参与：
-            # ods_{数据域}_{source_ref 中的原始表名}。
+            # 落点整个不给选：库恒为 ODS_DATABASE，表名按 ods_{数据域}_{原始表名} 生成。
+            # 调用方传入的 target_ods_database / database_prefix / target_ods_table
+            # 一律不参与——同步就是「源头数据 → 数仓 ODS」，分层是加工任务的事。
+            ods_database = ODS_DATABASE
             ods_table = target_ods_table_name(db, ontology_id, target)
 
             return {
@@ -111,7 +109,6 @@ class SyncDrafter(Drafter):
                 "target_datasource_id": context.get("target_datasource_id") or None,
                 "target_ods_database": ods_database,
                 "target_ods_table": ods_table,
-                "database_prefix": prefix,
                 # 表单显式选的装载方式/分区键优先；否则回退契约，再回退默认。
                 "mode": context.get("mode")
                 or (contract.load_strategy if contract else "full"),

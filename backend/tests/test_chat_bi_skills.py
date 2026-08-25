@@ -473,8 +473,9 @@ def test_propose_action_requires_explicit_sync_endpoints_and_transform_doris():
             args={"kind": "sync", "intent": "把订单表搬到数仓"},
         )
         assert is_error is True
+        # 落点库不在必填里：同步恒写 ODS，由 Drafter 定，不该要模型/用户给。
         assert set(result["missing"]) == {
-            "source_datasource_id", "target_datasource_id", "target_ods_database",
+            "source_datasource_id", "target_datasource_id",
         }
         transform, _s, is_error = svc._dispatch_propose_action(
             db, ontology_id="onto1", domain_id="dom1",
@@ -484,13 +485,21 @@ def test_propose_action_requires_explicit_sync_endpoints_and_transform_doris():
         assert transform["missing"] == ["target_datasource_id"]
 
 
-def test_sync_proposal_requires_conversation_confirmations(client, admin_headers):
+def test_sync_proposal_requires_conversation_confirmations(
+    client, admin_headers, monkeypatch
+):
     """识别出 sync 任务不等于需求已确认；通过后仍校验真实业务源与默认 Doris。"""
     from uuid import uuid4
 
     from app.models import DataSource, ObjectType
     from app.models.chat_bi import ChatBiConversation
+    from app.services.materialize_preflight import PreflightReport
     from app.services.chat_bi_ledger import record_decision
+
+    monkeypatch.setattr(
+        "app.services.materialize_preflight.run_preflight",
+        lambda *args, **kwargs: PreflightReport(),
+    )
 
     domain_id, ontology_id, aliases = _seed_golden_domain()
     source_id = f"source-confirm-{uuid4().hex[:8]}"
@@ -577,6 +586,37 @@ def test_sync_proposal_requires_conversation_confirmations(client, admin_headers
                 {DataSource.is_default_warehouse: True}, synchronize_session=False
             )
         db.commit()
+
+
+def test_confirmed_task_rejects_ontology_outside_conversation_scope(
+    client, admin_headers
+):
+    """直达草稿接口不能用前端 ontology_id 越过会话绑定的数据域。"""
+    from app.models.chat_bi import ChatBiConversation
+
+    domain_a, _ontology_a, _aliases_a = _seed_golden_domain()
+    _domain_b, ontology_b, _aliases_b = _seed_golden_domain()
+    with SessionLocal() as db:
+        conv = ChatBiConversation(title="作用域门禁")
+        conv.set_domain_ids([domain_a])
+        db.add(conv)
+        db.commit()
+        conversation_id = conv.id
+
+    response = client.post(
+        "/api/agents/draft-confirmed",
+        headers=admin_headers,
+        json={
+            "conversation_id": conversation_id,
+            "confirmation_id": "foreign-ontology",
+            "kind": "materialize",
+            "intent": "物化别域对象",
+            "ontology_id": ontology_b,
+            "context": {},
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert "不属于当前会话的数据域作用域" in response.json()["detail"]
 
 
 def test_all_write_task_proposals_require_three_step_confirmation():
@@ -812,7 +852,7 @@ def test_task_skill_flow_stays_read_only(client):
     assert payload["form_request"]
     assert payload["form_request"]["confirmation_id"]
     assert [s["node"] for s in payload["form_request"]["confirmation_steps"]] == [
-        "requirement", "ontology", "data"
+        "requirement", "ontology", "data", "plan", "execute", "result"
     ]
     assert "form" in [b["type"] for b in answer_to_blocks(payload)]
     assert not payload.get("action_proposals")

@@ -337,8 +337,9 @@ def test_transform_executor_reuses_m3_generator(seeded):
     out = TransformExecutor().execute(spec, {})
     assert out["target_table"] == "dim_erp.customer"
     assert "INSERT OVERWRITE TABLE `dim_erp`.`customer`" in out["sql"]
-    # Transform 只读 Doris ODS，不再直连业务源表。
-    assert f"FROM `ods_erp`.`ods_{seeded['domain_code']}_tab_customer`" in out["sql"]
+    # Transform 只读 Doris ODS，不再直连业务源表。库名前缀只作用于服务层（dim_erp），
+    # ODS 侧恒为同步写入的那一个库——两边各按前缀拼一个库名，读的就不是搬进来的数据。
+    assert f"FROM `ods`.`ods_{seeded['domain_code']}_tab_customer`" in out["sql"]
     assert out["applied_rules"] == ["deduplicate"]
     # 该本体没声明主键 → 退回整行去重，且**明说**是整行，不冒充按主键
     assert "SELECT DISTINCT" in out["sql"]
@@ -432,11 +433,14 @@ def test_sync_drafter_maps_via_ontology_not_raw_copy(seeded):
     spec = SyncDrafter().draft(
         "同步客户数据",
         {"ontology_id": seeded["ontology_id"], "object_type": "customer",
-         "database_prefix": "erp"},
+         # 落点不是配置项：库名前缀/自定义 ODS 库传进来也不生效。
+         "database_prefix": "erp", "target_ods_database": "dwd_erp"},
     )
     # 源由 source_ref 定位，目标结构由本体决定
     assert spec["source"] == "erp_ods.tab_customer"
-    assert spec["target"] == f"ods_erp.ods_{seeded['domain_code']}_tab_customer"
+    assert spec["target"] == f"ods.ods_{seeded['domain_code']}_tab_customer"
+    assert spec["target_ods_database"] == "ods"
+    assert "database_prefix" not in spec
     assert spec["mode"] == "incremental"  # 有 datetime 字段
     assert spec["partition_key"] == "created_at"
     assert spec["preservation"]["preserve"] is False

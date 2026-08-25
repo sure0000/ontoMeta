@@ -239,6 +239,7 @@ def test_chat_bi_no_hit_refuses_fiction(client, admin_headers):
 
 
 def test_chat_bi_session_domain_binding(client, admin_headers):
+    """续聊使用会话创建时的域，页面筛选变化不能中断确认流程。"""
     domain_a, ontology_a = _seed_domain_with_ontology(name="bind-a")
     domain_b, ontology_b = _seed_domain_with_ontology(name="bind-b")
     with SessionLocal() as db:
@@ -253,7 +254,7 @@ def test_chat_bi_session_domain_binding(client, admin_headers):
     assert created.status_code == 200
     conv_id = created.json()["id"]
 
-    mismatch = client.post(
+    continued = client.post(
         "/api/chat-bi/ask",
         headers=admin_headers,
         json={
@@ -262,8 +263,21 @@ def test_chat_bi_session_domain_binding(client, admin_headers):
             "question": "订单数量",
         },
     )
-    assert mismatch.status_code == 400
-    assert "数据域" in mismatch.json()["detail"]
+    assert continued.status_code == 200, continued.text
+    assert continued.json()["domain_ids"] == [domain_a]
+
+    streamed = client.post(
+        "/api/chat-bi/ask/stream",
+        headers=admin_headers,
+        json={
+            "domain_ids": [domain_b],
+            "conversation_id": conv_id,
+            "question": "继续确认数据",
+        },
+    )
+    assert streamed.status_code == 200, streamed.text
+    assert "会话不属于当前数据域作用域" not in streamed.text
+    assert f'"domain_ids": ["{domain_a}"]' in streamed.text
 
 
 def test_failed_task_retry_and_duplicate_report(client, admin_headers, llm_ready):

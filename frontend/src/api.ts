@@ -15,6 +15,7 @@ import type {
   ChatBiConversation,
   ChatBiDecision,
   ChatBiDecisionClosure,
+  ChatBiFormRequest,
   ChatBiHistoryItem,
   ChatBiMessageItem,
   ChatBiStreamEvent,
@@ -1369,6 +1370,21 @@ export const api = {
       `/api/ontologies/${ontologyId}/properties`,
     ),
 
+  /**
+   * 按任务类型现取一张六环确认表单（字段骨架 + 真实候选 + 本次 confirmation_id）。
+   * 任务链逐步确认用的就是这张，与对话里 request_form 出的是同一份。
+   */
+  taskConfirmationForm: (body: {
+    kind: string;
+    ontology_id: string;
+    title?: string;
+    intent?: string;
+    prefill?: Record<string, unknown>;
+  }) =>
+    request<ChatBiFormRequest>("/api/agents/task-form", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   draftConfirmedArtifact: (body: {
     conversation_id: string;
     confirmation_id: string;
@@ -1451,6 +1467,23 @@ export const api = {
   advancePipeline: (id: string) =>
     request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance`, {
       method: "POST",
+    }),
+  /**
+   * 确认过前三环（需求/本体/数据）后起草链上的下一步，并直接产出执行方案预览。
+   * 缺任何一环后端 409 并说清缺哪环——链不替谁确认。
+   */
+  advancePipelineConfirmed: (
+    id: string,
+    body: {
+      conversation_id: string;
+      confirmation_id: string;
+      context: Record<string, unknown>;
+      intent?: string;
+    },
+  ) =>
+    request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance-confirmed`, {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   /** C2：一键起草全部步骤（血缘驱动，起草阶段不阻塞）。只起草不执行。 */
   draftAllPipeline: (id: string) =>

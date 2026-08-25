@@ -18,7 +18,7 @@ from app.models import (
     WarehouseObjectProjection,
 )
 from app.services.materialization_contract import MaterializationContractService
-from app.services.ods_naming import target_ods_table_name
+from app.services.ods_naming import ODS_DATABASE, target_ods_table_name
 from app.services.source_ref import has_physical_source
 from app.warehouse.policy import require_doris_datasource
 
@@ -111,7 +111,9 @@ def _upsert_deployment(
                 queryable=False,
             )
             db.add(projection)
-        projection.ods_database = f"ods_{database_prefix}" if database_prefix else "ods"
+        # ODS 落点恒定（见 ods_naming.ODS_DATABASE）：库名前缀只作用于服务层（dim/dwd/…），
+        # 让 Projection 记一个带前缀的 ODS 库，会和同步实际写入的库对不上。
+        projection.ods_database = ODS_DATABASE
         projection.ods_table = (
             target_ods_table_name(db, ontology.id, obj)
             if has_physical_source(obj.source_ref)

@@ -143,7 +143,15 @@ class TaskPipelineService:
 
     # ---------- 推进 ----------
 
-    def advance(self, db: Session, pipeline_id: str) -> GovernanceArtifact:
+    def advance(
+        self,
+        db: Session,
+        pipeline_id: str,
+        *,
+        context: dict[str, Any] | None = None,
+        intent: str | None = None,
+        user_created: bool = False,
+    ) -> GovernanceArtifact:
         """起草下一步，返回它的制品。**只起草，不确认、不执行。**
 
         拒绝的两种情形都如实说清楚，因为它们对用户意味着完全不同的下一步动作：
@@ -152,6 +160,10 @@ class TaskPipelineService:
         C2：线性「等上一步成功」放宽为「等血缘上游成功」——步骤若声明了
         ``depends_on``（血缘推导的显式上游步序），只要求这些上游成功，
         不再要求「前面所有步」都成功；未声明则沿用线性默认（依赖上一步）。
+
+        ``context`` / ``intent`` / ``user_created`` 是**人在六环向导里定下的取值**（见
+        ``/agents/pipelines/{id}/advance-confirmed``）：写回该步后再起草，优先级最高——
+        链的继承只补人没填的键。人确认了 A 就不能拿继承来的 B 去建任务。
         """
         pipeline = self.require(db, pipeline_id)
         steps = self._steps(db, pipeline_id)
@@ -180,20 +192,29 @@ class TaskPipelineService:
                     f"（当前 {status or '未起草'}），第 {pending.step_index + 1} 步不能起草"
                 )
 
-        context = {
+        # 人确认过的取值落回该步：链态从此与人的确认一致，抽屉里再看也是这份。
+        if context:
+            pending.context_json = _dumps({**(_loads(pending.context_json, {}) or {}), **context})
+        if intent:
+            pending.intent = intent
+
+        step_context = {
             **self._inherited(steps, artifacts, before=pending.step_index),
             # 本步显式给的优先：链的继承是补默认值，不是覆盖用户的选择。
             **(_loads(pending.context_json, {}) or {}),
         }
-        context.setdefault("ontology_id", pipeline.ontology_id)
-        context = {k: v for k, v in context.items() if v is not None}
+        step_context.setdefault("ontology_id", pipeline.ontology_id)
+        step_context = {k: v for k, v in step_context.items() if v is not None}
 
         artifact = self._artifacts.draft(
             db,
             kind=pending.kind,
             intent=pending.intent,
-            context=context,
+            context=step_context,
             ontology_id=pipeline.ontology_id,
+            # 人刚在六环向导里逐环确认过这一步，溯源就该是"人工创建"——记成机器创建，
+            # 审计时会把一条确认过的任务当成 agent 自己冒出来的。
+            user_created=user_created,
         )
         pending.artifact_id = artifact.id
         db.commit()

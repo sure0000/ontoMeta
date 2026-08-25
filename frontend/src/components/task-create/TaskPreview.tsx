@@ -1,10 +1,10 @@
-import { Space, Typography, Descriptions, Tag, Alert, Divider } from "antd";
-import { CheckCircleOutlined, WarningOutlined } from "@ant-design/icons";
+import { Alert, Descriptions, Space, Tag, Typography } from "antd";
+import { WarningOutlined } from "@ant-design/icons";
 import { SPEC_FIELDS, type SpecFieldDef } from "../artifact-spec/specFields";
 import { useSpecOptions } from "../artifact-spec/useSpecOptions";
 import { RANGE_STEP_KEYS } from "./TaskConfigForm";
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 interface Props {
   kind: string;
@@ -24,7 +24,7 @@ const KIND_LABEL: Record<string, string> = {
 
 const KIND_ACTION: Record<string, string> = {
   materialize: "生成数据表和同步作业",
-  sync: "同步数据到目标库",
+  sync: "把源头数据同步进数仓 ODS",
   transform: "执行数据转换",
   metric: "计算指标并生成聚合表",
 };
@@ -99,26 +99,14 @@ export function TaskPreview({
   const missingRequired = configFields.filter((f) => f.required && !filled(specData, f.key));
 
   return (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <div>
-        <Title level={4}>预览确认</Title>
-        <Text type="secondary">检查配置信息，确认无误后提交创建</Text>
-      </div>
-
-      {missingRequired.length > 0 ? (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {/* 只在真的挡路时才占一条 Alert：一切正常时「配置完成」那条横幅什么也没说，
+          而下面的两张表本身就是给人核对的内容。 */}
+      {missingRequired.length > 0 && (
         <Alert
           type="error"
           showIcon
-          message="必填项未填写"
-          description={`请返回「配置参数」补齐：${missingRequired.map((f) => f.label).join("、")}`}
-        />
-      ) : (
-        <Alert
-          type="success"
-          icon={<CheckCircleOutlined />}
-          message="配置完成"
-          description="请仔细检查以下配置信息，确认后将创建任务。任务创建后需要经过校验和确认才能执行。"
-          showIcon
+          message={`请返回补齐：${missingRequired.map((f) => f.label).join("、")}`}
         />
       )}
 
@@ -133,8 +121,6 @@ export function TaskPreview({
         <Descriptions.Item label="执行操作">{KIND_ACTION[kind]}</Descriptions.Item>
       </Descriptions>
 
-      <Divider />
-
       <Descriptions title={KIND_SECTION[kind] ?? "任务配置"} bordered size="small" column={1}>
         <Descriptions.Item label={ENTITY_LABEL[kind] ?? "作用范围"}>
           {hasEntities ? (
@@ -148,7 +134,7 @@ export function TaskPreview({
             </Space>
           ) : kind === "materialize" ? (
             <Text type="warning">
-              <WarningOutlined /> 全部实体（未指定则物化本体下所有业务对象和关系）
+              <WarningOutlined /> 全部实体
             </Text>
           ) : (
             <Text type="danger">未选择</Text>
@@ -167,18 +153,9 @@ export function TaskPreview({
         ))}
       </Descriptions>
 
-      <Alert
-        type="info"
-        message="下一步操作"
-        description={
-          <ul style={{ margin: 0, paddingLeft: 20 }}>
-            <li>任务创建后将处于"草稿"状态</li>
-            <li>系统会自动执行校验，检查配置是否合法</li>
-            <li>校验通过后，您需要确认任务（人工审核）</li>
-            <li>确认后，任务才能被执行</li>
-          </ul>
-        }
-      />
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        创建后为草稿，需经校验与人工确认才会执行。
+      </Text>
     </Space>
   );
 }

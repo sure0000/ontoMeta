@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -746,8 +747,8 @@ def test_reconcile_failed_dagrun_writes_back_status(monkeypatch):
                 assert artifact.status == ArtifactStatus.FAILED.value
 
 
-def test_reconcile_running_dagrun_keeps_succeeded(monkeypatch):
-    """orchestrated 制品 Airflow 报 DagRun running（非终态）→ status 保持 SUCCEEDED，不回写。"""
+def test_reconcile_running_dagrun_keeps_executing(monkeypatch):
+    """orchestrated 制品 Airflow 尚在运行时不能提前显示成功。"""
     from unittest.mock import MagicMock, patch
 
     from app.models.agent import ArtifactStatus, GovernanceArtifact
@@ -780,8 +781,53 @@ def test_reconcile_running_dagrun_keeps_succeeded(monkeypatch):
             with SessionLocal() as db:
                 artifact = svc.get(db, artifact_id)
                 assert artifact is not None
-                # running 非终态 → status 保持 SUCCEEDED（live_state 会展示 running）
-                assert artifact.status == ArtifactStatus.SUCCEEDED.value
+                assert artifact.status == ArtifactStatus.EXECUTING.value
+
+
+def test_reconcile_sync_empty_target_is_successful(monkeypatch):
+    """Airflow success 且目标表可查询时，零行是合法同步结果。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.models.agent import ArtifactStatus, GovernanceArtifact
+    from app.services.agent_pipeline import AgentPipelineService
+
+    with SessionLocal() as db:
+        artifact = GovernanceArtifact(
+            kind="sync",
+            name="sync-empty-target",
+            status=ArtifactStatus.EXECUTING.value,
+            execution_receipt_json=(
+                '{"execute_mode":"orchestrated","dag_id":"sync-dag",'
+                '"dag_run_id":"sync-run","ingestion_contract_id":"contract-1"}'
+            ),
+        )
+        db.add(artifact)
+        db.commit()
+        artifact_id = artifact.id
+
+    airflow = MagicMock()
+    airflow.get_dag_run.return_value = {"state": "success"}
+    runtime = MagicMock(available=True)
+    verification = {
+        "status": "verified",
+        "verified": True,
+        "target_table": "ods.customer",
+        "row_count": 0,
+        "empty": True,
+    }
+    with patch("app.services.settings_service.SettingsService") as settings_cls:
+        settings_cls.return_value.get_airflow_runtime.return_value = runtime
+        with patch("app.connectors.airflow.AirflowClient", return_value=airflow):
+            with patch(
+                "app.services.sync_reconciliation.reconcile_sync_receipt",
+                return_value=verification,
+            ):
+                with SessionLocal() as db:
+                    artifact = AgentPipelineService().get(db, artifact_id)
+                    assert artifact is not None
+                    assert artifact.status == ArtifactStatus.SUCCEEDED.value
+                    receipt = json.loads(artifact.execution_receipt_json or "{}")
+                    assert receipt["doris_verification"] == verification
 
 
 def test_reconcile_skips_non_orchestrated(monkeypatch):
@@ -882,8 +928,10 @@ def test_execute_marks_failed_when_receipt_says_failed(
     assert out["status"] == "failed"
 
 
-def test_execute_keeps_succeeded_for_produce_only_receipt(client, admin_headers):
-    """「仅产出」回执（无 ok/无 state）不算失败——不能把正常产出误判成失败。"""
+def test_non_sync_produce_only_receipt_keeps_artifact_delivery_semantics(
+    client, admin_headers
+):
+    """非同步制品仍可把仅产出 SQL/DDL 作为交付结果。"""
     registry.register("metric", _FakeDrafter(
         {"metric_name": "gmv", "engine": "hive", "subject_objects": ["order"]}
     ), _ReceiptExecutor({"artifacts": {"ddl": "CREATE TABLE ..."}, "handoff": "DolphinScheduler"}))
@@ -892,6 +940,32 @@ def test_execute_keeps_succeeded_for_produce_only_receipt(client, admin_headers)
     finally:
         registry.unregister("metric")
     assert out["status"] == "succeeded"
+
+
+def test_sync_produce_only_receipt_is_failed():
+    """同步的交付物是数据；只有计划而没有搬运不能显示成功。"""
+    from app.models.agent import ArtifactStatus, GovernanceArtifact
+    from app.services.agent_pipeline import AgentPipelineService
+
+    registry.register(
+        "sync",
+        _FakeDrafter({"object_type": "order"}),
+        _ReceiptExecutor({"execute_mode": "handoff", "note": "只产出搬运计划"}),
+    )
+    try:
+        with SessionLocal() as db:
+            artifact = GovernanceArtifact(
+                kind="sync",
+                name="sync-handoff",
+                status=ArtifactStatus.CONFIRMED.value,
+                spec_json='{"object_type":"order"}',
+            )
+            db.add(artifact)
+            db.commit()
+            result = AgentPipelineService().execute(db, artifact.id)
+            assert result.status == ArtifactStatus.FAILED.value
+    finally:
+        registry.unregister("sync")
 
 
 # ---------- 派生名唯一 ----------
@@ -940,6 +1014,29 @@ def test_preflight_issues_rank_above_ontology_noise():
         "ontology_issue",
         "ontology_issue",
     ]
+
+
+def test_report_marks_each_issue_blocking_or_not(client, admin_headers):
+    """报告逐条带 blocking：判据只在后端一处，前端不必再维护一份码表镜像。
+
+    那份镜像漂过一次——少了 preflight_warning，于是「不拦提交的提醒」在问题列表里被
+    画成红色「阻断」，人照着去查一件根本不影响提交的事。
+    """
+    registry.register(
+        "metric", _FakeDrafter({"metric_name": "gmv", "engine": "teradata"}), _CountingExecutor()
+    )
+    try:
+        a = _draft(client, admin_headers)
+        a = client.post(
+            f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
+        ).json()
+        issues = a["validation_report"]["issues"]
+        assert issues, "本用例要求至少有一条问题"
+        assert all("blocking" in i for i in issues)
+        blocked = [i for i in issues if i["blocking"]]
+        assert len(blocked) == a["validation_report"]["blocking_count"]
+    finally:
+        registry.unregister("metric")
 
 
 def test_execute_injects_artifact_id_into_context():

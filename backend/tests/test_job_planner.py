@@ -20,8 +20,9 @@ from app.models import (
     Ontology,
     OntologyStatus,
     Property,
+    RelationType,
 )
-from app.services.job_planner import job_planner
+from app.services.job_planner import JobPlanningError, job_planner
 from app.services.materialization_contract import MaterializationContractService
 from app.services.warehouse_generator import WarehouseGenerator
 
@@ -319,6 +320,70 @@ def test_cdc_without_connector_is_reported_not_downgraded():
 def test_selected_targets_filters_by_entity_name():
     plan = _build(_seed("selected"), selected_targets=["customer"])
     assert {j.target.table for j in plan.jobs} == {"customer"}
+
+
+def test_ods_sync_deduplicates_object_and_relation_implementation_table():
+    """对象表兼作关系实现表时，ODS 覆盖后只能生成一个最终搬运任务。
+
+    真实 Odoo 本体的 sale_order 同时产出 dim.sale_order 与 dwd.sale_order；同步契约把两者
+    都改写为 ods.ods_odoo_sale_order，旧 planner 因而生成两个相同 task_id，Airflow 在
+    import 阶段以 DuplicateTaskIdFound 拒绝整张 DAG。
+    """
+    ontology_id = _seed("odsduplicate")
+    with SessionLocal() as db:
+        objects = {
+            obj.name: obj
+            for obj in db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+        }
+        db.add(
+            RelationType(
+                ontology_id=ontology_id,
+                name="sales_order_entity",
+                display_name="订单归属",
+                source_object_type_id=objects["customer"].id,
+                target_object_type_id=objects["sales_order"].id,
+                structure_type="bridge_table",
+                mapping_object_type_id=objects["sales_order"].id,
+            )
+        )
+        db.commit()
+        _contracts.sync(db, ontology_id)
+
+        logical = _generator.build_logical_schema(db, ontology_id)
+        assert [
+            table.qualified_name
+            for table in logical.schema.tables
+            if table.source_name == "sales_order"
+        ] == ["dim.sales_order", "dwd.sales_order"]
+
+    plan = _build(
+        ontology_id,
+        selected_targets=["sales_order"],
+        load_strategy="full",
+        target_ods_database="ods",
+        target_ods_tables={"sales_order": "ods_erp_sales_order"},
+        target_primary_keys={"sales_order": ["sales_order_id"]},
+    )
+
+    assert len(plan.jobs) == 1
+    assert plan.jobs[0].name == "sync_ods_ods_erp_sales_order"
+    assert plan.jobs[0].target.qualified == "ods.ods_erp_sales_order"
+
+
+def test_ods_sync_rejects_different_jobs_writing_the_same_target():
+    """不同源作业写同一目标表必须在 planner 阶段失败，不能静默丢掉其中一份。"""
+    ontology_id = _seed("odsconflict")
+
+    with pytest.raises(JobPlanningError, match="搬运作业冲突"):
+        _build(
+            ontology_id,
+            load_strategy="full",
+            target_ods_database="ods",
+            target_ods_tables={
+                "customer": "same_target",
+                "sales_order": "same_target",
+            },
+        )
 
 
 def test_runner_capabilities_gate_rejects_unsupported_sink():

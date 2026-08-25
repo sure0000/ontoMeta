@@ -593,7 +593,8 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
         "description": (
             "根据已填写的任务确认表单生成任务提案。"
             "context 包含表单返回的 task_confirmation_id 和字段值。"
-            "materialize 建本体结构；sync 写入 ODS；transform 加工 ODS 数据；metric 生成 ADS 结果。"
+            "materialize 为没有源表的人工建模对象建结构；sync 写入 ODS（自带幂等建表，不必先物化）；"
+            "transform 加工 ODS 数据；metric 生成 ADS 结果。"
             "返回的是提案，后续状态由任务流水线更新。"
         ),
         "parameters": {
@@ -621,12 +622,16 @@ _PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
         "name": "propose_pipeline",
         "description": (
             "当用户要的是**前后相继的多个任务**（如「物化到数仓，然后清洗，再按口径聚合」）时，"
-            "产出一条**任务链提案**（不执行、不写库）。链上每一步仍是一条独立任务，各自走"
-            "「校验→dry-run→人工确认→执行」；链负责的是记住下一步、并把上游已定下的目标数据源/"
-            "默认 Doris/本体版本接到下游，用户不必逐步重报。\n"
+            "产出一条**任务链提案**（不执行、不写库）。链上每一步仍是一条独立任务，"
+            "与单发任务一样由用户逐环确认「需求 → 本体 → 数据 → 执行方案 → 执行 → 结果」"
+            "六环；链负责的是记住下一步、并把上游已定下的目标数据源/默认 Doris/本体版本"
+            "接到下游作为默认值，用户不必逐步重报（但仍要逐环过目确认）。\n"
             "**只有一个任务时用 propose_action**，别为单步套一条链。\n"
-            "当前标准链是 materialize(Doris 建结构) → sync(业务源经 Flink 写 ODS) → "
-            "transform(Doris ODS→DIM/DWD/DWS) → metric(Doris ADS)。metric 必须引用已发布且形式化的口径。"
+            "当前标准链是 sync(业务源经 Flink 写 ODS) → transform(Doris ODS→DIM/DWD/DWS) → "
+            "metric(Doris ADS)。metric 必须引用已发布且形式化的口径。\n"
+            "**不要在 sync 前面加 materialize**：同步自己会对目标 ODS 表下幂等 "
+            "CREATE TABLE IF NOT EXISTS（落点恒为 ODS），为同步而排的物化步骤会被服务端删掉。"
+            "materialize 只用于没有物理源表的人工建模对象——那些表只能靠物化建出来。"
             "sync 的 source_datasource_id、ODS 库、主键/水位/CDC 策略"
             "不能从 materialize 继承，必须显式给；ODS 表名由后端固定生成，"
             "target_datasource_id 固定继承默认 Doris。"
@@ -771,8 +776,6 @@ def _sync_context_errors(
         and bool((target.dsn_secret_ref or "").strip())
     ):
         errors.append("target_datasource_id 必须是启用、已配置连接的默认 Doris")
-    if context.get("target_ods_database") and not str(context["target_ods_database"]).startswith("ods"):
-        errors.append("target_ods_database 必须以 ods 开头")
     mode = str(context.get("mode") or "full")
     if mode in {"incremental", "cdc"} and not context.get("primary_keys"):
         errors.append(f"{mode} 必须配置 primary_keys")
@@ -811,11 +814,8 @@ def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
     if kind == "metric":
         required.append("business_logic_id")
     if kind == "sync":
-        required.extend((
-            "source_datasource_id",
-            "target_datasource_id",
-            "target_ods_database",
-        ))
+        # 落点库不在其中：同步恒写 ODS（ods_naming.ODS_DATABASE），不是调用方的配置项。
+        required.extend(("source_datasource_id", "target_datasource_id"))
     return [
         key
         for key in dict.fromkeys(required)

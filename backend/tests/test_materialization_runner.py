@@ -1,7 +1,7 @@
 """物化 / 数据同步编排：``run_materialize``（只建结构）与 ``run_sync``（只搬数据）。
 
 两者总是交 Airflow 编排（不再有直连落库）。验证：各自只产该产的东西（物化无搬运任务、
-同步无建表且回执 tables 为空）、按勾选/覆盖裁剪与重命名、按 cron 分组分批、触发失败不丢
+同步先确保目标表且回执 tables 为空）、按勾选/覆盖裁剪与重命名、按 cron 分组分批、触发失败不丢
 产物、前置校验（无数据源/无 dsn/未配 Airflow）报错、dag_id 按制品隔离。
 生成器按 Doris 引擎产出真实 DDL；非 Doris 只保留历史读取，不可重执行。
 """
@@ -405,7 +405,7 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
 
 def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypatch):
     """统一执行：产出 Flink SQL DAG（BashOperator flink run），每个搬运作业一个 .sql 文件，
-    产物无凭据明文。"""
+    DAG 可通过 ensure_connections 自行注册所需连接。"""
     ids = _seed("flinkok")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     triggered: dict = {}
@@ -425,12 +425,12 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
     assert receipt["sync_tool"] == "flink"
     assert "sync_channel" not in receipt  # 多通道概念已废除
     assert receipt["state"] == "queued"
-    # DAG 是 Flink 通道：BashOperator + flink run，无 Docker 兄弟容器、无凭据明文。
+    # DAG 是 Flink 通道：BashOperator + flink run，无 Docker 兄弟容器。
     # （read_spec 用一个 PythonOperator 读边车 JSON 暴露 sql_dir，属正常编排，不是搬运容器。）
     dag_py = next(p for p in (tmp_path / "dags").rglob("*.py"))
     source = dag_py.read_text(encoding="utf-8")
     assert "BashOperator" in source and "DockerOperator" not in source
-    assert "password" not in source and "jdbc:" not in source
+    assert "ensure_connections" in source and "DockerOperator" not in source
     # 每个搬运作业一个 .sql 文件（落 <dags>/ontometa/<artifact>/jobs/）
     sql_files = [p for p in (tmp_path / "dags").rglob("jobs/*.sql") if p.is_file()]
     assert len(sql_files) == len(receipt["jobs"]) >= 1
@@ -861,12 +861,12 @@ def test_materialize_emits_ddl_only(tmp_path, monkeypatch):
     assert not list((tmp_path / "dags").rglob("jobs/*.sql"))
 
 
-def test_sync_emits_dml_only(tmp_path, monkeypatch):
-    """同步只搬数据：不建业务表，回执的 tables 为空。
+def test_sync_ensures_target_table_before_dml(tmp_path, monkeypatch):
+    """同步先幂等确保正式表，再建 staging 和搬数据；回执的 tables 仍为空。
 
     ``tables`` 是前端（MaterializationContractPanel）判「这张表已物化」的依据，
-    同步填了就会让一次搬运冒充成物化。批里唯一允许出现的 DDL 是 staging 表
-    （``CREATE TABLE … LIKE 正式表``，属搬运侧且要求正式表已存在）。
+    同步填了就会让一次搬运冒充成物化，所以新增 ensured_tables 单独表达。正式表的
+    ``CREATE TABLE IF NOT EXISTS`` 必须排在 staging 和 move task 之前。
     """
     ids = _seed("emitdml")
     _enable_airflow(tmp_path, monkeypatch, triggered={})
@@ -882,13 +882,16 @@ def test_sync_emits_dml_only(tmp_path, monkeypatch):
         )
 
     assert receipt["emit"] == "dml"
-    assert receipt["tables"] == [], "同步回执不得报告建了表"
+    assert receipt["tables"] == [], "同步回执不得报告独立物化"
+    assert receipt["ensured_tables"]
     assert receipt["jobs"]
-    assert all(b["tables"] == [] for b in receipt["batches"])
     ddl = [s for spec in _dag_specs(tmp_path) for s in spec["warehouse_ddl"]]
-    # 只有 staging 建表（LIKE 正式表），没有一条业务表的列定义
-    assert ddl and all(" LIKE " in s.upper() for s in ddl), ddl
-    assert not any("customer_id" in s for s in ddl), ddl
+    assert any("CREATE TABLE IF NOT EXISTS" in s.upper() for s in ddl), ddl
+    assert any("customer_id" in s for s in ddl), ddl
+    assert any(" LIKE " in s.upper() for s in ddl), ddl
+    formal = next(i for i, sql in enumerate(ddl) if "customer_id" in sql)
+    staging = next(i for i, sql in enumerate(ddl) if " LIKE " in sql.upper())
+    assert formal < staging, "正式目标表必须先于 staging 表创建"
 
 
 def test_sync_without_movable_objects_raises(tmp_path, monkeypatch):

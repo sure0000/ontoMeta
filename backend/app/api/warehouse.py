@@ -544,6 +544,7 @@ def materialize_preflight(
         target_datasource_id=payload.target_datasource_id,
         engine=payload.engine,
         selected_targets=payload.selected_targets,
+        managed_connections=True,
     )
     return MaterializePreflightResult(
         ok=report.ok,

@@ -10,7 +10,12 @@ import { TaskTypeSelector } from "../components/task-create/TaskTypeSelector";
 import { TaskDataRangeSelector } from "../components/task-create/TaskDataRangeSelector";
 import { TaskConfigForm, RANGE_STEP_KEYS } from "../components/task-create/TaskConfigForm";
 import { TaskPreview } from "../components/task-create/TaskPreview";
-import { requiredSpecKeys } from "../components/artifact-spec/specFields";
+import {
+  requiredSpecKeys,
+  SPEC_FIELDS,
+  SYNC_CONN_KEYS,
+  SYNC_STRATEGY_SKIP_KEYS,
+} from "../components/artifact-spec/specFields";
 import type { OntologySummary, DomainContext } from "../types";
 
 /** 数据范围步骤里「实体」是否必选。物化留空 = 全量，其余三类必须指到具体实体。 */
@@ -20,6 +25,31 @@ const ENTITY_REQUIRED: Record<string, string> = {
   // 这条任务链三类口径共用（指标/标签/规则），文案只写「指标」会让人以为标签选不了。
   metric: "请选择口径（业务逻辑：指标 / 标签 / 规则）",
 };
+
+/**
+ * sync 任务的步骤内容序列（比其他任务多一步：连接配置 + 同步策略分开）。
+ * 索引与 currentStep 对齐；"conn"/"strategy" 是 sync 专有的两个配置子步骤。
+ */
+type StepContent = "type" | "range" | "conn" | "config" | "strategy" | "preview";
+
+function buildStepContents(kind: string): StepContent[] {
+  if (kind === "sync") {
+    return ["type", "range", "conn", "strategy", "preview"];
+  }
+  return ["type", "range", "config", "preview"];
+}
+
+function buildStepItems(contents: StepContent[]) {
+  const LABELS: Record<StepContent, { title: string; description: string }> = {
+    type: { title: "任务类型", description: "选择要创建的任务类型" },
+    range: { title: "数据范围", description: "选择本体和相关实体" },
+    conn: { title: "连接配置", description: "选择源和目标数据源" },
+    config: { title: "配置参数", description: "填写任务执行参数" },
+    strategy: { title: "同步策略", description: "装载方式、主键与调度" },
+    preview: { title: "预览确认", description: "检查配置并提交" },
+  };
+  return contents.map((c) => LABELS[c]);
+}
 
 /** spec → selectedEntities 的反向映射（与 handleSubmit 里的正向映射对称）。 */
 function entitiesFromSpec(kind: string, spec: Record<string, unknown>): string[] {
@@ -58,8 +88,14 @@ export function TaskCreatePage() {
   const isEdit = Boolean(id);
   const [searchParams] = useSearchParams();
   const initialKind = searchParams.get("kind") || "materialize";
+  const requestedReturnTo = searchParams.get("returnTo");
+  const returnPath =
+    requestedReturnTo?.startsWith("/") && !requestedReturnTo.startsWith("//")
+      ? requestedReturnTo
+      : "/tasks";
 
-  const [currentStep, setCurrentStep] = useState(0);
+  // 编辑时类型不可变，直接落到数据范围；用户也可点步骤标题跳到任一处修改。
+  const [currentStep, setCurrentStep] = useState(isEdit ? 1 : 0);
   const [submitting, setSubmitting] = useState(false);
 
   // 表单状态
@@ -128,14 +164,16 @@ export function TaskCreatePage() {
     [ontologies, domainName],
   );
 
+  const stepContents = buildStepContents(kind);
+  const lastStep = stepContents.length - 1;
+
   const handleNext = () => {
-    // 步骤间校验。此前只拦了「没选本体」，实体与必填参数一路放行到提交，
-    // 后端 drafter 才抛 ValueError——错误来得晚且是英文键名，人看不懂要补什么。
-    if (currentStep === 0 && !kind) {
+    const content = stepContents[currentStep];
+    if (content === "type" && !kind) {
       message.error("请选择任务类型");
       return;
     }
-    if (currentStep === 1) {
+    if (content === "range") {
       if (!ontologyId) {
         message.error("请选择本体");
         return;
@@ -146,7 +184,21 @@ export function TaskCreatePage() {
         return;
       }
     }
-    if (currentStep === 2) {
+    if (content === "conn") {
+      // 连接步骤：校验 source + target 数据源
+      const connRequired = requiredSpecKeys(kind, RANGE_STEP_KEYS).filter((f) =>
+        SYNC_CONN_KEYS.has(f.key),
+      );
+      const missing = connRequired.filter((f) => {
+        const v = specData[f.key];
+        return v == null || v === "" || (Array.isArray(v) && v.length === 0);
+      });
+      if (missing.length > 0) {
+        message.error(`请填写：${missing.map((f) => f.label).join("、")}`);
+        return;
+      }
+    }
+    if (content === "config") {
       const missing = requiredSpecKeys(kind, RANGE_STEP_KEYS).filter((f) => {
         const v = specData[f.key];
         return v == null || v === "" || (Array.isArray(v) && v.length === 0);
@@ -156,18 +208,52 @@ export function TaskCreatePage() {
         return;
       }
     }
-    setCurrentStep((prev) => Math.min(prev + 1, 3));
+    setCurrentStep((prev) => Math.min(prev + 1, lastStep));
   };
 
   const handlePrev = () => {
     setCurrentStep((prev) => Math.max(prev - 1, 0));
   };
 
-  const handleSubmit = async () => {
+  const validateAll = (): boolean => {
     if (!ontologyId) {
+      setCurrentStep(1);
       message.error("请选择本体");
-      return;
+      return false;
     }
+    const entityHint = ENTITY_REQUIRED[kind];
+    if (entityHint && selectedEntities.length === 0) {
+      setCurrentStep(1);
+      message.error(entityHint);
+      return false;
+    }
+    // 校验所有 required 字段（不论当前在哪步）
+    const allSkipKeys = RANGE_STEP_KEYS;
+    const missing = requiredSpecKeys(kind, allSkipKeys).filter((field) => {
+      const value = specData[field.key];
+      return value == null || value === "" || (Array.isArray(value) && value.length === 0);
+    });
+    if (missing.length > 0) {
+      // 把用户带回第一个含缺失字段的步骤
+      const connIdx = stepContents.indexOf("conn");
+      const configIdx = stepContents.indexOf("config");
+      const strategyIdx = stepContents.indexOf("strategy");
+      const connMissing = missing.some((f) => SYNC_CONN_KEYS.has(f.key));
+      if (connMissing && connIdx >= 0) {
+        setCurrentStep(connIdx);
+      } else if (configIdx >= 0) {
+        setCurrentStep(configIdx);
+      } else if (strategyIdx >= 0) {
+        setCurrentStep(strategyIdx);
+      }
+      message.error(`请填写必填项：${missing.map((field) => field.label).join("、")}`);
+      return false;
+    }
+    return true;
+  };
+
+  const handleSubmit = async () => {
+    if (!validateAll() || !ontologyId) return;
 
     setSubmitting(true);
     try {
@@ -212,7 +298,7 @@ export function TaskCreatePage() {
         });
         message.success("任务创建成功");
       }
-      navigate("/tasks");
+      navigate(returnPath);
     } catch (err) {
       message.error(err instanceof Error ? err.message : isEdit ? "更新失败" : "创建失败");
     } finally {
@@ -220,24 +306,7 @@ export function TaskCreatePage() {
     }
   };
 
-  const steps = [
-    {
-      title: "任务类型",
-      description: "选择要创建的任务类型",
-    },
-    {
-      title: "数据范围",
-      description: "选择本体和相关实体",
-    },
-    {
-      title: "配置参数",
-      description: "填写任务执行参数",
-    },
-    {
-      title: "预览确认",
-      description: "检查配置并提交",
-    },
-  ];
+  const steps = buildStepItems(stepContents);
 
   return (
     <PageContainer>
@@ -250,22 +319,26 @@ export function TaskCreatePage() {
             : "通过向导式流程，分步配置并创建数据作业任务。"
         }
         extra={
-          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/tasks")}>
-            返回任务列表
+          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(returnPath)}>
+            {returnPath === "/tasks" ? "返回任务列表" : "返回 Data Agent"}
           </Button>
         }
       />
 
       <SectionCard title={isEdit ? "编辑向导" : "创建向导"}>
         <Space direction="vertical" size="large" style={{ width: "100%" }}>
-          <Steps current={currentStep} items={steps} />
+          <Steps
+            current={currentStep}
+            items={steps}
+            onChange={isEdit ? setCurrentStep : undefined}
+          />
 
           <div style={{ minHeight: 400 }}>
-            {currentStep === 0 && (
+            {stepContents[currentStep] === "type" && (
               <TaskTypeSelector value={kind} onChange={setKind} disabled={loading || isEdit} />
             )}
 
-            {currentStep === 1 && (
+            {stepContents[currentStep] === "range" && (
               <TaskDataRangeSelector
                 kind={kind}
                 ontologies={ontologies}
@@ -278,7 +351,29 @@ export function TaskCreatePage() {
               />
             )}
 
-            {currentStep === 2 && (
+            {/* sync 专属：连接配置步骤（只显示 source + target 数据源）*/}
+            {stepContents[currentStep] === "conn" && (
+              <TaskConfigForm
+                kind={kind}
+                ontologyId={ontologyId}
+                value={specData}
+                onChange={setSpecData}
+                name={taskName}
+                onNameChange={setTaskName}
+                namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
+                extraSkipKeys={
+                  new Set(
+                    (SPEC_FIELDS[kind] ?? [])
+                      .map((f) => f.key)
+                      .filter((k) => !SYNC_CONN_KEYS.has(k)),
+                  )
+                }
+                showNameInput={false}
+              />
+            )}
+
+            {/* 普通配置步骤（非 sync）*/}
+            {stepContents[currentStep] === "config" && (
               <TaskConfigForm
                 kind={kind}
                 ontologyId={ontologyId}
@@ -290,7 +385,22 @@ export function TaskCreatePage() {
               />
             )}
 
-            {currentStep === 3 && (
+            {/* sync 专属：同步策略步骤（跳过连接配置字段）*/}
+            {stepContents[currentStep] === "strategy" && (
+              <TaskConfigForm
+                kind={kind}
+                ontologyId={ontologyId}
+                value={specData}
+                onChange={setSpecData}
+                name={taskName}
+                onNameChange={setTaskName}
+                namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
+                extraSkipKeys={SYNC_STRATEGY_SKIP_KEYS}
+                showNameInput={true}
+              />
+            )}
+
+            {stepContents[currentStep] === "preview" && (
               <TaskPreview
                 kind={kind}
                 ontologyId={ontologyId}
@@ -308,17 +418,23 @@ export function TaskCreatePage() {
             </Button>
 
             <Space>
-              <Button onClick={() => navigate("/tasks")}>取消</Button>
+              <Button onClick={() => navigate(returnPath)}>取消</Button>
 
-              {currentStep < 3 ? (
+              {isEdit && (
+                <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
+                  保存修改
+                </Button>
+              )}
+
+              {!isEdit && currentStep < lastStep ? (
                 <Button type="primary" onClick={handleNext}>
                   下一步
                 </Button>
-              ) : (
+              ) : !isEdit ? (
                 <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
-                  {isEdit ? "保存修改" : "创建任务"}
+                  创建任务
                 </Button>
-              )}
+              ) : null}
             </Space>
           </Space>
         </Space>

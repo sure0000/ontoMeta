@@ -1,9 +1,7 @@
-import { Space, Typography, Select, Cascader, Alert, Spin } from "antd";
+import { Alert, Cascader, Form, Select, Spin } from "antd";
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../../api";
 import type { OntologySummary, DomainContext } from "../../types";
-
-const { Title, Text } = Typography;
 
 interface CascadeNode {
   value: string;
@@ -220,21 +218,6 @@ export function TaskDataRangeSelector({
     }
   };
 
-  const getHelp = () => {
-    switch (kind) {
-      case "materialize":
-        return "物化任务会为选中的业务对象和关系自动生成数据表。如果不选择具体实体，将物化该本体下的全部实体。";
-      case "sync":
-        return "选择需要从源系统同步到目标库的数据对象。";
-      case "transform":
-        return "选择数据加工后要写入的目标对象。";
-      case "metric":
-        return "选择要计算的业务指标定义，系统将根据定义生成聚合表。";
-      default:
-        return "";
-    }
-  };
-
   if (loading) {
     return (
       <div style={{ textAlign: "center", padding: "40px 0" }}>
@@ -244,22 +227,10 @@ export function TaskDataRangeSelector({
   }
 
   return (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <div>
-        <Title level={4}>选择数据范围</Title>
-        <Text type="secondary">指定任务要处理的本体和实体</Text>
-      </div>
-
-      {getHelp() && <Alert message={getHelp()} type="info" showIcon closable />}
-
-      <div>
-        <div style={{ marginBottom: 8 }}>
-          <Text strong>本体</Text>
-          <Text type="danger"> *</Text>
-        </div>
+    <Form layout="vertical" style={{ maxWidth: 640 }}>
+      <Form.Item label="本体" required style={{ marginBottom: 16 }}>
         <Select
-          style={{ width: "100%" }}
-          placeholder="选择本体（包含要处理的数据对象定义）"
+          placeholder="选择本体"
           showSearch
           allowClear
           optionFilterProp="label"
@@ -271,25 +242,19 @@ export function TaskDataRangeSelector({
             label: `${domainName(o.domain_context_id)} v${o.version}（${o.status}）`,
           }))}
         />
-        <div style={{ marginTop: 4 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            本体是数据对象和业务规则的集合，类似数据模型的一个版本快照
-          </Text>
-        </div>
-      </div>
+      </Form.Item>
 
       {ontologyId && entityConfig && (
-        <div>
-          <div style={{ marginBottom: 8 }}>
-            <Text strong>{entityConfig.label}</Text>
-            {kind !== "materialize" && <Text type="danger"> *</Text>}
-          </div>
-
+        <Form.Item
+          label={entityConfig.label}
+          required={kind !== "materialize"}
+          extra={kind === "materialize" ? "留空 = 该本体下全部实体" : undefined}
+          style={{ marginBottom: 16 }}
+        >
           {kind === "materialize" ? (
             <Select
               mode="multiple"
-              style={{ width: "100%" }}
-              placeholder="选择要物化的实体（留空则物化全部）"
+              placeholder="选择要物化的实体"
               showSearch
               allowClear
               loading={cascadeLoading}
@@ -303,7 +268,6 @@ export function TaskDataRangeSelector({
             />
           ) : (
             <Cascader
-              style={{ width: "100%" }}
               placeholder="先选本体，再选实体"
               showSearch
               allowClear
@@ -316,14 +280,12 @@ export function TaskDataRangeSelector({
               onChange={(val) => handleEntitiesChange(val as string[])}
             />
           )}
-
-          {emptyHint && (
-            <div style={{ marginTop: 8 }}>
-              <Alert message={emptyHint} type="warning" showIcon />
-            </div>
-          )}
-        </div>
+        </Form.Item>
       )}
-    </Space>
+
+      {ontologyId && entityConfig && emptyHint && (
+        <Alert message={emptyHint} type="warning" showIcon />
+      )}
+    </Form>
   );
 }

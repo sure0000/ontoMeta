@@ -411,3 +411,61 @@ def test_foreign_key_excluded_from_materialized_list_even_if_flag_true(client, a
     with SessionLocal() as db:
         selected = service.list_selected(db, ontology_id, selected_targets=None)
     assert all(c.target_id != ids["fk_id"] for c in selected)
+
+
+def test_data_table_with_datahub_source_materializes_in_ods(client, admin_headers):
+    """data_table / technical role 对象若有 DataHub 物理源，应落 ODS 层可同步。
+    无源的同角色对象仍不物化。这覆盖了码表（code_list）等非业务主体的同步场景。"""
+    _DATAHUB_URN = "urn:li:dataset:(urn:li:dataPlatform:mariadb,_d71df877e93eac81.tabCode List,PROD)"
+    with SessionLocal() as db:
+        domain = DomainContext(
+            datahub_domain_id="urn:li:domain:ods-sourced",
+            name="ods-sourced-domain",
+        )
+        db.add(domain)
+        db.flush()
+        ontology = Ontology(
+            domain_context_id=domain.id, status=OntologyStatus.DRAFT.value, version=0
+        )
+        db.add(ontology)
+        db.flush()
+
+        # 有 DataHub 来源的码表 → 应物化到 ODS
+        code_list = ObjectType(
+            ontology_id=ontology.id,
+            name="code_list",
+            display_name="码表",
+            table_role="data_table",
+            source_ref=_DATAHUB_URN,
+        )
+        # 无来源的技术表 → 不物化
+        audit_log = ObjectType(
+            ontology_id=ontology.id,
+            name="audit_log",
+            display_name="审计日志",
+            table_role="technical",
+            source_ref=None,
+        )
+        db.add_all([code_list, audit_log])
+        db.flush()
+        ontology_id = ontology.id
+        code_list_id = code_list.id
+        audit_log_id = audit_log.id
+        db.commit()
+
+    resp = client.post(
+        f"/api/ontologies/{ontology_id}/materialization-contracts/sync",
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    by_target = _contracts_by_target(ontology_id)
+
+    # 有源的 data_table → ODS 层，可物化可同步
+    code = by_target[code_list_id]
+    assert code.materialized is True
+    assert code.target_layer == "ods"
+
+    # 无源的 technical → 不物化
+    audit = by_target[audit_log_id]
+    assert audit.materialized is False

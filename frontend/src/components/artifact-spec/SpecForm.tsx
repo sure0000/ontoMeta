@@ -97,21 +97,17 @@ function SpecFieldControl({
 }) {
   const { options, loading, error } = useSpecOptions(def.optionSource, ontologyId, allValues);
 
-  // 选项拉取失败时给出可见提示：空下拉不该被当成「本来就没数据」。
-  const help = error ? (
-    <span style={{ color: "#cf1322" }}>选项加载失败，请重试或检查本体/数据源</span>
-  ) : (
-    def.help
-  );
-
+  // 说明走 extra、报错走 help：extra 参与布局（不必再手算 marginBottom 给它腾行），
+  // help 是校验位，红字只留给「选项拉取失败」这种真出错的情况——空下拉不该被当成
+  // 「本来就没数据」。
   return (
     <Form.Item
       label={def.label}
       required={requiredMark && def.required}
-      help={help}
+      extra={error ? undefined : def.help}
+      help={error ? "选项加载失败，请重试或检查本体/数据源" : undefined}
       validateStatus={error ? "error" : undefined}
-      // 有说明文字的项要留出说明那一行的高度，否则它会压到下一项的标签上。
-      style={{ marginBottom: help ? 28 : 12 }}
+      style={{ marginBottom: 16 }}
     >
       {renderControl(def, value, options, loading, onChange, disabled)}
     </Form.Item>

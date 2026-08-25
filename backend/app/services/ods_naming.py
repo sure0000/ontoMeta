@@ -1,12 +1,17 @@
-"""Doris ODS 物理表的确定性命名。
+"""Doris ODS 物理落点的确定性命名（库名 + 表名）。
 
-同步目标表不是用户或 Agent 可配置项。唯一规则：
+同步目标不是用户或 Agent 可配置项。唯一规则：
 
-    ods_{数据域}_{原始表名}
+    {ODS_DATABASE}.ods_{数据域}_{原始表名}
 
 其中数据域来自本体所属 ``DomainContext.name``，原始表名来自对象 ``source_ref`` 所指向
 物理表的最后一段。所有写侧入口必须调用本模块，避免 Drafter、接入契约和 Projection 各自
 拼出不同名字。
+
+**库名同样不给选**：同步只做「源头数据 → 数仓 ODS」这一件事，落点恒为
+``ODS_DATABASE``。分层（dim/dwd/dws/ads）是加工与聚合任务的事，不该出现在同步表单里；
+让人在同步时挑一个库/前缀，只会让写入端与读取端（transform 的 ODS 源、Projection）
+各自记住不同的库名。
 """
 
 from __future__ import annotations
@@ -19,6 +24,9 @@ from sqlalchemy.orm import Session
 from app.models import DomainContext, ObjectType, Ontology
 from app.services.source_ref import source_table_of
 
+
+# 同步唯一落点库。改这里等于改全仓的 ODS 库名——不要在别处再拼 ``ods_{prefix}``。
+ODS_DATABASE = "ods"
 
 _NON_IDENTIFIER = re.compile(r"[^a-z0-9]+")
 _CAMEL_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
@@ -71,4 +79,4 @@ def target_ods_table_name(db: Session, ontology_id: str, object_type: ObjectType
     return f"ods_{_domain_code(domain)}_{original_table}"
 
 
-__all__ = ["OdsNamingError", "target_ods_table_name"]
+__all__ = ["ODS_DATABASE", "OdsNamingError", "target_ods_table_name"]

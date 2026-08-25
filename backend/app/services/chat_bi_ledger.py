@@ -374,6 +374,99 @@ def search_decisions(
     return [{**_to_dict(row), "conversation_title": title} for row, title in rows]
 
 
+# ---------------- 任务确认之旅（六环）----------------
+#
+# 「一个数据任务要人分别确认哪几件事」是**一份**定义，不能各处各写一份：表单向导画前三
+# 环、制品抽屉画后三环、服务端按前三环放行——三处一旦分叉，用户会看到「向导说 3/6、
+# 抽屉说 2/3、后端说还差一环」这种没人解释得清的状态。故在此定义一份，前端经 API 拿到
+# 同一份，后端门禁也用同一份。
+
+# 前三环在对话内的表单向导里逐环确认；后三环在制品抽屉里逐环确认（dry-run 出来才谈得上
+# 确认执行方案）。phase 就是「这一环在哪儿确认」，前端据此决定哪几步是当前可填的。
+FORM_CONFIRMATION_NODES: tuple[str, ...] = (
+    DecisionNode.REQUIREMENT.value,
+    DecisionNode.ONTOLOGY.value,
+    DecisionNode.DATA.value,
+)
+ARTIFACT_CONFIRMATION_NODES: tuple[str, ...] = (
+    DecisionNode.PLAN.value,
+    DecisionNode.EXECUTE.value,
+    DecisionNode.RESULT.value,
+)
+
+# 人真的表过态才算这一环走到了。rejected/skipped 不算——那是「没确认」的两种说法。
+CONFIRMED_OUTCOMES: frozenset[str] = frozenset(
+    {DecisionOutcome.ACCEPTED.value, DecisionOutcome.MODIFIED.value}
+)
+
+_NODE_LABEL: dict[str, str] = dict(NODE_SEQUENCE)
+
+
+def task_journey_steps(
+    *, ontology_label: str = "本体/口径", data_label: str = "数据落点"
+) -> list[dict[str, str]]:
+    """一个数据任务的六环确认之旅（给前端画同一条进度条）。
+
+    前三环的标题按任务类型定制（同步确认的是"同步本体"、物化确认的是"物化范围"），
+    后三环对四类任务是同一件事，故文案固定。
+    """
+    return [
+        {"node": DecisionNode.REQUIREMENT.value, "phase": "form",
+         "title": "确认任务需求", "description": "确认任务目标；可修改系统理解的需求"},
+        {"node": DecisionNode.ONTOLOGY.value, "phase": "form",
+         "title": f"确认{ontology_label}", "description": "只从当前本体和形式化口径的真实候选中选择"},
+        {"node": DecisionNode.DATA.value, "phase": "form",
+         "title": "确认数据与参数", "description": f"确认{data_label}"},
+        {"node": DecisionNode.PLAN.value, "phase": "artifact",
+         "title": "确认执行方案", "description": "校验与 dry-run 后，在任务详情里核对执行方案再确认"},
+        {"node": DecisionNode.EXECUTE.value, "phase": "artifact",
+         "title": "执行任务", "description": "确认过的方案才可执行；执行由你在任务详情里发起"},
+        {"node": DecisionNode.RESULT.value, "phase": "artifact",
+         "title": "确认执行结果", "description": "跑完后核对回执与实际落库结果，给出成功/失败反馈"},
+    ]
+
+
+def task_confirmations(
+    db: Session, conversation_id: str, confirmation_id: str
+) -> dict[str, dict]:
+    """取本次任务（按 ``confirmation_id`` 隔离）各环的**最新**确认记录。
+
+    同一会话可能连续建多条任务，故必须按表单发的 ``confirmation_id`` 隔离，
+    不能拿上一条任务的确认给这一条放行。
+    """
+    if not conversation_id or not confirmation_id:
+        return {}
+    latest: dict[str, dict] = {}
+    for record in list_decisions(db, conversation_id):
+        chosen = record.get("chosen") or {}
+        if (
+            isinstance(chosen, dict)
+            and chosen.get("task_confirmation_id") == confirmation_id
+        ):
+            latest[record["node"]] = record
+    return latest
+
+
+def missing_task_confirmations(
+    db: Session,
+    conversation_id: str,
+    confirmation_id: str,
+    *,
+    nodes: tuple[str, ...] = FORM_CONFIRMATION_NODES,
+) -> list[str]:
+    """还差哪几环没确认（按给定环序返回，便于原样展示给用户）。"""
+    latest = task_confirmations(db, conversation_id, confirmation_id)
+    return [
+        node
+        for node in nodes
+        if (latest.get(node) or {}).get("outcome") not in CONFIRMED_OUTCOMES
+    ]
+
+
+def node_label(node: str) -> str:
+    return _NODE_LABEL.get(node, node)
+
+
 def resolve_conversation_for_artifact(db: Session, artifact_id: str) -> str | None:
     """制品 → 催生它的会话。
 
@@ -400,4 +493,11 @@ __all__ = [
     "build_closure",
     "search_decisions",
     "resolve_conversation_for_artifact",
+    "FORM_CONFIRMATION_NODES",
+    "ARTIFACT_CONFIRMATION_NODES",
+    "CONFIRMED_OUTCOMES",
+    "task_journey_steps",
+    "task_confirmations",
+    "missing_task_confirmations",
+    "node_label",
 ]

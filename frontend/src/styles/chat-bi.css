@@ -2122,34 +2122,84 @@
   opacity: 0.6;
 }
 
-/* P6 交互表单块：Agent 动态生成的可填写表单，一次收集多个结构化参数。 */
+/* P6 交互表单块：Agent 动态生成的任务向导，一环收一组参数。
+   按**卡片**做而不是「气泡里的一段」：建任务是这条对话里最重的动作，它需要自己的
+   边界、留白和一条明确的操作区。三段（标题 / 进度 / 字段）之间用细线分栏，人一眼
+   能分出「这是第几环」和「这一环要填什么」。 */
 .chatbi-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 16px;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-left: 3px solid var(--om-primary, #2563eb);
-  border-radius: 8px;
-  background: var(--om-neutral-subtle, #f8fafc);
+  padding: 16px 18px 12px;
+  border: 1px solid var(--om-border-strong, #e2e8f0);
+  border-radius: var(--om-radius-lg, 12px);
+  background: var(--om-surface, #fff);
+  box-shadow: var(--om-shadow-sm, 0 1px 2px rgba(15, 23, 42, 0.04));
 }
 .chatbi-form-title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--om-text-primary, #0f172a);
+  line-height: 22px;
+  color: var(--om-text, #0f172a);
 }
 .chatbi-form-intent {
+  margin-top: 2px;
   font-size: 12px;
-  color: var(--om-text-tertiary, #64748b);
+  line-height: 18px;
+  color: var(--om-text-tertiary, #7c8798);
+}
+/* 六环进度条：与标题拉开、与字段区之间压一条细线（inline style 会盖不住，故
+   TaskRingSteps 的间距也改成了 class）。六环挤在一条 ~700px 的消息宽度里，
+   环名并排放不下（会折成「确认任务需 / 求」），故对话里的这份改成竖排 + 12px。 */
+.chatbi-form .task-ring-steps {
+  margin: 14px 0 0;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--om-border, #eef1f6);
+}
+.chatbi-form .task-ring-steps .ant-steps-item-title {
+  font-size: 12px;
+  line-height: 18px;
+}
+/* 极窄时（侧栏展开 + 小窗）连竖排也摆不下六个名字：把没轮到的那几环收成序号，
+   只留当前这一环的名字。放任它折行，一个环名会被挤成一列单字（「执 / 行 / 任 / 务」）。 */
+@media (max-width: 900px) {
+  .chatbi-form .task-ring-steps .ant-steps-item:not(.ant-steps-item-active) .ant-steps-item-title {
+    display: none;
+  }
+}
+/* 当前这一环的说明：跟在进度条下面，是「这一环要确认什么」的一句话。 */
+.chatbi-form-step-desc {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--om-text-secondary, #475569);
 }
 .chatbi-form-body {
-  margin-top: 4px;
+  margin-top: 14px;
 }
 .chatbi-form-body .ant-form-item {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+}
+.chatbi-form-body .ant-form-item-label > label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--om-text-secondary, #475569);
+}
+/* 字段说明压到三级色 12px：一段说明不该比它解释的输入框还抢眼。
+   antd 给 extra 留了 controlHeightSM 的最小高度，一句短提示会因此多出一截空白。 */
+.chatbi-form-body .ant-form-item-extra {
+  min-height: 0;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--om-text-tertiary, #7c8798);
 }
 .chatbi-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
   margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--om-border, #eef1f6);
 }
 
 /* 任务链（多任务编排）：一条链上的若干步，按序号纵向排开。

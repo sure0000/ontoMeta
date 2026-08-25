@@ -1181,3 +1181,8 @@
     justify-content: flex-start;
   }
 }
+
+/* 六环确认进度条（TaskRingSteps）：对话表单与任务详情抽屉共用，故间距定在这里。 */
+.task-ring-steps {
+  margin-bottom: 16px;
+}

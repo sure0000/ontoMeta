@@ -182,6 +182,86 @@ def test_materialize_preflight_skipped_without_datasource(db):
     assert "missing_required_field" in _blocking_codes(issues)
 
 
+def test_sync_gate_previews_this_task_not_the_contract(db, monkeypatch):
+    """闸门跑的自检，预演的必须是**这条任务**：全量就是全量，不回头读契约。
+
+    回归：customer_group 的物化契约写着 incremental，于是一条 mode=full 的同步被预演成
+    流式作业，报「有 1 张 CDC 表，缺 checkpoint」——人在表单上从没选过 CDC，照着提示去配
+    checkpoint 也治不好一件不存在的事。
+    """
+    import app.services.materialize_preflight as pf
+    from app.models import DataSource
+
+    seen: dict = {}
+
+    def _capture(db_, ontology_id, **kwargs):
+        seen.update(kwargs)
+        return pf.PreflightReport()
+
+    monkeypatch.setattr(pf, "run_preflight", _capture)
+    db.add(DataSource(
+        id="ds-pf2", name="仓库", kind="doris", purpose="warehouse",
+        is_default_warehouse=True, enabled=True, status="ok",
+        dsn_secret_ref="mysql+pymysql://reader@fe:9030",
+    ))
+    db.commit()
+    try:
+        validate_spec(
+            db,
+            kind="sync",
+            spec={
+                "ontology_id": "onto-pf",
+                "target_datasource_id": "ds-pf2",
+                "object_type": "customer_group",
+                "source": "erp.tabCustomer Group",
+                "mode": "full",
+                "incremental_column": "modified",
+                "flink_checkpoint_dir": "file:///tmp/ckpt",
+            },
+            ontology_id="onto-pf",
+        )
+    finally:
+        db.query(DataSource).filter(DataSource.id == "ds-pf2").delete()
+        db.commit()
+    assert seen["emit"] == "dml"
+    assert seen["load_strategy"] == "full"
+    assert seen["incremental_column"] == "modified"
+    # 任务级 Flink 覆盖也要带上：checkpoint 填在这条任务上同样算数。
+    assert seen["flink_task_params"]["flink_checkpoint_dir"] == "file:///tmp/ckpt"
+
+
+def test_materialize_gate_does_not_preview_movement(db, monkeypatch):
+    """物化只建表，不产 Flink 作业——闸门不替它体检搬运。"""
+    import app.services.materialize_preflight as pf
+    from app.models import DataSource
+
+    seen: dict = {}
+
+    def _capture(db_, ontology_id, **kwargs):
+        seen.update(kwargs)
+        return pf.PreflightReport()
+
+    monkeypatch.setattr(pf, "run_preflight", _capture)
+    db.add(DataSource(
+        id="ds-pf3", name="仓库", kind="doris", purpose="warehouse",
+        is_default_warehouse=True, enabled=True, status="ok",
+        dsn_secret_ref="mysql+pymysql://reader@fe:9030",
+    ))
+    db.commit()
+    try:
+        validate_spec(
+            db,
+            kind="materialize",
+            spec={"ontology_id": "onto-pf", "target_datasource_id": "ds-pf3", "engine": "doris"},
+            ontology_id="onto-pf",
+        )
+    finally:
+        db.query(DataSource).filter(DataSource.id == "ds-pf3").delete()
+        db.commit()
+    assert seen["emit"] == "ddl"
+    assert seen["load_strategy"] is None
+
+
 def test_preflight_warning_codes_do_not_block():
     """自检的提醒项与「自检没跑成」呈现但不拦——「验了不通过」和「没验成」是两回事。"""
     from app.services.draft_consistency import ValidationIssue

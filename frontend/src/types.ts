@@ -901,6 +901,11 @@ export interface ChatBiFormField {
 export interface ChatBiFormRequest {
   title: string;
   intent?: string;
+  /**
+   * 服务端改判/合并了这次请求时给人的一句解释（如「同步自带建表，已省掉物化那一步」）。
+   * 改判不能只在后台发生——人得知道自己拿到的为什么是这张表单。
+   */
+  notice?: string;
   submit_label?: string;
   fields: ChatBiFormField[];
   /** 数据任务表单元数据；存在时提交直接进入草稿+dry-run，不再续问 LLM。 */
@@ -908,11 +913,17 @@ export interface ChatBiFormRequest {
   ontology_id?: string;
   /** 一张任务确认单的隔离 id；防止复用同会话旧确认。 */
   confirmation_id?: string;
-  /** 同步任务按需求→本体→数据逐步确认；没有则按普通单页表单渲染。 */
+  /**
+   * 一个数据任务的六环确认之旅：需求 → 本体 → 数据 → 执行方案 → 执行 → 结果。
+   * `phase="form"` 的前三环在本表单里逐环确认，`phase="artifact"` 的后三环在任务
+   * 详情抽屉里逐环确认——一次给全，人从第一步就看得见一共几环、现在第几环。
+   * 没有这个字段则按普通单页表单渲染（非任务表单）。
+   */
   confirmation_steps?: Array<{
-    node: "requirement" | "ontology" | "data" | "plan" | string;
+    node: "requirement" | "ontology" | "data" | "plan" | "execute" | "result" | string;
     title: string;
     description?: string;
+    phase?: "form" | "artifact" | string;
   }>;
 }
 
@@ -1063,6 +1074,12 @@ export type ChatBiBlock =
         intent?: string;
         ontology_id?: string | null;
         steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
+        /**
+         * 服务端砍掉的步骤（当前只有一种：排在同步前、纯为同步建表的物化）。
+         * 同步自己会幂等建出 ODS 表，那一步是多余的；但砍了要说出来，不能让人
+         * 以为自己要的步骤凭空消失。
+         */
+        dropped_steps?: { kind: string; intent: string; reason: string }[];
         /** 「创建任务链」按钮原样传给 api.createPipeline 的载荷。 */
         create_payload: {
           name: string;
@@ -1796,6 +1813,8 @@ export interface AgentValidationIssue {
   entity_type?: string | null;
   entity_id?: string | null;
   entity_name?: string | null;
+  /** 后端 is_blocking 的判据（唯一真源）。旧报告没有这个字段，前端按码表兜底。 */
+  blocking?: boolean;
 }
 
 export interface AgentValidationReport {

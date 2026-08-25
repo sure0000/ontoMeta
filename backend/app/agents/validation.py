@@ -24,6 +24,7 @@ from app.governance.lint import lint_spec
 from app.models import DataSource, ObjectType, Ontology, Property
 from app.services import flink_params
 from app.services.draft_consistency import ValidationIssue, validate_ontology
+from app.services.ods_naming import ODS_DATABASE
 from app.warehouse import UnknownEngineError, get_adapter
 from app.warehouse.policy import ALLOWED_EXECUTION_ENGINES, WAREHOUSE_ENGINE, require_doris
 
@@ -74,8 +75,8 @@ def validate_spec(
     issues.extend(_check_ontology_refs(db, spec, ontology_id))
     issues.extend(_check_required_metadata(kind, spec, standard))
     issues.extend(_check_standard(kind, spec, standard))
-    if kind == "materialize":
-        issues.extend(_check_materialize_preflight(db, spec, ontology_id))
+    if kind in {"materialize", "sync"}:
+        issues.extend(_check_execution_preflight(db, kind, spec, ontology_id))
     if kind == "sync":
         issues.extend(_check_doris_ingestion(db, spec))
     if kind == "transform":
@@ -302,11 +303,13 @@ def _check_doris_ingestion(
             entity_type="datasource",
             entity_id=str(spec.get("source_datasource_id") or ""),
         ))
-    target_db = str(spec.get("target_ods_database") or "")
-    if not target_db.startswith("ods"):
+    # 落点库不是配置项（见 ods_naming.ODS_DATABASE）；这里只兜住存量 Spec 里
+    # 写着别的库的老制品——执行时会被改写成 ODS，先在校验里说清楚。
+    target_db = str(spec.get("target_ods_database") or ODS_DATABASE)
+    if target_db != ODS_DATABASE:
         issues.append(ValidationIssue(
             code="sync_target_not_ods",
-            message="Flink sync 目标必须是 Doris ODS 数据库（名称以 ods 开头）",
+            message=f"同步只写 Doris 的 {ODS_DATABASE} 库；该制品记录的是「{target_db}」，请重建任务",
             entity_type="artifact",
             entity_name=target_db,
         ))
@@ -454,10 +457,10 @@ def _check_required_metadata(
     return issues
 
 
-def _check_materialize_preflight(
-    db: Session, spec: dict[str, Any], ontology_id: str | None
+def _check_execution_preflight(
+    db: Session, kind: str, spec: dict[str, Any], ontology_id: str | None
 ) -> list[ValidationIssue]:
-    """物化的提交前自检并入闸门（Airflow 连通/鉴权/建表连接/DAG 目录）。
+    """物化/同步的提交前自检并入闸门。
 
     **为什么在这里**：物化弹窗强制「跑完自检且无阻断项」才让提交，而 Data Agent 那条路
     直接 validate→confirm→execute，同一件破坏性操作走了两套门槛——agent 提的任务会在
@@ -471,16 +474,49 @@ def _check_materialize_preflight(
     if not ontology_id or not target_datasource_id:
         # 缺这两样另有 missing_required_field 报，不在这里重复喊一遍。
         return []
+    from app.services import flink_params
     from app.services.materialize_preflight import run_preflight
     from app.services.materialization_runner import resolve_engine
 
+    is_sync = kind == "sync"
     try:
         report = run_preflight(
             db,
             ontology_id,
             target_datasource_id=str(target_datasource_id),
             engine=resolve_engine(db, str(target_datasource_id), spec.get("engine")),
-            selected_targets=spec.get("selected_targets"),
+            selected_targets=(
+                [str(spec["object_type"])]
+                if is_sync and spec.get("object_type")
+                else spec.get("selected_targets")
+            ),
+            source_datasource_id=(
+                str(spec["source_datasource_id"])
+                if is_sync and spec.get("source_datasource_id")
+                else None
+            ),
+            source_database=(
+                str(spec["source"]).split(".", 1)[0]
+                if is_sync and spec.get("source") and "." in str(spec["source"])
+                else None
+            ),
+            managed_connections=True,
+            # 搬运侧的自检必须照**本任务 Spec**预演，不能回头读契约：同一张表的契约写着
+            # incremental，而这条任务人选的是「全量」——按契约预演出来的是另一个作业，
+            # 报的阻断（缺 checkpoint）在真跑里根本不会发生。
+            emit="dml" if is_sync else "ddl",
+            load_strategy=str(spec["mode"]) if is_sync and spec.get("mode") else None,
+            incremental_column=(
+                str(spec["incremental_column"])
+                if is_sync and spec.get("incremental_column")
+                else None
+            ),
+            initial_watermark=(
+                str(spec["initial_watermark"])
+                if is_sync and spec.get("initial_watermark")
+                else None
+            ),
+            flink_task_params=flink_params.from_spec(spec) if is_sync else None,
         )
     except Exception as exc:  # noqa: BLE001 — 自检炸了不该把校验一起带走
         return [

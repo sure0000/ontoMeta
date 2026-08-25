@@ -105,6 +105,7 @@ def _install(
     handler,
     *,
     ds=SimpleNamespace(id="ds1", name="dw"),
+    source_ds=None,
     contracts=(),
     names=None,
     runtime_over=None,
@@ -129,6 +130,9 @@ def _install(
     monkeypatch.setattr(
         pf, "probe_ssh_pipeline", lambda af: (True, "test：管道连通（桩）")
     )
+    # 同理：expose_config 关着时会回退去 SSH 上读 dags_folder，默认桩成「读不到」，
+    # 免得单测真去 ssh 一台不存在的主机。要测这条回退的用例自己覆盖。
+    monkeypatch.setattr(pf, "dags_folder_via_ssh", lambda af: None)
     monkeypatch.setattr(pf._settings, "get_airflow_runtime", lambda db: runtime)
     monkeypatch.setattr(
         pf._contract_service, "list_contracts", lambda db, oid, **kw: list(contracts)
@@ -136,7 +140,11 @@ def _install(
     monkeypatch.setattr(
         pf._contract_service, "resolve_target_names", lambda db, cs: names or {}
     )
-    return SimpleNamespace(get=lambda model, _id: ds)
+    return SimpleNamespace(
+        get=lambda model, _id: source_ds
+        if source_ds is not None and _id == source_ds.id
+        else ds
+    )
 
 
 def _fake_job(name: str, *, database: str = "erp_ods", table: str = "tab_a"):
@@ -192,6 +200,67 @@ def test_missing_warehouse_connection_blocks(monkeypatch, tmp_path):
     assert conn.status == pf.FAIL and conn.blocking is True
     # 下一步要能直接照做：给出该建的 conn_id。
     assert "ontometa_ds_ds1" in (conn.next_step or "")
+
+
+def test_missing_source_connection_blocks_sync(monkeypatch, tmp_path):
+    """同步除目标端外还必须在 Airflow 中配置源库 Connection。"""
+    normal = _make_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/ontometa_source_source1"):
+            return httpx.Response(404, text="not found")
+        return normal(request)
+
+    source = SimpleNamespace(id="source-1", name="ERP")
+    db = _install(monkeypatch, tmp_path, handler, source_ds=source)
+    report = pf.run_preflight(
+        db,
+        "o1",
+        target_datasource_id="ds1",
+        source_datasource_id="source-1",
+        engine="hive",
+    )
+
+    assert report.ok is False
+    conn = _by_key(report)["source_conn"]
+    assert conn.status == pf.FAIL and conn.blocking is True
+    assert "ontometa_source_source1" in (conn.next_step or "")
+
+
+def test_managed_connections_do_not_require_preexisting_airflow_rows(monkeypatch, tmp_path):
+    """自包含 DAG 会在首任务注册连接，Airflow 当前 404 不应阻断提交。"""
+    source = SimpleNamespace(id="source-1", name="ERP")
+    db = _install(
+        monkeypatch,
+        tmp_path,
+        _make_handler(connection=404),
+        source_ds=source,
+    )
+    monkeypatch.setattr(
+        pf,
+        "build_embedded_airflow_connections",
+        lambda *args, **kwargs: [
+            {"conn_id": "warehouse"},
+            {"conn_id": "warehouse_flink"},
+            {"conn_id": "source"},
+        ],
+    )
+    report = pf.run_preflight(
+        db,
+        "o1",
+        target_datasource_id="ds1",
+        source_datasource_id="source-1",
+        source_database="erp",
+        managed_connections=True,
+        engine="hive",
+    )
+
+    assert report.ok is True
+    items = _by_key(report)
+    assert items["warehouse_conn"].status == pf.PASS
+    assert items["doris_flink_conn"].status == pf.PASS
+    assert items["source_conn"].status == pf.PASS
+    assert "自动创建或更新" in items["source_conn"].detail
 
 
 def test_readonly_connection_403_is_non_blocking_warn(monkeypatch, tmp_path):
@@ -328,50 +397,132 @@ _NO_FLINK = {"flink_sql_runner_jar": "", "flink_checkpoint_dir": ""}
 def test_missing_flink_jar_warns_but_not_blocks(monkeypatch, tmp_path):
     """缺 SqlRunner JAR → 搬运只产出不执行（handoff），WARN 不阻断提交。"""
     db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive", emit="dml")
     item = _by_key(report)["flink_jar"]
     assert item.status == pf.WARN and item.blocking is False
     assert "Flink SqlRunner JAR" in (item.next_step or "")
     assert report.ok is True
 
 
-def test_incremental_without_checkpoint_blocks(monkeypatch, tmp_path):
-    """本次有增量/CDC 表但未配 checkpoint：流式作业编译期必挂，提交前必须红。"""
+def _plan_of(*jobs) -> SimpleNamespace:
+    return SimpleNamespace(jobs=jobs)
+
+
+def _move_job(name: str, mode: str, **over) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        mode=mode,
+        incremental_column=over.get("incremental_column"),
+        initial_watermark=over.get("initial_watermark"),
+        source=SimpleNamespace(database="erp", table="tabA", platform="mysql"),
+    )
+
+
+def test_cdc_without_checkpoint_blocks(monkeypatch, tmp_path):
+    """本次有 CDC 表但未配 checkpoint：流式作业编译期必挂，提交前必须红。"""
     from app.services.job_planner import JobPlanner
 
-    plan = SimpleNamespace(
-        jobs=(
-            SimpleNamespace(name="inc_a", mode="incremental",
-                            source=SimpleNamespace(database="erp", table="tabA", platform="mysql")),
-        )
-    )
-    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: plan)
+    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: _plan_of(_move_job("sync_ods_a", "cdc")))
     db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive", emit="dml")
     item = _by_key(report)["flink_checkpoint"]
     assert item.status == pf.FAIL and item.blocking is True
     assert "Checkpoint" in (item.next_step or "")
     assert report.ok is False
 
 
-def test_incremental_with_checkpoint_passes(monkeypatch, tmp_path):
-    """增量/CDC 表配了 checkpoint → PASS。"""
+def test_cdc_with_checkpoint_passes(monkeypatch, tmp_path):
+    """CDC 表配了 checkpoint → PASS。"""
     from app.services.job_planner import JobPlanner
 
-    plan = SimpleNamespace(
-        jobs=(
-            SimpleNamespace(name="inc_a", mode="incremental",
-                            source=SimpleNamespace(database="erp", table="tabA", platform="mysql")),
-        )
-    )
-    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: plan)
+    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: _plan_of(_move_job("sync_ods_a", "cdc")))
     db = _install(
         monkeypatch, tmp_path, _make_handler(),
         runtime_over={"flink_sql_runner_jar": "", "flink_checkpoint_dir": "file:///tmp/ckpt"},
     )
-    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive", emit="dml")
     item = _by_key(report)["flink_checkpoint"]
     assert item.status == pf.PASS and item.blocking is False
+    assert report.ok is True
+
+
+def test_task_level_checkpoint_dir_satisfies_cdc(monkeypatch, tmp_path):
+    """checkpoint 目录填在**这条任务**上也算数——只看设置页会拦下已经配好的任务。"""
+    from app.services.job_planner import JobPlanner
+
+    monkeypatch.setattr(JobPlanner, "build", lambda *a, **k: _plan_of(_move_job("sync_ods_a", "cdc")))
+    db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
+    report = pf.run_preflight(
+        db, "o1", target_datasource_id="ds1", engine="hive", emit="dml",
+        flink_task_params={"flink_checkpoint_dir": "file:///tmp/task-ckpt"},
+    )
+    assert _by_key(report)["flink_checkpoint"].status == pf.PASS
+    assert report.ok is True
+
+
+def test_incremental_does_not_need_checkpoint(monkeypatch, tmp_path):
+    """增量是有界 batch（水位谓词 + 跑完即退），不该被当成流式作业索要 checkpoint。
+
+    缺增量字段/水位是另一件事，由 ``_check_sync_spec`` 按本任务 Spec 直接报——拿
+    「配 checkpoint」去治它，人照做也编不出 SQL。
+    """
+    from app.services.job_planner import JobPlanner
+
+    monkeypatch.setattr(
+        JobPlanner, "build", lambda *a, **k: _plan_of(_move_job("sync_ods_a", "incremental"))
+    )
+    db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive", emit="dml")
+    assert "flink_checkpoint" not in _by_key(report)
+    assert report.ok is True
+
+
+def test_sync_preflight_previews_this_task_not_the_contract(monkeypatch, tmp_path):
+    """回归：一条「全量」同步不能因为**契约**写着 incremental/cdc 而被判成流式作业。
+
+    自检预演的必须是这次要提交的作业，故装载方式/增量字段/水位按 Spec 传给 planner，
+    落点固定 ODS（同步从不写 dim/dwd，作业名也不该出现分层）。
+    """
+    from app.services.job_planner import JobPlanner
+
+    seen: dict = {}
+
+    def _capture(self, db, ontology_id, **kwargs):
+        seen.update(kwargs)
+        # planner 收到 load_strategy 覆盖后，本次作业就是全量——与契约无关。
+        return _plan_of(_move_job("sync_ods_customer_group", kwargs.get("load_strategy") or "cdc"))
+
+    monkeypatch.setattr(JobPlanner, "build", _capture)
+    db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
+    report = pf.run_preflight(
+        db, "o1", target_datasource_id="ds1", engine="hive", emit="dml",
+        selected_targets=["customer_group"],
+        load_strategy="full",
+        incremental_column="modified",
+    )
+    assert seen["load_strategy"] == "full"
+    assert seen["target_ods_database"] == "ods"
+    assert seen["incremental_columns"] == {"customer_group": "modified"}
+    # 全量既不是 CDC 也不需要 checkpoint：这一项根本不该出现。
+    assert "flink_checkpoint" not in _by_key(report)
+    assert report.ok is True
+
+
+def test_materialize_skips_flink_checks(monkeypatch, tmp_path):
+    """物化只建表（SQLExecuteQueryOperator 直连目标仓），不产 Flink 作业。
+
+    此前它照样预演搬运，于是别人契约上的装载方式能把一次建表拦在提交之前。
+    """
+    from app.services.job_planner import JobPlanner
+
+    def _boom(*a, **k):  # 物化路径压根不该调 planner
+        raise AssertionError("materialize 不应预演搬运作业")
+
+    monkeypatch.setattr(JobPlanner, "build", _boom)
+    db = _install(monkeypatch, tmp_path, _make_handler(), runtime_over=dict(_NO_FLINK))
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    keys = _by_key(report)
+    assert "flink_jar" not in keys and "flink_checkpoint" not in keys
     assert report.ok is True
 
 
@@ -465,9 +616,51 @@ def test_dag_dir_under_the_instance_folder_passes(monkeypatch, tmp_path):
 
 
 def test_expose_config_off_only_warns(monkeypatch, tmp_path):
-    """读不到 core.dags_folder 是「没法对账」，不是「配错了」——别拿它拦提交。"""
+    """两条路都读不到 core.dags_folder 是「没法对账」，不是「配错了」——别拿它拦提交。"""
     db = _install(monkeypatch, tmp_path, _make_handler())  # dags_folder=None → 403
     report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
     item = _by_key(report)["dag_dir_matches_instance"]
     assert item.status == pf.WARN and item.blocking is False
     assert "expose_config" in item.detail
+    assert "SSH" in item.detail  # 说清 SSH 那条也试过了，省得人以为还有招没用
+
+
+def test_expose_config_off_falls_back_to_ssh_reading(monkeypatch, tmp_path):
+    """expose_config 关着是默认配置，不该让「投递目录对不对」永久留在盲区。
+
+    投递管道刚验通，就用同一条 SSH 去问那台机器本人；读到了就照常对账。
+    """
+    db = _install(monkeypatch, tmp_path, _make_handler())  # REST /config → 403
+    monkeypatch.setattr(pf, "dags_folder_via_ssh", lambda af: "/srv/airflow/dags")
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["dag_dir_matches_instance"]
+    assert item.status == pf.WARN and item.blocking is False
+    assert "/srv/airflow/dags" in item.detail and "SSH" in item.detail
+    assert report.ok is True  # 只提醒，不阻断
+
+
+def test_ssh_reading_ignores_cli_noise(monkeypatch, tmp_path):
+    """airflow CLI 会在 stdout 里夹带警告；只认最后一行的绝对路径，读不出就当没读到。"""
+    calls: list[str] = []
+
+    class _FakeDelivery:
+        def _ssh(self, cmd):
+            calls.append(cmd)
+            return SimpleNamespace(
+                stdout="DeprecationWarning: something\n/opt/airflow/dags\n"
+            )
+
+    monkeypatch.setattr("app.services.dag_delivery.get_delivery", lambda *a, **k: _FakeDelivery())
+    airflow = _runtime("/x", ssh_host="h1", ssh_user="u", ssh_port=22, ssh_password=None)
+    assert pf.dags_folder_via_ssh(airflow) == "/opt/airflow/dags"
+    assert "dags_folder" in calls[0]
+
+
+def test_ssh_reading_failure_is_silent(monkeypatch, tmp_path):
+    """远端没有 airflow 命令（或连不上）只是读不到，不该把整份自检带崩。"""
+    def _boom(*a, **k):
+        raise RuntimeError("bash: airflow: command not found")
+
+    monkeypatch.setattr("app.services.dag_delivery.get_delivery", _boom)
+    airflow = _runtime("/x", ssh_host="h1", ssh_user="u", ssh_port=22, ssh_password=None)
+    assert pf.dags_folder_via_ssh(airflow) is None

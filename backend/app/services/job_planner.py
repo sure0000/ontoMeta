@@ -44,6 +44,10 @@ DEFAULT_TARGET_ALIAS = "warehouse_default"
 _generator = WarehouseGenerator()
 
 
+class JobPlanningError(ValueError):
+    """搬运计划存在无法安全执行的作业冲突。"""
+
+
 def _split_qualified(name: str) -> tuple[str | None, str]:
     """``_3214abce8e7be3d7.tabAddress`` → (库, 表)；无库名时库为 None。"""
     if "." in name:
@@ -56,6 +60,70 @@ def _task_name(layer: str, table: str) -> str:
     """作业名。需能直接用作 Airflow task_id，故只留字母数字与下划线。"""
     raw = f"sync_{layer}_{table}"
     return "".join(c if c.isalnum() or c in "_-." else "_" for c in raw)
+
+
+def _move_signature(job: JobSpec) -> tuple:
+    """比较两个作业是否会执行同一次数据搬运。
+
+    目标表的 comment / 外键属于建表元数据，不改变 Flink 搬运本身；列形状、读写端点、
+    装载方式与水位策略则必须完全一致。这样对象表与以它为实现表的关系表在统一改写到
+    同一 ODS 表后可以安全合并，而真正的同名异义冲突不会被静默吞掉。
+    """
+    target_columns = job.target_table.columns if job.target_table is not None else ()
+    return (
+        job.source,
+        job.target,
+        job.columns,
+        job.mode,
+        job.partition_key,
+        job.incremental_column,
+        job.initial_watermark,
+        job.delete_policy,
+        job.layer,
+        job.source_urn,
+        job.entity_name,
+        target_columns,
+    )
+
+
+def _deduplicate_jobs(jobs: list[JobSpec]) -> tuple[JobSpec, ...]:
+    """按最终 task id 与目标表去重，并在歧义写入前失败。
+
+    Airflow 要求一个 DAG 内 task_id 唯一；数据侧也不允许两个不同作业并发写同一目标表。
+    planner 是两条约束最后同时可见的边界，因此在这里收口，而不是等 DAG import 才暴露。
+    """
+    unique: list[JobSpec] = []
+    by_name: dict[str, JobSpec] = {}
+    by_target: dict[tuple[str, str, str], JobSpec] = {}
+
+    for job in sorted(jobs, key=lambda item: (item.layer, item.name)):
+        target_key = (job.target.alias, job.target.platform, job.target.qualified)
+        collisions: list[JobSpec] = []
+        for existing in (by_name.get(job.name), by_target.get(target_key)):
+            if existing is not None and all(existing is not item for item in collisions):
+                collisions.append(existing)
+
+        if not collisions:
+            unique.append(job)
+            by_name[job.name] = job
+            by_target[target_key] = job
+            continue
+
+        if len(collisions) == 1 and _move_signature(collisions[0]) == _move_signature(job):
+            # 同一本体对象可能同时是对象表和关系实现表。ODS 同步把两者改写到相同的
+            # 最终库表后，它们是同一次搬运，只保留稳定排序后的第一份。
+            continue
+
+        existing = collisions[0]
+        raise JobPlanningError(
+            "搬运作业冲突：Airflow task_id "
+            f"{job.name!r} 或目标表 {job.target.qualified!r} 被多个不同作业占用"
+            f"（{existing.source.qualified} -> {existing.target.qualified}；"
+            f"{job.source.qualified} -> {job.target.qualified}）。"
+            "请检查对象/关系物化契约与目标表覆盖配置。"
+        )
+
+    return tuple(unique)
 
 
 def _runner_reject(
@@ -257,8 +325,9 @@ class JobPlanner:
                 )
             )
 
-        # 稳定排序：同一本体重复生成必须逐字节一致（沿用 M3 的幂等要求）。
-        plan.jobs = tuple(sorted(jobs, key=lambda j: (j.layer, j.name)))
+        # 稳定排序 + 最终唯一性：同一本体重复生成必须逐字节一致；同一个 Airflow task_id
+        # 或目标表也只能有一个执行者，否则 DAG 无法 import 或会并发写同一张表。
+        plan.jobs = _deduplicate_jobs(jobs)
         return plan
 
     @staticmethod
@@ -287,6 +356,7 @@ job_planner = JobPlanner()
 __all__ = [
     "DEFAULT_SOURCE_ALIAS",
     "DEFAULT_TARGET_ALIAS",
+    "JobPlanningError",
     "JobPlanner",
     "job_planner",
 ]

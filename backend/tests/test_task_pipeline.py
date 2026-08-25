@@ -427,3 +427,220 @@ def test_advance_rejects_self_dependency(domain):
                  "context": {"target_datasource_id": "ds-chain"}, "depends_on": [0]},
             ],
         )
+
+
+# ---------------- 六环确认：链上的每一步与单发任务一视同仁 ----------------
+#
+# 链此前有两条捷径——「起草第 N 步」直接建制品、「一键起草全部步骤」一次建完——
+# 于是链上的任务比单发任务少确认需求/本体/数据三环。链只该省重复输入，不该省人审。
+
+
+def _conversation(title: str) -> str:
+    from app.models.chat_bi import ChatBiConversation
+
+    with SessionLocal() as db:
+        conv = ChatBiConversation(title=title)
+        db.add(conv)
+        db.commit()
+        return conv.id
+
+
+def _confirm_three_rings(conversation_id: str, confirmation_id: str, **chosen) -> None:
+    from app.services.chat_bi_ledger import record_decision
+
+    with SessionLocal() as db:
+        for node in ("requirement", "ontology", "data"):
+            record_decision(
+                db,
+                conversation_id=conversation_id,
+                node=node,
+                stage=f"task_{node}_confirm",
+                outcome="accepted",
+                chosen={"task_confirmation_id": confirmation_id, **chosen},
+            )
+
+
+def test_advance_confirmed_refuses_before_the_first_three_rings(
+    domain, client, admin_headers
+):
+    """没逐环确认需求/本体/数据，链上的下一步就不给起草——且说清缺哪几环。"""
+    db, onto_id = domain
+    pipeline = _chain(db, onto_id)
+    conversation_id = _conversation("任务链六环门禁")
+
+    response = client.post(
+        f"/api/agents/pipelines/{pipeline.id}/advance-confirmed",
+        headers=admin_headers,
+        json={
+            "conversation_id": conversation_id,
+            "confirmation_id": "chain-step-0",
+            "context": {"target_datasource_id": "ds-chain", "target_database": "dw"},
+        },
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["missing_confirmations"] == ["requirement", "ontology", "data"]
+    assert detail["missing_labels"] == ["需求确认", "本体确认", "数据确认"]
+    # 拒绝就是没起草：链态里这一步仍然没有制品。
+    assert TaskPipelineService().detail(db, pipeline.id)["steps"][0]["artifact_id"] is None
+
+
+def test_advance_confirmed_drafts_with_the_confirmed_values(domain, client, admin_headers):
+    """确认过就起草，并且**以人确认的取值为准**——链的继承只补人没填的键。"""
+    db, onto_id = domain
+    pipeline = _chain(db, onto_id)
+    conversation_id = _conversation("任务链六环放行")
+    _confirm_three_rings(conversation_id, "chain-step-ok")
+
+    response = client.post(
+        f"/api/agents/pipelines/{pipeline.id}/advance-confirmed",
+        headers=admin_headers,
+        json={
+            "conversation_id": conversation_id,
+            "confirmation_id": "chain-step-ok",
+            "intent": "物化到数仓（人改过的需求）",
+            "context": {"target_datasource_id": "ds-chain", "target_database": "confirmed_db"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    artifact = response.json()["artifact"]
+    assert artifact["kind"] == "materialize"
+    assert artifact["intent"] == "物化到数仓（人改过的需求）"
+    # 人刚逐环确认过，溯源就该是「人工创建」——记成机器创建会让审计以为是 agent 自己冒出来的。
+    assert artifact["origin"] == "user"
+    # 起草即出执行方案预览：后三环从「确认执行方案」开始，而不是让人再点一次校验。
+    assert artifact["validation_report"] is not None
+
+    detail = TaskPipelineService().detail(db, pipeline.id)
+    assert detail["steps"][0]["artifact_id"] == artifact["id"]
+    assert detail["steps"][0]["context"]["target_database"] == "confirmed_db"
+
+
+def test_task_form_endpoint_gives_the_same_six_rings(domain, client, admin_headers):
+    """链逐步确认取的表单，与对话里 request_form 出的是同一张六环向导。"""
+    _db, onto_id = domain
+    response = client.post(
+        "/api/agents/task-form",
+        headers=admin_headers,
+        json={"kind": "materialize", "ontology_id": onto_id, "intent": "物化到数仓"},
+    )
+    assert response.status_code == 200, response.text
+    form = response.json()
+    assert [s["node"] for s in form["confirmation_steps"]] == [
+        "requirement", "ontology", "data", "plan", "execute", "result"
+    ]
+    assert [s["phase"] for s in form["confirmation_steps"]] == [
+        "form", "form", "form", "artifact", "artifact", "artifact"
+    ]
+    assert form["confirmation_id"]
+    assert form["task_kind"] == "materialize"
+    # 每个字段都归属某一环，否则它在向导里一格都不属于（看不见却仍参与提交校验）。
+    assert form["fields"]
+    assert all(f["confirmation_node"] in {"requirement", "ontology", "data"} for f in form["fields"])
+
+
+# ---------------- 同步自带建表：链上不再排多余的物化步骤 ----------------
+#
+# 同步执行时对目标 ODS 表下的是幂等 CREATE TABLE IF NOT EXISTS（落点恒为 ODS），
+# 表不存在就建。为同步而先排一个物化步骤，只会让用户白确认一次「物化范围」——
+# 而那份范围的惯性默认是整本体几百个实体。
+
+
+@pytest.fixture
+def syncable(domain):
+    """golden 域 + 一个与 order 对象 source_ref 对得上的业务源。
+
+    链上的 sync 步骤要过 ``_sync_context_errors``（源必须是启用的 business_source，
+    且与本体 source_ref 的平台/库/表对得上），否则测不到后面的物化裁剪。
+    """
+    from app.models import ObjectType
+
+    db, onto_id = domain
+    obj = (
+        db.query(ObjectType)
+        .filter(ObjectType.ontology_id == onto_id, ObjectType.name == "order")
+        .first()
+    )
+    assert obj is not None, "golden 种子应有 order 对象"
+    obj.source_ref = (
+        "urn:li:dataset:(urn:li:dataPlatform:postgres,erp.public.order,PROD)"
+    )
+    db.add(DataSource(
+        id="ds-src-chain", name="ERP PG", kind="postgres", purpose="business_source",
+        enabled=True, status="ok", catalog_name="erp",
+        dsn_secret_ref="postgresql://reader@db/erp",
+    ))
+    db.commit()
+    try:
+        yield db, onto_id
+    finally:
+        db.query(DataSource).filter(DataSource.id == "ds-src-chain").delete()
+        db.commit()
+
+
+def _sync_step(intent: str, *, depends_on: list[int] | None = None) -> dict:
+    return {
+        "kind": "sync", "intent": intent, "depends_on": depends_on or [],
+        "context": {
+            "object_type": "order",
+            "source_datasource_id": "ds-src-chain",
+            "target_datasource_id": "ds-chain",
+            "target_ods_database": "ods",
+            "mode": "full",
+        },
+    }
+
+
+def test_pipeline_drops_materialize_that_only_serves_the_sync(syncable):
+    """物化(未点名范围) → 同步 → 清洗：物化被砍，depends_on 顺延。"""
+    db, onto_id = syncable
+    result, summary, is_error = _propose(db, onto_id, {
+        "name": "订单入仓链",
+        "steps": [
+            {"kind": "materialize", "intent": "先把结构建出来",
+             "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
+            _sync_step("同步订单", depends_on=[0]),
+            {"kind": "transform", "intent": "清洗订单", "depends_on": [1],
+             "context": {"target_table": "order"}},
+        ],
+    })
+    assert is_error is False, result
+    assert [s["kind"] for s in result["steps"]] == ["sync", "transform"]
+    # 清洗原本依赖第 2 步（下标 1）；砍掉物化后同步成了第 1 步，依赖要跟着挪。
+    assert result["steps"][1]["depends_on"] == [0]
+    assert [d["kind"] for d in result["dropped_steps"]] == ["materialize"]
+    assert "CREATE TABLE IF NOT EXISTS" in result["dropped_steps"][0]["reason"]
+    assert "已省略" in summary
+
+
+def test_pipeline_keeps_materialize_for_entities_the_sync_never_touches(syncable):
+    """物化点名了同步不碰的实体就**保留**——人工建模对象的表只能靠物化建出来。"""
+    db, onto_id = syncable
+    result, _summary, is_error = _propose(db, onto_id, {
+        "name": "混合链",
+        "steps": [
+            {"kind": "materialize", "intent": "建人工对象的表",
+             "context": {"target_datasource_id": "ds-chain", "target_database": "dw",
+                         "selected_targets": ["manual_only_entity"]}},
+            _sync_step("同步订单", depends_on=[0]),
+        ],
+    })
+    assert is_error is False, result
+    assert [s["kind"] for s in result["steps"]] == ["materialize", "sync"]
+    assert result["dropped_steps"] == []
+
+
+def test_pipeline_rejects_chain_that_is_only_a_sync_after_dropping(syncable):
+    """砍完只剩一步就不是链——让模型改走 propose_action，别把单任务套成链。"""
+    db, onto_id = syncable
+    result, _summary, is_error = _propose(db, onto_id, {
+        "name": "物化+同步",
+        "steps": [
+            {"kind": "materialize", "intent": "建结构",
+             "context": {"target_datasource_id": "ds-chain", "target_database": "dw"}},
+            _sync_step("同步订单", depends_on=[0]),
+        ],
+    })
+    assert is_error is True
+    assert "propose_action" in result["error"]
+    assert "CREATE TABLE IF NOT EXISTS" in result["reason"]

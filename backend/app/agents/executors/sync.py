@@ -1,9 +1,8 @@
-"""① 同步作业 Executor —— 只**搬数据**，统一走 Flink SQL on YARN。
+"""① 同步作业 Executor —— 确保目标表后搬数据，统一走 Flink SQL on YARN。
 
-物化 = 建结构（DDL），同步 = 搬数据（DML），且物化在先。故这里调
-``materialization_runner.run_sync``：只产 Flink SQL 搬运作业（全量走 staging + 原子
-切换），**不建业务表**——目标表须已由物化任务建好。回执的 ``tables`` 因而恒为空
-（前端拿它判「已物化」，同步填了就会冒充成物化）。
+同步 DAG 先用幂等 ``CREATE TABLE IF NOT EXISTS`` 确保 ODS 目标，再执行 Flink SQL 搬运
+（全量走 staging + 原子切换）。目标表不存在时自动创建，已存在时不改写。顶层回执的
+``tables`` 仍恒为空（前端拿它判独立物化），本次确保的目标通过 ``ensured_tables`` 返回。
 
 与 transform/metric 同一条执行路径（Flink SQL → BashOperator ``flink run``）。
 不再渲染 SeaTunnel/DataX 作业配置——那套多通道已废除。
@@ -20,6 +19,7 @@ from app.agents.executors.base import Executor
 from app.services import flink_params
 from app.models import DataSource, ObjectType
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
+from app.services.ods_naming import ODS_DATABASE
 
 
 class SyncExecutor(Executor):
@@ -38,7 +38,7 @@ class SyncExecutor(Executor):
             "object_type": spec.get("object_type"),
             "source_datasource_id": spec.get("source_datasource_id"),
             "target_datasource_id": spec.get("target_datasource_id"),
-            "target_ods_database": spec.get("target_ods_database"),
+            "target_ods_database": ODS_DATABASE,
             "target_ods_table": spec.get("target_ods_table"),
             "mode": spec.get("mode") or "full",
             "primary_keys": spec.get("primary_keys") or [],
@@ -88,7 +88,7 @@ class SyncExecutor(Executor):
                 "note": "未配置 target_datasource_id，ontoMeta 只给出搬运计划，不执行（链上游会传入此字段）",
             }
 
-        # 进链执行：sync = 只搬数据（不建表）。走 materialization_runner 的 Flink SQL 通道，
+        # 进链执行：sync = 先确保目标表，再搬数据。走 materialization_runner 的 Flink SQL 通道，
         # 传 selected_targets=[对象名] 只搬那一个对象。回执带 dag_id，可被
         # pipeline_compiler 串进链 DAG。
         object_type = spec.get("object_type")
@@ -117,6 +117,7 @@ class SyncExecutor(Executor):
 
         with SessionLocal() as db:
             target_ds = db.get(DataSource, target_datasource_id)
+            source_datasource_id = None
             if target_ds is not None and target_ds.purpose == "warehouse":
                 source_ds = db.get(DataSource, spec.get("source_datasource_id"))
                 if source_ds is None or source_ds.purpose != "business_source":
@@ -135,6 +136,48 @@ class SyncExecutor(Executor):
                 )
                 if obj is None:
                     raise ValueError(f"本体对象 {object_type} 不存在")
+
+                # Validation normally catches these before confirmation. Repeat the
+                # read-only preflight here so older validated artifacts and direct
+                # executor calls cannot submit a DAG with unresolved conn_ids.
+                from app.services.materialize_preflight import run_preflight
+
+                preflight = run_preflight(
+                    db,
+                    ontology_id,
+                    target_datasource_id=target_datasource_id,
+                    engine=materialization_runner.resolve_engine(
+                        db, target_datasource_id, engine
+                    ),
+                    selected_targets=[object_type],
+                    source_datasource_id=source_ds.id,
+                    source_database=(
+                        str(spec["source"]).split(".", 1)[0]
+                        if spec.get("source") and "." in str(spec["source"])
+                        else None
+                    ),
+                    managed_connections=True,
+                    # 与下面 run_sync 传的是同一套装载参数：自检预演的必须就是这次要提交的
+                    # 作业，否则它按契约预演出 CDC/增量，拦下一条其实是全量的同步。
+                    emit="dml",
+                    load_strategy=spec.get("mode"),
+                    incremental_column=spec.get("incremental_column"),
+                    initial_watermark=spec.get("initial_watermark"),
+                    flink_task_params=flink_params.from_spec(spec, context),
+                )
+                if not preflight.ok:
+                    blocking = [
+                        f"[{item.label}] {item.detail}"
+                        + (f" -> {item.next_step}" if item.next_step else "")
+                        for item in preflight.blocking_failures
+                    ]
+                    raise RuntimeError(
+                        f"提交前自检发现 {len(blocking)} 项阻断，无法执行同步：\n"
+                        + "\n".join(
+                            f"  {idx + 1}. {message}"
+                            for idx, message in enumerate(blocking)
+                        )
+                    )
                 from app.services.ingestion_contract import (
                     IngestionContractError,
                     IngestionContractService,
@@ -145,7 +188,8 @@ class SyncExecutor(Executor):
                     "source_physical_table": spec.get("source"),
                     "source_mapping": spec.get("source_mapping") or {},
                     "doris_datasource_id": target_ds.id,
-                    "target_ods_database": spec.get("target_ods_database") or "ods",
+                    # 落点库不可配：存量 Spec 里带的自定义库名不再生效，同步恒进 ODS。
+                    "target_ods_database": ODS_DATABASE,
                     # IngestionContractService 会按 ods_{数据域}_{原始表名} 强制重算；
                     # Spec 里的历史值只为兼容旧制品传入，不能覆盖后端规则。
                     "target_ods_table": spec.get("target_ods_table"),
@@ -174,6 +218,7 @@ class SyncExecutor(Executor):
                     }
                 source_token = "".join(c for c in source_ds.id.lower() if c.isalnum())[:12]
                 source_alias = f"ontometa_source_{source_token}"
+                source_datasource_id = source_ds.id
                 ods_database = ingestion.target_ods_database
                 ods_table = ingestion.target_ods_table
                 primary_keys = {object_type: spec.get("primary_keys") or []}
@@ -199,7 +244,7 @@ class SyncExecutor(Executor):
                 delete_policies = {object_type: ingestion.delete_policy}
             else:
                 source_alias = spec.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS
-                ods_database = None
+                ods_database = ODS_DATABASE
                 ods_table = None
                 primary_keys = None
                 sequences = None
@@ -215,7 +260,8 @@ class SyncExecutor(Executor):
                     ontology_id,
                     target_datasource_id=target_datasource_id,
                     engine=engine,
-                    database_prefix=spec.get("database_prefix"),
+                    # 同步不带库名前缀：落点恒为 ODS_DATABASE（见 ods_naming）。
+                    database_prefix=None,
                     load_strategy=spec.get("mode"),
                     # 只搬这一个对象（按实体名裁剪）
                     selected_targets=[object_type],
@@ -224,6 +270,7 @@ class SyncExecutor(Executor):
                     # 额外 -D）：Spec 优先、context 兜底，留空的项跟随设置页默认。
                     flink_task_params=flink_params.from_spec(spec, context),
                     source_alias=source_alias,
+                    source_datasource_id=source_datasource_id,
                     target_ods_database=ods_database,
                     target_ods_tables=({object_type: ods_table} if ods_table else None),
                     target_primary_keys=primary_keys,
@@ -250,6 +297,14 @@ class SyncExecutor(Executor):
                     "compute_engine": "flink",
                     "target_engine": "doris",
                     "ingestion_contract_id": ingestion.id,
+                    "object": {
+                        "name": obj.name,
+                        "display_name": obj.display_name or obj.name,
+                    },
+                    "source_datasource": {
+                        "name": source_ds.name,
+                        "kind": source_ds.kind,
+                    },
                     "mode": ingestion.mode,
                     "target_tables": [
                         f"{ingestion.target_ods_database}.{ingestion.target_ods_table}"

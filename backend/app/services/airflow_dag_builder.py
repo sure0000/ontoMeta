@@ -237,6 +237,7 @@ def build_flink_sql_dag(
     task_dependencies: list[tuple[FlinkSqlTask, FlinkSqlTask]] | None = None,
     dag_id_base: str | None = None,
     nested_layout: bool = True,
+    connections: list[dict[str, Any]] | None = None,
 ) -> DagBundle:
     """构建 Flink SQL DAG 包（统一执行架构的唯一搬运路径）。
 
@@ -355,6 +356,9 @@ def build_flink_sql_dag(
         "engine": engine,
         "schedule": schedule or None,
         "warehouse_conn_id": warehouse_conn_id,
+        # 用户明确选择自包含 DAG：连接参数（含密码）由首个任务幂等写入 Airflow。
+        # 不把密码直接插进 Python 源码，但边车 JSON 与 DAG 制品目录均含明文凭据。
+        "connections": list(connections or []),
         "max_active_tasks": max_active_tasks,
         "warehouse_ddl": [_as_single_statement(ddl_statements[k]) for k in sorted(ddl_statements)],
         "ddl_targets": sorted(ddl_statements),
@@ -455,8 +459,10 @@ with DAG(
     #    ``.parent.parent`` 推：无 artifact_id 时产物退回扁平 dags_dir，那时往上两级
     #    会跑到 dags 目录之外。
     def _read_spec(**context):
+        visible_spec = {key: value for key, value in _SPEC.items() if key != "connections"}
         return {
-            "spec": _SPEC,
+            # Connection 密码已获准随 DAG 下发，但不能再经 XCom/任务返回值复制一份并打印。
+            "spec": visible_spec,
             "sql_dir": str(_SPEC_PATH.parent / "jobs"),
             "lib_dir": @@LIB_DIR_EXPR@@,
         }
@@ -465,6 +471,45 @@ with DAG(
         task_id="read_spec",
         python_callable=_read_spec,
     )
+
+    # 用户选择自包含 DAG：先把边车 spec 中的连接幂等写入 Airflow 元数据库，后续
+    # SQLExecuteQueryOperator 与 Jinja ``conn.<id>`` 才能正常解析。连接密码不会打印。
+    def _ensure_connections():
+        from airflow.models import Connection
+        from airflow.settings import Session
+        from sqlalchemy.exc import IntegrityError
+
+        session = Session()
+        try:
+            def upsert_all():
+                for raw in _SPEC.get("connections") or []:
+                    conn_id = raw["conn_id"]
+                    conn = session.query(Connection).filter(Connection.conn_id == conn_id).one_or_none()
+                    if conn is None:
+                        conn = Connection(conn_id=conn_id)
+                        session.add(conn)
+                    for field in ("conn_type", "host", "login", "password", "schema", "port"):
+                        setattr(conn, field, raw.get(field))
+                    extra = raw.get("extra")
+                    conn.extra = json.dumps(extra, ensure_ascii=False) if extra else None
+                session.commit()
+
+            try:
+                upsert_all()
+            except IntegrityError:
+                # 多批 DAG 首次并发时可能同时 INSERT 同一个 conn_id；赢家已提交后重查更新。
+                session.rollback()
+                upsert_all()
+        finally:
+            session.close()
+
+    ensure_connections = None
+    if _SPEC.get("connections"):
+        ensure_connections = PythonOperator(
+            task_id="ensure_connections",
+            python_callable=_ensure_connections,
+        )
+        read_spec >> ensure_connections
 
     # 2. 建表（M3 生成的 DDL，**绝不交给搬运工具自动建**）
     #    只搬数据的同步 DAG 可能一条 DDL 都没有（全增量、或关了 staging）——那时不建这个
@@ -478,7 +523,7 @@ with DAG(
             sql=warehouse_ddl,
             split_statements=True,
         )
-        read_spec >> create_tables
+        (ensure_connections or read_spec) >> create_tables
 
     # 3. 搬运任务（BashOperator 跑 flink run）
     move_tasks = {}
@@ -505,6 +550,8 @@ with DAG(
         # 拉到 None 拼出 "None/xxx.sql"。此前靠 create_tables 间接排在其后，而只搬数据的
         # DAG 没有建表任务。
         read_spec >> move_task
+        if ensure_connections is not None:
+            ensure_connections >> move_task
         # 搬运依赖建表（本 DAG 有建表任务时）
         if create_tables is not None:
             create_tables >> move_task
@@ -545,7 +592,7 @@ with DAG(
             split_statements=True,
         )
         # 约束只随建表产出，故正常必有 create_tables；防御性地兜住没有的情形。
-        (create_tables or read_spec) >> add_constraints
+        (create_tables or ensure_connections or read_spec) >> add_constraints
 """
 
 

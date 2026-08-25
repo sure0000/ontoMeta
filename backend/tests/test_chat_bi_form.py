@@ -142,6 +142,7 @@ def _materialize_form(
     datasource_id: str = "",
     extra: list | None = None,
     prefill: dict | None = None,
+    intent: str = "",
 ):
     """建一个可写数据源 + 对齐契约，产出物化表单模板。返回 (form, cleanup 已完成)。"""
     from app.database import SessionLocal
@@ -170,6 +171,7 @@ def _materialize_form(
                 db, ontology_id=onto_id,
                 args={"title": "物化参数", "task_kind": "materialize",
                       "target_datasource_id": datasource_id,
+                      **({"intent": intent} if intent else {}),
                       **({"fields": extra} if extra else {}),
                       **({"prefill": prefill} if prefill else {})},
             )
@@ -193,15 +195,26 @@ def test_materialize_template_only_asks_effective_fields():
     ]
     by_name = {f["name"]: f for f in form["fields"]}
     assert by_name["target_datasource_id"]["type"] == "select"
-    assert by_name["target_datasource_id"]["options"] == [
-        {"label": "默认 Doris（默认 Doris）", "value": "ds-tpl", "disabled": False}
-    ]
+    # 目录会如实包含其它未设为默认的 Doris（disabled）；当前唯一可执行默认项必须正确。
+    selected = next(
+        option
+        for option in by_name["target_datasource_id"]["options"]
+        if option["value"] == "ds-tpl"
+    )
+    assert selected == {
+        "label": "默认 Doris（默认 Doris）",
+        "value": "ds-tpl",
+        "disabled": False,
+    }
     assert by_name["target_datasource_id"]["default"] == "ds-tpl"
     assert by_name["selected_targets"]["type"] == "multiselect"
     # 物化不搬数据，这些属于同步或旧版无效字段，不能再出现。
     assert not {"target_table", "load_strategy", "partition_key", "refresh_cron"} & set(names)
     assert [s["node"] for s in form["confirmation_steps"]] == [
-        "requirement", "ontology", "data"
+        "requirement", "ontology", "data", "plan", "execute", "result"
+    ]
+    assert [s["phase"] for s in form["confirmation_steps"]] == [
+        "form", "form", "form", "artifact", "artifact", "artifact"
     ]
 
 
@@ -411,11 +424,16 @@ def test_sync_template_recommends_ontology_and_keeps_all_objects_searchable():
     assert "erp.public.sale_order" in sale["label"]
     assert "ods_golden_" in sale["label"] and sale["label"].endswith("_sale_order")
     assert any(o["value"] == "sync_object_34" for o in field["options"])
-    # 闭环向导：先需求，再本体，再数据；执行方案须等制品 dry-run 后另行确认，不能提前记 plan。
+    # 闭环向导：六环一次给全，人从第一步就看得见还剩几环。前三环在表单里收集
+    # （phase=form），后三环等制品 dry-run 出来后在任务详情里确认（phase=artifact）——
+    # 故这里不能提前记 plan。
     assert result["form"]["confirmation_id"]
     assert [s["node"] for s in result["form"]["confirmation_steps"]] == [
-        "requirement", "ontology", "data"
+        "requirement", "ontology", "data", "plan", "execute", "result"
     ]
+    assert [
+        s["node"] for s in result["form"]["confirmation_steps"] if s["phase"] == "form"
+    ] == ["requirement", "ontology", "data"]
     by_name = {f["name"]: f for f in result["form"]["fields"]}
     assert by_name["object_type"]["confirmation_node"] == "ontology"
     source_field = by_name["source_datasource_id"]
@@ -427,8 +445,242 @@ def test_sync_template_recommends_ontology_and_keeps_all_objects_searchable():
     ]
     assert all(o["value"] != mysql_id for o in source_field["options_by_value"]["sale_order"])
     assert by_name["target_datasource_id"]["confirmation_node"] == "data"
-    assert by_name["target_ods_database"]["default"] == "ods"
+    # 落点不给选：同步恒写 ODS 库，表单里不该再出现「ODS 数据库」这类分层/落库选项。
+    assert "target_ods_database" not in by_name
+    assert "database_prefix" not in by_name
     assert by_name["mode"]["default"] == "full"
+
+
+def test_sync_intent_cannot_be_misrouted_to_materialize_form():
+    """模型把同步误标为 materialize 时，服务端仍应返回源对象同步表单。"""
+    from app.database import SessionLocal
+    from app.models import ObjectType
+
+    _domain_id, onto_id, aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        order = db.get(ObjectType, aliases["@order"])
+        old_source_ref = order.source_ref
+        order.source_ref = (
+            "urn:li:dataset:(urn:li:dataPlatform:mysql,erp.tabSales Order,PROD)"
+        )
+        db.commit()
+        try:
+            result, _summary, is_error = ChatBiService()._dispatch_request_form(
+                db,
+                ontology_id=onto_id,
+                args={
+                    "title": "同步订单到数仓",
+                    "task_kind": "materialize",
+                    "intent": "将订单源表数据全量同步到 Doris 数仓",
+                },
+            )
+        finally:
+            order.source_ref = old_source_ref
+            db.commit()
+
+    assert is_error is False
+    form = result["form"]
+    assert form["task_kind"] == "sync"
+    by_name = {field["name"]: field for field in form["fields"]}
+    assert "object_type" in by_name
+    assert "selected_targets" not in by_name
+    assert by_name["object_type"]["default"] == "order"
+
+
+def test_materialize_before_sync_collapses_into_the_sync_form():
+    """「先物化再同步」只出同步表单——同步自己会幂等建出 ODS 表，物化那一步是多余的。
+
+    此前文本同时出现「物化」和「同步」时保持原值，于是用户为了同步一张表，先被要求
+    确认一次「物化范围」，而那份范围默认整本体几百个实体。
+    """
+    from app.database import SessionLocal
+    from app.models import ObjectType
+
+    _domain_id, onto_id, aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        order = db.get(ObjectType, aliases["@order"])
+        old_source_ref = order.source_ref
+        order.source_ref = (
+            "urn:li:dataset:(urn:li:dataPlatform:mysql,erp.tabSales Order,PROD)"
+        )
+        db.commit()
+        try:
+            result, _summary, is_error = ChatBiService()._dispatch_request_form(
+                db,
+                ontology_id=onto_id,
+                args={
+                    "title": "任务1/2：物化「订单」到数仓",
+                    "task_kind": "materialize",
+                    "intent": "先把订单物化到数仓，再把订单同步进 ODS",
+                },
+            )
+        finally:
+            order.source_ref = old_source_ref
+            db.commit()
+
+    assert is_error is False
+    form = result["form"]
+    assert form["task_kind"] == "sync"
+    assert "selected_targets" not in {field["name"] for field in form["fields"]}
+    assert [s["title"] for s in form["confirmation_steps"] if s["node"] == "ontology"] == [
+        "确认同步本体"
+    ]
+
+
+def test_materialize_step_collapses_when_only_the_user_said_sync():
+    """模型给子任务起的标题只写「物化 X」，用户原话里的「再同步」同样算数。
+
+    这是实测里真实发生的形状：模型把整句需求拆成「任务1/2：物化…」，标题与 intent
+    都不含「同步」，判据只看工具入参就永远看不到那一步是在为同步做准备。
+    """
+    from app.database import SessionLocal
+    from app.models import ObjectType
+
+    _domain_id, onto_id, aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        order = db.get(ObjectType, aliases["@order"])
+        old_source_ref = order.source_ref
+        order.source_ref = (
+            "urn:li:dataset:(urn:li:dataPlatform:mysql,erp.tabSales Order,PROD)"
+        )
+        db.commit()
+        try:
+            result, _summary, is_error = ChatBiService()._dispatch_request_form(
+                db,
+                ontology_id=onto_id,
+                args={
+                    "title": "任务1/2：物化「订单」到数仓",
+                    "task_kind": "materialize",
+                    "intent": "将订单(order)物化到数仓 Doris",
+                },
+                question="先把订单物化到数仓，再把订单同步进 ODS",
+            )
+        finally:
+            order.source_ref = old_source_ref
+            db.commit()
+
+    assert is_error is False
+    form = result["form"]
+    assert form["task_kind"] == "sync"
+    # 改判要说出来，标题里的「物化」也得改口——否则人看到的是一张写着「物化…」的同步表单。
+    assert "CREATE TABLE IF NOT EXISTS" in form["notice"]
+    assert "物化" not in form["title"]
+    assert "物化" not in form.get("intent", "")
+
+
+def test_materialize_stays_for_objects_without_a_physical_source():
+    """没有源表的对象不能改判成同步——那种表只能靠物化建出来。
+
+    改判的判据是证据（对象有没有物理源表），不是「文本里出现了同步两个字」。
+    """
+    from app.database import SessionLocal
+    from app.models import DataSource, ObjectType
+    from app.services.materialization_contract import MaterializationContractService
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        # 整个本体都没有物理源表 = 纯人工建模，同步无从谈起。
+        db.query(ObjectType).filter(ObjectType.ontology_id == onto_id).update(
+            {ObjectType.source_ref: None}, synchronize_session=False
+        )
+        old_defaults = [
+            row.id for row in db.query(DataSource).filter(
+                DataSource.is_default_warehouse.is_(True)
+            ).all()
+        ]
+        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
+            {DataSource.is_default_warehouse: False}, synchronize_session=False
+        )
+        db.add(DataSource(
+            id="ds-manual", name="默认 Doris", kind="doris", purpose="warehouse",
+            is_default_warehouse=True, enabled=True, status="ok", dsn_secret_ref="ref://m",
+        ))
+        db.commit()
+        try:
+            MaterializationContractService().sync(db, onto_id)
+            result, _summary, is_error = ChatBiService()._dispatch_request_form(
+                db,
+                ontology_id=onto_id,
+                args={
+                    "title": "物化订单",
+                    "task_kind": "materialize",
+                    "intent": "把订单物化到数仓",
+                },
+                question="先把订单物化出来，再同步进 ODS",
+            )
+        finally:
+            db.query(DataSource).filter(DataSource.id == "ds-manual").delete()
+            if old_defaults:
+                db.query(DataSource).filter(DataSource.id.in_(old_defaults)).update(
+                    {DataSource.is_default_warehouse: True}, synchronize_session=False
+                )
+            db.commit()
+
+    assert is_error is False
+    assert result["form"]["task_kind"] == "materialize"
+
+
+def test_materialize_scope_defaults_to_the_entity_the_intent_names():
+    """需求点名了实体，物化范围就默认成它——不是「全部契约实体（几百项）」。
+
+    默认全选 + 一路确认 = 人以为在物化一张表、实际建了整本体几百张。
+    """
+    form = _materialize_form(intent="将客户分组(customer_group)物化到数仓")
+    scope = {field["name"]: field for field in form["fields"]}["selected_targets"]
+    assert scope["default"] != ["__all__"]
+    assert len(scope["default"]) == 1
+    assert any(
+        option["value"] == scope["default"][0] and option["value"] != "__all__"
+        for option in scope["options"]
+    )
+
+
+def test_search_objects_uses_selected_ontology_and_matches_physical_table_name():
+    """无 domain_ids 时仍按 ontology_id 搜；中文、技术名和 source_ref 都可命中。"""
+    from uuid import uuid4
+
+    from app.database import SessionLocal
+    from app.models import EntityStatus, ObjectType
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    suffix = uuid4().hex[:8]
+    object_name = f"code_list_{suffix}"
+    with SessionLocal() as db:
+        obj = ObjectType(
+            ontology_id=onto_id,
+            name=object_name,
+            display_name=f"代码表目录{suffix}",
+            source_ref=(
+                "urn:li:dataset:(urn:li:dataPlatform:mysql,"
+                f"erp.tabCode List {suffix},PROD)"
+            ),
+            status=EntityStatus.PUBLISHED.value,
+        )
+        db.add(obj)
+        db.commit()
+
+        service = ChatBiService()
+        for keyword in (object_name, f"代码表目录{suffix}", f"tabCode List {suffix}"):
+            result, _summary, is_error = service._dispatch_agent_tool(
+                db,
+                domain_ids=[],
+                ontology_ids=[onto_id],
+                name="search_objects",
+                args={"keyword": keyword},
+            )
+            assert is_error is False
+            hits = result.get("items") or result.get("sample") or []
+            assert any(item["name"] == object_name for item in hits), keyword
+
+        all_result, _summary, is_error = service._dispatch_agent_tool(
+            db,
+            domain_ids=[],
+            ontology_ids=[onto_id],
+            name="search_objects",
+            args={"keyword": "*"},
+        )
+        assert is_error is False
+        assert all_result["total_matched"] > 0
 
 
 def test_task_kind_form_needs_no_model_fields():

@@ -331,6 +331,30 @@ def test_create_tables_present_when_ddl_given(tmp_path, monkeypatch):
     assert ("create_tables", "clean_customer") in dag["edges"]
 
 
+def test_embedded_connections_are_ensured_before_sql_and_flink(tmp_path, monkeypatch):
+    connections = [{
+        "conn_id": "managed_mysql",
+        "conn_type": "mysql",
+        "host": "db",
+        "login": "root",
+        "password": "secret",
+        "schema": "erp",
+        "port": 3306,
+        "extra": {},
+    }]
+    bundle = _build(connections=connections)
+    dag = _exec_dag_source(bundle, tmp_path, monkeypatch)
+
+    assert bundle.spec["connections"] == connections
+    assert "ensure_connections" in dag["tasks"]
+    assert ("read_spec", "ensure_connections") in dag["edges"]
+    assert ("ensure_connections", "create_tables") in dag["edges"]
+    assert ("ensure_connections", "clean_customer") in dag["edges"]
+    xcom_value = dag["kwargs"]["read_spec"]["python_callable"]()
+    assert "connections" not in xcom_value["spec"]
+    assert "secret" not in str(xcom_value)
+
+
 def test_move_task_always_waits_for_read_spec(tmp_path, monkeypatch):
     """搬运任务的 sql 路径来自 read_spec 的 XCom，必须挂在它下游。
 

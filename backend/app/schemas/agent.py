@@ -131,6 +131,32 @@ class TaskPipelineOut(BaseModel):
     updated_at: datetime
 
 
+class PipelineAdvanceConfirmedRequest(BaseModel):
+    """任务链的**某一步**走完前三环确认后才起草它。
+
+    链不替谁确认：每一步都是一条独立的数据任务，与单发任务同样要人分别确认
+    需求 / 本体 / 数据，再在制品抽屉里确认执行方案 / 执行 / 结果。
+    """
+
+    conversation_id: str
+    confirmation_id: str
+    #: 人在向导里定下的参数；合并进该步的 context（显式的优先于链的继承值）。
+    context: dict[str, Any] = Field(default_factory=dict)
+    #: 人在「确认任务需求」那一环改定的需求，作为该步 intent。留空则沿用链上原意图。
+    intent: str | None = None
+
+
+class TaskFormRequest(BaseModel):
+    """按任务类型现取一张六环确认表单（任务链逐步确认、非对话入口共用）。"""
+
+    kind: str
+    ontology_id: str
+    title: str = ""
+    intent: str = ""
+    #: 已知取值（如链上游继承来的落点）：核对候选后填成默认值，核不上的丢弃。
+    prefill: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskPipelineAdvanceOut(BaseModel):
     """推进一步的结果：新起草的制品 + 推进后的链态（前端一次拿全，不用再查一遍）。"""
 

@@ -57,6 +57,12 @@ from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
 from app.services.domain_semantic_card import build_card
 from app.services.ontology_ladder import OntologyLadderLoader
+from app.services.chat_bi_ledger import (
+    missing_task_confirmations,
+    node_label,
+    task_confirmations,
+    task_journey_steps,
+)
 from app.services.chat_bi_skills import SKILLS, Skill
 from app.services.tool_result_compaction import compact_tool_result
 
@@ -151,6 +157,91 @@ from app.services.chat_bi_references import (  # noqa: F401,E402
     _ReferenceResolver,
     _loads_payload,
 )
+
+
+# 「同步前面不需要物化」这条规矩的**唯一措辞**：给模型的报错、给人的链卡片注释共用一份。
+_MATERIALIZE_BEFORE_SYNC_REASON = (
+    "同步任务自己会对目标 ODS 表下幂等 CREATE TABLE IF NOT EXISTS（落点恒为 ODS 层），"
+    "表不存在就建、已存在不动结构。为了同步而先排一个物化步骤是多余的，"
+    "还会让用户白确认一次「物化范围」。物化只用于没有物理源表的人工建模对象。"
+)
+
+
+def _drop_redundant_materialize(
+    steps: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """砍掉「排在同步前面、纯粹为同步建表」的物化步骤。返回 (保留的步骤, 砍掉的步骤)。
+
+    **这是闸门不是提示词**：模型被告知过标准链、也仍会按惯性把 materialize 排在 sync 前面；
+    真正决定用户看不看得到那一步的，只能是这里。见 ``_MATERIALIZE_BEFORE_SYNC_REASON``。
+
+    砍的判据是「这一步的范围被后面的同步覆盖」：物化没点名实体（= 全本体，正是模型的惯性
+    默认，也正是让用户面对几百个实体的那份范围），或点名的实体都在后面某个同步步骤里。
+    点名了同步不碰的实体则**保留**——那多半是人工建模对象，它们的表只能靠物化建出来。
+    """
+    sync_targets: set[str] = set()
+    has_sync = False
+    for step in steps:
+        if step["kind"] != "sync":
+            continue
+        has_sync = True
+        context = step.get("context") or {}
+        for key in ("selected_targets", "object_types"):
+            value = context.get(key)
+            if isinstance(value, list):
+                sync_targets.update(str(v) for v in value if v)
+        single = context.get("object_type")
+        if single:
+            sync_targets.add(str(single))
+    if not has_sync:
+        return steps, []
+
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for step in steps:
+        if step["kind"] != "materialize":
+            kept.append(step)
+            continue
+        raw = (step.get("context") or {}).get("selected_targets")
+        scope = {str(v) for v in raw if v} if isinstance(raw, list) else set()
+        scope.discard("__all__")  # 表单里的「全部」哨兵，与「没点名」同义
+        if scope and not scope.issubset(sync_targets):
+            kept.append(step)  # 同步碰不到的实体，结构只能靠物化建
+            continue
+        dropped.append({
+            "kind": step["kind"],
+            "intent": step.get("intent", ""),
+            "reason": _MATERIALIZE_BEFORE_SYNC_REASON,
+        })
+    # 砍完要重排 depends_on：步序变了，原来的下标会指向别人。
+    if dropped:
+        kept = _relink_steps(steps, kept)
+    return kept, dropped
+
+
+def _relink_steps(
+    original: list[dict[str, Any]], kept: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """删步后重排 ``depends_on``：旧下标 → 新下标，指向已删步骤的依赖顺延到它的上游。"""
+    new_index = {id(step): i for i, step in enumerate(kept)}
+    old_index = {id(step): i for i, step in enumerate(original)}
+    kept_old_positions = sorted(old_index[id(step)] for step in kept)
+
+    def remap(old: int) -> list[int]:
+        if old in kept_old_positions:
+            step = original[old]
+            return [new_index[id(step)]]
+        # 被删的上游：接它前面最近的一个保留步骤（没有就无依赖）。
+        earlier = [p for p in kept_old_positions if p < old]
+        return [new_index[id(original[earlier[-1]])]] if earlier else []
+
+    out: list[dict[str, Any]] = []
+    for i, step in enumerate(kept):
+        depends: list[int] = []
+        for old in step.get("depends_on") or []:
+            depends.extend(d for d in remap(int(old)) if d < i and d not in depends)
+        out.append({**step, "depends_on": depends})
+    return out
 
 
 class ChatBiService:
@@ -3836,8 +3927,7 @@ class ChatBiService:
             result["target_datasources"] = target_datasources
             result["default_doris"] = default_doris
             result["required_context"] = [
-                "object_type", "source_datasource_id", "target_datasource_id",
-                "target_ods_database", "mode",
+                "object_type", "source_datasource_id", "target_datasource_id", "mode",
             ]
             # 每个本体对象单独推导来源；只有该对象唯一命中时才给可直接复制的推荐 context。
             if default_doris:
@@ -3849,15 +3939,14 @@ class ChatBiService:
                         "object_type": item["name"],
                         "source_datasource_id": matched[0].id,
                         "target_datasource_id": default_doris["id"],
-                        "target_ods_database": "ods",
-                        # 表名不进入 context：Drafter 按 ods_{数据域}_{原始表名} 固定生成。
+                        # 落点不进 context：Drafter 按 ODS_DATABASE + ods_{数据域}_{原始表名} 固定生成。
                         "mode": "full",
                     }
             result["load_strategies"] = [dict(s) for s in _LOAD_STRATEGIES]
             result["note"] = (
-                "同步只允许 business_source → Flink → 默认 Doris ODS。目标表名固定为 "
-                "ods_{数据域}_{原始表名}；无 source_ref 的对象已排除；incremental/CDC 还必须按 "
-                "load_strategies 的 hint 补齐主键、水位或 sequence/checkpoint。"
+                "同步只允许 business_source → Flink → 默认 Doris ODS。落点固定为 "
+                "ods.ods_{数据域}_{原始表名}，不接受自定义库/表；无 source_ref 的对象已排除；"
+                "incremental/CDC 还必须按 load_strategies 的 hint 补齐主键、水位或 sequence/checkpoint。"
             )
         else:
             from app.agents.drafters.transform import SUPPORTED_CLEANSING_RULES
@@ -3878,7 +3967,8 @@ class ChatBiService:
                 {"rule": code, "description": desc} for code, desc in SUPPORTED_CLEANSING_RULES
             ]
             result["note"] = (
-                "只列当前默认 Doris 中 ODS Projection 已同步就绪的对象；没有候选时须先物化并同步。"
+                "只列当前默认 Doris 中 ODS Projection 已同步就绪的对象；没有候选时须先建同步任务"
+                "（同步自己会幂等建出 ODS 表，不必先单独物化）。"
                 "清洗需求只有落到上述规则才会进 Spec，词表外需求不能假装执行。"
             )
         return result, f"可选项：{len(objects)}/{eligible} 个候选对象", False
@@ -3920,26 +4010,10 @@ class ChatBiService:
         confirmed_requirement: str | None = None
         confirmed_context: dict[str, Any] = {}
         if conversation_id:
-            # 识别出任务意图不等于需求已确认。四类写侧任务都要先逐步确认需求、本体/口径和
-            # 数据落点，真正执行方案在制品 dry-run 后另行确认。同一会话可能连续建多条任务，
-            # 故还必须按本张表单 confirmation_id 隔离，不能复用旧确认。
-            from app.services.chat_bi_ledger import list_decisions
-
-            latest: dict[str, dict] = {}
-            for record in list_decisions(db, conversation_id):
-                chosen = record.get("chosen") or {}
-                if (
-                    record["node"] in {"requirement", "ontology", "data"}
-                    and confirmation_id
-                    and isinstance(chosen, dict)
-                    and chosen.get("task_confirmation_id") == confirmation_id
-                ):
-                    latest[record["node"]] = record
-            confirmed = {
-                node
-                for node, record in latest.items()
-                if record.get("outcome") in {"accepted", "modified"}
-            }
+            # 识别出任务意图不等于需求已确认。四类写侧任务都要先逐环确认需求、本体/口径和
+            # 数据落点；后三环（执行方案/执行/结果）在制品抽屉里各自确认。同一会话可能连续
+            # 建多条任务，故必须按本张表单 confirmation_id 隔离，不能复用旧确认。
+            latest = task_confirmations(db, conversation_id, confirmation_id)
             requirement_chosen = (latest.get("requirement") or {}).get("chosen") or {}
             if isinstance(requirement_chosen, dict):
                 confirmed_requirement = str(
@@ -3956,19 +4030,18 @@ class ChatBiService:
                         for key, value in chosen.items()
                         if key != "task_confirmation_id"
                     })
-            missing_confirmations = [
-                node for node in ("requirement", "ontology", "data") if node not in confirmed
-            ]
+            missing_confirmations = missing_task_confirmations(
+                db, conversation_id, confirmation_id
+            )
             if missing_confirmations:
-                labels = {"requirement": "任务需求", "ontology": "本体/口径", "data": "数据落点"}
                 return (
                     {
-                        "error": "数据任务必须先逐步确认需求、本体/口径和数据落点",
+                        "error": "数据任务必须先逐环确认需求、本体/口径和数据落点",
                         "missing_confirmations": missing_confirmations,
                         "confirmation_id": confirmation_id or None,
                         "hint": f"请先调用 request_form(task_kind={kind})，并把回填中的 task_confirmation_id 原样放进 context。",
                     },
-                    "尚未确认：" + "、".join(labels[n] for n in missing_confirmations),
+                    "尚未确认：" + "、".join(node_label(n) for n in missing_confirmations),
                     True,
                 )
         # 人在向导中确认的本体/口径和数据参数是权威值，覆盖模型从回填文本再次解析出的值。
@@ -4203,6 +4276,18 @@ class ChatBiService:
             steps.append({"kind": kind, "intent": step_intent, "context": context,
                           "depends_on": depends})
 
+        steps, dropped = _drop_redundant_materialize(steps)
+        if len(steps) < 2:
+            # 砍掉多余物化后只剩一步：这本来就不是链，让模型改走单任务。
+            return (
+                {
+                    "error": "去掉多余的物化步骤后只剩一个任务，请改用 propose_action",
+                    "reason": _MATERIALIZE_BEFORE_SYNC_REASON,
+                },
+                "任务链只剩一步（物化步骤多余）",
+                True,
+            )
+
         intent = str(args.get("intent") or "").strip()
         chain = " → ".join(_ACTION_KIND_LABEL.get(s["kind"], s["kind"]) for s in steps)
         proposal = {
@@ -4211,6 +4296,9 @@ class ChatBiService:
             "intent": intent or chain,
             "ontology_id": ontology_id,
             "steps": steps,
+            # 砍掉的步骤如实说出来（前端在链卡片上展示，模型也据此措辞）——省一步是
+            # 对的，但不能让人以为自己要的那一步凭空消失了。
+            "dropped_steps": dropped,
             # 前端「创建任务链」按钮原样 POST /api/agents/pipelines 的载荷。
             "create_payload": {
                 "name": name or f"任务链 · {chain}",
@@ -4219,7 +4307,10 @@ class ChatBiService:
                 "steps": steps,
             },
         }
-        return proposal, f"提案：任务链 {chain}（{len(steps)} 步）", False
+        summary = f"提案：任务链 {chain}（{len(steps)} 步）"
+        if dropped:
+            summary += f"，已省略 {len(dropped)} 个多余的物化步骤"
+        return proposal, summary, False
 
     @staticmethod
     def _dispatch_update_plan(args: dict) -> tuple[dict, str, bool]:
@@ -4331,7 +4422,6 @@ class ChatBiService:
             "required": True,
             "default": intent,
             "confirmation_node": "requirement",
-            "help": "可修改；确认后的版本作为任务 intent，不进入任务 context",
         }]
         fields.append({
             "name": opts["context_key"],
@@ -4339,11 +4429,8 @@ class ChatBiService:
             "type": "select",
             "required": True,
             "placeholder": "搜索中文名或技术名" if is_sync and objects else None,
-            "help": (
-                "已根据需求推荐对应本体；请核对源表与固定 ODS 表，也可以搜索并修改"
-                if is_sync
-                else "Drafter 不再按意图猜对象——这里选定的就是最终目标"
-            ),
+            # 同步的选项文案里已带「源表 → ODS 表」，核对靠它，不再另写一段说明。
+            **({} if is_sync else {"help": "这里选定的就是最终目标，Drafter 不再按意图猜"}),
             "confirmation_node": "ontology",
             **({"options": objects} if objects else {}),
             **({"default": recommended["name"]} if recommended else {}),
@@ -4362,43 +4449,36 @@ class ChatBiService:
             target_options = self._doris_target_options(
                 opts.get("target_datasources") or []
             )
+            # 落点不是选项：同步就是「源头数据 → 数仓 ODS」，库名恒为
+            # ods_naming.ODS_DATABASE、表名恒为 ods_{数据域}_{原始表名}，两者都摆在
+            # 上面那个对象下拉的选项文案里（源表 → ODS 表），不必再要人填一个库。
             fields.extend([
                 {
                     "name": "source_datasource_id", "label": "源数据源",
                     "type": "select", "required": True,
-                    "placeholder": "由确认同步本体反推可用源",
+                    "placeholder": "按所选对象的来源筛出",
                     "confirmation_node": "data",
                     "depends_on": "object_type",
                     "options_by_value": source_options_by_object,
-                    "help": "候选由所选本体的 source_ref 平台/库/表映射反推；修改本体后会自动更新。凭据不会进入任务 Spec",
                     **({"options": source_options} if source_options else {}),
                     **({"default": source_options[0]["value"]} if len(source_options) == 1 else {}),
                 },
                 {
                     "name": "target_datasource_id", "label": "目标数仓",
                     "type": "select", "required": True,
-                    "placeholder": "请选择已登记的默认 Doris 数仓",
+                    "placeholder": "默认 Doris",
                     "confirmation_node": "data",
-                    "help": (
-                        "同步只允许写入启用、已配置连接的默认 Doris；"
-                        + ("当前没有可执行目标，请先到设置页配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
-                    ),
+                    # 正常情况不写说明；只有「没有可写的目标」这种挡路的事实才值得占一行。
+                    **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
                     **({"options": target_options} if target_options else {}),
                     **({"default": default_doris["id"]} if default_doris else {}),
                 },
                 {
-                    "name": "target_ods_database", "label": "ODS 数据库",
-                    "type": "text", "required": True, "default": "ods",
-                    "confirmation_node": "data",
-                    "help": "表名由后端固定生成：ods_{数据域}_{原始表名}",
-                },
-                {
-                    "name": "mode", "label": "装载方式偏好", "type": "radio",
+                    "name": "mode", "label": "装载方式", "type": "radio",
                     "required": True, "default": "full", "confirmation_node": "data",
                     "options": [
                         {"label": s["label"], "value": s["value"]} for s in _LOAD_STRATEGIES
                     ],
-                    "help": "；".join(f"{s['label']}：{s['hint']}" for s in _LOAD_STRATEGIES),
                 },
             ])
         else:
@@ -4412,10 +4492,7 @@ class ChatBiService:
                     "placeholder": "请选择已登记的默认 Doris 数仓",
                     "confirmation_node": "data",
                     "options": target_options,
-                    "help": (
-                        "加工只允许在启用、已配置连接的默认 Doris 中执行；"
-                        + ("当前没有可执行目标，请先配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
-                    ),
+                    **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
                     **({"default": default_doris["id"]} if default_doris else {}),
                 },
                 {
@@ -4433,12 +4510,12 @@ class ChatBiService:
                     "options": [
                         {"label": r["description"], "value": r["rule"]} for r in rules
                     ],
-                    "help": "只有这些确定性算子可执行；词表外需求不会被假装实现",
+                    "help": "只有这些确定性算子可执行",
                 },
                 {
                     "name": "refresh_cron", "label": "调度频率", "type": "cron",
                     "default": "", "confirmation_node": "data",
-                    "help": "留空表示仅手动触发",
+                    "help": "留空 = 仅手动触发",
                 },
             ])
         return fields
@@ -4478,13 +4555,12 @@ class ChatBiService:
             {
                 "name": "task_requirement", "label": "聚合任务需求", "type": "textarea",
                 "required": True, "default": intent, "confirmation_node": "requirement",
-                "help": "可修改；确认后的版本作为任务 intent",
             },
             {
                 "name": "business_logic_id", "label": "确认业务口径", "type": "select",
                 "required": True, "placeholder": "搜索已发布且形式化的指标/标签/规则",
                 "confirmation_node": "ontology", "options": options,
-                "help": "只允许选择已有形式化表达式的业务逻辑，不能由任务临时编造口径",
+                "help": "只能选已形式化的口径",
                 **({"default": recommended["business_logic_id"]} if recommended else {}),
             },
             {
@@ -4492,22 +4568,18 @@ class ChatBiService:
                 "required": True, "placeholder": "请选择已登记的默认 Doris 数仓",
                 "confirmation_node": "data",
                 "options": self._doris_target_options(catalog.get("target_datasources") or []),
-                "help": (
-                    "聚合固定写入默认 Doris ADS；"
-                    + ("当前没有可执行目标，请先配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
-                ),
+                **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
                 **({"default": default_doris["id"]} if default_doris else {}),
             },
             {
                 "name": "target_layer", "label": "目标层", "type": "select",
                 "required": True, "default": "ads", "confirmation_node": "data",
                 "options": [{"label": "应用层 ADS", "value": "ads"}],
-                "help": "指标、标签和规则的聚合结果固定进入 ADS",
             },
             {
                 "name": "refresh_cron", "label": "调度频率", "type": "cron",
                 "default": "", "confirmation_node": "data",
-                "help": "留空表示仅手动触发",
+                "help": "留空 = 仅手动触发",
             },
         ]
 
@@ -4543,6 +4615,19 @@ class ChatBiService:
             ],
         ] if entities else []
 
+        # 需求点名了某个实体，范围就默认成它——而不是「全部契约实体（几百项）」。
+        # 「把客户分组物化到数仓」配上一个默认全选的范围，人一路确认下来，最后建的是
+        # 整本体几百张表：确认的是 A、执行的是 B。点不准就退回全部（原行为）。
+        recommended_entity = None
+        if intent and entities:
+            from app.agents.common import select_by_intent
+
+            recommended_entity = select_by_intent(
+                intent,
+                entities,
+                key=lambda e: (e.get("entity"), e.get("display_name")),
+            )
+
         databases = list(catalog.get("databases") or [])
         configured_database = catalog.get("configured_database")
         if configured_database and configured_database not in databases:
@@ -4553,27 +4638,32 @@ class ChatBiService:
                 "name": "task_requirement", "label": "物化任务需求", "type": "textarea",
                 "required": True, "default": intent or "将本体结构物化到默认 Doris",
                 "confirmation_node": "requirement",
-                "help": "物化只建结构，不搬数据；确认后的版本作为任务 intent",
+                "help": "物化只建结构，不搬数据",
             },
             {
                 "name": "selected_targets", "label": "确认物化范围",
                 "type": "multiselect", "required": True,
                 "confirmation_node": "ontology", "options": entity_options,
                 "help": (
-                    "默认“全部”；若只物化部分，请删除“全部”后选择具体实体"
+                    "已按需求定位，可继续增删"
+                    if recommended_entity
+                    else "默认全部；只物化部分请先删除「全部契约实体」"
                     if entity_options
                     else "当前本体没有可物化契约实体，请先生成并确认物化契约"
                 ),
-                **({"default": ["__all__"]} if entity_options else {}),
+                **(
+                    {"default": [recommended_entity["entity"]]}
+                    if recommended_entity
+                    else {"default": ["__all__"]}
+                    if entity_options
+                    else {}
+                ),
             },
             {
                 "name": "target_datasource_id", "label": "目标数仓", "type": "select",
                 "required": True, "placeholder": "请选择已登记的默认 Doris 数仓",
                 "confirmation_node": "data", "options": target_options,
-                "help": (
-                    "物化只允许在启用、已配置连接的默认 Doris 建表；"
-                    + ("当前没有可执行目标，请先配置默认 Doris" if not default_doris else "唯一合法目标已自动选中")
-                ),
+                **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
                 **({"default": default_doris["id"]} if default_doris else {}),
             },
             {
@@ -4581,9 +4671,9 @@ class ChatBiService:
                 "required": True, "confirmation_node": "data",
                 "placeholder": "请选择默认 Doris 中已存在的数据库",
                 "help": (
-                    "候选来自默认 Doris 实时目录；各分层表建在这个库中"
+                    "候选来自默认 Doris 实时目录，物化不会自动建库"
                     if database_options
-                    else "无法读取默认 Doris 数据库目录，请先修复连接或配置默认数据库；禁止手填不存在的库"
+                    else "读不到默认 Doris 的库目录，请先修复连接；不接受手填"
                 ),
                 "options": database_options,
                 **(
@@ -4676,8 +4766,82 @@ class ChatBiService:
             **({"default": options[0]["value"]} if len(options) == 1 else {}),
         }]
 
+    # 四类任务在前三环各自确认的到底是什么，用一份表说清（表单标题与向导文案都取自此）。
+    _TASK_CONFIRMATION_LABELS: dict[str, tuple[str, str]] = {
+        "sync": ("同步本体", "业务源、目标 Doris、ODS 数据库和装载偏好"),
+        "materialize": ("物化范围", "目标 Doris 和目标数据库"),
+        "transform": ("加工对象", "目标 Doris、分层、清洗规则和调度"),
+        "metric": ("业务口径", "目标 Doris、ADS 层和调度"),
+    }
+
+    def build_task_form(
+        self,
+        db: Session,
+        *,
+        kind: str,
+        ontology_id: str,
+        title: str,
+        intent: str = "",
+        datasource_id: str = "",
+        prefill: dict | None = None,
+    ) -> dict:
+        """一个数据任务的**六环确认表单**（骨架字段 + 六环之旅 + 本次确认 id）。
+
+        对话里的 ``request_form`` 与任务链的逐步确认走的是同一张表单——两处各建一份的话，
+        同一个同步任务在单发时问四个参数、在链里只问两个，那不是两种体验，是两套事实。
+        """
+        fields = self._task_form_template(
+            db, kind=kind, ontology_id=ontology_id, datasource_id=datasource_id, intent=intent
+        )
+        prefilled = _apply_prefill(fields, prefill) if prefill else []
+        ontology_label, data_label = self._TASK_CONFIRMATION_LABELS.get(
+            kind, ("本体/口径", "数据落点")
+        )
+        return {
+            "title": title[:120],
+            "intent": intent[:200],
+            "fields": fields,
+            "task_kind": kind,
+            "ontology_id": ontology_id,
+            "confirmation_id": str(uuid.uuid4()),
+            "confirmation_steps": task_journey_steps(
+                ontology_label=ontology_label, data_label=data_label
+            ),
+            "prefilled": prefilled,
+        }
+
+    def _sync_supersedes_materialize(
+        self, db: Session, *, ontology_id: str, intent: str
+    ) -> bool:
+        """这次「物化」是不是纯粹在为一次同步做准备？
+
+        同步执行时会对目标 ODS 表下幂等 ``CREATE TABLE IF NOT EXISTS``（落点恒为 ODS
+        层），所以「先物化再同步」里的物化那一步是多余的。判据要**看证据不看措辞**：
+        意图指向的对象有物理源表，同步做得了它的表，物化就没必要单独走一遍。
+
+        对象没有源表（人工建模）时返回 False —— 那种表只能靠物化建出来，不能改判。
+        """
+        catalog, _summary, error = self._entity_task_options(
+            db, kind="sync", ontology_id=ontology_id, keyword="", limit=None
+        )
+        if error:
+            return False
+        objects = catalog.get("objects") or []
+        if not objects:
+            return False
+        if not intent:
+            return False
+        from app.agents.common import select_by_intent
+
+        hit = select_by_intent(
+            intent,
+            objects,
+            key=lambda o: (o.get("name"), o.get("display_name"), o.get("description")),
+        )
+        return hit is not None
+
     def _dispatch_request_form(
-        self, db: Session, *, ontology_id: str, args: dict
+        self, db: Session, *, ontology_id: str, args: dict, question: str = ""
     ) -> tuple[dict, str, bool]:
         """P6：生成一张可填写表单收集结构化上下文（纯 spec，不写库、不接地）。
 
@@ -4698,6 +4862,55 @@ class ChatBiService:
         title = str(args.get("title") or "").strip()
         raw_fields = args.get("fields")
         task_kind = str(args.get("task_kind") or "").strip()
+        # 模型偶尔会把“同步某张源表到数仓”误标为 materialize。两者的表单目录完全
+        # 不同：materialize 只选建表契约，sync 才选有 source_ref 的源对象。对这组
+        # 高代价混淆做确定性纠正，避免明明存在的对象从错误目录里“消失”。
+        #
+        # **文本同时提到物化与同步时也判 sync**：同步任务自己就会对目标 ODS 表下幂等
+        # ``CREATE TABLE IF NOT EXISTS``（见 materialization_runner.run_sync，落点恒为 ODS），
+        # 「先物化再同步」里的物化那一步是多余的。此前保持原值，于是用户为了同步一张表，
+        # 先被要求确认一次「物化范围」——而那份范围默认是整本体几百个实体。
+        # 用户的原话也算数：模型给某个子任务起的标题只写「物化 X」，它把整句需求
+        # （「先物化再同步」）留在了自己脑子里。判「这次物化是不是在为同步做准备」
+        # 必须看得见用户说的那句话，否则每次都只能看到「物化」两个字。
+        task_text = f"{title}\n{str(args.get('intent') or '')}\n{question}".lower()
+        sync_intent = any(
+            marker in task_text
+            for marker in (
+                "同步",
+                "落数",
+                "搬数据",
+                "写入 ods",
+                "写到 ods",
+                " sync ",
+                "cdc",
+            )
+        )
+        materialize_intent = any(
+            marker in task_text
+            for marker in ("物化", "建表", "建结构", "生成 ddl", " materialize ")
+        )
+        notice = ""
+        if sync_intent and task_kind == "materialize":
+            # 只在同步真的做得了这个对象时改判：有源表 = 它的 ODS 表由同步幂等建出。
+            # 对象没有源表（人工建模）就保持物化——那种表只能靠物化建。
+            if self._sync_supersedes_materialize(
+                db,
+                ontology_id=ontology_id,
+                intent=f"{title} {str(args.get('intent') or '')} {question}".strip(),
+            ):
+                task_kind = "sync"
+                # 改判要让人看见，而且标题/需求里的「物化」也得改口——否则人看到的是
+                # 一张写着「物化…」的同步表单，只会以为系统答非所问。
+                notice = (
+                    "已合并为一个同步任务：同步会对目标 ODS 表下幂等 "
+                    "CREATE TABLE IF NOT EXISTS（落点恒为 ODS 层），不需要先单独物化。"
+                )
+                title = title.replace("物化", "同步")
+                if args.get("intent"):
+                    args = {**args, "intent": str(args["intent"]).replace("物化", "同步")}
+        elif materialize_intent and not sync_intent and task_kind == "sync":
+            task_kind = "materialize"
         template: list[dict] = []
         if task_kind in _ACTION_KINDS:
             template = self._task_form_template(
@@ -4720,7 +4933,10 @@ class ChatBiService:
         # 也不能让模型通过 extra fields 偷偷加回来制造“填了会生效”的错觉。
         ignored_task_fields: dict[str, set[str]] = {
             "materialize": {"target_table", "load_strategy", "partition_key", "refresh_cron"},
-            "sync": {"target_ods_table", "load_strategy", "engine"},
+            "sync": {
+                "target_ods_table", "target_ods_database", "database_prefix",
+                "load_strategy", "engine",
+            },
             "transform": {"engine"},
             "metric": {"metric_name", "engine"},
         }
@@ -4759,6 +4975,11 @@ class ChatBiService:
                     field["options"] = options[:50]
             if item.get("default") is not None:
                 field["default"] = item["default"]
+            if task_kind in _ACTION_KINDS:
+                # 建数表单是分环向导：没有归属环的字段在向导里一格都不属于，会变成
+                # 「看不见却仍参与提交校验」的隐形必填。模型额外加的字段一律并进
+                # 「数据与参数」这一环，由人在那一步一起确认。
+                field["confirmation_node"] = "data"
             fields.append(field)
             if len(fields) >= _FORM_MAX_FIELDS:
                 break
@@ -4772,19 +4993,17 @@ class ChatBiService:
         if task_kind in _ACTION_KINDS:
             form["task_kind"] = task_kind
             form["ontology_id"] = ontology_id
-            labels = {
-                "sync": ("同步本体", "业务源、目标 Doris、ODS 数据库和装载偏好"),
-                "materialize": ("物化范围", "目标 Doris 和目标数据库"),
-                "transform": ("加工对象", "目标 Doris、分层、清洗规则和调度"),
-                "metric": ("业务口径", "目标 Doris、ADS 层和调度"),
-            }
-            ontology_label, data_label = labels.get(task_kind, ("本体/口径", "数据落点"))
+            ontology_label, data_label = self._TASK_CONFIRMATION_LABELS.get(
+                task_kind, ("本体/口径", "数据落点")
+            )
             form["confirmation_id"] = str(uuid.uuid4())
-            form["confirmation_steps"] = [
-                {"node": "requirement", "title": "确认任务需求", "description": "确认任务目标；可修改系统理解的需求"},
-                {"node": "ontology", "title": f"确认{ontology_label}", "description": "只从当前本体和形式化口径的真实候选中选择"},
-                {"node": "data", "title": "确认数据与参数", "description": f"确认{data_label}；真正执行方案将在 dry-run 后另行确认"},
-            ]
+            # 六环一次给全（含制品阶段的后三环）：人从第一步就看得见「一共要确认几件事、
+            # 现在在第几件」。前端只收集 phase=form 的前三环，后三环在制品抽屉里走。
+            form["confirmation_steps"] = task_journey_steps(
+                ontology_label=ontology_label, data_label=data_label
+            )
+        if notice:
+            form["notice"] = notice
         intent = str(args.get("intent") or "").strip()
         if intent:
             form["intent"] = intent[:200]
@@ -5000,12 +5219,24 @@ class ChatBiService:
         anchor_ontology = ontology_ids[0] if ontology_ids else None
         try:
             if name == "search_objects":
-                kw = str(args.get("keyword") or "").strip() or None
+                raw_kw = str(args.get("keyword") or "").strip()
+                kw = None if raw_kw in {"", "*"} else raw_kw
                 items: list[dict] = []
                 total = 0
-                for did in domain_ids:
+                # 明确选中的本体是最窄、最可靠的作用域。此前即使传了 ontology_ids，
+                # 字面检索仍只遍历 domain_ids；域上下文缺失/滞后时就会返回空结果。
+                scopes = (
+                    [("ontology_id", oid) for oid in ontology_ids]
+                    if ontology_ids
+                    else [("domain_context_id", did) for did in domain_ids]
+                )
+                for scope_key, scope_id in scopes:
                     page = qs.list_object_types(
-                        db, domain_context_id=did, published_only=True, q=kw, limit=_SEARCH_LIMIT
+                        db,
+                        published_only=True,
+                        q=kw,
+                        limit=_SEARCH_LIMIT,
+                        **{scope_key: scope_id},
                     )
                     items.extend(self._compact_object_summary(o) for o in page.items)
                     total += page.total
@@ -5111,8 +5342,14 @@ class ChatBiService:
                     db, ontology_id=anchor_ontology, args=args
                 )
             if name == "propose_action":
-                return self._dispatch_propose_action(
-                    db, ontology_id=anchor_ontology, domain_id=anchor_domain, args=args
+                # 循环里对 propose_action 特判并注入 conversation_id（见 ask_stream）——
+                # 那条注入是六环门禁的输入。走到这条通用分支就意味着没有会话上下文，
+                # 而没有会话就核不了「需求/本体/数据是否已逐环确认」。此时**拒绝**，
+                # 不能悄悄退化成不校验地发提案：那正是门禁被绕过的样子。
+                return (
+                    {"error": "propose_action 必须在对话上下文中调用（需要会话的逐环确认记录）"},
+                    "提案缺会话上下文",
+                    True,
                 )
             if name == "propose_pipeline":
                 return self._dispatch_propose_pipeline(
@@ -5792,6 +6029,17 @@ class ChatBiService:
                         domain_id=domains[0].id,
                         args=call_args,
                         conversation_id=conversation_id,
+                    )
+                elif tool_name == "request_form":
+                    # 建数表单要看得见**用户的原话**：模型给子任务起的标题只写「物化 X」，
+                    # 「先物化再同步」这句整体需求留在它自己脑子里。判「这次物化是不是
+                    # 在为同步做准备」得有那句话，故在此注入（同 propose_panel 的理由）。
+                    result, summary, is_error = await asyncio.to_thread(
+                        self._dispatch_request_form,
+                        db,
+                        ontology_id=ontologies[0].id,
+                        args=call_args,
+                        question=question,
                     )
                 elif tool_name in ("propose_panel", "propose_dashboard"):
                     # 数据应用提案：注入本轮已命中的对象——面板必须绑定一个主对象，

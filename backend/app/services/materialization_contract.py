@@ -26,6 +26,7 @@ from app.models.warehouse import (
     TargetKind,
 )
 from app.services.edit import _mark_overridden
+from app.services.source_ref import has_physical_source
 
 # 机器推导可写的列。refresh_cron 不在其中——刷新频率是业务决策，机器无判定依据。
 _MACHINE_FIELDS = (
@@ -93,7 +94,19 @@ class MaterializationContractService:
                     True,
                     "table_role=bridge → 关系实现表，落 DWD",
                 )
+            elif role == "data_table":
+                # 码表/参考表/配置表：有 DataHub 物理源则落 ODS 贴源层，可同步；
+                # 无源（人工建模）则不物化。
+                has_source = has_physical_source(obj.source_ref)
+                layer = "ods" if has_source else layering.role_to_layer.get(role, "dim")
+                materialized = has_source
+                reason = (
+                    f"table_role={role} 有物理源表 → ODS 贴源，可同步"
+                    if has_source
+                    else f"table_role={role} → 无物理源，不落物理表"
+                )
             else:
+                # technical 及其他未知角色：系统内部表，不进数仓。
                 layer, materialized, reason = (
                     layering.role_to_layer.get(role, "dim"),
                     False,
