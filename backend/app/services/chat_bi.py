@@ -3943,10 +3943,13 @@ class ChatBiService:
                         "mode": "full",
                     }
             result["load_strategies"] = [dict(s) for s in _LOAD_STRATEGIES]
+            result["cron_presets"] = [dict(c) for c in _CRON_PRESETS]
             result["note"] = (
                 "同步只允许 business_source → Flink → 默认 Doris ODS。落点固定为 "
                 "ods.ods_{数据域}_{原始表名}，不接受自定义库/表；无 source_ref 的对象已排除；"
                 "incremental/CDC 还必须按 load_strategies 的 hint 补齐主键、水位或 sequence/checkpoint。"
+                "另外要问清 refresh_cron（调度频率）：入仓作业跑一次不叫管道，"
+                "留空只会产出一条手动触发的 DAG。"
             )
         else:
             from app.agents.drafters.transform import SUPPORTED_CLEANSING_RULES
@@ -4386,23 +4389,15 @@ class ChatBiService:
         if err:
             return []
         raw_objects = opts.get("objects") or []
+        # 选项文案只给**业务名**。此前一条选项长这样：
+        #   「团队成员介绍（about_us_team_member） · _d71df877e93eac81.tabAbout Us Team
+        #    Member → ods_erpnext_tab_about_us_team_member」
+        # ——四个技术标识（技术名、源库的哈希名、物理源表、ODS 表名）挤在一行，人要在几百
+        # 条这样的字符串里挑一个。要确认的是「同步哪个业务对象」，源表与 ODS 落点是后端
+        # 按固定规则派生的结果（ods_naming），不该在选之前就摊一遍；它们在任务详情的
+        # 「源表 / 目标表」两行里仍看得到，核对不丢。
         objects = [
-            {
-                # 中文名和技术名都放进 label，使前端本地搜索两者都能命中；同步还把
-                # 源表→固定 ODS 表摆出来，让“确认本体”同时可核对物理数据映射。
-                "label": (
-                    (
-                        f"{o['display_name']}（{o['name']}）"
-                        if o.get("display_name") and o["display_name"] != o["name"]
-                        else o["name"]
-                    )
-                    + (
-                        f" · {o.get('source_table')} → {o.get('target_ods_table')}"
-                        if kind == "sync" else ""
-                    )
-                ),
-                "value": o["name"],
-            }
+            {"label": o.get("display_name") or o["name"], "value": o["name"]}
             for o in raw_objects
         ]
         recommended = None
@@ -4428,8 +4423,8 @@ class ChatBiService:
             "label": "确认同步本体" if is_sync else "目标表（业务对象）",
             "type": "select",
             "required": True,
-            "placeholder": "搜索中文名或技术名" if is_sync and objects else None,
-            # 同步的选项文案里已带「源表 → ODS 表」，核对靠它，不再另写一段说明。
+            # 搜索匹配的是 label（业务名），placeholder 就照实说，别再承诺搜技术名。
+            "placeholder": "搜索对象名称" if is_sync and objects else None,
             **({} if is_sync else {"help": "这里选定的就是最终目标，Drafter 不再按意图猜"}),
             "confirmation_node": "ontology",
             **({"options": objects} if objects else {}),
@@ -4479,6 +4474,16 @@ class ChatBiService:
                     "options": [
                         {"label": s["label"], "value": s["value"]} for s in _LOAD_STRATEGIES
                     ],
+                    # 不写说明：三个选项的名字已经说清是哪种同步，而 hint 那几句是给模型
+                    # 读的实现口径（Flink batch / Doris atomic replace / JDBC 有界批），
+                    # 摆在人眼前只是一段看不懂的实现细节。选了增量/CDC 之后要填什么，由
+                    # 随之出现的那几个格子自己说。
+                },
+                *self._sync_strategy_fields(db),
+                {
+                    "name": "refresh_cron", "label": "调度频率", "type": "cron",
+                    "default": "", "confirmation_node": "data",
+                    "help": "入仓作业跑一次不算管道；留空 = 仅手动触发",
                 },
             ])
         else:
@@ -4519,6 +4524,87 @@ class ChatBiService:
                 },
             ])
         return fields
+
+    def _sync_strategy_fields(self, db: Session) -> list[dict]:
+        """装载方式选了增量/CDC 之后才要填的那几项。
+
+        **为什么必须有**：装载方式那个单选给了三个选项，但表单此前只到那里为止。选「增量
+        同步」的人填完整张表单，提交时被 ``_sync_context_errors`` 打回「incremental 必须配置
+        primary_keys / incremental_column / initial_watermark」——而表单里根本没有这三个格子。
+        三选一里两个是死路，等于只有全量能用。
+
+        候选（主键/增量字段/sequence 列）随所选对象实时取（``options_from``），不静态摊进
+        表单：一个几百对象的本体，把每个对象的字段全摊开是几 MB 的消息负载。
+
+        ``visible_when`` 决定可见性：全量同步的人不该看到六个填不着的格子——这是**同一张
+        表单在三种装载语义下的三副面孔**，不是六个可选项。
+        """
+        incremental_only = {"field": "mode", "in": ["incremental"]}
+        cdc_only = {"field": "mode", "in": ["cdc"]}
+        fields: list[dict] = [
+            {
+                "name": "primary_keys", "label": "业务主键", "type": "multiselect",
+                "required": True, "confirmation_node": "data",
+                "depends_on": "object_type", "options_from": "object_properties",
+                "visible_when": {"field": "mode", "in": ["incremental", "cdc"]},
+                "help": "增量/CDC 靠它做 UPSERT 去重；命中 <对象>_id / id 约定的字段已预选，"
+                        "没命中就必须自己指定——猜错会让重跑变成插重复行",
+            },
+            {
+                "name": "incremental_column", "label": "增量字段", "type": "select",
+                "required": True, "confirmation_node": "data",
+                "depends_on": "object_type", "options_from": "object_properties",
+                "visible_when": incremental_only,
+                "help": "每轮只搬该字段 ≥ 上次成功水位的行；通常是更新时间列",
+            },
+            {
+                "name": "initial_watermark", "label": "初始水位", "type": "text",
+                "required": True, "confirmation_node": "data",
+                "visible_when": incremental_only,
+                "placeholder": "如 2026-01-01 00:00:00",
+                "help": "第一次跑从这里开始；之后由每轮成功的水位自动推进",
+            },
+            {
+                "name": "sequence_column", "label": "Sequence 列", "type": "select",
+                "required": True, "confirmation_node": "data",
+                "depends_on": "object_type", "options_from": "object_properties",
+                "visible_when": cdc_only,
+                "help": "同一主键的多条变更按它定新旧，避免乱序回放把旧值覆盖成最新",
+            },
+            {
+                "name": "delete_policy", "label": "DELETE 策略", "type": "select",
+                "required": True, "default": "ignore", "confirmation_node": "data",
+                "visible_when": cdc_only,
+                "options": [
+                    {"label": "忽略删除（源删了 ODS 保留）", "value": "ignore"},
+                    {"label": "软删除（打标记）", "value": "soft_delete"},
+                    {"label": "传播删除（ODS 同步删除）", "value": "hard_delete"},
+                ],
+            },
+        ]
+        # checkpoint 目录是「这套部署长什么样」：设置页配了就跟随，不逼每条 CDC 任务重填
+        # 一遍（见 DEVELOPMENT_PRINCIPLES P1「全局配置 ≠ 唯一取值」）。只有设置页也没有时
+        # 才非填不可——没有读位点持久化，CDC 作业一重启就从头重搬。
+        if not self._settings_checkpoint_dir(db):
+            fields.append({
+                "name": "flink_checkpoint_dir", "label": "Checkpoint 目录", "type": "text",
+                "required": True, "confirmation_node": "data",
+                "visible_when": cdc_only,
+                "placeholder": "如 hdfs:///flink/checkpoints 或 file:///var/flink/ck",
+                "help": "CDC 是常驻流作业，读位点存这里；设置页配了全局默认就不必逐条填",
+            })
+        return fields
+
+    @staticmethod
+    def _settings_checkpoint_dir(db: Session) -> str:
+        """设置页配的 Flink checkpoint 目录（没有则空串）。
+
+        判据只有 ``chat_bi_tool_schemas`` 那一处：表单「问不问这一格」与闸门「拦不拦」
+        必须同源，否则会出现「表单不问、闸门要」这种填不出来的死路。
+        """
+        from app.services.chat_bi_tool_schemas import _settings_checkpoint_dir
+
+        return _settings_checkpoint_dir(db)
 
     def _metric_form_template(
         self, db: Session, *, ontology_id: str, intent: str = ""
@@ -4851,9 +4937,9 @@ class ChatBiService:
         只做结构校验与归一：非法/空字段丢弃，选项类字段无候选项时退化为文本输入（避免空下拉）。
 
         **P2：建数任务走模板**（``task_kind``）。哪些参数非问不可，是 Drafter 与治理规约
-        已经确定的事实，不该每轮重新赌模型记不记得——实测它就漏过装载方式与分区键。故这三类
-        表单的字段骨架由服务端出、候选由目录填，模型只管标题；它另给的 fields 作为额外字段
-        追加在后面（不覆盖骨架）。
+        已经确定的事实，不该每轮重新赌模型记不记得——实测它就漏过装载方式与分区键。故这几类
+        表单的字段骨架由服务端出、候选由目录填，模型只管标题；**它另给的 fields 一律丢弃**
+        （理由见下面那段注释：模型加的字段没人消费，且最爱加骨架已有项的同义改名）。
 
         **prefill：用户已经说过的不再问一遍**。模型把从对话里读到的取值给进来，服务端按字段
         的真实候选核对后填成默认值——核不上的**丢掉**而不是原样塞进去，否则一个听错的库名会
@@ -4929,28 +5015,25 @@ class ChatBiService:
 
         fields: list[dict] = list(template)
         seen: set[str] = {f["name"] for f in template}
-        # 这些是旧版表单字段：要么执行器不消费，要么属于后续同步而非本任务。模板移除后，
-        # 也不能让模型通过 extra fields 偷偷加回来制造“填了会生效”的错觉。
-        ignored_task_fields: dict[str, set[str]] = {
-            "materialize": {"target_table", "load_strategy", "partition_key", "refresh_cron"},
-            "sync": {
-                "target_ods_table", "target_ods_database", "database_prefix",
-                "load_strategy", "engine",
-            },
-            "transform": {"engine"},
-            "metric": {"metric_name", "engine"},
-        }
-        ignored = ignored_task_fields.get(task_kind, set())
+        # **建数任务的字段骨架就是全部字段**：模型另给的 fields 一律丢弃。
+        #
+        # 骨架由 Drafter 的必填 context 与治理规约反推，Spec 里没有第七个键可填——模型
+        # 加出来的字段没有任何执行器会读，填了不生效。而它偏偏最爱加的就是骨架已有项的
+        # 同义改名：实测同步表单里「目标数仓」（target_datasource_id，骨架）之后又长出一
+        # 个「目标数据源」（target_datasource，模型加的，候选写死 "doris"），同一件事问
+        # 两遍、其中一遍还是死的。逐个把已知别名塞进忽略名单是追不完的（下次叫「目标仓
+        # 库」就又漏了），故按来源判：骨架出得来，模型就不再加字段。
+        #
+        # 骨架真的建不出来时（目录读失败 → 模板为空）仍退回模型给的字段，总好过空表单。
+        if template:
+            raw_fields = []
         for item in raw_fields[:_FORM_MAX_FIELDS]:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
             label = str(item.get("label") or "").strip()
             ftype = str(item.get("type") or "").strip()
-            if (
-                not name or not label or ftype not in _FORM_FIELD_TYPES
-                or name in seen or name in ignored
-            ):
+            if not name or not label or ftype not in _FORM_FIELD_TYPES or name in seen:
                 continue
             seen.add(name)
             field: dict[str, Any] = {"name": name[:64], "label": label[:80], "type": ftype}

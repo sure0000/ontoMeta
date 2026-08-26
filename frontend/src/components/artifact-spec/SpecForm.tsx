@@ -1,6 +1,6 @@
 import { Collapse, Form, Input, InputNumber, Select } from "antd";
 import { CronPicker } from "../CronPicker";
-import { SPEC_FIELDS, type SpecFieldDef } from "./specFields";
+import { SPEC_FIELDS, isFieldVisible, type SpecFieldDef } from "./specFields";
 import { useSpecOptions } from "./useSpecOptions";
 
 /**
@@ -32,7 +32,11 @@ export function SpecForm({
   disabled?: boolean;
 }) {
   const fields = SPEC_FIELDS[kind] ?? [];
-  const visible = skipKeys ? fields.filter((f) => !skipKeys.has(f.key)) : fields;
+  // 条件不满足的字段不渲染：同步的三种装载语义共用一张表单，全量的人不该看到
+  // 增量水位、CDC sequence 列这些填不着的格子。
+  const visible = fields.filter(
+    (f) => !(skipKeys?.has(f.key) ?? false) && isFieldVisible(f, value),
+  );
   if (!visible.length) {
     return null;
   }

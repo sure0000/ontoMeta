@@ -46,6 +46,9 @@ class SyncExecutor(Executor):
             "initial_watermark": spec.get("initial_watermark"),
             "sequence_column": spec.get("sequence_column"),
             "delete_policy": spec.get("delete_policy"),
+            # 调度频率进计划描述：人在「确认执行方案」那一环要看得见这条同步是定时跑
+            # 还是只手动跑一次——这是搬运任务最实质的一条属性。
+            "refresh_cron": spec.get("refresh_cron"),
             "engine": spec.get("engine") or "doris",
             # 凭据不入产物：只放源库连接别名（= Airflow conn_id）。
             "source_ref_alias": spec.get("source_ref_alias") or DEFAULT_SOURCE_ALIAS,
@@ -70,6 +73,7 @@ class SyncExecutor(Executor):
             "initial_watermark": plan["initial_watermark"],
             "sequence_column": plan["sequence_column"],
             "delete_policy": plan["delete_policy"],
+            "refresh_cron": plan["refresh_cron"],
             "engine": plan["engine"],
             "preserved": plan["preserved"],
             "preservation_reason": plan["preservation_reason"],
@@ -263,6 +267,10 @@ class SyncExecutor(Executor):
                     # 同步不带库名前缀：落点恒为 ODS_DATABASE（见 ods_naming）。
                     database_prefix=None,
                     load_strategy=spec.get("mode"),
+                    # 调度频率：写回本次选中实体的契约，再由 `_cron_by_entity` 决定这条
+                    # 搬运 DAG 的 schedule（一个 cron 一个 DAG）。不传的话产出的永远是
+                    # schedule=None 的手动 DAG——同步任务就此只能靠人点。
+                    refresh_cron=spec.get("refresh_cron"),
                     # 只搬这一个对象（按实体名裁剪）
                     selected_targets=[object_type],
                     artifact_id=context.get("artifact_id"),

@@ -146,31 +146,75 @@ class OntologyPropertyOption(BaseModel):
     name: str
     display_name: str
     object_type_name: str
+    data_type: str | None = None
+    semantic_type: str | None = None
+    #: 是否命中身份命名约定（``<对象>_id`` / ``id``）。同步表单据此给主键的默认值——
+    #: 只在**有把握**时给，猜的不给（见 ontology_projection.primary_key_is_confident）。
+    is_identity: bool = False
 
 
 @router.get(
     "/ontologies/{ontology_id}/properties",
     response_model=list[OntologyPropertyOption],
 )
-def list_ontology_properties(ontology_id: str, db: Session = Depends(get_db)):
-    """列出某本体下全部字段（跨对象），供手动结构化 Spec 表单下拉。
+def list_ontology_properties(
+    ontology_id: str,
+    object_type: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """列出某本体下的字段，供结构化 Spec 表单下拉。
 
     与 validation._check_ontology_refs 的 known_properties 查询同构：spec 里引用的字段
     名必须在此集合内，否则校验闸门报 unknown_property。
+
+    ``object_type``：只列这一个对象的字段。同步任务的主键/增量字段/sequence 列都必须
+    是**所选那张表**上的列——跨对象混列会让人从 700 张表的字段里挑一个根本不在目标表上
+    的列，选完才在执行期炸。缺省仍返回全本体（metric 的多对象口径要跨对象选）。
     """
-    rows = (
-        db.query(Property.name, Property.display_name, ObjectType.name)
+    q = (
+        db.query(
+            Property.name,
+            Property.display_name,
+            ObjectType.name,
+            Property.data_type,
+            Property.semantic_type,
+        )
         .join(ObjectType, Property.object_type_id == ObjectType.id)
         .filter(ObjectType.ontology_id == ontology_id)
-        .order_by(ObjectType.name, Property.name)
-        .all()
     )
+    if object_type:
+        q = q.filter(ObjectType.name == object_type)
+    rows = q.order_by(ObjectType.name, Property.name).all()
+    identity = _identity_columns(rows)
     return [
         OntologyPropertyOption(
-            name=name, display_name=display_name, object_type_name=obj_name
+            name=name,
+            display_name=display_name,
+            object_type_name=obj_name,
+            data_type=data_type,
+            semantic_type=semantic_type,
+            is_identity=(obj_name, name) in identity,
         )
-        for (name, display_name, obj_name) in rows
+        for (name, display_name, obj_name, data_type, semantic_type) in rows
     ]
+
+
+def _identity_columns(rows: list) -> set[tuple[str, str]]:
+    """按命名约定判定的身份列 ``(对象名, 字段名)``。判据复用本体投影那一份，不另立。"""
+    from app.services.ontology_projection import primary_key_is_confident, primary_key_name
+
+    by_object: dict[str, list[tuple[str, str | None]]] = {}
+    for name, _display, obj_name, _dt, semantic_type in rows:
+        by_object.setdefault(obj_name, []).append((name, semantic_type))
+    out: set[tuple[str, str]] = set()
+    for obj_name, props in by_object.items():
+        names = [n for n, _ in props]
+        identifiers = [n for n, st in props if (st or "") == "identifier"]
+        if primary_key_is_confident(obj_name, names, identifiers):
+            pk = primary_key_name(obj_name, names, identifiers)
+            if pk:
+                out.add((obj_name, pk))
+    return out
 
 
 @router.get("/ontologies/{ontology_id}/graph", response_model=OntologyGraph)

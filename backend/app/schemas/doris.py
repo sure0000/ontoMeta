@@ -18,6 +18,8 @@ class DorisWarehouseConfigUpdate(BaseModel):
     query_timeout_seconds: int = Field(15, ge=1, le=3600)
     ssl_enabled: bool = False
     fenodes: list[str] = Field(default_factory=list)
+    # BE HTTP 地址（host:8040）。留空＝由 FE 告诉连接器 BE 在哪。
+    benodes: list[str] = Field(default_factory=list)
     airflow_ddl_conn_id: str | None = None
     airflow_etl_conn_id: str | None = None
     airflow_flink_conn_id: str | None = None
@@ -37,6 +39,8 @@ class DorisWarehouseConfigOut(BaseModel):
     query_timeout_seconds: int
     ssl_enabled: bool
     fenodes: list[str] = Field(default_factory=list)
+    # BE HTTP 地址（host:8040）。留空＝由 FE 告诉连接器 BE 在哪。
+    benodes: list[str] = Field(default_factory=list)
     airflow_ddl_conn_id: str | None = None
     airflow_etl_conn_id: str | None = None
     airflow_flink_conn_id: str | None = None

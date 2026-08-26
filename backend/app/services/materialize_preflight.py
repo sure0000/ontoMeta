@@ -644,8 +644,8 @@ def _check_dag_dir_visible(
             next_step=(
                 "确认：①SSH 主机/端口/用户名正确且主机可达；"
                 "②已填 SSH 密码且 ontoMeta 侧装了 sshpass（或留空密码、走本机 ~/.ssh 免密身份）；"
-                "③DAG 目录填的是那台 Airflow 已在扫描的 dags_folder（点「从 Airflow 读取」取回），"
-                "且该用户对它有写权限。以上都在设置页 → Airflow → DAG 投递。"
+                "③DAG 目录填的是那台 Airflow 已在扫描的 dags_folder（容器部署则填宿主机上"
+                "挂载到它的那个目录），且该用户对它有写权限。以上都在设置页 → Airflow → DAG 投递。"
             ),
         )
     )
@@ -702,6 +702,28 @@ def _within(child: str, parent: str) -> bool:
     return c == p or c.startswith(p + "/")
 
 
+def _delivered_dags_are_scanned(client: AirflowClient, folder: str) -> str | None:
+    """实例已登记的 DAG 里，有没有一个就来自我们投的那个目录？
+
+    容器部署下 ``dags_folder`` 与投递目录**必然**是两个字符串（``/opt/airflow/dags`` vs
+    宿主机上挂载到它的那个目录），按字符串对账永远不一致，于是一条「值得核对」的提醒会
+    永久挂在每一次自检上——常驻的黄灯等于没有灯。
+
+    这里改用实例自己的账本作证：产物恒投在 ``<dags_dir>/ontometa/<制品id>/`` 下（见
+    ``dag_delivery``），实例回报的 ``fileloc`` 若落在 ``<folder>/ontometa/`` 里，就证明
+    两个路径指的是同一处。不查 docker 挂载表：远端非交互 shell 的 PATH 上未必有 docker。
+
+    返回作证的那条 fileloc；没有任何 ontometa DAG（还没投过东西）返回 None——此时确实
+    无从证明，退回原来的提醒是诚实的。
+    """
+    try:
+        filelocs = client.list_dag_filelocs()
+    except Exception:  # noqa: BLE001 — 旁路举证失败不该带走整份自检
+        return None
+    prefix = posixpath.normpath(folder.rstrip("/") or "/") + "/ontometa/"
+    return next((loc for loc in filelocs if loc.startswith(prefix)), None)
+
+
 def _check_dag_dir_matches_instance(
     report: PreflightReport, client: AirflowClient, airflow, *, ssh_ok: bool
 ) -> None:
@@ -713,7 +735,8 @@ def _check_dag_dir_matches_instance(
     **只提醒、不阻断**：容器部署下两者本来就不同——``dags_folder`` 是**容器内**路径
     （官方镜像恒为 ``/opt/airflow/dags``），而 SSH 投递落在**宿主机**文件系统上，该填的
     是挂载到那个容器路径的宿主机目录。ontoMeta 看不见这层映射，故不一致只是"值得核对"，
-    不是"必错"。软链接同理。
+    不是"必错"。软链接同理。字符串对不上时先找实证（见
+    :func:`_delivered_dags_are_scanned`），找得到就是真等价，不必惊动人。
     """
     folder = dags_folder_of(client)
     reading = "REST /config"
@@ -737,6 +760,7 @@ def _check_dag_dir_matches_instance(
                     f"手动核对 Airflow 主机上的 dags_folder 是否就是 {airflow.dags_dir}"
                     "（在那台机器上跑 `airflow config get-value core dags_folder`，"
                     "或看 airflow.cfg 的 [core] dags_folder / AIRFLOW__CORE__DAGS_FOLDER）。"
+                    "确认一致后，可在设置页 → Airflow → DAG 投递把目录改对。"
                 ),
             )
         )
@@ -752,6 +776,21 @@ def _check_dag_dir_matches_instance(
             )
         )
         return
+    witness = _delivered_dags_are_scanned(client, folder)
+    if witness:
+        report.add(
+            PreflightItem(
+                key="dag_dir_matches_instance",
+                label="DAG 目录与实例一致",
+                status=PASS,
+                blocking=False,
+                detail=(
+                    f"实例扫描 {folder}（{reading}），与投递目录 {airflow.dags_dir} 路径不同，"
+                    f"但实例已解析到本目录投出的 DAG（{witness}）——容器挂载，等价成立。"
+                ),
+            )
+        )
+        return
     report.add(
         PreflightItem(
             key="dag_dir_matches_instance",
@@ -759,14 +798,15 @@ def _check_dag_dir_matches_instance(
             status=WARN,
             blocking=False,
             detail=(
-                f"实例扫描的是 {folder}（{reading}），投递目录配的是 {airflow.dags_dir}，两者不一致。"
+                f"实例扫描的是 {folder}（{reading}），投递目录配的是 {airflow.dags_dir}，两者不一致，"
+                "且实例上还没有来自本目录的 DAG 可作证。"
             ),
             next_step=(
-                f"若 Airflow 是**直接装在这台机器上**：把 DAG 目录改成 {folder}"
-                "（点「从 Airflow 读取」可直接填入），否则产物投过去没人扫。"
+                f"若 Airflow 是**直接装在这台机器上**：把设置页 → Airflow → DAG 目录改成 {folder}，"
+                "否则产物投过去没人扫。"
                 f"若 Airflow 跑在**容器里**：{folder} 是容器内路径，这里要填宿主机上"
                 "挂载到它的那个目录（docker inspect / compose 的 volumes 可查），"
-                "此时不一致是正常的。"
+                "此时不一致是正常的——投出第一个 DAG 后这条自检会自行转为通过。"
             ),
         )
     )

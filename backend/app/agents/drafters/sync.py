@@ -101,6 +101,10 @@ class SyncDrafter(Drafter):
                 "source": source_table,
                 "target": f"{ods_database}.{ods_table}",
                 "object_type": target.name,
+                # 业务名派生一次、存进 Spec：任务名要写「同步 · 客户分组」而不是
+                # 「同步 · _d71df877e93eac81.tabCustomer Group」，而 ``name_from_spec``
+                # 只拿得到 Spec（手工结构化起草那条路径没有 db 会话可查对象）。
+                "object_display_name": target.display_name or target.name,
                 "ontology_id": ontology_id,
                 # 目标数据源：执行器缺它就退回「只渲染作业配置、不真跑」。链上游会在
                 # execute 的 context 里传，但手工建的独立任务没有上游——不带进 Spec 的话
@@ -124,6 +128,15 @@ class SyncDrafter(Drafter):
                 "partition_key": context.get("partition_key")
                 or (contract.partition_key if contract else None),
                 "delete_policy": context.get("delete_policy") or "ignore",
+                # 调度频率：**同步任务最该有的一个参数**。入仓作业跑一次不叫管道，
+                # 而此前 Spec 里根本没有这个键——执行器 `spec.get("refresh_cron")` 恒为
+                # None，产出的 DAG 一律 schedule=None（只能手动点）。想让同步定时跑，
+                # 只能绕到物化弹窗里逐实体改契约的 refresh_cron，没人找得到。
+                # 留空 = 仅手动触发（与加工/聚合任务的口径一致）。
+                "refresh_cron": (
+                    str(context.get("refresh_cron") or context.get("schedule") or "").strip()
+                    or None
+                ),
                 # 引擎随目标数据源走（人显式选的除外）：选了 postgres 目标仓却产
                 # Hive DDL/sink，建表那一步必挂。
                 "engine": resolve_spec_engine(db, context, contract),
@@ -141,4 +154,16 @@ class SyncDrafter(Drafter):
         return self.name_from_spec(spec)
 
     def name_from_spec(self, spec: dict[str, Any]) -> str:
-        return f"同步 · {spec.get('source')} → {spec.get('target')}"
+        """任务名用**业务名**，不用物理坐标。
+
+        此前是 ``同步 · {源库.源表} → {ods 库.ods 表}``，于是任务列表里整屏都是
+        ``同步 · _d71df877e93eac81.tabCustomer Group → ods.ods_erpnext_tab_customer_group``
+        ——源库名是个哈希、源表名是 doctype 原样，一眼看不出这条任务在同步什么业务对象。
+        落点恒为数仓 ODS（后端固定规则），写出来也不构成区分度；真正的物理坐标在任务
+        详情的「源表 / 目标表」两行里，核对不丢。
+        """
+        label = spec.get("object_display_name") or spec.get("object_type")
+        if not label:
+            # 极旧的 Spec 没有对象名（只有物理坐标）时不硬编一个名字，退回原口径。
+            return f"同步 · {spec.get('source')} → {spec.get('target')}"
+        return f"同步 · {label} → 数仓 ODS"

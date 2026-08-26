@@ -129,6 +129,18 @@ class DialectAdapter(ABC):
         orig = self._qual(table.database, table.name)
         return f"CREATE TABLE IF NOT EXISTS {stg} LIKE {orig};"
 
+    def render_truncate_staging(self, table: LogicalTable, run_id: str) -> str:
+        """清空 staging。**全量装载必须从空表开始**。
+
+        staging 名按批次而非按运行（见 ``_plan_staging``），所以它会跨运行复用：
+        上一次运行如果搬完但切换失败，那批行就留在 staging 里，下一次全量再
+        ``INSERT INTO`` 一遍——切换过去的正式表于是每行都有两份。源 5 行、目标 10 行，
+        而两个作业各自都报成功。``CREATE TABLE IF NOT EXISTS`` 对这种残留是沉默的，
+        所以清空要显式做。
+        """
+        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        return f"TRUNCATE TABLE {stg};"
+
     def render_swap(self, table: LogicalTable, run_id: str) -> list[str]:
         """把 staging 原子切换成正式表。
 
@@ -146,6 +158,24 @@ class DialectAdapter(ABC):
             f"ALTER TABLE {stg} RENAME TO {orig};",
             f"DROP TABLE IF EXISTS {old};",
         ]
+
+    # ---------- 目标实例的实测事实 ----------
+
+    def for_storage_nodes(self, count: int | None) -> DialectAdapter:
+        """按目标实例**实测的存储节点数**定制一个渲染器；默认返回自身。
+
+        建表 DDL 里有一类值不是本体决定的，也不是引擎方言决定的，而是**这套实例有多大**
+        决定的——最典型的就是副本数。Doris 建表不写 ``replication_num`` 时取 FE 的
+        ``default_replication_num``（默认 3），单 BE 的实例上每一条建表语句都会被拒：
+
+            errCode = 2, detailMessage = replication num should be less than the number
+            of available backends. replication num is 3, available backend num is 1
+
+        节点数由调用方在目标仓上实测后传进来（读不到就传 None，此时行为逐字节不变——
+        宁可沿用引擎默认，也不按猜的数字建表）。**换算成什么 DDL 是引擎知识**，故留在
+        各 Adapter 里，生成器只管把实测数字递过来。
+        """
+        return self
 
     # ---------- 能力校验 ----------
 

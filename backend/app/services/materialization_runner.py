@@ -38,7 +38,7 @@ from typing import Any, Literal
 from sqlalchemy.orm import Session
 from sqlalchemy.engine import make_url
 
-from app.connectors.airflow import AirflowClient, AirflowError
+from app.connectors.airflow import AirflowClient, AirflowError, build_run_id
 from app.connectors.datahub import build_dataset_urn
 from app.models import IngestionContract, MaterializationContract, ObjectType, Ontology
 from app.models.warehouse import TargetKind
@@ -162,6 +162,21 @@ def _connection_payload(
     }
 
 
+def _benodes(config: DorisWarehouseConfig | None) -> list[str]:
+    """已保存的 BE HTTP 地址列表（``host:8040``）。没配就是空列表。
+
+    不从 fenodes 猜：FE 与 BE 同机只是单机部署的巧合，多 BE 集群猜出来的地址是错的，
+    而错的 benodes 比不配更糟——不配时连接器还会去问 FE。
+    """
+    raw = getattr(config, "benodes_json", None) if config else None
+    if not raw:
+        return []
+    try:
+        return [str(v).strip() for v in json.loads(raw) if str(v).strip()]
+    except (TypeError, ValueError):
+        return []
+
+
 def build_embedded_airflow_connections(
     db: Session,
     target_ds: DataSource,
@@ -199,20 +214,26 @@ def build_embedded_airflow_connections(
             fenodes = []
     if not fenodes:
         raise MaterializationError("Doris Flink Connection 无法随 DAG 下发：未配置 fenodes")
+    # BE 的 HTTP 地址：配了就下发，Flink 连接器据此直接 stream load；没配则不下发，
+    # 连接器仍按老路问 FE 要 BE 地址（多 BE 集群里 FE 那份才是全的）。
+    benodes = _benodes(config)
     flink_conn_id = _warehouse_flink_conn_id(db, target_ds)
     host = target_ds.dsn_secret_ref
+    flink_extra = {
+        "fenodes": ",".join(fenodes),
+        "jdbc_url": (
+            f"jdbc:mysql://{config.query_host or make_url(host).host}:"
+            f"{config.query_port or make_url(host).port or 9030}/{target_schema}"
+        ),
+    }
+    if benodes:
+        flink_extra["benodes"] = ",".join(benodes)
     connections.append(
         _connection_payload(
             flink_conn_id,
             host,
             schema_fallback=target_schema,
-            extra={
-                "fenodes": ",".join(fenodes),
-                "jdbc_url": (
-                    f"jdbc:mysql://{config.query_host or make_url(host).host}:"
-                    f"{config.query_port or make_url(host).port or 9030}/{target_schema}"
-                ),
-            },
+            extra=flink_extra,
         )
     )
     connections.append(
@@ -279,6 +300,20 @@ def _ensure_ods_materialized(
         db.flush()
 
 
+def target_storage_nodes(ds: DataSource) -> int | None:
+    """目标仓实测的存储节点数（Doris BE）；读不到返回 None。
+
+    只在生成 DDL 前探一次，结果交给 Adapter 换算成建表属性（副本数）。放在 runner 里
+    而不是 Adapter 里，是因为 Adapter 没有、也不该有数据库连接。
+    """
+    dsn = (ds.dsn_secret_ref or "").strip() if ds is not None else ""
+    if not dsn:
+        return None
+    from app.services.data_app_executor import storage_node_count  # noqa: PLC0415
+
+    return storage_node_count(dsn)
+
+
 def _ods_ddl_items(
     db: Session,
     ontology_id: str,
@@ -287,6 +322,7 @@ def _ods_ddl_items(
     database_overrides: dict[str, str] | None,
     table_overrides: dict[str, str] | None,
     selected_targets: list[str] | None,
+    storage_nodes: int | None = None,
 ) -> list[tuple[str, str]]:
     """Render ODS tables from current-version IngestionContracts for materialize.
 
@@ -316,7 +352,7 @@ def _ods_ddl_items(
         table_overrides=table_overrides,
     ).schema
     by_entity = {table.source_name: table for table in logical.tables}
-    adapter = get_adapter("doris")
+    adapter = get_adapter("doris").for_storage_nodes(storage_nodes)
     items: list[tuple[str, str]] = []
     for contract in sorted(contracts, key=lambda row: (row.target_ods_database, row.target_ods_table)):
         obj = objects.get(contract.object_type_id)
@@ -364,6 +400,7 @@ def _sync_ods_ddl_items(
     database_overrides: dict[str, str] | None,
     table_overrides: dict[str, str] | None,
     selected_targets: list[str] | None,
+    storage_nodes: int | None = None,
 ) -> list[tuple[str, str]]:
     """Render the exact ODS targets used by this sync as idempotent pre-DDL.
 
@@ -381,7 +418,7 @@ def _sync_ods_ddl_items(
         table_overrides=table_overrides,
     ).schema
     by_entity = {table.source_name: table for table in logical.tables}
-    adapter = get_adapter("doris")
+    adapter = get_adapter("doris").for_storage_nodes(storage_nodes)
     items: list[tuple[str, str]] = []
     objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
     for obj in sorted(objects, key=lambda row: row.name):
@@ -741,13 +778,25 @@ def _run_orchestrated(
         )
         tasks = []
         swaps: dict[str, list[str]] = {}
+        # 目标 Doris 是否配了 BE 地址：部署事实在这里查一次，随每个作业传给编译器
+        # （planner/编译器不碰 DB，见各自模块的约束说明）。
+        target_benodes = bool(
+            _benodes(
+                db.query(DorisWarehouseConfig)
+                .filter(DorisWarehouseConfig.warehouse_datasource_id == ds.id)
+                .first()
+            )
+        )
         for job in batch["jobs"]:
             # staging 化的 job（full 表写 staging）或原 job（增量/未启用 staging）。
             exec_job = stage.exec_jobs.get(job.name, job)
             try:
                 tasks.append(
                     compile_move_task(
-                        exec_job, engine=engine, checkpoint_dir=checkpoint_dir
+                        exec_job,
+                        engine=engine,
+                        checkpoint_dir=checkpoint_dir,
+                        target_benodes=target_benodes,
                     )
                 )
             except ValueError as exc:
@@ -839,8 +888,8 @@ def _run_orchestrated(
             client, [bundle.dag_id for _, bundle in bundles], parse_timeout
         )
         for batch, bundle in bundles:
-            # run_id 带批次后缀：每个 DAG 一个确定性 run_id，重复提交在 Airflow 侧幂等。
-            run_id = f"ontometa__{artifact_id or 'manual'}__{batch['suffix']}"
+            # run_id 带批次后缀 + 本次提交时刻：重复执行是**新的一次运行**，不是 409。
+            run_id = build_run_id(artifact_id, batch["suffix"])
             error: str | None = None
             triggered: dict[str, Any] = {}
             if bundle.dag_id not in parsed:
@@ -1078,6 +1127,11 @@ def _orchestrate(
     if emit == "dml" and source_physical_tables:
         _ensure_ods_materialized(db, ontology_id, source_physical_tables)
 
+    # 目标实例有几个存储节点，只有实例自己知道——建表的副本数不能超过它，否则 Doris 的
+    # FE 会拒掉每一条 CREATE TABLE（"replication num is 3, available backend num is 1"）。
+    # 探一次，交给 Adapter 换算成建表属性；探不到就沿用引擎默认（行为逐字节不变）。
+    storage_nodes = target_storage_nodes(ds)
+
     ddl = _generator.generate_ddl(
         db,
         ontology_id,
@@ -1085,6 +1139,7 @@ def _orchestrate(
         database_prefix=database_prefix,
         database_overrides=database_overrides,
         table_overrides=table_overrides,
+        storage_nodes=storage_nodes,
     )
 
     selected = _selected_names(db, ontology_id, selected_targets, table_overrides)
@@ -1097,6 +1152,7 @@ def _orchestrate(
             database_overrides=database_overrides,
             table_overrides=table_overrides,
             selected_targets=selected_targets,
+            storage_nodes=storage_nodes,
         ) + ddl_items
         constraint_items = _select_constraints(ddl.get("constraints"), ddl_items)
     else:
@@ -1128,6 +1184,7 @@ def _orchestrate(
             database_overrides=database_overrides,
             table_overrides=table_overrides,
             selected_targets=selected_targets,
+            storage_nodes=storage_nodes,
         )
 
     return _run_orchestrated(

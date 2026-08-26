@@ -23,8 +23,13 @@ export function useSpecOptions(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
 
-  // databases 依赖的字段当前值（仅当来源是 databases 时有意义）
-  const dependsKey = optionSource?.kind === "databases" ? optionSource.dependsOn : undefined;
+  // 依赖字段的当前值：databases 依赖目标数据源，properties 依赖选定的对象。
+  const dependsKey =
+    optionSource?.kind === "databases"
+      ? optionSource.dependsOn
+      : optionSource?.kind === "properties"
+        ? optionSource.scopeField
+        : undefined;
   const dependsValue = dependsKey ? (allValues[dependsKey] as string | undefined) : undefined;
 
   useEffect(() => {
@@ -66,11 +71,20 @@ export function useSpecOptions(
           }
           case "properties": {
             if (!ontologyId) break;
-            const props = await api.listOntologyProperties(ontologyId);
+            // scopeField 指定了对象就只列那张表的列：同步的主键/增量字段/sequence 列必须
+            // 在目标表上，全本体混列会让人选到一个执行期才发现不存在的字段。对象还没选时
+            // 不发请求——空下拉比一份跨对象的错候选好。
+            if (optionSource.scopeField && !dependsValue) break;
+            const props = await api.listOntologyProperties(
+              ontologyId,
+              optionSource.scopeField ? dependsValue : undefined,
+            );
             // 字段名在本体内可能跨对象重名；用对象名消歧展示，value 仍是字段 name
             next = props.map((p) => ({
               value: p.name,
-              label: `${p.display_name || p.name}（${p.object_type_name}）`,
+              label: optionSource.scopeField
+                ? `${p.display_name || p.name}（${p.name}）`
+                : `${p.display_name || p.name}（${p.object_type_name}）`,
             }));
             break;
           }
@@ -105,6 +119,24 @@ export function useSpecOptions(
                 value: d.id,
                 label: `${d.name}（${d.kind}${d.is_default_warehouse ? " · 默认" : ""}）`,
               }));
+            // 上面的过滤说的是「现在可以选哪些」，可 Spec 里存着的那条可能已经掉出候选
+            // （源库停用、目标仓不再是默认仓）。不补回来的话，下拉和只读预览都只剩一串
+            // uuid——而人恰恰是在这种时候最需要看清它到底是谁。补进来但标注清楚。
+            const current = optionSource.selfField
+              ? String(allValues[optionSource.selfField] ?? "")
+              : "";
+            if (current && !next.some((o) => o.value === current)) {
+              const stale = list.find((d) => d.id === current);
+              if (stale) {
+                next = [
+                  ...next,
+                  {
+                    value: stale.id,
+                    label: `${stale.name}（${stale.kind} · 不在候选范围）`,
+                  },
+                ];
+              }
+            }
             break;
           }
           case "databases": {
@@ -135,6 +167,10 @@ export function useSpecOptions(
     optionSource?.kind === "dataSources" ? optionSource.engine : undefined,
     optionSource?.kind === "dataSources" ? optionSource.defaultOnly : undefined,
     optionSource?.kind === "dataSources" ? optionSource.executableOnly : undefined,
+    // 当前值：它掉出候选集时要被补回候选，故值一变就得重算。
+    optionSource?.kind === "dataSources" && optionSource.selfField
+      ? allValues[optionSource.selfField]
+      : undefined,
     ontologyId,
     dependsValue,
   ]);

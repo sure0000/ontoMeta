@@ -553,7 +553,15 @@ class WarehouseGenerator:
         database_prefix: str | None = None,
         database_overrides: dict[str, str] | None = None,
         table_overrides: dict[str, str] | None = None,
+        storage_nodes: int | None = None,
     ) -> dict:
+        """本体 → 目标引擎的建表 DDL。
+
+        ``storage_nodes`` 是**目标实例实测的存储节点数**（调用方在目标仓上探得，探不到
+        传 None）。建表里有一类值既不由本体决定、也不由方言决定，而由「这套实例有多大」
+        决定——最典型的是副本数：Doris 不写 ``replication_num`` 时取 FE 默认 3，单 BE
+        的实例上每条 DDL 都会被拒。换算成什么属性是引擎知识，故只把数字递给 Adapter。
+        """
         plan = self.build_logical_schema(
             db,
             ontology_id,
@@ -561,7 +569,7 @@ class WarehouseGenerator:
             database_overrides=database_overrides,
             table_overrides=table_overrides,
         )
-        adapter = get_adapter(engine)
+        adapter = get_adapter(engine).for_storage_nodes(storage_nodes)
         statements: dict[str, str] = {}
         warnings: list[dict] = []
         rendered: list[LogicalTable] = []

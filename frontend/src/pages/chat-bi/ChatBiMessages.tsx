@@ -1,7 +1,8 @@
 import { RobotOutlined } from "@ant-design/icons";
-import { Spin } from "antd";
+import { Spin, message } from "antd";
 import type { RefObject } from "react";
-import { ChatBubble } from "./ChatBiReferences";
+import { api } from "../../api";
+import { ChatBubble, useArtifactDrawer } from "./ChatBiReferences";
 import { ClosureCard } from "./ClosureCard";
 import { useDecisionLedger } from "./DecisionLedger";
 import type { ChatMessage } from "./utils";
@@ -123,6 +124,22 @@ export function ChatBiMessages({
 /** 会话闭环卡；一环未达则整块不渲染——随口一问不该顶着一张全灰的六环图。 */
 function ConversationClosure() {
   const { closure } = useDecisionLedger();
+  // 后三环都在这个抽屉里确认。闭环卡是**会话级**的，抽屉挂在它身上就与任何一条消息块的
+  // 生命周期无关了——人关掉窗口、甚至刷新页面，任务行还在，点一下就重新进来。
+  const drawer = useArtifactDrawer(undefined, closure?.conversation_id);
   if (!closure || closure.reached_count === 0) return null;
-  return <ClosureCard closure={closure} />;
+  const enterTask = (artifactId: string) => {
+    void api
+      .getArtifact(artifactId)
+      .then(drawer.open)
+      .catch((err) =>
+        message.error(err instanceof Error ? err.message : "任务详情读取失败，请重试"),
+      );
+  };
+  return (
+    <>
+      <ClosureCard closure={closure} onEnterTask={enterTask} />
+      {drawer.node}
+    </>
+  );
 }

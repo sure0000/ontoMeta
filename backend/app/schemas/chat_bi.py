@@ -98,6 +98,13 @@ class ChatBiFormField(BaseModel):
     # 级联候选：depends_on 字段当前值 → options_by_value[value]。
     depends_on: str | None = None
     options_by_value: dict[str, list[ChatBiFormOption]] = Field(default_factory=dict)
+    # 候选实时取：``object_properties`` = 取 depends_on 那个对象的字段清单。
+    # 静态摊开几百个对象的字段是几 MB 的消息负载，故这类候选按需拉。
+    options_from: str | None = None
+    # 条件可见：``{"field": "mode", "in": ["incremental", "cdc"]}``。不满足时前端既不
+    # 渲染、也不校验、更不把值提交上来——避免「先选了 CDC 填了 sequence 列，又改回全量」
+    # 时把一个不该生效的参数留在 Spec 里（它会真的进建表语句）。
+    visible_when: dict[str, Any] | None = None
 
     @field_validator("options", mode="before")
     @classmethod
@@ -299,6 +306,15 @@ class ChatBiClosureNode(BaseModel):
     count: int = 0
 
 
+class ChatBiClosureTask(BaseModel):
+    """本会话催生的一条数据任务。闭环卡据此给出「重新进入某一环」的入口。"""
+
+    artifact_id: str
+    name: str
+    kind: str | None = None
+    status: str | None = None
+
+
 class ChatBiDecisionClosure(BaseModel):
     """一次对话的确认闭环总结。恒六环——未到达的标灰而非隐藏。"""
 
@@ -307,6 +323,7 @@ class ChatBiDecisionClosure(BaseModel):
     reached_count: int
     total_count: int
     dangling: list[str] = []
+    tasks: list[ChatBiClosureTask] = []
     records: list[ChatBiDecisionOut] = []
 
 

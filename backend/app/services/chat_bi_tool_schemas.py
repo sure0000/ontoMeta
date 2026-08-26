@@ -595,6 +595,8 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
             "context 包含表单返回的 task_confirmation_id 和字段值。"
             "materialize 为没有源表的人工建模对象建结构；sync 写入 ODS（自带幂等建表，不必先物化）；"
             "transform 加工 ODS 数据；metric 生成 ADS 结果。"
+            "sync/transform/metric 都收 refresh_cron（调度频率）：留空只产出手动触发的 DAG，"
+            "跑一次不叫管道，故要按用户说的频率填上。"
             "返回的是提案，后续状态由任务流水线更新。"
         ),
         "parameters": {
@@ -784,10 +786,27 @@ def _sync_context_errors(
             if context.get(key) in (None, ""):
                 errors.append(f"incremental 必须配置 {key}")
     if mode == "cdc":
-        for key in ("sequence_column", "delete_policy", "flink_checkpoint_dir"):
+        for key in ("sequence_column", "delete_policy"):
             if context.get(key) in (None, ""):
                 errors.append(f"CDC 必须配置 {key}")
+        # checkpoint 目录是「这套部署长什么样」的事实：设置页配了全局默认就跟随，不逼每条
+        # CDC 任务重填一遍（见 DEVELOPMENT_PRINCIPLES P1「全局配置 ≠ 唯一取值」）。
+        # 两处都没有才拦——没有读位点持久化，CDC 作业一重启就从头重搬。
+        if context.get("flink_checkpoint_dir") in (None, "") and not _settings_checkpoint_dir(db):
+            errors.append(
+                "CDC 必须配置 flink_checkpoint_dir（或在设置页 → Airflow/Flink 配一个全局默认）"
+            )
     return errors
+
+
+def _settings_checkpoint_dir(db: Session) -> str:
+    """设置页配的 Flink checkpoint 目录（读不到返回空串，绝不因此炸校验）。"""
+    try:
+        from app.api.deps import settings_service
+
+        return (settings_service.get_airflow_runtime(db).flink_checkpoint_dir or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
@@ -1039,14 +1058,23 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
         "description": (
             "生成可填写表单。"
             "数据任务提供 task_kind 和 intent，服务端生成需求、本体或口径、数据参数三个确认步骤。"
-            "fields 可用于普通分析表单；任务表单可留空。"
+            "**建数任务不要给 fields**：字段骨架由服务端出，你给的会被整体丢弃"
+            "（加出来的字段没有执行器会读，只会让人填一个不生效的格子）。"
+            "fields 只用于没有 task_kind 的普通分析表单。"
             "prefill 可填写用户已经给出的值。"
             "表单提交后将 task_confirmation_id 和字段值用于 propose_action。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "表单标题：这一步在收集什么（一句话）"},
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "表单标题：这一步在收集什么（一句话）。"
+                        "**用业务名，别带技术标识**：写「客户分组 → 数仓同步任务」，"
+                        "不要写成「customer_group 同步」或带上表名/uuid"
+                    ),
+                },
                 "task_kind": {
                     "type": "string", "enum": list(_ACTION_KINDS),
                     "description": "建数任务填 materialize/sync/transform/metric；服务端生成完整确认向导",
@@ -1055,7 +1083,13 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
                     "type": "string",
                     "description": "task_kind=materialize 且已定下数据源时给，服务端会据此把「目标库」也列成下拉",
                 },
-                "intent": {"type": "string", "description": "可选：为什么需要这些信息（一句话辅助说明）"},
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "可选：为什么需要这些信息（一句话辅助说明）。"
+                        "同样只用业务名——它会成为任务描述，界面上不该出现技术名或 id"
+                    ),
+                },
                 "submit_label": {"type": "string", "description": "可选：提交按钮文案，缺省「提交」"},
                 "prefill": {
                     "type": "object",
@@ -1067,7 +1101,10 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
                 },
                 "fields": {
                     "type": "array",
-                    "description": f"表单字段（1-{_FORM_MAX_FIELDS} 个）",
+                    "description": (
+                        f"表单字段（1-{_FORM_MAX_FIELDS} 个）。"
+                        "**只在没有 task_kind 时给**；建数任务给了也会被丢弃"
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1105,7 +1142,10 @@ _REQUEST_FORM_TOOL: dict[str, Any] = {
                     },
                 },
             },
-            "required": ["title", "fields"],
+            # fields 不再必填：建数任务的骨架由服务端出，把 fields 标成必填只会逼模型
+            # 每次都编一组——编出来的最常见形态就是骨架已有项的同义改名（「目标数仓」
+            # 之后又来一个「目标数据源」）。没有 task_kind 时缺 fields 仍会被 dispatch 拦。
+            "required": ["title"],
         },
     },
 }

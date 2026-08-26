@@ -799,12 +799,21 @@ export interface ChatBiClosureNode {
 }
 
 /** 一次对话的确认闭环总结。nodes 恒为六项——未到达的标灰而非隐藏。 */
+/** 本会话催生的一条数据任务。闭环卡据此给出「重新进入某一环」的入口。 */
+export interface ChatBiClosureTask {
+  artifact_id: string;
+  name: string;
+  kind?: string | null;
+  status?: string | null;
+}
+
 export interface ChatBiDecisionClosure {
   conversation_id: string;
   nodes: ChatBiClosureNode[];
   reached_count: number;
   total_count: number;
   dangling: string[];
+  tasks: ChatBiClosureTask[];
   records: ChatBiDecision[];
 }
 
@@ -892,6 +901,16 @@ export interface ChatBiFormField {
   depends_on?: string;
   /** 上游字段值 → 本字段候选。 */
   options_by_value?: Record<string, ChatBiFormOption[]>;
+  /**
+   * 候选实时取而非静态摊开。`object_properties` = 拉 `depends_on` 那个对象的字段清单
+   * （几百对象的本体全摊开是几 MB 的消息负载）。
+   */
+  options_from?: "object_properties" | string;
+  /**
+   * 条件可见：`{ field: "mode", in: ["incremental", "cdc"] }`。不满足时不渲染、不校验、
+   * 也不提交该字段的值——否则改回全量后，先前填的 CDC 参数仍会进 Spec 并真的生效。
+   */
+  visible_when?: { field: string; in: string[] };
 }
 
 /**
@@ -1399,6 +1418,7 @@ export interface DorisWarehouseConfig {
   query_timeout_seconds: number;
   ssl_enabled: boolean;
   fenodes: string[];
+  benodes?: string[];
   airflow_ddl_conn_id?: string | null;
   airflow_etl_conn_id?: string | null;
   airflow_flink_conn_id?: string | null;
@@ -1419,6 +1439,7 @@ export interface DorisWarehouseConfigInput {
   query_timeout_seconds?: number;
   ssl_enabled?: boolean;
   fenodes?: string[];
+  benodes?: string[];
   airflow_ddl_conn_id?: string | null;
   airflow_etl_conn_id?: string | null;
   airflow_flink_conn_id?: string | null;

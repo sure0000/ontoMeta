@@ -16,13 +16,17 @@ from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
 
 # 清洗需求 → 结构化规则。命中不了的原文保留在 notes 里交人处理，不臆造规则。
+#
+# **这份表必须与 executor 的 ``_APPLIABLE`` 完全一致**：闭集的意义是「说得出的都做得到」。
+# 曾经收录的 ``normalize_code``（编码标准化）没有对应实现，也说不出「标准化成什么」——
+# 选了它的任务会照常"成功"，SQL 里却一个字符都没变。没有码值映射表就不该出现在词表里，
+# 故已移除；存量 Spec 里带着它的仍会被执行器归入 unapplied 并给出原因，不静默丢弃。
 _RULE_PATTERNS: tuple[tuple[str, str, str], ...] = (
     (r"去重|重复|dedup", "deduplicate", "按主键去重"),
     (r"空值|为空|null|缺失", "drop_null", "过滤关键字段空值"),
-    (r"去空格|trim|首尾空", "trim", "字符串首尾去空格"),
-    (r"大写|uppercase", "uppercase", "统一转大写"),
-    (r"小写|lowercase", "lowercase", "统一转小写"),
-    (r"标准化|统一编码|归一", "normalize_code", "编码标准化"),
+    (r"去空格|trim|首尾空", "trim", "字符串列首尾去空格"),
+    (r"大写|uppercase", "uppercase", "字符串列统一转大写"),
+    (r"小写|lowercase", "lowercase", "字符串列统一转小写"),
 )
 
 # 可产出的清洗规则词表（闭集）。**对外公开**是因为这是一份能力边界：说不出的清洗需求

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from app.warehouse import get_adapter
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
 
@@ -32,10 +34,16 @@ def test_run_id_is_sanitized_into_staging_name():
 
 
 def test_doris_swap_is_single_atomic_replace():
+    """staging 一侧写**裸表名**：Doris 的解析器不收 `库`.`表` 作第二个参数。
+
+    带库前缀真跑会得到 ``ParseException: no viable alternative at input
+    'ALTER TABLE `库`.`表` REPLACE'``（2.1.0 实测）——位置指在 REPLACE 上，
+    读起来像这条语句不受支持，其实只是多写了一个库名。
+    """
     swap = get_adapter("doris").render_swap(_table(), _RUN)
     assert swap == [
         f'ALTER TABLE `dw`.`dim_customer` REPLACE WITH TABLE '
-        f'`dw`.`dim_customer__stg_{_SUF}` PROPERTIES("swap" = "false");'
+        f'`dim_customer__stg_{_SUF}` PROPERTIES("swap" = "false");'
     ]
     # 单语句 = 原子；swap=false 表示替换后丢弃 staging（不把旧数据换到 staging 名下）
     assert len(swap) == 1 and 'swap" = "false' in swap[0]
@@ -112,3 +120,42 @@ def test_swap_without_database_omits_qualifier():
         f'ALTER TABLE `dim_customer` REPLACE WITH TABLE '
         f'`dim_customer__stg_{_SUF}` PROPERTIES("swap" = "false");'
     ]
+
+
+def test_full_load_truncates_staging_before_writing():
+    """全量装载前 staging 必须被清空，且清空要排在建表之后。
+
+    staging 名按批次而非按运行（跨运行复用），上一次「搬完但切换失败」的行会留在
+    里面。``CREATE TABLE IF NOT EXISTS`` 对残留是沉默的，于是这次全量在旧数据上再
+    追加一份：源 5 行、目标 10 行，而搬运与切换两个任务都报成功——数据错了，没有
+    任何一处报错。
+    """
+    from app.services.airflow_dag_builder import _plan_staging
+    from app.warehouse.jobs import JobPlan
+    from app.warehouse.jobs.base import ColumnMapping, JobEndpoint, JobSpec
+    from app.warehouse.logical_schema import LogicalColumn, LogicalTable as LT
+
+    target = LT(
+        name="dim_customer", database="dw", layer="dim",
+        columns=(LogicalColumn("id", "bigint", "id"),),
+    )
+    job = JobSpec(
+        name="sync_dim_customer",
+        source=JobEndpoint(alias="erp", platform="mysql", table="customer"),
+        target=JobEndpoint(alias="dw", platform="doris", table="dim_customer", database="dw"),
+        columns=(ColumnMapping(source="id", target="id"),),
+        mode="full",
+        target_table=target,
+    )
+    staging = _plan_staging(JobPlan(jobs=[job]), engine="doris", token="manual", enabled=True)
+
+    assert len(staging.ddl) == 2
+    assert staging.ddl[0].startswith("CREATE TABLE IF NOT EXISTS")
+    assert staging.ddl[1] == "TRUNCATE TABLE `dw`.`dim_customer__stg_manual`"
+
+    # 增量不走 staging，也就没有清空这回事（清的会是正式表的存量）
+    incremental = _plan_staging(
+        JobPlan(jobs=[replace(job, mode="incremental")]),
+        engine="doris", token="manual", enabled=True,
+    )
+    assert incremental.ddl == []

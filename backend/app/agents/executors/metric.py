@@ -341,8 +341,15 @@ class MetricExecutor(Executor):
                 if config and config.airflow_etl_conn_id
                 else f"ontometa_doris_{token}_etl"
             )
+            # 真要落库的那条 DDL 按目标实例的实测 BE 数重渲染：``artifacts["ddl"]`` 是
+            # 给 dry-run 看的（那时还没定下目标仓），而 Doris 建表的副本数不能超过存活
+            # BE 数，否则单 BE 的实例上这条 ADS 建表必被 FE 拒。
+            from app.services.materialization_runner import target_storage_nodes
+            create_ads = get_adapter("doris").for_storage_nodes(
+                target_storage_nodes(ds)
+            ).render_create_table(table)
             setup = [
-                artifacts["ddl"],
+                create_ads,
                 f"DROP TABLE IF EXISTS {staging};",
                 adapter.render_create_staging(table, artifact_id),
             ]

@@ -29,6 +29,7 @@ import { ArtifactDetail } from "../../components/AgentsPanel";
 import { CronPicker } from "../../components/CronPicker";
 import { DataSourcesModal } from "../../components/DataSourcesModal";
 import { SpecForm } from "../../components/artifact-spec/SpecForm";
+import { useSpecOptions } from "../../components/artifact-spec/useSpecOptions";
 import { SPEC_FIELDS } from "../../components/artifact-spec/specFields";
 import { TaskRingSteps, type TaskRing } from "../../components/TaskRingSteps";
 import { useDecisionLedger } from "./DecisionLedger";
@@ -49,6 +50,7 @@ import type {
   ChatBiClarification,
   ChatBiDataResult,
   ChatBiFormField,
+  ChatBiFormOption,
   ChatBiFormRequest,
   ChatBiReference,
   GovernanceArtifact,
@@ -751,6 +753,10 @@ function describeCronValue(expr: string): string {
  * 候选类字段回「名称（取值）」：**名称给人读、取值给模型用**。id 类候选（数据源、对象）
  * 只回名称的话，模型下一轮还得再猜是哪条记录；只回 id 则这条消息在对话里没法读。
  * 自由输入类（text/autocomplete/number）没有这层映射，原样回即可。
+ *
+ * ⚠ 查的必须是**解析后**的候选表。同步表单的「源数据源」候选是跟着所选对象联动出来的
+ * （后端只给 `options_by_value`，`options` 只在恰好推荐了对象时才有），照 `field.options`
+ * 查等于查了个空表——于是对话里赫然印着 `- 源数据源：8e3f-…` 这么一串 uuid。
  */
 function formatFieldValue(field: ChatBiFormField, raw: unknown): string {
   if (field.type === "cron") {
@@ -770,9 +776,20 @@ function formatFieldValue(field: ChatBiFormField, raw: unknown): string {
   return decorate(raw);
 }
 
-/** 把填好的表单值拼成既可读、又便于 LLM 解析的结构化回填文本。 */
-function composeFormReply(form: ChatBiFormRequest, values: Record<string, unknown>): string {
-  const lines = form.fields.map((f) => `- ${f.label}：${formatFieldValue(f, values[f.name])}`);
+/**
+ * 把填好的表单值拼成既可读、又便于 LLM 解析的结构化回填文本。
+ *
+ * `resolveField` 由调用方传入组件内的候选解析器（合并了运行期刷新的候选与按上游字段
+ * 联动的 `options_by_value`）；不传就退回字段自带的静态候选。
+ */
+function composeFormReply(
+  form: ChatBiFormRequest,
+  values: Record<string, unknown>,
+  resolveField?: (field: ChatBiFormField) => ChatBiFormField,
+): string {
+  const lines = form.fields.map(
+    (f) => `- ${f.label}：${formatFieldValue(resolveField ? resolveField(f) : f, values[f.name])}`,
+  );
   if (form.confirmation_id) {
     lines.unshift(`- task_confirmation_id：${form.confirmation_id}`);
   }
@@ -944,12 +961,25 @@ export function FormBlock({
     }
     return iv;
   }, [form]);
+  const [liveValues, setLiveValues] = useState<Record<string, unknown>>(initialValues);
+  /**
+   * 条件可见：不满足 `visible_when` 的字段既不渲染、也不参与校验、更不提交。
+   * 同步表单的三种装载语义共用一张表单，全量的人不该看到六个填不着的 CDC 格子。
+   */
+  const isVisible = (f: ChatBiFormField, values?: Record<string, unknown>): boolean => {
+    const cond = f.visible_when;
+    if (!cond?.field) return true;
+    return cond.in.includes(String((values ?? liveValues)[cond.field] ?? ""));
+  };
   const fieldsOfStep = (node: string) =>
     form.fields.filter(
-      (f) => f.confirmation_node === node || (node === "plan" && !f.confirmation_node),
+      (f) =>
+        (f.confirmation_node === node || (node === "plan" && !f.confirmation_node)) &&
+        isVisible(f),
     );
-  const visibleFields = staged ? fieldsOfStep(activeStep?.node ?? "") : form.fields;
-  const [liveValues, setLiveValues] = useState<Record<string, unknown>>(initialValues);
+  const visibleFields = staged
+    ? fieldsOfStep(activeStep?.node ?? "")
+    : form.fields.filter((f) => isVisible(f));
   // DataSource 是可变设置，不能永久使用消息生成时的静态 options 快照。尤其是用户先收到
   // 空表单、再去设置页配置默认 Doris 后，返回历史消息时应立即看到新目标，无需重开对话。
   const [runtimeOptions, setRuntimeOptions] = useState<Record<string, ChatBiFormField["options"]>>({});
@@ -1002,7 +1032,71 @@ export function FormBlock({
       cancelled = true;
     };
   }, [form.fields, antForm]);
+  /**
+   * `options_from: "object_properties"` 的字段（同步的主键 / 增量字段 / sequence 列）：
+   * 候选是**所选那个对象**的字段，随对象实时取。静态摊开一个几百对象本体的全部字段是
+   * 几 MB 的消息负载，而跨对象混列会让人选到根本不在目标表上的列。
+   */
+  const propertyScope = String(
+    liveValues[
+      form.fields.find((f) => f.options_from === "object_properties")?.depends_on ?? ""
+    ] ?? "",
+  );
+  const [propertyOptions, setPropertyOptions] = useState<ChatBiFormOption[]>([]);
+  const [identityColumns, setIdentityColumns] = useState<string[]>([]);
+  const [propertyError, setPropertyError] = useState(false);
+  useEffect(() => {
+    if (!form.fields.some((f) => f.options_from === "object_properties")) return;
+    if (!effectiveOntologyId || !propertyScope) {
+      setPropertyOptions([]);
+      setIdentityColumns([]);
+      return;
+    }
+    let cancelled = false;
+    setPropertyError(false);
+    api
+      .listOntologyProperties(effectiveOntologyId, propertyScope)
+      .then((props) => {
+        if (cancelled) return;
+        setPropertyOptions(
+          props.map((p) => ({
+            label: p.display_name && p.display_name !== p.name ? `${p.display_name}（${p.name}）` : p.name,
+            value: p.name,
+          })),
+        );
+        setIdentityColumns(props.filter((p) => p.is_identity).map((p) => p.name));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPropertyOptions([]);
+        setIdentityColumns([]);
+        setPropertyError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.fields, effectiveOntologyId, propertyScope]);
+  // 命中 <对象>_id / id 约定的字段预选成主键：有把握才给默认值，猜的不给
+  // （后端 is_identity 已按同一判据算好）。人仍可改——这里是建议，不是断言。
+  useEffect(() => {
+    if (!identityColumns.length) return;
+    const current = antForm.getFieldValue("primary_keys");
+    if (Array.isArray(current) ? current.length : current) return;
+    antForm.setFieldValue("primary_keys", identityColumns);
+    setLiveValues((prev) => ({ ...prev, primary_keys: identityColumns }));
+  }, [identityColumns, propertyScope, antForm]);
   const resolvedField = (field: ChatBiFormField): ChatBiFormField => {
+    if (field.options_from === "object_properties") {
+      return {
+        ...field,
+        options: propertyOptions,
+        help: propertyError
+          ? "字段候选加载失败，请重试"
+          : !propertyScope
+            ? "请先在上一步选定对象"
+            : field.help,
+      };
+    }
     const liveOptions = runtimeOptions[field.name];
     if (liveOptions) {
       return {
@@ -1022,6 +1116,8 @@ export function FormBlock({
       help: runtimeHelp[field.name] ?? field.help,
     };
   };
+  const upstream = (all: Record<string, unknown>, field: ChatBiFormField) =>
+    String(all[field.depends_on ?? ""] ?? "");
   const handleValuesChange = (
     changed: Record<string, unknown>,
     all: Record<string, unknown>,
@@ -1029,13 +1125,24 @@ export function FormBlock({
     const next = { ...all };
     for (const field of form.fields) {
       if (!field.depends_on || !(field.depends_on in changed)) continue;
-      const upstream = String(all[field.depends_on] ?? "");
-      const options = field.options_by_value?.[upstream] ?? [];
+      // options_from 的候选是异步拉的，此刻还没到；一律清空由上面的 effect 重填，
+      // 免得把 A 对象的字段名留给 B 对象。
+      const options = field.options_from ? [] : field.options_by_value?.[upstream(all, field)] ?? [];
       const current = all[field.name];
       const stillValid = options.some((option) => option.value === current);
       const replacement = stillValid ? current : options.length === 1 ? options[0].value : undefined;
       antForm.setFieldValue(field.name, replacement);
       next[field.name] = replacement;
+    }
+    // 变得不可见的字段清值：先选 CDC 填了 sequence 列、又改回全量，那个值若留在表单里
+    // 会一路进 Spec 并真的写进建表语句——「确认的是全量，建出来的是 CDC 表」。
+    for (const field of form.fields) {
+      const cond = field.visible_when;
+      if (!cond?.field || !(cond.field in changed)) continue;
+      if (cond.in.includes(String(next[cond.field] ?? ""))) continue;
+      const fallback = field.default ?? undefined;
+      antForm.setFieldValue(field.name, fallback);
+      next[field.name] = fallback;
     }
     setLiveValues(next);
   };
@@ -1049,6 +1156,10 @@ export function FormBlock({
         ).trim();
         delete context.task_requirement;
         delete context.sync_requirement;
+        // 条件不满足的字段不进 context：它们在界面上根本没出现，人没有确认过。
+        for (const field of form.fields) {
+          if (!isVisible(field, values)) delete context[field.name];
+        }
         const payload = {
           values: toJsonSafe(context) as Record<string, unknown>,
           intent,
@@ -1084,7 +1195,9 @@ export function FormBlock({
     }
 
     setSubmitted(true);
-    onSubmit?.(composeFormReply(form, values));
+    // 用界面上真正呈现过的候选去翻译取值：人在下拉里选的是「ERP 主库（mysql）」，
+    // 回填文本就不该是一串 uuid。
+    onSubmit?.(composeFormReply(form, values, resolvedField));
     if (staged) return;
     // 通用单页表单仍按原逻辑记为需求确认。
     recordDecisionQuietly(conversationId, {
@@ -1104,6 +1217,8 @@ export function FormBlock({
   };
   const confirmCurrentStep = async () => {
     if (!activeStep) return;
+    // fieldsOfStep 已按 visible_when 过滤：隐藏字段不校验（否则「全量同步」会被一个
+    // 看不见的必填 sequence 列卡住），也不记进本环的确认内容。
     const stepFields = fieldsOfStep(activeStep.node);
     const names = stepFields.map((f) => f.name);
     try {
@@ -1766,8 +1881,10 @@ function PlanBlock({
 /**
  * 任务制品抽屉（P0）：复用治理面板的 ArtifactDetail（已含 dry-run 差异 + 校验/确认/执行 + 回执）。
  * agent 只出提案，人在此抽屉里过既有人审门；写全部落在 publisher 门控之后。
+ *
+ * 导出给闭环卡用：后三环都在这个抽屉里确认，关掉后要能重新进来（见 `ClosureCard`）。
  */
-function useArtifactDrawer(
+export function useArtifactDrawer(
   onClose?: () => void,
   conversationId?: string,
   messageId?: string,
@@ -2014,6 +2131,13 @@ function ProposalContextForm({
       .catch(() => setContractNames({}));
   }, [needsContracts, ontologyId, contractNames]);
   const nameOf = (contractId: string) => contractNames?.[contractId] ?? contractId;
+  // 数据源在 context 里只存 id（凭据不进 context）。schema 之外的键是只读展示、没有
+  // 下拉替它翻名字，直接印 uuid 的话人核对不出这条任务连的是哪个源、落到哪个仓。
+  const { options: dataSources } = useSpecOptions({ kind: "dataSources" }, null, {});
+  const readableValue = (key: string, value: unknown): string =>
+    key.endsWith("datasource_id") && typeof value === "string"
+      ? (dataSources.find((o) => o.value === value)?.label ?? value)
+      : contextValueText(value);
 
   // schema 里定义了控件的字段交给 SpecForm 渲染成完整可编辑表单（含 LLM 没填的空字段）；
   // schema 之外、但 LLM 填了的键（selected_targets / *_overrides / sync_tool 等嵌套覆盖）
@@ -2058,7 +2182,7 @@ function ProposalContextForm({
                 )}
               </div>
             ) : (
-              <code className="chatbi-proposal-param-ro">{contextValueText(value)}</code>
+              <code className="chatbi-proposal-param-ro">{readableValue(key, value)}</code>
             )}
           </div>
         );

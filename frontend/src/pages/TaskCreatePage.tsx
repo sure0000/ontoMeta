@@ -11,7 +11,9 @@ import { TaskDataRangeSelector } from "../components/task-create/TaskDataRangeSe
 import { TaskConfigForm, RANGE_STEP_KEYS } from "../components/task-create/TaskConfigForm";
 import { TaskPreview } from "../components/task-create/TaskPreview";
 import {
+  pruneHiddenSpecValues,
   requiredSpecKeys,
+  specDefaults,
   SPEC_FIELDS,
   SYNC_CONN_KEYS,
   SYNC_STRATEGY_SKIP_KEYS,
@@ -102,7 +104,11 @@ export function TaskCreatePage() {
   const [kind, setKind] = useState<string>(initialKind);
   const [ontologyId, setOntologyId] = useState<string | undefined>();
   const [selectedEntities, setSelectedEntities] = useState<string[]>([]);
-  const [specData, setSpecData] = useState<Record<string, unknown>>({});
+  // 声明了 default 的字段先落成真值：表单上写着「默认 full」，提交的就得是 full。
+  // 只作初值——人改过之后以人改的为准（见 specDefaults 的说明）。
+  const [specData, setSpecData] = useState<Record<string, unknown>>(() =>
+    specDefaults(initialKind),
+  );
   const [taskName, setTaskName] = useState<string>("");
 
   // 数据
@@ -167,6 +173,32 @@ export function TaskCreatePage() {
   const stepContents = buildStepContents(kind);
   const lastStep = stepContents.length - 1;
 
+  /**
+   * 交给 SpecForm 的取值。**必须把「数据范围」那一步选的实体并进来**：它存在
+   * `selectedEntities` 里而不在 `specData` 里，而字段级下拉（主键/增量字段/sequence 列）
+   * 要按所选对象收窄候选——看不见 object_type 就只能给一个空下拉。这些键本身在
+   * RANGE_STEP_KEYS 里被跳过渲染，合进来不会多出控件。
+   */
+  /** 实体键的唯一权威是 `selectedEntities`；表单回写时把它们剥掉，免得两处各存一份。 */
+  const handleSpecChange = (next: Record<string, unknown>) => {
+    const clean = { ...next };
+    for (const key of RANGE_STEP_KEYS) delete clean[key];
+    setSpecData(clean);
+  };
+
+  const specWithScope: Record<string, unknown> = {
+    ...specData,
+    ...(selectedEntities.length > 0
+      ? kind === "sync"
+        ? { object_type: selectedEntities[0] }
+        : kind === "transform"
+          ? { target_table: selectedEntities[0] }
+          : kind === "metric"
+            ? { business_logic_id: selectedEntities[0] }
+            : { selected_targets: selectedEntities }
+      : {}),
+  };
+
   const handleNext = () => {
     const content = stepContents[currentStep];
     if (content === "type" && !kind) {
@@ -199,7 +231,7 @@ export function TaskCreatePage() {
       }
     }
     if (content === "config") {
-      const missing = requiredSpecKeys(kind, RANGE_STEP_KEYS).filter((f) => {
+      const missing = requiredSpecKeys(kind, RANGE_STEP_KEYS, specData).filter((f) => {
         const v = specData[f.key];
         return v == null || v === "" || (Array.isArray(v) && v.length === 0);
       });
@@ -229,7 +261,7 @@ export function TaskCreatePage() {
     }
     // 校验所有 required 字段（不论当前在哪步）
     const allSkipKeys = RANGE_STEP_KEYS;
-    const missing = requiredSpecKeys(kind, allSkipKeys).filter((field) => {
+    const missing = requiredSpecKeys(kind, allSkipKeys, specData).filter((field) => {
       const value = specData[field.key];
       return value == null || value === "" || (Array.isArray(value) && value.length === 0);
     });
@@ -257,10 +289,12 @@ export function TaskCreatePage() {
 
     setSubmitting(true);
     try {
-      // 构建 context（各类型任务的 drafter 输入格式）
+      // 构建 context（各类型任务的 drafter 输入格式）。
+      // 剔除当前不可见字段：先选 CDC 填了 sequence 列、又改回全量，那个值留在这里会
+      // 真的进建表语句——「确认的是全量、建出来的是 CDC 表」。
       const context: Record<string, unknown> = {
         ontology_id: ontologyId,
-        ...specData,
+        ...pruneHiddenSpecValues(kind, specData),
       };
 
       // 添加选中的实体
@@ -335,7 +369,17 @@ export function TaskCreatePage() {
 
           <div style={{ minHeight: 400 }}>
             {stepContents[currentStep] === "type" && (
-              <TaskTypeSelector value={kind} onChange={setKind} disabled={loading || isEdit} />
+              <TaskTypeSelector
+                value={kind}
+                onChange={(next) => {
+                  setKind(next);
+                  // 换任务类型 = 换一整套字段，旧类型填的值不该留在新表单里；
+                  // 新类型自己的声明默认值要跟着落成真值。
+                  setSpecData(specDefaults(next));
+                  setSelectedEntities([]);
+                }}
+                disabled={loading || isEdit}
+              />
             )}
 
             {stepContents[currentStep] === "range" && (
@@ -356,8 +400,8 @@ export function TaskCreatePage() {
               <TaskConfigForm
                 kind={kind}
                 ontologyId={ontologyId}
-                value={specData}
-                onChange={setSpecData}
+                value={specWithScope}
+                onChange={handleSpecChange}
                 name={taskName}
                 onNameChange={setTaskName}
                 namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
@@ -377,8 +421,8 @@ export function TaskCreatePage() {
               <TaskConfigForm
                 kind={kind}
                 ontologyId={ontologyId}
-                value={specData}
-                onChange={setSpecData}
+                value={specWithScope}
+                onChange={handleSpecChange}
                 name={taskName}
                 onNameChange={setTaskName}
                 namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
@@ -390,8 +434,8 @@ export function TaskCreatePage() {
               <TaskConfigForm
                 kind={kind}
                 ontologyId={ontologyId}
-                value={specData}
-                onChange={setSpecData}
+                value={specWithScope}
+                onChange={handleSpecChange}
                 name={taskName}
                 onNameChange={setTaskName}
                 namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
@@ -407,7 +451,7 @@ export function TaskCreatePage() {
                 ontologyName={ontologyId ? ontologyName(ontologyId) : ""}
                 taskName={taskName}
                 selectedEntities={selectedEntities}
-                specData={specData}
+                specData={specWithScope}
               />
             )}
           </div>

@@ -31,7 +31,7 @@ def test_transform_rules_from_context_structures_codes():
     out = TransformDrafter._rules_from_context(["deduplicate", "trim"])
     assert out == [
         {"rule": "deduplicate", "description": "按主键去重"},
-        {"rule": "trim", "description": "字符串首尾去空格"},
+        {"rule": "trim", "description": "字符串列首尾去空格"},
     ]
 
 
@@ -41,7 +41,7 @@ def test_transform_rules_from_context_preserves_dicts_and_drops_unknown():
         [{"rule": "uppercase"}, "not_a_real_rule", "drop_null"]
     )
     assert out == [
-        {"rule": "uppercase", "description": "统一转大写"},
+        {"rule": "uppercase", "description": "字符串列统一转大写"},
         {"rule": "drop_null", "description": "过滤关键字段空值"},
     ]
 

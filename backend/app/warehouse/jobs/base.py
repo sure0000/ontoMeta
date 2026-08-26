@@ -37,6 +37,19 @@ def _alias_token(alias: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in alias).strip("_").upper()
 
 
+def _conn_attr(conn: str, attr: str) -> str:
+    """Connection 某个字段的 Jinja 表达式，**None 渲染成空串而不是 "None"**。
+
+    Airflow 的 Jinja 不设 finalize：``{{ conn.x.password }}`` 在密码为 NULL 时渲染出
+    字面量 ``None``，于是环境变量真的带着四个字母交给连接器。Doris 默认的 root 就是
+    空密码，报出来的是 ``Access denied for user 'root@…' (using password: YES)``——
+    看着像密码错了，其实是我们发了一个叫 "None" 的密码。host/schema 同理：库名 None
+    会拼进 JDBC url 变成 ``/None``。
+    """
+    expr = f"{conn}.{attr}"
+    return f"{{{{ {expr} if {expr} is not none else '' }}}}"
+
+
 def endpoint_credential_env(alias: str, platform: str) -> dict[str, str]:
     """一端的凭据环境变量 → Airflow 运行期 Jinja 表达式。
 
@@ -60,24 +73,24 @@ def _endpoint_env(endpoint) -> dict[str, str]:
     token = _alias_token(endpoint.alias)
     conn = f"conn.{endpoint.alias}"
     env = {
-        f"{token}_USER": f"{{{{ {conn}.login }}}}",
-        f"{token}_PASSWORD": f"{{{{ {conn}.password }}}}",
+        f"{token}_USER": _conn_attr(conn, "login"),
+        f"{token}_PASSWORD": _conn_attr(conn, "password"),
         # host/port 拆开的占位符：Flink CDC 源连接器（mysql-cdc/postgres-cdc）不吃 JDBC url，
         # 要 hostname/port 分开的字段。**只新增、不改上面的 _URL**——JDBC 系（transform/metric
         # 的 sink、全量搬运）仍用 _URL，两套并存，互不影响。值同样是运行期 Jinja 表达式。
-        f"{token}_HOSTNAME": f"{{{{ {conn}.host }}}}",
-        f"{token}_PORT": f"{{{{ {conn}.port }}}}",
+        f"{token}_HOSTNAME": _conn_attr(conn, "host"),
+        f"{token}_PORT": _conn_attr(conn, "port"),
         # CDC 源要单独的库名（database-name）与库内 schema（postgres 的 schema-name），
         # 从 Connection 的 schema 段取。mysql-cdc 只用 database-name，postgres-cdc 两者都用。
-        f"{token}_DATABASE": f"{{{{ {conn}.schema }}}}",
+        f"{token}_DATABASE": _conn_attr(conn, "schema"),
     }
     scheme = _JDBC_URL_SCHEMES.get((endpoint.platform or "").lower())
     if scheme:
         # 库名取 Connection 的 schema，而不是 JobSpec 里的目标库——连的是哪个库属于
         # 部署事实，由建 Connection 的人说了算。
         env[f"{token}_URL"] = (
-            f"jdbc:{scheme}://{{{{ {conn}.host }}}}:{{{{ {conn}.port }}}}"
-            f"/{{{{ {conn}.schema }}}}"
+            f"jdbc:{scheme}://{_conn_attr(conn, 'host')}:{_conn_attr(conn, 'port')}"
+            f"/{_conn_attr(conn, 'schema')}"
         )
     if (endpoint.platform or "").lower() == "doris":
         # Doris connector writes through FE HTTP (8030), not the SQL port.
@@ -86,6 +99,16 @@ def _endpoint_env(endpoint) -> dict[str, str]:
         env[f"{token}_FENODES"] = (
             f"{{{{ {conn}.extra_dejson.get('fenodes', '') }}}}"
         )
+        # BE 的 HTTP 地址（可选）。只有设置页配了 benodes 时生成的 SQL 才会引用
+        # ${ALIAS_BENODES}；这里始终给出表达式，没配就是空串，不引用也无害。
+        env[f"{token}_BENODES"] = (
+            f"{{{{ {conn}.extra_dejson.get('benodes', '') }}}}"
+        )
+        # stream load 的 label 前缀：**每次运行必须不同**。Doris 按 label 去重事务，
+        # 连接器默认的前缀由表名派生，于是同一张表第二次搬运就是
+        # ``LABEL_ALREADY_EXISTS``——首次成功之后再也搬不动。用 DagRun 的时刻 + 本次
+        # 重试次数：重跑是新 DagRun（新时刻），DAG 内重试是新 try_number，都不会重名。
+        env[f"{token}_LOAD_LABEL"] = "ontometa_{{ ts_nodash }}_{{ ti.try_number }}"
         env[f"{token}_JDBC_URL"] = (
             f"{{{{ {conn}.extra_dejson.get('jdbc_url', '') }}}}"
         )

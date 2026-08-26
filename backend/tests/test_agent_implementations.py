@@ -402,14 +402,56 @@ def test_transform_drop_null_unapplied_without_keys(seeded):
     assert "IS NOT NULL" not in out["sql"]
 
 
-def test_transform_reports_unapplied_rules(seeded):
-    """无法确定性表达的规则显式列出，不静默丢弃。"""
+def test_transform_column_rules_rewrite_string_projection(seeded):
+    """列级算子必须真的进 SQL：曾经 trim/大小写只在词表里，选了也一个字符不改。"""
     spec = TransformDrafter().draft(
-        "客户表统一转大写",
+        "客户表去空格并统一转大写",
         {"ontology_id": seeded["ontology_id"], "target_table": "customer"},
     )
+    assert {r["rule"] for r in spec["cleansing_rules"]} == {"trim", "uppercase"}
     out = TransformExecutor().execute(spec, {})
-    assert out["unapplied_rules"] == ["uppercase"]
+    assert out["applied_rules"] == ["trim", "uppercase"]
+    # trim 先于大小写，且必须回写同名别名——否则外层（去重那层）找不到列。
+    assert "UPPER(TRIM(`region`)) AS `region`" in out["sql"]
+    assert out["unapplied_rules"] == []
+
+
+def test_transform_column_rules_only_touch_string_columns(seeded):
+    """数值/日期列不该被 TRIM：判据是目标列真实落成的 Doris 类型。"""
+    spec = TransformDrafter().draft(
+        "客户表去空格", {"ontology_id": seeded["ontology_id"], "target_table": "customer"}
+    )
+    out = TransformExecutor().execute(spec, {})
+    assert out["applied_rules"] == ["trim"]
+    assert "TRIM(`region`) AS `region`" in out["sql"]
+    # amount 落 DECIMAL、created_at 落 DATETIME：两者都不该被套上字符串算子。
+    assert "TRIM(`amount`)" not in out["sql"]
+    assert "TRIM(`created_at`)" not in out["sql"]
+
+
+def test_transform_case_rules_are_mutually_exclusive(seeded):
+    """大写 + 小写同时选 = 后一条静默覆盖前一条；两条都不应用并说清冲突。"""
+    spec = TransformDrafter().draft(
+        "客户表", {"ontology_id": seeded["ontology_id"], "target_table": "customer",
+                  "cleansing_rules": ["uppercase", "lowercase"]},
+    )
+    out = TransformExecutor().execute(spec, {})
+    assert out["applied_rules"] == []
+    assert set(out["unapplied_rules"]) == {"uppercase", "lowercase"}
+    assert any("互斥" in n["detail"] for n in out["rule_notes"])
+    assert "UPPER(" not in out["sql"] and "LOWER(" not in out["sql"]
+
+
+def test_transform_reports_unapplied_rules(seeded):
+    """闭集之外的规则显式列出，不静默丢弃（如已下线的 normalize_code 存量 Spec）。"""
+    spec = TransformDrafter().draft(
+        "客户表",
+        {"ontology_id": seeded["ontology_id"], "target_table": "customer",
+         "cleansing_rules": [{"rule": "normalize_code", "description": "编码标准化"}]},
+    )
+    out = TransformExecutor().execute(spec, {})
+    assert out["unapplied_rules"] == ["normalize_code"]
+    assert out["applied_rules"] == []
 
 
 # ---------- ① 同步 ----------
@@ -444,6 +486,32 @@ def test_sync_drafter_maps_via_ontology_not_raw_copy(seeded):
     assert spec["mode"] == "incremental"  # 有 datetime 字段
     assert spec["partition_key"] == "created_at"
     assert spec["preservation"]["preserve"] is False
+
+
+def test_sync_task_name_uses_the_business_object_not_physical_coordinates(seeded):
+    """任务名写业务名。
+
+    此前是 ``同步 · {源库.源表} → {ods 库.ods 表}``，真实 ERP 上长成
+    ``同步 · _d71df877e93eac81.tabCustomer Group → ods.ods_erpnext_tab_customer_group``
+    ——源库名是哈希、源表名是 doctype 原样，任务列表里一屏全是这种串，看不出在同步什么。
+    """
+    drafter = SyncDrafter()
+    spec = drafter.draft(
+        "同步客户", {"ontology_id": seeded["ontology_id"], "object_type": "customer"}
+    )
+    assert spec["object_display_name"] == "客户"
+    name = drafter.name_from_spec(spec)
+    assert name == "同步 · 客户 → 数仓 ODS"
+    assert "tab_customer" not in name
+    assert drafter.suggested_name("同步客户", spec) == name
+
+
+def test_sync_task_name_falls_back_for_legacy_specs():
+    """老 Spec 没有对象名（只有物理坐标）时不硬编名字，退回原口径。"""
+    legacy = {"source": "erp_ods.tab_customer", "target": "ods.ods_erp_tab_customer"}
+    assert SyncDrafter().name_from_spec(legacy) == (
+        "同步 · erp_ods.tab_customer → ods.ods_erp_tab_customer"
+    )
 
 
 def test_sync_preservation_surfaces_in_plan(seeded):

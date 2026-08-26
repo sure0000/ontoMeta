@@ -30,7 +30,7 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { SectionCard } from "./SectionCard";
 import { SpecForm } from "./artifact-spec/SpecForm";
-import { CLEANSING_RULES, SPEC_FIELDS } from "./artifact-spec/specFields";
+import { CLEANSING_RULES, isFieldVisible, SPEC_FIELDS } from "./artifact-spec/specFields";
 import { useSpecOptions } from "./artifact-spec/useSpecOptions";
 import { TaskRingSteps, ringIndexForArtifact, ringsForKind } from "./TaskRingSteps";
 import type {
@@ -861,7 +861,12 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** spec 里这些字段是 drafter 派生的内部字段，对用户无意义，详情中不展示。 */
+/** spec 里这些字段是 drafter 派生的内部字段，对用户无意义，详情中不展示。
+ *
+ * ⚠ `target_datasource_id` 曾在这份名单里，是错的：它不是派生字段，四类任务都必须收它
+ * （缺它时 materialize 起草就失败，sync/transform/metric 会「成功」却一行数据都不动）。
+ * 排查「数据没进去」时「这条任务落到哪个仓」正是第一个要确认的事，藏起来等于把它从
+ * 界面上抹掉。下面的 `resolve()` 会把它翻成数据源名称。 */
 const INTERNAL_SPEC_KEYS = new Set([
   "source_ref",
   "source_ref_alias",
@@ -870,7 +875,6 @@ const INTERNAL_SPEC_KEYS = new Set([
   "source_platform",
   "source_field_refs",
   "field_mapping",
-  "target_datasource_id",
   "target_database",
   "database_prefix",
   "ontology_id",
@@ -880,6 +884,19 @@ const INTERNAL_SPEC_KEYS = new Set([
   "overrides",
   "preservation",
   "sync_tool",
+  // 同步 Spec 里由 drafter 填死、执行器再没读过的几项。此前它们以**英文键名原样**
+  // 摆在任务详情里（"idempotency_strategy  primary_key_upsert"、"late_arrival_policy
+  // strict"、"target_ods_database  ods"），既看不懂也不代表任何可改的选择：
+  //  · idempotency_strategy / late_arrival_policy 恒为同一个常量；
+  //  · partition_key 只是增量字段的副本——同步的 ODS 表恒以 partition_key=None 渲染，
+  //    摆出来会让人以为这条同步按它分区；
+  //  · target_ods_database 恒为 ods，「目标表」那行已经写了 ods.xxx。
+  "idempotency_strategy",
+  "late_arrival_policy",
+  "partition_key",
+  "target_ods_database",
+  // 任务名用的业务名（drafter 派生）。「对象（本体）」那行已经是同一个名字。
+  "object_display_name",
 ]);
 
 /** spec 枚举值 → 中文标签（与 specFields.ts 的 static options 同源）。 */
@@ -944,7 +961,28 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
   const { options: dataSources } = useSpecOptions({ kind: "dataSources" }, null, {});
   const ontologyId = typeof spec.ontology_id === "string" ? spec.ontology_id : null;
   const { options: objectTypes } = useSpecOptions({ kind: "objectTypes" }, ontologyId, {});
-  const { options: properties } = useSpecOptions({ kind: "properties" }, ontologyId, {});
+  /**
+   * 字段候选按**这个任务的对象**取。字段名在本体内跨对象重名是常态（几百张表都有
+   * `modified`），全本体混列时按 value 查到的是排在最前的那张表的同名列——于是一条同步
+   * 客户分组的任务，「增量字段」那行显示的是「修改时间（about_us_team_member）」，
+   * 指着一张跟本任务毫无关系的表。
+   */
+  const propertyScope =
+    (typeof spec.object_type === "string" && spec.object_type) ||
+    (typeof spec.target_table === "string" && spec.target_table) ||
+    undefined;
+  const { options: scopedProperties } = useSpecOptions(
+    propertyScope ? { kind: "properties", scopeField: "__scope" } : undefined,
+    ontologyId,
+    { __scope: propertyScope },
+  );
+  // 聚合任务的字段跨多个对象（主体 + 维度），没有单一作用域可收窄，仍取全本体。
+  const { options: allProperties } = useSpecOptions(
+    propertyScope ? undefined : { kind: "properties" },
+    ontologyId,
+    {},
+  );
+  const properties = propertyScope ? scopedProperties : allProperties;
   const { options: businessLogics } = useSpecOptions(
     { kind: "businessLogics" },
     ontologyId,
@@ -979,6 +1017,11 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
   if (fields) {
     for (const f of fields) {
       if (!(f.key in spec)) continue;
+      // 与表单同一份可见性判定：全量同步的详情里不该出现「业务主键 / 初始水位 /
+      // CDC Sequence 列 / DELETE 策略」这几行——它们只在增量/CDC 下才有意义，
+      // 而 drafter 会把它们一律写进 Spec（多为空值或从契约带出的残留），摆出来
+      // 会让人以为这条全量同步按某个主键去重、按某个 sequence 列定新旧。
+      if (!isFieldVisible(f, spec)) continue;
       entries.push({ label: f.label, text: resolve(f.key, spec[f.key]) });
     }
   }

@@ -17,7 +17,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.connectors.airflow import AirflowClient, AirflowError
+from app.connectors.airflow import AirflowClient, AirflowError, build_run_id
 from app.services.airflow_dag_builder import (
     FlinkSqlTask,
     build_flink_sql_dag,
@@ -174,7 +174,7 @@ def run_flink_sql(
         username=airflow.username,
         password=airflow.password,
     )
-    run_id = f"ontometa__{artifact_id or 'manual'}"
+    run_id = build_run_id(artifact_id)
     error: str | None = None
     triggered: dict[str, Any] = {}
     try:

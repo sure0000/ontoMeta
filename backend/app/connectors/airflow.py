@@ -33,6 +33,28 @@ class AirflowError(RuntimeError):
         super().__init__(f"Airflow {operation} 失败：{cause}")
 
 
+def build_run_id(
+    artifact_id: str | None, suffix: str | None = None, *, stamp: str | None = None
+) -> str:
+    """DagRun id ＝ ``ontometa__<制品>[__<批次>]__<本次提交时刻>``。
+
+    **时间戳不是装饰**：run_id 曾只由制品 id 决定，注释写着「重复提交在 Airflow 侧幂等」，
+    实际是 Airflow 对重复 run_id 回 409 ``already exists``——于是一个失败的任务**永远重试
+    不了**，人在界面上再确认多少次都是同一句冲突。
+
+    防重复提交本就不归 run_id 管：制品状态机只让 confirmed 执行、succeeded 直接回原回执
+    （见 ``agent_pipeline.execute``）。走到这里就说明人确实要再跑一次，那就该是**新的一次**
+    运行，回执里记的也是这个新 run_id。
+    """
+    from datetime import datetime, timezone
+
+    parts = ["ontometa", artifact_id or "manual"]
+    if suffix:
+        parts.append(suffix)
+    parts.append(stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    return "__".join(parts)
+
+
 class AirflowClient:
     """最小 Airflow 下发/回读客户端。``client`` 可注入（测试用 httpx.MockTransport）。"""
 
@@ -66,7 +88,14 @@ class AirflowClient:
         return f"{self.endpoint}/api/{self.api_version}{path}"
 
     def _headers(self) -> dict[str, str]:
-        return {"Content-Type": "application/json"}
+        """``Accept`` 不是装饰：Airflow 的 ``/config`` 会按它做内容协商。
+
+        httpx 默认发 ``Accept: */*``，Airflow 据此选 ``text/plain`` 返回 ini 文本，
+        ``_request`` 在 ``response.json()`` 上抛「响应不是 JSON」，``get_config_option``
+        再把它吞成 None——于是**任何**实例都被自检说成「关掉了 expose_config」，哪怕它
+        开着。测试替身当时无视 Accept 恒返 JSON，这条路因此一直没被覆盖。
+        """
+        return {"Content-Type": "application/json", "Accept": "application/json"}
 
     def _send(self, method: str, path: str, operation: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -197,6 +226,17 @@ class AirflowClient:
             params["dag_id_pattern"] = pattern
         body = self._request("GET", "/dags", "list_dags", params=params)
         return [d.get("dag_id") for d in (body.get("dags") or []) if d.get("dag_id")]
+
+    def list_dag_filelocs(self, *, limit: int = 200) -> list[str]:
+        """已登记 DAG 的源文件路径（``fileloc``），按实例自己看到的路径给。
+
+        用途是**实证**投递目录与实例扫描目录等价：容器部署下两者本来就是两个字符串
+        （宿主机路径 vs ``/opt/airflow/dags``），比字符串永远不一致。但只要有一个已注册
+        DAG 的 fileloc 落在实例自报的 dags_folder 下的 ``ontometa/`` 里，就说明我们投出去
+        的东西**确实**被它扫到了——这比让人去查 docker 挂载表可靠，也不需要远端有 docker。
+        """
+        body = self._request("GET", "/dags", "list_dags", params={"limit": limit})
+        return [d.get("fileloc") for d in (body.get("dags") or []) if d.get("fileloc")]
 
     def get_config_option(self, section: str, option: str) -> str | None:
         """读 Airflow 自己的配置项；读不到（expose_config=False → 403/406）返回 None。

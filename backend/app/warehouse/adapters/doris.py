@@ -45,6 +45,10 @@ _CAPS = Capabilities(
 # PoC 分桶数；生产应按数据量与 BE 数调整。
 _BUCKETS = 10
 
+# 副本数上限。Doris 的推荐生产值就是 3（FE 的 default_replication_num 默认值），
+# 再多不会提高可用性，只是多占存储。
+_MAX_REPLICATION = 3
+
 
 def _q(name: str) -> str:
     return f"`{name}`"
@@ -59,8 +63,25 @@ def _c(text: str) -> str:
 class DorisAdapter(DialectAdapter):
     name = "doris"
 
+    def __init__(self, replication_num: int | None = None) -> None:
+        #: 建表要写死的副本数。None = 不写，沿用 FE 的 default_replication_num。
+        #: 注册表里那个实例是共享单例，故这个值只能由 ``for_storage_nodes`` 产出的
+        #: **副本**持有，绝不在共享实例上就地改。
+        self._replication_num = replication_num
+
     def capabilities(self) -> Capabilities:
         return _CAPS
+
+    def for_storage_nodes(self, count: int | None) -> DorisAdapter:
+        """实测 BE 数 → 建表的 ``replication_num``（封顶 3）。
+
+        Doris 要求副本数 ≤ 存活 BE 数，否则建表直接被 FE 拒（errCode 2）。单 BE 的开发
+        实例上，不写这个属性就等于每条建表语句都跑不了。读不到 BE 数（count=None）时
+        不写属性——沿用引擎默认，而不是拿一个猜的数字去建表。
+        """
+        if not isinstance(count, int) or count < 1:
+            return self
+        return DorisAdapter(replication_num=min(count, _MAX_REPLICATION))
 
     def map_type(self, data_type: str | None, semantic_type: str | None) -> str:
         """本体类型 → Doris 类型。判定顺序与 hive.py 一致（语义优先于物理类型）。
@@ -123,6 +144,14 @@ class DorisAdapter(DialectAdapter):
         return f"AUTO PARTITION BY LIST ({_q(table.partition_key)}) ()"
 
     def render_create_table(self, table: LogicalTable) -> str:
+        return self._create_table_body(table) + self._properties_clause([]) + ";"
+
+    def _create_table_body(self, table: LogicalTable) -> str:
+        """建表语句的主体（到 ``DISTRIBUTED BY`` 为止，无 PROPERTIES、无分号）。
+
+        ``render_ingestion_table`` 还要往同一条语句上并入 Merge-on-Write / sequence 列，
+        而 Doris 只接受**一个** PROPERTIES 块——故主体与属性分开渲染，由调用方合并一次。
+        """
         self.guard(table)
         columns = self._ordered_columns(table)
         keys = self._key_columns(table)
@@ -149,7 +178,23 @@ class DorisAdapter(DialectAdapter):
             lines.append(partition)
         bucket = keys[0] if keys else columns[0].name
         lines.append(f"DISTRIBUTED BY HASH({_q(bucket)}) BUCKETS {_BUCKETS}")
-        return "\n".join(lines) + ";"
+        return "\n".join(lines)
+
+    def _properties_clause(self, props: list[tuple[str, str]]) -> str:
+        """``PROPERTIES (...)`` 片段（不带结尾分号）；没有任何属性时返回空串。
+
+        副本数在这里统一并进来：它对**每一张** Doris 表都成立（建表、ODS 摄取表都要），
+        由 ``for_storage_nodes`` 按目标实例的实测 BE 数定下。
+        """
+        merged = list(props)
+        if self._replication_num is not None and not any(
+            key == "replication_num" for key, _ in merged
+        ):
+            merged.append(("replication_num", str(self._replication_num)))
+        if not merged:
+            return ""
+        rendered = ",\n  ".join(f'"{key}" = "{value}"' for key, value in merged)
+        return f"\nPROPERTIES (\n  {rendered}\n)"
 
     def render_ingestion_table(
         self, table: LogicalTable, *, sequence_column: str | None = None
@@ -163,7 +208,7 @@ class DorisAdapter(DialectAdapter):
         keys = self._key_columns(table)
         if sequence_column and table.column(sequence_column) is None:
             raise ValueError(f"sequence column {sequence_column!r} 不在 ODS 列清单中")
-        sql = self.render_create_table(table).rstrip().rstrip(";")
+        base = self._create_table_body(table)
         props: list[tuple[str, str]] = []
         if keys:
             props.append(("enable_unique_key_merge_on_write", "true"))
@@ -171,10 +216,7 @@ class DorisAdapter(DialectAdapter):
             if not keys:
                 raise ValueError("sequence column 只能用于 Doris Unique Key ODS 表")
             props.append(("function_column.sequence_col", sequence_column))
-        if not props:
-            return sql + ";"
-        rendered = ",\n  ".join(f'"{key}" = "{value}"' for key, value in props)
-        return f"{sql}\nPROPERTIES (\n  {rendered}\n);"
+        return base + self._properties_clause(props) + ";"
 
     def render_alter(self, before: LogicalTable, after: LogicalTable) -> list[str]:
         """本体变更 → ALTER。Doris 支持逐列增/删/改（值列为 light schema change）。"""
@@ -212,8 +254,14 @@ class DorisAdapter(DialectAdapter):
         """Doris 原子切换：``ALTER TABLE ... REPLACE WITH TABLE``（单语句、原子）。
 
         ``swap="false"`` 表示替换后**丢弃** staging（否则会把旧数据换到 staging 名下）。
-        docs/3.x：Alter/replace-table。⚠ 原子性与代价需真实实例核实（§8.3）。
+        docs/3.x：Alter/replace-table。
+
+        **第二张表只能写裸表名**：Doris 的语法是
+        ``ALTER TABLE [库.]目标 REPLACE WITH TABLE staging``，staging 隐含同库。带上库
+        前缀会被 FE 的解析器拒掉——``ParseException: no viable alternative at input
+        'ALTER TABLE `库`.`表` REPLACE'``，错误位置指在 REPLACE 上，看着像不支持这条语句，
+        其实只是多写了个库名（2.1.0 实测）。
         """
-        stg = self._qual(table.database, self.staging_table_name(table, run_id))
+        stg = _q(self.staging_table_name(table, run_id))
         orig = self._qual(table.database, table.name)
         return [f'ALTER TABLE {orig} REPLACE WITH TABLE {stg} PROPERTIES("swap" = "false");']

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 import os
 from unittest.mock import MagicMock, patch
 
@@ -94,7 +96,10 @@ def test_with_runner_jar_writes_and_triggers(db_mock, tmp_path):
 
     assert receipt["execute_mode"] == "flink_on_yarn"
     assert receipt["dag_id"].startswith("ontometa_flink_")
-    assert receipt["dag_run_id"] == "ontometa__制品-456"
+    # run_id = 制品 id + 本次提交时刻：重跑一个失败的制品要拿到**新的**一次运行，
+    # 定死成 ontometa__<制品> 时 Airflow 回 409 already exists，永远重试不了。
+    assert receipt["dag_run_id"].startswith("ontometa__制品-456__")
+    assert re.fullmatch(r"ontometa__制品-456__\d{8}T\d{6}Z", receipt["dag_run_id"])
     assert receipt["state"] == "queued"
     assert receipt["run_url"] == "http://airflow/dags/x/grid?dag_run_id=y"
     assert "artifacts" in receipt

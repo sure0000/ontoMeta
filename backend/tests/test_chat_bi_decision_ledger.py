@@ -15,6 +15,7 @@ import json
 import pytest
 
 from app.database import SessionLocal
+from app.models.agent import GovernanceArtifact
 from app.models.chat_bi import ChatBiConversation, ChatBiConversationTask
 from app.models.chat_bi_ledger import ChatBiDecisionRecord
 from app.services import chat_bi_ledger as ledger
@@ -185,6 +186,53 @@ def test_resolve_conversation_for_artifact(db, conv):
     assert ledger.resolve_conversation_for_artifact(db, "art-x") == conv.id
     # 工单直接起草的制品无会话——返回 None 是正常路径，不是错误
     assert ledger.resolve_conversation_for_artifact(db, "no-such") is None
+
+
+def test_closure_carries_conversation_tasks_for_reentry(db, conv):
+    """闭环必须带上本会话的任务——那是重新进入后三环的唯一入口。
+
+    方案/执行/结果都在任务详情抽屉里确认，而抽屉此前只在「刚提交完那一下」弹一次，
+    制品 id 只活在组件的 useState 里：人关掉窗口或刷新页面，这条任务就在对话里失联，
+    剩下三环再也走不到。关联本来就落了库，缺的只是读回来的通道。
+    """
+    artifact = GovernanceArtifact(
+        kind="sync", name="客户分组同步", status="validated", intent="同步客户分组"
+    )
+    db.add(artifact)
+    db.flush()
+    db.add(
+        ChatBiConversationTask(
+            conversation_id=conv.id, artifact_id=artifact.id, kind="sync"
+        )
+    )
+    db.commit()
+
+    closure = ledger.build_closure(db, conv.id)
+    assert [t["artifact_id"] for t in closure["tasks"]] == [artifact.id]
+    task = closure["tasks"][0]
+    assert task["name"] == "客户分组同步"  # 给人认的名字，不是 uuid
+    assert task["status"] == "validated"  # 前端据此决定按钮说「继续确认方案」
+    assert task["kind"] == "sync"
+
+
+def test_closure_tasks_survive_a_deleted_artifact(db, conv):
+    """制品被删了也别在界面上摆一串 uuid——退回意图文本，至少认得出是哪件事。"""
+    db.add(
+        ChatBiConversationTask(
+            conversation_id=conv.id, artifact_id="gone-1", kind="sync", intent="同步订单表"
+        )
+    )
+    db.commit()
+    task = ledger.build_closure(db, conv.id)["tasks"][0]
+    assert task["name"] == "同步订单表" and task["status"] is None
+
+
+def test_closure_tasks_dedupe_same_artifact(db, conv):
+    """同一条制品可能被关联多次（重复提交/任务链推进），闭环里只该出现一行。"""
+    for _ in range(2):
+        db.add(ChatBiConversationTask(conversation_id=conv.id, artifact_id="dup-1"))
+    db.commit()
+    assert len(ledger.build_closure(db, conv.id)["tasks"]) == 1
 
 
 def test_search_decisions_filters(db, conv):

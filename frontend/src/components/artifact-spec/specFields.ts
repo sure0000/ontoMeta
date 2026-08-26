@@ -29,7 +29,12 @@ export type SpecControlType =
 export type OptionSource =
   | { kind: "static"; options: { value: string; label: string }[] }
   | { kind: "objectTypes" }
-  | { kind: "properties" }
+  /**
+   * 本体字段候选。`scopeField` 指向表单里选定对象的那个字段（sync 是 object_type、
+   * transform 是 target_table）：主键 / 增量字段 / sequence 列必须是**那张表**上的列，
+   * 全本体混列会让人从几百张表的字段里选到一个根本不在目标表上的名字。
+   */
+  | { kind: "properties"; scopeField?: string }
   | { kind: "businessLogics" }
   | { kind: "engines" }
   | {
@@ -38,6 +43,15 @@ export type OptionSource =
       engine?: string;
       defaultOnly?: boolean;
       executableOnly?: boolean;
+      /**
+       * 这个候选表所服务的字段自己的 key。
+       *
+       * 上面几个过滤条件说的是「现在**可以选**哪些」，而 Spec 里存着的可能是一条已经
+       * 掉出候选集的数据源（源库被停用、目标仓不再是默认仓）。候选里找不到时下拉和
+       * 只读预览都会退回裸 uuid——恰恰是最该看清名字的时候。给了 selfField，
+       * `useSpecOptions` 就能把当前值从未过滤的清单里捞回来补进候选。
+       */
+      selfField?: string;
     }
   | { kind: "databases"; dependsOn: string }
   | { kind: "cleansingRules" };
@@ -55,18 +69,31 @@ export interface SpecFieldDef {
   max?: number;
   /** 折进「高级」折叠面板：调优项，不填也能跑（留空 = 跟随设置页默认）。 */
   advanced?: boolean;
+  /**
+   * 条件可见：`{ field: "mode", in: ["incremental", "cdc"] }`。不满足时不渲染、不校验、
+   * 提交前也会被剔除——先选 CDC 填了 sequence 列、又改回全量，那个值若留在 spec 里会
+   * 真的进建表语句（Doris 的 sequence 列），「确认的是全量、建出来的是 CDC 表」。
+   */
+  visibleWhen?: { field: string; in: string[] };
 }
+
+const INCREMENTAL_OR_CDC = { field: "mode", in: ["incremental", "cdc"] };
+const INCREMENTAL_ONLY = { field: "mode", in: ["incremental"] };
+const CDC_ONLY = { field: "mode", in: ["cdc"] };
 
 // ---- 闭集常量（与后端同源，注释标注来源；变动极少，P0 前端内置避免多一次请求） ----
 
-/** transform 清洗规则：后端 SUPPORTED_CLEANSING_RULES（transform.py:31）。 */
+/**
+ * transform 清洗规则：后端 SUPPORTED_CLEANSING_RULES（drafters/transform.py）。
+ * 闭集的意义是「说得出的都做得到」——曾经的 `normalize_code` 没有实现也说不出标准化成
+ * 什么，选了它的任务照常"成功"而 SQL 一个字符没改，已从两端同时下线。
+ */
 export const CLEANSING_RULES: { value: string; label: string }[] = [
   { value: "deduplicate", label: "去重" },
   { value: "drop_null", label: "空值过滤" },
-  { value: "trim", label: "去除首尾空格" },
-  { value: "uppercase", label: "转大写" },
-  { value: "lowercase", label: "转小写" },
-  { value: "normalize_code", label: "编码标准化" },
+  { value: "trim", label: "字符串列去首尾空格" },
+  { value: "uppercase", label: "字符串列转大写" },
+  { value: "lowercase", label: "字符串列转小写" },
 ];
 
 const LOAD_STRATEGY_OPTIONS = [
@@ -107,6 +134,7 @@ const targetDatasourceField = (note: string): SpecFieldDef => ({
     engine: "doris",
     defaultOnly: true,
     executableOnly: true,
+    selfField: "target_datasource_id",
   },
   help: note,
 });
@@ -229,7 +257,12 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       label: "业务源",
       control: "select",
       required: true,
-      optionSource: { kind: "dataSources", purpose: "business_source", executableOnly: true },
+      optionSource: {
+        kind: "dataSources",
+        purpose: "business_source",
+        executableOnly: true,
+        selfField: "source_datasource_id",
+      },
       help: "须与所选对象的来源匹配",
     },
     // 同步的落点不给选：库恒为 ods、表名恒为 ods_{数据域}_{原始表名}（后端 ods_naming）。
@@ -247,38 +280,58 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       key: "primary_keys",
       label: "业务主键",
       control: "propertyMultiSelect",
-      optionSource: { kind: "properties" },
-      help: "incremental / CDC 必填",
+      required: true,
+      visibleWhen: INCREMENTAL_OR_CDC,
+      optionSource: { kind: "properties", scopeField: "object_type" },
+      help: "靠它做 UPSERT 去重，猜错会让重跑插出重复行",
     },
     {
       key: "incremental_column",
       label: "增量字段",
       control: "propertySingle",
-      optionSource: { kind: "properties" },
-      help: "incremental 模式必填",
+      required: true,
+      visibleWhen: INCREMENTAL_ONLY,
+      optionSource: { kind: "properties", scopeField: "object_type" },
+      help: "每轮只搬该字段 ≥ 上次成功水位的行；通常是更新时间列",
     },
-    { key: "initial_watermark", label: "初始水位", control: "text", help: "incremental 模式必填" },
+    {
+      key: "initial_watermark",
+      label: "初始水位",
+      control: "text",
+      required: true,
+      visibleWhen: INCREMENTAL_ONLY,
+      help: "第一次从这里开始，之后由每轮成功水位自动推进",
+    },
     {
       key: "sequence_column",
       label: "CDC Sequence 列",
       control: "propertySingle",
-      optionSource: { kind: "properties" },
-      help: "CDC 必填",
+      required: true,
+      visibleWhen: CDC_ONLY,
+      optionSource: { kind: "properties", scopeField: "object_type" },
+      help: "同一主键的多条变更按它定新旧，避免乱序回放把旧值覆盖成最新",
     },
     {
       key: "delete_policy",
       label: "DELETE 策略",
       control: "select",
+      visibleWhen: CDC_ONLY,
       optionSource: {
         kind: "static",
         options: [
-          { value: "ignore", label: "忽略删除" },
-          { value: "soft_delete", label: "软删除" },
-          { value: "hard_delete", label: "传播删除（仅 CDC）" },
+          { value: "ignore", label: "忽略删除（源删了 ODS 保留）" },
+          { value: "soft_delete", label: "软删除（打标记）" },
+          { value: "hard_delete", label: "传播删除（ODS 同步删除）" },
         ],
       },
       default: "ignore",
     },
+    /**
+     * 调度频率。**同步最该有的一个参数**：入仓作业跑一次不叫管道。此前 Spec 里没有这个
+     * 键，产出的 DAG 一律 schedule=None，只能手动点；想定时只能绕到物化弹窗里逐实体改
+     * 契约的 refresh_cron，没人找得到。留空 = 仅手动触发。
+     */
+    { key: "refresh_cron", label: "调度频率", control: "cron", help: "留空 = 仅手动触发" },
     ...flinkFields(),
   ],
   materialize: [
@@ -300,9 +353,61 @@ export const SYNC_CONN_KEYS = new Set(["source_datasource_id", "target_datasourc
 /** sync 策略步骤需要跳过的键（已在连接步骤展示）。 */
 export const SYNC_STRATEGY_SKIP_KEYS: Set<string> = SYNC_CONN_KEYS;
 
-/** 表单里标了 required 的字段——向导提交前据此做真校验（不只是画个星号）。 */
-export function requiredSpecKeys(kind: string, skipKeys?: Set<string>): SpecFieldDef[] {
-  return (SPEC_FIELDS[kind] ?? []).filter((f) => f.required && !(skipKeys?.has(f.key) ?? false));
+/**
+ * 声明了 `default` 的字段的初值。**表单上写着「默认 X」，提交的就必须是 X。**
+ *
+ * 此前 `default` 只当占位文案用（Select 的 placeholder「默认 full」），一个值都不进
+ * specData：于是新建同步任务时装载方式那格显示「默认 full」，提交的 context 里却没有
+ * `mode`，后端 SyncDrafter 退回**物化契约的 load_strategy**——契约是 incremental 的对象
+ * 就建成了增量任务。而增量要的业务主键/初始水位在向导里是 `visibleWhen: mode=incremental`
+ * 的隐藏字段（当时 mode 为空，没渲染），任务一建出来就被校验闸门以
+ * `sync_primary_key_missing` / `sync_initial_watermark_missing` 双阻断卡死，且无处可填。
+ */
+export function specDefaults(kind: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const def of SPEC_FIELDS[kind] ?? []) {
+    if (def.default !== undefined) out[def.key] = def.default;
+  }
+  return out;
+}
+
+/** 条件可见判定。没声明 `visibleWhen` 的字段恒可见。 */
+export function isFieldVisible(def: SpecFieldDef, values: Record<string, unknown>): boolean {
+  const cond = def.visibleWhen;
+  if (!cond) return true;
+  return cond.in.includes(String(values[cond.field] ?? ""));
+}
+
+/**
+ * 表单里标了 required 的字段——向导提交前据此做真校验（不只是画个星号）。
+ * 给了 `values` 就跳过当前不可见的字段：全量同步不该被一个看不见的 sequence 列卡住。
+ */
+export function requiredSpecKeys(
+  kind: string,
+  skipKeys?: Set<string>,
+  values?: Record<string, unknown>,
+): SpecFieldDef[] {
+  return (SPEC_FIELDS[kind] ?? []).filter(
+    (f) =>
+      f.required &&
+      !(skipKeys?.has(f.key) ?? false) &&
+      (!values || isFieldVisible(f, values)),
+  );
+}
+
+/**
+ * 提交前剔除当前不可见字段的取值。改回全量后，先前填的 CDC 参数不能悄悄留在 Spec 里
+ * ——它们会真的生效（sequence 列进建表语句、主键进 Unique Key 模型）。
+ */
+export function pruneHiddenSpecValues(
+  kind: string,
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const out = { ...values };
+  for (const def of SPEC_FIELDS[kind] ?? []) {
+    if (!isFieldVisible(def, values)) delete out[def.key];
+  }
+  return out;
 }
 
 /** metric 走 drafter+context 路径（非 spec 直填），其余 kind 走 spec 直填。 */

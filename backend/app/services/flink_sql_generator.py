@@ -98,10 +98,15 @@ def quote_identifier(name: str) -> str:
 @dataclass(frozen=True)
 class FlinkEndpoint:
     """Flink 里一张表对应的物理端点。``alias`` 是唯一的凭据线索（占位符由它派生），
-    ``platform`` 决定 connector 与驱动。本对象不含主机/账号/密码。"""
+    ``platform`` 决定 connector 与驱动。本对象不含主机/账号/密码。
+
+    ``benodes``：Doris 目标端是否显式下发 BE 地址。**只有设置页真配了才置 True**——
+    置了就多发一个 ``${别名_BENODES}`` 占位符，而 SqlRunner 对缺失的环境变量是报错的，
+    没配却发＝运行期报「缺少凭据环境变量」。"""
 
     alias: str
     platform: str
+    benodes: bool = False
 
 
 #: 引擎原生类型（Adapter.map_type 的产物）→ Flink 类型。按**前缀**匹配，第一条命中为准；
@@ -140,8 +145,13 @@ def source_flink_type(col: LogicalColumn) -> str:
     不能拿目标引擎的 Adapter 来算：那答的是「这列在数仓里该建成什么」，
     而源端要的是「驱动会返回什么 Java 类型」。差一档就是运行期
     ``ClassCastException: Integer cannot be cast to String``。
+
+    **语义类型在这里也不算数**（``use_semantic=False``）：``is_group`` 的语义是 flag、
+    物理是 ``TINYINT(4)``，MySQL 驱动对 tinyint(4) 返回的是 Integer，源表声明成 BOOLEAN
+    就是运行期 ``Integer cannot be cast to Boolean``。语义只决定这列在**数仓**里建成什么，
+    到目标端由 Adapter 说了算，两端不同就由 :func:`build_identity_select` CAST。
     """
-    return _flink_type(col, None)
+    return _flink_type(col, None, use_semantic=False)
 
 
 def target_flink_type(col: LogicalColumn, engine: str) -> str:
@@ -149,7 +159,9 @@ def target_flink_type(col: LogicalColumn, engine: str) -> str:
     return _flink_type(col, engine)
 
 
-def _flink_type(col: LogicalColumn, platform: str | None = None) -> str:
+def _flink_type(
+    col: LogicalColumn, platform: str | None = None, *, use_semantic: bool = True
+) -> str:
     """列类型 → Flink SQL 类型。
 
     **目标端以 Dialect Adapter 的产物为准**：数仓里那一列到底是什么类型，是
@@ -172,7 +184,8 @@ def _flink_type(col: LogicalColumn, platform: str | None = None) -> str:
             pass
     raw = (col.data_type or "string").lower().strip()
     base = re.split(r"[(\s]", raw, maxsplit=1)[0]
-    st = (col.semantic_type or "").lower().strip()
+    # use_semantic=False（源端）时语义类型一律不参与：驱动只认物理类型。
+    st = (col.semantic_type or "").lower().strip() if use_semantic else ""
     if st == "date" or base == "date":
         return "DATE"
     if st in {"datetime", "time"} or "time" in base or "date" in base:
@@ -281,7 +294,18 @@ def _connector_props(
             "table.identifier": physical,
             "username": _placeholder(alias, "USER"),
             "password": _placeholder(alias, "PASSWORD"),
+            # 每次运行一个 label 前缀。Doris 的 stream load 按 label 去重，连接器默认
+            # 从表名派生前缀，于是**同一张表的第二次运行**必然
+            # ``[LABEL_ALREADY_EXISTS] Label [...] has already been used``——第一次跑成功
+            # 之后就再也搬不了第二次。值由 Airflow 运行期给（见 endpoint_credential_env），
+            # 带 DagRun 时刻与重试次数，故重跑、重试都各是一个新 label。
+            "sink.label-prefix": _placeholder(alias, "LOAD_LABEL"),
         }
+        if endpoint.benodes:
+            # 配了 BE 地址就直接用，不再问 FE：容器化 Doris 的 BE 在 FE 里登记的是
+            # 127.0.0.1，集群外的 Flink 照着连只会连到自己（Connection refused，
+            # 报在作业运行期）。没配则不发这个属性，维持连接器问 FE 的老路。
+            props["benodes"] = _placeholder(alias, "BENODES")
         if delete_policy == "hard_delete":
             props["sink.enable-delete"] = "true"
         return props
@@ -331,7 +355,12 @@ def render_create_table(
         cdc: 源端用 CDC 连接器（mysql-cdc/postgres-cdc），仅 CDC/增量作业的源表
     """
     col_lines = [
-        f"  `{c.name}` {_flink_type(c, endpoint.platform if is_target else None)}"
+        # 源表用 source_flink_type（物理类型，语义不参与）、目标表用 target_flink_type
+        # （引擎 Adapter）。两边必须与 build_identity_select 判 CAST 时用的是同两个函数，
+        # 否则会出现「投影里 CAST(x AS BOOLEAN)、源表却声明成 BOOLEAN」这种自相矛盾：
+        # 提交期看不出来，运行期在 TaskManager 里 ClassCastException。
+        f"  `{c.name}` "
+        + (target_flink_type(c, endpoint.platform) if is_target else source_flink_type(c))
         + (f" COMMENT '{c.comment}'" if c.comment else "")
         for c in table.columns
     ]

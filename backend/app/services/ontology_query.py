@@ -1201,6 +1201,10 @@ class OntologyQueryService:
             display_name=obj.display_name,
             description=obj.description,
             source_ref=obj.source_ref,
+            # 派生属性要**显式**带上：本读模型是按关键字构造的，``from_attributes`` 只在
+            # 从 ORM 对象校验时才生效。漏掉这一项 → 恒取默认值 "none" → 前端把每个对象
+            # 都判成「无源表，不可同步」，同步向导里 483 个对象全部置灰、一个都选不了。
+            source_provenance=obj.source_provenance,
             status=obj.status,
             property_count=property_count,
             relation_count=relation_count,

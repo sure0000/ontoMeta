@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import inspect
 from unittest.mock import MagicMock, patch
 
@@ -86,7 +88,8 @@ def test_doris_job_runner_delivers_and_triggers(tmp_path):
         )
     assert receipt["compute_engine"] == "doris"
     assert receipt["execute_mode"] == "orchestrated"
-    assert receipt["dag_run_id"] == "ontometa__artifact-1"
+    # 带本次提交时刻：同一个制品重跑得到新 run_id，不撞 Airflow 的 409
+    assert re.fullmatch(r"ontometa__artifact-1__\d{8}T\d{6}Z", receipt["dag_run_id"])
 
 
 def test_transform_reconciliation_opens_projection_only_after_success(db):

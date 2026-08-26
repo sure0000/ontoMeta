@@ -230,15 +230,64 @@ def test_materialize_ignores_obsolete_model_fields():
     assert not {"target_table", "load_strategy", "partition_key", "refresh_cron"} & names
 
 
-def test_task_template_appends_supported_model_fields_without_overriding():
-    """额外有效字段可追加；骨架同名字段仍不能覆盖。"""
+def test_task_template_drops_every_model_added_field():
+    """建数任务的骨架就是全部字段：模型另给的一律丢弃，同名的也不能覆盖。
+
+    Spec 里没有第七个键可填，模型加出来的字段没有任何执行器会读——留着只会让人填一个
+    不生效的格子。
+    """
     form = _materialize_form(extra=[
         {"name": "target_database", "label": "模型想改的库", "type": "text"},
         {"name": "comment", "label": "备注", "type": "textarea"},
     ])
     by_name = {f["name"]: f for f in form["fields"]}
-    assert by_name["target_database"]["label"] == "目标数据库"
-    assert form["fields"][-1]["name"] == "comment"
+    assert by_name["target_database"]["label"] == "目标数据库"  # 骨架的那份为准
+    assert "comment" not in by_name
+
+
+def test_sync_form_has_exactly_one_target_warehouse_field():
+    """回归：模型给骨架已有项换个名字再加一遍 → 同一件事被问两遍。
+
+    实测同步表单在「目标数仓」（target_datasource_id）之后又长出一个「目标数据源」
+    （target_datasource，候选写死 "doris"，没有任何执行器读它）。
+    """
+    from app.database import SessionLocal
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db,
+            ontology_id=onto_id,
+            args={
+                "title": "同步参数",
+                "task_kind": "sync",
+                "fields": [{
+                    "name": "target_datasource", "label": "目标数据源", "type": "select",
+                    "options": [{"label": "Doris（默认数仓）", "value": "doris"}],
+                    "required": True, "help": "选择同步目标数据源",
+                }],
+            },
+        )
+    assert is_error is False
+    labels = [f["label"] for f in result["form"]["fields"]]
+    assert labels.count("目标数仓") == 1
+    assert "目标数据源" not in labels
+    assert "target_datasource" not in {f["name"] for f in result["form"]["fields"]}
+
+
+def test_sync_load_strategy_carries_no_explainer():
+    """装载方式不带说明文字：三个选项名已经说清是哪种同步。"""
+    from app.database import SessionLocal
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db, ontology_id=onto_id, args={"title": "同步参数", "task_kind": "sync"},
+        )
+    assert is_error is False
+    mode = {f["name"]: f for f in result["form"]["fields"]}["mode"]
+    assert "help" not in mode
+    assert [o["label"] for o in mode["options"]] == ["全量覆盖", "增量同步", "CDC 变更捕获"]
 
 
 def test_transform_template_offers_cleansing_vocabulary():
@@ -416,13 +465,16 @@ def test_sync_template_recommends_ontology_and_keeps_all_objects_searchable():
     assert is_error is False
     field = {f["name"]: f for f in result["form"]["fields"]}["object_type"]
     assert field["label"] == "确认同步本体"
-    assert field["placeholder"] == "搜索中文名或技术名"
+    assert field["placeholder"] == "搜索对象名称"
     assert field["default"] == "sale_order"
     assert len(field["options"]) == 37
     sale = next(o for o in field["options"] if o["value"] == "sale_order")
-    assert "销售订单（sale_order）" in sale["label"]
-    assert "erp.public.sale_order" in sale["label"]
-    assert "ods_golden_" in sale["label"] and sale["label"].endswith("_sale_order")
+    # 选项文案只给业务名：技术名、物理源表、ODS 落点都是派生结果，不该摊在「选哪个
+    # 业务对象」这一步（它们在任务详情的源表/目标表里仍看得到）。
+    assert sale["label"] == "销售订单"
+    assert "sale_order" not in sale["label"]
+    assert "erp.public" not in sale["label"]
+    assert "ods_golden_" not in sale["label"]
     assert any(o["value"] == "sync_object_34" for o in field["options"])
     # 闭环向导：六环一次给全，人从第一步就看得见还剩几环。前三环在表单里收集
     # （phase=form），后三环等制品 dry-run 出来后在任务详情里确认（phase=artifact）——

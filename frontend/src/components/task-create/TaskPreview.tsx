@@ -1,6 +1,6 @@
 import { Alert, Descriptions, Space, Tag, Typography } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
-import { SPEC_FIELDS, type SpecFieldDef } from "../artifact-spec/specFields";
+import { SPEC_FIELDS, isFieldVisible, type SpecFieldDef } from "../artifact-spec/specFields";
 import { useSpecOptions } from "../artifact-spec/useSpecOptions";
 import { RANGE_STEP_KEYS } from "./TaskConfigForm";
 
@@ -94,9 +94,26 @@ export function TaskPreview({
 }: Props) {
   const hasEntities = selectedEntities.length > 0;
   // 参数步骤真正渲染过的字段（范围步骤接管的那几个不在这里重复展示）。
-  const configFields = (SPEC_FIELDS[kind] ?? []).filter((f) => !RANGE_STEP_KEYS.has(f.key));
+  // 与表单同一份可见性判定：预览里不该出现「当前装载方式根本用不到、也不会提交」的字段，
+  // 否则人在最后一步确认的是一份与实际提交不一致的清单。
+  const configFields = (SPEC_FIELDS[kind] ?? []).filter(
+    (f) => !RANGE_STEP_KEYS.has(f.key) && isFieldVisible(f, specData),
+  );
   const shownFields = configFields.filter((f) => filled(specData, f.key));
   const missingRequired = configFields.filter((f) => f.required && !filled(specData, f.key));
+  /**
+   * 作用范围里的实体存的是技术名（对象 name / 业务逻辑 id）。最后这一步是给人核对的，
+   * 摆一个 `customer_group`（聚合任务更是一串 uuid）等于让人对着 id 点确认——
+   * 用与「数据范围」那一步同一份候选表换回业务名。
+   */
+  const entitySource = kind === "metric" ? "businessLogics" : "objectTypes";
+  const { options: entityOptions } = useSpecOptions(
+    { kind: entitySource },
+    ontologyId,
+    {},
+  );
+  const entityLabel = (value: string): string =>
+    entityOptions.find((o) => o.value === value)?.label ?? value;
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -114,8 +131,10 @@ export function TaskPreview({
         <Descriptions.Item label="任务类型">
           <Tag color="blue">{KIND_LABEL[kind]}</Tag>
         </Descriptions.Item>
+        {/* 留空时后端按 Spec 派生（如「同步 · 客户分组 → 数仓 ODS」），不是本体名——
+            此前这里回填本体名，等于在最后一步告诉人任务会叫「erpnext v1」。 */}
         <Descriptions.Item label="任务名称">
-          {taskName.trim() || ontologyName || "（自动生成）"}
+          {taskName.trim() || "（按配置自动命名）"}
         </Descriptions.Item>
         <Descriptions.Item label="本体">{ontologyName || "未选择"}</Descriptions.Item>
         <Descriptions.Item label="执行操作">{KIND_ACTION[kind]}</Descriptions.Item>
@@ -128,7 +147,7 @@ export function TaskPreview({
               {kind === "materialize" && <Text>已选择 {selectedEntities.length} 个实体</Text>}
               <div style={{ maxHeight: 120, overflow: "auto" }}>
                 {selectedEntities.map((e) => (
-                  <Tag key={e}>{e}</Tag>
+                  <Tag key={e}>{entityLabel(e)}</Tag>
                 ))}
               </div>
             </Space>

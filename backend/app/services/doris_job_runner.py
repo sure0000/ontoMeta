@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.connectors.airflow import AirflowClient, AirflowError
+from app.connectors.airflow import AirflowClient, AirflowError, build_run_id
 from app.services.doris_sql_dag_builder import build_doris_sql_dag
 from app.services.settings_service import SettingsService
 
@@ -87,7 +87,7 @@ def run_doris_sql(
     client = AirflowClient(
         airflow.endpoint, username=airflow.username, password=airflow.password
     )
-    run_id = f"ontometa__{artifact_id}"
+    run_id = build_run_id(artifact_id)
     error: str | None = None
     triggered: dict[str, Any] = {}
     try:

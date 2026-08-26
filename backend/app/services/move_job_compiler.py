@@ -66,6 +66,7 @@ def compile_move_task(
     *,
     engine: str,
     checkpoint_dir: str | None = None,
+    target_benodes: bool = False,
 ) -> FlinkSqlTask:
     """一个搬运 JobSpec → 一个 FlinkSqlTask。
 
@@ -74,6 +75,8 @@ def compile_move_task(
         engine: 目标引擎（hive/doris/postgres…），决定目标列类型与 sink 连接器。
         checkpoint_dir: CDC 作业的 checkpoint 目录（``file://…``）；full/incremental 忽略。
             新 incremental 契约使用持久化水位的有界 batch；历史无水位契约保留 CDC 兼容重放。
+        target_benodes: 目标 Doris 是否已在设置页配了 BE 地址。配了才在 sink 上发
+            ``benodes``（部署事实由调用方查，planner/编译器不查库）。
 
     Returns:
         FlinkSqlTask：task_id = 作业名；sql = 完整 Flink SQL；env = 两端凭据占位符表达式；
@@ -98,7 +101,7 @@ def compile_move_task(
         source_table=source_table,
         target_table=target_table,
         source=FlinkEndpoint(job.source.alias, job.source.platform),
-        target=FlinkEndpoint(job.target.alias, job.target.platform),
+        target=FlinkEndpoint(job.target.alias, job.target.platform, benodes=target_benodes),
         target_engine=engine,
         mode=effective_mode,
         column_map=column_map,

@@ -192,6 +192,26 @@ def test_source_table_uses_physical_types_not_adapter():
     # 两者不同 → 生成 SELECT 时必须 CAST（见 build_flink_etl_input）
 
 
+def test_source_type_ignores_semantic_flag():
+    """语义类型不参与**源端**声明：flag 的物理类型是 TINYINT，驱动给的是 Integer。
+
+    ``is_group`` 语义是 flag、物理是 ``TINYINT(4)``。把语义搬到源端，源表就声明成
+    BOOLEAN，作业提交得进集群、运行期才炸
+    ``ClassCastException: Integer cannot be cast to Boolean``——错误不在提交回执里，
+    要翻 Flink 作业的 exceptions 才看得见。语义只决定这列在数仓里建成什么。
+    """
+    from app.services.flink_sql_generator import source_flink_type, target_flink_type
+    from app.warehouse import LogicalColumn
+
+    flag = LogicalColumn("is_group", "TINYINT(4)", "flag")
+    assert source_flink_type(flag) == "INT"                     # 源端＝物理
+    assert target_flink_type(flag, "doris") == "BOOLEAN"        # 目标端＝语义经 Adapter
+
+    # 物理本来就是布尔的列，源端照旧是 BOOLEAN（去掉语义不等于一律不认布尔）
+    real_bool = LogicalColumn("is_active", "BOOLEAN", "flag")
+    assert source_flink_type(real_bool) == "BOOLEAN"
+
+
 def test_flink_type_mirrors_the_target_engine_adapter():
     """目标端的列类型以 Dialect Adapter 的产物为准——数仓里那一列实际就是这个类型。
 
@@ -305,6 +325,34 @@ def test_generate_move_sql_is_idempotent():
         source=_hive("erp"), target=_hive("dw"), target_engine="hive", mode="full",
     )
     assert generate_move_sql(**kwargs) == generate_move_sql(**kwargs)
+
+
+def test_move_sql_source_ddl_and_projection_agree_on_flag_columns():
+    """源表 DDL 与投影必须同口径：flag 列源端声明 INT、投影里才 CAST 成 BOOLEAN。
+
+    两条路径各算各的时，产物会自相矛盾——源表写 ``is_group BOOLEAN``、投影却写
+    ``CAST(is_group AS BOOLEAN)``。SQL 提交得进集群，运行期 MySQL 驱动对 tinyint(4)
+    返回 Integer，在 TaskManager 里炸 ``Integer cannot be cast to Boolean``，而 Airflow
+    只看得到一句 "Failed to wait job finish"。
+    """
+    flag_src = LogicalTable(
+        name="src_customer_group", database=None, layer="ods",
+        columns=(LogicalColumn("is_group", "TINYINT(4)", "flag", "是否为分组节点"),),
+    )
+    flag_tgt = LogicalTable(
+        name="ods_customer_group", database="ods", layer="ods",
+        columns=(LogicalColumn("is_group", "TINYINT(4)", "flag", "是否为分组节点"),),
+    )
+    sql = generate_move_sql(
+        source_table=flag_src, target_table=flag_tgt,
+        source=FlinkEndpoint(alias="erp", platform="mariadb"),
+        target=FlinkEndpoint(alias="dw", platform="doris"),
+        target_engine="doris", mode="full",
+    )
+    source_ddl, _, rest = sql.partition("-- 目标表")
+    assert "`is_group` INT" in source_ddl        # 源端＝驱动会返回的类型
+    assert "`is_group` BOOLEAN" in rest          # 目标端＝数仓里的类型
+    assert "CAST(`is_group` AS BOOLEAN)" in rest  # 差一档就得 CAST
 
 
 def _pg(alias: str) -> FlinkEndpoint:

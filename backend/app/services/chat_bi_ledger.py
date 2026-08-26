@@ -24,6 +24,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.agent import GovernanceArtifact
 from app.models.chat_bi import ChatBiConversation, ChatBiConversationTask
 from app.models.chat_bi_ledger import (
     NODE_SEQUENCE,
@@ -309,8 +310,53 @@ def build_closure(
         "reached_count": sum(1 for n in nodes if n["reached"]),
         "total_count": len(NODE_SEQUENCE),
         "dangling": _detect_dangling(by_node),
+        "tasks": _conversation_tasks(db, conversation_id),
         "records": records if include_records else [],
     }
+
+
+def _conversation_tasks(db: Session, conversation_id: str) -> list[dict]:
+    """本会话催生的任务（治理制品），最近的在前。
+
+    闭环卡靠这份清单给出**重新进入某一环的入口**。此前后三环只能从"刚提交完那一下"
+    弹出的抽屉里确认，制品 id 只活在组件的 useState 里——人不小心关掉窗口（或刷新页面），
+    这条任务就在对话里彻底失联，方案/执行/结果三环再也走不到。而 (会话, 制品) 的关联
+    本来就落了库（``draft-confirmed`` 建完草稿即 ``link_conversation_task``），缺的只是
+    读回来的通道。
+
+    照本模块的既有姿态：读失败给空列表，绝不连累闭环本身。
+    """
+    try:
+        rows = (
+            db.query(ChatBiConversationTask, GovernanceArtifact)
+            .outerjoin(
+                GovernanceArtifact,
+                GovernanceArtifact.id == ChatBiConversationTask.artifact_id,
+            )
+            .filter(ChatBiConversationTask.conversation_id == conversation_id)
+            .order_by(ChatBiConversationTask.created_at.desc())
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("conversation tasks lookup failed: %s", exc)
+        return []
+    tasks: list[dict] = []
+    seen: set[str] = set()
+    for link, artifact in rows:
+        # 同一条制品可能被关联多次（重复提交/任务链推进），只留最近的一条。
+        if link.artifact_id in seen:
+            continue
+        seen.add(link.artifact_id)
+        tasks.append(
+            {
+                "artifact_id": link.artifact_id,
+                "kind": (artifact.kind if artifact else None) or link.kind,
+                # 制品已被删除时退回意图文本：给个能认出来的说法，好过一串 uuid。
+                "name": (artifact.name if artifact else None) or link.intent or link.artifact_id,
+                "status": artifact.status if artifact else None,
+            }
+        )
+    return tasks
 
 
 def _detect_dangling(by_node: dict[str, list[dict]]) -> list[str]:

@@ -1365,10 +1365,21 @@ export const api = {
     request<{ default: string; engines: { name: string; implemented: boolean }[] }>(
       "/api/warehouse/engines",
     ),
-  listOntologyProperties: (ontologyId: string) =>
-    request<{ name: string; display_name: string; object_type_name: string }[]>(
-      `/api/ontologies/${ontologyId}/properties`,
-    ),
+  /**
+   * 本体字段候选。`objectType` 只列那一个对象的字段——同步的主键/增量字段/sequence 列
+   * 必须是所选那张表上的列，跨对象混列会选到根本不存在于目标表的字段。
+   */
+  listOntologyProperties: (ontologyId: string, objectType?: string) =>
+    request<
+      {
+        name: string;
+        display_name: string;
+        object_type_name: string;
+        data_type?: string | null;
+        semantic_type?: string | null;
+        is_identity?: boolean;
+      }[]
+    >(`/api/ontologies/${ontologyId}/properties${buildQuery({ object_type: objectType })}`),
 
   /**
    * 按任务类型现取一张六环确认表单（字段骨架 + 真实候选 + 本次 confirmation_id）。

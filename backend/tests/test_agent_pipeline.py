@@ -784,6 +784,93 @@ def test_reconcile_running_dagrun_keeps_executing(monkeypatch):
                 assert artifact.status == ArtifactStatus.EXECUTING.value
 
 
+def test_reconcile_missing_dagrun_is_judged_failed(monkeypatch):
+    """Airflow 上查无此 DagRun（被清理/被删）→ 改判失败，不留在 executing。
+
+    对账读不到状态就什么都不改的话，制品会**永久**停在 executing：那个状态既不能
+    重新校验（"executing 状态的制品不可重新校验"）也不能再确认，界面上的任务就此
+    定死，只能改库救。而 404 与网络抖动不同——那次运行不会再出现了。
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.connectors.airflow import AirflowError
+    from app.models.agent import ArtifactStatus, GovernanceArtifact
+    from app.services.agent_pipeline import AgentPipelineService
+
+    with SessionLocal() as db:
+        artifact = GovernanceArtifact(
+            kind="materialize",
+            name="test-reconcile-missing-run",
+            status=ArtifactStatus.EXECUTING.value,
+            execution_receipt_json='{"execute_mode": "orchestrated", "dag_id": "dag3", '
+            '"dag_run_id": "run3", "batches": [{"dag_id": "dag3", "dag_run_id": "run3"}]}',
+        )
+        db.add(artifact)
+        db.commit()
+        artifact_id = artifact.id
+
+    mock_client = MagicMock()
+    mock_client.get_dag_run.side_effect = AirflowError("get_dag_run", "HTTP 404 not found")
+    mock_rt = MagicMock()
+    mock_rt.available = True
+
+    with patch("app.services.settings_service.SettingsService") as mock_settings_cls:
+        mock_settings_cls.return_value.get_airflow_runtime.return_value = mock_rt
+        with patch("app.connectors.airflow.AirflowClient", return_value=mock_client):
+            svc = AgentPipelineService()
+            with SessionLocal() as db:
+                artifact = svc.get(db, artifact_id)
+                assert artifact is not None
+                assert artifact.status == ArtifactStatus.FAILED.value
+
+
+def test_reconcile_transient_airflow_error_keeps_executing(monkeypatch):
+    """问不到 ≠ 没有：网络/鉴权失败保持未知，下次再对，不冤枉判失败。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.connectors.airflow import AirflowError
+    from app.models.agent import ArtifactStatus, GovernanceArtifact
+    from app.services.agent_pipeline import AgentPipelineService
+
+    with SessionLocal() as db:
+        artifact = GovernanceArtifact(
+            kind="materialize",
+            name="test-reconcile-transient",
+            status=ArtifactStatus.EXECUTING.value,
+            execution_receipt_json='{"execute_mode": "orchestrated", "dag_id": "dag4", '
+            '"dag_run_id": "run4", "batches": [{"dag_id": "dag4", "dag_run_id": "run4"}]}',
+        )
+        db.add(artifact)
+        db.commit()
+        artifact_id = artifact.id
+
+    mock_client = MagicMock()
+    mock_client.get_dag_run.side_effect = AirflowError("get_dag_run", "Connection refused")
+    mock_rt = MagicMock()
+    mock_rt.available = True
+
+    with patch("app.services.settings_service.SettingsService") as mock_settings_cls:
+        mock_settings_cls.return_value.get_airflow_runtime.return_value = mock_rt
+        with patch("app.connectors.airflow.AirflowClient", return_value=mock_client):
+            svc = AgentPipelineService()
+            with SessionLocal() as db:
+                artifact = svc.get(db, artifact_id)
+                assert artifact is not None
+                assert artifact.status == ArtifactStatus.EXECUTING.value
+
+
+def test_run_id_differs_between_executions():
+    """同一个制品的两次执行拿到不同 run_id——否则 Airflow 回 409，失败任务永远重试不了。"""
+    from app.connectors.airflow import build_run_id
+
+    first = build_run_id("artifact-1", "manual", stamp="20260826T041500Z")
+    second = build_run_id("artifact-1", "manual", stamp="20260826T041501Z")
+    assert first != second
+    assert first.startswith("ontometa__artifact-1__manual__")
+    # 没有制品 id 的手工提交也要能区分两次
+    assert build_run_id(None, stamp="20260826T041500Z") == "ontometa__manual__20260826T041500Z"
+
+
 def test_reconcile_sync_empty_target_is_successful(monkeypatch):
     """Airflow success 且目标表可查询时，零行是合法同步结果。"""
     from unittest.mock import MagicMock, patch

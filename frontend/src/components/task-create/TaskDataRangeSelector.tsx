@@ -226,27 +226,33 @@ export function TaskDataRangeSelector({
     );
   }
 
+  // 级联本身的第一层就是本体：同步/加工/聚合不再单独摆一个本体下拉。
+  // 此前两者并存且那个下拉是 disabled 的，而级联又只在「已经选了本体」之后才渲染
+  // ——新建同步任务时第 2 步既选不了本体、也没有级联可点，向导在这里彻底走不下去。
+  const cascadePicksOntology = kind !== "materialize" && entityConfig !== undefined;
+
   return (
     <Form layout="vertical" style={{ maxWidth: 640 }}>
-      <Form.Item label="本体" required style={{ marginBottom: 16 }}>
-        <Select
-          placeholder="选择本体"
-          showSearch
-          allowClear
-          optionFilterProp="label"
-          value={ontologyId}
-          onChange={handleOntologyChange}
-          disabled={kind !== "materialize" && entityConfig !== undefined}
-          options={ontologies.map((o) => ({
-            value: o.id,
-            label: `${domainName(o.domain_context_id)} v${o.version}（${o.status}）`,
-          }))}
-        />
-      </Form.Item>
+      {!cascadePicksOntology && (
+        <Form.Item label="本体" required style={{ marginBottom: 16 }}>
+          <Select
+            placeholder="选择本体"
+            showSearch
+            allowClear
+            optionFilterProp="label"
+            value={ontologyId}
+            onChange={handleOntologyChange}
+            options={ontologies.map((o) => ({
+              value: o.id,
+              label: `${domainName(o.domain_context_id)} v${o.version}（${o.status}）`,
+            }))}
+          />
+        </Form.Item>
+      )}
 
-      {ontologyId && entityConfig && (
+      {entityConfig && (cascadePicksOntology || ontologyId) && (
         <Form.Item
-          label={entityConfig.label}
+          label={cascadePicksOntology ? `本体与${entityConfig.label}` : entityConfig.label}
           required={kind !== "materialize"}
           extra={kind === "materialize" ? "留空 = 该本体下全部实体" : undefined}
           style={{ marginBottom: 16 }}

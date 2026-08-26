@@ -64,6 +64,7 @@ def _make_handler(
     connection=200,
     sentinel_found=True,
     dag_list=(),
+    dag_filelocs=(),
     dags_folder=None,
 ):
     """按路由分派的 MockTransport handler。各路由的响应可逐个覆盖以造不同失败。"""
@@ -77,18 +78,26 @@ def _make_handler(
                 return httpx.Response(404)
             return httpx.Response(200, json={"servers": [{"url": f"/api/{openapi_version}"}]})
         if path == "/api/v1/config":
+            # **必须照抄真实的内容协商**：Airflow 按 Accept 决定回 JSON 还是 ini 文本。
+            # 此前这里无视 Accept 恒返 JSON，于是"客户端忘了发 Accept"这个真实故障
+            # （每个实例都被说成关掉了 expose_config）在测试里根本复现不出来。
+            if "application/json" not in request.headers.get("accept", ""):
+                return httpx.Response(200, text="[core]\ndags_folder = /opt/airflow/dags\n")
             if dags_folder is None:  # expose_config=False 的真实响应
                 return httpx.Response(403, text="config not exposed")
             return httpx.Response(200, json={"sections": [
                 {"name": "core", "options": [{"key": "dags_folder", "value": dags_folder}]}
             ]})
-        if path == "/api/v1/dags":  # ping_api / list_dag_ids（带版本前缀，不含 id）
+        if path == "/api/v1/dags":  # ping_api / list_dag_ids / list_dag_filelocs
+            entries = [{"dag_id": d} for d in dag_list]
+            for i, loc in enumerate(dag_filelocs):
+                if i < len(entries):
+                    entries[i]["fileloc"] = loc
+                else:
+                    entries.append({"dag_id": f"delivered{i}", "fileloc": loc})
             return httpx.Response(
                 ping,
-                json={
-                    "dags": [{"dag_id": d} for d in dag_list],
-                    "total_entries": len(dag_list),
-                },
+                json={"dags": entries, "total_entries": len(entries)},
             )
         if path.startswith("/api/v1/connections/"):
             return httpx.Response(connection, json={"connection_id": path.rsplit("/", 1)[-1]})
@@ -637,6 +646,71 @@ def test_expose_config_off_falls_back_to_ssh_reading(monkeypatch, tmp_path):
     assert item.status == pf.WARN and item.blocking is False
     assert "/srv/airflow/dags" in item.detail and "SSH" in item.detail
     assert report.ok is True  # 只提醒，不阻断
+
+
+def test_dag_dir_mismatch_passes_when_instance_scanned_our_dags(monkeypatch, tmp_path):
+    """路径对不上但实例已解析到本目录投出的 DAG → 判通过，别留常驻黄灯。
+
+    容器部署下两个路径**必然**不同（容器内 /opt/airflow/dags vs 宿主机挂载目录），
+    按字符串对账永远不一致；一条每次自检都亮的提醒等于没有提醒。实例回报的 fileloc
+    落在 <dags_folder>/ontometa/ 下就是等价的实证——比让人去查挂载表可靠。
+    """
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(
+            dags_folder="/opt/airflow/dags",
+            dag_filelocs=("/opt/airflow/dags/ontometa/a1b2/ontometa_flink_a1b2__manual.py",),
+        ),
+        runtime_over={"dags_dir": "/home/xuyc/airflow-docker/dags"},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    item = _by_key(report)["dag_dir_matches_instance"]
+    assert item.status == pf.PASS and item.blocking is False
+    assert "容器挂载" in item.detail  # 说清凭什么判它等价
+
+
+def test_dag_dir_mismatch_ignores_dags_outside_our_subdir(monkeypatch, tmp_path):
+    """别人的 DAG 不能给我们作证：只认 <dags_folder>/ontometa/ 下的 fileloc。"""
+    db = _install(
+        monkeypatch, tmp_path,
+        _make_handler(
+            dags_folder="/opt/airflow/dags",
+            dag_filelocs=("/opt/airflow/dags/someone_else/etl.py",),
+        ),
+        runtime_over={"dags_dir": "/home/xuyc/airflow-docker/dags"},
+    )
+    report = pf.run_preflight(db, "o1", target_datasource_id="ds1", engine="hive")
+    assert _by_key(report)["dag_dir_matches_instance"].status == pf.WARN
+
+
+def test_config_read_sends_json_accept_header(monkeypatch, tmp_path):
+    """回归：读 /config 必须发 ``Accept: application/json``。
+
+    真实故障——客户端只发 Content-Type，httpx 补的默认 ``Accept: */*`` 让 Airflow
+    按内容协商回 ini 文本，``response.json()`` 抛错被吞成 None，于是**每个**实例都被
+    自检说成「关掉了 expose_config」，哪怕它开着。这条钉住那个头。
+    """
+    handler = _make_handler(dags_folder="/opt/airflow/dags")
+    client = AirflowClient(
+        "http://airflow:8080",
+        username="admin",
+        password="admin",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert client.get_config_option("core", "dags_folder") == "/opt/airflow/dags"
+
+    # 把头拿掉就该退回「读不到」——证明上面那条断言真的是这个头在起作用，
+    # 而不是替身无论如何都回 JSON。
+    monkeypatch.setattr(
+        AirflowClient, "_headers", lambda self: {"Content-Type": "application/json"}
+    )
+    blind = AirflowClient(
+        "http://airflow:8080",
+        username="admin",
+        password="admin",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert blind.get_config_option("core", "dags_folder") is None
 
 
 def test_ssh_reading_ignores_cli_noise(monkeypatch, tmp_path):

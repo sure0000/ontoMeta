@@ -68,18 +68,34 @@ class RelView:
 DEFAULT_REF_COLUMN = "id"
 
 
+#: 强到可以据以发强制约束的身份命名约定。除此之外都只是「像个 id 的列」。
+#: 顺序即优先级，``primary_key_name`` 与 ``primary_key_is_confident`` 共用这一份，
+#: 二者**必须在说同一列**——见下面 primary_key_name 的说明。
+_CONFIDENT_PK_NAMES = ("{obj}_id", "id")
+
+
 def primary_key_name(
     obj_name: str, prop_names, identifier_names
 ) -> str | None:
-    """身份属性：优先 ``<对象名>_id``，其次首个标识语义字段（字典序，保证确定性）。"""
-    if f"{obj_name}_id" in set(prop_names):
-        return f"{obj_name}_id"
+    """身份属性：优先命名约定（``<对象名>_id`` → ``id``），其次首个标识语义字段。
+
+    **``id`` 必须在"首个标识字段"之前**：两个函数曾对不上口径——``primary_key_is_confident``
+    看到 ``id`` 就说"有把握"，而这里在没有 ``<对象名>_id`` 时直接跳到字典序第一个标识字段。
+    真实 Odoo 的 ``sale_order`` 正是这个形状：有 ``id``（真主键），另有 20 个 ``*_id`` 外键列
+    全被标成 identifier 语义。于是「有把握」的是 ``id``，返回的却是 ``analytic_account_id``
+    ——一个大量为空的外键。据此建出的 ODS 表主键错位，装不进自己的源数据
+    （同类事故见记忆 inferred-facts-not-enforced）。
+
+    命名约定都没命中时才退回标识字段，且此时 ``primary_key_is_confident`` 为 False：
+    语义导航/去重照用，但不据以发强制约束。
+    """
+    names = set(prop_names)
+    for pattern in _CONFIDENT_PK_NAMES:
+        candidate = pattern.format(obj=obj_name)
+        if candidate in names:
+            return candidate
     identifiers = sorted(identifier_names)
     return identifiers[0] if identifiers else None
-
-
-#: 强到可以据以发强制约束的身份命名约定。除此之外都只是「像个 id 的列」。
-_CONFIDENT_PK_NAMES = ("{obj}_id", "id")
 
 
 def primary_key_is_confident(obj_name: str, prop_names, identifier_names) -> bool:

@@ -26,6 +26,7 @@ type DorisWarehouseFormValues = {
   username?: string;
   password?: string;
   fenodes: string;
+  benodes: string;
   connect_timeout_seconds: number;
   query_timeout_seconds: number;
   ssl_enabled: boolean;
@@ -84,6 +85,7 @@ export function useDorisWarehouseController() {
         username: currentSource?.username ?? "",
         password: "",
         fenodes: dorisConfig?.fenodes?.join("\n") ?? "",
+        benodes: dorisConfig?.benodes?.join("\n") ?? "",
         connect_timeout_seconds: dorisConfig?.connect_timeout_seconds ?? 10,
         query_timeout_seconds: dorisConfig?.query_timeout_seconds ?? 15,
         ssl_enabled: dorisConfig?.ssl_enabled ?? false,
@@ -110,6 +112,10 @@ export function useDorisWarehouseController() {
     }
 
     const fenodes = values.fenodes
+      .split(/[\n,]/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const benodes = (values.benodes ?? "")
       .split(/[\n,]/)
       .map((value) => value.trim())
       .filter(Boolean);
@@ -146,6 +152,7 @@ export function useDorisWarehouseController() {
         query_timeout_seconds: values.query_timeout_seconds,
         ssl_enabled: values.ssl_enabled,
         fenodes,
+        benodes,
         reader_dsn_secret_ref: dsn,
       });
 
@@ -338,6 +345,19 @@ export function DorisWarehouseDrawer({ controller }: { controller: DorisWarehous
             rows={3}
             placeholder={"fe-1:8030\nfe-2:8030"}
             autoSize={{ minRows: 2, maxRows: 5 }}
+          />
+        </Form.Item>
+
+        <Form.Item
+          name="benodes"
+          label="BE HTTP 地址"
+          tooltip="Doris BE 的 HTTP 地址。留空时由 FE 告诉 Flink BE 在哪；容器化/单机 Doris 的 BE 常向 FE 登记成 127.0.0.1，集群外的 Flink 照着连会失败，此时在这里填可路由的地址。"
+          extra="选填。每行一个，通常是 8040 端口；不确定就留空。"
+        >
+          <Input.TextArea
+            rows={2}
+            placeholder={"be-1:8040\nbe-2:8040"}
+            autoSize={{ minRows: 1, maxRows: 4 }}
           />
         </Form.Item>
 

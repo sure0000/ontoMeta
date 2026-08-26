@@ -72,6 +72,7 @@ def validate_spec(
     standard = active_standard(db)
     issues.extend(_check_engines(db, kind, spec))
     issues.extend(_check_flink_params(spec))
+    issues.extend(_check_schedule(spec))
     issues.extend(_check_ontology_refs(db, spec, ontology_id))
     issues.extend(_check_required_metadata(kind, spec, standard))
     issues.extend(_check_standard(kind, spec, standard))
@@ -164,6 +165,33 @@ def _check_flink_params(spec: dict[str, Any]) -> list[ValidationIssue]:
             )
         ]
     return []
+
+
+def _check_schedule(spec: dict[str, Any]) -> list[ValidationIssue]:
+    """调度表达式的形态校验（``schedule`` / ``refresh_cron``）。
+
+    与 Flink 参数同理：这两个值会逐字写进生成的 DAG。写错的 cron 让 Airflow **import
+    不了这条 DAG**——而 import 失败在 ontoMeta 这边看不见（回执 ok、状态"已提交"），
+    表却永远不更新。故在闸门上拦，说的是"星期字段只能是 0-7"。
+    """
+    from app.services.cron_spec import CronError, normalize_cron
+
+    issues: list[ValidationIssue] = []
+    for key in ("schedule", "refresh_cron"):
+        if spec.get(key) in (None, ""):
+            continue
+        try:
+            normalize_cron(str(spec[key]))
+        except CronError as exc:
+            issues.append(
+                ValidationIssue(
+                    code="schedule_invalid",
+                    message=f"调度频率（{key}）：{exc}",
+                    entity_type="artifact",
+                    entity_name=key,
+                )
+            )
+    return issues
 
 
 def _check_engines(db: Session, kind: str, spec: dict[str, Any]) -> list[ValidationIssue]:

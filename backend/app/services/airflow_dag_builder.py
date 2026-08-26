@@ -78,6 +78,11 @@ def _plan_staging(plan, *, engine: str, token: str, enabled: bool) -> _Staging:
         staging.ddl.append(
             _as_single_statement(adapter.render_create_staging(table, token))
         )
+        # 建完就清空：staging 名跨运行复用，上一次搬完但切换失败的行还在里面，
+        # 不清空这次全量就是在旧数据上再追加一份（见 render_truncate_staging）。
+        staging.ddl.append(
+            _as_single_statement(adapter.render_truncate_staging(table, token))
+        )
         staging.swaps[job.name] = [
             _as_single_statement(s) for s in adapter.render_swap(table, token)
         ]

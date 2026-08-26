@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.database import SessionLocal
@@ -387,8 +389,9 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     assert receipt["emit"] == "dml"
     assert receipt["ok"] is True
     assert receipt["state"] == "queued"
-    # run_id = 制品 id + 批次后缀（无 cron → manual）：每个 DAG 一个确定性 run_id，重复提交幂等
-    assert receipt["dag_run_id"] == "ontometa__artifact-1__manual"
+    # run_id = 制品 id + 批次后缀（无 cron → manual）+ 本次提交时刻。带时刻是因为
+    # 重跑失败任务必须是新的一次运行：run_id 只由制品 id 定时，Airflow 回 409。
+    assert re.fullmatch(r"ontometa__artifact-1__manual__\d{8}T\d{6}Z", receipt["dag_run_id"])
     assert triggered["run_id"] == receipt["dag_run_id"]
     assert triggered["unpaused"] == receipt["dag_id"]
     # M16：无 cron 的表进单个 __manual DAG（本例 2 表未超上限，不分批）
@@ -892,6 +895,53 @@ def test_sync_ensures_target_table_before_dml(tmp_path, monkeypatch):
     formal = next(i for i, sql in enumerate(ddl) if "customer_id" in sql)
     staging = next(i for i, sql in enumerate(ddl) if " LIKE " in sql.upper())
     assert formal < staging, "正式目标表必须先于 staging 表创建"
+
+
+def test_ddl_pins_replication_to_the_targets_real_backend_count(tmp_path, monkeypatch):
+    """建表副本数按目标实例实测的 BE 数写死。
+
+    回归：单 BE 的 Doris 上不写 ``replication_num`` 就取 FE 默认 3，``create_tables``
+    整条被拒（``replication num is 3, available backend num is 1``），一行数据都搬不进去。
+    """
+    ids = _seed("replnum")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    monkeypatch.setattr(data_app_executor, "storage_node_count", lambda dsn: 1)
+
+    with SessionLocal() as db:
+        materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="doris",
+            load_strategy="full",
+            artifact_id="art-replnum",
+        )
+
+    ddl = [s for spec in _dag_specs(tmp_path) for s in spec["warehouse_ddl"]]
+    formal = [s for s in ddl if "customer_id" in s and " LIKE " not in s.upper()]
+    assert formal, ddl
+    assert all('"replication_num" = "1"' in s for s in formal), formal
+
+
+def test_ddl_keeps_engine_default_when_backends_cannot_be_probed(tmp_path, monkeypatch):
+    """探不到 BE 数就不写这个属性：宁可沿用引擎默认，也不拿猜的数字建表。"""
+    ids = _seed("replprobe")
+    _enable_airflow(tmp_path, monkeypatch, triggered={})
+    monkeypatch.setattr(data_app_executor, "storage_node_count", lambda dsn: None)
+
+    with SessionLocal() as db:
+        materialization_runner.run_sync(
+            db,
+            ids["ontology_id"],
+            target_datasource_id=ids["datasource_id"],
+            engine="doris",
+            load_strategy="full",
+            artifact_id="art-replprobe",
+        )
+
+    ddl = [s for spec in _dag_specs(tmp_path) for s in spec["warehouse_ddl"]]
+    assert ddl
+    assert not any("replication_num" in s for s in ddl)
 
 
 def test_sync_without_movable_objects_raises(tmp_path, monkeypatch):

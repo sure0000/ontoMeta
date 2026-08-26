@@ -82,6 +82,11 @@ class DorisWarehouseConfig(Base):
     query_timeout_seconds: Mapped[int] = mapped_column(Integer, default=15, server_default="15")
     ssl_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     fenodes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # BE 的 HTTP 地址（``host:8040``）。留空＝由 FE 告诉 Flink 连接器 BE 在哪，这在
+    # 单机/容器化 Doris 上会拿到 BE 自报的 127.0.0.1，集群外的 Flink 连不上
+    # （``Connect to 127.0.0.1:8040 failed``，报在作业运行期而非提交期）。填了就直接
+    # 下发给连接器的 benodes，不再问 FE。
+    benodes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     airflow_ddl_conn_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     airflow_etl_conn_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     airflow_flink_conn_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

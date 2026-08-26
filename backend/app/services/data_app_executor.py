@@ -436,6 +436,38 @@ def list_databases(dsn: str) -> list[str]:
     return sorted(n for n in names if n and n.lower() not in _SYSTEM_SCHEMAS)
 
 
+def storage_node_count(dsn: str) -> int | None:
+    """目标仓上**存活的存储节点数**（Doris / StarRocks 的 BE）。读不到返回 None。
+
+    建表的副本数不能超过存活 BE 数，否则 Doris 的 FE 直接拒绝整条 DDL：
+
+        errCode = 2, detailMessage = replication num should be less than the number of
+        available backends. replication num is 3, available backend num is 1
+
+    「这套实例有几个 BE」只有实例自己知道，既不在本体里也不在设置页里，故实测。
+    **从不抛异常**：读不到就是读不到（引擎没有 SHOW BACKENDS、权限不足、连不上），
+    调用方据此沿用引擎默认，而不是拿一个猜的数字去建表。
+    """
+    try:
+        engine = _engine_or_error(dsn)
+        with engine.connect() as conn:
+            rows = conn.exec_driver_sql("SHOW BACKENDS")
+            keys = [str(k) for k in (rows.keys() or [])]
+            fetched = rows.fetchall()
+    except Exception as exc:  # noqa: BLE001 —— 探测失败不该影响主流程
+        logger.info("SHOW BACKENDS unavailable on target (%s): %s", _backend_of(dsn), exc)
+        return None
+    if not fetched:
+        return None
+    # Alive 列在 Doris/StarRocks 各版本里大小写不一；找不到就按行数算（能列出来的
+    # 都当在线），总比返回 None 让副本数继续走默认 3 强。
+    alive_idx = next((i for i, k in enumerate(keys) if k.lower() == "alive"), None)
+    if alive_idx is None:
+        return len(fetched)
+    alive = sum(1 for row in fetched if str(row[alive_idx]).strip().lower() in {"true", "1"})
+    return alive or None
+
+
 def list_tables(dsn: str, database: str | None = None) -> list[str]:
     """列出某个库下的表名（含视图），供物化时推荐表名与提示「已存在」。"""
     engine = _engine_or_error(dsn)

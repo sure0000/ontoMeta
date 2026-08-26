@@ -159,6 +159,67 @@ def test_doris_ingestion_table_enables_mow_and_sequence():
     assert '"function_column.sequence_col" = "modified_at"' in ddl
 
 
+# ---------- 副本数：DDL 里那个由「实例有多大」决定的值 ----------
+
+
+def _ods_table() -> LogicalTable:
+    return LogicalTable(
+        name="ods_customer", database="ods", layer="ods",
+        columns=(
+            LogicalColumn("customer_id", "bigint", "identifier"),
+            LogicalColumn("modified_at", "timestamp", "datetime"),
+        ),
+        constraints=(LogicalConstraint("primary_key", ("customer_id",)),),
+    )
+
+
+def test_doris_single_backend_pins_replication_to_one():
+    """单 BE 实例：不写 replication_num 时 Doris 取默认 3，整条 DDL 被 FE 拒——
+
+        errCode = 2, detailMessage = replication num should be less than the number of
+        available backends. replication num is 3, available backend num is 1
+    """
+    adapter = get_adapter("doris").for_storage_nodes(1)
+    for ddl in (
+        adapter.render_create_table(_ods_table()),
+        adapter.render_ingestion_table(_ods_table(), sequence_column="modified_at"),
+    ):
+        assert '"replication_num" = "1"' in ddl
+        # Doris 只接受一个 PROPERTIES 块。
+        assert ddl.count("PROPERTIES (") == 1
+        assert ddl.rstrip().endswith(";")
+
+
+def test_doris_replication_capped_at_three():
+    """BE 再多也封顶 3：多于 3 份副本不提高可用性，只多占存储。"""
+    ddl = get_adapter("doris").for_storage_nodes(9).render_create_table(_ods_table())
+    assert '"replication_num" = "3"' in ddl
+
+
+def test_doris_without_probe_keeps_engine_default():
+    """探不到 BE 数就不写这个属性——沿用引擎默认，不拿猜的数字建表。"""
+    adapter = get_adapter("doris")
+    for count in (None, 0, -1, "3"):
+        assert "replication_num" not in adapter.for_storage_nodes(count).render_create_table(
+            _ods_table()
+        )
+
+
+def test_for_storage_nodes_does_not_mutate_the_shared_adapter():
+    """注册表里的是共享单例：定制必须产出副本，否则一次同步会污染后续所有建表。"""
+    shared = get_adapter("doris")
+    shared.for_storage_nodes(1)
+    assert "replication_num" not in shared.render_create_table(_ods_table())
+    assert get_adapter("doris") is shared
+
+
+def test_other_engines_ignore_storage_nodes():
+    """副本数是 Doris 的建表知识；基类默认原样返回自身，其余引擎行为不变。"""
+    for engine in ("hive", "postgres", "clickhouse"):
+        adapter = get_adapter(engine)
+        assert adapter.for_storage_nodes(1) is adapter
+
+
 # ---------- Hive 类型映射 ----------
 
 

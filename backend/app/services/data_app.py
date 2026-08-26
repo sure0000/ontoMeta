@@ -315,9 +315,9 @@ class DataAppService:
             )
             db.add(config)
         for key, value in data.items():
-            if key == "fenodes":
+            if key in {"fenodes", "benodes"}:
                 value = _dumps(value)
-                key = "fenodes_json"
+                key = f"{key}_json"
             if key == "reader_dsn_secret_ref":
                 if not value:
                     continue  # blank means keep existing secret
@@ -344,6 +344,7 @@ class DataAppService:
     def serialize_doris_config(config: DorisWarehouseConfig) -> dict[str, Any]:
         out = {c.name: getattr(config, c.name) for c in config.__table__.columns}
         out["fenodes"] = _loads(out.pop("fenodes_json"), [])
+        out["benodes"] = _loads(out.pop("benodes_json", None), [])
         secret = out.pop("reader_dsn_secret_ref", None)
         out["reader_dsn_set"] = bool(secret)
         out["reader_dsn_hint"] = "已配置" if secret else None

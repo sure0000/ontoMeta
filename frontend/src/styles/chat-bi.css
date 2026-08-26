@@ -2047,6 +2047,45 @@
 .chatbi-closure-node--on .chatbi-closure-node-state {
   color: var(--om-success, #10b981);
 }
+/* 本会话任务行：重新进入后三环的入口（抽屉关掉后唯一的回去的路） */
+.chatbi-closure-tasks {
+  margin-top: 10px;
+  border-top: 1px solid var(--om-border, #e2e8f0);
+}
+.chatbi-closure-task {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+}
+.chatbi-closure-task + .chatbi-closure-task {
+  border-top: 1px dashed var(--om-border, #e2e8f0);
+}
+.chatbi-closure-task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.chatbi-closure-task-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--om-text-primary, #0f172a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chatbi-closure-task-hint {
+  font-size: 12px;
+  color: var(--om-text-tertiary, #94a3b8);
+}
+.chatbi-closure-task-more {
+  padding: 6px 0 0;
+  border-top: 1px dashed var(--om-border, #e2e8f0);
+  font-size: 12px;
+  color: var(--om-text-tertiary, #94a3b8);
+}
 .chatbi-closure-dangling {
   margin: 10px 0 0;
   padding-left: 18px;

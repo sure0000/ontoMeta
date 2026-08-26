@@ -476,8 +476,13 @@ class AgentPipelineService:
                     try:
                         run = client.get_dag_run(bid, brun)
                         states.append(run.get("state"))
-                    except Exception:  # noqa: BLE001
-                        states.append(None)  # 读不到 → 未知，不影响其他批
+                    except Exception as exc:  # noqa: BLE001
+                        # 404 ＝ Airflow 上确实没有这次运行（被清理/被删）。它永远不会
+                        # 再出现，当作失败改判——否则制品会永久停在 executing：对账读不到
+                        # 状态就什么都不改，而 executing 既不能重新校验也不能再确认，
+                        # 界面上那条任务就此定死，只能改库。
+                        # 其余异常（网络/鉴权）是「这次没问到」，保持未知、下次再对。
+                        states.append("failed" if "404" in str(exc) else None)
             finally:
                 client.close()
 

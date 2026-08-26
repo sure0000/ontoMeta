@@ -91,6 +91,38 @@ GovernanceArtifact Spec
 | transform | 对 ready Doris ODS Projection 生成并执行 Doris SQL 清洗 | 不直连业务源、不调用 Flink | `agents/executors/transform.py` |
 | metric | MetricCompiler(doris) 编译并执行 ADS 聚合/标签/规则 SQL | 不替用户发明口径、不调用 Flink | `agents/executors/metric.py` |
 
+### 2.1.1 单任务的调度频率（2026-08-26）
+
+四类任务里**只有 materialize 不带调度**（建表是幂等的一次性动作，挂 cron 只会每轮重复
+`CREATE`）。其余三类都在 Spec 里带自己的周期，与链级 `schedule_cron` 互不替代：
+
+| kind | Spec 键 | 生效路径 |
+|---|---|---|
+| sync | `refresh_cron` | `run_sync(refresh_cron=…)` → 写回契约 → `_cron_by_entity` → 一个 cron 一个 DAG |
+| transform | `schedule` | `run_doris_sql(schedule=…)` → DAG `schedule=` |
+| metric | `schedule` | 同上 |
+
+`sync.refresh_cron` 是补齐项：此前 Spec 里没有这个键，执行器读到的恒为 `None`，产出的
+搬运 DAG 一律 `schedule=None`（只能人点），想定时只能绕到物化弹窗里逐实体改契约。
+
+**cron 一律过形态校验**（`services/cron_spec.normalize_cron`，闸门里的 `schedule_invalid`）。
+理由与 Flink 参数相同：这些值逐字写进 DAG，写错会让 Airflow **import 不了**那条 DAG，
+而 import 失败在 ontoMeta 这边看不见——回执 ok、任务显示"已提交"，表却永远不更新。
+
+### 2.1.2 装载方式与它要的参数
+
+装载方式是三选一，**每一支要的参数都必须在同一张表单里填得完**，否则那个选项是死路：
+
+| mode | 必填 | 备注 |
+|---|---|---|
+| full | — | staging + 原子切换 |
+| incremental | `primary_keys` `incremental_column` `initial_watermark` | 水位之后由每轮成功值推进 |
+| cdc | `primary_keys` `sequence_column` `delete_policy` `flink_checkpoint_dir` | checkpoint 设置页配了全局默认就跟随 |
+
+主键/增量字段/sequence 列的候选**按所选对象收窄**（`GET /api/ontologies/{id}/properties?object_type=`）。
+命中 `<对象>_id` / `id` 约定的列会被预选为主键（`is_identity`），没命中就不给默认值——
+猜错主键会让重跑插出重复行。
+
 ### 2.2 统一执行通道
 
 - 调度器：Airflow；

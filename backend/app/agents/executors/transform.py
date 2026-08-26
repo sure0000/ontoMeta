@@ -25,8 +25,29 @@ from app.warehouse.policy import require_doris_datasource
 
 _generator = WarehouseGenerator()
 Quote = Callable[[str], str]
-_APPLIABLE = {"drop_null", "deduplicate"}
+
+#: 列级清洗算子：只作用于**落成字符串类型**的列，按本表顺序依次套用（trim 先于大小写）。
+#: 表达式必须回写别名（``TRIM(`a`) AS `a```），否则去重那层的外层 SELECT 找不到列名。
+_COLUMN_RULES: tuple[tuple[str, str], ...] = (
+    ("trim", "TRIM({expr})"),
+    ("uppercase", "UPPER({expr})"),
+    ("lowercase", "LOWER({expr})"),
+)
+#: 行级算子（过滤/去重），作用在整个 SELECT 体上。
+_ROW_RULES: frozenset[str] = frozenset({"drop_null", "deduplicate"})
+_APPLIABLE: frozenset[str] = _ROW_RULES | frozenset(code for code, _ in _COLUMN_RULES)
 _RANK_COLUMN = "__rn"
+#: Doris 的字符串类型前缀（``map_type`` 的产物）。判「这列该不该 TRIM」用**目标列
+#: 真实落成的类型**，而不是本体上那个可能为空的 data_type——两者不一致时以建表为准。
+_STRING_TYPE_PREFIXES = ("VARCHAR", "STRING", "CHAR", "TEXT")
+
+
+def _string_columns(table: LogicalTable, map_type: Callable[..., str]) -> tuple[str, ...]:
+    return tuple(
+        c.name
+        for c in table.columns
+        if str(map_type(c.data_type, c.semantic_type)).upper().startswith(_STRING_TYPE_PREFIXES)
+    )
 
 
 def _key_columns(table: LogicalTable | None) -> tuple[str, ...]:
@@ -70,17 +91,49 @@ def _deduplicate(
     )
 
 
-def _apply_rules(
-    select_body: str,
-    rules: list[str],
-    table: LogicalTable | None,
+def _projection(
+    table: LogicalTable,
+    column_rules: list[str],
+    string_cols: tuple[str, ...],
     quote: Quote,
+) -> str:
+    """SELECT 列表：字符串列按次序套上列级算子，并回写同名别名。"""
+    lines: list[str] = []
+    targets = set(string_cols)
+    for col in table.columns:
+        expr = quote(col.name)
+        if col.name in targets:
+            wrapped = expr
+            for code, template in _COLUMN_RULES:
+                if code in column_rules:
+                    wrapped = template.format(expr=wrapped)
+            if wrapped != expr:
+                expr = f"{wrapped} AS {quote(col.name)}"
+        lines.append(f"  {expr}")
+    return "SELECT\n" + ",\n".join(lines)
+
+
+def _apply_rules(
+    from_clause: str,
+    rules: list[str],
+    table: LogicalTable,
+    quote: Quote,
+    string_cols: tuple[str, ...] = (),
 ) -> tuple[str, list[str], list[str], list[dict[str, str]]]:
-    """Apply the deterministic cleansing rule closed set."""
+    """确定性清洗算子闭集 → 完整 SELECT 体。
+
+    列级算子（trim/大小写）改的是**投影**，行级算子（过滤/去重）包在其外层，故两者必须
+    出自同一份 ``applied`` 判定：先算出哪些真能应用，再据此渲染投影，避免出现「回执说
+    TRIM 了、SQL 里没有」这种假成功。
+    """
     keys = _key_columns(table)
     applied: list[str] = []
     unapplied: list[str] = []
     notes: list[dict[str, str]] = []
+    # 大写与小写互斥：两条都选等于让后一条覆盖前一条，静默按顺序生效就是「确认的是 A、
+    # 执行的是 B」。两条都不应用，并说清冲突。
+    case_conflict = "uppercase" in rules and "lowercase" in rules
+    column_codes = {code for code, _ in _COLUMN_RULES}
     for rule in rules:
         if rule not in _APPLIABLE:
             unapplied.append(rule)
@@ -90,13 +143,34 @@ def _apply_rules(
                 "rule": rule,
                 "detail": "本体未声明主键、也无必填字段，说不出该滤哪几列，规则未应用",
             })
+        elif case_conflict and rule in {"uppercase", "lowercase"}:
+            unapplied.append(rule)
+            notes.append({
+                "rule": rule,
+                "detail": "统一大写与统一小写互斥，两条都未应用；请只保留一条",
+            })
+        elif rule in column_codes and not string_cols:
+            unapplied.append(rule)
+            notes.append({
+                "rule": rule,
+                "detail": "目标表没有字符串类型的列，该算子无处可施，规则未应用",
+            })
         else:
             applied.append(rule)
+    for code, _template in _COLUMN_RULES:
+        if code in applied:
+            notes.append({
+                "rule": code,
+                "detail": f"作用于 {len(string_cols)} 个字符串列："
+                + "、".join(string_cols[:8])
+                + ("…" if len(string_cols) > 8 else ""),
+            })
+    select_body = _projection(table, applied, string_cols, quote) + f"\n{from_clause}"
     if "drop_null" in applied:
         select_body = _drop_null(select_body, keys, quote)
         notes.append({"rule": "drop_null", "detail": "过滤关键字段为空的行：" + "、".join(keys)})
     if "deduplicate" in applied:
-        if keys and table is not None:
+        if keys:
             select_body = _deduplicate(select_body, table, keys, quote)
             detail = "按 " + "、".join(keys) + " 去重" + (
                 f"，同键取 {table.partition_key} 最大的一行"
@@ -202,15 +276,13 @@ class TransformExecutor(Executor):
             table = self._logical_table(db, ontology.id, target, prefix)
             source = self._ods_source(db, ontology, obj, datasource_id)
 
-        q = adapter.quote_identifier
-        select_body = (
-            "SELECT\n"
-            + ",\n".join(f"  {q(c.name)}" for c in table.columns)
-            + f"\nFROM {adapter.quote_table_ref(source)}"
-        )
         rules = [str(r.get("rule")) for r in spec.get("cleansing_rules") or []]
         select_body, applied, unapplied, notes = _apply_rules(
-            select_body, rules, table, adapter.quote_identifier
+            f"FROM {adapter.quote_table_ref(source)}",
+            rules,
+            table,
+            adapter.quote_identifier,
+            _string_columns(table, adapter.map_type),
         )
         target_physical = table.qualified_name
         sql = f"INSERT OVERWRITE TABLE {adapter.quote_table_ref(target_physical)}\n{select_body};"
