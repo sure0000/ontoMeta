@@ -5526,6 +5526,26 @@ class ChatBiService:
         return calls
 
     @staticmethod
+    def _extract_thinking(text: str | None) -> tuple[str, str]:
+        """提取 ReAct 思考内容（V5.1）。
+
+        返回 (思考内容, 去除思考标签后的文本)。
+        思考标签格式：<thinking>...</thinking>
+        """
+        if not text:
+            return "", ""
+
+        # 提取 <thinking> 标签内容
+        thinking_match = re.search(r"<thinking>(.*?)</thinking>", text, flags=re.S | re.I)
+        thinking = ""
+        if thinking_match:
+            thinking = thinking_match.group(1).strip()
+            # 去除 thinking 标签，保留其它内容
+            text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.S | re.I).strip()
+
+        return thinking, text
+
+    @staticmethod
     def _strip_tool_markup(text: str | None) -> str:
         """去除正文里泄漏的工具调用标记（DSML/tool_calls/invoke/parameter），避免当答案展示。"""
         if not text:
@@ -5555,6 +5575,55 @@ class ChatBiService:
         if any(m in q for m in _STRUCTURAL_MARKERS):
             return "structural"
         return "general"
+
+    @staticmethod
+    def _auto_select_skill(question: str) -> str | None:
+        """基于关键词自动选择 Skill（V5 优化：减少工具混乱，引导模型进入专门模式）。
+
+        返回 skill name 或 None（未匹配时让模型自己选或用默认工具集）。
+
+        优先级顺序（从具体到一般）：
+        1. task - 数据任务（物化/同步/加工/状态查询）
+        2. onboard - 接数据源/生成本体
+        3. lineage - 血缘影响
+        4. create - 建口径/指标
+        5. query - 取数分析
+        6. overview - 域概览
+
+        只在明确命中时返回 skill，模糊情况返回 None 让模型选择（通过 select_skill 工具）。
+        """
+        q = (question or "").lower()
+
+        # 1. task - 数据任务相关
+        task_markers = ("物化", "同步", "加工", "任务", "执行", "状态", "进度", "成功", "失败", "跑到哪", "完成了吗")
+        if any(m in q for m in task_markers):
+            return "task"
+
+        # 2. onboard - 接数据相关
+        onboard_markers = ("接入", "接进来", "连接", "数据源", "生成本体", "元数据采集")
+        if any(m in q for m in onboard_markers):
+            return "onboard"
+
+        # 3. lineage - 血缘影响
+        lineage_markers = ("血缘", "上游", "下游", "来源", "依赖", "影响", "被谁用", "从哪来", "影响面")
+        if any(m in q for m in lineage_markers):
+            return "lineage"
+
+        # 4. create - 建口径/指标
+        create_markers = ("建个", "新建", "创建", "定义", "指标", "口径", "标签", "规则")
+        if any(m in q for m in create_markers):
+            return "create"
+
+        # 5. query - 取数分析（已被 _ANALYTICAL_MARKERS 覆盖）
+        if any(m in q for m in _ANALYTICAL_MARKERS):
+            return "query"
+
+        # 6. overview - 域概览（已被 _STRUCTURAL_MARKERS 覆盖）
+        if any(m in q for m in _STRUCTURAL_MARKERS):
+            return "overview"
+
+        # 未明确命中，返回 None 让模型自己选
+        return None
 
     @staticmethod
     def _question_names_published_entity(
@@ -5875,6 +5944,33 @@ class ChatBiService:
         # 选中技能后就地重建 messages[0] = base_system + overlay（重复选取以最后一次为准）。
         base_system = messages[0]["content"]
         active_skill: Skill | None = None
+
+        # V5 优化：自动 Skill 预选（减少工具混乱，引导模型进入专门模式）。
+        # 明确命中关键词时自动激活对应 skill；否则用默认工具集 + select_skill 让模型选。
+        auto_skill_name = self._auto_select_skill(question)
+        if auto_skill_name and auto_skill_name in SKILLS:
+            active_skill = SKILLS[auto_skill_name]
+            # 叠加 skill overlay 到 system prompt
+            overlay = active_skill.prompt_overlay
+            # V3 S2/S3：治理规约卡（需要时）
+            if active_skill.attach_governance:
+                try:
+                    from app.governance import active_standard
+                    std = active_standard()
+                    if std:
+                        governance_card = std.compile_prompt_card()
+                        overlay = f"{overlay}\n\n{governance_card}"
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("governance card unavailable: %s", exc)
+            messages[0] = {"role": "system", "content": f"{base_system}\n\n{overlay}"}
+            logger.info(f"Auto-selected skill: {auto_skill_name}")
+            # 发送 skill 选择事件通知前端
+            yield {
+                "type": "skill_selected",
+                "skill": auto_skill_name,
+                "auto": True,  # 标记为自动选择
+            }
+
         # V4 O3 渐进披露：read_result 不进基础工具集——它只在有 run_sql 结果可翻时才有意义。
         # 首轮不暴露（省首轮 prefill）；首次 run_sql 取到数后再解锁。
         read_result_unlocked = False
@@ -5951,7 +6047,13 @@ class ChatBiService:
                 # 解析并当作工具调用执行，避免把一堆标记当答案输出。
                 tool_calls = self._extract_text_tool_calls(msg.content or "")
             if not tool_calls:
-                _candidate = self._strip_tool_markup(msg.content or "")
+                # V5.1 ReAct：提取思考内容（在没有工具调用时，可能只是纯思考）
+                thinking, stripped = self._extract_thinking(msg.content)
+                if thinking:
+                    tel.thinking(len(thinking))
+                    logger.info(f"ReAct thinking: {thinking[:100]}...")
+
+                _candidate = self._strip_tool_markup(stripped or msg.content or "")
                 # V5 F2/F4：结构性/取数意图下**本轮一次工具都没调**就想收尾——逆一次，
                 # 要它先核实。只逆一次，不成就放行（照旧由接地判定兜底）。
                 #
@@ -5995,8 +6097,14 @@ class ChatBiService:
                     answer = self._strip_tool_markup(answer)
                 break
 
-            # 存入历史的 content 去掉工具标记，避免污染上下文并被当作 thought 展示。
-            clean_content = self._strip_tool_markup(msg.content or "")
+            # V5.1 ReAct：提取并记录思考内容（有工具调用时）
+            thinking, clean_content_no_thinking = self._extract_thinking(msg.content or "")
+            if thinking:
+                tel.thinking(len(thinking))
+                logger.info(f"ReAct thinking before tool call: {thinking[:100]}...")
+
+            # 存入历史的 content 去掉工具标记和 thinking 标签，避免污染上下文并被当作 thought 展示。
+            clean_content = self._strip_tool_markup(clean_content_no_thinking)
             messages.append(
                 {
                     "role": "assistant",
@@ -6013,7 +6121,8 @@ class ChatBiService:
             )
             # 工具间的模型自述：作为 thought 伪步穿插进轨迹（贴近 Claude Code 的"先说再做"），
             # 既实时流给前端、也落进 steps 持久化；_steps_to_caliber 因 tool 不匹配自动忽略它。
-            thought = clean_content.strip()
+            # V5.1 ReAct：如果有 thinking 标签，优先展示思考内容；否则展示整个 clean_content。
+            thought = thinking.strip() if thinking else clean_content.strip()
             if thought:
                 t_idx = len(steps)
                 steps.append({"index": t_idx, "kind": "thought", "tool": "", "text": thought})

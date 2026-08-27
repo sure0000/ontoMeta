@@ -66,6 +66,9 @@ class RunTelemetry:
     # V4 O2 大结果离场：被移出上下文的字符数（全量 JSON − 样例 JSON）。
     offloaded_chars: int = 0
     offload_count: int = 0
+    # V5.1 ReAct：统计思考内容（thinking 标签）的使用情况
+    thinking_count: int = 0  # 有多少次调用前有 thinking
+    thinking_chars: int = 0  # 思考内容总字符数
 
     def offload(self, chars: int) -> None:
         self.offloaded_chars += max(0, int(chars))
@@ -120,6 +123,11 @@ class RunTelemetry:
         self.refused = True
         self.refuse_kind = kind
 
+    def thinking(self, chars: int) -> None:
+        """记录一次 ReAct 思考（V5.1）。"""
+        self.thinking_count += 1
+        self.thinking_chars += chars
+
 
 class _Aggregate:
     """进程内全局聚合。加锁——ask/ask_stream 跑在不同事件循环任务里。"""
@@ -147,6 +155,8 @@ class _Aggregate:
             self.subagent_steps = 0
             self.subagent_isolated_chars = 0
             self.context_chars = 0
+            self.thinking_count = 0
+            self.thinking_chars = 0
             self.context_calls = 0
             self.compaction_runs = 0
             self.compaction_summarized_turns = 0
@@ -169,6 +179,8 @@ class _Aggregate:
             self.subagent_steps += run.subagent_steps
             self.subagent_isolated_chars += run.subagent_isolated_chars
             self.context_chars += run.context_chars
+            self.thinking_count += run.thinking_count
+            self.thinking_chars += run.thinking_chars
             self.context_calls += run.context_calls
             if run.compaction_triggered:
                 self.compaction_runs += 1
@@ -215,6 +227,13 @@ class _Aggregate:
                 "context_chars_per_call": (
                     round(self.context_chars / self.context_calls, 1)
                     if self.context_calls else 0.0
+                ),
+                # V5.1 ReAct：思考内容统计
+                "thinking_count": self.thinking_count,
+                "thinking_chars": self.thinking_chars,
+                "avg_thinking_chars": (
+                    round(self.thinking_chars / self.thinking_count, 1)
+                    if self.thinking_count else 0.0
                 ),
                 # V4 O1：触发摘要的运行数与累计被摘要轮数
                 "compaction_runs": self.compaction_runs,

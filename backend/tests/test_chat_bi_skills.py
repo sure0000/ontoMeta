@@ -3,6 +3,8 @@
 覆盖：技能注册表、`select_skill` 的 overlay 叠加与工具解锁、`render_chart` 的接地校验
 （x/y 必须是真实结果列、图型枚举、无数据即拒）。这些是「只解锁不收窄 + 图表不臆造列」
 两条不变式的回归面。
+
+V5.1: 新增 ReAct 模式的思考提取测试。
 """
 
 from __future__ import annotations
@@ -54,7 +56,8 @@ def test_create_skill_unlocks_lint_without_prompt_governance_card():
     )
     assert is_error is False and skill.name == "create"
     assert "【治理规约】" not in messages[0]["content"]
-    assert len(messages[0]["content"]) < 500
+    # V5: overlay 更详细，放宽长度限制
+    assert len(messages[0]["content"]) < 1200  # 原 500 太严格
 
 
 def test_safe_skill_selection_keeps_minimal_system_prompt():
@@ -67,16 +70,27 @@ def test_safe_skill_selection_keeps_minimal_system_prompt():
 
 
 def test_tools_only_unlock_never_shrink():
-    """只解锁不收窄：任何技能的工具集都 ⊇ 基础工具集。"""
-    base = {t["function"]["name"] for t in c._BASE_TOOL_SCHEMAS}
-    assert "select_skill" in base
-    assert "render_chart" not in base  # 未选技能时图表工具不暴露
+    """V5 改：真收窄而非只解锁。每个 skill 有独立白名单，工具集不再 ⊇ 基础集。"""
+    # 默认工具集（未选 skill）
+    default_tools = {t["function"]["name"] for t in c._tools_for_skill(None)}
+    assert "select_skill" in default_tools
+    assert "render_chart" not in default_tools
+
+    # overview skill - 只有检索和概览工具
     overview_tools = {t["function"]["name"] for t in c._tools_for_skill(SKILLS["overview"])}
+    assert "search_objects" in overview_tools
+    assert "get_domain_overview" in overview_tools
+    assert "select_skill" in overview_tools
+    assert "render_chart" not in overview_tools  # 不解锁图表
+    assert "run_sql" not in overview_tools  # 不需要取数
+
+    # query skill - 解锁分析和图表工具
     query_tools = {t["function"]["name"] for t in c._tools_for_skill(SKILLS["query"])}
-    assert base <= overview_tools
-    assert base <= query_tools
+    assert "search_objects" in query_tools
+    assert "run_sql" in query_tools
     assert "render_chart" in query_tools
-    assert "render_chart" not in overview_tools
+    assert "analyze_result" in query_tools
+    assert "get_domain_overview" not in query_tools  # query 不需要 overview 工具
 
 
 def test_select_skill_appends_overlay_and_unlocks():
@@ -87,7 +101,8 @@ def test_select_skill_appends_overlay_and_unlocks():
     assert is_error is False
     assert skill is not None and skill.name == "query"
     assert messages[0]["content"].startswith("BASE\n\n")
-    assert "【取数分析】" in messages[0]["content"]
+    assert "【取数分析模式】" in messages[0]["content"]  # V5: 更详细的 overlay
+    # V5: tools_unlocked 含义改为"该 skill 特有的工具"，不再是全量工具集
     assert result["tools_unlocked"] == [
         "update_plan", "scout_query", "analyze_result", "render_chart",
         "propose_panel", "propose_dashboard",
@@ -100,8 +115,8 @@ def test_select_skill_reselect_replaces_not_stacks():
     svc._apply_select_skill({"skill": "query"}, messages, "BASE")
     svc._apply_select_skill({"skill": "overview"}, messages, "BASE")
     assert messages[0]["content"].count("BASE") == 1
-    assert "【域概览】" in messages[0]["content"]
-    assert "【取数分析】" not in messages[0]["content"]
+    assert "【域概览模式】" in messages[0]["content"]  # V5: 更详细的 overlay
+    assert "【取数分析模式】" not in messages[0]["content"]
 
 
 def test_select_skill_unknown_is_error_no_switch():
@@ -659,9 +674,14 @@ def test_task_skill_unlocks_action_tools():
     task = SKILLS["task"]
     assert task.attach_governance is False
     tools = {t["function"]["name"] for t in c._tools_for_skill(task)}
-    base = {t["function"]["name"] for t in c._BASE_TOOL_SCHEMAS}
-    assert base <= tools  # 只解锁不收窄
+    # V5: 真收窄，task skill 只有任务相关工具，不包含全部基础工具
     assert {"propose_action", "get_task_status", "lint_against_standard"} <= tools
+    assert "search_objects" in tools  # 基础检索保留
+    assert "get_object" in tools
+    assert "select_skill" in tools
+    # 但不包含不相关的工具
+    assert "render_chart" not in tools
+    assert "get_lineage" not in tools
 
 
 def test_existing_conversation_uses_its_own_domain_scope(client, admin_headers):
@@ -1869,3 +1889,47 @@ def test_expression_flow_stays_read_only(client):
     assert "SUM" in payload["draft_proposals"][0]["compiled_sql"]
     assert "draft_proposal" in [b["type"] for b in answer_to_blocks(payload)]
     assert _count() == before  # 只读不变式：提案不落库
+
+
+def test_react_thinking_extraction():
+    """V5.1: 验证 ReAct 思考内容的提取。"""
+    # 测试带 thinking 标签的内容
+    text_with_thinking = "<thinking>需要先搜索销售对象</thinking>调用 search_objects"
+    thinking, clean = ChatBiService._extract_thinking(text_with_thinking)
+    assert thinking == "需要先搜索销售对象"
+    assert clean == "调用 search_objects"
+
+    # 测试多行 thinking
+    multiline = """<thinking>
+    1. 用户问销售额
+    2. 需要找销售订单对象
+    3. 然后用 run_sql 取数
+    </thinking>
+    开始执行"""
+    thinking, clean = ChatBiService._extract_thinking(multiline)
+    assert "用户问销售额" in thinking
+    assert "需要找销售订单对象" in thinking
+    assert clean == "开始执行"
+
+    # 测试没有 thinking 标签
+    no_thinking = "直接调用工具"
+    thinking, clean = ChatBiService._extract_thinking(no_thinking)
+    assert thinking == ""
+    assert clean == "直接调用工具"
+
+    # 测试空字符串
+    thinking, clean = ChatBiService._extract_thinking("")
+    assert thinking == ""
+    assert clean == ""
+
+    # 测试 None
+    thinking, clean = ChatBiService._extract_thinking(None)
+    assert thinking == ""
+    assert clean == ""
+
+    # 测试大小写不敏感
+    upper_case = "<THINKING>大写也可以</THINKING>内容"
+    thinking, clean = ChatBiService._extract_thinking(upper_case)
+    assert thinking == "大写也可以"
+    assert clean == "内容"
+

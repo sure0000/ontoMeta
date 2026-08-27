@@ -41,12 +41,37 @@ _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 #   · 不得编造   → FactLedger + answer_verifier 断言级核验（F4）当场拒答，
 #                 比反复叮嘱「宁可少答不可编造」有效得多
 # 保留下来的都是**工具选择策略**——这类「该先调谁」的判断，守卫拦得住结果却教不会顺序。
+#
+# V5 优化：加入工作流程和工具选择策略，引导模型逐步执行。
+# V5.1 ReAct：要求模型在调用工具前先思考（提高准确性、便于调试）。
 _AGENT_SYSTEM_PROMPT = (
-    "你是企业数据助手，请用中文简洁回答。"
-    "使用当前已发布本体和工具结果获取信息。"
-    "数据查询使用默认 Doris。元数据问题使用本体工具。"
-    "数据任务使用任务工具和确认表单。"
-    "请清楚标注建议、草稿、查询结果和任务状态。"
+    "你是企业数据助手，请用中文简洁回答。\n\n"
+
+    "# 工作方式（ReAct 模式）\n"
+    "1. **理解意图**：用户是要查数据、看结构、建资源，还是管任务？不确定时用 ask_clarification 问清楚\n"
+    "2. **思考再行动**：调用工具前先在 <thinking> 标签中简要说明：\n"
+    "   - 当前目标是什么\n"
+    "   - 为什么选这个工具\n"
+    "   - 期望获得什么信息\n"
+    "   例如：<thinking>用户问销售额，需要先找到销售相关对象，用 search_objects</thinking>\n"
+    "3. **选择技能**（重要）：根据意图调用 select_skill 进入专门模式，获得该场景的最佳工具集\n"
+    "4. **逐步执行**：一次调用一个工具，根据结果决定下一步，不要一次性调用多个工具\n"
+    "5. **基于事实**：只使用工具返回的信息作答，不编造对象、字段或数据\n\n"
+
+    "# 工具选择原则\n"
+    "- **查数据**（统计/明细/趋势） → select_skill('query') → search_objects 定位 → run_sql 取数 → analyze_result 解读\n"
+    "- **看结构**（对象有哪些字段/关系） → select_skill('overview') → 使用域语义卡 + search_* 浏览\n"
+    "- **看血缘**（上下游/影响面） → select_skill('lineage') → search_objects 定位 → get_lineage 获取\n"
+    "- **建口径**（新建指标/标签） → select_skill('create') → search_logics 查重 → propose_draft/propose_expression\n"
+    "- **管任务**（物化/同步/加工） → select_skill('task') → get_task_options → request_form 六环确认 → propose_action\n"
+    "- **接数据**（连新库/生成本体） → select_skill('onboard') → list_onboarding_targets → propose_datasource/propose_ontology_draft\n\n"
+
+    "# 重要约束\n"
+    "- 数据查询默认使用 Doris 数仓\n"
+    "- 数据任务需六环逐一确认（需求 → 本体 → 数据 → 执行方案 → 执行 → 结果），不能跳过或代替用户确认\n"
+    "- 同步任务不需要先物化：sync 会自动建 ODS 表，直接建 sync 任务即可\n"
+    "- 清楚标注状态：建议 vs 草稿 vs 执行中 vs 已完成\n"
+    "- search_* 工具返回的是样本，可能不全，必要时说明「仅展示部分结果」\n"
 )
 
 # Prompt 被上游网关误判时使用的单次精简重试版本。它不包含动态本体卡、历史记忆或任务细节。
@@ -1724,23 +1749,101 @@ _STRUCTURAL_MARKERS: tuple[str, ...] = (
 # 自由作答、不要求接地，因此**无需维护一张一般问题白名单**（默认即豁免）。
 # 即便 general 里混进真本体问题，F4 断言校验仍拦得住捏造的具名实体/数值，是最后一道网。
 
+# ============================================================================
+# Skill 工具白名单（V5 优化：从"只解锁不收窄"改为"真正收窄"）
+# ============================================================================
+# 每个 skill 精选 5-10 个核心工具，未选 skill 时使用 DEFAULT 集合。
+# 目标：减少工具选择困难，提升准确率和响应速度。
+
+# 核心检索工具（所有 skill 共用）
+_CORE_SEARCH_TOOLS = frozenset({
+    "search_objects", "get_object", "search_relations", "search_logics", "get_logic",
+})
+
+# 每个 skill 的专属工具集（含核心检索 + 专门工具）
+SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
+    "overview": frozenset({
+        *_CORE_SEARCH_TOOLS,
+        "get_domain_overview", "locate_entities",
+        "select_skill",  # 允许切换到其他 skill
+    }),
+    "query": frozenset({
+        *_CORE_SEARCH_TOOLS,
+        "locate_entities", "find_join_path", "compile_metric", "profile_values",
+        "run_sql", "scout_query", "analyze_result", "render_chart",
+        # read_result 动态解锁，不在白名单
+        "update_plan",  # 多步分析计划
+        "propose_panel", "propose_dashboard",  # 保存结果
+        "select_skill",
+    }),
+    "lineage": frozenset({
+        *_CORE_SEARCH_TOOLS,
+        "get_lineage",
+        "select_skill",
+    }),
+    "create": frozenset({
+        *_CORE_SEARCH_TOOLS,
+        "propose_draft", "propose_expression", "lint_against_standard",
+        "ask_clarification",  # 补充需求细节
+        "select_skill",
+    }),
+    "task": frozenset({
+        "search_objects", "get_object",  # 只需要最基础的检索
+        "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
+        "request_form",  # 六环确认表单
+        "lint_against_standard",
+        "select_skill",
+    }),
+    "onboard": frozenset({
+        "list_onboarding_targets", "propose_datasource", "propose_ontology_draft",
+        "select_skill",
+    }),
+}
+
+# 未选 skill 时的默认工具集（收窄到最常用的，引导用户选 skill）
+DEFAULT_TOOL_ALLOWLIST: frozenset[str] = frozenset({
+    "search_objects", "get_object", "search_logics", "get_logic",
+    "run_sql",  # 简单查询
+    "select_skill",  # 核心：引导分类
+    "ask_clarification",  # 需求不明时问清楚
+    "propose_preference",  # 记忆提案
+    "request_form",  # 交互表单
+})
+
 
 def _tools_for_skill(
     skill: "Skill | None", *, sql_allowed: bool = True
 ) -> list[dict[str, Any]]:
-    """当前可用工具集：基础工具 + 激活技能解锁的额外工具（只增不减）。
+    """当前可用工具集：根据 skill 收窄到白名单（V5 优化：真正收窄而非只解锁）。
 
-    ``sql_allowed=False``（结构性问题）时**收窄**——从工具集移除取数工具
-    （run_sql / compile_metric），让模型在 API 层就无法调用它们。这是「只解锁不收窄」
-    的意图门控例外：默认 True 保持旧行为，仅结构性 turn 显式收窄。
+    ``sql_allowed=False``（结构性问题）时**额外收窄**——从工具集移除取数工具
+    （run_sql / compile_metric），让模型在 API 层就无法调用它们。
+
+    行为变化（V5）：
+    - 旧：基础 12 工具永远可用，skill 只叠加 extra_tool_names（只增不减）
+    - 新：每个 skill 有独立白名单（5-10 个精选工具），未选 skill 用默认集合（9 个）
+
+    目标：减少工具选择困难，提升准确率。从 38 个工具降到每个场景 5-10 个。
     """
-    base = _BASE_TOOL_SCHEMAS if skill is None else [
-        *_BASE_TOOL_SCHEMAS,
-        *[_TOOL_BY_NAME[n] for n in skill.extra_tool_names if n in _TOOL_BY_NAME],
-    ]
-    if sql_allowed:
-        return base
-    return [t for t in base if t["function"]["name"] not in _SQL_TOOL_NAMES]
+    # 确定白名单
+    if skill is None:
+        allowlist = DEFAULT_TOOL_ALLOWLIST
+    else:
+        allowlist = SKILL_TOOL_ALLOWLIST.get(skill.name, DEFAULT_TOOL_ALLOWLIST)
+
+    # 从注册表筛选白名单内的工具
+    tools = [t for t in _BASE_TOOL_SCHEMAS if t["function"]["name"] in allowlist]
+
+    # 补充白名单中未在 BASE 的工具（如 skill 特有的）
+    for name in allowlist:
+        if name in _TOOL_BY_NAME and not any(t["function"]["name"] == name for t in tools):
+            tools.append(_TOOL_BY_NAME[name])
+
+    # 意图门控：结构性问题移除取数工具
+    if not sql_allowed:
+        tools = [t for t in tools if t["function"]["name"] not in _SQL_TOOL_NAMES]
+
+    return tools
 
 
 def _search_items(result: Any) -> list[dict]:
@@ -1797,6 +1900,8 @@ __all__ = [
     '_LINT_TOOL',
     '_ACTION_KINDS',
     '_ACTION_KIND_LABEL',
+    'SKILL_TOOL_ALLOWLIST',
+    'DEFAULT_TOOL_ALLOWLIST',
     '_PIPELINE_KINDS',
     '_PIPELINE_MAX_STEPS',
     '_PROPOSE_ACTION_TOOL',
