@@ -178,6 +178,26 @@ def test_no_lineage_block_without_nodes():
     assert "lineage" not in _types({"answer": "x", "lineage": {"center_id": "o1", "nodes": []}})
 
 
+def test_ops_record_block_keeps_provenance_fields():
+    payload = {
+        "answer": "订单尚未落地。",
+        "ops_records": [
+            {
+                "family": "landing",
+                "subject": "订单",
+                "facts": [{"key": "state", "label": "落点状态", "value": "not_landed"}],
+                "as_of": None,
+                "observed_at": "2026-08-28T00:00:00+00:00",
+                "source": "object_landing",
+                "note": "没有落点登记",
+            }
+        ],
+    }
+    blocks = answer_to_blocks(payload)
+    assert [b["type"] for b in blocks] == ["markdown", "record"]
+    assert blocks[1]["record"]["source"] == "object_landing"
+
+
 def test_draft_proposal_block_from_payload():
     """V3 S3：propose_draft 产出投影成 draft_proposal 块，携带 create_payload。"""
     payload = {
@@ -244,4 +264,3 @@ def test_clarification_takes_precedence_over_form():
 
 def test_no_form_block_without_form_request():
     assert "form" not in _types({"answer": "客户表当前有 1200 行。"})
-

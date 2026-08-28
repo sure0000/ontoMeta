@@ -50,6 +50,47 @@ def test_classify_intent_analytical_wins_ties():
     assert cls("各业务对象的属性数量统计") == "analytical"
 
 
+def test_classify_intent_operational_is_read_only_and_specific():
+    """已发生的落点/运行事实进入 operational，且不能抢走真实取数问题。"""
+    cls = ChatBiService._classify_intent
+    assert cls("采购订单落到哪张物理表了") == "operational"
+    assert cls("这个任务为什么失败") == "operational"
+    assert cls("整条链做到哪了") == "operational"
+    assert cls("当前六环进度到哪一环") == "operational"
+    assert cls("本体发布版本和上一版有什么差异") == "operational"
+    assert cls("当前生效规约是哪版") == "operational"
+    assert cls("近30天任务失败次数是多少") == "analytical"
+
+
+def test_ops_skill_exposes_only_read_record_tools():
+    from app.services.chat_bi_skills import SKILLS
+
+    tools = {t["function"]["name"] for t in c._tools_for_skill(SKILLS["ops"])}
+    assert {"search_objects", "get_object", "get_landing", "get_ops_record"} <= tools
+    assert not {"propose_action", "propose_pipeline", "request_form"} & tools
+
+
+def test_operational_autoroute_does_not_steal_analytical_queries():
+    assert ChatBiService._auto_select_skill("采购订单落到哪张物理表了") == "ops"
+    assert ChatBiService._auto_select_skill("物理表有多少行") == "query"
+    assert ChatBiService._auto_select_skill("创建同步任务") == "task"
+
+
+def test_materialize_target_question_routes_to_read_lane_not_task():
+    """V6 §1 的触发案例：「物化到哪个数据源」问的是已发生的落点，不是要建任务。
+
+    钉住的是那条会「流畅地答错」的路径——"物化" 是 task 车道第一优先标记，不在
+    operational 里认下「物化到哪」这个复合词，问题就会进建任务车道，再拿契约里的
+    materialization 配置编一句「物化在默认 Doris」，与实际落点无关。
+    """
+    route = ChatBiService._auto_select_skill
+    assert route("这个本体物化到哪个数据源？") == "ops"
+    assert route("客户对象同步到哪张表了") == "ops"
+    # 对照：明确的写意图仍归 task，只读车道不能把建任务吸走。
+    assert route("帮我建个物化任务") == "task"
+    assert route("给订单对象配置物化") == "task"
+
+
 def test_classify_intent_defaults_general():
     """未命中取数/结构标记 → general（默认自由作答，不要求接地）。"""
     cls = ChatBiService._classify_intent
@@ -73,7 +114,8 @@ def test_classify_intent_precise_intents_win_over_general():
 def test_tools_narrow_removes_sql_tools_when_not_allowed():
     """sql_allowed=False：取数工具（run_sql/compile_metric）被移出工具集。"""
     full = {t["function"]["name"] for t in c._tools_for_skill(None, sql_allowed=True)}
-    assert {"run_sql", "compile_metric"} <= full  # 默认放开时都在
+    assert "run_sql" in full  # V5：run_sql 在 DEFAULT_TOOL_ALLOWLIST 里
+    # compile_metric 不在默认集，只在 query skill 解锁
 
     narrowed = {t["function"]["name"] for t in c._tools_for_skill(None, sql_allowed=False)}
     assert "run_sql" not in narrowed
@@ -95,10 +137,14 @@ def test_tools_narrow_applies_under_skill_too():
 
 
 def test_tools_default_unchanged_for_existing_callers():
-    """默认 sql_allowed=True：既有「只解锁不收窄」不变式不动。"""
-    base = {t["function"]["name"] for t in c._BASE_TOOL_SCHEMAS}
+    """V5 工具收窄后：默认集从 _BASE_TOOL_SCHEMAS 收窄到 DEFAULT_TOOL_ALLOWLIST（9个）。"""
+    from app.services.chat_bi_tool_schemas import DEFAULT_TOOL_ALLOWLIST
+
     default = {t["function"]["name"] for t in c._tools_for_skill(None)}
-    assert default == base
+    # V5: 默认集是白名单，不再等于全部 BASE
+    assert default == DEFAULT_TOOL_ALLOWLIST
+    # 仍包含核心检索 + 简单查询 + select_skill
+    assert {"search_objects", "get_object", "run_sql", "select_skill"} <= default
 
 
 # --------------------------------------------------------------------------- 端到端
@@ -143,7 +189,7 @@ def test_structural_question_hard_rejects_run_sql(client):
     order_id = aliases["@order"]
     called = {"run_sql": False}
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」1 字段", False)
         if name == "run_sql":
@@ -178,7 +224,7 @@ def test_structural_prose_sql_fence_not_promoted(client):
     domain_id, _onto, aliases = _seed_golden_domain()
     order_id = aliases["@order"]
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」1 字段", False)
         return ({"error": f"unexpected {name}"}, "", True)
@@ -201,7 +247,7 @@ def test_analytical_prose_sql_fence_still_promoted(client):
     domain_id, _onto, aliases = _seed_golden_domain()
     order_id = aliases["@order"]
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」1 字段", False)
         return ({"error": f"unexpected {name}"}, "", True)
@@ -223,7 +269,7 @@ def test_escalation_via_query_skill_reenables_sql(client):
     """升级阀：结构性问题下模型显式 select_skill('query') 后，run_sql 重新可执行。"""
     domain_id, _onto, aliases = _seed_golden_domain()
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "run_sql":
             return (
                 {"executed": True, "sql": args.get("sql"),
@@ -250,7 +296,7 @@ def test_general_question_not_refused_without_tool_hit(client):
     """一般/元问题（产品 how-to）：模型不调任何工具直接作答，也不被接地判定拦成拒答。"""
     domain_id, _onto, aliases = _seed_golden_domain()
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         return ({"error": f"unexpected {name}"}, "", True)  # 一般问题不该调任何工具
 
     script = [FinalTurn("在「数据任务」页点击新建，选择来源与目标即可创建同步/转换任务。")]
@@ -290,7 +336,7 @@ def test_general_but_names_entity_requires_grounding(client):
     模型不查本体、纯散文常识作答 → 应被接地判定拦成拒答，不再吃 general 豁免。"""
     domain_id, _onto, aliases = _seed_golden_domain()
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         return ({"error": f"unexpected {name}"}, "", True)  # 模型没调任何工具
 
     # 纯散文常识作答：不含任何标记具名实体/带单位数值，F4 拦不住——正是要靠接地闸拦的一类
@@ -310,7 +356,7 @@ def test_general_names_entity_but_tool_hit_not_refused(client):
     domain_id, _onto, aliases = _seed_golden_domain()
     order_id = aliases["@order"]
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "get_object":
             return (_obj_detail(order_id), "对象「订单」", False)
         return ({"error": f"unexpected {name}"}, "", True)

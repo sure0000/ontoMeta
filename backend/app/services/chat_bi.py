@@ -118,6 +118,8 @@ from app.services.chat_bi_tool_schemas import (  # noqa: F401
     _sync_context_errors,
     _action_context_candidates,
     _GET_TASK_STATUS_TOOL,
+    _GET_LANDING_TOOL,
+    _GET_OPS_RECORD_TOOL,
     _PLAN_STATUSES,
     _PLAN_MAX_STEPS,
     _UPDATE_PLAN_TOOL,
@@ -144,6 +146,7 @@ from app.services.chat_bi_tool_schemas import (  # noqa: F401
     _SQL_TOOL_NAMES,
     _ANALYTICAL_MARKERS,
     _STRUCTURAL_MARKERS,
+    _OPERATIONAL_MARKERS,
     _tools_for_skill,
     _search_items,
     _format_sql,
@@ -1265,6 +1268,7 @@ class ChatBiService:
             "properties": props,
             "relations": rels,
             "business_logics": logics,
+            "landing": d.get("landing"),  # S1: 透传物理落点（数据已在 ObjectTypeDetail 里）
         }
 
     @staticmethod
@@ -1648,6 +1652,17 @@ class ChatBiService:
                 for e in result.get("edges") or []:
                     if isinstance(e, dict) and e.get("label"):
                         ledger.add_context_name(str(e["label"]))
+            elif tool_name in ("get_landing", "get_ops_record") and isinstance(result, dict):
+                # V6：运行记录里的表名、任务名和制品 id 是读模型返回的真实事实。
+                # 统一由注册表声明要入账的字段；原始 fact/item 值也登记为单元格，
+                # 否则「6 环」「3 个版本」这类真实数值仍会被 F4 当成无依据断言。
+                from app.services.ops_records import ledger_names, ledger_values  # noqa: PLC0415
+
+                ledger.add_context_name(*ledger_names(result))
+                ledger.add_cells(
+                    ["value"],
+                    [{"value": value} for value in ledger_values(result)],
+                )
             elif tool_name == "list_datasets" and isinstance(result, dict):
                 # 物理表名是目录从登记行读出来的事实——答案说「已落到 ods.ods_erp_customer」
                 # 时引用它不得被 F4 判成幻觉。实体名同理。
@@ -5229,6 +5244,18 @@ class ChatBiService:
             return json.dumps(picked, ensure_ascii=False)[:160] if picked else None
 
         def _project(a) -> dict:
+            # S2: 补 spec 白名单字段，对齐 REST 的 _to_out（api/agents.py:105-121）
+            spec = {}
+            if a.spec_json:
+                try:
+                    full_spec = json.loads(a.spec_json)
+                    if isinstance(full_spec, dict):
+                        # 只取高频需要的字段，避免把整个 spec 倒进上下文
+                        for k in ("target_datasource_id", "target_database", "target_table", "refresh_cron"):
+                            if k in full_spec:
+                                spec[k] = full_spec[k]
+                except (TypeError, json.JSONDecodeError):
+                    pass
             return {
                 "id": a.id,
                 "kind": a.kind,
@@ -5237,6 +5264,7 @@ class ChatBiService:
                 "is_high_risk": a.is_high_risk,
                 "executed_at": a.executed_at.isoformat() if a.executed_at else None,
                 "receipt_summary": _summarize_receipt(a.execution_receipt_json),
+                "spec": spec,  # S2: spec 白名单字段
             }
 
         artifact_id = str(args.get("artifact_id") or "").strip()
@@ -5258,8 +5286,16 @@ class ChatBiService:
             limit = 5
         limit = max(1, min(limit, 20))
 
+        # S2: scope 参数——"conversation"（P1 优先）/ "ontology"（默认）/ "all"
+        # 未指定 scope 时：有 conversation_id 优先查本会话任务，否则查本体任务
+        scope = str(args.get("scope") or "").strip()
+        if not scope:
+            scope = "conversation" if conversation_id else "ontology"
+        if scope not in ("conversation", "ontology", "all"):
+            scope = "ontology"
+
         # P1：优先本会话催生的任务（跨轮记忆）
-        if conversation_id:
+        if conversation_id and scope == "conversation":
             linked_ids = self.list_conversation_task_ids(db, conversation_id)
             linked = [a for aid in linked_ids if (a := agent_pipeline.get(db, aid)) is not None]
             if linked:
@@ -5277,13 +5313,196 @@ class ChatBiService:
         kind = str(args.get("kind") or "").strip() or None
         if kind and kind not in _ACTION_KINDS:
             kind = None
-        rows = agent_pipeline.list_artifacts(db, ontology_id=ontology_id, kind=kind)
+        # S2: scope="all" 时查全局制品；"ontology" 时过滤本体
+        rows = agent_pipeline.list_artifacts(
+            db, ontology_id=(ontology_id if scope == "ontology" else None), kind=kind
+        )
         tasks = [_project(a) for a in rows[:limit]]
+        scope_label = "全局" if scope == "all" else "本域"
         return (
-            {"tasks": tasks, "total": len(rows), "scope": "ontology"},
-            f"最近 {len(tasks)} 个数据任务" if tasks else "暂无数据任务",
+            {"tasks": tasks, "total": len(rows), "scope": scope},
+            f"{scope_label}最近 {len(tasks)} 个数据任务" if tasks else f"{scope_label}暂无数据任务",
             False,
         )
+
+    def _dispatch_get_landing(
+        self,
+        db: Session,
+        *,
+        ontology_id: str | None,
+        args: dict,
+    ) -> tuple[dict, str, bool]:
+        """读取对象/口径的真实物理落点。
+
+        落点状态只能来自 ``object_landing`` 的聚合读模型。这里负责的仅是主体解析与
+        本体作用域校验，避免模型把另一域的同名对象或 ``materialization_contract``
+        当作当前域的物理事实。
+        """
+        from app.services.ops_records import read_landing
+
+        target_kind = str(args.get("target_kind") or "").strip().lower()
+        if target_kind not in {"object", "logic"}:
+            return (
+                {"error": "target_kind 必须是 object 或 logic"},
+                "落点主体类型无效",
+                True,
+            )
+        if not ontology_id:
+            return {"error": "当前没有可用的已发布本体"}, "没有本体作用域", True
+
+        target_id = str(args.get("target_id") or "").strip()
+        keyword = str(args.get("keyword") or "").strip()
+        subject = None
+
+        model = ObjectType if target_kind == "object" else BusinessLogic
+        if target_id:
+            entity = db.get(model, target_id)
+            if entity is None or entity.ontology_id != ontology_id or entity.status != EntityStatus.PUBLISHED.value:
+                return (
+                    {"error": "主体不存在、未发布或不属于当前数据域", "target_id": target_id},
+                    "落点主体未命中",
+                    True,
+                )
+            subject = entity.display_name or entity.name
+        else:
+            if not keyword:
+                return (
+                    {"error": "需要 target_id，或提供 keyword 做候选定位"},
+                    "缺少落点主体",
+                    True,
+                )
+            if target_kind == "object":
+                page = self.query_service.list_object_types(
+                    db, ontology_id=ontology_id, published_only=True, q=keyword, limit=4
+                )
+            else:
+                page = self.query_service.list_business_logics(
+                    db, ontology_id=ontology_id, published_only=True, q=keyword, limit=4
+                )
+            candidates = [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "display_name": item.display_name,
+                }
+                for item in page.items
+            ]
+            if len(candidates) != 1:
+                return (
+                    {
+                        "family": "landing",
+                        "target_kind": target_kind,
+                        "candidates": candidates,
+                        "total": page.total,
+                        "note": (
+                            "没有唯一主体，请从 candidates 中选择 id 后再次调用 get_landing。"
+                            if candidates else "当前本体没有匹配的已发布主体。"
+                        ),
+                    },
+                    f"找到 {len(candidates)} 个落点主体候选",
+                    False,
+                )
+            target_id = candidates[0]["id"]
+            subject = candidates[0].get("display_name") or candidates[0].get("name")
+
+        payload = read_landing(
+            db,
+            {
+                "object_id": target_id if target_kind == "object" else "",
+                "logic_id": target_id if target_kind == "logic" else "",
+                "subject": subject,
+            },
+        ).to_dict()
+        return payload, f"已读取「{subject or target_id}」的物理落点", False
+
+    @staticmethod
+    def _dispatch_get_ops_record(
+        db: Session,
+        *,
+        ontology_id: str | None,
+        domain_id: str | None = None,
+        args: dict,
+        conversation_id: str | None = None,
+    ) -> tuple[dict, str, bool]:
+        """按问题族读取专用运行记录注册表。读模型本身不在这里重复实现。"""
+        from app.services.ops_records import REGISTRY
+
+        family = str(args.get("family") or "").strip()
+        if family not in REGISTRY:
+            return (
+                {
+                    "error": f"不支持的运行记录族：{family or '(空)'}",
+                    "available_families": [
+                        {"key": key, "display": value.display, "answers": value.answers}
+                        for key, value in REGISTRY.items()
+                    ],
+                },
+                "运行记录族无效",
+                True,
+            )
+        params = dict(args)
+        default_scope = {
+            "decision": "conversation",
+            "standard": "all",
+        }.get(family, "ontology")
+        scope = str(params.get("scope") or default_scope).strip()
+        allowed_scopes: dict[str, set[str]] = {
+            "task_run": {"conversation", "ontology", "all"},
+            "pipeline": {"ontology", "all"},
+            "decision": {"conversation"},
+            "ontology_version": {"ontology"},
+            "standard": {"global", "all"},
+        }
+        allowed = allowed_scopes.get(
+            family, {"conversation", "ontology", "all", "global"}
+        )
+        if scope not in allowed:
+            return (
+                {
+                    "error": (
+                        f"family={family} 的 scope 只能是 "
+                        f"{', '.join(sorted(allowed))}"
+                    )
+                },
+                "运行记录范围无效",
+                True,
+            )
+        if scope == "ontology" and not ontology_id:
+            return (
+                {"error": f"family={family} 需要当前本体上下文"},
+                "缺少本体上下文",
+                True,
+            )
+        if family == "decision" and not conversation_id:
+            return (
+                {"error": "family=decision 需要当前对话上下文"},
+                "缺少对话上下文",
+                True,
+            )
+        if family == "task_run" and scope == "conversation":
+            if not conversation_id:
+                return (
+                    {"error": "scope=conversation 需要当前对话上下文"},
+                    "缺少对话上下文",
+                    True,
+                )
+            linked_ids = (
+                db.query(ChatBiConversationTask.artifact_id)
+                .filter(ChatBiConversationTask.conversation_id == conversation_id)
+                .order_by(desc(ChatBiConversationTask.created_at))
+                .all()
+            )
+            params["artifact_ids"] = [row[0] for row in linked_ids]
+        params["scope"] = scope
+        if ontology_id and not params.get("ontology_id"):
+            params["ontology_id"] = ontology_id
+        if domain_id and not params.get("domain_id"):
+            params["domain_id"] = domain_id
+        if conversation_id and not params.get("conversation_id"):
+            params["conversation_id"] = conversation_id
+        answer = REGISTRY[family].reader(db, params).to_dict()
+        count = len(answer.get("items") or []) or (1 if answer.get("facts") else 0)
+        return answer, f"已读取 {REGISTRY[family].display} 记录（{count} 条）", False
 
     def _conversation_lineage(self, artifacts: list[Any]) -> dict:
         """L4：会话内任务的血缘汇总（谁依赖谁）。
@@ -5352,6 +5571,7 @@ class ChatBiService:
         name: str,
         args: dict,
         principal_role: str | None = None,
+        conversation_id: str | None = None,
     ) -> tuple[Any, str, bool]:
         """执行一个工具调用，返回 (结果对象, 人类可读摘要, 是否错误)。同步，供 to_thread 调用。
 
@@ -5489,6 +5709,18 @@ class ChatBiService:
                 return self._dispatch_get_task_options(
                     db, ontology_id=anchor_ontology, args=args
                 )
+            if name == "get_landing":
+                return self._dispatch_get_landing(
+                    db, ontology_id=anchor_ontology, args=args
+                )
+            if name == "get_ops_record":
+                return self._dispatch_get_ops_record(
+                    db,
+                    ontology_id=anchor_ontology,
+                    domain_id=anchor_domain,
+                    args=args,
+                    conversation_id=conversation_id,
+                )
             if name == "propose_action":
                 # 循环里对 propose_action 特判并注入 conversation_id（见 ask_stream）——
                 # 那条注入是六环门禁的输入。走到这条通用分支就意味着没有会话上下文，
@@ -5624,10 +5856,11 @@ class ChatBiService:
 
     @staticmethod
     def _classify_intent(question: str) -> str:
-        """意图分类：``"analytical"`` / ``"structural"`` / ``"general"``。
+        """意图分类：``"analytical"`` / ``"operational"`` / ``"structural"`` / ``"general"``。
 
         以「需要精准回答的意图」正向定义，规则优先、确定性、零额外 LLM 调用：
         - 命中取数标记 → analytical（要真数据，需接地；赢平局，绝不误伤真实取数）；
+        - 否则命中运行记录标记 → operational（要已发生事实，需接地）；
         - 否则命中结构标记 → structural（要具体本体元数据，需接地）；
         - 否则 → **general**（默认；打招呼/问能力/产品用法等，自由作答、不要求接地）。
 
@@ -5637,6 +5870,8 @@ class ChatBiService:
         q = (question or "").lower()
         if any(m in q for m in _ANALYTICAL_MARKERS):
             return "analytical"
+        if any(m in q for m in _OPERATIONAL_MARKERS):
+            return "operational"
         if any(m in q for m in _STRUCTURAL_MARKERS):
             return "structural"
         return "general"
@@ -5648,42 +5883,52 @@ class ChatBiService:
         返回 skill name 或 None（未匹配时让模型自己选或用默认工具集）。
 
         优先级顺序（从具体到一般）：
-        1. task - 数据任务（物化/同步/加工/状态查询）
-        2. onboard - 接数据源/生成本体
-        3. lineage - 血缘影响
-        4. create - 建口径/指标
-        5. query - 取数分析
-        6. overview - 域概览
+        1. ops - 已发生的运行记录/物理落点查询
+        2. task - 数据任务起草/确认
+        3. onboard - 接数据源/生成本体
+        4. lineage - 血缘影响
+        5. create - 建口径/指标
+        6. query - 取数分析
+        7. overview - 域概览
 
         只在明确命中时返回 skill，模糊情况返回 None 让模型选择（通过 select_skill 工具）。
         """
         q = (question or "").lower()
 
-        # 1. task - 数据任务相关
+        # 1. ops - 已发生事实；只在没有明确写意图时进入只读车道。
+        task_write_markers = ("新建", "创建", "建个", "起草", "帮我做", "配置", "生成任务")
+        if ChatBiService._classify_intent(question) != "analytical" and any(
+            m in q for m in _OPERATIONAL_MARKERS
+        ) and not any(
+            m in q for m in task_write_markers
+        ):
+            return "ops"
+
+        # 2. task - 数据任务相关
         task_markers = ("物化", "同步", "加工", "任务", "执行", "状态", "进度", "成功", "失败", "跑到哪", "完成了吗")
         if any(m in q for m in task_markers):
             return "task"
 
-        # 2. onboard - 接数据相关
+        # 3. onboard - 接数据相关
         onboard_markers = ("接入", "接进来", "连接", "数据源", "生成本体", "元数据采集")
         if any(m in q for m in onboard_markers):
             return "onboard"
 
-        # 3. lineage - 血缘影响
+        # 4. lineage - 血缘影响
         lineage_markers = ("血缘", "上游", "下游", "来源", "依赖", "影响", "被谁用", "从哪来", "影响面")
         if any(m in q for m in lineage_markers):
             return "lineage"
 
-        # 4. create - 建口径/指标
+        # 5. create - 建口径/指标
         create_markers = ("建个", "新建", "创建", "定义", "指标", "口径", "标签", "规则")
         if any(m in q for m in create_markers):
             return "create"
 
-        # 5. query - 取数分析（已被 _ANALYTICAL_MARKERS 覆盖）
+        # 6. query - 取数分析（已被 _ANALYTICAL_MARKERS 覆盖）
         if any(m in q for m in _ANALYTICAL_MARKERS):
             return "query"
 
-        # 6. overview - 域概览（已被 _STRUCTURAL_MARKERS 覆盖）
+        # 7. overview - 域概览（已被 _STRUCTURAL_MARKERS 覆盖）
         if any(m in q for m in _STRUCTURAL_MARKERS):
             return "overview"
 
@@ -5861,7 +6106,7 @@ class ChatBiService:
             )
 
         # 阶梯式加载（窄而深）：优先锁定**最可能相关**的少数本体，对命中者一次性带回
-        # 完整信息包（字段全集/关系/口径/取值样例/物化引擎），模型开口前即掌握细节，
+        # 完整信息包（字段全集/关系/口径/取值样例/物化配置契约），模型开口前即掌握细节，
         # 不必来回 get_object→profile_values→查物化。无命中/置信度过低则不注入，
         # 不把无关实体倒进上下文——与"全量加载"相反：范围窄、信息全。
         ladder_note = ""
@@ -5889,7 +6134,7 @@ class ChatBiService:
                 pkgs = merged_pkgs[:4]
                 ladder_note = (
                     "\n\n【已深加载的相关本体】以下是系统为本次问题精确锁定并**完整加载**的"
-                    "业务对象（含字段、关系、绑定口径、取值样例/统计、物化引擎），已是当前问题"
+                    "业务对象（含字段、关系、绑定口径、取值样例/统计、物化配置契约），已是当前问题"
                     "最相关的实体，可直接据此作答或写取数 SQL；如需其它实体再调 search_*：\n"
                     + _json.dumps(pkgs, ensure_ascii=False)
                 )
@@ -6049,7 +6294,7 @@ class ChatBiService:
         # 工具名和 JSON Schema 表达调用契约；运行时移除长描述，降低 prompt 体积。
         # 参数校验与业务规则由 dispatch/validation gate 执行。
         active_tools = self._compact_tools_for_prompt_retry(_compose_tools(active_skill))
-        # V5 F2：首轮“先搜再拒”守卫——结构性/取数意图下，若模型首轮不调任何工具就
+        # V5 F2 / V6：首轮“先搜再拒”守卫——结构性/取数/运行记录意图下，若模型首轮不调任何工具就
         # 直接拒答（实测：“X 对象有哪些字段” 0 步就拒），先逆一次逗它至少 search 一次再判。只逗一次。
         _search_nudged = False
         # 治理规则由后端目录、校验和状态机执行，不放入模型提示。
@@ -6064,6 +6309,7 @@ class ChatBiService:
         app_proposals: list[dict] = []  # propose_panel/dashboard 产出的数据应用提案（供 app_proposal 块）
         onboard_proposals: list[dict] = []  # propose_datasource/ontology_draft 产出的接数据提案
         task_statuses: list[dict] = []  # get_task_status 产出的任务状态（供 task_status 块）
+        ops_records: list[dict] = []  # V6：运行记录读模型（供 record 块）
         plan: dict | None = None  # update_plan 产出的多步分析计划（供 plan 块；整体覆盖）
         # V4 O2：本次问答的大结果离场 store（run_sql 全量行寄存于此，上下文只见样例）。
         result_store = RunResultStore()
@@ -6119,7 +6365,7 @@ class ChatBiService:
                     logger.info(f"ReAct thinking: {thinking[:100]}...")
 
                 _candidate = self._strip_tool_markup(stripped or msg.content or "")
-                # V5 F2/F4：结构性/取数意图下**本轮一次工具都没调**就想收尾——逆一次，
+                # V5 F2/F4 / V6：结构性/取数/运行记录意图下**本轮一次工具都没调**就想收尾——逆一次，
                 # 要它先核实。只逆一次，不成就放行（照旧由接地判定兜底）。
                 #
                 # F2 原本只逆「看着像拒答」的那种。F4（长会话实测）暴露出另一半、且更常见：
@@ -6129,7 +6375,7 @@ class ChatBiService:
                 # 两种都是「未经核实就收尾」，同一处逆，只是话术分开。
                 if (
                     not _search_nudged
-                    and intent in ("structural", "analytical")
+                    and intent in ("structural", "analytical", "operational")
                     and not grounded_hit
                 ):
                     _search_nudged = True
@@ -6137,13 +6383,13 @@ class ChatBiService:
                     messages.append({
                         "role": "user",
                         "content": (
-                            "先别下结论。请至少先用 search_objects / search_logics 换几个关键词"
-                            "（中英文、同义词、上位词）检索一次；确实搜不到再说无法回答。"
+                            "先别下结论。请先用 search_objects / search_logics / get_landing / "
+                            "get_ops_record 等工具核实一次；确实查不到再说明无法回答。"
                         )
                         if self._looks_like_refusal(_candidate)
                         else (
                             "这一轮你还没调用任何工具，答案无法被核实。请先用 search_objects /"
-                            " get_object 等工具把你要提到的对象、字段、口径核实一遍（早前轮查过"
+                            " get_object / get_landing / get_ops_record 等工具把你要提到的对象、字段、记录核实一遍（早前轮查过"
                             "也要重查，本轮的结论要有本轮的凭证），再据实作答。"
                         ),
                     })
@@ -6317,6 +6563,7 @@ class ChatBiService:
                         name=tool_name,
                         args=call_args,
                         principal_role=principal_role,
+                        conversation_id=conversation_id,
                     )
                 tel.tool(tool_name, is_error=is_error)
                 if isinstance(result, dict):
@@ -6363,6 +6610,7 @@ class ChatBiService:
                     or (tool_name in (
                         "get_object", "get_logic", "get_domain_overview",
                         "find_join_path", "profile_values", "compile_metric", "get_lineage",
+                        "get_landing", "get_ops_record",
                         "propose_draft", "propose_expression",
                         "propose_action", "propose_pipeline",
                         "get_task_status",
@@ -6415,6 +6663,8 @@ class ChatBiService:
                                 )
                     elif tool_name == "get_lineage" and result.get("nodes"):
                         lineage = result
+                    elif tool_name in ("get_landing", "get_ops_record") and result.get("family"):
+                        ops_records.append(result)
                     elif tool_name == "propose_draft" and result.get("create_payload"):
                         draft_proposals.append(result)
                     elif tool_name == "propose_expression" and (
@@ -6565,7 +6815,7 @@ class ChatBiService:
                 tel.repair_succeeded()
                 break
 
-        # 接地判定：只有需要精准回答的意图（analytical/structural）才要求命中本体工具。
+        # 接地判定：只有需要精准回答的意图（analytical/operational/structural）才要求命中本体工具。
         # 其余默认 general（打招呼/问能力/产品 how-to/一般解释）——与具体业务数据无关，
         # 直接作答即可，豁免 grounded_hit。拒答是少数精准场景的例外，不是常态。
         # 但仍**保留** verify_ok（F4）：万一 general 混进真本体问题、模型据此编造具名实体/数值，
@@ -6644,6 +6894,7 @@ class ChatBiService:
                 "app_proposals": app_proposals,
                 "onboard_proposals": onboard_proposals,
                 "task_statuses": task_statuses,
+                "ops_records": ops_records,
                 "plan": plan,
                 "skill": active_skill.name if active_skill else None,
                 "_grounded": grounded,

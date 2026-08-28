@@ -1,6 +1,6 @@
 # Data Agent V6 计划：运行记录可问答（Operational Recall）
 
-> 状态：⬜ **全部未开始**——本文是方案，尚未实施。
+> 状态：🟡 **P0/P1 已落地，P2（两类运行记录）已落地**——其余运行记录族仍按需扩展。
 > 日期：2026-08-28
 > 承接 [DATA_AGENT_V5_OPTIMIZATION.md](./DATA_AGENT_V5_OPTIMIZATION.md)（工具收窄 38→9）与 [DATA_AGENT_V5_PLAN.md](./DATA_AGENT_V5_PLAN.md)。
 > 主战场：`backend/app/services/chat_bi.py`、`chat_bi_tool_schemas.py`、`chat_bi_skills.py`、
@@ -234,10 +234,21 @@ for rec in payload.get("ops_records") or []:
 
 | 阶段 | 内容 | 依赖 | 风险 | 状态 |
 | --- | --- | --- | --- | --- |
-| **P0 止血** | S3（拆假信息源）→ S1 → S2。**零新工具、零新概念** | 无 | 低 | ⬜ |
-| **P1 骨架** | `ops_records.py` 注册表 + `landing`/`task_run` 两族 reader + `get_landing` 工具 + `ops` 技能 + **账本登记（F0）** | P0 | 中 | ⬜ |
-| **P2 铺开** | 其余 11 族 reader + `get_ops_record` + `operational` 意图 + 路由读/写判别 + `record` 块 + 前端 | P1 | 中 | ⬜ |
+| **P0 止血** | S3（拆假信息源）→ S1 → S2。**零新工具、零新概念** | 无 | 低 | ✅ |
+| **P1 骨架** | `ops_records.py` 注册表 + `landing`/`task_run` 两族 reader + `get_landing` 工具 + `ops` 技能 + **账本登记（F0）** | P0 | 中 | ✅ |
+| **P2 铺开** | 其余 11 族 reader + `get_ops_record` + `operational` 意图 + 路由读/写判别 + `record` 块 + 前端 | P1 | 中 | 🟡 |
 | **P3 验收** | 运维问题集实测 + golden 扩例 | P2 | 低 | ⬜ |
+
+P2 记 🟡 而非 ✅：机制（`get_ops_record` 分发 + `operational` 意图 + `record` 块）已通，
+但注册表里只有 `landing`/`task_run` 两族，§3 表格中的 C/D/E/F/H/J 等族尚未接 reader。
+
+### 本地落地进度（2026-08-28）
+
+- ✅ P0：物化配置与物理落点命名分离；对象详情透传已有 landing；任务状态读取补齐受控 spec 字段与查询范围。
+- ✅ P1：新增 `get_landing`、`get_ops_record(family=task_run)` 两个只读工具；接入 `ops` 技能、FactLedger 登记和本体作用域校验。
+- ✅ P2（首批）：新增 `operational` 意图与读/写路由判别；运行记录统一返回 `as_of`、`observed_at`、`source`；前端新增 `record` 块展示事实和来源。
+- ✅ P2（第二批）：`get_ops_record` 接入 `pipeline`、`decision`、`ontology_version`、`standard`；分别复用任务链服务、追加式决策账本、本体版本服务和规约服务。scope 按族收紧（会话/本体/全局），FactLedger 同时登记具名事实与原始数值。
+- ⏳ 后续：扩展其余运行记录族、完整的生产问题集回放，以及跨轮 Agent run/artifact 持久化。
 
 ### 验收标准
 

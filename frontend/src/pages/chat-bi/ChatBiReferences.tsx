@@ -52,6 +52,7 @@ import type {
   ChatBiFormField,
   ChatBiFormOption,
   ChatBiFormRequest,
+  ChatBiOpsRecord,
   ChatBiReference,
   GovernanceArtifact,
   GraphEdge,
@@ -554,6 +555,8 @@ function BlockRenderer({
           blockId={block.id}
         />
       );
+    case "record":
+      return <OpsRecordBlock record={block.record} />;
     case "notice":
       return block.variant === "refused" ? <RefusedNotice /> : <MockNotice />;
     case "clarify":
@@ -2756,6 +2759,62 @@ function TaskStatusBlock({
         label="任务状态是否符合预期？"
       />
       {node}
+    </div>
+  );
+}
+
+const OPS_RECORD_LABELS: Record<string, string> = {
+  landing: "物理落点",
+  task_run: "任务执行",
+  pipeline: "任务链",
+  decision: "决策审计",
+  ontology_version: "本体版本",
+  standard: "治理规约",
+};
+
+function OpsRecordBlock({ record }: { record: ChatBiOpsRecord }) {
+  const facts = record.facts ?? [];
+  const items = record.items ?? [];
+  const formatValue = (value: unknown) => {
+    if (value === null || value === undefined || value === "") return "-";
+    if (typeof value === "boolean") return value ? "是" : "否";
+    return typeof value === "string" ? value : JSON.stringify(value);
+  };
+  return (
+    <div className="chatbi-ops-record">
+      <div className="chatbi-ops-record-head">
+        <Tag color="blue">{OPS_RECORD_LABELS[record.family] ?? record.family}</Tag>
+        {record.subject && <span className="chatbi-task-name">{record.subject}</span>}
+      </div>
+      {facts.length > 0 && (
+        <div className="chatbi-ops-record-facts">
+          {facts.map((fact) => (
+            <div className="chatbi-ops-record-fact" key={fact.key}>
+              <span className="chatbi-ops-record-label">{fact.label}</span>
+              <span>{formatValue(fact.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {items.length > 0 && (
+        <div className="chatbi-ops-record-items">
+          {items.map((item, index) => (
+            <div className="chatbi-ops-record-item" key={String(item.id ?? index)}>
+              {Object.entries(item).map(([key, value]) => (
+                <span key={key}>
+                  <strong>{key}</strong> {formatValue(value)}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {record.note && <div className="chatbi-draft-note">{record.note}</div>}
+      <div className="chatbi-ops-record-meta">
+        <span>事实时间：{record.as_of ? new Date(record.as_of).toLocaleString() : "未记录"}</span>
+        <span>读取时间：{record.observed_at ? new Date(record.observed_at).toLocaleString() : "-"}</span>
+        <span>来源：{record.source || "-"}</span>
+      </div>
     </div>
   );
 }

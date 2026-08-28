@@ -24,7 +24,7 @@ from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golde
 
 
 def test_registry_has_overview_and_query():
-    assert set(SKILLS) == {"overview", "query", "lineage", "create", "task", "onboard"}
+    assert set(SKILLS) == {"overview", "query", "lineage", "create", "task", "onboard", "ops"}
     assert SKILLS["query"].extra_tool_names == (
         "update_plan", "scout_query", "analyze_result", "render_chart",
         "propose_panel", "propose_dashboard",
@@ -40,6 +40,9 @@ def test_registry_has_overview_and_query():
     )
     assert SKILLS["onboard"].extra_tool_names == (
         "list_onboarding_targets", "propose_datasource", "propose_ontology_draft",
+    )
+    assert SKILLS["ops"].extra_tool_names == (
+        "get_landing", "get_ops_record", "get_task_status", "get_lineage",
     )
     assert "overview" in skill_choices_text() and "query" in skill_choices_text()
 
@@ -194,7 +197,7 @@ def test_skill_and_chart_flow_end_to_end(client):
     )
     service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         # 只需喂 run_sql 一份可执行结果，让 render_chart 有真实列可作图。
         if name == "run_sql":
             return (
@@ -1173,7 +1176,7 @@ def test_plan_flow_end_to_end(client):
 
     real_dispatch = service._dispatch_agent_tool
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "run_sql":
             return (
                 {"executed": True, "sql": args.get("sql"),
@@ -1343,7 +1346,7 @@ def test_analyze_flow_end_to_end(client):
     )
     service._resolve_domain_data_source = lambda _db: None  # type: ignore[assignment]
 
-    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None):
+    def fake_dispatch(db, *, domain_ids, ontology_ids, name, args, principal_role=None, conversation_id=None):
         if name == "run_sql":
             return (
                 {"executed": True, "sql": args.get("sql"),
@@ -1932,4 +1935,3 @@ def test_react_thinking_extraction():
     thinking, clean = ChatBiService._extract_thinking(upper_case)
     assert thinking == "大写也可以"
     assert clean == "内容"
-

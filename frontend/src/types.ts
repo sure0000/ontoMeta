@@ -1013,6 +1013,18 @@ export interface ChatBiCaliberItem {
   references: ChatBiCaliberReference[];
 }
 
+export interface ChatBiOpsRecord {
+  family: string;
+  subject?: string | null;
+  facts?: Array<{ key: string; label: string; value: unknown }>;
+  items?: Array<Record<string, unknown>>;
+  as_of?: string | null;
+  observed_at?: string | null;
+  source?: string;
+  truncated?: boolean;
+  note?: string | null;
+}
+
 export interface ChatBiAgentStep {
   index: number;
   /**
@@ -1371,6 +1383,7 @@ export type ChatBiBlock =
         };
       };
     }
+  | { id: string; type: "record"; record: ChatBiOpsRecord }
   | {
       id: string;
       /** P3.1：记忆提案（跨会话约定）。agent 只提案，点「记住」才写入本域约定。 */
@@ -1400,6 +1413,8 @@ export interface ChatBiAnswer {
   clarification?: ChatBiClarification | null;
   /** P6：需一次补齐多个结构化参数时，Agent 生成的可填写表单（终态出口）。 */
   form_request?: ChatBiFormRequest | null;
+  /** V6：物理落点/运行记录读模型。 */
+  ops_records?: ChatBiOpsRecord[];
   steps?: ChatBiAgentStep[];
   data_result?: ChatBiDataResult | null;
   /** V3 S0 渲染块（后端双写）；缺失时前端 answerToBlocks 由旧字段兜底。 */

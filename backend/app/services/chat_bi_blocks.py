@@ -172,6 +172,11 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for status in payload.get("task_statuses") or []:
         _add({"type": "task_status", "status": status})
 
+    # V6：运行记录块（get_landing/get_ops_record 产出）。facts/items 统一由读模型提供，
+    # 并保留 as_of、observed_at、source，避免把「当前读取时间」误说成事实发生时间。
+    for record in payload.get("ops_records") or []:
+        _add({"type": "record", "record": record})
+
     # 确认闭环总结**刻意不做成块**：块随消息落库，于是每条回答都会带一份快照——
     # 要么每轮重复同一张图（噪声），要么得靠时间戳判断"自上条回答以来有无新决策"来抑制
     # （SQLite 的 now() 只到秒，同秒内的决策会被误判成旧的）。而闭环是**会话级**状态，

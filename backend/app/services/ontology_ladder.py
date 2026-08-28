@@ -72,7 +72,7 @@ class LoadedObject:
     relations: list[dict] = field(default_factory=list)       # 进出关系
     business_logics: list[dict] = field(default_factory=list)  # 绑定口径
     profiles: list[dict] = field(default_factory=list)        # 数据样例 + 统计（可空）
-    materialization: dict | None = None                        # 物化引擎/物理表（可空）
+    materialization_contract: dict | None = None               # 物化配置契约（意图侧，非物理落点）
 
     def to_dict(self) -> dict:
         d = {
@@ -88,8 +88,8 @@ class LoadedObject:
         }
         if self.profiles:
             d["value_profiles"] = self.profiles
-        if self.materialization is not None:
-            d["materialization"] = self.materialization
+        if self.materialization_contract is not None:
+            d["materialization_contract"] = self.materialization_contract
         return d
 
 
@@ -411,8 +411,8 @@ class OntologyLadderLoader:
             business_logics=logics,
         )
 
-        # 物化引擎/物理表：纯元数据，无权限门槛。
-        pkg.materialization = self._load_materialization(db, ontology_id, obj.id)
+        # 物化配置契约（意图侧，非物理落点）：纯元数据，无权限门槛。
+        pkg.materialization_contract = self._load_materialization(db, ontology_id, obj.id)
 
         # 数据样例 + 统计：真实数据暴露，走 run_sql 同一道权限闸门。
         if with_profiles:
@@ -428,7 +428,10 @@ class OntologyLadderLoader:
     def _load_materialization(
         self, db: Session, ontology_id: str, object_id: str
     ) -> dict | None:
-        """物化契约：落在哪个引擎、哪张物理表、更新策略。缺失即返回 None。"""
+        """物化契约（意图侧配置，非物理落点）：目标层/装载策略/分区键/调度。缺失即返回 None。
+
+        注意这不是物理落点——落点读 object_landing.bulk_object_landings（ODS/服务层表名+状态）。
+        """
         try:
             from app.services.materialization_contract import (
                 MaterializationContractService,

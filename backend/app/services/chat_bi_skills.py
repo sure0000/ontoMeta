@@ -241,6 +241,48 @@ SKILLS: dict[str, Skill] = {
         ),
         block_types=("markdown", "onboard_proposal"),
     ),
+    "ops": Skill(
+        name="ops",
+        display="运行记录",
+        when_to_use="用户问某个任务/对象的运行状态、物理落点、执行记录、或其它已经发生过的事实",
+        prompt_overlay=(
+            "【运行记录模式】\n"
+            "当前任务：查询已经发生过什么——任务跑到哪了、对象落在哪张表、什么状态。\n\n"
+
+            "核心原则：**只读现场勘查模式**\n"
+            "- 先定位主体（对象/任务/域）→ search_objects / get_object\n"
+            "- 再取运行记录 → get_landing / get_ops_record / get_task_status / get_lineage\n"
+            "- 答案**必须带 as_of（记录时点）与 source（权威层）**\n"
+            "- **不出任何提案**：这是纯只读模式，要建任务请 select_skill('task')\n\n"
+
+            "两类问题：\n"
+            "1. **物理落点**（get_landing）：\n"
+            "   - 这个对象/口径落到哪张物理表了？\n"
+            "   - 表建了吗？数搬了吗？现在能不能查？\n"
+            "   - 工作流：search_objects → get_landing(object_id)\n"
+            "   - 返回 ODS 表、服务层表、装载模式、最近成功搬数时间\n"
+            "   - **重要**：没有落点登记 ≠ 错误 — 正是这条信息挡住了「推测表名」\n\n"
+
+            "2. **任务执行**（get_task_status）：\n"
+            "   - 那个任务跑完了吗？卡在哪一步？失败原因是什么？\n"
+            "   - 工作流：get_task_status(artifact_id) 或 get_task_status() 列最近任务\n"
+            "   - 返回状态、执行时间、失败原因、物化/同步制品的回执摘要\n\n"
+
+            "3. **血缘影响**（get_lineage）：\n"
+            "   - 这个对象的上游是谁、下游影响谁？\n"
+            "   - 工作流：search_objects → get_lineage(center_id, depth)\n\n"
+
+            "回答原则：\n"
+            "- 基于工具真实返回的记录；没查到就说没查到，不许推测\n"
+            "- 必须说清「截至 XX 时间」和「数据来源：XX」\n"
+            "- 落点状态有 7 种：未落地/已登记/表已建/搬运中/已落地/陈旧/失败\n"
+            "- 没有落点登记是个真答案，说明这个对象在数仓里还没有对应的物理表\n"
+        ),
+        extra_tool_names=(
+            "get_landing", "get_ops_record", "get_task_status", "get_lineage",
+        ),
+        block_types=("markdown", "record", "task_status", "lineage"),
+    ),
 }
 
 

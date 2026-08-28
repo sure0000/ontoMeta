@@ -45,33 +45,11 @@ _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 # V5 优化：加入工作流程和工具选择策略，引导模型逐步执行。
 # V5.1 ReAct：要求模型在调用工具前先思考（提高准确性、便于调试）。
 _AGENT_SYSTEM_PROMPT = (
-    "你是企业数据助手，请用中文简洁回答。\n\n"
-
-    "# 工作方式（ReAct 模式）\n"
-    "1. **理解意图**：用户是要查数据、看结构、建资源，还是管任务？不确定时用 ask_clarification 问清楚\n"
-    "2. **思考再行动**：调用工具前先在 <thinking> 标签中简要说明：\n"
-    "   - 当前目标是什么\n"
-    "   - 为什么选这个工具\n"
-    "   - 期望获得什么信息\n"
-    "   例如：<thinking>用户问销售额，需要先找到销售相关对象，用 search_objects</thinking>\n"
-    "3. **选择技能**（重要）：根据意图调用 select_skill 进入专门模式，获得该场景的最佳工具集\n"
-    "4. **逐步执行**：一次调用一个工具，根据结果决定下一步，不要一次性调用多个工具\n"
-    "5. **基于事实**：只使用工具返回的信息作答，不编造对象、字段或数据\n\n"
-
-    "# 工具选择原则\n"
-    "- **查数据**（统计/明细/趋势） → select_skill('query') → search_objects 定位 → run_sql 取数 → analyze_result 解读\n"
-    "- **看结构**（对象有哪些字段/关系） → select_skill('overview') → 使用域语义卡 + search_* 浏览\n"
-    "- **看血缘**（上下游/影响面） → select_skill('lineage') → search_objects 定位 → get_lineage 获取\n"
-    "- **建口径**（新建指标/标签） → select_skill('create') → search_logics 查重 → propose_draft/propose_expression\n"
-    "- **管任务**（物化/同步/加工） → select_skill('task') → get_task_options → request_form 六环确认 → propose_action\n"
-    "- **接数据**（连新库/生成本体） → select_skill('onboard') → list_onboarding_targets → propose_datasource/propose_ontology_draft\n\n"
-
-    "# 重要约束\n"
-    "- 数据查询默认使用 Doris 数仓\n"
-    "- 数据任务需六环逐一确认（需求 → 本体 → 数据 → 执行方案 → 执行 → 结果），不能跳过或代替用户确认\n"
-    "- 同步任务不需要先物化：sync 会自动建 ODS 表，直接建 sync 任务即可\n"
-    "- 清楚标注状态：建议 vs 草稿 vs 执行中 vs 已完成\n"
-    "- search_* 工具返回的是样本，可能不全，必要时说明「仅展示部分结果」\n"
+    "你是企业数据助手，请用中文简洁回答。\n"
+    "先判断意图并选择技能；需要业务事实时先调用工具核实，答案只引用工具结果。\n"
+    "查数据→query；看结构→overview；看血缘→lineage；建口径→create；管任务→task；"
+    "查运行记录→ops（只读）；接数据→onboard。\n"
+    "数据查询使用默认 Doris。任务写入必须经六环确认；区分建议、草稿和运行状态。\n"
 )
 
 # Prompt 被上游网关误判时使用的单次精简重试版本。它不包含动态本体卡、历史记忆或任务细节。
@@ -936,6 +914,77 @@ _GET_TASK_STATUS_TOOL: dict[str, Any] = {
     },
 }
 
+_GET_LANDING_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_landing",
+        "description": (
+            "读取已发布本体对象或业务口径的真实物理落点与状态。回答「落到哪张表、表建了吗、"
+            "数搬了吗、现在能不能查」时使用。只返回既有 IngestionContract / WarehouseProjection"
+            "登记；没有登记时明确返回未落地，禁止按命名规则推测表名。target_id 应来自"
+            "search_objects/search_logics；不知道 id 时可给 keyword 让服务端做一次候选定位。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_kind": {
+                    "type": "string",
+                    "enum": ["object", "logic"],
+                    "description": "主体类型：object=业务对象，logic=业务口径",
+                },
+                "target_id": {"type": "string", "description": "对象或口径 id"},
+                "keyword": {"type": "string", "description": "主体显示名/标识符（无 id 时使用）"},
+            },
+            "required": ["target_kind"],
+        },
+    },
+}
+
+_GET_OPS_RECORD_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_ops_record",
+        "description": (
+            "读取已经发生过的权威运行记录，只读，不创建或执行任务。"
+            "task_run 查单任务状态、执行时间和失败原因；pipeline 查整条任务链及逐步状态；"
+            "decision 查当前会话的六环确认与决策人；ontology_version 查当前本体发布版本或版本差异；"
+            "standard 查当前生效治理规约与发布历史。没有匹配记录时返回明确的空结果。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "family": {
+                    "type": "string",
+                    "enum": [
+                        "task_run", "pipeline", "decision", "ontology_version", "standard"
+                    ],
+                    "description": "运行记录问题族",
+                },
+                "artifact_id": {"type": "string", "description": "指定任务制品 id"},
+                "pipeline_id": {"type": "string", "description": "指定任务链 id"},
+                "version": {
+                    "type": "integer",
+                    "description": "指定本体发布版本；用于 ontology_version 读取相对上一版的差异",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "任务类型过滤，例如 materialize/sync/transform/metric",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["conversation", "ontology", "global", "all"],
+                    "description": (
+                        "查询范围；各族会严格校验：decision 仅 conversation，ontology_version "
+                        "仅 ontology，pipeline 支持 ontology/all，standard 支持 global/all"
+                    ),
+                },
+                "limit": {"type": "integer", "description": "最多返回条数，默认 5"},
+            },
+            "required": ["family"],
+        },
+    },
+}
+
 # 计划步骤状态（P2 显式规划）
 _PLAN_STATUSES: frozenset[str] = frozenset({"pending", "active", "done"})
 _PLAN_MAX_STEPS: int = 12
@@ -1729,6 +1778,8 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _PROPOSE_PIPELINE_TOOL,
         _GET_TASK_OPTIONS_TOOL,
         _GET_TASK_STATUS_TOOL,
+        _GET_LANDING_TOOL,
+        _GET_OPS_RECORD_TOOL,
         _UPDATE_PLAN_TOOL,
         _PROPOSE_PANEL_TOOL,
         _PROPOSE_DASHBOARD_TOOL,
@@ -1767,6 +1818,21 @@ _STRUCTURAL_MARKERS: tuple[str, ...] = (
     "有哪些", "哪些属性", "哪些字段", "包含哪些", "由哪些", "组成", "构成",
     "属性", "字段", "结构", "定义", "关系", "关联", "主键", "外键",
     "数据类型", "schema", "元数据", "是什么意思", "怎么理解",
+)
+# 运行记录问题必须走事实读取工具，不能落到 task 的建任务车道或 general 的
+# 自由作答车道。刻意只收复合短语；「记录/状态/进度」等裸词会误伤真实取数问题，
+# analytical 在分类时仍优先于 operational。
+_OPERATIONAL_MARKERS: tuple[str, ...] = (
+    "物理落点", "物理表", "落到哪", "落在哪", "在哪张表", "表建了吗", "能不能查",
+    "跑完了吗", "跑到哪", "卡在哪", "失败原因", "为什么失败", "执行状态",
+    "任务状态", "任务进度", "谁批的", "第几版", "部署状态", "运行记录", "执行记录",
+    "任务链状态", "整条链", "做到哪", "哪一环", "六环进度",
+    "发布版本", "版本差异", "当前规约", "规约版本", "生效规约",
+    # 「物化/同步**到哪**」是本方案 §1 的触发案例：问的是已发生的落点，但 "物化"/"同步"
+    # 同时是 task 车道的第一优先标记，不在这里认下来就会被路由去建任务、再拿契约里的
+    # materialization.engines 编一句「物化在默认 Doris」。必须用复合词（§8）：单说
+    # "物化"/"同步" 会把「帮我建个物化任务」也吸进只读车道。
+    "物化到哪", "物化在哪", "同步到哪", "同步到了哪", "建到哪", "写到哪",
 )
 # 接地判定的适用范围由「需要精准回答的意图」正向定义，而非反向枚举「哪些不必拒答」：
 # 只有 analytical（要真数据）和 structural（要具体本体元数据）**才要求接地**——答业务事实
@@ -1820,6 +1886,11 @@ SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
         "list_datasets",  # 清洗要读上游 ODS：先看它搬完没有
         "request_form",  # 六环确认表单
         "lint_against_standard",
+        "select_skill",
+    }),
+    "ops": frozenset({
+        *_CORE_SEARCH_TOOLS,
+        "get_landing", "get_ops_record", "get_task_status", "get_lineage",
         "select_skill",
     }),
     "onboard": frozenset({
@@ -1923,6 +1994,8 @@ __all__ = [
     '_READ_RESULT_TOOL',
     '_SCOUT_QUERY_TOOL',
     '_GET_LINEAGE_TOOL',
+    '_GET_LANDING_TOOL',
+    '_GET_OPS_RECORD_TOOL',
     '_LIST_DATASETS_TOOL',
     '_PROPOSE_DRAFT_TOOL',
     '_PROPOSE_EXPRESSION_TOOL',
@@ -1975,6 +2048,7 @@ __all__ = [
     '_SQL_TOOL_NAMES',
     '_ANALYTICAL_MARKERS',
     '_STRUCTURAL_MARKERS',
+    '_OPERATIONAL_MARKERS',
     '_tools_for_skill',
     '_search_items',
     '_format_sql',

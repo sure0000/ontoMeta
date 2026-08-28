@@ -116,6 +116,10 @@ export function answerToBlocks(payload: ChatBiAnswer | undefined, content?: stri
     });
   }
 
+  for (const record of payload.ops_records ?? []) {
+    blocks.push({ id: id(), type: "record", record });
+  }
+
   return blocks;
 }
 

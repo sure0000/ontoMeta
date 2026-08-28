@@ -1411,6 +1411,61 @@
   color: var(--om-text-tertiary);
 }
 
+/* V6：运行记录块。与任务状态块同一信息密度，但明确区分事实时间与读取时间。 */
+.chatbi-ops-record {
+  margin: 12px 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface, #fff);
+  font-size: 13px;
+}
+
+.chatbi-ops-record-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chatbi-ops-record-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 16px;
+}
+
+.chatbi-ops-record-fact {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chatbi-ops-record-label {
+  color: var(--om-text-tertiary);
+  flex: 0 0 auto;
+}
+
+.chatbi-ops-record-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--om-border);
+}
+
+.chatbi-ops-record-item:last-child {
+  border-bottom: 0;
+}
+
+.chatbi-ops-record-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 10px;
+  color: var(--om-text-tertiary);
+  font-size: 12px;
+}
+
 /* L4 血缘：任务间依赖（上游产出 → 下游消费） */
 .chatbi-task-lineage {
   margin-top: 6px;
