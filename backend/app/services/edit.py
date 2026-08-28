@@ -14,6 +14,7 @@ from app.models import (
     Property,
     RelationType,
 )
+from app.services.object_landing import bulk_object_landings
 from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.services.common import log_change
 from app.ontology_types import is_valid_cardinality, is_valid_semantic_type
@@ -276,7 +277,13 @@ class EditService:
             updated.append(obj)
 
         db.commit()
-        return [self.query._to_object_summary(db, o) for o in updated]
+        landings = bulk_object_landings(db, [o.id for o in updated])
+        return [
+            self.query._to_object_summary(
+                db, o, landing=landings.get(o.id), landing_loaded=True
+            )
+            for o in updated
+        ]
 
     async def ensure_object_type_from_dataset(
         self,

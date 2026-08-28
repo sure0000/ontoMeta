@@ -29,6 +29,7 @@ from app.schemas import (
     GraphPoint,
     GroupedGraphEdge,
     HubNode,
+    ObjectLandingOut,
     ObjectTypeSummary,
     OntologyGraph,
     OntologyGroupedGraph,
@@ -40,6 +41,7 @@ from app.schemas import (
     RelationTypeOut,
     VersionRecordOut,
 )
+from app.services.object_landing import ObjectLanding, bulk_object_landings
 from app.services.community_detection import (
     compute_graph_layout,
     identify_hub_nodes,
@@ -389,12 +391,15 @@ class OntologyQueryService:
         domain_map = self._bulk_resolve_domain_context(
             db, [obj.ontology_id for obj in objects]
         )
+        landings = bulk_object_landings(db, [o.id for o in objects])
         items = [
             self._to_object_summary(
                 db,
                 obj,
                 stats=stats.get(obj.id),
                 domain=domain_map.get(obj.ontology_id),
+                landing=landings.get(obj.id),
+                landing_loaded=True,
             )
             for obj in objects
         ]
@@ -1186,6 +1191,8 @@ class OntologyQueryService:
         *,
         stats: tuple[int, int, int] | None = None,
         domain: tuple[str | None, str | None] | None = None,
+        landing: ObjectLanding | None = None,
+        landing_loaded: bool = False,
     ) -> ObjectTypeSummary:
         if stats is None:
             stats = self._bulk_object_stats(db, [obj.id]).get(obj.id, (0, 0, 0))
@@ -1195,6 +1202,11 @@ class OntologyQueryService:
             domain_id, domain_name = self._resolve_domain_context(db, obj.ontology_id)
         else:
             domain_id, domain_name = domain
+        # 落点的「查过了但没有」与「压根没查」必须分得开：前者是真·未落地，后者是漏传。
+        # 比照 stats 的自愈写法——列表页批量传入，单对象调用就地补查，故任何调用点
+        # 都不会静默退化成「全部未落地」（``source_provenance`` 曾栽在这上面）。
+        if landing is None and not landing_loaded:
+            landing = bulk_object_landings(db, [obj.id]).get(obj.id)
         return ObjectTypeSummary(
             id=obj.id,
             name=obj.name,
@@ -1216,6 +1228,9 @@ class OntologyQueryService:
             role_reason=obj.role_reason,
             domain_context_id=domain_id,
             domain_name=domain_name,
+            landing=(
+                ObjectLandingOut.model_validate(landing) if landing is not None else None
+            ),
             updated_at=obj.updated_at,
             origin=obj.origin or "machine",
             upstream_removed=bool(obj.upstream_removed),
@@ -1263,6 +1278,11 @@ class OntologyQueryService:
 
         datahub = DataHubConnector(SettingsService().get_datahub_runtime(db))
         if obj.source_ref:
+            if not _refers_to_dataset(obj.source_ref):
+                # 人工建模与派生对象在 DataHub 里没有数据集。get_dataset_url 会把
+                # `derived:<本体>:<标识>` 当表名拼成一个 hive URN，前端于是显示一个
+                # 点开必然空白的「在 DataHub 中查看表详情」。引用照给，链接不给。
+                return obj.source_ref, None
             return obj.source_ref, datahub.get_dataset_url(obj.source_ref)
 
         name_hint = obj.name.replace("_entity", "")
@@ -1288,3 +1308,14 @@ class OntologyQueryService:
                     return urn, datahub.get_dataset_url(urn)
 
         return None, None
+
+
+def _refers_to_dataset(ref: str | None) -> bool:
+    """这个 source_ref 在 DataHub 里是否可能对应一个数据集。
+
+    只排除已知的两种非数据集形态（``manual:`` / ``derived:``），不改历史上那条
+    「裸库表名 → 兜底拼 hive URN」的行为——存量对象里确实有靠它出链接的。
+    """
+    from app.services.source_ref import is_derived_source_ref, is_manual_source_ref
+
+    return bool(ref) and not is_manual_source_ref(ref) and not is_derived_source_ref(ref)

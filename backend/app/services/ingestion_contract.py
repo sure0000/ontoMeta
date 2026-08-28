@@ -29,6 +29,63 @@ class IngestionContractError(ValueError):
     pass
 
 
+# 契约状态 → Projection 同步态。两套登记并存是历史事实（同步写契约、物化/清洗写
+# Projection），但**推进只能有一处**，否则「本体工作区显示已落地、清洗却说 ODS 没就绪」。
+_PROJECTION_SYNC_STATUS = {
+    "ready": "ready",
+    "running": "syncing",
+    "failed": "failed",
+}
+
+
+def mirror_contract_to_projection(
+    db: Session, contract: IngestionContract
+) -> WarehouseObjectProjection | None:
+    """把接入契约的落数状态镜像到同版本部署的对象 Projection。**不提交事务。**
+
+    两条对账路径都得走这里：``IngestionContractService.reconcile_task_result``（仓库 API
+    回传 Airflow task 结果）和 ``sync_reconciliation.reconcile_sync_receipt``（制品流水线
+    按 DagRun 对账）。此前只有前者镜像，于是走制品流水线的同步跑成功后
+    ``projection.sync_status`` 仍停在 ``empty``——下游 transform 直接拒绝
+    「对象 X 的 ODS 尚未同步完成」，读侧也看不到落点。
+    """
+    deployment = (
+        db.query(OntologyWarehouseDeployment)
+        .filter(
+            OntologyWarehouseDeployment.ontology_id == contract.ontology_id,
+            OntologyWarehouseDeployment.ontology_version == contract.ontology_version,
+            OntologyWarehouseDeployment.doris_datasource_id == contract.doris_datasource_id,
+        )
+        .first()
+    )
+    if deployment is None:
+        return None
+    projection = (
+        db.query(WarehouseObjectProjection)
+        .filter(
+            WarehouseObjectProjection.deployment_id == deployment.id,
+            WarehouseObjectProjection.object_type_id == contract.object_type_id,
+        )
+        .first()
+    )
+    if projection is None:
+        return None
+
+    sync_status = _PROJECTION_SYNC_STATUS.get(contract.status)
+    if sync_status is None:
+        # draft/submitted 等中间态不推进：没跑完的搬运不该改写上一次的落数结论。
+        return projection
+    projection.sync_status = sync_status
+    if contract.status == "ready":
+        projection.last_sync_at = contract.last_success_at
+        projection.sync_watermark = contract.sync_watermark
+    # ODS 本身不对外服务。要 queryable 得再经一次 transform 或显式把服务层设为 ods。
+    projection.queryable = bool(
+        projection.serving_layer == "ods" and contract.status == "ready"
+    )
+    return projection
+
+
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
@@ -222,6 +279,9 @@ class IngestionContractService:
         payload = result or {}
         if state in {"failed", "upstream_failed"}:
             contract.status = "failed"
+            # 失败也要落到 Projection：否则上一次成功留下的 ready 会让工作区显示「已落地」、
+            # 让 transform 从一张没搬成的表上继续加工。
+            mirror_contract_to_projection(db, contract)
             db.commit()
             db.refresh(contract)
             return contract
@@ -245,35 +305,7 @@ class IngestionContractService:
             if contract.mode == "incremental" and next_watermark not in (None, ""):
                 contract.sync_watermark = str(next_watermark)
 
-        deployment = (
-            db.query(OntologyWarehouseDeployment)
-            .filter(
-                OntologyWarehouseDeployment.ontology_id == contract.ontology_id,
-                OntologyWarehouseDeployment.ontology_version == contract.ontology_version,
-                OntologyWarehouseDeployment.doris_datasource_id == contract.doris_datasource_id,
-            )
-            .first()
-        )
-        if deployment is not None:
-            projection = (
-                db.query(WarehouseObjectProjection)
-                .filter(
-                    WarehouseObjectProjection.deployment_id == deployment.id,
-                    WarehouseObjectProjection.object_type_id == contract.object_type_id,
-                )
-                .first()
-            )
-            if projection is not None:
-                projection.sync_status = (
-                    "syncing" if contract.mode == "cdc" else "ready"
-                )
-                projection.last_sync_at = contract.last_success_at
-                projection.sync_watermark = contract.sync_watermark
-                # ODS is not serving by default. A later transform or explicit
-                # serving configuration is required before queryable=True.
-                projection.queryable = bool(
-                    projection.serving_layer == "ods" and contract.status == "ready"
-                )
+        mirror_contract_to_projection(db, contract)
         db.commit()
         db.refresh(contract)
         return contract

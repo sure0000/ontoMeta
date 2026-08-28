@@ -59,8 +59,17 @@ def _key_columns(table: LogicalTable | None) -> tuple[str, ...]:
     return tuple(c.name for c in table.columns if not c.nullable)
 
 
-def _drop_null(select_body: str, keys: tuple[str, ...], quote: Quote) -> str:
-    predicate = " AND ".join(f"{quote(c)} IS NOT NULL" for c in keys)
+def _drop_null(
+    select_body: str, keys: tuple[str, ...], quote: Quote, column_expr: Quote | None = None
+) -> str:
+    """按关键列过滤空值。
+
+    谓词写**源端表达式**而不是 SELECT 别名：SQL 的 WHERE 在投影之前求值，MySQL/Doris
+    都不认别名。单源时两者同形（都是 ```col```），多源时差别是 `t0.`col`` 与一个不存在
+    的标识符——后者要么报错，要么在两张表都有该列时静默解析到错的那张。
+    """
+    expr_of = column_expr or quote
+    predicate = " AND ".join(f"{expr_of(c)} IS NOT NULL" for c in keys)
     if "\nWHERE " in select_body:
         return f"{select_body} AND {predicate}"
     return f"{select_body}\nWHERE {predicate}"
@@ -96,19 +105,26 @@ def _projection(
     column_rules: list[str],
     string_cols: tuple[str, ...],
     quote: Quote,
+    column_expr: Quote | None = None,
 ) -> str:
-    """SELECT 列表：字符串列按次序套上列级算子，并回写同名别名。"""
+    """SELECT 列表：字符串列按次序套上列级算子，并回写目标列名做别名。
+
+    ``column_expr`` 把目标列名映射成**源端表达式**。单源时它就是 ``quote``（源列与目标
+    列同名，输出与从前逐字节一致）；多源时它是 ``t0.`原列名``——此时别名不是可选的：
+    没有 ``AS`` 的话，外层去重/落表看到的列名是源列名，与目标表对不上。
+    """
+    expr_of = column_expr or quote
     lines: list[str] = []
     targets = set(string_cols)
     for col in table.columns:
-        expr = quote(col.name)
+        base = expr_of(col.name)
+        expr = base
         if col.name in targets:
-            wrapped = expr
             for code, template in _COLUMN_RULES:
                 if code in column_rules:
-                    wrapped = template.format(expr=wrapped)
-            if wrapped != expr:
-                expr = f"{wrapped} AS {quote(col.name)}"
+                    expr = template.format(expr=expr)
+        if expr != quote(col.name):
+            expr = f"{expr} AS {quote(col.name)}"
         lines.append(f"  {expr}")
     return "SELECT\n" + ",\n".join(lines)
 
@@ -119,6 +135,7 @@ def _apply_rules(
     table: LogicalTable,
     quote: Quote,
     string_cols: tuple[str, ...] = (),
+    column_expr: Quote | None = None,
 ) -> tuple[str, list[str], list[str], list[dict[str, str]]]:
     """确定性清洗算子闭集 → 完整 SELECT 体。
 
@@ -165,9 +182,11 @@ def _apply_rules(
                 + "、".join(string_cols[:8])
                 + ("…" if len(string_cols) > 8 else ""),
             })
-    select_body = _projection(table, applied, string_cols, quote) + f"\n{from_clause}"
+    select_body = (
+        _projection(table, applied, string_cols, quote, column_expr) + f"\n{from_clause}"
+    )
     if "drop_null" in applied:
-        select_body = _drop_null(select_body, keys, quote)
+        select_body = _drop_null(select_body, keys, quote, column_expr)
         notes.append({"rule": "drop_null", "detail": "过滤关键字段为空的行：" + "、".join(keys)})
     if "deduplicate" in applied:
         if keys:
@@ -206,6 +225,104 @@ class TransformExecutor(Executor):
             raise ValueError(f"目标表 {target} 无法从本体/物化契约解析")
         return table
 
+    #: 多源 FROM 的表别名。用序号而不是实体名：实体名可能撞车（不同上游同名对象），
+    #: 也可能含非 ASCII，拼进 SQL 要另做一轮转义。
+    _ALIAS_PREFIX = "t"
+
+    @classmethod
+    def _multi_source(
+        cls,
+        db,
+        *,
+        ontology_id: str,
+        refs: list[str],
+        joins: list[dict[str, Any]],
+        field_mapping: list[dict[str, Any]],
+        table: LogicalTable,
+        adapter,
+    ) -> tuple[str, list[str], Quote]:
+        """多个上游数据集 → (FROM 子句, 物理表清单, 目标列→源表达式)。
+
+        引用而不是表名：Spec 里存的是 ``dataset_catalog`` 的稳定引用，物理表名在这里
+        当场解析。表名会随契约变、引用不会——把表名冻进 Spec，改一次落点就会让存量任务
+        去读一张已经改名的表。
+
+        自检与执行都经由 ``_artifacts`` 走这条路径，所以「预演读到的」与「真跑读到的」
+        必然是同一批表。
+        """
+        from app.services import dataset_catalog
+
+        quote = adapter.quote_identifier
+        catalog = {
+            entry.ref: entry
+            for entry in dataset_catalog.list_datasets(db, ontology_id)
+        }
+        alias_of: dict[str, str] = {}
+        physical_of: dict[str, str] = {}
+        for i, ref in enumerate(refs):
+            entry = catalog.get(ref)
+            if entry is None:
+                raise ValueError(
+                    f"上游数据集「{ref}」已不在本体的数仓落点里（可能被删或换了归属），"
+                    "请重建这个加工任务"
+                )
+            if not entry.source_ready:
+                # 表还没建出来就去 join，SQL 生成得出来、跑起来报表不存在。
+                raise ValueError(
+                    f"上游「{entry.entity_display_name}」的表 {entry.physical} 尚未就绪"
+                    f"（{entry.state}），不能作为加工源"
+                )
+            alias_of[ref] = f"{cls._ALIAS_PREFIX}{i}"
+            physical_of[ref] = entry.physical
+
+        lines = [
+            f"FROM {adapter.quote_table_ref(physical_of[refs[0]])} {alias_of[refs[0]]}"
+        ]
+        for join in joins or []:
+            left_ref = str(join.get("left_ref") or "")
+            right_ref = str(join.get("right_ref") or "")
+            if left_ref not in alias_of or right_ref not in alias_of:
+                raise ValueError("连接条件引用了不在上游列表里的数据集，请重建这个加工任务")
+            conditions = join.get("on") or []
+            if not conditions:
+                # 没有连接条件的 join 是一次笛卡尔积：不报错，只把行数乘起来。
+                raise ValueError(
+                    f"上游「{physical_of[right_ref]}」缺少连接条件，会产生笛卡尔积"
+                )
+            how = "LEFT JOIN" if str(join.get("how") or "inner").lower() == "left" else "INNER JOIN"
+            on = " AND ".join(
+                f"{alias_of[left_ref]}.{quote(str(c.get('left')))} = "
+                f"{alias_of[right_ref]}.{quote(str(c.get('right')))}"
+                for c in conditions
+            )
+            lines.append(
+                f"{how} {adapter.quote_table_ref(physical_of[right_ref])} "
+                f"{alias_of[right_ref]} ON {on}"
+            )
+
+        mapping = {
+            str(item.get("property")): item
+            for item in field_mapping or []
+            if item.get("property")
+        }
+        missing = [c.name for c in table.columns if c.name not in mapping]
+        if missing:
+            # 目标表有列、字段映射说不出它从哪来 → 宁可拒绝，也不要生成一句
+            # 「t0.<列名>」去赌某个上游恰好有这个列。
+            raise ValueError(
+                "目标表的这些列在派生定义里没有来源：" + "、".join(missing)
+                + "；请补全派生定义后重建任务"
+            )
+
+        def column_expr(name: str) -> str:
+            item = mapping[name]
+            ref = str(item.get("from_ref") or "")
+            if ref not in alias_of:
+                raise ValueError(f"字段「{name}」的来源不在上游列表里，请重建这个加工任务")
+            return f"{alias_of[ref]}.{quote(str(item.get('from_column') or name))}"
+
+        return "\n".join(lines), [physical_of[ref] for ref in refs], column_expr
+
     @staticmethod
     def _ods_source(
         db,
@@ -241,7 +358,16 @@ class TransformExecutor(Executor):
             raise ValueError("当前本体版本没有可用的 Doris Deployment/ODS Projection")
         # 读的库必须和同步写的库是同一个：ODS 落点不给选，这里也不能按前缀另拼一个。
         from app.services.ods_naming import ODS_DATABASE, target_ods_table_name
-        from app.services.source_ref import has_physical_source
+        from app.services.source_ref import has_physical_source, is_derived_source_ref
+
+        if is_derived_source_ref(obj.source_ref):
+            # 派生对象的上游是若干数据集（见 DerivedDefinition），不是「它自己的 ODS 表」。
+            # 落到下面那条 else 会拼出 ods.<对象名> —— 一张谁都没建过的表，SQL 生成得
+            # 出来、跑起来才报表不存在。宁可在这里说实话。
+            raise ValueError(
+                f"对象「{obj.name}」是派生对象，需要按其派生定义读多个上游数据集；"
+                "当前清洗任务只支持单一 ODS 源，暂不能为它生成加工作业"
+            )
 
         database = ODS_DATABASE
 
@@ -274,24 +400,46 @@ class TransformExecutor(Executor):
             if obj is None:
                 raise ValueError(f"目标对象 {target} 不在本体中")
             table = self._logical_table(db, ontology.id, target, prefix)
-            source = self._ods_source(db, ontology, obj, datasource_id)
+            # 多源（派生对象）与单源（1:1 清洗）在这里分岔。**Spec 说了算**：带
+            # source_datasets 就按它读，不带就是历史行为，一个字节都不变。执行器不回头
+            # 读派生定义——定义后来改了，不该让一份已确认的制品静默换掉它读的表。
+            refs = [str(r) for r in (spec.get("source_datasets") or []) if r]
+            if refs:
+                from_clause, source_tables, column_expr = self._multi_source(
+                    db,
+                    ontology_id=ontology.id,
+                    refs=refs,
+                    joins=list(spec.get("joins") or []),
+                    field_mapping=list(spec.get("field_mapping") or []),
+                    table=table,
+                    adapter=adapter,
+                )
+            else:
+                source = self._ods_source(db, ontology, obj, datasource_id)
+                from_clause = f"FROM {adapter.quote_table_ref(source)}"
+                source_tables = [source]
+                column_expr = None
 
         rules = [str(r.get("rule")) for r in spec.get("cleansing_rules") or []]
         select_body, applied, unapplied, notes = _apply_rules(
-            f"FROM {adapter.quote_table_ref(source)}",
+            from_clause,
             rules,
             table,
             adapter.quote_identifier,
             _string_columns(table, adapter.map_type),
+            column_expr,
         )
         target_physical = table.qualified_name
         sql = f"INSERT OVERWRITE TABLE {adapter.quote_table_ref(target_physical)}\n{select_body};"
         if applied:
             sql = "\n".join(f"-- 清洗规则：{rule}" for rule in applied) + "\n" + sql
+        # 粒度写进 SQL 头：这份作业按什么粒度产出，读 SQL 的人不该再去翻本体。
+        if spec.get("grain"):
+            sql = f"-- 粒度：{spec['grain']}\n" + sql
         return {
             "engine": "doris",
             "compute_engine": "doris",
-            "source_tables": [source],
+            "source_tables": source_tables,
             "target_table": target_physical,
             "target_logical_table": table,
             "key_columns": list(_key_columns(table)),

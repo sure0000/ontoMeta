@@ -5,9 +5,17 @@ from sqlalchemy.orm import Session
 from app.api.deps import edit_service, provenance_service, publish_service, query
 from app.database import get_db
 from app.models import ObjectType, Property
+from app.services import dataset_catalog, derived_object, unclaimed_tables
 from app.schemas import (
+    ClaimTableRequest,
     ClusterDetail,
     ConflictResolveRequest,
+    DatasetOut,
+    DerivedDefinitionOut,
+    DerivedObjectCreate,
+    DerivedObjectCreated,
+    UnclaimedTableOut,
+    UnclaimedTablesOut,
     FieldPinRequest,
     FormalIssueOut,
     FormalValidationResult,
@@ -348,6 +356,174 @@ def formal_validate_ontology(ontology_id: str, db: Session = Depends(get_db)):
         warning_count=len(warnings),
         issues=[FormalIssueOut(**i.to_dict()) for i in issues],
     )
+
+
+@router.get("/ontologies/{ontology_id}/datasets", response_model=list[DatasetOut])
+def list_ontology_datasets(
+    ontology_id: str,
+    layer: str | None = Query(None, description="ods / dim / dwd / dws / ads"),
+    q: str | None = Query(None, description="按实体名或物理表名过滤"),
+    source_ready_only: bool = Query(False, description="只列可作下游作业源表的"),
+    queryable_only: bool = Query(False, description="只列可直接查询的"),
+    db: Session = Depends(get_db),
+):
+    """本体在数仓里的数据集目录：每个已登记的落点一条，带稳定引用 ``ref``。
+
+    这是「同步完之后指得到那张表」的入口。它是**读模型**，由接入契约与 Projection 聚合
+    而成（见 ``services/dataset_catalog``），不是新的权威源，也不落任何表。
+    """
+    if not query.get_ontology(db, ontology_id):
+        raise HTTPException(status_code=404, detail="Ontology not found")
+    entries = dataset_catalog.list_datasets(
+        db,
+        ontology_id,
+        layer=layer,
+        q=q,
+        source_ready_only=source_ready_only,
+        queryable_only=queryable_only,
+    )
+    return [DatasetOut.model_validate(entry) for entry in entries]
+
+
+@router.post(
+    "/ontologies/{ontology_id}/derived-objects",
+    response_model=DerivedObjectCreated,
+)
+def create_derived_object(
+    ontology_id: str,
+    body: DerivedObjectCreate,
+    db: Session = Depends(get_db),
+):
+    """由数仓里的若干数据集派生一个**新粒度**的业务对象。
+
+    这是「本体同步到数仓之后」唯一该新增实体的场景：多表 join 出的宽表/汇总表，一行
+    代表的东西变了，它是新的业务概念。1:1 的搬运与清洗**不走这里**——那只是同一个对象
+    的另一个落点（见 ``services/derived_object`` 与 ``services/object_landing``）。
+
+    新对象仍落在同一个本体里：一域一本体，不会因为加工出一张新表就多出一个本体。
+    """
+    if not query.get_ontology(db, ontology_id):
+        raise HTTPException(status_code=404, detail="Ontology not found")
+    payload = derived_object.DerivedObjectInput(
+        name=body.name,
+        display_name=body.display_name,
+        grain=body.grain,
+        upstream_refs=list(body.upstream_refs),
+        fields=[
+            derived_object.FieldSource(
+                property=f.property,
+                from_ref=f.from_ref,
+                from_column=f.from_column,
+                display_name=f.display_name,
+            )
+            for f in body.fields
+        ],
+        description=body.description,
+        joins=[
+            derived_object.UpstreamJoin(
+                left_ref=j.left_ref,
+                right_ref=j.right_ref,
+                how=j.how,
+                on=[
+                    derived_object.JoinCondition(left=c.left, right=c.right) for c in j.on
+                ],
+            )
+            for j in body.joins
+        ],
+        layer=body.layer,
+        notes=body.notes,
+    )
+    try:
+        result = derived_object.create_derived_object(db, ontology_id, payload)
+    except derived_object.DerivedObjectError as exc:
+        # 定义不成立是用户输入问题（缺粒度/缺连接条件/上游不在目录里），不是服务器故障。
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DerivedObjectCreated(**vars(result))
+
+
+@router.get(
+    "/object-types/{object_type_id}/derived-definition",
+    response_model=DerivedDefinitionOut,
+)
+def get_derived_definition(object_type_id: str, db: Session = Depends(get_db)):
+    """派生定义：上游、粒度、连接条件、字段来源。非派生对象 404。"""
+    view = derived_object.get_definition(db, object_type_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="该对象不是派生对象")
+    return DerivedDefinitionOut(
+        object_type_id=view.object_type_id,
+        grain=view.grain,
+        layer=view.layer,
+        upstreams=[DatasetOut.model_validate(e) for e in view.upstreams],
+        dangling_refs=list(view.dangling_refs),
+        joins=list(view.joins),
+        field_mapping=list(view.field_mapping),
+        notes=view.notes,
+    )
+
+
+@router.get(
+    "/ontologies/{ontology_id}/unclaimed-tables", response_model=UnclaimedTablesOut
+)
+def list_unclaimed_tables(
+    ontology_id: str,
+    datasource_id: str | None = Query(None),
+    database: str | None = Query(None, description="只扫这个库；默认扫本体自己写过的库"),
+    db: Session = Depends(get_db),
+):
+    """数仓里存在、本体里没人认领的表。**实时扫库**（慢接口）。
+
+    只给两个出路：认领为已有实体的落点，或者不管它。**不提供「照着表建对象」**——
+    照物理表反推出来的对象正是重复对象的来源。
+    """
+    if not query.get_ontology(db, ontology_id):
+        raise HTTPException(status_code=404, detail="Ontology not found")
+    try:
+        items, scanned = unclaimed_tables.list_unclaimed_tables(
+            db, ontology_id, datasource_id=datasource_id, database=database
+        )
+    except unclaimed_tables.UnclaimedTableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 —— 连不上数仓是环境问题，不是请求错误
+        raise HTTPException(status_code=502, detail=f"读取数仓表列表失败：{exc}") from exc
+    return UnclaimedTablesOut(
+        items=[
+            UnclaimedTableOut(
+                database=item.database,
+                table=item.table,
+                physical=item.physical,
+                layer=item.layer,
+            )
+            for item in items
+        ],
+        scanned_databases=scanned,
+    )
+
+
+@router.post("/ontologies/{ontology_id}/claim-table", response_model=DatasetOut)
+def claim_table(
+    ontology_id: str, body: ClaimTableRequest, db: Session = Depends(get_db)
+):
+    """把一张无主表登记为某个已有对象的落点（不新建对象）。
+
+    认领只登记归属：不代表平台搬过这张表的数据，故不写最近成功时间、也不放行查询网关。
+    """
+    if not query.get_ontology(db, ontology_id):
+        raise HTTPException(status_code=404, detail="Ontology not found")
+    try:
+        entry = unclaimed_tables.claim_table(
+            db,
+            ontology_id,
+            object_type_id=body.object_type_id,
+            database=body.database,
+            table=body.table,
+            datasource_id=body.datasource_id,
+        )
+    except unclaimed_tables.UnclaimedTableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DatasetOut.model_validate(entry)
 
 
 @router.get("/object-types", response_model=PageResult[ObjectTypeSummary])

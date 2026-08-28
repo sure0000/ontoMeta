@@ -30,13 +30,13 @@ def test_registry_has_overview_and_query():
         "propose_panel", "propose_dashboard",
     )
     assert SKILLS["overview"].extra_tool_names == ()
-    assert SKILLS["lineage"].extra_tool_names == ("get_lineage",)
+    assert SKILLS["lineage"].extra_tool_names == ("get_lineage", "list_datasets")
     assert SKILLS["create"].extra_tool_names == (
         "propose_draft", "propose_expression", "lint_against_standard",
     )
     assert SKILLS["task"].extra_tool_names == (
         "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
-        "lint_against_standard",
+        "lint_against_standard", "list_datasets",
     )
     assert SKILLS["onboard"].extra_tool_names == (
         "list_onboarding_targets", "propose_datasource", "propose_ontology_draft",

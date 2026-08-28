@@ -65,6 +65,7 @@ from app.models.settings import (
     LlmServiceConfig,
 )
 from app.models.warehouse import (
+    DerivedDefinition,
     IngestionContract,
     LoadStrategy,
     MaterializationContract,
@@ -126,6 +127,7 @@ __all__ = [
     "DataAppVersion",
     "DataAppWidget",
     "IngestionContract",
+    "DerivedDefinition",
     "MaterializationContract",
     "OntologyWarehouseDeployment",
     "WarehouseObjectProjection",

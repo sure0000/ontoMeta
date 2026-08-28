@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from app.config import settings
 from app.services.common import log_change
 from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generation_queue import ACTIVE_STATUSES
+from app.services.evidence_builder import scope_evidence
 from app.services import ontology_workspace
 
 logger = logging.getLogger("ontometa.workspace")
@@ -43,6 +45,37 @@ _AUTO_RESUME_SENTINEL = "⟳自动续跑"
 # 持有后台草稿生成任务的强引用，避免 asyncio 在任务完成前将其 GC 回收。
 _background_tasks: set = set()
 _draft_async_tasks: dict[str, "asyncio.Task"] = {}
+
+
+def _loads_list(raw: str | None) -> list[str]:
+    """任务行上的 JSON 文本字段读成字符串列表；坏数据一律当「没裁剪」。
+
+    裁剪范围读坏时退回全域是安全的方向：多生成不会丢数据，少生成才会让人以为
+    某张表建过了。"""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [str(x) for x in value] if isinstance(value, list) else []
+
+
+def _progress_of(task: DraftGenerationTask) -> DraftProgressOut:
+    """任务行 → 进度读模型。**唯一构造点**：字段加在这里，五个返回点自动跟上。
+
+    ``scoped_table_count`` 尤其不能各写各的——漏一处就会让界面把「只生成 3 张表」
+    显示成全域生成，而两者的代价差着三个数量级。
+    """
+    return DraftProgressOut(
+        task_id=task.id,
+        status=task.status,
+        progress=task.progress,
+        message=task.message,
+        ontology_id=task.ontology_id,
+        scope=task.scope,
+        scoped_table_count=len(_loads_list(task.dataset_urns_json)),
+    )
 
 
 def _log_change(
@@ -320,44 +353,49 @@ class DraftTaskService:
         db.commit()
         db.refresh(task)
 
-        progress = DraftProgressOut(
-            task_id=task.id,
-            status=task.status,
-            progress=task.progress,
-            message=task.message,
-            scope=task.scope,
-        )
+        return _progress_of(task)
 
-        return progress
+    def start_object_generation(
+        self,
+        db: Session,
+        domain_id: str,
+        dataset_urns: list[str] | None = None,
+    ) -> DraftProgressOut:
+        """仅生成业务对象：可与 ``start_relation_generation`` 并行执行。
 
-    def start_object_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
-        """仅生成业务对象：可与 ``start_relation_generation`` 并行执行。"""
+        ``dataset_urns`` 非空时只对这些数据集跑 LLM（按表裁剪），空则全域——后者是
+        历史默认，行为不变。裁剪范围随任务行落库，因为生成跑在独立子进程里。
+        """
         domain = db.get(DomainContext, domain_id)
         if not domain:
             raise ValueError("Domain not found")
 
         self._ensure_llm_ready(db)
         self._ensure_no_conflicting_task(db, domain_id, "objects")
-        self._reset_evidence_for_fresh_run(domain_id)
+        scoped = [urn for urn in (dataset_urns or []) if urn]
+        # 裁剪生成**不清**证据缓存与检查点：这些 urn 正是「未建模表」清单刚从 DataHub
+        # 实时拉回来的那一批（清单接口会顺手回填缓存），此刻的元数据按定义就是最新的。
+        # 清了只会让每次挑几张表都重付一次分钟级抓取，还会顺带抹掉一次全域生成的续跑点。
+        if not scoped:
+            self._reset_evidence_for_fresh_run(domain_id)
 
         task = DraftGenerationTask(
             domain_context_id=domain_id,
             scope="objects",
+            dataset_urns_json=json.dumps(scoped, ensure_ascii=False) if scoped else None,
             status="queued",
             progress=0,
-            message="已入队，等待执行名额…",
+            message=(
+                f"已入队（本次只生成 {len(scoped)} 张表），等待执行名额…"
+                if scoped
+                else "已入队，等待执行名额…"
+            ),
         )
         db.add(task)
         db.commit()
         db.refresh(task)
 
-        return DraftProgressOut(
-            task_id=task.id,
-            status=task.status,
-            progress=task.progress,
-            message=task.message,
-            scope=task.scope,
-        )
+        return _progress_of(task)
 
     def start_relation_generation(self, db: Session, domain_id: str) -> DraftProgressOut:
         """仅生成业务关系：需已有草稿本体且已含业务对象，可与
@@ -393,13 +431,7 @@ class DraftTaskService:
         db.commit()
         db.refresh(task)
 
-        return DraftProgressOut(
-            task_id=task.id,
-            status=task.status,
-            progress=task.progress,
-            message=task.message,
-            scope=task.scope,
-        )
+        return _progress_of(task)
 
     def stop_draft_generation(
         self, db: Session, domain_id: str, task_id: str
@@ -460,6 +492,8 @@ class DraftTaskService:
         task = DraftGenerationTask(
             domain_context_id=domain_id,
             scope=scope,
+            # 裁剪范围随重试继承：丢了它，重试一次就从「只生成 3 张表」悄悄变成全域重扫。
+            dataset_urns_json=failed.dataset_urns_json,
             status="queued",
             progress=0,
             message=message,
@@ -474,13 +508,7 @@ class DraftTaskService:
         )
         db.commit()
         db.refresh(task)
-        return DraftProgressOut(
-            task_id=task.id,
-            status=task.status,
-            progress=task.progress,
-            message=task.message,
-            scope=task.scope,
-        )
+        return _progress_of(task)
 
     @staticmethod
     def _is_transient_failure(exc: BaseException) -> bool:
@@ -766,6 +794,8 @@ class DraftTaskService:
                 db.commit()
                 return
             datahub_domain_id = domain.datahub_domain_id
+            # 裁剪范围只存在于任务行上：worker 是独立子进程，只拿 task_id 回查。
+            scoped_urns = _loads_list(task.dataset_urns_json)
         finally:
             db.close()
 
@@ -776,8 +806,35 @@ class DraftTaskService:
             evidence = await self._load_or_fetch_evidence(
                 domain_id, datahub_domain_id, task_id, log_prefix="object_generation"
             )
+            if scoped_urns:
+                full_count = len(evidence.object_types)
+                evidence = scope_evidence(evidence, scoped_urns)
+                if not evidence.object_types:
+                    # 选中的表在当前证据里一张都找不到：上游已删、或域绑定变了。
+                    # 静默跑成「生成 0 个对象」会让人以为建过了，故明确失败。
+                    raise ValueError(
+                        f"选中的 {len(scoped_urns)} 张表在当前 DataHub 元数据中都不存在，"
+                        "请刷新未建模表清单后重试"
+                    )
+                logger.info(
+                    "object_generation scope=partial task_id=%s domain_id=%s "
+                    "selected=%d matched=%d domain_total=%d",
+                    task_id,
+                    domain_id,
+                    len(scoped_urns),
+                    len(evidence.object_types),
+                    full_count,
+                )
 
-            await self._update_task_progress(task_id, 45, "正在生成业务对象...")
+            await self._update_task_progress(
+                task_id,
+                45,
+                (
+                    f"正在生成业务对象（本次 {len(evidence.object_types)} 张表）..."
+                    if scoped_urns
+                    else "正在生成业务对象..."
+                ),
+            )
 
             async def _on_chunk_progress(done: int, total: int) -> None:
                 if total <= 0:
@@ -1155,14 +1212,7 @@ class DraftTaskService:
         task = query.order_by(DraftGenerationTask.created_at.desc()).first()
         if not task:
             return None
-        return DraftProgressOut(
-            task_id=task.id,
-            status=task.status,
-            progress=task.progress,
-            message=task.message,
-            ontology_id=task.ontology_id,
-            scope=task.scope,
-        )
+        return _progress_of(task)
 
     def list_tasks(self, db: Session, domain_id: str) -> list[TaskRecordOut]:
         tasks = (

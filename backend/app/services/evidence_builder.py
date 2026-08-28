@@ -888,3 +888,36 @@ class EvidenceBuilder:
             return "flag"
         return "attribute"
 
+
+
+def scope_evidence(
+    evidence: EvidenceBundle, dataset_urns: list[str] | None
+) -> EvidenceBundle:
+    """把证据包裁剪到指定的数据集，供「只对这几张表跑生成」使用。
+
+    ``dataset_urns`` 为空/None 时**原样返回**——全域生成是默认行为，不因这个入口改变。
+
+    裁剪是过滤而非重建：``object_types`` 按 ``source_dataset_urn`` 命中，``properties``
+    与 ``relations`` 跟着存活的 ``candidate_name`` 走。这样裁剪后的包与全域包在结构上
+    完全同形，下游生成/合并不需要知道自己拿到的是不是子集。
+
+    为什么必须裁剪证据、而不是生成完再筛结果：LLM 成本正比于喂进去的表数（ERP 域 734
+    张表一次几十万 token），全跑一遍再丢掉才是要消除的那件事。合并侧本就按
+    ``source_ref`` upsert 且 ``handle_removal=False``，子集不会误删域内其它对象。
+    """
+    if not dataset_urns:
+        return evidence
+    wanted = {urn for urn in dataset_urns if urn}
+    objects = [o for o in evidence.object_types if o.source_dataset_urn in wanted]
+    names = {o.candidate_name for o in objects}
+    return EvidenceBundle(
+        object_types=objects,
+        properties=[p for p in evidence.properties if p.object_candidate_name in names],
+        # 两端都在子集内才留：只留半条边会让关系指向一个本次并不生成的对象。
+        relations=[
+            r
+            for r in evidence.relations
+            if r.source_object in names and r.target_object in names
+        ],
+        business_logics=list(evidence.business_logics),
+    )

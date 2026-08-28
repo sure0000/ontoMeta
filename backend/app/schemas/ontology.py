@@ -220,6 +220,156 @@ class PropertyOut(_ProvenanceReadMixin):
     model_config = {"from_attributes": True}
 
 
+class ObjectLandingOut(BaseModel):
+    """对象的物理落点（见 ``services/object_landing``）。
+
+    ``state`` 由后端汇总，前端直接渲染——判定放到前端就会出现第二份口径。
+    """
+
+    state: str
+    ods_table: str | None = None
+    ods_status: str | None = None
+    ods_mode: str | None = None
+    serving_table: str | None = None
+    serving_layer: str | None = None
+    serving_status: str | None = None
+    schema_status: str | None = None
+    queryable: bool = False
+    last_success_at: datetime | None = None
+    materialization_artifact_id: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class LogicLandingOut(BaseModel):
+    """业务口径的 ADS 落点。指标任务产出的表挂在口径上，不是业务对象。"""
+
+    state: str
+    serving_table: str | None = None
+    status: str | None = None
+    queryable: bool = False
+    last_success_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class DatasetOut(BaseModel):
+    """数仓里一张已被本体认领的物理表（见 ``services/dataset_catalog``）。
+
+    ``ref`` 是稳定句柄，任务 Spec / 前端表单存的都是它；``physical`` 只用于展示与复制，
+    **不要**拿它回填进 Spec——表名会随契约变，引用不会。
+    """
+
+    ref: str
+    entity_kind: str
+    entity_id: str
+    entity_name: str
+    entity_display_name: str
+    slot: str
+    layer: str
+    physical: str
+    state: str
+    queryable: bool
+    source_ready: bool
+    mode: str | None = None
+    last_success_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class DerivedJoinCondition(BaseModel):
+    left: str
+    right: str
+
+
+class DerivedJoinInput(BaseModel):
+    """把 ``right_ref`` 接到已在图里的 ``left_ref`` 上。``on`` 为空即笛卡尔积，服务端拒。"""
+
+    left_ref: str
+    right_ref: str
+    on: list[DerivedJoinCondition]
+    how: str = "inner"
+
+
+class DerivedFieldInput(BaseModel):
+    """派生对象的一个属性来自哪个上游的哪一列。"""
+
+    property: str
+    from_ref: str
+    from_column: str
+    display_name: str | None = None
+
+
+class DerivedObjectCreate(BaseModel):
+    """由数仓里的若干数据集派生一个新粒度的业务对象。
+
+    ``grain`` 必填：它就是「该不该建新对象」的判据——粒度没变的加工只是既有对象的另一个
+    落点，不该在本体里多出一个实体。
+    """
+
+    name: str
+    display_name: str
+    grain: str
+    upstream_refs: list[str]
+    fields: list[DerivedFieldInput]
+    description: str | None = None
+    joins: list[DerivedJoinInput] = []
+    layer: str = "dwd"
+    notes: str | None = None
+
+
+class DerivedObjectCreated(BaseModel):
+    object_type_id: str
+    name: str
+    display_name: str
+    ontology_id: str
+    layer: str
+    upstream_refs: list[str]
+
+
+class DerivedDefinitionOut(BaseModel):
+    """派生定义 + 上游此刻的落点状态。"""
+
+    object_type_id: str
+    grain: str
+    layer: str | None = None
+    upstreams: list[DatasetOut] = []
+    # 已解析不到的上游引用（上游被删/被降级）。**要显示**：少一个上游的定义看起来
+    # 仍然成立，跑起来才发现少了一张表。
+    dangling_refs: list[str] = []
+    joins: list[dict] = []
+    field_mapping: list[dict] = []
+    notes: str | None = None
+
+
+class UnclaimedTableOut(BaseModel):
+    """数仓里存在、本体里没人认领的一张表（见 ``services/unclaimed_tables``）。"""
+
+    database: str
+    table: str
+    physical: str
+    # 由库名推断的分层；推不出就是 None（不猜——层会写进落点登记）。
+    layer: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class UnclaimedTablesOut(BaseModel):
+    items: list[UnclaimedTableOut] = []
+    # 实际扫过的库。少扫了哪个（库不存在/连不上）要看得见，否则「没有无主表」既可能是
+    # 真的干净，也可能是压根没扫到。
+    scanned_databases: list[str] = []
+
+
+class ClaimTableRequest(BaseModel):
+    """把一张无主表登记为某个已有对象的落点。**不新建对象**。"""
+
+    object_type_id: str
+    database: str
+    table: str
+    datasource_id: str | None = None
+
+
 class ObjectTypeSummary(_ProvenanceReadMixin):
     id: str
     name: str
@@ -242,6 +392,9 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     role_reason: str | None = None
     domain_context_id: str | None = None
     domain_name: str | None = None
+    # 物理落点：这个对象落到哪张表了。``None`` = 还没有任何落点登记（未物化/未同步），
+    # 与「登记了但状态未就绪」是两回事，故不给默认对象。见 services/object_landing。
+    landing: ObjectLandingOut | None = None
     updated_at: datetime
 
     model_config = {"from_attributes": True}

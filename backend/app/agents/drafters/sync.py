@@ -21,8 +21,9 @@ from app.services import flink_params
 from app.services.job_planner import DEFAULT_SOURCE_ALIAS
 from app.services.ods_naming import ODS_DATABASE, target_ods_table_name
 from app.services.source_ref import (
+    NO_SOURCE_NOTE_BY_PROVENANCE,
     has_physical_source,
-    is_manual_source_ref,
+    provenance_of,
     source_table_of,
 )
 
@@ -71,13 +72,13 @@ class SyncDrafter(Drafter):
             if target is None:
                 raise ValueError("未在本体中找到匹配的对象；请在 context.object_type 指定")
             if not has_physical_source(target.source_ref):
-                # 人工建模对象（``manual:`` 引用）与无 source_ref 的对象在这里是同一件事：
-                # 没有可搬的源。它们的正确去处是物化——建出表来给业务写，而不是同步。
+                # 三种成因对搬运是同一件事（没有源库表可搬），但对使用者不是同一件事：
+                # 人工建模对象该去物化，派生对象该去清洗——它有上游，只是上游在数仓里。
+                # 一律回一句「没有物理源表」会把人推去补一个根本不存在的数据源。
                 raise ValueError(
-                    f"对象「{target.name}」没有物理源表"
-                    f"（{'手工建模对象' if is_manual_source_ref(target.source_ref) else '无 source_ref'}），"
-                    "不能建同步任务。这类对象只需物化建表；同步只适用于由数据源采集而来、"
-                    "背后有真实源表的对象。"
+                    f"对象「{target.name}」不能建同步任务："
+                    f"{NO_SOURCE_NOTE_BY_PROVENANCE[provenance_of(target.source_ref)]}。"
+                    "同步只适用于由数据源采集而来、背后有真实源库表的对象。"
                 )
 
             contract = (

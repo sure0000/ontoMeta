@@ -115,6 +115,7 @@ SKILLS: dict[str, Skill] = {
             "工作流程：\n"
             "1. search_objects(关键词) 定位目标对象\n"
             "2. get_lineage(对象id) 获取血缘邻域（上游/下游/关系）\n"
+            "   list_datasets(q=对象名) 看它在数仓里落成了哪张表（ODS/DWD/…）\n"
             "3. 解读结果：\n"
             "   - upstream：数据来源（从哪来）\n"
             "   - downstream：数据去向（被谁用）\n"
@@ -126,7 +127,7 @@ SKILLS: dict[str, Skill] = {
             "- 说明影响：「修改 X 会影响下游的 Y、Z」\n"
             "- 如果血缘为空，说明是孤立对象或数据源头\n"
         ),
-        extra_tool_names=("get_lineage",),
+        extra_tool_names=("get_lineage", "list_datasets"),
         block_types=("markdown", "lineage"),
     ),
     "create": Skill(
@@ -187,6 +188,7 @@ SKILLS: dict[str, Skill] = {
             "  **注意**：sync 会自动建表（CREATE TABLE IF NOT EXISTS），不需要先物化\n"
             "- **transform（加工）**：从 ODS 转换到分层（DWD/DWS/ADS）\n"
             "  候选：ODS ready 对象、清洗规则、目标分层\n"
+            "  **上游表用 list_datasets(layer=\'ods\') 查**：搬完的才能加工，表名不要自己拼\n"
             "- **metric（指标）**：基于形式化业务口径生成定时计算任务\n"
             "  候选：已发布的业务逻辑（口径）\n\n"
 
@@ -204,7 +206,7 @@ SKILLS: dict[str, Skill] = {
         ),
         extra_tool_names=(
             "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
-            "lint_against_standard",
+            "lint_against_standard", "list_datasets",
         ),
         block_types=("markdown", "action_proposal", "pipeline_proposal", "task_status"),
     ),

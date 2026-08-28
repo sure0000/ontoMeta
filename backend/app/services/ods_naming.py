@@ -22,7 +22,7 @@ import unicodedata
 from sqlalchemy.orm import Session
 
 from app.models import DomainContext, ObjectType, Ontology
-from app.services.source_ref import source_table_of
+from app.services.source_ref import is_derived_source_ref, source_table_of
 
 
 # 同步唯一落点库。改这里等于改全仓的 ODS 库名——不要在别处再拼 ``ods_{prefix}``。
@@ -72,6 +72,13 @@ def target_ods_table_name(db: Session, ontology_id: str, object_type: ObjectType
         raise OdsNamingError("本体未关联数据域，无法生成 ODS 表名")
     source_table = source_table_of(object_type.source_ref)
     if not source_table:
+        # 派生对象走到这里不是配置缺失，是问错了问题：它的数据来自数仓里的上游数据集，
+        # 根本没有 ODS 贴源落点。给它编一个 ods_ 表名，下游就会去读一张不存在的表。
+        if is_derived_source_ref(object_type.source_ref):
+            raise OdsNamingError(
+                f"对象「{object_type.name}」是派生对象，没有 ODS 贴源落点；"
+                "它的上游是数仓里的数据集（见派生定义），由清洗任务落数"
+            )
         raise OdsNamingError(f"对象「{object_type.name}」没有可定位的原始表")
     original_table = _identifier_part(source_table.rsplit(".", 1)[-1])
     if not original_table:

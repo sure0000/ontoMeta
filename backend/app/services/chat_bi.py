@@ -1648,6 +1648,22 @@ class ChatBiService:
                 for e in result.get("edges") or []:
                     if isinstance(e, dict) and e.get("label"):
                         ledger.add_context_name(str(e["label"]))
+            elif tool_name == "list_datasets" and isinstance(result, dict):
+                # 物理表名是目录从登记行读出来的事实——答案说「已落到 ods.ods_erp_customer」
+                # 时引用它不得被 F4 判成幻觉。实体名同理。
+                for item in result.get("items") or []:
+                    if isinstance(item, dict):
+                        ledger.add_context_name(
+                            *[
+                                str(v)
+                                for v in (
+                                    item.get("physical"),
+                                    item.get("entity"),
+                                    item.get("entity_name"),
+                                )
+                                if v
+                            ]
+                        )
             elif tool_name in ("propose_draft", "propose_expression") and isinstance(result, dict):
                 # 提案里的口径名是本轮工具产出的事实——答案复述「建议新建指标X」时
                 # 引用 X 不得被 F4 判成幻觉（它是提案而非对已有实体的断言）。
@@ -2582,6 +2598,51 @@ class ChatBiService:
             "edges": edges,
         }
         summary = f"「{center.display_name}」邻域：{len(nodes)} 对象 / {len(edges)} 关系"
+        return result, summary, False
+
+    def _dispatch_list_datasets(
+        self, db: Session, *, ontology_id: str, args: dict
+    ) -> tuple[dict, str, bool]:
+        """本体在数仓里的物理落点目录（见 ``services/dataset_catalog``）。
+
+        为什么模型需要这个：同步/加工不产生新对象，数仓里那张表在本体里没有独立身份，
+        模型若靠命名规则自己拼「ods_xx_yy」，拼出来的表可能压根不存在。目录是唯一说法。
+
+        只读、只列已登记的落点；数仓里的无主表不在其中（那是治理问题，不是可选项）。
+        """
+        from app.services import dataset_catalog
+
+        if not ontology_id:
+            return {"error": "当前会话没有锚定本体"}, "落点目录缺本体", True
+        try:
+            limit = int(args.get("limit") or 30)
+        except (TypeError, ValueError):
+            limit = 30
+        limit = max(1, min(limit, 100))
+        entries = dataset_catalog.list_datasets(
+            db,
+            ontology_id,
+            layer=str(args.get("layer") or "").strip() or None,
+            q=str(args.get("q") or "").strip() or None,
+            source_ready_only=bool(args.get("source_ready_only")),
+        )
+        items = [
+            {
+                "ref": e.ref,
+                "entity": e.entity_display_name,
+                "entity_name": e.entity_name,
+                "kind": e.entity_kind,
+                "layer": e.layer,
+                "physical": e.physical,
+                "state": e.state,
+                "source_ready": e.source_ready,
+                "queryable": e.queryable,
+                **({"mode": e.mode} if e.mode else {}),
+            }
+            for e in entries[:limit]
+        ]
+        result = {"items": items, "total": len(entries), "shown": len(items)}
+        summary = f"数仓落点 {len(items)}/{len(entries)} 张表"
         return result, summary, False
 
     _PROPOSE_LOGIC_TYPES = ("metric", "tag", "rule")
@@ -5412,6 +5473,10 @@ class ChatBiService:
                 return self._dispatch_compile_metric(db, args=args)
             if name == "get_lineage":
                 return self._dispatch_get_lineage(db, ontology_id=anchor_ontology, args=args)
+            if name == "list_datasets":
+                return self._dispatch_list_datasets(
+                    db, ontology_id=anchor_ontology, args=args
+                )
             if name == "propose_draft":
                 return self._dispatch_propose_draft(domain_id=anchor_domain, args=args)
             if name == "propose_expression":
@@ -6306,6 +6371,7 @@ class ChatBiService:
                         # 真实本体对象（面板须命中主对象）或真实系统状态（域/数据源目录）产出的。
                         "propose_panel", "propose_dashboard",
                         "list_onboarding_targets", "propose_datasource",
+                        "list_datasets",
                         "propose_ontology_draft",
                     ))
                     or (tool_name == "run_sql" and isinstance(result, dict) and (result.get("executed") or result.get("sql")))

@@ -80,6 +80,25 @@ export interface DraftProgress {
   message?: string;
   ontology_id?: string;
   scope: DraftGenerationScope;
+  /** 本次按表裁剪的数量；0 = 全域生成。 */
+  scoped_table_count?: number;
+}
+
+/** 数据域里还没进本体的表（`GET /domains/{id}/unmodeled-tables`）。 */
+export interface UnmodeledTable {
+  urn: string;
+  name: string;
+  display_name?: string;
+  description?: string;
+  platform?: string;
+  field_count: number;
+  row_count?: number;
+}
+
+export interface UnmodeledTables {
+  items: UnmodeledTable[];
+  /** 域内表总数，用于说明「N 张里有 M 张没建模」。 */
+  domain_table_count: number;
 }
 
 export interface TaskRecord {
@@ -113,21 +132,170 @@ export interface FieldProvenance {
   conflicts?: Record<string, { base?: unknown; ours?: unknown; theirs?: unknown }>;
 }
 
+/**
+ * 对象的**物理落点**：这个业务对象落到哪张物理表了。
+ *
+ * 任务产出的表不会变成新的业务对象——它们是既有对象的物理投影，由后端从
+ * 接入契约 / 仓库 Projection 聚合而来（见 backend `services/object_landing`）。
+ * `state` 由后端汇总，前端只负责渲染；在这里再算一遍就会出现第二份口径。
+ */
+export interface ObjectLanding {
+  /**
+   * `not_landed` 无任何登记 · `registered` 落点已登记未搬数 · `schema_ready` 表已建未搬数
+   * · `syncing` 在跑 · `landed` 已落地 · `stale` 陈旧 · `failed` 失败
+   */
+  state: "not_landed" | "registered" | "schema_ready" | "syncing" | "landed" | "stale" | "failed";
+  /** ODS 落点（库.表），恒为 `ods.ods_{数据域}_{原表}` */
+  ods_table?: string;
+  ods_status?: string;
+  /** full / incremental / cdc */
+  ods_mode?: string;
+  /** 服务层落点（库.表） */
+  serving_table?: string;
+  serving_layer?: string;
+  serving_status?: string;
+  schema_status?: string;
+  queryable?: boolean;
+  last_success_at?: string;
+  materialization_artifact_id?: string;
+}
+
+/**
+ * 业务口径的 ADS 落点：指标/标签/规则任务把这条口径物化成的表。
+ * 口径的物化归口径——它不会变成一个业务对象。
+ */
+export interface LogicLanding {
+  state: ObjectLanding["state"];
+  serving_table?: string;
+  status?: string;
+  queryable?: boolean;
+  last_success_at?: string;
+}
+
+/**
+ * 数仓里一张**已被本体认领**的物理表（`GET /ontologies/{id}/datasets`）。
+ *
+ * 同步/加工不会产生新本体——ODS、DWD 表都是既有实体的物理投影。目录给每个落点一个
+ * 稳定引用 `ref`，它才是要存进任务配置的东西；`physical` 只用于展示与复制，表名会随
+ * 契约变、引用不会。见 backend `services/dataset_catalog`。
+ */
+export interface DatasetEntry {
+  /** `obj:<id>@ods` | `obj:<id>@serving` | `logic:<id>@ads` */
+  ref: string;
+  entity_kind: "object_type" | "business_logic";
+  entity_id: string;
+  entity_name: string;
+  entity_display_name: string;
+  /** 存储槽位：ods / serving / ads。引用指槽位不指层。 */
+  slot: "ods" | "serving" | "ads";
+  /** 展示用的分层：ods / dim / dwd / dws / ads */
+  layer: string;
+  /** 库.表 */
+  physical: string;
+  state: ObjectLanding["state"];
+  queryable: boolean;
+  /** 能否作为下游作业的源表。后端判定，前端不要再算一遍。 */
+  source_ready: boolean;
+  /** 仅 ODS：full / incremental / cdc */
+  mode?: string;
+  last_success_at?: string;
+}
+
+/**
+ * 派生对象：由数仓里的若干数据集按**新粒度**算出来的业务对象。
+ *
+ * 判据只有一条：换了粒度才换实体，换了层只换落点。1:1 的搬运与清洗不产生新对象，
+ * 它们只是既有对象的另一个落点（见 ObjectLanding / DatasetEntry）。
+ */
+export interface DerivedJoinCondition {
+  left: string;
+  right: string;
+}
+
+export interface DerivedJoin {
+  left_ref: string;
+  right_ref: string;
+  on: DerivedJoinCondition[];
+  how?: "inner" | "left";
+}
+
+export interface DerivedFieldInput {
+  property: string;
+  from_ref: string;
+  from_column: string;
+  display_name?: string;
+}
+
+export interface DerivedObjectCreate {
+  name: string;
+  display_name: string;
+  /** 一行代表什么。**必填**——它就是「该不该建新对象」的判据。 */
+  grain: string;
+  upstream_refs: string[];
+  fields: DerivedFieldInput[];
+  description?: string;
+  joins?: DerivedJoin[];
+  layer?: string;
+  notes?: string;
+}
+
+export interface DerivedObjectCreated {
+  object_type_id: string;
+  name: string;
+  display_name: string;
+  ontology_id: string;
+  layer: string;
+  upstream_refs: string[];
+}
+
+export interface DerivedDefinition {
+  object_type_id: string;
+  grain: string;
+  layer?: string;
+  upstreams: DatasetEntry[];
+  /** 已解析不到的上游（被删/被降级）。要显示——少列一个会让定义看起来仍然成立。 */
+  dangling_refs: string[];
+  joins: DerivedJoin[];
+  field_mapping: DerivedFieldInput[];
+  notes?: string;
+}
+
+/**
+ * 数仓里存在、本体里没人认领的一张表（`GET /ontologies/{id}/unclaimed-tables`）。
+ *
+ * 对这类表只给两个动作：认领为已有实体的落点，或者不管它。**没有「照着表建对象」**——
+ * 照物理表反推出来的对象正是重复对象的来源。
+ */
+export interface UnclaimedTable {
+  database: string;
+  table: string;
+  physical: string;
+  /** 由库名推断的分层；推不出就没有（不猜——层会写进落点登记）。 */
+  layer?: string;
+}
+
+export interface UnclaimedTables {
+  items: UnclaimedTable[];
+  /** 实际扫过的库。少扫了哪个要看得见，否则「没有无主表」既可能是真干净也可能是没扫到。 */
+  scanned_databases: string[];
+}
+
 export interface ObjectTypeSummary extends FieldProvenance {
   id: string;
   name: string;
   display_name: string;
   description?: string;
-  /** 源表定位（DataHub urn，或人工建模对象的 `manual:<源>:<标识>`）。 */
+  /** 源表定位（DataHub urn / `manual:<源>:<标识>` / `derived:<本体 id>:<标识>`）。 */
   source_ref?: string;
   /**
    * 对象来源。判「能不能建同步任务」用这个，**不要**用 `source_ref` 是否为空——
-   * 人工建模对象的 source_ref 非空却没有任何物理表可搬。
+   * 人工建模与派生对象的 source_ref 都非空，却都没有可搬的源库表。
    * - `datahub` 由数据源采集而来，有真实源表 → 可同步
    * - `manual`  人工建模，只有元数据 → 只能物化建表
+   * - `derived` 派生对象，上游是数仓里的数据集 → 物化建表 + 清洗落数，不可同步
    * - `none`    无 source_ref 或无法解析
    */
-  source_provenance?: "datahub" | "manual" | "none";
+  source_provenance?: "datahub" | "manual" | "derived" | "none";
   status: string;
   property_count: number;
   relation_count: number;
@@ -139,6 +307,11 @@ export interface ObjectTypeSummary extends FieldProvenance {
   role_reason?: string;
   domain_context_id?: string;
   domain_name?: string;
+  /**
+   * 物理落点。`undefined` = 还没有任何落点登记（既没物化也没同步），与
+   * 「登记了但未就绪」是两回事，故后端不给默认值。
+   */
+  landing?: ObjectLanding;
   updated_at: string;
 }
 
@@ -266,6 +439,8 @@ export interface BusinessLogic {
   category_name?: string | null;
   bound_object_count?: number;
   bound_property_count?: number;
+  /** ADS 落点。`undefined` = 该口径还没有被指标任务物化。 */
+  landing?: LogicLanding;
   updated_at: string;
 }
 

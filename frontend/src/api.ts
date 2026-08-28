@@ -22,6 +22,11 @@ import type {
   ChatBiSuggestions,
   Confirmation,
   DataHubDatasetOption,
+  DatasetEntry,
+  DerivedDefinition,
+  DerivedObjectCreate,
+  DerivedObjectCreated,
+  UnclaimedTables,
   AirflowSettings,
   DatahubSettings,
   CubeSettings,
@@ -30,6 +35,7 @@ import type {
   DraftGenerationScope,
   DraftGenerationSettings,
   DraftProgress,
+  UnmodeledTables,
   ExpressionDraft,
   ExpressionJson,
   DataAppSummary,
@@ -214,8 +220,18 @@ export const api = {
     ),
   generateDraft: (domainId: string) =>
     request<DraftProgress>(`/api/domains/${domainId}/generate-draft`, { method: "POST" }),
-  generateObjects: (domainId: string) =>
-    request<DraftProgress>(`/api/domains/${domainId}/generate-objects`, { method: "POST" }),
+  /**
+   * 仅生成业务对象。带 `datasetUrns` 时只对这些表跑 LLM（增量建模），
+   * 不带就是全域生成——为几张新表重扫整个域正是要消除的代价。
+   */
+  generateObjects: (domainId: string, datasetUrns?: string[]) =>
+    request<DraftProgress>(`/api/domains/${domainId}/generate-objects`, {
+      method: "POST",
+      body: JSON.stringify({ dataset_urns: datasetUrns ?? [] }),
+    }),
+  /** 域内还没进本体的表。实时拉 DataHub，是分钟级的慢接口。 */
+  listUnmodeledTables: (domainId: string) =>
+    request<UnmodeledTables>(`/api/domains/${domainId}/unmodeled-tables`),
   generateRelations: (domainId: string) =>
     request<DraftProgress>(`/api/domains/${domainId}/generate-relations`, { method: "POST" }),
   getProgress: (domainId: string, scope?: DraftGenerationScope) =>
@@ -263,6 +279,49 @@ export const api = {
     operator?: string;
   }) =>
     request<{ id: string; field: string; pinned: boolean }>(`/api/fields/pin`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** 本体在数仓里的数据集目录：每个已登记的落点一条。见 types.DatasetEntry。 */
+  listDatasets: (
+    ontologyId: string,
+    params?: { layer?: string; q?: string; sourceReadyOnly?: boolean; queryableOnly?: boolean },
+  ) =>
+    request<DatasetEntry[]>(
+      `/api/ontologies/${ontologyId}/datasets${buildQuery({
+        layer: params?.layer,
+        q: params?.q,
+        source_ready_only: params?.sourceReadyOnly,
+        queryable_only: params?.queryableOnly,
+      })}`,
+    ),
+
+  /** 由数仓里的若干数据集派生一个新粒度的业务对象（仍落在同一个本体里）。 */
+  createDerivedObject: (ontologyId: string, body: DerivedObjectCreate) =>
+    request<DerivedObjectCreated>(`/api/ontologies/${ontologyId}/derived-objects`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** 派生定义：上游、粒度、连接条件。非派生对象返回 404。 */
+  getDerivedDefinition: (objectTypeId: string) =>
+    request<DerivedDefinition>(`/api/object-types/${objectTypeId}/derived-definition`),
+
+  /** 数仓里没人认领的表。**实时扫库**，是个慢接口。 */
+  listUnclaimedTables: (ontologyId: string, params?: { database?: string }) =>
+    request<UnclaimedTables>(
+      `/api/ontologies/${ontologyId}/unclaimed-tables${buildQuery({
+        database: params?.database,
+      })}`,
+    ),
+
+  /** 把一张无主表登记为某个已有对象的落点（不新建对象）。 */
+  claimTable: (
+    ontologyId: string,
+    body: { object_type_id: string; database: string; table: string },
+  ) =>
+    request<DatasetEntry>(`/api/ontologies/${ontologyId}/claim-table`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
@@ -956,14 +1015,10 @@ export const api = {
     ),
 
   listChatBiDecisions: (conversationId: string) =>
-    request<ChatBiDecision[]>(
-      `/api/chat-bi/conversations/${conversationId}/decisions`,
-    ),
+    request<ChatBiDecision[]>(`/api/chat-bi/conversations/${conversationId}/decisions`),
 
   getChatBiClosure: (conversationId: string) =>
-    request<ChatBiDecisionClosure>(
-      `/api/chat-bi/conversations/${conversationId}/closure`,
-    ),
+    request<ChatBiDecisionClosure>(`/api/chat-bi/conversations/${conversationId}/closure`),
 
   /** 跨会话决策查询，供决策追踪页。结果附带 conversation_title。 */
   searchChatBiDecisions: (params: {
@@ -980,9 +1035,7 @@ export const api = {
       if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
     }
     const suffix = qs.toString();
-    return request<ChatBiDecision[]>(
-      `/api/chat-bi/decisions${suffix ? `?${suffix}` : ""}`,
-    );
+    return request<ChatBiDecision[]>(`/api/chat-bi/decisions${suffix ? `?${suffix}` : ""}`);
   },
 
   /** P3.1：把用户确认的约定落库为本域记忆（点「记住」后调用）。 */
@@ -1124,8 +1177,7 @@ export const api = {
     return request<{ tables: string[] }>(`/api/data-sources/${id}/tables${qs}`);
   },
 
-  getDorisWarehouseConfig: () =>
-    request<DorisWarehouseConfig | null>(`/api/doris-warehouse`),
+  getDorisWarehouseConfig: () => request<DorisWarehouseConfig | null>(`/api/doris-warehouse`),
   saveDorisWarehouseConfig: (body: DorisWarehouseConfigInput) =>
     request<DorisWarehouseConfig>(`/api/doris-warehouse`, {
       method: "PUT",

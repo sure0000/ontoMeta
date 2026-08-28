@@ -22,6 +22,8 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { DatasetCatalogPanel } from "./DatasetCatalog";
+import { LandingBadge } from "./ObjectLanding";
 import { SectionCard } from "./SectionCard";
 import { StatusBadge } from "./StatusBadge";
 import { EmptyState } from "./EmptyState";
@@ -34,9 +36,15 @@ import {
 import type { ObjectTypeSummary, RelationType } from "../types";
 import { getRoleMeta } from "../utils/role";
 
-/** 视图 Tab：三类对象（业务对象/数据表/技术·系统表）+ 一个业务关系去重列表。
- *  关系表(bridge) 不作为对象展示。Tab 顺序：业务对象 → 业务关系 → 数据表 → 技术/系统表。 */
-type ViewTab = "relations" | "business_object" | "data_table" | "technical";
+/** 视图 Tab：三类对象（业务对象/数据表/技术·系统表）+ 业务关系去重列表 + 数仓落点。
+ *  关系表(bridge) 不作为对象展示。Tab 顺序：业务对象 → 业务关系 → 数据表 → 技术/系统表 → 数仓落点。
+ *
+ *  数仓落点排在最后且**是一个 Tab 而不是页面下方的一块**：它与对象列表争的是同一片
+ *  垂直空间，摆在下面会把主内容（对象网格）挤成两行。 */
+type ViewTab = "relations" | "business_object" | "data_table" | "technical" | "datasets";
+
+/** 三个按角色分的对象 Tab。关系与落点各有自己的渲染路径，不走对象网格。 */
+type ObjectTab = Exclude<ViewTab, "relations" | "datasets">;
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -133,6 +141,10 @@ interface Props {
   /** 仅看待复核开关受控；未传则本地过滤 */
   needsReviewOnly?: boolean;
   onNeedsReviewOnlyChange?: (v: boolean) => void;
+  /** 传入即多一个「数仓落点」Tab：该本体的对象/口径落到数仓的哪些物理表。 */
+  datasetOntologyId?: string;
+  /** 从落点派生出新对象后刷新对象列表（否则新对象要等下次进页面才看得见）。 */
+  onDerivedObjectCreated?: () => void;
   /** 是否展示对象角色分类（类型列/斜角标/待复核/类型筛选）。浏览已发布本体时置 false。 */
   showRoleClassification?: boolean;
   /** 批量修改对象角色/复核状态。传入即开启对象卡片多选批量操作（仅工作区）。 */
@@ -149,6 +161,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   relationDetailPath,
   relationScope,
   relationGroupDetailPath,
+  datasetOntologyId,
+  onDerivedObjectCreated,
   objectPaging,
   relationPaging,
   searchQuery,
@@ -228,7 +242,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     return relations.filter((r) => matchRelation(r, normalizedQuery));
   }, [relations, normalizedQuery, serverMode]);
 
-  const isObjectTab = viewTab !== "relations";
+  // 数仓落点既不是对象也不是关系：搜索框、批量、角色筛选都不该跟着它走。
+  const isDatasetTab = viewTab === "datasets";
+  const isObjectTab = viewTab !== "relations" && !isDatasetTab;
 
   useEffect(() => {
     if (!serverMode) {
@@ -449,16 +465,13 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   const useVirtualTable = effectiveObjectPageSize >= 50 || effectiveRelationPageSize >= 50;
 
-  const OBJECT_TAB_META: Record<
-    Exclude<ViewTab, "relations">,
-    { label: string; icon: React.ReactNode }
-  > = {
+  const OBJECT_TAB_META: Record<ObjectTab, { label: string; icon: React.ReactNode }> = {
     business_object: { label: "业务对象", icon: <AppstoreOutlined /> },
     data_table: { label: "数据表", icon: <DatabaseOutlined /> },
     technical: { label: "技术/系统表", icon: <ToolOutlined /> },
   };
 
-  const objectTabItem = (role: Exclude<ViewTab, "relations">) => ({
+  const objectTabItem = (role: ObjectTab) => ({
     key: role,
     label: (
       <span>
@@ -467,6 +480,15 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       </span>
     ),
   });
+  const datasetTabItem = {
+    key: "datasets",
+    label: (
+      <span>
+        <DatabaseOutlined style={{ marginRight: 6 }} />
+        数仓落点
+      </span>
+    ),
+  };
   const relationTabItem = {
     key: "relations",
     label: (
@@ -488,6 +510,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         relationTabItem,
         objectTabItem("data_table"),
         objectTabItem("technical"),
+        ...(datasetOntologyId ? [datasetTabItem] : []),
       ]}
     />
   );
@@ -566,16 +589,25 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   return (
     <div className="om-stack">
       {tabSwitcher}
-      <div className="toolbar">
-        <div className="toolbar-left">
-          {searchInput}
-          {needsReviewSwitcher}
-          {batchToggle}
+      {/* 落点面板自带搜索与分层筛选；再摆一个搜不到东西的框只会让人以为它坏了。 */}
+      {!isDatasetTab && (
+        <div className="toolbar">
+          <div className="toolbar-left">
+            {searchInput}
+            {needsReviewSwitcher}
+            {batchToggle}
+          </div>
         </div>
-      </div>
+      )}
       {batchBar}
 
-      {viewTab === "relations" ? (
+      {isDatasetTab && datasetOntologyId ? (
+        <DatasetCatalogPanel
+          ontologyId={datasetOntologyId}
+          objectDetailPath={objectDetailPath}
+          onObjectCreated={onDerivedObjectCreated}
+        />
+      ) : viewTab === "relations" ? (
         useRelationGroups ? (
           <SectionCard title="关系列表（去重）" icon={<ApartmentOutlined />} bodyFlush>
             <RelationGroupList
@@ -668,6 +700,9 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                         <span className="entity-card-review">待复核</span>
                       </Tooltip>
                     )}
+                    {/* 物理落点：任务把这个对象落成了哪张表。没有登记就不占位——
+                        整域近千个对象里多数还没物化，逐个显示「未落地」只是噪声。 */}
+                    <LandingBadge landing={obj.landing} />
                   </div>
                   <div className="entity-card-foot">
                     <span className="entity-card-foot-item">

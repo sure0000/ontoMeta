@@ -18,10 +18,16 @@ from app.schemas import (
     BusinessLogicPropertyBindingOut,
     BusinessLogicPropertyOption,
     BusinessLogicRef,
+    LogicLandingOut,
     ObjectTypeDetail,
     ObjectTypeSummary,
     PageResult,
     PropertyOut,
+)
+from app.services.object_landing import (
+    LogicLanding,
+    bulk_logic_landings,
+    bulk_object_landings,
 )
 from app.services.ontology_query import (
     OntologyQueryService as _OntologyQueryBase,
@@ -43,6 +49,8 @@ class OntologyQueryService(_OntologyQueryBase):
         domain: tuple[str | None, str | None] | None = None,
         binding_counts: tuple[int, int] | None = None,
         category_name: str | None = None,
+        landing: LogicLanding | None = None,
+        landing_loaded: bool = False,
     ) -> BusinessLogicOut:
         if domain is None:
             domain_id, domain_name = self._resolve_domain_context(db, logic.ontology_id)
@@ -53,6 +61,9 @@ class OntologyQueryService(_OntologyQueryBase):
                 logic.id, (0, 0)
             )
         bound_object_count, bound_property_count = binding_counts
+        # 与对象落点同构的自愈：批量调用传入，单条调用就地补查。
+        if landing is None and not landing_loaded:
+            landing = bulk_logic_landings(db, [logic.id]).get(logic.id)
         if category_name is None and logic.category_id:
             cat = db.get(BusinessLogicCategory, logic.category_id)
             if cat:
@@ -76,6 +87,9 @@ class OntologyQueryService(_OntologyQueryBase):
             category_name=category_name,
             bound_object_count=bound_object_count,
             bound_property_count=bound_property_count,
+            landing=(
+                LogicLandingOut.model_validate(landing) if landing is not None else None
+            ),
             updated_at=logic.updated_at,
         )
 
@@ -389,6 +403,7 @@ class OntologyQueryService(_OntologyQueryBase):
         related_binding_map = self._bulk_business_logic_binding_counts(
             db, related_logic_ids
         )
+        related_logic_landings = bulk_logic_landings(db, related_logic_ids)
         source_ref, datahub_url = self._resolve_object_datahub(db, obj)
         versions = self.list_versions(db, obj.id)
         ontology_versions = self.list_versions(db, obj.ontology_id)
@@ -410,6 +425,8 @@ class OntologyQueryService(_OntologyQueryBase):
                     logic,
                     domain=related_domain_map.get(logic.ontology_id, (None, None)),
                     binding_counts=related_binding_map.get(logic.id, (0, 0)),
+                    landing=related_logic_landings.get(logic.id),
+                    landing_loaded=True,
                 )
                 for logic in related_logics
             ],
@@ -459,6 +476,7 @@ class OntologyQueryService(_OntologyQueryBase):
         logic_ids = [it.id for it in items]
         domain_map = self._bulk_resolve_domain_context(db, [it.ontology_id for it in items])
         binding_map = self._bulk_business_logic_binding_counts(db, logic_ids)
+        logic_landings = bulk_logic_landings(db, logic_ids)
         category_ids = {it.category_id for it in items if it.category_id}
         category_names: dict[str, str] = {}
         if category_ids:
@@ -476,6 +494,8 @@ class OntologyQueryService(_OntologyQueryBase):
                     domain=domain_map.get(it.ontology_id, (None, None)),
                     binding_counts=binding_map.get(it.id, (0, 0)),
                     category_name=category_names.get(it.category_id) if it.category_id else None,
+                    landing=logic_landings.get(it.id),
+                    landing_loaded=True,
                 )
                 for it in items
             ],
@@ -537,11 +557,15 @@ class OntologyQueryService(_OntologyQueryBase):
         available_object_types, available_properties = self._available_targets_for_logic(db, logic)
 
         related_object_logics = self._batch_object_logic_refs(db, [o.id for o in related_objects], exclude_logic_id=logic.id)
+        related_landings = bulk_object_landings(db, [o.id for o in related_objects])
 
         return BusinessLogicDetail(
             **self._to_business_logic_out(db, logic).model_dump(),
             related_object_types=[
-                self._to_object_summary(db, obj) for obj in related_objects
+                self._to_object_summary(
+                    db, obj, landing=related_landings.get(obj.id), landing_loaded=True
+                )
+                for obj in related_objects
             ],
             related_object_logics=related_object_logics,
             related_properties=[PropertyOut.model_validate(p) for p in related_properties],
@@ -563,7 +587,14 @@ class OntologyQueryService(_OntologyQueryBase):
             .order_by(ObjectType.name)
             .all()
         )
-        object_summaries = [self._to_object_summary(db, obj) for obj in objects]
+        # 候选是整个本体的对象（ERP 域近千个）：落点必须批量取，逐个自愈补查会打出上千条 SQL。
+        landings = bulk_object_landings(db, [obj.id for obj in objects])
+        object_summaries = [
+            self._to_object_summary(
+                db, obj, landing=landings.get(obj.id), landing_loaded=True
+            )
+            for obj in objects
+        ]
         if not objects:
             return [], []
 

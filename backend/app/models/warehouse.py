@@ -263,6 +263,53 @@ class WarehouseMigrationEvidence(Base):
     )
 
 
+class DerivedDefinition(Base):
+    """派生对象的定义：这个业务对象是由数仓里哪几张表、按什么粒度算出来的。
+
+    **为什么派生对象要有实体身份，而 ODS/DWD 的 1:1 落点不要**：判据是粒度。源表搬进
+    ODS、ODS 清洗成 DWD，一行代表的东西没变，那是同一个实体的另一个落点；而多表 join
+    出的宽表、汇总表、快照表，一行代表的东西变了（从「一张订单」变成「订单×商品×日」），
+    那就是一个新的业务概念——它必须在本体里有名字，否则下游没有任何东西可引用。
+
+    但它**仍在同一个本体里**：一域一本体，再造一个「数仓本体」会让关系图、字段权威与
+    发布门闸各自分叉（见 ONTOLOGY_LIFECYCLE_REDESIGN.md）。
+
+    **派生必须是声明，不是推断。** 上游、粒度、连接条件都由人显式写下来，不靠扫描 Doris
+    反推——反推出来的「新对象」正是重复对象的来源（见 services/unmodeled_tables）。
+
+    血缘存在这里而**不是** RelationType：业务关系有「两端都必须是 business_object」的
+    角色门闸，把加工血缘混进去会在下一次全量合并时被当成不合规关系剥掉。
+    """
+
+    __tablename__ = "derived_definitions"
+    __table_args__ = (
+        UniqueConstraint("object_type_id", name="uq_derived_definition_object"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    object_type_id: Mapped[str] = mapped_column(
+        ForeignKey("object_types.id"), index=True
+    )
+    # 粒度声明：一行代表什么。**必填**——它就是「该不该是新实体」的判据本身，
+    # 允许留空等于允许人把一个 1:1 落点包装成新对象，重复对象由此重新长出来。
+    grain: Mapped[str] = mapped_column(Text)
+    # 上游数据集引用（``dataset_catalog`` 的 ref），JSON 数组，**第一个是主表**。
+    # 存引用而不是物理表名：表名会随契约变，引用指存储槽位不变。
+    upstream_refs_json: Mapped[str] = mapped_column(Text)
+    # 连接条件：[{"left_ref":…,"right_ref":…,"how":"inner|left","on":[{"left":…,"right":…}]}]
+    joins_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 字段来源：[{"property":…,"from_ref":…,"from_column":…}]，供 P3 生成 SELECT 列表。
+    field_mapping_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+
+
 class MaterializationContract(Base, ProvenanceMixin):
     __tablename__ = "materialization_contracts"
     __table_args__ = (

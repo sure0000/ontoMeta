@@ -170,6 +170,7 @@ export function OntologyPage() {
             showRoleClassification={false}
             relationDetailPath={(relationId) => `/ontology/relations/${relationId}`}
             relationScope={{ ontologyId: publishedOntologyId ?? undefined, publishedOnly: true }}
+            datasetOntologyId={publishedOntologyId ?? undefined}
             relationGroupDetailPath={(displayName) =>
               `/ontology/relation-groups/${encodeURIComponent(displayName)}?oid=${publishedOntologyId}&pub=1`
             }

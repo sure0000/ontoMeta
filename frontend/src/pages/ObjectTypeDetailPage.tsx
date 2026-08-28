@@ -36,6 +36,8 @@ import { EmptyState } from "../components/EmptyState";
 import { EntityEditToolbar, MappingDatasetSelect } from "../components/entity-edit";
 import { FieldAuthorityPanel } from "../components/FieldAuthorityPanel";
 import { MaterializeModal } from "../components/MaterializeModal";
+import { DerivedDefinitionPanel } from "../components/DerivedDefinitionPanel";
+import { ObjectLandingPanel } from "../components/ObjectLanding";
 import { ObjectRelationGraph } from "../components/ObjectRelationGraph";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -939,19 +941,30 @@ export function ObjectTypeDetailPage() {
                           </Row>
                         </Form>
                       ) : (
-                        <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
-                          <Descriptions.Item label="数据域">
-                            {obj.domain_name || "-"}
-                          </Descriptions.Item>
-                          <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
-                          <Descriptions.Item label="命名置信度">
-                            {obj.source_confidence?.toFixed(2) ?? "-"}
-                          </Descriptions.Item>
-                          <Descriptions.Item label="描述" span={4}>
-                            {obj.description || "暂无描述"}
-                          </Descriptions.Item>
-                        </Descriptions>
+                        <>
+                          <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+                            <Descriptions.Item label="数据域">
+                              {obj.domain_name || "-"}
+                            </Descriptions.Item>
+                            <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
+                            <Descriptions.Item label="命名置信度">
+                              {obj.source_confidence?.toFixed(2) ?? "-"}
+                            </Descriptions.Item>
+                            <Descriptions.Item label="描述" span={4}>
+                              {obj.description || "暂无描述"}
+                            </Descriptions.Item>
+                          </Descriptions>
+                        </>
                       )}
+                      {/* 物化/同步/清洗任务把这个对象落成的物理表。它们不是新的业务对象，
+                          故只在这里以落点呈现，不进对象列表。落点是执行结果、不是可编辑
+                          字段，所以放在编辑表单之外——工作区与浏览态都要看得见。 */}
+                      <ObjectLandingPanel landing={obj.landing} />
+                      {/* 派生对象的数据来自别的对象的落点，那条血缘只有这里讲得清。 */}
+                      <DerivedDefinitionPanel
+                        objectId={obj.id}
+                        provenance={obj.source_provenance}
+                      />
                     </div>
                   </>
                 ),

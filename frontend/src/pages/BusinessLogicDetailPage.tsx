@@ -35,6 +35,7 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { SectionCard } from "../components/SectionCard";
+import { LandingBadge } from "../components/ObjectLanding";
 import { StatusBadge } from "../components/StatusBadge";
 import type { BusinessLogicDetail, ExpressionDraft, ExpressionJson } from "../types";
 
@@ -406,6 +407,18 @@ export function BusinessLogicDetailPage() {
                   </Descriptions.Item>
                   <Descriptions.Item label="置信度">
                     {logic.source_confidence?.toFixed(2) ?? "-"}
+                  </Descriptions.Item>
+                  {/* 指标任务把这条口径物化成的 ADS 表。口径的物化归口径——
+                      它不会、也不该变成一个业务对象。 */}
+                  <Descriptions.Item label="物理落点">
+                    {logic.landing ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <LandingBadge landing={logic.landing} />
+                        <Text code>{logic.landing.serving_table || "-"}</Text>
+                      </span>
+                    ) : (
+                      "尚未物化"
+                    )}
                   </Descriptions.Item>
                 </Descriptions>
               )}

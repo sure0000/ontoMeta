@@ -52,6 +52,10 @@ class DraftGenerationTask(Base):
     # 生成范围："full"(对象+关系一体生成，历史默认)、"objects"(仅业务对象)、
     # "relations"(仅业务关系)。用于支持对象/关系分开触发、并行执行。
     scope: Mapped[str] = mapped_column(String(20), default="full", server_default="full")
+    # 按表裁剪的生成范围（JSON 文本的 DataHub dataset urn 数组）。**空/NULL = 全域**，
+    # 与历史行为一致。落库而非留在内存：生成跑在独立子进程，worker 只拿 task_id
+    # 回查这一行（见 app/jobs/draft_worker），参数传不进去。
+    dataset_urns_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)

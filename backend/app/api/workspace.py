@@ -19,11 +19,14 @@ from app.schemas import (
     DomainContextSummary,
     DraftProgressOut,
     EnsureObjectTypeRequest,
+    GenerateObjectsRequest,
     ManualObjectCreateRequest,
     ManualObjectCreateResponse,
     MergeReportOut,
     ObjectTypeSummary,
     TaskRecordOut,
+    UnmodeledTableOut,
+    UnmodeledTablesOut,
 )
 from app.services.draft_generation_queue import run_draft_generation_limited
 from app.services.draft_generator import LlmNotConfiguredError
@@ -217,11 +220,42 @@ async def generate_draft(domain_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/domains/{domain_id}/generate-objects", response_model=DraftProgressOut)
-async def generate_objects(domain_id: str, db: Session = Depends(get_db)):
-    """仅生成业务对象；可与 /generate-relations 并行触发，互不阻塞。"""
+@router.get("/domains/{domain_id}/unmodeled-tables", response_model=UnmodeledTablesOut)
+async def list_unmodeled_tables(domain_id: str, db: Session = Depends(get_db)):
+    """域内还没进本体的表。**只列清单，不自动生成**——建不建由人决定。
+
+    实时拉 DataHub（因此是分钟级的慢接口），顺带回填证据缓存，让紧接着的
+    「只生成选中的表」用的就是本清单所依据的同一份元数据。
+    """
+    from app.services.unmodeled_tables import list_unmodeled_tables as _list
+
     try:
-        progress = workspace.start_object_generation(db, domain_id)
+        items, total = await _list(db, domain_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"读取 DataHub 元数据失败：{exc}") from exc
+    return UnmodeledTablesOut(
+        items=[UnmodeledTableOut.model_validate(item) for item in items],
+        domain_table_count=total,
+    )
+
+
+@router.post("/domains/{domain_id}/generate-objects", response_model=DraftProgressOut)
+async def generate_objects(
+    domain_id: str,
+    body: GenerateObjectsRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """仅生成业务对象；可与 /generate-relations 并行触发，互不阻塞。
+
+    带 ``dataset_urns`` 时只对这些表跑 LLM（配合 /unmodeled-tables 做增量建模）；
+    不带就是全域生成，与历史行为一致。
+    """
+    try:
+        progress = workspace.start_object_generation(
+            db, domain_id, dataset_urns=(body.dataset_urns if body else None)
+        )
         _launch_draft_task(
             progress, lambda task_id: workspace._run_object_generation(domain_id, task_id)
         )

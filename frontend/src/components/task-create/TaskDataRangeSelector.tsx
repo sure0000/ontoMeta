@@ -1,7 +1,8 @@
 import { Alert, Cascader, Form, Select, Spin } from "antd";
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../../api";
-import type { OntologySummary, DomainContext } from "../../types";
+import type { DatasetEntry, OntologySummary, DomainContext } from "../../types";
+import { landingStateLabel } from "../ObjectLanding";
 
 interface CascadeNode {
   value: string;
@@ -121,6 +122,20 @@ export function TaskDataRangeSelector({
             ontologyId: target.value,
             publishedOnly: false,
           });
+          // 清洗读的是这个对象自己的 ODS 表（executors/transform._ods_source），源表
+          // 没搬完执行器就会拒。把落点目录取回来，在选之前就把那张表和它的状态摆出来，
+          // 而不是让人选完、提交、再被「对象 X 的 ODS 尚未同步完成」挡住。
+          const odsByEntity = new Map<string, DatasetEntry>();
+          if (kind === "transform") {
+            try {
+              for (const entry of await api.listDatasets(target.value, { layer: "ods" })) {
+                odsByEntity.set(entry.entity_id, entry);
+              }
+            } catch {
+              // 目录读不到不该把整个下拉打成不可选：落点是附加信息，
+              // 真正的闸门在执行器那一侧，这里退化成不标注即可。
+            }
+          }
           children = page.items.map((o) => {
             // 同步必须能定位源表；没有物理源表的对象置灰并说明原因，
             // 而不是让人选完、提交、再在 drafter 里被拒。
@@ -129,13 +144,30 @@ export function TaskDataRangeSelector({
             const manual = o.source_provenance === "manual";
             const unsyncable =
               kind === "sync" && (manual || o.source_provenance !== "datahub");
+            const ods = odsByEntity.get(o.id);
+            // 派生对象读的是它派生定义里的那几张上游表，不是「它自己的 ODS」——它本来
+            // 就不会有 ODS 落点。按有没有 ODS 来判可选，会把唯一真正需要多源加工的
+            // 那类对象整个挡在门外。上游就绪与否由 Drafter/闸门按派生定义逐个查。
+            const isDerived = o.source_provenance === "derived";
+            const untransformable = kind === "transform" && !isDerived && !ods?.source_ready;
+            const display = o.display_name || o.name;
+            let label = display;
+            if (unsyncable) {
+              label = `${display}（${manual ? "手工建模对象，需先物化" : "无源表"}，不可同步）`;
+            } else if (kind === "transform") {
+              if (isDerived) {
+                label = `${display}（派生对象 · 按派生定义读多个上游）`;
+              } else {
+                label = ods
+                  ? `${display} ← ${ods.physical}（${landingStateLabel(ods.state)}）`
+                  : `${display}（尚无 ODS 落点，需先建同步任务）`;
+              }
+            }
             return {
               value: o.name,
-              label: unsyncable
-                ? `${o.display_name || o.name}（${manual ? "手工建模对象，需先物化" : "无源表"}，不可同步）`
-                : o.display_name || o.name,
+              label,
               isLeaf: true,
-              disabled: unsyncable,
+              disabled: unsyncable || untransformable,
             };
           });
         } else {
@@ -167,7 +199,9 @@ export function TaskDataRangeSelector({
           setEmptyHint(
             entityConfig.source === "businessLogics"
               ? "该本体下的业务逻辑都还没绑定对象，无法建任务；请先在「业务逻辑」里绑定主对象。"
-              : "该本体下的对象都没有物理源表，无法建同步任务。人工建模的对象只需「物化」把表建出来给业务用；要同步数据，请先完成数据源采集接入。",
+              : kind === "transform"
+                ? "该本体下没有可加工的对象：普通对象要先把同步任务跑成功（清洗读的是它自己的 ODS 落点），派生对象则可直接加工。"
+                : "该本体下的对象都没有物理源表，无法建同步任务。人工建模的对象只需「物化」把表建出来给业务用；要同步数据，请先完成数据源采集接入。",
           );
         } else {
           setEmptyHint(null);

@@ -293,6 +293,13 @@ class OntologyMergeService:
             db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
         )
         existing_by_ref = {o.source_ref: o for o in existing_objs if o.source_ref}
+        # 无 source_ref 的机器对象只剩「名字」这一个可用身份。不认它，每次重跑就是
+        # 一轮删了再建：计数看着没涨，对象 id 却换了人——挂在 object_type_id 上的东西
+        # （物化/同步落点、逻辑绑定）全部断链。只在**两边都没有 source_ref** 时按名字
+        # 认，避免把一个有源表的对象错认成无源的同名对象。
+        existing_by_name_no_ref = {
+            o.name: o for o in existing_objs if not o.source_ref
+        }
 
         # 库层唯一约束 uq_object_type_ontology_name 在 **flush 时**就拦，等不到本方法
         # 末尾的兜底 sweep。故新建/改名前就地占名——规则与
@@ -336,7 +343,11 @@ class OntologyMergeService:
             pending_renames.append((obj, final_name))
 
         for item in object_types:
-            existing = existing_by_ref.get(item.source_ref) if item.source_ref else None
+            existing = (
+                existing_by_ref.get(item.source_ref)
+                if item.source_ref
+                else existing_by_name_no_ref.get(item.name)
+            )
             incoming = {
                 "name": item.name,
                 "display_name": item.display_name,
@@ -577,9 +588,26 @@ class OntologyMergeService:
         gen_id: str | None,
         report: MergeReport,
     ) -> None:
-        for obj in existing_objs:
-            if obj.id in seen_object_ids or obj.user_created or obj.deleted_by_user:
-                continue
+        candidates = [
+            obj
+            for obj in existing_objs
+            if obj.id not in seen_object_ids
+            and not obj.user_created
+            and not obj.deleted_by_user
+        ]
+        if not candidates:
+            return
+        # 已落地的对象**绝不硬删**：物化/同步任务在数仓里给它建了实表、搬了数据，
+        # 而落点登记行（warehouse_object_projections / ingestion_contracts）是按
+        # object_type_id 挂的。删掉对象，那些行就变成指向不存在 id 的孤儿：库里那张表
+        # 还在、还有数据，本体里却没有任何东西对应它——「任务建的表在建模里看不见」
+        # 会原样重现，而且这次连登记都找不回来。上游真的没了就降级为 deprecated，
+        # 让人看见并自己决定，而不是静默抹掉。
+        from app.services.object_landing import bulk_object_landings
+
+        landed = set(bulk_object_landings(db, [obj.id for obj in candidates]))
+
+        for obj in candidates:
             has_edits = bool(_loads(obj.overridden_fields, [])) or obj.status not in (
                 EntityStatus.SUGGESTED.value,
                 EntityStatus.DEPRECATED.value,
@@ -593,7 +621,7 @@ class OntologyMergeService:
                 .first()
                 is not None
             )
-            if has_edits or referenced:
+            if has_edits or referenced or obj.id in landed:
                 obj.status = EntityStatus.DEPRECATED.value
                 obj.upstream_removed = True
                 report.record(

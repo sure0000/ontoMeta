@@ -4,6 +4,9 @@ import type { FieldProvenance } from "../types";
 
 const ORIGIN_META: Record<string, { label: string; color: string }> = {
   machine: { label: "机器生成", color: "blue" },
+  // 新建入口（人工建模 / 派生建模）写的是 `user`，编辑路径写的是 `manual`（见后端
+  // edit._mark_overridden）。两个值都得认——漏一个，人刚建的对象会被标成「机器生成」。
+  user: { label: "人工新建", color: "purple" },
   manual: { label: "人工新建", color: "purple" },
   machine_edited: { label: "人工修正", color: "cyan" },
 };

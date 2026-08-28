@@ -14,6 +14,8 @@ from app.agents.drafters.base import Drafter
 from app.database import SessionLocal
 from app.models import MaterializationContract, ObjectType
 from app.models.warehouse import TargetKind
+from app.services import derived_object
+from app.services.source_ref import is_derived_source_ref
 
 # 清洗需求 → 结构化规则。命中不了的原文保留在 notes 里交人处理，不臆造规则。
 #
@@ -79,9 +81,34 @@ class TransformDrafter(Drafter):
                 )
                 .first()
             )
+            # 派生对象的上游是数仓里的若干数据集，不是「它自己的 ODS 表」。把那份声明
+            # **抄进 Spec**（而不是让执行器回头去读派生定义）：制品要能自证这次读了哪几张
+            # 表，定义后来改了也不会静默换掉一份已确认任务的行为。同一条规矩见
+            # materialize 的「自检按 Spec 预演，不读契约」。
+            derived: dict[str, Any] = {}
+            if is_derived_source_ref(target.source_ref):
+                definition = derived_object.get_definition(db, target.id)
+                if definition is None:
+                    raise ValueError(
+                        f"对象「{target.name}」标记为派生对象却没有派生定义，无法确定上游"
+                    )
+                if definition.dangling_refs:
+                    raise ValueError(
+                        "派生定义里有已失效的上游："
+                        + "、".join(definition.dangling_refs)
+                        + "；请先修好派生定义再建加工任务"
+                    )
+                derived = {
+                    "source_datasets": [u.ref for u in definition.upstreams],
+                    "joins": definition.joins,
+                    "field_mapping": definition.field_mapping,
+                    "grain": definition.grain,
+                }
+
             return {
                 "target_table": target.name,
                 "ontology_id": ontology_id,
+                **derived,
                 # 见 sync.py 同名字段：缺它执行器只渲染 SQL 不落库。
                 "target_datasource_id": context.get("target_datasource_id") or None,
                 # 表单显式选的层优先——此前一律取契约（无契约则 dim），用户在表单里

@@ -6,6 +6,7 @@ import {
   DownOutlined,
   EditOutlined,
   ExportOutlined,
+  FileSearchOutlined,
   HistoryOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
@@ -29,6 +30,7 @@ import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
 import { ConflictsPanel } from "../components/ConflictsPanel";
+import { IncrementalModelingModal } from "../components/IncrementalModelingModal";
 import { ManualCreateModal } from "../components/ManualCreateModal";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -143,8 +145,8 @@ function PublishPreflightSummary({ preflight }: { preflight: PublishPreflight })
         版本 v{preflight.current_version} → <strong>v{preflight.next_version}</strong>
       </div>
       <div>
-        将发布：业务对象 <strong>{preflight.object_count}</strong> · 属性{" "}
-        {preflight.property_count} · 业务关系 {preflight.relation_count}
+        将发布：业务对象 <strong>{preflight.object_count}</strong> · 属性 {preflight.property_count}{" "}
+        · 业务关系 {preflight.relation_count}
       </div>
       {skipped.length > 0 && <div>将跳过：{skipped.join(" · ")}</div>}
       {preflight.unresolved_conflicts > 0 && (
@@ -197,9 +199,7 @@ function MergeReportDrawer({
               }}
             >
               <div style={{ fontSize: 20, fontWeight: 500 }}>{s[sec.key]}</div>
-              <div style={{ fontSize: 12, color: "var(--om-text-secondary)" }}>
-                {sec.label}
-              </div>
+              <div style={{ fontSize: 12, color: "var(--om-text-secondary)" }}>{sec.label}</div>
             </div>
           ))}
         </div>
@@ -216,11 +216,7 @@ function MergeReportDrawer({
               const items = report[entity]?.[sec.key] ?? [];
               if (!items.length) return null;
               const label =
-                entity === "object_types"
-                  ? "对象"
-                  : entity === "relation_types"
-                    ? "关系"
-                    : "属性";
+                entity === "object_types" ? "对象" : entity === "relation_types" ? "关系" : "属性";
               return (
                 <div key={entity} style={{ color: "var(--om-text-secondary)" }}>
                   {label}（{items.length}）：
@@ -298,6 +294,7 @@ export function DomainDetailPage() {
   >({ full: null, objects: null, relations: null });
   const [ontologyLoading, setOntologyLoading] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
+  const [incrementalOpen, setIncrementalOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [mergeReport, setMergeReport] = useState<MergeReport | null>(null);
   const [mergeReportOpen, setMergeReportOpen] = useState(false);
@@ -694,6 +691,14 @@ export function DomainDetailPage() {
                     onClick: () => handleGenerate("relations"),
                   },
                   { type: "divider" as const },
+                  // 增量建模：为几张新表重扫整个域，代价是几十万 token 且会把待复核
+                  // 重新灌满。先看清楚哪几张表是新的，再只对它们生成。
+                  {
+                    key: "incremental",
+                    icon: <FileSearchOutlined />,
+                    label: "增量建模（只生成新表）",
+                    onClick: () => setIncrementalOpen(true),
+                  },
                   {
                     key: "manual",
                     icon: <EditOutlined />,
@@ -758,9 +763,7 @@ export function DomainDetailPage() {
             <Space size={8} wrap>
               {pendingCount > 0 && <Tag color="orange">{pendingCount} 项已发布内容被修改</Tag>}
               {pendingPublish > 0 && <Tag color="blue">{pendingPublish} 项待提升</Tag>}
-              {needsReviewCount > 0 && (
-                <Tag>{needsReviewCount} 个待复核对象（发布会跳过）</Tag>
-              )}
+              {needsReviewCount > 0 && <Tag>{needsReviewCount} 个待复核对象（发布会跳过）</Tag>}
               {conflictCount > 0 && <Tag color="red">{conflictCount} 处字段冲突</Tag>}
               <span style={{ color: "var(--om-text-secondary)", fontSize: 13 }}>
                 尚未固化为新版本
@@ -839,6 +842,8 @@ export function DomainDetailPage() {
               objectDetailPath={objectDetailPath}
               relationDetailPath={relationDetailPath}
               relationScope={{ ontologyId: domain.working_ontology_id ?? undefined }}
+              datasetOntologyId={domain.working_ontology_id}
+              onDerivedObjectCreated={reloadBundle}
               relationGroupDetailPath={relationGroupDetailPath}
               workspaceMode
               searchQuery={searchQuery}
@@ -971,6 +976,21 @@ export function DomainDetailPage() {
         open={mergeReportOpen}
         onClose={() => setMergeReportOpen(false)}
       />
+
+      {domainId && (
+        <IncrementalModelingModal
+          open={incrementalOpen}
+          domainId={domainId}
+          onClose={() => setIncrementalOpen(false)}
+          // 裁剪生成也是一次 objects 范围的任务，进度沿用同一条轮询链路。
+          onStarted={(progress) => {
+            setGenerating((prev) => ({ ...prev, objects: true }));
+            setActionError(null);
+            setDraftProgress((prev) => ({ ...prev, objects: progress }));
+            pollProgress("objects", progress.task_id);
+          }}
+        />
+      )}
 
       {domainId && (
         <ManualCreateModal

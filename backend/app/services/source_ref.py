@@ -1,11 +1,18 @@
-"""``ObjectType.source_ref`` 的判读 —— 本体的两种来源在这里分开。
+"""``ObjectType.source_ref`` 的判读 —— 本体的三种来源在这里分开。
 
-本体有两个来源，只有 ``source_ref`` 的**形态**能把它们区分开：
+本体有三个来源，只有 ``source_ref`` 的**形态**能把它们区分开：
 
 - **DataHub 采集**：``urn:li:dataset:(urn:li:dataPlatform:<平台>,<库>.<表>,PROD)``。
   背后有真实的物理源表，可以搬数据 → 同步。
 - **人工建模**：``manual:<数据源|方言>:<标识>``（只有 ``ManualCreationService`` 产出）。
   任何库里都没有表，只有元数据 → 只能物化建表，没有可搬的源。
+- **派生建模**：``derived:<本体 id>:<标识>``（只有 ``derived_object`` 产出）。
+  上游在**数仓里**（几张 ODS/DWD 表 join 出的新粒度），不在源库里 → 同样不能同步，
+  但它有确定的上游：那份声明在 ``DerivedDefinition``，不在 ``source_ref`` 里。
+
+三者对「能不能同步」的答案是一样的（只有 datahub 能），但对「数据从哪来」不一样：
+人工建模没有上游，派生建模有——所以它们不能共用一个 ``manual`` 标签，否则界面只能对
+派生对象说「无源表」，而它的源明明就在数仓里躺着。
 
 ``origin`` / ``user_created`` **不能**用来判别：``services/edit.py`` 会给带真实 URN 的对象打
 ``user_created=True``（从 DataHub 数据集补建承载对象），而每次改字段又会翻转 ``origin``。
@@ -23,18 +30,30 @@ from typing import Literal
 from app.connectors.datahub import _extract_dataset_name, _extract_platform
 
 MANUAL_PREFIX = "manual:"
+DERIVED_PREFIX = "derived:"
 _URN_PREFIX = "urn:li:dataset:"
 
-Provenance = Literal["datahub", "manual", "none"]
+Provenance = Literal["datahub", "manual", "derived", "none"]
 
-# 「这个对象没有可搬的源」的统一说法。两种成因（压根没有 source_ref / 是手工建模对象）
-# 对使用者是同一件事：它只能物化建表，不能同步。分开写两句只会让人以为是两种故障。
+# 「这个对象没有可搬的源」的统一说法。三种成因（无 source_ref / 手工建模 / 派生建模）
+# 对搬运是同一件事：没有源库表可搬。但**派生对象要单独说**——它有上游，只是上游在数仓里，
+# 对它说「无源表」会让人以为建模缺了东西而去补一个不存在的数据源。
 NO_PHYSICAL_SOURCE_NOTE = "对象无可定位的物理源表（无 source_ref，或为手工建模对象），不产搬运作业"
+NO_SOURCE_NOTE_BY_PROVENANCE = {
+    "manual": "手工建模对象（库里没有对应的源表），只能物化建表，不产搬运作业",
+    "derived": "派生对象（上游是数仓里的数据集，见派生定义），由清洗任务落数，不产搬运作业",
+    "none": NO_PHYSICAL_SOURCE_NOTE,
+}
 
 
 def is_manual_source_ref(ref: str | None) -> bool:
     """该引用是否指向人工建模对象（无物理源表）。"""
     return bool(ref) and ref.startswith(MANUAL_PREFIX)
+
+
+def is_derived_source_ref(ref: str | None) -> bool:
+    """该引用是否指向派生对象（上游在数仓里，见 ``DerivedDefinition``）。"""
+    return bool(ref) and ref.startswith(DERIVED_PREFIX)
 
 
 def is_dataset_urn(ref: str | None) -> bool:
@@ -56,7 +75,8 @@ def _dataset_name(ref: str) -> str | None:
 
 
 def provenance_of(ref: str | None) -> Provenance:
-    """本体对象的来源：``datahub`` 有源表可搬，``manual`` / ``none`` 没有。
+    """本体对象的来源：只有 ``datahub`` 有源库表可搬；``derived`` 的上游在数仓里，
+    ``manual`` / ``none`` 没有上游。
 
     结构不完整的 URN 归 ``none`` 而非 ``datahub``：它自称采集而来，但我们无从据此定位
     任何东西，把这个「声称」当事实正是要消除的那类错误。
@@ -65,11 +85,17 @@ def provenance_of(ref: str | None) -> Provenance:
         return "datahub"
     if is_manual_source_ref(ref):
         return "manual"
+    if is_derived_source_ref(ref):
+        return "derived"
     return "none"
 
 
 def has_physical_source(ref: str | None) -> bool:
-    """是否存在可搬运的物理源表。同步的准入条件，物化不看这个。"""
+    """是否存在**可搬运的源库表**。同步的准入条件，物化不看这个。
+
+    派生对象在这里同样是 False：它的上游是数仓里的表，由清洗任务按
+    ``DerivedDefinition`` 读取，不走「从源库搬进 ODS」那条路。
+    """
     return provenance_of(ref) == "datahub"
 
 
@@ -96,11 +122,14 @@ def manual_dialect_of(ref: str | None) -> str | None:
 
 
 __all__ = [
+    "DERIVED_PREFIX",
     "MANUAL_PREFIX",
     "NO_PHYSICAL_SOURCE_NOTE",
+    "NO_SOURCE_NOTE_BY_PROVENANCE",
     "Provenance",
     "has_physical_source",
     "is_dataset_urn",
+    "is_derived_source_ref",
     "is_manual_source_ref",
     "manual_dialect_of",
     "provenance_of",

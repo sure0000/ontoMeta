@@ -142,6 +142,36 @@ class DomainContextDetail(DomainContextSummary):
     unresolved_conflict_count: int = 0
 
 
+class GenerateObjectsRequest(BaseModel):
+    """「仅生成业务对象」的可选按表裁剪。
+
+    不传 / 传空 = 全域生成（历史行为）。传了就只对这些 DataHub 数据集跑 LLM——
+    为几张新表重扫整个域，代价与重复正是这个字段要消除的东西。
+    """
+
+    dataset_urns: list[str] = Field(default_factory=list)
+
+
+class UnmodeledTableOut(BaseModel):
+    """域内还没进本体的表。"""
+
+    urn: str
+    name: str
+    display_name: str | None = None
+    description: str | None = None
+    platform: str | None = None
+    field_count: int = 0
+    row_count: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class UnmodeledTablesOut(BaseModel):
+    items: list[UnmodeledTableOut] = Field(default_factory=list)
+    #: 域内表总数，用于在界面上说明「N 张里有 M 张没建模」。
+    domain_table_count: int = 0
+
+
 class DraftProgressOut(BaseModel):
     task_id: str
     status: str
@@ -149,6 +179,8 @@ class DraftProgressOut(BaseModel):
     message: str | None = None
     ontology_id: str | None = None
     scope: str = "full"
+    #: 本次按表裁剪的数量；0 = 全域。
+    scoped_table_count: int = 0
 
 
 class TaskRecordOut(BaseModel):

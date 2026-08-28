@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models import DataSource, IngestionContract
 from app.services.data_app_executor import ExecutionError, execute_sql
+from app.services.ingestion_contract import mirror_contract_to_projection
 from app.warehouse import get_adapter
 
 
@@ -43,6 +44,7 @@ def reconcile_sync_receipt(
     target = f"{contract.target_ods_database}.{contract.target_ods_table}"
     if state in {"running", "queued", "scheduled"}:
         contract.status = "running"
+        mirror_contract_to_projection(db, contract)
         db.commit()
         return {
             "status": "running",
@@ -51,6 +53,7 @@ def reconcile_sync_receipt(
         }
     if state in {"failed", "upstream_failed"}:
         contract.status = "failed"
+        mirror_contract_to_projection(db, contract)
         db.commit()
         return {
             "status": "failed",
@@ -64,6 +67,7 @@ def reconcile_sync_receipt(
     datasource = db.get(DataSource, contract.doris_datasource_id)
     if datasource is None or not (datasource.dsn_secret_ref or "").strip():
         contract.status = "failed"
+        mirror_contract_to_projection(db, contract)
         db.commit()
         return {
             "status": "failed",
@@ -84,6 +88,7 @@ def reconcile_sync_receipt(
         row_count = int((rows[0] if rows else {}).get("row_count") or 0)
     except (ExecutionError, TypeError, ValueError) as exc:
         contract.status = "failed"
+        mirror_contract_to_projection(db, contract)
         db.commit()
         return {
             "status": "failed",
@@ -95,6 +100,9 @@ def reconcile_sync_receipt(
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     contract.status = "ready"
     contract.last_success_at = now
+    # 落数验证通过才算真成功：此时才把「已落地」镜像给 Projection，本体工作区的
+    # 落点、下游 transform 的 ODS 准入、查询网关的 queryable 共用这一处结论。
+    mirror_contract_to_projection(db, contract)
     db.commit()
     return {
         "status": "verified",

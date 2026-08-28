@@ -3,7 +3,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.schemas.ontology import ObjectTypeSummary, PropertyOut, VersionRecordOut
+from app.schemas.ontology import (
+    LogicLandingOut,
+    ObjectTypeSummary,
+    PropertyOut,
+    VersionRecordOut,
+)
 
 class BusinessLogicObjectBindingOut(BaseModel):
     id: str
@@ -146,6 +151,9 @@ class BusinessLogicOut(BaseModel):
     category_name: str | None = None
     bound_object_count: int = 0
     bound_property_count: int = 0
+    # ADS 落点：指标/标签/规则任务把这条口径物化成的表。口径的物化归口径，
+    # **不给它建业务对象**——那是 ObjectType 的位置，不是这里的。见 services/object_landing。
+    landing: LogicLandingOut | None = None
     updated_at: datetime
 
     model_config = {"from_attributes": True}

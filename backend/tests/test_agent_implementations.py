@@ -340,6 +340,9 @@ def test_transform_executor_reuses_m3_generator(seeded):
     # Transform 只读 Doris ODS，不再直连业务源表。库名前缀只作用于服务层（dim_erp），
     # ODS 侧恒为同步写入的那一个库——两边各按前缀拼一个库名，读的就不是搬进来的数据。
     assert f"FROM `ods`.`ods_{seeded['domain_code']}_tab_customer`" in out["sql"]
+    # 单源不带表别名、不带 JOIN：多源改造给 _projection 加的列表达式映射，缺省必须
+    # 等价于「原样引用同名列」，否则每一份存量清洗作业的 SQL 都会变样。
+    assert " t0" not in out["sql"] and "JOIN" not in out["sql"]
     assert out["applied_rules"] == ["deduplicate"]
     # 该本体没声明主键 → 退回整行去重，且**明说**是整行，不冒充按主键
     assert "SELECT DISTINCT" in out["sql"]

@@ -302,6 +302,60 @@ def _check_doris_transform(
             message="Doris transform 不接受 Flink/streaming 参数：" + ", ".join(flink_keys),
             entity_type="artifact",
         ))
+    issues.extend(_check_transform_sources(db, spec))
+    return issues
+
+
+def _check_transform_sources(
+    db: Session, spec: dict[str, Any]
+) -> list[ValidationIssue]:
+    """多源加工（派生对象）：上游此刻还在不在、表建出来没有。
+
+    在闸门里查而不是等执行：上游被删或还没搬完，SQL 照样生成得出来，跑到 Doris 才报
+    「表不存在」——那时任务已经确认过、排进调度了。判据与执行器同源（都问数据集目录
+    的 ``source_ready``），不会出现「闸门放行、执行器拒绝」。
+    """
+    refs = [str(r) for r in (spec.get("source_datasets") or []) if r]
+    ontology_id = spec.get("ontology_id")
+    if not refs or not ontology_id:
+        return []
+    from app.services import dataset_catalog
+
+    catalog = {
+        entry.ref: entry for entry in dataset_catalog.list_datasets(db, str(ontology_id))
+    }
+    issues: list[ValidationIssue] = []
+    for ref in refs:
+        entry = catalog.get(ref)
+        if entry is None:
+            issues.append(ValidationIssue(
+                code="transform_source_missing",
+                message=f"加工源「{ref}」已不在本体的数仓落点里，请重建这个任务",
+                entity_type="artifact",
+                entity_name=ref,
+            ))
+        elif not entry.source_ready:
+            issues.append(ValidationIssue(
+                code="transform_source_not_ready",
+                message=(
+                    f"加工源 {entry.physical}（{entry.entity_display_name}）尚未就绪"
+                    f"：{entry.state}"
+                ),
+                entity_type="artifact",
+                entity_name=entry.physical,
+            ))
+    mapped_refs = {
+        str(item.get("from_ref"))
+        for item in spec.get("field_mapping") or []
+        if item.get("from_ref")
+    }
+    for ref in sorted(mapped_refs - set(refs)):
+        issues.append(ValidationIssue(
+            code="transform_field_source_unknown",
+            message=f"字段映射引用了不在上游列表里的数据集「{ref}」",
+            entity_type="artifact",
+            entity_name=ref,
+        ))
     return issues
 
 

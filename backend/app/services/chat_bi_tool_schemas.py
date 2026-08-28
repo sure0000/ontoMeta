@@ -478,6 +478,30 @@ _GET_LINEAGE_TOOL: dict[str, Any] = {
     },
 }
 
+_LIST_DATASETS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_datasets",
+        "description": (
+            "列出本体在数仓里的物理落点（数据集目录）：哪个对象/口径落到了哪张表、在哪一层、能不能用。"
+            "同步/加工**不会产生新的业务对象**——ODS、DWD 表都是既有实体的物理投影，"
+            "所以「数仓里那张表叫什么」只能从这里查，不要自己按命名规则拼表名。"
+            "回答「数据同步到哪了 / 这个对象落成哪张表了 / 哪些表可以拿来加工」时用它。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "layer": {"type": "string", "enum": ["ods", "dim", "dwd", "dws", "ads"],
+                          "description": "只看某一层；不填看全部"},
+                "q": {"type": "string", "description": "按实体名或物理表名过滤"},
+                "source_ready_only": {"type": "boolean",
+                                      "description": "只列可作下游作业源表的（表已建出来）"},
+                "limit": {"type": "integer", "description": "最多返回条数，默认 30"},
+            },
+        },
+    },
+}
+
 _PROPOSE_DRAFT_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -1697,6 +1721,7 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _ANALYZE_RESULT_TOOL,
         _SCOUT_QUERY_TOOL,
         _GET_LINEAGE_TOOL,
+        _LIST_DATASETS_TOOL,
         _PROPOSE_DRAFT_TOOL,
         _PROPOSE_EXPRESSION_TOOL,
         _LINT_TOOL,
@@ -1771,6 +1796,7 @@ SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
         *_CORE_SEARCH_TOOLS,
         "locate_entities", "find_join_path", "compile_metric", "profile_values",
         "run_sql", "scout_query", "analyze_result", "render_chart",
+        "list_datasets",  # 哪张表已落地可查
         # read_result 动态解锁，不在白名单
         "update_plan",  # 多步分析计划
         "propose_panel", "propose_dashboard",  # 保存结果
@@ -1779,6 +1805,7 @@ SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
     "lineage": frozenset({
         *_CORE_SEARCH_TOOLS,
         "get_lineage",
+        "list_datasets",  # 「这个对象最后落到哪张表」也是血缘问题的一半
         "select_skill",
     }),
     "create": frozenset({
@@ -1790,6 +1817,7 @@ SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
     "task": frozenset({
         "search_objects", "get_object",  # 只需要最基础的检索
         "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
+        "list_datasets",  # 清洗要读上游 ODS：先看它搬完没有
         "request_form",  # 六环确认表单
         "lint_against_standard",
         "select_skill",
@@ -1895,6 +1923,7 @@ __all__ = [
     '_READ_RESULT_TOOL',
     '_SCOUT_QUERY_TOOL',
     '_GET_LINEAGE_TOOL',
+    '_LIST_DATASETS_TOOL',
     '_PROPOSE_DRAFT_TOOL',
     '_PROPOSE_EXPRESSION_TOOL',
     '_LINT_TOOL',
