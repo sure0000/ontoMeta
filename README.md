@@ -43,7 +43,7 @@ docker compose up --build -d
 - API / OpenAPI：http://localhost:8000/docs  
 - 健康检查：`GET http://localhost:8000/health`  
 - 默认管理 Token：`dev-admin-token-change-me`（与 Compose 环境变量一致）  
-- 未配置 DataHub / OpenAI / Cube 时，对应功能走确定性路径或显式报错（不再内置 Mock 开关）
+- 未配置 DataHub / OpenAI 时，对应功能走确定性路径或显式报错（不再内置 Mock 开关）
 
 停止：`docker compose down`（数据卷 `ontometa_pg` 会保留）。
 

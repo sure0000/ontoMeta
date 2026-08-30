@@ -1,0 +1,71 @@
+/* BlockCard - 统一卡片容器
+ * 所有 Data Agent 渲染块（21 种）共享的外观规格 */
+
+.block-card {
+  margin: var(--om-space-3) 0;
+  padding: var(--om-space-4);
+  border: 1px solid var(--om-border);
+  border-left-width: 3px;
+  border-radius: var(--om-radius-md);
+  background: var(--om-surface);
+  box-shadow: var(--om-shadow-sm);
+}
+
+/* 语义色变体：只用于左边框强调，背景保持中性白 */
+.block-card--primary {
+  border-left-color: var(--om-primary);
+}
+
+.block-card--success {
+  border-left-color: var(--om-success);
+}
+
+.block-card--warning {
+  border-left-color: var(--om-warning);
+}
+
+.block-card--error {
+  border-left-color: var(--om-error);
+}
+
+.block-card--neutral {
+  border-left-color: var(--om-neutral);
+}
+
+/* 标题栏（当存在 title 或 actions 时） */
+.block-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-3);
+  margin-bottom: var(--om-space-3);
+  padding-bottom: var(--om-space-3);
+  border-bottom: 1px solid var(--om-border);
+}
+
+.block-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--om-text-md);
+  font-weight: 600;
+  color: var(--om-text);
+}
+
+.block-card-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+}
+
+/* 主体内容区 */
+.block-card-body {
+  font-size: var(--om-text-base);
+  line-height: 1.6;
+  color: var(--om-text);
+}
+
+/* 卡片内的嵌套元素间距调整 */
+.block-card-body > * + * {
+  margin-top: var(--om-space-2);
+}

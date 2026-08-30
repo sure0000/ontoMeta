@@ -126,6 +126,179 @@ class RecordFamily:
     ledger_fields: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class OpsQuestionRoute:
+    """运行问题的确定性路由提示。
+
+    它只负责在已经判定为 ``operational`` 后缩小 reader 候选，不替 reader 回答，
+    也不绕过模型的主体定位。``matched`` 留作 P3 诊断：问题集失败时能直接看到是哪组
+    复合词没有命中，而不是只得到一个笼统的「family 错了」。
+    """
+
+    tool: str
+    family: str
+    matched: tuple[str, ...]
+
+
+OPS_RECORD_DEFAULT_SCOPES: dict[str, str] = {
+    "decision": "conversation",
+    "standard": "global",
+    "datasource": "global",
+    "component": "global",
+}
+
+OPS_RECORD_ALLOWED_SCOPES: dict[str, frozenset[str]] = {
+    "task_run": frozenset({"conversation", "ontology", "all"}),
+    "pipeline": frozenset({"ontology", "all"}),
+    "decision": frozenset({"conversation"}),
+    "ontology_version": frozenset({"ontology"}),
+    "standard": frozenset({"global", "all"}),
+    "draft_run": frozenset({"ontology"}),
+    "merge_report": frozenset({"ontology"}),
+    "conflict": frozenset({"ontology"}),
+    "datasource": frozenset({"global", "all"}),
+    "data_app": frozenset({"ontology", "all"}),
+    "component": frozenset({"global", "all"}),
+    "migration": frozenset({"ontology", "all"}),
+}
+
+
+def default_ops_record_scope(family: str) -> str:
+    """返回 reader 的服务端默认范围；未特列的运行记录均按当前本体读取。"""
+    return OPS_RECORD_DEFAULT_SCOPES.get(family, "ontology")
+
+
+# 按 reader 而不是工具组织。较具体的族排在前面；最终仍按匹配短语的长度与数量评分，
+# 因而「Airflow 部署失败原因」会落 component，而不是被通用的「失败原因」吸到 task_run。
+_OPS_ROUTE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "migration",
+        (
+            "生产割接", "割接状态", "割接进度", "割接到哪", "观察窗", "回滚责任人",
+            "生产切换", "迁移批次", "影子校验", "割接批次",
+        ),
+    ),
+    (
+        "component",
+        (
+            "依赖组件", "组件部署", "组件状态", "部署失败原因", "部署结果",
+            "doris 组件", "llm 组件",
+        ),
+    ),
+    (
+        "datasource",
+        (
+            "数据源状态", "数据源连接", "数据源是否可用", "上次测通", "连接状态",
+            "拨测结果", "数据库连通", "库连得上", "数据源连得上", "连接测试",
+        ),
+    ),
+    (
+        "data_app",
+        (
+            "数据应用", "看板版本", "看板发布", "大屏版本", "面板版本",
+            "应用版本", "应用发布", "发布了几版", "应用发布记录",
+        ),
+    ),
+    (
+        "conflict",
+        (
+            "待复核冲突", "合并冲突", "冲突字段", "字段冲突", "冲突清单",
+            "机器值", "人工值", "冲突三元组",
+        ),
+    ),
+    (
+        "merge_report",
+        (
+            "合并报告", "合并结果", "重新生成改了什么", "重新生成的变化",
+            "生成差异", "新增和更新", "保留了什么", "合并摘要",
+        ),
+    ),
+    (
+        "draft_run",
+        (
+            "草稿生成", "本体生成进度", "本体生成状态", "上次生成",
+            "上次生成为什么失败", "生成为什么失败", "生成失败原因",
+            "生成记录", "生成任务进度", "生成了多少证据",
+        ),
+    ),
+    (
+        "decision",
+        (
+            "六环进度", "哪一环", "谁批的", "谁确认", "谁审批", "谁拍板",
+            "确认记录", "决策记录", "悬挂确认", "六环闭环",
+        ),
+    ),
+    (
+        "standard",
+        (
+            "当前规约", "规约版本", "生效规约", "治理规约", "治理标准",
+            "强制条款", "合规规则", "规约历史", "标准版本",
+        ),
+    ),
+    (
+        "pipeline",
+        (
+            "任务链状态", "任务链进度", "任务链做到哪", "整条链", "流水线状态", "流水线进度",
+            "pipeline 状态", "dag 编译", "调度编译", "逐步状态", "链路阻塞",
+        ),
+    ),
+    (
+        "ontology_version",
+        (
+            "本体版本", "发布版本", "版本差异", "上一版", "本体第几版",
+            "发布到第几版", "版本历史", "历次发布", "版本变更",
+        ),
+    ),
+    (
+        "landing",
+        (
+            "物理落点", "物理表", "落到哪", "落在哪", "在哪张表", "表建了吗",
+            "能不能查", "是否落地", "落地状态", "物化到哪", "物化在哪",
+            "同步到哪", "同步到了哪", "建到哪", "写到哪", "ads 表", "ods 表",
+        ),
+    ),
+    (
+        "task_run",
+        (
+            "跑完了吗", "跑到哪", "卡在哪", "失败原因", "为什么失败", "执行状态",
+            "任务状态", "任务进度", "执行记录", "运行记录", "最近一次执行",
+            "上次执行", "执行结果", "调度状态",
+        ),
+    ),
+)
+
+
+def route_ops_question(question: str) -> OpsQuestionRoute | None:
+    """把自然语言运营问题映射到最可能的权威 reader。
+
+    该函数故意不做 ``analytical``/写意图判定；调用方必须先经过 Data Agent 的顶层
+    意图门。这样「近 30 天任务失败次数」仍由 analytical 赢平局，而这里保持为一个
+    可复用、可离线评测的窄路由器。
+    """
+    q = (question or "").strip().lower()
+    if not q:
+        return None
+
+    candidates: list[tuple[tuple[int, int, int, int], str, tuple[str, ...]]] = []
+    for priority, (family, markers) in enumerate(_OPS_ROUTE_MARKERS):
+        matched = tuple(marker for marker in markers if marker in q)
+        if not matched:
+            continue
+        lengths = [len(marker) for marker in matched]
+        # 先认最长复合短语，再认总证据量；同分时保持上表的具体族优先级。
+        score = (max(lengths), sum(lengths), len(matched), -priority)
+        candidates.append((score, family, matched))
+    if not candidates:
+        return None
+
+    _score, family, matched = max(candidates, key=lambda item: item[0])
+    return OpsQuestionRoute(
+        tool="get_landing" if family == "landing" else "get_ops_record",
+        family=family,
+        matched=matched,
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -155,11 +328,6 @@ def _limit(params: dict, default: int = 5) -> int:
     except (TypeError, ValueError):
         value = default
     return max(1, min(value, 20))
-
-
-def _limit_of(params: dict, default: int = 5) -> int:
-    """兼容尚未接线的后续 reader；所有列表族共享同一上限。"""
-    return _limit(params, default)
 
 
 def _iso(value: Any) -> Any:
@@ -506,7 +674,12 @@ def read_pipeline(db: Session, params: dict) -> RecordAnswer:
 
 
 def read_decision(db: Session, params: dict) -> RecordAnswer:
-    """F 族：当前会话六环走到哪、谁确认过、是否存在悬挂确认。"""
+    """F 族：当前会话各条任务的六环走到哪、谁确认过、是否存在悬挂确认。
+
+    **六环是按任务算的**：一条会话可能建了好几条任务，也可能通篇只是查数一条没建。
+    只报会话级的并集，就会出现「这次会话六环走了 4 环」这种谁都对不上号的说法——
+    问的人想知道的是**某条任务**还差哪一环。故任务级的进度单独出一条事实。
+    """
     from app.services.chat_bi_ledger import build_closure  # noqa: PLC0415
 
     source = "ChatBiDecisionRecord（当前会话追加式决策账本）"
@@ -552,6 +725,28 @@ def read_decision(db: Session, params: dict) -> RecordAnswer:
             _fact("dangling_count", "悬挂项数", len(closure.get("dangling") or [])),
             _fact("dangling", "悬挂项", closure.get("dangling") or []),
             _fact("task_count", "关联任务数", len(closure.get("tasks") or [])),
+            # 任务级进度：闭环的真实粒度。会话级的 nodes 只是审计并集。
+            _fact(
+                "task_closures",
+                "各任务六环进度",
+                [
+                    {
+                        "artifact_id": task.get("artifact_id"),
+                        "name": task.get("name"),
+                        "kind": task.get("kind"),
+                        "status": task.get("status"),
+                        "reached_count": task.get("reached_count", 0),
+                        "total_count": task.get("total_count", 6),
+                        "unreached": [
+                            ring.get("label")
+                            for ring in task.get("nodes") or []
+                            if not ring.get("reached")
+                        ],
+                        "dangling": task.get("dangling") or [],
+                    }
+                    for task in closure.get("tasks") or []
+                ],
+            ),
             _fact("decision_count", "决策记录数", len(records)),
         ],
         items=items,
@@ -559,7 +754,15 @@ def read_decision(db: Session, params: dict) -> RecordAnswer:
         observed_at=_now(),
         source=source,
         truncated=len(records) > len(shown),
-        note=None if records else "当前会话还没有任何人工决策记录，六环均未到达。",
+        note=(
+            "当前会话还没有任何人工决策记录，六环均未到达。"
+            if not records
+            else (
+                "当前会话没有数据任务，只有决策留痕——没有要闭的六环。"
+                if not (closure.get("tasks") or [])
+                else None
+            )
+        ),
     )
 
 
@@ -777,11 +980,12 @@ def read_draft_run(db: Session, params: dict) -> RecordAnswer:
             note="这个域没有任何草稿生成记录。",
         )
 
-    limit = _limit_of(params)
+    limit = _limit(params)
     shown = tasks[:limit]
     latest = tasks[0]
     return RecordAnswer(
         family="draft_run",
+        subject=latest.id,
         facts=[
             _fact("task_id", "最近一次生成 id", latest.id),
             _fact("status", "状态", latest.status),
@@ -834,48 +1038,68 @@ def read_merge_report(db: Session, params: dict) -> RecordAnswer:
             note="找不到这个本体所属的数据域。",
         )
 
+    tasks = DraftTaskService().list_tasks(db, domain_id)
     task_id = str(params.get("task_id") or "").strip()
-    as_of: datetime | None = None
-    if not task_id:
-        tasks = DraftTaskService().list_tasks(db, domain_id)
-        if not tasks:
-            return RecordAnswer(
-                family="merge_report",
-                observed_at=_now(),
-                source=source,
-                note="这个域没有任何草稿生成记录，也就没有合并报告。",
-            )
-        task_id = tasks[0].id
-        as_of = tasks[0].updated_at
-
-    try:
-        report = ProvenanceService().get_merge_report(db, domain_id, task_id)
-    except ValueError:
+    task = next((item for item in tasks if item.id == task_id), None) if task_id else (
+        tasks[0] if tasks else None
+    )
+    if task is None:
         return RecordAnswer(
             family="merge_report",
             observed_at=_now(),
             source=source,
-            note=f"这个域下没有 id 为 {task_id} 的生成任务。",
+            note=(
+                f"这个域下没有 id 为 {task_id} 的生成任务。"
+                if task_id
+                else "这个域没有任何草稿生成记录，也就没有合并报告。"
+            ),
         )
+    task_id = task.id
+    report = ProvenanceService().get_merge_report(db, domain_id, task_id)
 
-    facts = [_fact("task_id", "生成任务 id", report.task_id), _fact("scope", "生成范围", report.scope)]
-    for key, label, section in (
+    facts = [
+        _fact("task_id", "生成任务 id", report.task_id),
+        _fact("scope", "生成范围", report.scope),
+        _fact("summary", "合并摘要", report.summary),
+    ]
+    items: list[dict[str, Any]] = []
+    for section_key, section_label, section in (
         ("object_types", "业务对象", report.object_types),
         ("properties", "属性", report.properties),
         ("relation_types", "业务关系", report.relation_types),
         ("business_logics", "业务口径", report.business_logics),
     ):
-        if section:
-            facts.append(_fact(f"merge_{key}", f"{label}合并", section))
-    if report.summary:
-        facts.append(_fact("summary", "合并摘要", report.summary))
+        for outcome in ("added", "updated", "kept", "conflict", "removed"):
+            changes = section.get(outcome) if isinstance(section, dict) else None
+            if not isinstance(changes, list):
+                continue
+            for change in changes:
+                item = {
+                    "section": section_key,
+                    "section_label": section_label,
+                    "outcome": outcome,
+                }
+                if isinstance(change, dict):
+                    item.update(change)
+                else:
+                    item["value"] = change
+                items.append(_json_value(item))
+    limit = _limit(params, default=20)
+    shown = items[:limit]
     return RecordAnswer(
         family="merge_report",
+        subject=task_id,
         facts=facts,
-        as_of=as_of,
+        items=shown,
+        as_of=task.updated_at,
         observed_at=_now(),
         source=source,
-        note=None if report.summary or facts[2:] else "这次生成没有留下合并报告（可能是首次生成）。",
+        truncated=len(items) > len(shown),
+        note=(
+            None
+            if report.summary or items
+            else "这次生成没有留下合并报告（可能是首次生成）。"
+        ),
     )
 
 
@@ -905,7 +1129,7 @@ def read_conflict(db: Session, params: dict) -> RecordAnswer:
             note="这个本体当前没有待复核的字段级冲突。",
         )
 
-    limit = _limit_of(params, default=10)
+    limit = _limit(params, default=10)
     shown = result.items[:limit]
     return RecordAnswer(
         family="conflict",
@@ -913,6 +1137,7 @@ def read_conflict(db: Session, params: dict) -> RecordAnswer:
         items=[
             {
                 "entity_type": item.entity_type,
+                "entity_id": item.entity_id,
                 "name": item.display_name or item.name,
                 "field": item.field,
                 "base": item.base,
@@ -953,7 +1178,7 @@ def read_datasource(db: Session, params: dict) -> RecordAnswer:
             note=("没有名称匹配的数据源。" if keyword else "还没有配置任何数据源。"),
         )
 
-    limit = _limit_of(params, default=10)
+    limit = _limit(params, default=10)
     shown = rows[:limit]
     tested = [d.tested_at for d in shown if d.tested_at]
     items = []
@@ -998,7 +1223,10 @@ def read_data_app(db: Session, params: dict) -> RecordAnswer:
     from app.services.data_app import DataAppService  # noqa: PLC0415
 
     ontology_id = str(params.get("ontology_id") or "").strip() or None
-    domain_id = _domain_id_of(db, ontology_id)
+    scope = str(params.get("scope") or "ontology").strip()
+    domain_id = None if scope == "all" else (
+        str(params.get("domain_id") or "").strip() or _domain_id_of(db, ontology_id)
+    )
     service = DataAppService()
     source = "DataApp / DataAppVersion（发布快照）"
 
@@ -1041,14 +1269,15 @@ def read_data_app(db: Session, params: dict) -> RecordAnswer:
                     "operator": v.operator,
                     "created_at": _iso(v.created_at),
                 }
-                for v in versions[: _limit_of(params)]
+                for v in versions[: _limit(params)]
             ],
             as_of=app.published_at,
             observed_at=_now(),
             source=source,
+            truncated=len(versions) > _limit(params),
         )
 
-    limit = _limit_of(params, default=10)
+    limit = _limit(params, default=10)
     shown = apps[:limit]
     published = [a.published_at for a in shown if a.published_at]
     return RecordAnswer(
@@ -1102,7 +1331,7 @@ def read_component(db: Session, params: dict) -> RecordAnswer:
             note=("没有匹配的依赖组件。" if key else "还没有登记任何依赖组件。"),
         )
 
-    limit = _limit_of(params, default=10)
+    limit = _limit(params, default=10)
     shown = rows[:limit]
     outs = [service.to_out(r) for r in shown]
     updated = [r.updated_at for r in shown if r.updated_at]
@@ -1127,6 +1356,7 @@ def read_component(db: Session, params: dict) -> RecordAnswer:
         as_of=max(updated) if updated else None,
         observed_at=_now(),
         source=source,
+        truncated=len(rows) > len(shown),
     )
 
 
@@ -1147,26 +1377,31 @@ def read_migration(db: Session, params: dict) -> RecordAnswer:
     source = "WarehouseMigrationBatch + WarehouseMigrationEvidence（不可变证据）"
     ontology_id = str(params.get("ontology_id") or "").strip() or None
     batch_id = str(params.get("batch_id") or "").strip()
+    scope = str(params.get("scope") or "ontology").strip()
 
     query = db.query(WarehouseMigrationBatch)
     if batch_id:
         query = query.filter(WarehouseMigrationBatch.id == batch_id)
-    elif ontology_id:
+    if scope != "all" and ontology_id:
         query = query.filter(WarehouseMigrationBatch.ontology_id == ontology_id)
-    batches = query.order_by(WarehouseMigrationBatch.created_at.desc()).all()
-    if not batches:
+    batch_count = query.count()
+    latest = query.order_by(WarehouseMigrationBatch.created_at.desc()).first()
+    if latest is None:
         return RecordAnswer(
             family="migration",
             observed_at=_now(),
             source=source,
-            note="没有生产割接批次记录：这个本体还没走过割接流程。",
+            note=(
+                f"当前范围内没有 id 为 {batch_id} 的生产割接批次。"
+                if batch_id
+                else "没有生产割接批次记录：这个本体还没走过割接流程。"
+            ),
         )
 
     service = WarehouseMigrationService()
-    latest = batches[0]
     data = service.serialize(db, latest)
     timeline = data.get("timeline") or []
-    limit = _limit_of(params, default=10)
+    limit = _limit(params, default=10)
     shown_timeline = timeline[-limit:]
     return RecordAnswer(
         family="migration",
@@ -1183,7 +1418,7 @@ def read_migration(db: Session, params: dict) -> RecordAnswer:
             _fact("cutover_at", "割接时间", _iso(data.get("cutover_at"))),
             _fact("observation_ends_at", "观察窗结束", _iso(data.get("observation_ends_at"))),
             _fact("blocked_reason", "阻塞原因", data.get("blocked_reason")),
-            _fact("batch_count", "该范围内批次数", len(batches)),
+            _fact("batch_count", "该范围内批次数", batch_count),
         ],
         items=[
             {
@@ -1252,6 +1487,60 @@ REGISTRY: dict[str, RecordFamily] = {
         answers="当前生效哪版治理规约、有哪些强制条款、历次发布记录是什么",
         reader=read_standard,
         ledger_fields=("subject", "active_version", "version", "note", "code", "description"),
+    ),
+    "draft_run": RecordFamily(
+        key="draft_run",
+        display="草稿生成",
+        answers="当前本体最近一次草稿生成跑到哪、是否失败、生成了多少证据",
+        reader=read_draft_run,
+        ledger_fields=("subject", "task_id", "message", "error_summary"),
+    ),
+    "merge_report": RecordFamily(
+        key="merge_report",
+        display="合并报告",
+        answers="当前本体最近一次重新生成新增、更新、保留、冲突或删除了什么",
+        reader=read_merge_report,
+        ledger_fields=(
+            "subject", "task_id", "id", "name", "display_name", "field",
+        ),
+    ),
+    "conflict": RecordFamily(
+        key="conflict",
+        display="待复核冲突",
+        answers="当前本体还有哪些字段级冲突等待人工拍板，以及机器和人工各自的值",
+        reader=read_conflict,
+        ledger_fields=("entity_id", "name", "field", "base", "ours", "theirs"),
+    ),
+    "datasource": RecordFamily(
+        key="datasource",
+        display="数据源状态",
+        answers="全局数据源上次是否测通、何时测试、用途和安全脱敏后的连接位置",
+        reader=read_datasource,
+        ledger_fields=("subject", "id", "name", "catalog_name", "database"),
+    ),
+    "data_app": RecordFamily(
+        key="data_app",
+        display="数据应用",
+        answers="数据表或看板当前状态、编辑版本、已发布版本和发布历史",
+        reader=read_data_app,
+        ledger_fields=("subject", "app_id", "name", "diff_summary", "operator"),
+    ),
+    "component": RecordFamily(
+        key="component",
+        display="依赖组件",
+        answers="全局依赖组件是否部署成功、部署方式和最近一次部署失败原因",
+        reader=read_component,
+        ledger_fields=("subject", "key", "name", "deploy_error"),
+    ),
+    "migration": RecordFamily(
+        key="migration",
+        display="生产割接",
+        answers="生产割接批次到第几步、是否阻塞、谁批准以及观察窗何时结束",
+        reader=read_migration,
+        ledger_fields=(
+            "subject", "batch_id", "approver", "approved_by", "rollback_owner",
+            "blocked_reason", "name", "recorded_by",
+        ),
     ),
 }
 

@@ -10,6 +10,7 @@ interface Props {
   kind: string;
   ontologyId?: string;
   ontologyName: string;
+  taskRequirement: string;
   taskName: string;
   selectedEntities: string[];
   specData: Record<string, unknown>;
@@ -88,6 +89,7 @@ export function TaskPreview({
   kind,
   ontologyId,
   ontologyName,
+  taskRequirement,
   taskName,
   selectedEntities,
   specData,
@@ -135,6 +137,9 @@ export function TaskPreview({
             此前这里回填本体名，等于在最后一步告诉人任务会叫「erpnext v1」。 */}
         <Descriptions.Item label="任务名称">
           {taskName.trim() || "（按配置自动命名）"}
+        </Descriptions.Item>
+        <Descriptions.Item label="任务需求">
+          {taskRequirement.trim() || "未填写"}
         </Descriptions.Item>
         <Descriptions.Item label="本体">{ontologyName || "未选择"}</Descriptions.Item>
         <Descriptions.Item label="执行操作">{KIND_ACTION[kind]}</Descriptions.Item>

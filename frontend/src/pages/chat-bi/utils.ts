@@ -19,6 +19,18 @@ export interface ChatMessage {
   pending?: boolean;
   /** 正在逐字流式产出最终答案（用于末尾闪烁光标）。 */
   streaming?: boolean;
+  /**
+   * 这一轮还没结束（SSE 未收到 done/error）。
+   * 与 streaming 的区别：从最后一个工具跑完到第一个 token 吐出之间有一段空档——校验、
+   * 自愈重写都在那里发生，此时没有 running 的步、也还没有 token。只看步骤状态会把这段
+   * 空档当成「已完成」，折叠头就会在答案还没出来时先报出耗时。
+   */
+  live?: boolean;
+  /**
+   * 本轮思考耗时（毫秒），思考流水的折叠头用它显示「思考了 1 分 1 秒」。
+   * 只在本次会话现场流式产出的消息上有值；历史消息由 payload.agent_run 的起止时间还原。
+   */
+  thinkingMs?: number;
   error?: boolean;
 }
 

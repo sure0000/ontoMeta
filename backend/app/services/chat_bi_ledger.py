@@ -276,23 +276,47 @@ def list_decisions(db: Session, conversation_id: str) -> list[dict]:
 def build_closure(
     db: Session, conversation_id: str, *, include_records: bool = True
 ) -> dict:
-    """闭环总结：恒六环 + 悬挂项告警 + 完整时间线。
+    """会话的决策总结：**每条任务各一组六环** + 会话级审计聚合 + 完整时间线。
+
+    ``tasks`` 是给人看的闭环，**一条数据任务一组六环**；会话级的 ``nodes`` /
+    ``reached_count`` / ``dangling`` 只是审计聚合（跨会话统计、F 族运行记录问答用），
+    界面不拿它当"闭环"画。
+
+    **为什么闭环必须按任务分开**：会话级的并集在两个地方是错的——
+    ① 随口一问点个「认可」就点亮 data 环，于是一次纯查询也顶着一张六环卡，
+      而那次查询根本没有要闭的环；
+    ② 一条会话连着建三条任务，三份确认被并成一组六环，"哪一环是给哪条任务走的"
+      从图上根本读不出来，点进去也不知道该进哪条。
 
     **未到达的环标灰而不隐藏**——"哪一环没走"正是管理要看的东西。
     闭环状态由记录聚合推导、不独立维护（同 PipelineStatus 的取舍：两处状态迟早分叉）。
 
-    ``include_records=False`` 给出不含时间线的轻量摘要，供只要六环聚合的调用方。
+    ``include_records=False`` 给出不含时间线的轻量摘要，供只要聚合的调用方。
     """
     records = list_decisions(db, conversation_id)
     by_node: dict[str, list[dict]] = {}
     for rec in records:
         by_node.setdefault(rec["node"], []).append(rec)
 
-    nodes: list[dict] = []
+    nodes = _rings(by_node)
+    return {
+        "conversation_id": conversation_id,
+        "nodes": nodes,
+        "reached_count": sum(1 for n in nodes if n["reached"]),
+        "total_count": len(NODE_SEQUENCE),
+        "dangling": _detect_dangling(by_node),
+        "tasks": _conversation_tasks(db, conversation_id, records),
+        "records": records if include_records else [],
+    }
+
+
+def _rings(by_node: dict[str, list[dict]]) -> list[dict]:
+    """按 NODE_SEQUENCE 摊平成恒六环。同一环多条记录取最新一条作为该环的表述。"""
+    rings: list[dict] = []
     for node_value, label in NODE_SEQUENCE:
         items = by_node.get(node_value, [])
         latest = items[-1] if items else None
-        nodes.append(
+        rings.append(
             {
                 "node": node_value,
                 "label": label,
@@ -303,20 +327,40 @@ def build_closure(
                 "count": len(items),
             }
         )
-
-    return {
-        "conversation_id": conversation_id,
-        "nodes": nodes,
-        "reached_count": sum(1 for n in nodes if n["reached"]),
-        "total_count": len(NODE_SEQUENCE),
-        "dangling": _detect_dangling(by_node),
-        "tasks": _conversation_tasks(db, conversation_id),
-        "records": records if include_records else [],
-    }
+    return rings
 
 
-def _conversation_tasks(db: Session, conversation_id: str) -> list[dict]:
-    """本会话催生的任务（治理制品），最近的在前。
+def _task_records(
+    records: list[dict], *, artifact_id: str, confirmation_id: str | None
+) -> dict[str, list[dict]]:
+    """把会话的时间线切给某一条任务：**两条归属依据，缺一不可**。
+
+    后三环（方案/执行/结果）在制品建出来之后确认，带 ``ref_kind=artifact`` 软引用；
+    前三环（需求/本体/数据）在制品还不存在时就确认了，只带表单向导的
+    ``chosen.task_confirmation_id``。两条依据合起来才拼得出一条任务的完整六环。
+
+    没有任何一条依据命中的记录（纯查询里对 SQL/结果/映射的「认可」、登记数据源、
+    生成看板……）**不属于任何任务**，故不进任何一组六环——那正是"随口一问不该冒出
+    一张闭环卡"的实现处。
+    """
+    by_node: dict[str, list[dict]] = {}
+    for rec in records:
+        owned = rec.get("ref_kind") == "artifact" and rec.get("ref_id") == artifact_id
+        if not owned and confirmation_id:
+            chosen = rec.get("chosen")
+            owned = (
+                isinstance(chosen, dict)
+                and chosen.get("task_confirmation_id") == confirmation_id
+            )
+        if owned:
+            by_node.setdefault(rec["node"], []).append(rec)
+    return by_node
+
+
+def _conversation_tasks(
+    db: Session, conversation_id: str, records: list[dict] | None = None
+) -> list[dict]:
+    """本会话催生的任务（治理制品）**各自的六环闭环**，最近的在前。
 
     闭环卡靠这份清单给出**重新进入某一环的入口**。此前后三环只能从"刚提交完那一下"
     弹出的抽屉里确认，制品 id 只活在组件的 useState 里——人不小心关掉窗口（或刷新页面），
@@ -324,8 +368,13 @@ def _conversation_tasks(db: Session, conversation_id: str) -> list[dict]:
     本来就落了库（``draft-confirmed`` 建完草稿即 ``link_conversation_task``），缺的只是
     读回来的通道。
 
+    每条任务带自己的 ``nodes``/``reached_count``/``dangling``——闭环的粒度是任务，
+    不是会话（见 ``build_closure`` 的立论）。
+
     照本模块的既有姿态：读失败给空列表，绝不连累闭环本身。
     """
+    if records is None:
+        records = list_decisions(db, conversation_id)
     try:
         rows = (
             db.query(ChatBiConversationTask, GovernanceArtifact)
@@ -347,6 +396,12 @@ def _conversation_tasks(db: Session, conversation_id: str) -> list[dict]:
         if link.artifact_id in seen:
             continue
         seen.add(link.artifact_id)
+        by_node = _task_records(
+            records,
+            artifact_id=link.artifact_id,
+            confirmation_id=link.confirmation_id,
+        )
+        rings = _rings(by_node)
         tasks.append(
             {
                 "artifact_id": link.artifact_id,
@@ -354,25 +409,44 @@ def _conversation_tasks(db: Session, conversation_id: str) -> list[dict]:
                 # 制品已被删除时退回意图文本：给个能认出来的说法，好过一串 uuid。
                 "name": (artifact.name if artifact else None) or link.intent or link.artifact_id,
                 "status": artifact.status if artifact else None,
+                # 历史关联没有这个值：那条任务的前三环无从归属，如实标灰，不猜。
+                "confirmation_id": link.confirmation_id,
+                "nodes": rings,
+                "reached_count": sum(1 for ring in rings if ring["reached"]),
+                "total_count": len(NODE_SEQUENCE),
+                "dangling": _detect_dangling(by_node, scoped=True),
             }
         )
     return tasks
 
 
-def _detect_dangling(by_node: dict[str, list[dict]]) -> list[str]:
-    """悬挂项：走了一半没走完的环。这是"可管理"最直接的兑现。"""
+def _detect_dangling(by_node: dict[str, list[dict]], *, scoped: bool = False) -> list[str]:
+    """悬挂项：走了一半没走完的环。这是"可管理"最直接的兑现。
+
+    ``scoped=True`` 表示这组记录已经切给了某一条任务：告警文案里就不必再点名制品 id
+    （卡片本身写着任务名），点名反而是把界面上已有的东西再念一遍 uuid。
+    """
     issues: list[str] = []
     plans = by_node.get(DecisionNode.PLAN.value, [])
     execs = by_node.get(DecisionNode.EXECUTE.value, [])
     results = by_node.get(DecisionNode.RESULT.value, [])
+
+    if scoped:
+        if plans and not execs:
+            issues.append("已确认执行方案但尚未执行")
+        # "未确认不得执行"是治理硬不变量。账本里出现无对应 plan 的 execute，
+        # 要么是绕过了对话入口（工单直接起草，正常），要么是真有问题——一律呈现给人判断。
+        if execs and not plans:
+            issues.append("存在未经本会话方案确认的执行记录")
+        if execs and not results:
+            issues.append("任务已执行但结果尚未确认")
+        return issues
 
     planned_refs = {r["ref_id"] for r in plans if r["ref_id"]}
     executed_refs = {r["ref_id"] for r in execs if r["ref_id"]}
 
     for ref in sorted(planned_refs - executed_refs):
         issues.append(f"已确认执行方案但尚未执行（制品 {ref}）")
-    # "未确认不得执行"是治理硬不变量。账本里出现无对应 plan 的 execute，
-    # 要么是绕过了对话入口（工单直接起草，正常），要么是真有问题——一律呈现给人判断。
     for ref in sorted(executed_refs - planned_refs):
         issues.append(f"存在未经本会话方案确认的执行记录（制品 {ref}）")
     if execs and not results:

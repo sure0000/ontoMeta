@@ -228,7 +228,7 @@ export function DataAppEditorPage() {
     widgetsRef.current = widgets;
     const byId = new Map(getSpecPanels(app.spec).map((t) => [t.id, t]));
     const panels = widgets.map((w) => applyWidgetToPanel(w, byId.get(w.id)));
-    const spec = { ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined };
+    const spec = { ...(app.spec ?? {}), layout: "canvas", panels };
     // 本地即时更新，避免拖拽卡顿；松手后持久化
     setData({ ...app, spec });
   };
@@ -237,7 +237,7 @@ export function DataAppEditorPage() {
     if (!app) return;
     const byId = new Map(getSpecPanels(app.spec).map((t) => [t.id, t]));
     const panels = widgetsRef.current.map((w) => applyWidgetToPanel(w, byId.get(w.id)));
-    await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined });
+    await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels });
   };
 
   const addWidget = async (type: string) => {
@@ -245,7 +245,7 @@ export function DataAppEditorPage() {
     const widgets = [...getSpecPanels(app.spec).map(panelToScreenWidget), newWidget(type)];
     widgetsRef.current = widgets;
     const panels = widgets.map((w) => applyWidgetToPanel(w));
-    await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels, tiles: undefined });
+    await updateSpec({ ...(app.spec ?? {}), layout: "canvas", panels });
   };
 
   // 布局模式切换：栅格（grid）⇄ 大屏画布（canvas），面板语义不变，仅重排坐标。
@@ -275,7 +275,6 @@ export function DataAppEditorPage() {
       ...(app.spec ?? {}),
       layout: mode,
       panels,
-      tiles: undefined,
     };
     if (mode === "canvas" && !app.spec?.canvas) {
       spec.canvas = { width: 1920, height: 1080, bg: "#0b1a2e" };
@@ -287,25 +286,25 @@ export function DataAppEditorPage() {
   const addTile = async (type: string) => {
     if (!app) return;
     const tiles = [...getSpecPanels(app.spec), newTile(type, 0)];
-    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles });
   };
   const patchTile = async (id: string, patch: Partial<DashboardTile>) => {
     if (!app) return;
     const tiles = getSpecPanels(app.spec).map((t) => (t.id === id ? { ...t, ...patch } : t));
-    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles });
   };
   const removeTile = async (id: string) => {
     if (!app) return;
     const tiles = getSpecPanels(app.spec).filter((t) => t.id !== id);
-    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles });
   };
   const commitTiles = (tiles: DashboardTile[]) => {
     if (!app) return;
-    setData({ ...app, spec: { ...(app.spec ?? {}), panels: tiles, tiles: undefined } });
+    setData({ ...app, spec: { ...(app.spec ?? {}), panels: tiles } });
   };
   const persistTiles = async (tiles: DashboardTile[]) => {
     if (!app) return;
-    await updateSpec({ ...(app.spec ?? {}), panels: tiles, tiles: undefined });
+    await updateSpec({ ...(app.spec ?? {}), panels: tiles });
   };
 
   const handleShowLineage = async () => {

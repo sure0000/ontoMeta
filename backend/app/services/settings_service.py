@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.config import settings as env_settings
 from app.models import (
     AirflowSetting,
-    CubeSetting,
     DatahubSetting,
     DraftGenerationSetting,
     LlmServiceConfig,
@@ -109,7 +108,6 @@ class AirflowRuntimeConfig:
     max_tasks_per_dag: int
     max_active_tasks_per_dag: int
     dag_parse_timeout: float
-    preflight_sentinel_timeout: float
     staging_swap: bool
     enabled: bool
     # Flink 执行引擎参数（设置页配）：搬运/计算任务经 Airflow BashOperator 提交 flink run。
@@ -131,8 +129,8 @@ class AirflowRuntimeConfig:
     def build_delivery(self):
         """构造 SSH 投递器。
 
-        放在运行期配置上，调用侧（materialization_runner / flink_job_runner /
-        pipeline_compiler）拿到后直接 ``deliver(...)``。
+        放在运行期配置上，调用侧（materialization_runner / pipeline_compiler）拿到后直接
+        ``deliver(...)``。
 
         只有 SSH 一条通道：ontoMeta / Airflow / Flink 常分处三台机器，"写本地文件系统"
         在那种拓扑下只会把产物写进一台没人看的机器。本机验证把 ssh_host 指向 localhost。
@@ -145,15 +143,6 @@ class AirflowRuntimeConfig:
             port=self.ssh_port,
             password=self.ssh_password or None,
         )
-
-
-@dataclass
-class CubeRuntimeConfig:
-    api_url: str
-    api_secret: str | None
-    preagg_refresh: str
-    tenant_dimension: str | None
-    timeout_seconds: int
 
 
 def mask_secret(value: str | None) -> str | None:
@@ -171,8 +160,7 @@ class SettingsService:
     _defaults_initialized: bool = False
 
     def __init__(self) -> None:
-        # Phase 1：DataHub / Cube / LLM 读取侧改为从统一注册表投影，委托给 DependencyComponentService。
-        # Airflow 仍读旧表（编排参数与连接混合，待后续迁移）。
+        # DataHub、LLM 和 Airflow 的读取侧统一投影到依赖组件注册表。
         from app.services.dependency_service import DependencyComponentService
         self._deps = DependencyComponentService()
 
@@ -271,7 +259,6 @@ class SettingsService:
             max_tasks_per_dag=a.get("max_tasks_per_dag") or 50,
             max_active_tasks_per_dag=a.get("max_active_tasks_per_dag") or 16,
             dag_parse_timeout=a.get("dag_parse_timeout") or 60.0,
-            preflight_sentinel_timeout=a.get("preflight_sentinel_timeout") or 20.0,
             staging_swap=a.get("staging_swap") if a.get("staging_swap") is not None else True,
             enabled=a.get("enabled", False),
             # Flink 执行参数（设置页配，空则用默认；flink_bin 缺省 PATH 上的 `flink`）。
@@ -284,27 +271,6 @@ class SettingsService:
             flink_yarn_queue=a.get("flink_yarn_queue") or "",
             flink_checkpoint_dir=a.get("flink_checkpoint_dir") or "",
             flink_rest_endpoint=a.get("flink_rest_endpoint") or "",
-        )
-
-    # Cube（保留用于向后兼容，但不再作为可部署组件）
-    def get_cube_settings(self, db: Session) -> dict:
-        """已废弃：Cube 不再作为可部署的基础设施组件。保留此方法用于向后兼容。"""
-        from datetime import datetime, timezone
-        return {"updated_at": datetime.now(timezone.utc)}
-
-    def update_cube_settings(self, db: Session, data: dict) -> dict:
-        """已废弃：Cube 不再作为可部署的基础设施组件。保留此方法用于向后兼容。"""
-        from datetime import datetime, timezone
-        return {"updated_at": datetime.now(timezone.utc)}
-
-    def get_cube_runtime(self, db: Session) -> CubeRuntimeConfig:
-        """已废弃：Cube 不再作为可部署的基础设施组件。返回空配置用于向后兼容。"""
-        return CubeRuntimeConfig(
-            api_url="",
-            api_secret=None,
-            preagg_refresh="1 hour",
-            tenant_dimension=None,
-            timeout_seconds=30,
         )
 
     def get_llm_runtime(self, db: Session) -> LlmRuntimeConfig:
@@ -412,20 +378,6 @@ class SettingsService:
             )
             db.commit()
 
-        if not db.get(CubeSetting, "default"):
-            # 首次从环境变量播种一次；此后以 DB（设置页）为权威
-            db.add(
-                CubeSetting(
-                    id="default",
-                    api_url=env_settings.cube_api_url,
-                    api_secret=env_settings.cube_api_secret,
-                    preagg_refresh=env_settings.cube_preagg_refresh,
-                    tenant_dimension=env_settings.cube_tenant_dimension,
-                    timeout_seconds=int(env_settings.cube_timeout_seconds),
-                )
-            )
-            db.commit()
-
         if not db.get(AirflowSetting, "default"):
             # 默认不启用：需在设置页填 endpoint 并启用后才能物化（物化一律走 Airflow 编排）。
             # **环境变量只在这里播一次种**：编排配置此后以这一行为准，改 .env 不再生效。
@@ -434,13 +386,9 @@ class SettingsService:
                 AirflowSetting(
                     id="default",
                     dags_dir=_default_dags_dir(),
-                    # 遗留表仍有 jobs_dir 列（读取侧真源已是 dependency_components，
-                    # 且投递不再用它）——留空即可，不再播种一个指向已删组件的路径。
-                    jobs_dir="",
                     max_tasks_per_dag=env_settings.ontometa_max_tasks_per_dag,
                     max_active_tasks_per_dag=env_settings.ontometa_max_active_tasks_per_dag,
                     dag_parse_timeout=env_settings.ontometa_dag_parse_timeout,
-                    preflight_sentinel_timeout=env_settings.ontometa_preflight_sentinel_timeout,
                     staging_swap=env_settings.ontometa_staging_swap,
                 )
             )
@@ -448,8 +396,8 @@ class SettingsService:
 
         SettingsService._defaults_initialized = True
 
-        # Phase 1：把旧表（DatahubSetting/CubeSetting/LlmServiceConfig）搬进统一注册表。
-        # 幂等：已存在对应行则跳过。此后 DataHub/Cube/LLM 读取侧只认注册表。
+        # Phase 1：把旧表（DatahubSetting/LlmServiceConfig）搬进统一注册表。
+        # 幂等：已存在对应行则跳过。此后 DataHub/LLM 读取侧只认注册表。
         self._deps.migrate_from_legacy(db)
 
     def _clear_default_llm(self, db: Session) -> None:

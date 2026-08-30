@@ -121,7 +121,8 @@ class TransformDrafter(Drafter):
                 or self._rules(intent),
                 # 表单填的备注优先；对话路径仍把未匹配成规则的原文留在这里交人处理。
                 "notes": context.get("notes") or intent,
-                "schedule": context.get("schedule") or context.get("refresh_cron"),
+                # 新任务协议统一使用 refresh_cron；读取旧 schedule 仅为兼容历史调用方。
+                "refresh_cron": context.get("refresh_cron") or context.get("schedule"),
             }
 
     # code → 描述，用于把表单下拉给的规则码结构化成 {rule, description}。

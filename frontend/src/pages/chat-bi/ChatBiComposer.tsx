@@ -21,7 +21,7 @@ export function ChatBiComposer({
       <div className="chatbi-composer-inner">
         <textarea
           className="chatbi-input"
-          placeholder={`向「${scopeLabel}」提问… (Enter 发送，Shift+Enter 换行)`}
+          placeholder={`向「${scopeLabel}」提问…`}
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={(e) => {

@@ -44,12 +44,20 @@ _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
 #
 # V5 优化：加入工作流程和工具选择策略，引导模型逐步执行。
 # V5.1 ReAct：要求模型在调用工具前先思考（提高准确性、便于调试）。
+#
+# `<thinking>` 这一句是**唯一一条为界面而写的指令**，看着像例外，其实不是：
+# `_extract_thinking` 早就在解析这个标签、`thought` 伪步早就在往前端流，但从来没有
+# 哪段提示词要求模型输出它——于是那条链恒走兜底分支，用户看到的「思考」实际是模型
+# 调工具时顺带写的开场白（常常没有）。思考轨迹是**模型自己才知道的东西**，工具名和
+# 参数复原不出「为什么这一步查它」，构造保证不了，只能要。
 _AGENT_SYSTEM_PROMPT = (
     "你是企业数据助手，请用中文简洁回答。\n"
     "先判断意图并选择技能；需要业务事实时先调用工具核实，答案只引用工具结果。\n"
     "查数据→query；看结构→overview；看血缘→lineage；建口径→create；管任务→task；"
     "查运行记录→ops（只读）；接数据→onboard。\n"
     "数据查询使用默认 Doris。任务写入必须经六环确认；区分建议、草稿和运行状态。\n"
+    "每次调用工具前，先用 <thinking>…</thinking> 写一句不超过 30 字的中文，"
+    "说明这一步要查什么、为什么；像自言自语，不要复述工具名和参数。\n"
 )
 
 # Prompt 被上游网关误判时使用的单次精简重试版本。它不包含动态本体卡、历史记忆或任务细节。
@@ -497,9 +505,16 @@ _PROPOSE_DRAFT_TOOL: dict[str, Any] = {
                                "description": "指标 metric / 标签 tag / 规则 rule"},
                 "name": {"type": "string",
                          "description": "英文标识符（snake_case，如 repurchase_rate）；缺省则由中文名派生"},
-                "description": {"type": "string", "description": "口径的自然语言说明/意图"},
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "口径的自然语言说明/意图，**必填**：这段话是提案里唯一承载口径含义的"
+                        "字段（如「客户分组表中 is_group=0 的分组数量」）。漏了它，用户在提案"
+                        "卡片上看到的就只有一个名字。"
+                    ),
+                },
             },
-            "required": ["display_name", "logic_type"],
+            "required": ["display_name", "logic_type", "description"],
         },
     },
 }
@@ -510,6 +525,88 @@ _PROPOSE_DRAFT_TOOL: dict[str, Any] = {
 # 因为守卫不是提示词而是**编译器**：产出的 AST 当场过 compile_candidate（与已发布口径同一条
 # 编译+自证路径），编不出来就把编译器的错误与候选字段还给模型让它改；编得出来，人看到的
 # 也是真 SQL 与口径展开轨迹，而不是一段自然语言承诺。
+# 表达式体的**结构化** schema。此前 body 只是 {"type": "object"}，三种形态全写在
+# description 里——而运行时 _compact_tools_for_prompt_retry 会递归删掉所有 description，
+# 于是模型看到的是个没有任何字段说明的空对象，只能猜（实测连猜 aggregation/measure/op
+# 三轮全挂在 unsupported_operation）。契约必须由 schema 本身承载。
+_REF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"ref": {"type": "string", "description": "fields 里声明过的别名"}},
+    "required": ["ref"],
+}
+_VALUE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"value": {"description": "字面量（数字/字符串/布尔）"}},
+    "required": ["value"],
+}
+# JSON Schema 表达不了无限递归；给两层足够覆盖 and/or 嵌套，更深的由编译器校验。
+def _condition_schema(depth: int = 2) -> dict[str, Any]:
+    node: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "op": {
+                "type": "string",
+                "enum": [*COMPARE_OPS, "and", "or"],
+                "description": "比较算子；and/or 时改用 conditions 列子条件",
+            },
+            "left": {"anyOf": [_REF_SCHEMA, _VALUE_SCHEMA]},
+            "right": {"anyOf": [_REF_SCHEMA, _VALUE_SCHEMA]},
+        },
+        "required": ["op"],
+    }
+    if depth > 0:
+        node["properties"]["conditions"] = {
+            "type": "array",
+            "items": _condition_schema(depth - 1),
+            "description": "op=and/or 时的子条件",
+        }
+    return node
+
+
+_EXPRESSION_BODY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        # metric
+        "operation": {
+            "type": "string",
+            "enum": list(METRIC_OPS),
+            "description": "metric 必填：聚合算子。SUM/AVG 只能作用于语义类型 measure 的字段",
+        },
+        "args": {
+            "type": "array",
+            "items": _REF_SCHEMA,
+            "description": "metric：被聚合的字段，形如 [{\"ref\":\"amt\"}]；count 全表时可空",
+        },
+        "group_by": {
+            "type": "array",
+            "items": _REF_SCHEMA,
+            "description": "metric：分组维度",
+        },
+        "filter": {**_condition_schema(), "description": "metric：过滤条件，无则 null"},
+        # tag
+        "cases": {
+            "type": "array",
+            "description": "tag 必填：分支列表；when=null 即 else 分支，每支都要给标签值",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "when": _condition_schema(),
+                    "then": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                },
+                "required": ["then"],
+            },
+        },
+        # rule
+        "condition": {**_condition_schema(), "description": "rule 必填：**应当成立**的条件"},
+        "message": {"type": "string", "description": "rule：违规说明"},
+    },
+}
+
+
 _PROPOSE_EXPRESSION_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -545,7 +642,7 @@ _PROPOSE_EXPRESSION_TOOL: dict[str, Any] = {
                     },
                 },
                 "body": {
-                    "type": "object",
+                    **_EXPRESSION_BODY_SCHEMA,
                     "description": (
                         "表达式体，按类型三选一，引用一律写 {\"ref\":\"别名\"}：\n"
                         "· metric：{\"operation\":\"" + "|".join(METRIC_OPS) + "\","
@@ -752,7 +849,7 @@ _GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
                           "description": "要建的任务类型：materialize / sync / transform"},
                 "target_datasource_id": {
                     "type": "string",
-                    "description": "兼容参数；物化实际固定使用服务端唯一可执行默认 Doris，不能用它覆盖",
+                    "description": "可选的 Doris 数据源 id；不传则使用服务端唯一可执行默认项",
                 },
                 "keyword": {"type": "string",
                              "description": "按实体名/显示名过滤候选，候选很多时用它收窄"},
@@ -778,8 +875,10 @@ def _sync_context_errors(
     from app.models import DataSource, ObjectType
 
     errors: list[str] = []
-    source = db.get(DataSource, context.get("source_datasource_id"))
-    target = db.get(DataSource, context.get("target_datasource_id"))
+    source_id = context.get("source_datasource_id")
+    target_id = context.get("target_datasource_id")
+    source = db.get(DataSource, source_id) if source_id else None
+    target = db.get(DataSource, target_id) if target_id else None
     if source is not None and (source.purpose != "business_source" or not source.enabled):
         errors.append("source_datasource_id 必须是启用的 business_source")
     if source is not None and ontology_id and context.get("object_type"):
@@ -948,7 +1047,11 @@ _GET_OPS_RECORD_TOOL: dict[str, Any] = {
             "读取已经发生过的权威运行记录，只读，不创建或执行任务。"
             "task_run 查单任务状态、执行时间和失败原因；pipeline 查整条任务链及逐步状态；"
             "decision 查当前会话的六环确认与决策人；ontology_version 查当前本体发布版本或版本差异；"
-            "standard 查当前生效治理规约与发布历史。没有匹配记录时返回明确的空结果。"
+            "standard 查当前生效治理规约与发布历史；draft_run 查草稿生成进度；"
+            "merge_report 查重新生成的合并结果；conflict 查待复核字段冲突；"
+            "datasource 查数据源上次拨测状态；data_app 查数据应用发布版本；"
+            "component 查依赖组件部署结果；migration 查生产割接进度。"
+            "没有匹配记录时返回明确的空结果。"
         ),
         "parameters": {
             "type": "object",
@@ -956,12 +1059,25 @@ _GET_OPS_RECORD_TOOL: dict[str, Any] = {
                 "family": {
                     "type": "string",
                     "enum": [
-                        "task_run", "pipeline", "decision", "ontology_version", "standard"
+                        "task_run", "pipeline", "decision", "ontology_version", "standard",
+                        "draft_run", "merge_report", "conflict", "datasource", "data_app",
+                        "component", "migration",
                     ],
                     "description": "运行记录问题族",
                 },
                 "artifact_id": {"type": "string", "description": "指定任务制品 id"},
                 "pipeline_id": {"type": "string", "description": "指定任务链 id"},
+                "task_id": {"type": "string", "description": "指定草稿生成任务 id"},
+                "app_id": {"type": "string", "description": "指定数据应用 id"},
+                "batch_id": {"type": "string", "description": "指定生产割接批次 id"},
+                "component_key": {
+                    "type": "string",
+                    "description": "依赖组件 key，例如 airflow/datahub/llm",
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": "按数据源、数据应用或依赖组件名称过滤",
+                },
                 "version": {
                     "type": "integer",
                     "description": "指定本体发布版本；用于 ontology_version 读取相对上一版的差异",
@@ -975,7 +1091,8 @@ _GET_OPS_RECORD_TOOL: dict[str, Any] = {
                     "enum": ["conversation", "ontology", "global", "all"],
                     "description": (
                         "查询范围；各族会严格校验：decision 仅 conversation，ontology_version "
-                        "仅 ontology，pipeline 支持 ontology/all，standard 支持 global/all"
+                        "及草稿/合并/冲突仅 ontology，pipeline/data_app/migration 支持 "
+                        "ontology/all，standard/datasource/component 支持 global/all"
                     ),
                 },
                 "limit": {"type": "integer", "description": "最多返回条数，默认 5"},
@@ -1828,11 +1945,33 @@ _OPERATIONAL_MARKERS: tuple[str, ...] = (
     "任务状态", "任务进度", "谁批的", "第几版", "部署状态", "运行记录", "执行记录",
     "任务链状态", "整条链", "做到哪", "哪一环", "六环进度",
     "发布版本", "版本差异", "当前规约", "规约版本", "生效规约",
+    "草稿生成状态", "草稿生成进度", "上次生成", "生成失败原因",
+    "合并报告", "重新生成改了什么", "合并冲突", "待复核冲突", "冲突字段",
+    "数据源状态", "上次测通", "连接状态", "连得上吗",
+    "数据应用版本", "看板版本", "发布了几版",
+    "组件部署状态", "依赖组件状态", "部署失败原因",
+    "割接状态", "割接到哪", "割接进度", "观察窗结束",
+    # P3 生产问法：仍只收复合短语，不收裸「状态/进度/记录」。
+    "是否落地", "落地状态", "最近一次执行", "上次执行", "执行结果", "调度状态",
+    "任务链进度", "流水线状态", "流水线进度", "dag 编译", "调度编译", "逐步状态",
+    "谁确认", "谁审批", "谁拍板", "确认记录", "决策记录", "悬挂确认", "六环闭环",
+    "本体版本", "版本历史", "历次发布", "治理规约", "治理标准", "强制条款", "合规规则",
+    "本体生成进度", "本体生成状态", "生成记录", "生成任务进度", "生成了多少证据",
+    "合并结果", "重新生成的变化", "生成差异", "新增和更新", "保留了什么", "合并摘要",
+    "冲突清单", "机器值", "人工值", "冲突三元组",
+    "数据源连接", "数据源是否可用", "拨测结果", "数据库连通", "库连得上", "连接测试",
+    "看板发布", "大屏版本", "面板版本", "应用版本", "应用发布", "应用发布记录",
+    "组件部署", "组件状态", "部署结果", "生产切换", "迁移批次", "影子校验", "回滚责任人",
     # 「物化/同步**到哪**」是本方案 §1 的触发案例：问的是已发生的落点，但 "物化"/"同步"
     # 同时是 task 车道的第一优先标记，不在这里认下来就会被路由去建任务、再拿契约里的
     # materialization.engines 编一句「物化在默认 Doris」。必须用复合词（§8）：单说
     # "物化"/"同步" 会把「帮我建个物化任务」也吸进只读车道。
     "物化到哪", "物化在哪", "同步到哪", "同步到了哪", "建到哪", "写到哪",
+    # 落点的**列举**形态。此前只认「某对象落到哪张表」（单主体），而「数仓里已经落地、
+    # 能直接查的表有哪些」没有主体，落到 structural → overview，被域概览拿 154 个**本体
+    # 对象**当答案回掉——本体对象不是物理落点。同样只收复合词。
+    "已经落地", "已落地", "落地的表", "落成了哪", "能直接查", "可直接查",
+    "数仓里有哪些表", "数仓里已经", "哪些表能查", "哪些表可以查", "已建好的表",
 )
 # 接地判定的适用范围由「需要精准回答的意图」正向定义，而非反向枚举「哪些不必拒答」：
 # 只有 analytical（要真数据）和 structural（要具体本体元数据）**才要求接地**——答业务事实
@@ -1891,6 +2030,13 @@ SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
     "ops": frozenset({
         *_CORE_SEARCH_TOOLS,
         "get_landing", "get_ops_record", "get_task_status", "get_lineage",
+        # get_landing 回答「某个对象落在哪」；「数仓里已经落地的表有哪些」是同一类问题的
+        # 列举形态，唯一权威来源是落点目录。没有它，只读车道只能拿本体对象充数。
+        "list_datasets",
+        # 「这个提案符合规约吗」会被判成 operational 进只读车道，而只读车道里没有校验器时，
+        # 模型只能读出规约条款、再凭正文推断合规——实测就这么编出过「已绑定 X 对象，
+        # 满足必填要求」。lint 本身是只读的，属于这条车道。
+        "lint_against_standard",
         "select_skill",
     }),
     "onboard": frozenset({

@@ -154,7 +154,7 @@ class EditService:
     @property
     def query(self):
         if self._query_service is None:
-            from app.services.query import OntologyQueryService
+            from app.services.logic_query import OntologyQueryService
 
             self._query_service = OntologyQueryService()
         return self._query_service

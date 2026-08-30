@@ -6,8 +6,6 @@ from app.database import get_db
 from app.schemas import (
     AirflowSettingsOut,
     AirflowSettingsUpdate,
-    CubeSettingsOut,
-    CubeSettingsUpdate,
     DatahubSettingsOut,
     DatahubSettingsUpdate,
     DraftGenerationSettingsOut,
@@ -17,8 +15,6 @@ from app.schemas import (
     LlmModelOption,
     LlmServiceConfigCreate,
     LlmServiceConfigDetail,
-    SyncRunnerSecretOut,
-    SyncRunnerSecretUpdate,
     LlmServiceConfigOut,
     LlmServiceConfigUpdate,
 )
@@ -158,7 +154,6 @@ def _airflow_settings_out(row) -> AirflowSettingsOut:
         max_tasks_per_dag=row.get("max_tasks_per_dag") or 50,
         max_active_tasks_per_dag=row.get("max_active_tasks_per_dag") or 16,
         dag_parse_timeout=row.get("dag_parse_timeout") or 60.0,
-        preflight_sentinel_timeout=row.get("preflight_sentinel_timeout") or 20.0,
         staging_swap=row.get("staging_swap") if row.get("staging_swap") is not None else True,
         updated_at=row.get("updated_at"),
     )
@@ -229,31 +224,4 @@ def test_airflow_ssh_delivery(db: Session = Depends(get_db)):
     if not ok:
         raise HTTPException(status_code=400, detail=detail)
     return {"ok": True, "detail": detail}
-
-
-# Cube（已废弃，保留用于向后兼容）
-def _cube_settings_out(row) -> CubeSettingsOut:
-    return CubeSettingsOut(
-        api_url=row.get("api_url", ""),
-        secret_set=bool(row.get("api_secret")),
-        secret_hint=mask_secret(row.get("api_secret")),
-        preagg_refresh=row.get("preagg_refresh", "1 hour"),
-        tenant_dimension=row.get("tenant_dimension"),
-        timeout_seconds=int(row.get("timeout_seconds", 30) or 30),
-        updated_at=row.get("updated_at"),
-    )
-
-
-@router.get("/settings/cube", response_model=CubeSettingsOut, deprecated=True)
-def get_cube_settings(db: Session = Depends(get_db)):
-    """已废弃：Cube 不再作为可部署的基础设施组件。"""
-    return _cube_settings_out(settings_service.get_cube_settings(db))
-
-
-@router.put("/settings/cube", response_model=CubeSettingsOut, deprecated=True)
-def update_cube_settings(data: CubeSettingsUpdate, db: Session = Depends(get_db)):
-    """已废弃：Cube 不再作为可部署的基础设施组件。"""
-    row = settings_service.update_cube_settings(db, data.model_dump())
-    return _cube_settings_out(row)
-
 

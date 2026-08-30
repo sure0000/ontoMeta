@@ -21,7 +21,7 @@ from app.models import (
     ObjectType,
     Property,
 )
-from app.services.query import _logic_relates_to_object, _logic_text_blob
+from app.services.ontology_query import _logic_relates_to_object, _logic_text_blob
 
 
 def _backfill_object_bindings(db: Session) -> int:

@@ -17,6 +17,4 @@ ARG DATAHUB_PLUGIN_VERSION=1.6.0
 
 USER airflow
 RUN pip install --no-cache-dir \
-      "acryl-datahub-airflow-plugin==${DATAHUB_PLUGIN_VERSION}" \
-      "apache-airflow-providers-docker" \
-      "apache-airflow-providers-mysql"
+      "acryl-datahub-airflow-plugin==${DATAHUB_PLUGIN_VERSION}"

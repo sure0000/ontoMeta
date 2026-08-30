@@ -40,7 +40,13 @@ def test_ineffective_fields_are_gone(client, admin_headers):
       Web 表单里填一个别处的路径只会得到一个测不出真假的配置。
     """
     body = client.get("/api/settings/airflow", headers=admin_headers).json()
-    for gone in ("token_set", "token", "api_version", "ssh_key_path"):
+    for gone in (
+        "token_set",
+        "token",
+        "api_version",
+        "ssh_key_path",
+        "preflight_sentinel_timeout",
+    ):
         assert gone not in body, gone
 
 
@@ -167,10 +173,10 @@ def _artifact_with_batches(batches: list[dict]) -> str:
         return artifact.id
 
 
-def test_task_result_reports_which_backend_moved_the_table(
+def test_task_result_reports_flink_rows_written(
     client, admin_headers, monkeypatch
 ):
-    """runner 逐表自选档位，回执得说清这张表实际用了哪一档（契约 v3 的 backend）。"""
+    """任务结果只回传 Flink 作业和写入行数，不暴露已移除的执行档位。"""
     artifact_id = _artifact_with_batches(
         [
             {"dag_id": "dag_a", "dag_run_id": "r1"},
@@ -186,7 +192,7 @@ def test_task_result_reports_which_backend_moved_the_table(
             # 第一批没有这个任务：端点要逐批找下去，而不是就此认输。
             if dag_id != "dag_b":
                 return None
-            return {"backend": "seatunnel", "job_id": "j1", "rows_written": 42}
+            return {"flink_job_id": "j1", "rows_written": 42}
 
         def close(self):
             pass
@@ -200,7 +206,7 @@ def test_task_result_reports_which_backend_moved_the_table(
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["backend"] == "seatunnel"
+    assert "backend" not in body
     assert body["dag_id"] == "dag_b"
     assert body["rows_written"] == 42
 
@@ -228,4 +234,4 @@ def test_task_result_is_empty_not_error_when_task_has_no_xcom(
         headers=admin_headers,
     )
     assert r.status_code == 200
-    assert r.json()["backend"] is None
+    assert "backend" not in r.json()

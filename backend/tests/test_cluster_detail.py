@@ -13,7 +13,7 @@ import uuid
 
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus, RelationType
-from app.services.query import OntologyQueryService
+from app.services.logic_query import OntologyQueryService
 
 query = OntologyQueryService()
 

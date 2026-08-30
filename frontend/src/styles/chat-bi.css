@@ -45,7 +45,7 @@
   justify-content: center;
   color: #fff;
   font-size: 16px;
-  background: linear-gradient(135deg, var(--om-primary, #2563eb), #4f46e5);
+  background: linear-gradient(135deg, var(--om-primary, var(--om-primary)), #4f46e5);
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28);
 }
 
@@ -53,14 +53,20 @@
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.2px;
-  color: var(--om-text, #0f172a);
+  color: var(--om-text, var(--om-text));
   line-height: 1.2;
 }
 
 .chatbi-sidebar-brand-sub {
   font-size: 12px;
-  color: var(--om-text-tertiary, #94a3b8);
+  color: var(--om-text-tertiary, var(--om-text-tertiary));
   margin-top: 2px;
+}
+
+.chatbi-sidebar-close {
+  display: none;
+  margin-left: auto;
+  color: var(--om-text-tertiary);
 }
 
 .chatbi-sidebar-header {
@@ -399,15 +405,15 @@
   gap: 6px;
   padding: 6px 10px;
   margin-bottom: 4px;
-  background: var(--om-primary-soft, #eef2ff);
+  background: var(--om-primary-soft, var(--om-primary-soft));
   border-radius: 8px;
-  border: 1px solid var(--om-primary, #2563eb);
+  border: 1px solid var(--om-primary, var(--om-primary));
 }
 
 .chatbi-batch-toolbar-info {
   font-size: 12px;
   font-weight: 600;
-  color: var(--om-primary, #2563eb);
+  color: var(--om-primary, var(--om-primary));
   white-space: nowrap;
 }
 
@@ -423,11 +429,11 @@
 }
 
 .chatbi-conv-item--batch-selected {
-  background: var(--om-primary-soft, #eef2ff) !important;
+  background: var(--om-primary-soft, var(--om-primary-soft)) !important;
 }
 
 .chatbi-conv-item--batch-selected:hover {
-  background: var(--om-primary-soft, #eef2ff) !important;
+  background: var(--om-primary-soft, var(--om-primary-soft)) !important;
 }
 
 /* ---- Archived section ---- */
@@ -511,7 +517,7 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
-  background: #fafbfc;
+  background: var(--om-surface);
   scroll-behavior: smooth;
 }
 
@@ -559,8 +565,8 @@
   width: 64px;
   height: 64px;
   border-radius: 20px;
-  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-  color: #3b82f6;
+  background: linear-gradient(135deg, var(--om-primary-soft) 0%, var(--om-primary-border) 100%);
+  color: var(--om-primary);
   font-size: 28px;
   display: grid;
   place-items: center;
@@ -606,7 +612,7 @@
 }
 
 .chatbi-suggestion-chip:hover:not(:disabled) {
-  border-color: #93c5fd;
+  border-color: var(--om-primary-border);
   background: #f0f7ff;
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(59, 130, 246, 0.08);
@@ -615,84 +621,6 @@
 .chatbi-suggestion-chip:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* ---------- Chat bubbles ---------- */
-
-.chatbi-bubble {
-  display: flex;
-  gap: 12px;
-  max-width: 820px;
-  width: 100%;
-  animation: chatbi-fade-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-
-@keyframes chatbi-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.985);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-/* 用户消息：右对齐气泡，柔和底色。 */
-.chatbi-bubble--user {
-  align-self: flex-end;
-  flex-direction: row-reverse;
-  width: auto;
-  max-width: 80%;
-}
-
-/* 助手消息：ChatGPT/Claude 式扁平布局——头像 + 透明正文，不套卡片。 */
-.chatbi-bubble--assistant {
-  align-self: stretch;
-  max-width: 820px;
-}
-
-.chatbi-bubble-avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  font-size: 15px;
-  margin-top: 2px;
-  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-  color: #ffffff;
-  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.22);
-}
-
-.chatbi-bubble-body {
-  flex: 1;
-  min-width: 0;
-  font-size: 15px;
-  line-height: 1.72;
-  color: var(--om-text);
-}
-
-/* 助手正文直接落在画布上，无背景/边框/阴影。 */
-.chatbi-bubble--assistant .chatbi-bubble-body {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 0;
-  box-shadow: none;
-}
-
-/* 用户气泡：圆角胶囊，软底色，窄宽。 */
-.chatbi-bubble--user .chatbi-bubble-body {
-  flex: 0 1 auto;
-  width: fit-content;
-  max-width: 100%;
-  background: #f4f6f9;
-  border: 1px solid #e6ebf2;
-  border-radius: 18px;
-  padding: 10px 16px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .chatbi-bubble-pending {
@@ -762,7 +690,10 @@
 .chatbi-md {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-base);
+  line-height: 1.72;
+  color: var(--om-text);
 }
 
 /* 主题分隔线：LLM 常用 `---` 分节，这里化作一条柔和的渐变细线，
@@ -770,12 +701,12 @@
 .chatbi-md-hr {
   border: 0;
   height: 1px;
-  margin: 12px 0 8px;
+  margin: var(--spacing-md) 0 var(--spacing-sm);
   background: linear-gradient(
     to right,
     transparent,
-    var(--om-border, #e2e8f0) 18%,
-    var(--om-border, #e2e8f0) 82%,
+    var(--om-border) 18%,
+    var(--om-border) 82%,
     transparent
   );
 }
@@ -796,31 +727,31 @@
 }
 
 .chatbi-md-h1 {
-  font-size: 19px;
-  margin: 14px 0 2px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--om-border, #e6ebf2);
+  font-size: var(--font-size-h1);
+  margin: var(--spacing-md) 0 var(--spacing-xs);
+  padding-bottom: var(--spacing-xs);
+  border-bottom: 1px solid var(--om-border);
 }
 .chatbi-md-h2 {
-  font-size: 16.5px;
-  margin: 12px 0 2px;
-  padding-bottom: 5px;
-  border-bottom: 1px solid var(--om-border, #eef2f7);
+  font-size: var(--font-size-h2);
+  margin: var(--spacing-md) 0 var(--spacing-xs);
+  padding-bottom: var(--spacing-xs);
+  border-bottom: 1px solid var(--om-bg-soft);
 }
 .chatbi-md-h3 {
-  font-size: 15px;
-  margin: 10px 0 2px;
+  font-size: var(--font-size-h3);
+  margin: var(--spacing-sm) 0 var(--spacing-xs);
 }
 .chatbi-md-h4 {
-  font-size: 14px;
-  margin: 8px 0 2px;
+  font-size: var(--font-size-base);
+  margin: var(--spacing-sm) 0 var(--spacing-xs);
   color: var(--om-text-secondary);
 }
 
 .chatbi-md-listitem {
   display: flex;
-  gap: 8px;
-  padding-left: 2px;
+  gap: var(--spacing-sm);
+  padding-left: var(--spacing-xs);
 }
 
 .chatbi-md-listitem--ordered {
@@ -843,26 +774,26 @@
 }
 
 .chatbi-md-quote {
-  margin: 4px 0;
-  padding: 4px 14px;
-  border-left: 3px solid var(--om-border-strong, #cbd5e1);
+  margin: var(--spacing-xs) 0;
+  padding: var(--spacing-xs) var(--spacing-md);
+  border-left: 3px solid var(--om-border-strong);
   color: var(--om-text-secondary);
-  font-size: 14px;
+  font-size: var(--font-size-base);
   line-height: 1.6;
 }
 
 .chatbi-md-inline-code {
   font-family: var(--om-font-mono);
-  background: var(--om-neutral-soft, #f1f5f9);
-  border: 1px solid var(--om-border, #e6ebf2);
-  padding: 1px 6px;
-  border-radius: 5px;
-  font-size: 12.5px;
+  background: var(--om-neutral-soft);
+  border: 1px solid var(--om-border);
+  padding: 1px var(--spacing-xs);
+  border-radius: var(--border-radius-sm);
+  font-size: var(--font-size-sm);
   color: var(--om-text);
 }
 
 .chatbi-md-link {
-  color: var(--om-primary, #2563eb);
+  color: var(--om-primary);
   text-decoration: none;
   border-bottom: 1px solid transparent;
   transition: border-color 0.15s ease;
@@ -873,8 +804,8 @@
 
 .chatbi-codeblock {
   margin: 10px 0 6px;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--om-text);
+  color: var(--om-border-strong);
   padding: 14px 16px;
   border-radius: 10px;
   font-family: var(--om-font-mono);
@@ -939,17 +870,17 @@
   opacity: 0.82;
 }
 .chatbi-notice--warning {
-  background: #fffbeb;
+  background: var(--om-warning-soft);
   border-color: #fde68a;
   color: #92400e;
 }
 .chatbi-notice--warning .chatbi-notice-icon {
-  color: #d97706;
+  color: var(--om-warning);
 }
 .chatbi-notice--error {
   background: #fef2f2;
-  border-color: #fecaca;
-  color: #b91c1c;
+  border-color: var(--om-error-soft);
+  color: var(--om-error);
 }
 
 /* ---------- Composer ---------- */
@@ -978,7 +909,7 @@
 }
 
 .chatbi-composer-inner:focus-within {
-  border-color: #93c5fd;
+  border-color: var(--om-primary-border);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
@@ -1017,12 +948,12 @@
 }
 
 .chatbi-send-btn--active {
-  background: #3b82f6;
+  background: var(--om-primary);
   color: #ffffff;
 }
 
 .chatbi-send-btn--active:hover {
-  background: #2563eb;
+  background: var(--om-primary);
   transform: scale(1.05);
 }
 
@@ -1038,7 +969,7 @@
   margin: 12px 0 6px;
   border: 1px solid var(--om-border);
   border-radius: 12px;
-  background: #fafbfc;
+  background: var(--om-surface);
   overflow: hidden;
 }
 
@@ -1064,7 +995,7 @@
   padding: 12px 14px;
   border: 1px solid var(--om-border);
   border-radius: 12px;
-  background: #fafbfc;
+  background: var(--om-surface);
 }
 
 .chatbi-chart-title {
@@ -1091,7 +1022,7 @@
   padding: 12px 14px;
   border: 1px solid var(--om-border);
   border-radius: 12px;
-  background: #fafbfc;
+  background: var(--om-surface);
 }
 
 .chatbi-lineage-head {
@@ -1107,28 +1038,13 @@
 }
 
 /* V3 S3：建数提案块（agent 只出提案，确认后才由用户动作建草稿口径）。 */
-.chatbi-draft {
-  margin: 12px 0 6px;
-  padding: 12px 14px;
-  border: 1px solid var(--om-border);
-  border-radius: 12px;
-  background: #fffdf5;
-}
-
-.chatbi-draft-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--om-text-secondary);
-}
+/* 已废弃的 .chatbi-draft 和 .chatbi-draft-head 样式已被 BlockCard 组件替代 */
 
 .chatbi-draft-name {
   margin: 6px 0 2px;
   font-size: 15px;
   font-weight: 700;
-  color: var(--om-text-primary);
+  color: var(--om-text);
 }
 
 .chatbi-draft-desc {
@@ -1157,29 +1073,42 @@
   list-style: disc;
 }
 
-/* 提案参数表（P2）：标签一列、值一列；标量可改，嵌套结构只读。 */
+/* 提案参数表（P2）：标签一列、值一列；标量可改，嵌套结构只读。
+   确认区是「人要按下去负责」的地方——比正文更重的边界感，逐行可扫。 */
 .chatbi-proposal-params {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin: 8px 0 10px;
+  gap: 2px;
+  margin: 12px 0 14px;
+  padding: 4px 0;
+  border-top: 1px solid var(--om-border);
+  border-bottom: 1px solid var(--om-border);
 }
 
 .chatbi-proposal-param {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
   align-items: center;
+  padding: 7px 10px;
+  margin: 0 -10px;
+  border-radius: 6px;
+  transition: background-color 0.15s ease;
+}
+
+.chatbi-proposal-param:hover {
+  background: rgba(59, 130, 246, 0.03);
 }
 
 .chatbi-proposal-param-label {
   font-size: 12px;
+  font-weight: 500;
   color: var(--om-text-tertiary);
 }
 
 .chatbi-proposal-param-ro {
-  font-size: 12px;
-  color: var(--om-text-secondary);
+  font-size: 12.5px;
+  color: var(--om-text);
   overflow-x: auto;
   white-space: nowrap;
 }
@@ -1219,14 +1148,14 @@
 }
 
 .chatbi-proposal-nested-v {
-  color: var(--om-text-primary);
+  color: var(--om-text);
   min-width: 0;
   overflow-x: auto;
 }
 
 .chatbi-draft-error {
   font-size: 12px;
-  color: var(--om-error, #d4380d);
+  color: var(--om-error, var(--om-error));
 }
 
 /* P5：结果分析块 */
@@ -1235,7 +1164,7 @@
   padding: 10px 14px;
   border: 1px solid var(--om-border);
   border-radius: 12px;
-  background: #fff7f5;
+  background: var(--om-surface);
 }
 
 .chatbi-insight-head {
@@ -1258,7 +1187,7 @@
 .chatbi-insight-colname {
   font-size: 13px;
   font-weight: 600;
-  color: var(--om-text-primary);
+  color: var(--om-text);
 }
 
 .chatbi-insight-stats {
@@ -1271,13 +1200,13 @@
 }
 
 .chatbi-insight-null {
-  color: var(--om-warning, #d46b08);
+  color: var(--om-warning, var(--om-warning));
 }
 
 .chatbi-insight-outliers {
   margin-top: 2px;
   font-size: 12px;
-  color: var(--om-error, #d4380d);
+  color: var(--om-error, var(--om-error));
 }
 
 .chatbi-insight-outvals {
@@ -1295,7 +1224,7 @@
 }
 
 .chatbi-insight-trend--down {
-  color: var(--om-error, #d4380d);
+  color: var(--om-error, var(--om-error));
 }
 
 .chatbi-insight-trend--flat {
@@ -1305,16 +1234,16 @@
 .chatbi-insight-jumps {
   margin-top: 2px;
   font-size: 12px;
-  color: var(--om-warning, #d46b08);
+  color: var(--om-warning, var(--om-warning));
 }
 
-/* P2：分析计划块 */
+/* P2：分析计划块。按 Claude Code 的克制原则：平面卡片，不用阴影/渐变/彩色图标。 */
 .chatbi-plan {
   margin: 12px 0 6px;
   padding: 10px 14px;
   border: 1px solid var(--om-border);
-  border-radius: 12px;
-  background: #faf7ff;
+  border-radius: var(--om-radius);
+  background: var(--om-surface);
 }
 
 .chatbi-plan-head {
@@ -1322,7 +1251,7 @@
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--om-text-secondary);
 }
 
@@ -1344,7 +1273,7 @@
   align-items: baseline;
   gap: 8px;
   font-size: 13px;
-  color: var(--om-text-primary);
+  color: var(--om-text-secondary);
 }
 
 .chatbi-plan-mark {
@@ -1355,15 +1284,15 @@
 }
 
 .chatbi-plan-step--active {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .chatbi-plan-step--active .chatbi-plan-mark {
-  color: var(--om-primary, #722ed1);
+  color: var(--om-text-secondary);
 }
 
 .chatbi-plan-step--done .chatbi-plan-mark {
-  color: var(--om-success, #389e0d);
+  color: var(--om-text-disabled);
 }
 
 .chatbi-plan-step--done .chatbi-plan-title {
@@ -1398,7 +1327,7 @@
 
 .chatbi-task-name {
   font-weight: 600;
-  color: var(--om-text-primary);
+  color: var(--om-text);
 }
 
 .chatbi-task-receipt {
@@ -1486,7 +1415,7 @@
 }
 
 .chatbi-task-lineage-node {
-  color: var(--om-text-primary);
+  color: var(--om-text);
   font-weight: 500;
   max-width: 45%;
   overflow: hidden;
@@ -1646,7 +1575,7 @@
   margin: 12px 0 6px;
   border-radius: 12px;
   overflow: hidden;
-  background: #0f172a;
+  background: var(--om-text);
   border: 1px solid #1e293b;
 }
 
@@ -1656,7 +1585,7 @@
   justify-content: space-between;
   padding: 8px 14px;
   background: #1e293b;
-  color: #94a3b8;
+  color: var(--om-text-tertiary);
 }
 
 .chatbi-sql-head-label {
@@ -1668,8 +1597,8 @@
 
 .chatbi-sql-copy {
   background: transparent;
-  border: 1px solid #334155;
-  color: #cbd5e1;
+  border: 1px solid var(--om-text-secondary);
+  color: var(--om-text-disabled);
   font-size: 11px;
   padding: 3px 12px;
   border-radius: 6px;
@@ -1679,8 +1608,8 @@
 }
 
 .chatbi-sql-copy:hover {
-  background: #334155;
-  color: #f8fafc;
+  background: var(--om-text-secondary);
+  color: var(--om-surface-muted);
 }
 
 .chatbi-sql-pre {
@@ -1690,7 +1619,7 @@
   font-family: var(--om-font-mono);
   font-size: 13px;
   line-height: 1.7;
-  color: #e2e8f0;
+  color: var(--om-border-strong);
 }
 
 .chatbi-sql-line {
@@ -1698,7 +1627,7 @@
 }
 
 .chatbi-sql-keyword {
-  color: #93c5fd;
+  color: var(--om-primary-border);
   font-weight: 600;
 }
 
@@ -1711,12 +1640,12 @@
 }
 
 .chatbi-sql-comment {
-  color: #64748b;
+  color: var(--om-text-tertiary);
   font-style: italic;
 }
 
 .chatbi-sql-punct {
-  color: #94a3b8;
+  color: var(--om-text-tertiary);
 }
 
 /* ---------- Responsive ---------- */
@@ -1738,6 +1667,12 @@
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
   }
 
+  .chatbi-sidebar-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
   .chatbi-composer {
     padding: 12px;
   }
@@ -1747,243 +1682,95 @@
   }
 }
 
-/* Data Agent · 欢迎页能力标签 */
-.chatbi-welcome-caps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  margin-top: 16px;
-}
-.chatbi-welcome-cap {
-  font-size: 12px;
-  color: var(--om-text-secondary, #475569);
-  background: var(--om-neutral-soft, #f1f5f9);
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-radius: 999px;
-  padding: 4px 12px;
-  line-height: 1.4;
-}
-
-/* Data Agent · P1 工具编排步骤轨迹 */
-.chatbi-steps {
-  margin: 0 0 10px;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-radius: 8px;
-  background: var(--om-neutral-soft, #f8fafc);
-  overflow: hidden;
-}
-.chatbi-steps-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 10px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--om-text-secondary, #475569);
-  text-align: left;
-}
-.chatbi-steps-toggle:hover {
-  background: var(--om-neutral-hover, #eef2f7);
-}
-.chatbi-steps-caret {
-  display: inline-block;
-  transition: transform 0.15s ease;
-  color: var(--om-text-tertiary, #94a3b8);
-}
-.chatbi-steps-caret.open {
-  transform: rotate(90deg);
-}
-.chatbi-steps-list {
-  margin: 0;
-  padding: 4px 10px 8px 10px;
-  list-style: none;
-  border-top: 1px solid var(--om-border, #e2e8f0);
-}
-.chatbi-step {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 3px 0;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.chatbi-step-tool {
-  font-weight: 600;
-  color: var(--om-text-primary, #1e293b);
-  white-space: nowrap;
-}
-.chatbi-step-tool::before {
-  content: "●";
-  color: var(--om-success, #16a34a);
-  margin-right: 5px;
-  font-size: 9px;
-  vertical-align: middle;
-}
-.chatbi-step--failed .chatbi-step-tool::before {
-  color: var(--om-error, #dc2626);
-}
-.chatbi-step-arg {
-  font-family: var(--om-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11px;
-  color: var(--om-text-secondary, #475569);
-  background: var(--om-neutral-hover, #eef2f7);
-  border-radius: 4px;
-  padding: 0 5px;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chatbi-step-summary {
-  color: var(--om-text-tertiary, #94a3b8);
-}
-
-/* Data Agent · P1 run_sql 结果表格 */
+/* Data Agent · P1 run_sql 结果表格。
+   排版按 Claude Code 的口径：只靠一条细横线分行，不用斑马纹/渐变表头/大写字距。 */
 .chatbi-result {
   margin: 10px 0;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-radius: 8px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
   overflow: hidden;
 }
 .chatbi-result-title {
-  padding: 6px 10px;
-  font-size: 12px;
+  padding: 10px 16px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--om-text-secondary, #475569);
-  background: var(--om-neutral-soft, #f8fafc);
-  border-bottom: 1px solid var(--om-border, #e2e8f0);
+  color: var(--om-text);
+  background: var(--om-surface-muted);
+  border-bottom: 1px solid var(--om-border);
 }
 .chatbi-result-scroll {
-  max-height: 320px;
+  max-height: 400px;
   overflow: auto;
 }
 .chatbi-result-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 12px;
+  font-size: 13px;
 }
 .chatbi-result-table th,
 .chatbi-result-table td {
-  border-bottom: 1px solid var(--om-border, #eef2f7);
-  padding: 5px 10px;
+  border-bottom: 1px solid var(--om-border);
+  padding: 10px 16px;
   text-align: left;
   white-space: nowrap;
 }
 .chatbi-result-table th {
   position: sticky;
   top: 0;
-  background: var(--om-neutral-soft, #f8fafc);
+  background: var(--om-surface-muted);
   font-weight: 600;
-  color: var(--om-text-primary, #1e293b);
+  color: var(--om-text);
+  z-index: 1;
 }
-.chatbi-result-table tbody tr:hover {
-  background: var(--om-neutral-soft, #f8fafc);
+.chatbi-result-table td {
+  color: var(--om-text-secondary);
+}
+.chatbi-result-table tbody tr:last-child td {
+  border-bottom: none;
 }
 .chatbi-result-more {
-  padding: 5px 10px;
-  font-size: 11px;
-  color: var(--om-text-tertiary, #94a3b8);
-  background: var(--om-neutral-soft, #f8fafc);
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--om-text-tertiary);
+  background: var(--om-surface-muted);
+  text-align: center;
+  border-top: 1px solid var(--om-border);
 }
 
-/* Data Agent · 回答正文 markdown 表格 */
+/* Data Agent · 回答正文 markdown 表格。
+   排版按 Claude Code 的口径：只靠一条细横线分行，不用斑马纹/渐变表头/大写字距——
+   表格是答案的一部分，装饰越少越读得快。表头与正文只差字重。 */
 .chatbi-md-tablewrap {
-  margin: 10px 0;
+  margin: 16px 0;
   overflow-x: auto;
-  border: 1px solid var(--om-border, #e6ebf2);
-  border-radius: 10px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
 }
 .chatbi-md-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 13.5px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.6;
 }
 .chatbi-md-table th,
 .chatbi-md-table td {
-  padding: 8px 12px;
+  padding: 10px 14px;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid var(--om-border, #eef2f7);
+  border-bottom: 1px solid var(--om-border);
 }
 .chatbi-md-table th {
-  background: var(--om-neutral-soft, #f8fafc);
+  background: var(--om-surface-muted);
   font-weight: 600;
-  color: var(--om-text-primary, #1e293b);
+  color: var(--om-text);
   white-space: nowrap;
-  border-bottom: 1px solid var(--om-border-strong, #d8e0ea);
+  font-size: 13px;
+}
+.chatbi-md-table td {
+  color: var(--om-text-secondary);
 }
 .chatbi-md-table tbody tr:last-child td {
   border-bottom: none;
-}
-.chatbi-md-table tbody tr:nth-child(even) {
-  background: var(--om-neutral-soft, #fafcff);
-}
-
-/* Data Agent · P2 实时步骤（spinner + 状态图标 + 人话动作） */
-@keyframes chatbi-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-.chatbi-steps-spin,
-.chatbi-step-spin {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  border: 2px solid var(--om-border, #cbd5e1);
-  border-top-color: var(--om-primary, #3b82f6);
-  border-radius: 50%;
-  animation: chatbi-spin 0.7s linear infinite;
-  vertical-align: middle;
-}
-.chatbi-steps-spin {
-  margin-right: 6px;
-}
-.chatbi-step {
-  align-items: center;
-}
-.chatbi-step-icon {
-  display: inline-flex;
-  width: 14px;
-  justify-content: center;
-  font-size: 12px;
-  flex: 0 0 auto;
-}
-.chatbi-step--succeeded .chatbi-step-icon {
-  color: var(--om-success, #16a34a);
-}
-.chatbi-step--failed .chatbi-step-icon {
-  color: var(--om-error, #dc2626);
-}
-.chatbi-step-emoji {
-  flex: 0 0 auto;
-}
-.chatbi-step-text {
-  color: var(--om-text-primary, #1e293b);
-}
-.chatbi-step--running .chatbi-step-text {
-  color: var(--om-text-secondary, #475569);
-}
-
-/* 工具间的模型自述：像 Claude Code 一样先说再做，弱化为引注风格 */
-.chatbi-step--thought {
-  align-items: flex-start;
-}
-.chatbi-step--thought .chatbi-step-emoji {
-  margin-top: 1px;
-  opacity: 0.75;
-}
-.chatbi-step-thought {
-  color: var(--om-text-secondary, #475569);
-  font-style: italic;
-  line-height: 1.55;
-  white-space: pre-wrap;
 }
 
 /* 最终答案逐字流式时的闪烁光标 */
@@ -1996,7 +1783,7 @@
   height: 1em;
   margin-left: 2px;
   vertical-align: text-bottom;
-  background: var(--om-primary, #2563eb);
+  background: var(--om-primary, var(--om-primary));
   border-radius: 1px;
   animation: chatbi-caret-blink 1s steps(2, start) infinite;
 }
@@ -2006,140 +1793,183 @@
   }
 }
 
-/* 认可/存疑轻量表态条（P1 决策留痕） */
+/* 认可/存疑轻量表态条（P1 决策留痕）- Enhanced interaction */
 .chatbi-ack {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 8px 12px;
-  background: var(--om-surface-secondary, #f8fafc);
-  border-radius: 6px;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.03) 0%, rgba(147, 197, 253, 0.03) 100%);
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
   font-size: 13px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  transition: all 0.2s ease;
+}
+.chatbi-ack:hover {
+  border-color: var(--om-primary-border);
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.08);
 }
 .chatbi-ack-label {
-  color: var(--om-text-secondary, #64748b);
-  margin-right: 4px;
+  color: var(--om-text-secondary);
+  margin-right: 6px;
+  font-weight: 500;
 }
 .chatbi-ack-btn {
-  padding: 4px 12px;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-radius: 4px;
-  background: var(--om-surface, #fff);
-  color: var(--om-text-secondary, #475569);
+  padding: 6px 16px;
+  border: 1.5px solid var(--om-border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--om-text-secondary);
   font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 .chatbi-ack-btn:hover {
-  border-color: var(--om-primary, #2563eb);
-  color: var(--om-primary, #2563eb);
+  border-color: var(--om-primary);
+  color: var(--om-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.15);
+}
+.chatbi-ack-btn:active {
+  transform: translateY(0);
 }
 .chatbi-ack-btn--on {
-  background: var(--om-success, #10b981);
-  border-color: var(--om-success, #10b981);
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-color: #10b981;
   color: #fff;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+.chatbi-ack-btn--on:hover {
+  border-color: #10b981;
+  color: #fff;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
 }
 .chatbi-ack-btn--off {
-  background: var(--om-warning, #f59e0b);
-  border-color: var(--om-warning, #f59e0b);
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  border-color: #f59e0b;
   color: #fff;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
+}
+.chatbi-ack-btn--off:hover {
+  border-color: #f59e0b;
+  color: #fff;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.4);
 }
 
-/* 确认闭环总结块（P2）：恒六环，未走到的标灰而非隐藏——「哪一环没走」才是要看的 */
+/* 确认闭环总结块（P2）- Enhanced card design */
 .chatbi-closure {
-  margin-top: 14px;
-  padding: 12px 14px;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-radius: 8px;
-  background: var(--om-surface-secondary, #f8fafc);
+  margin-top: 20px;
+  padding: 18px 20px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.02) 0%, rgba(147, 197, 253, 0.02) 100%);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+  transition: all 0.2s ease;
+}
+.chatbi-closure:hover {
+  border-color: var(--om-primary-border);
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.12);
 }
 .chatbi-closure-head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--om-border);
 }
+/* 卡头是「任务名 — 几环 — 进去继续」：名字可长可短，故它收缩、后两者贴右不被挤掉。 */
 .chatbi-closure-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--om-text-primary, #0f172a);
-}
-.chatbi-closure-count {
-  font-size: 12px;
-  color: var(--om-text-tertiary, #94a3b8);
-}
-.chatbi-closure-nodes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.chatbi-closure-node {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 88px;
-  padding: 6px 10px;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-radius: 6px;
-  background: var(--om-surface, #fff);
-  /* 未到达：整格降到 60% 不透明度。比换一套灰色变量省事，且深浅色主题下都成立 */
-  opacity: 0.6;
-}
-.chatbi-closure-node--on {
-  opacity: 1;
-  border-color: var(--om-success, #10b981);
-}
-.chatbi-closure-node-label {
-  font-size: 12px;
-  color: var(--om-text-secondary, #475569);
-}
-.chatbi-closure-node-state {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--om-text-primary, #0f172a);
-}
-.chatbi-closure-node--on .chatbi-closure-node-state {
-  color: var(--om-success, #10b981);
-}
-/* 本会话任务行：重新进入后三环的入口（抽屉关掉后唯一的回去的路） */
-.chatbi-closure-tasks {
-  margin-top: 10px;
-  border-top: 1px solid var(--om-border, #e2e8f0);
-}
-.chatbi-closure-task {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 0;
-}
-.chatbi-closure-task + .chatbi-closure-task {
-  border-top: 1px dashed var(--om-border, #e2e8f0);
-}
-.chatbi-closure-task-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex: 1 1 auto;
   min-width: 0;
-}
-.chatbi-closure-task-name {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--om-text-primary, #0f172a);
+  color: var(--om-text);
+  letter-spacing: 0.2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chatbi-closure-task-hint {
+.chatbi-closure-count {
+  flex: 0 0 auto;
   font-size: 12px;
-  color: var(--om-text-tertiary, #94a3b8);
+  color: var(--om-text-tertiary);
+  font-weight: 500;
+}
+.chatbi-closure-head .ant-btn {
+  flex: 0 0 auto;
+  padding: 0;
+  height: auto;
+}
+.chatbi-closure-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.chatbi-closure-node {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--om-border);
+  border-radius: 8px;
+  background: #fff;
+  opacity: 0.5;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chatbi-closure-node:hover {
+  opacity: 0.7;
+}
+.chatbi-closure-node--on {
+  opacity: 1;
+  border-color: var(--om-success);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(5, 150, 105, 0.03) 100%);
+  box-shadow: 0 2px 6px rgba(16, 185, 129, 0.15);
+}
+.chatbi-closure-node--on:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+}
+.chatbi-closure-node-label {
+  font-size: 11px;
+  color: var(--om-text-tertiary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.chatbi-closure-node-state {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text-secondary);
+}
+.chatbi-closure-node--on .chatbi-closure-node-state {
+  color: var(--om-success);
+}
+/* 这条任务眼下停在哪一环的一句人话，紧跟卡头。 */
+.chatbi-closure-task-hint {
+  margin: -6px 0 12px;
+  font-size: 12px;
+  color: var(--om-text-tertiary);
 }
 .chatbi-closure-task-more {
   padding: 6px 0 0;
-  border-top: 1px dashed var(--om-border, #e2e8f0);
+  border-top: 1px dashed var(--om-border, var(--om-border-strong));
   font-size: 12px;
-  color: var(--om-text-tertiary, #94a3b8);
+  color: var(--om-text-tertiary, var(--om-text-tertiary));
+}
+/* 改版前建的任务：前三环归属不上，标灰之外还得说清为什么，别让人以为自己漏了三步。 */
+.chatbi-closure-legacy {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--om-text-tertiary);
 }
 .chatbi-closure-dangling {
   margin: 10px 0 0;
@@ -2151,7 +1981,7 @@
 /* 决策追踪页抽屉里的时间线条目。闭环条本身与对话内总结块共用 .chatbi-closure-* */
 .om-decision-item {
   padding: 10px 0;
-  border-bottom: 1px solid var(--om-border, #e2e8f0);
+  border-bottom: 1px solid var(--om-border, var(--om-border-strong));
   font-size: 13px;
 }
 .om-decision-item:last-child {
@@ -2177,19 +2007,19 @@
   flex-direction: column;
   gap: 8px;
   padding: 12px 14px;
-  border: 1px solid var(--om-border, #e2e8f0);
-  border-left: 3px solid var(--om-primary, #2563eb);
+  border: 1px solid var(--om-border, var(--om-border-strong));
+  border-left: 3px solid var(--om-primary, var(--om-primary));
   border-radius: 8px;
-  background: var(--om-neutral-subtle, #f8fafc);
+  background: var(--om-neutral-subtle, var(--om-surface-muted));
 }
 .chatbi-clarify-q {
   font-size: 14px;
   font-weight: 600;
-  color: var(--om-text-primary, #0f172a);
+  color: var(--om-text-primary, var(--om-text));
 }
 .chatbi-clarify-why {
   font-size: 12px;
-  color: var(--om-text-tertiary, #64748b);
+  color: var(--om-text-tertiary, var(--om-text-tertiary));
 }
 .chatbi-clarify-options {
   display: flex;
@@ -2199,17 +2029,17 @@
 }
 .chatbi-clarify-option {
   padding: 5px 12px;
-  border: 1px solid var(--om-border, #e2e8f0);
+  border: 1px solid var(--om-border, var(--om-border-strong));
   border-radius: 999px;
   background: var(--om-surface, #fff);
-  color: var(--om-text-secondary, #475569);
+  color: var(--om-text-secondary, var(--om-text-secondary));
   font-size: 13px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 .chatbi-clarify-option:hover:not(:disabled) {
-  border-color: var(--om-primary, #2563eb);
-  color: var(--om-primary, #2563eb);
+  border-color: var(--om-primary, var(--om-primary));
+  color: var(--om-primary, var(--om-primary));
 }
 .chatbi-clarify-option:disabled {
   cursor: default;
@@ -2224,22 +2054,18 @@
   display: flex;
   flex-direction: column;
   padding: 16px 18px 12px;
-  border: 1px solid var(--om-border-strong, #e2e8f0);
+  border: 1px solid var(--om-border-strong, var(--om-border-strong));
   border-radius: var(--om-radius-lg, 12px);
   background: var(--om-surface, #fff);
   box-shadow: var(--om-shadow-sm, 0 1px 2px rgba(15, 23, 42, 0.04));
 }
-.chatbi-form-title {
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 22px;
-  color: var(--om-text, #0f172a);
-}
+/* 已废弃的 .chatbi-form-title 和 .chatbi-form-actions 样式已被 BlockCard 组件替代 */
+
 .chatbi-form-intent {
   margin-top: 2px;
   font-size: 12px;
   line-height: 18px;
-  color: var(--om-text-tertiary, #7c8798);
+  color: var(--om-text-tertiary, var(--om-text-tertiary));
 }
 /* 六环进度条：与标题拉开、与字段区之间压一条细线（inline style 会盖不住，故
    TaskRingSteps 的间距也改成了 class）。六环挤在一条 ~700px 的消息宽度里，
@@ -2247,7 +2073,7 @@
 .chatbi-form .task-ring-steps {
   margin: 14px 0 0;
   padding-bottom: 14px;
-  border-bottom: 1px solid var(--om-border, #eef1f6);
+  border-bottom: 1px solid var(--om-border, var(--om-border));
 }
 .chatbi-form .task-ring-steps .ant-steps-item-title {
   font-size: 12px;
@@ -2265,7 +2091,7 @@
   margin-top: 12px;
   font-size: 12px;
   line-height: 18px;
-  color: var(--om-text-secondary, #475569);
+  color: var(--om-text-secondary, var(--om-text-secondary));
 }
 .chatbi-form-body {
   margin-top: 14px;
@@ -2276,7 +2102,7 @@
 .chatbi-form-body .ant-form-item-label > label {
   font-size: 12px;
   font-weight: 500;
-  color: var(--om-text-secondary, #475569);
+  color: var(--om-text-secondary, var(--om-text-secondary));
 }
 /* 字段说明压到三级色 12px：一段说明不该比它解释的输入框还抢眼。
    antd 给 extra 留了 controlHeightSM 的最小高度，一句短提示会因此多出一截空白。 */
@@ -2285,16 +2111,10 @@
   margin-top: 4px;
   font-size: 12px;
   line-height: 18px;
-  color: var(--om-text-tertiary, #7c8798);
+  color: var(--om-text-tertiary, var(--om-text-tertiary));
 }
-.chatbi-form-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 2px;
-  padding-top: 12px;
-  border-top: 1px solid var(--om-border, #eef1f6);
-}
+
+/* 已废弃的 .chatbi-form-actions 样式已被 BlockCard 组件的 actions 属性替代 */
 
 /* 任务链（多任务编排）：一条链上的若干步，按序号纵向排开。
    链只管顺序与上下文传递——每一步仍各自过校验/确认/执行，故这里没有「一键跑完」的样式位。 */
@@ -2346,7 +2166,7 @@
 
 .chatbi-pipeline-step-intent {
   font-size: 13px;
-  color: var(--om-text-primary);
+  color: var(--om-text);
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -2362,4 +2182,552 @@
 .chatbi-pipeline-step-wait {
   font-size: 12px;
   color: var(--om-text-tertiary);
+}
+
+/* ---------- Data Agent conversation surface ---------- */
+
+/* The response is the primary surface. Activity details remain available, but stay quiet. */
+.chatbi-shell {
+  background: var(--om-bg);
+}
+
+.chatbi-shell-topbar {
+  min-height: 52px;
+  padding: 8px 18px;
+  background: rgba(255, 255, 255, 0.94);
+  border-bottom-color: var(--om-border);
+  z-index: 2;
+}
+
+.chatbi-shell-topbar .ant-btn {
+  color: var(--om-text-tertiary);
+}
+
+.chatbi-shell-topbar .ant-btn:hover {
+  color: var(--om-primary);
+  background: var(--om-primary-soft);
+}
+
+.chatbi-shell-topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-shell-domain .ant-tag {
+  margin-inline-end: 0;
+  border-color: var(--om-primary-border);
+  background: var(--om-primary-soft);
+  color: var(--om-primary);
+  font-size: 11px;
+}
+
+.chatbi-messages {
+  gap: 30px;
+  padding: 34px 18px 28px;
+  background: var(--om-bg);
+}
+
+.chatbi-bubble {
+  display: flex;
+  max-width: min(100%, 1200px);
+  width: 100%;
+  gap: 11px;
+}
+
+.chatbi-bubble--assistant {
+  align-self: center;
+  max-width: min(100%, 1200px);
+  width: 100%;
+}
+
+.chatbi-bubble--user {
+  align-self: center;
+  max-width: min(100%, 1200px);
+  width: 100%;
+}
+
+.chatbi-bubble-column {
+  flex: 1;
+  min-width: 0;
+}
+
+.chatbi-bubble--user .chatbi-bubble-column {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.chatbi-bubble-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: 22px;
+  flex-shrink: 0;
+}
+
+.chatbi-bubble-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--om-radius);
+  background: var(--om-primary);
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.18);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  flex-shrink: 0;
+}
+
+.chatbi-bubble-author {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  color: var(--om-text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.chatbi-bubble-status {
+  color: var(--om-text-tertiary);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.chatbi-bubble-body {
+  font-size: 15px;
+  line-height: 1.76;
+}
+
+.chatbi-bubble--assistant .chatbi-bubble-body {
+  padding: 0;
+  /* 作者名已移到头像下方，正文列不再有它顶着，手动对齐头像的 margin-top */
+  margin-top: 22px;
+}
+
+.chatbi-bubble--user .chatbi-bubble-body {
+  max-width: min(78%, 620px);
+  padding: 10px 15px;
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius-lg);
+  background: var(--om-surface);
+  color: var(--om-text);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.035);
+  line-height: 1.6;
+}
+
+.chatbi-bubble-pending {
+  min-height: 28px;
+  color: var(--om-text-tertiary);
+  font-size: 13px;
+}
+
+.chatbi-pending-label {
+  color: var(--om-text-tertiary);
+  font-size: 13px;
+}
+
+.chatbi-typing-dots span {
+  width: 5px;
+  height: 5px;
+  background: var(--om-text-tertiary);
+}
+
+.chatbi-welcome {
+  max-width: 620px;
+  padding: 20px 12px 36px;
+  gap: 13px;
+  text-align: left;
+  align-items: stretch;
+}
+
+.chatbi-welcome-kicker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--om-text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.chatbi-welcome-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--om-primary);
+  color: #ffffff;
+  box-shadow: none;
+  font-size: 13px;
+}
+
+.chatbi-welcome-scope {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--om-primary);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatbi-welcome-title {
+  margin: 10px 0 0;
+  color: var(--om-text);
+  font-size: clamp(24px, 3vw, 30px);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.chatbi-welcome-desc {
+  max-width: 560px;
+  color: var(--om-text-tertiary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.chatbi-suggestions {
+  width: 100%;
+  margin-top: 17px;
+  gap: 7px;
+}
+
+.chatbi-suggestions-label {
+  margin-bottom: 3px;
+  color: var(--om-text-tertiary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+}
+
+.chatbi-suggestion-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 9px 12px 9px 14px;
+  border: 1px solid var(--om-border-strong);
+  border-radius: 9px;
+  background: #ffffff;
+  color: var(--om-text-secondary);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
+  font-size: 13px;
+}
+
+.chatbi-suggestion-chip:hover:not(:disabled) {
+  transform: none;
+  border-color: var(--om-primary-border);
+  background: #ffffff;
+  box-shadow: 0 3px 10px rgba(37, 99, 235, 0.08);
+  color: var(--om-primary);
+}
+
+.chatbi-suggestion-arrow {
+  flex: 0 0 auto;
+  color: var(--om-text-tertiary);
+  font-size: 16px;
+  line-height: 1;
+  transition:
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.chatbi-suggestion-chip:hover:not(:disabled) .chatbi-suggestion-arrow {
+  color: var(--om-primary);
+  transform: translate(1px, -1px);
+}
+
+/* Modern thinking timeline: subtle and scannable */
+.chatbi-steps {
+  margin: 0 0 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.chatbi-steps-toggle {
+  width: 100%;
+  min-height: 26px;
+  padding: 0;
+  gap: 8px;
+  color: var(--om-text-tertiary);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s ease;
+  /* 这几条不是装饰：只写了 :hover 的 background 而没写常态，浏览器就用 <button> 的
+     默认灰底+边框把折叠头画成一个整行按钮。它要读起来像一行字，不像一个控件。 */
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chatbi-steps-toggle:hover {
+  background: transparent;
+  color: var(--om-text-secondary);
+}
+
+.chatbi-steps-caret {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  color: var(--om-text-tertiary);
+  font-size: 10px;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.chatbi-steps-caret.open {
+  transform: rotate(90deg);
+}
+
+.chatbi-steps-loading,
+.chatbi-steps-state {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--om-text-tertiary);
+  font-size: 12px;
+}
+
+/* 完成态不用绿勾报喜：过程区是可选读物，一个彩色徽标会把它抬到与答案同级。 */
+.chatbi-steps-state {
+  color: var(--om-text-disabled);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.chatbi-steps-toggle-label {
+  font-weight: 400;
+  flex: 1;
+}
+
+.chatbi-steps-toggle-hint {
+  margin-left: auto;
+  color: var(--om-text-tertiary);
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.chatbi-steps-toggle:hover .chatbi-steps-toggle-hint,
+.chatbi-steps-toggle:focus-visible .chatbi-steps-toggle-hint {
+  opacity: 1;
+}
+
+.chatbi-steps-list {
+  position: relative;
+  margin: 14px 0 0;
+  padding: 8px 0 2px 20px;
+  border-top: 1px solid var(--om-border);
+  /* 改造前每个 <li> 是 flex 容器（flex item 不生成列表标记），分组后 li 退回 block，
+     ol 的自动编号就冒了出来，在左槽里和时间线的圆点/竖线撞成一片。 */
+  list-style: none;
+}
+
+/* 一组 = 模型说的一句话 + 它说完之后动手做的那几件事。 */
+.chatbi-think-group {
+  position: relative;
+  padding: 2px 0 6px;
+}
+
+.chatbi-think-group:last-child {
+  padding-bottom: 0;
+}
+
+/* 竖线只连思考点，且只连到下一句：附注行不参与串联，靠缩进表达归属。
+   （改造前是一条贯穿整个列表的通体长线，工具行和思考行被串成同一层级。） */
+.chatbi-think-group:not(:last-child)::before {
+  position: absolute;
+  top: 22px;
+  bottom: 0;
+  left: -15px;
+  width: 1px;
+  background: var(--om-border-strong);
+  content: "";
+}
+
+.chatbi-think {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 2px 0;
+  color: var(--om-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.chatbi-think-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  margin-left: -23px;
+  color: var(--om-text-tertiary);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chatbi-think-text {
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.chatbi-think--repair .chatbi-think-text {
+  color: var(--om-text-tertiary);
+}
+
+/* 工具调用降级为附注：缩进一级、更小更淡，是「怎么做到的」而不是「在想什么」。 */
+.chatbi-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+  padding-left: 1px;
+  color: var(--om-text-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 模型没写自述就直接动手的前导组：没有标题行，附注顶格。 */
+.chatbi-think-group--headless .chatbi-tool {
+  padding-left: 0;
+}
+
+.chatbi-tool-arrow {
+  flex: 0 0 auto;
+  color: var(--om-text-disabled);
+}
+
+.chatbi-tool-text {
+  min-width: 0;
+}
+
+.chatbi-tool--failed .chatbi-tool-text {
+  color: var(--om-error);
+}
+
+.chatbi-tool-mark {
+  flex: 0 0 auto;
+  color: var(--om-text-tertiary);
+  font-size: 10px;
+}
+
+.chatbi-tool--failed .chatbi-tool-mark {
+  color: var(--om-error);
+}
+
+.chatbi-tool-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--om-text-disabled);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Bottom workbench stays quiet until focused, keeping attention on the answer. */
+.chatbi-composer {
+  gap: 0;
+  padding: 12px max(18px, calc((100% - 900px) / 2)) 18px;
+  background: var(--om-bg);
+  border-top: 0;
+}
+
+.chatbi-composer-inner {
+  min-height: 56px;
+  padding: 7px 7px 7px 16px;
+  border-color: var(--om-border-strong);
+  border-radius: 13px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
+}
+
+.chatbi-composer-inner:focus-within {
+  border-color: var(--om-primary-border);
+  box-shadow:
+    0 0 0 3px rgba(59, 130, 246, 0.1),
+    0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.chatbi-input {
+  min-height: 40px;
+  padding: 8px 0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.chatbi-send-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+}
+
+.chatbi-send-btn--active {
+  background: var(--om-primary);
+}
+
+.chatbi-send-btn--active:hover {
+  background: var(--om-primary);
+  transform: translateY(-1px);
+}
+
+@media (max-width: 768px) {
+  .chatbi-shell-topbar {
+    padding: 8px 12px;
+  }
+
+  .chatbi-messages {
+    gap: 24px;
+    padding: 22px 14px 20px;
+  }
+
+  .chatbi-bubble--user {
+    max-width: 100%;
+  }
+
+  .chatbi-bubble--user .chatbi-bubble-body {
+    max-width: 88%;
+  }
+
+  .chatbi-composer {
+    padding: 10px 12px 14px;
+  }
+
+  .chatbi-welcome {
+    padding: 12px 3px 24px;
+  }
+
+  .chatbi-welcome-title {
+    font-size: 25px;
+  }
+
+  .chatbi-steps-list {
+    margin-left: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chatbi-bubble,
+  .chatbi-block-in,
+  .chatbi-typing-dots span,
+  .chatbi-steps-caret,
+  .chatbi-suggestion-arrow {
+    animation: none;
+    transition: none;
+  }
 }

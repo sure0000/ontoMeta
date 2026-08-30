@@ -109,6 +109,7 @@ export function TaskCreatePage() {
   const [specData, setSpecData] = useState<Record<string, unknown>>(() =>
     specDefaults(initialKind),
   );
+  const [taskRequirement, setTaskRequirement] = useState<string>("");
   const [taskName, setTaskName] = useState<string>("");
 
   // 数据
@@ -118,7 +119,12 @@ export function TaskCreatePage() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([api.listOntologies(), api.listDomains()])
+    // 新建任务只对齐 Data Agent 的已发布本体作用域；编辑历史任务仍加载完整本体列表，
+    // 避免草稿本体上的存量制品在编辑页丢失当前选项。
+    Promise.all([
+      api.listOntologies(isEdit ? undefined : { publishedOnly: true }),
+      api.listDomains(),
+    ])
       .then(([onts, doms]) => {
         setOntologies(onts);
         setDomains(doms);
@@ -140,8 +146,15 @@ export function TaskCreatePage() {
       .then((artifact) => {
         setKind(artifact.kind);
         setOntologyId(artifact.ontology_id ?? undefined);
-        const spec = artifact.spec ?? {};
+        // 历史 metric/transform Spec 使用 schedule；编辑时映射到新协议，避免旧任务的
+        // 调度值在字段改名后变成不可见字段并被提交时丢掉。新任务只保存 refresh_cron。
+        const spec = { ...(artifact.spec ?? {}) } as Record<string, unknown>;
+        if (spec.refresh_cron == null && spec.schedule != null) {
+          spec.refresh_cron = spec.schedule;
+        }
+        delete spec.schedule;
         setSpecData(spec);
+        setTaskRequirement(artifact.intent ?? "");
         setTaskName(artifact.name ?? "");
         setSelectedEntities(entitiesFromSpec(artifact.kind, spec));
       })
@@ -216,6 +229,10 @@ export function TaskCreatePage() {
         return;
       }
     }
+    if ((content === "conn" || content === "config") && !taskRequirement.trim()) {
+      message.error("请填写任务需求");
+      return;
+    }
     if (content === "conn") {
       // 连接步骤：校验 source + target 数据源
       const connRequired = requiredSpecKeys(kind, RANGE_STEP_KEYS).filter((f) =>
@@ -257,6 +274,13 @@ export function TaskCreatePage() {
     if (entityHint && selectedEntities.length === 0) {
       setCurrentStep(1);
       message.error(entityHint);
+      return false;
+    }
+    if (!taskRequirement.trim()) {
+      const configIdx = stepContents.indexOf("config");
+      const connIdx = stepContents.indexOf("conn");
+      setCurrentStep(connIdx >= 0 ? connIdx : configIdx);
+      message.error("请填写任务需求");
       return false;
     }
     // 校验所有 required 字段（不论当前在哪步）
@@ -311,26 +335,38 @@ export function TaskCreatePage() {
       // 留空则不传名字，交后端按 spec 派生并去重。此前留空是拿**本体名**当任务名，
       // 于是同一本体建的每个任务都同名（且「任务名称」与「本体」两行一模一样）。
       const explicitName = taskName.trim() || undefined;
+      const intent = taskRequirement.trim();
 
       if (isEdit && id) {
         // 编辑走 PATCH + drafter 重派生；后端会把状态打回 drafted 并清空旧校验。
         await api.updateArtifact(id, {
           name: explicitName,
-          intent: explicitName,
+          intent,
           ontology_id: ontologyId,
           context,
         });
         message.success("任务已更新，已回到草稿状态，请重新校验");
       } else {
-        await api.draftArtifact({
+        const artifact = await api.draftArtifact({
           kind,
           name: explicitName,
-          intent: explicitName,
+          intent,
           ontology_id: ontologyId,
           context,
           user_created: true,
         });
-        message.success("任务创建成功");
+        // 与 Data Agent 的 confirmed 创建保持一致：草稿落库后立即生成校验报告和 dry-run，
+        // 但不越过后续人工确认/执行门禁。
+        try {
+          const validated = await api.validateArtifact(artifact.id);
+          if (validated.status === "validated") {
+            message.success("任务创建成功，执行方案已生成，请确认后执行");
+          } else {
+            message.warning("任务已创建，但执行方案存在阻断项，请在详情中查看");
+          }
+        } catch {
+          message.warning("任务已创建，但执行方案生成失败，请在详情中重试");
+        }
       }
       navigate(returnPath);
     } catch (err) {
@@ -402,6 +438,8 @@ export function TaskCreatePage() {
                 ontologyId={ontologyId}
                 value={specWithScope}
                 onChange={handleSpecChange}
+                taskRequirement={taskRequirement}
+                onTaskRequirementChange={setTaskRequirement}
                 name={taskName}
                 onNameChange={setTaskName}
                 namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
@@ -413,6 +451,7 @@ export function TaskCreatePage() {
                   )
                 }
                 showNameInput={false}
+                showRequirement={true}
               />
             )}
 
@@ -423,9 +462,12 @@ export function TaskCreatePage() {
                 ontologyId={ontologyId}
                 value={specWithScope}
                 onChange={handleSpecChange}
+                taskRequirement={taskRequirement}
+                onTaskRequirementChange={setTaskRequirement}
                 name={taskName}
                 onNameChange={setTaskName}
                 namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
+                showRequirement={true}
               />
             )}
 
@@ -436,11 +478,14 @@ export function TaskCreatePage() {
                 ontologyId={ontologyId}
                 value={specWithScope}
                 onChange={handleSpecChange}
+                taskRequirement={taskRequirement}
+                onTaskRequirementChange={setTaskRequirement}
                 name={taskName}
                 onNameChange={setTaskName}
                 namePlaceholder="留空则按配置自动命名（重名会自动加序号）"
                 extraSkipKeys={SYNC_STRATEGY_SKIP_KEYS}
                 showNameInput={true}
+                showRequirement={false}
               />
             )}
 
@@ -449,6 +494,7 @@ export function TaskCreatePage() {
                 kind={kind}
                 ontologyId={ontologyId}
                 ontologyName={ontologyId ? ontologyName(ontologyId) : ""}
+                taskRequirement={taskRequirement}
                 taskName={taskName}
                 selectedEntities={selectedEntities}
                 specData={specWithScope}

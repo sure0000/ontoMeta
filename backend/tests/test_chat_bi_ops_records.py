@@ -4,8 +4,20 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
-from app.models import ChatBiConversation, ChatBiConversationTask
+from app.models import (
+    ChatBiConversation,
+    ChatBiConversationTask,
+    DataApp,
+    DataAppVersion,
+    DataSource,
+    DependencyComponent,
+    DraftGenerationTask,
+    ObjectType,
+    WarehouseMigrationBatch,
+    WarehouseMigrationEvidence,
+)
 from app.models.agent import ArtifactStatus, GovernanceArtifact
 from app.models.chat_bi_ledger import ChatBiDecisionRecord
 from app.models.governance import GovernanceStandardRecord
@@ -13,6 +25,7 @@ from app.models.ontology import VersionRecord
 from app.services import chat_bi_ledger
 from app.services.agent_grounding import FactLedger
 from app.services.chat_bi import ChatBiService
+from app.services.chat_bi_tool_schemas import _GET_OPS_RECORD_TOOL
 from app.services.ops_records import ledger_names, ledger_values
 from app.services.task_pipeline import TaskPipelineService
 from tests.test_chat_bi_golden import _seed_golden_domain
@@ -182,6 +195,22 @@ def test_ops_ledger_names_only_contains_declared_facts():
         ],
     }
     assert set(ledger_names(nested)) == {"require_owner", "必须声明 owner"}
+
+
+def test_landing_missing_subject_is_authoritative_empty_envelope(db):
+    _domain_id, ontology_id, _aliases = _seed_golden_domain()
+    result, _summary, is_error = ChatBiService()._dispatch_get_landing(
+        db,
+        ontology_id=ontology_id,
+        args={"target_kind": "object", "keyword": "不存在的对象"},
+    )
+    assert is_error is False
+    assert result["family"] == "landing"
+    assert result["subject"] == "不存在的对象"
+    assert result["candidates"] == []
+    assert result["as_of"] is None
+    assert result["observed_at"]
+    assert result["source"] == "OntologyQueryService（当前已发布本体目录）"
 
 
 def test_pipeline_reader_returns_whole_chain_and_enforces_ontology_boundary(db):
@@ -403,3 +432,336 @@ def test_ops_ledger_values_registers_numeric_facts():
     assert ledger.has_numeric("2")
     assert ledger.has_numeric("3")
     assert ledger.has_numeric("6")
+
+
+def test_ops_tool_schema_exposes_all_registered_read_families():
+    family_schema = _GET_OPS_RECORD_TOOL["function"]["parameters"]["properties"]["family"]
+    assert set(family_schema["enum"]) == {
+        "task_run",
+        "pipeline",
+        "decision",
+        "ontology_version",
+        "standard",
+        "draft_run",
+        "merge_report",
+        "conflict",
+        "datasource",
+        "data_app",
+        "component",
+        "migration",
+    }
+
+
+def test_draft_run_reader_returns_latest_generation_state(db):
+    domain_id, ontology_id, _aliases = _seed_golden_domain()
+    task = DraftGenerationTask(
+        domain_context_id=domain_id,
+        ontology_id=ontology_id,
+        scope="objects",
+        status="failed",
+        progress=65,
+        message="对象生成中断",
+        error_summary="模型返回格式不合法",
+    )
+    db.add(task)
+    db.commit()
+
+    try:
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            domain_id=domain_id,
+            args={"family": "draft_run"},
+        )
+        assert is_error is False
+        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
+        assert result["subject"] == task.id
+        assert facts["status"] == "failed"
+        assert facts["progress"] == 65
+        assert facts["error_summary"] == "模型返回格式不合法"
+        assert isinstance(result["items"][0]["created_at"], str)
+
+        invalid, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            args={"family": "draft_run", "scope": "all"},
+        )
+        assert is_error is True
+        assert "draft_run" in invalid["error"]
+    finally:
+        db.delete(task)
+        db.commit()
+
+
+def test_merge_report_reader_flattens_and_bounds_authoritative_report(db):
+    domain_id, ontology_id, _aliases = _seed_golden_domain()
+    changes = [
+        {"id": f"obj-{index}", "name": f"object_{index}", "display_name": f"对象{index}"}
+        for index in range(5)
+    ]
+    task = DraftGenerationTask(
+        domain_context_id=domain_id,
+        ontology_id=ontology_id,
+        scope="full",
+        status="succeeded",
+        progress=100,
+        merge_report_json=json.dumps(
+            {
+                "summary": {"added": 5, "updated": 0, "kept": 0, "conflict": 0, "removed": 0},
+                "object_types": {
+                    "added": changes,
+                    "updated": [],
+                    "kept": [],
+                    "conflict": [],
+                    "removed": [],
+                },
+                "properties": {},
+                "relation_types": {},
+                "business_logics": {},
+            },
+            ensure_ascii=False,
+        ),
+    )
+    db.add(task)
+    db.commit()
+
+    try:
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            domain_id=domain_id,
+            args={"family": "merge_report", "task_id": task.id, "limit": 3},
+        )
+        assert is_error is False
+        assert result["subject"] == task.id
+        assert len(result["items"]) == 3
+        assert result["truncated"] is True
+        assert all(item["outcome"] == "added" for item in result["items"])
+        summary = next(
+            fact["value"] for fact in result["facts"] if fact["key"] == "summary"
+        )
+        assert summary["added"] == 5
+    finally:
+        db.delete(task)
+        db.commit()
+
+
+def test_conflict_reader_returns_only_current_ontology_conflicts(db):
+    _domain_id, ontology_id, _aliases = _seed_golden_domain()
+    obj = ObjectType(
+        ontology_id=ontology_id,
+        name=f"ops_conflict_{uuid4().hex[:8]}",
+        display_name="待复核订单",
+        status="edited",
+        conflict_json=json.dumps(
+            {"display_name": {"base": "订单表", "ours": "订单", "theirs": "订单信息"}},
+            ensure_ascii=False,
+        ),
+    )
+    db.add(obj)
+    db.commit()
+
+    try:
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            args={"family": "conflict", "limit": 20},
+        )
+        assert is_error is False
+        item = next(item for item in result["items"] if item["entity_id"] == obj.id)
+        assert item["field"] == "display_name"
+        assert item["ours"] == "订单"
+        assert item["theirs"] == "订单信息"
+    finally:
+        db.delete(obj)
+        db.commit()
+
+
+def test_datasource_reader_is_global_read_only_and_redacts_dsn(db):
+    tag = uuid4().hex[:8]
+    tested_at = datetime.now(timezone.utc)
+    datasource = DataSource(
+        name=f"ERP-{tag}",
+        kind="mysql",
+        purpose="business_source",
+        dsn_secret_ref="mysql://reader:top-secret@erp.internal:3306/erp_prod",
+        catalog_name=f"erp_{tag}",
+        status="ok",
+        tested_at=tested_at,
+    )
+    db.add(datasource)
+    db.commit()
+
+    try:
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=None,
+            args={"family": "datasource", "keyword": tag},
+        )
+        assert is_error is False
+        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
+        assert result["subject"] == f"ERP-{tag}"
+        assert facts["status"] == "ok"
+        assert facts["database"] == "erp_prod"
+        assert "top-secret" not in json.dumps(result, ensure_ascii=False)
+
+        invalid, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id="onto",
+            args={"family": "datasource", "scope": "ontology"},
+        )
+        assert is_error is True
+        assert "datasource" in invalid["error"]
+    finally:
+        db.delete(datasource)
+        db.commit()
+
+
+def test_data_app_reader_honors_ontology_scope_and_lists_versions(db):
+    domain_id, ontology_id, _aliases = _seed_golden_domain()
+    app = DataApp(
+        domain_id=domain_id,
+        ontology_id=ontology_id,
+        app_type="screen",
+        name=f"经营看板-{uuid4().hex[:8]}",
+        status="published",
+        current_version=3,
+        published_version=2,
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add(app)
+    db.flush()
+    versions = [
+        DataAppVersion(
+            app_id=app.id,
+            version=number,
+            diff_summary=f"发布 v{number}",
+            operator="publisher-1",
+        )
+        for number in (1, 2)
+    ]
+    db.add_all(versions)
+    db.commit()
+
+    try:
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            domain_id=domain_id,
+            args={
+                "family": "data_app",
+                "app_id": app.id,
+                "ontology_id": "forged-ontology",
+                "domain_id": "forged-domain",
+            },
+        )
+        assert is_error is False
+        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
+        assert result["subject"] == app.name
+        assert facts["current_version"] == 3
+        assert facts["published_version"] == 2
+        assert facts["version_count"] == 2
+        assert [item["version"] for item in result["items"]] == [2, 1]
+
+        hidden, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id="another-ontology",
+            domain_id="another-domain",
+            args={"family": "data_app", "app_id": app.id},
+        )
+        assert is_error is False
+        assert "没有匹配" in (hidden.get("note") or "")
+    finally:
+        db.query(DataAppVersion).filter(DataAppVersion.app_id == app.id).delete(
+            synchronize_session=False
+        )
+        db.delete(app)
+        db.commit()
+
+
+def test_component_reader_uses_redacted_projection_and_global_scope(db):
+    tag = uuid4().hex[:8]
+    component = DependencyComponent(
+        key="llm",
+        name=f"模型服务-{tag}",
+        deploy_mode="external",
+        deploy_status="failed",
+        deploy_error="健康检查超时",
+        deploy_spec_json=json.dumps({"ssh_password": "deploy-secret"}),
+        connection_json=json.dumps({"api_key": "connection-secret"}),
+        enabled=True,
+    )
+    db.add(component)
+    db.commit()
+
+    try:
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=None,
+            args={"family": "component", "keyword": tag},
+        )
+        assert is_error is False
+        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
+        assert result["subject"] == component.name
+        assert facts["deploy_status"] == "failed"
+        assert facts["deploy_error"] == "健康检查超时"
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert "deploy-secret" not in serialized
+        assert "connection-secret" not in serialized
+    finally:
+        db.delete(component)
+        db.commit()
+
+
+def test_migration_reader_enforces_batch_ontology_boundary(db):
+    _domain_id, ontology_id, _aliases = _seed_golden_domain()
+    other_ontology = f"other-{uuid4()}"
+    batch = WarehouseMigrationBatch(
+        ontology_id=other_ontology,
+        ontology_version=7,
+        status="blocked",
+        current_step=4,
+        approver="publisher-1",
+        approved_by="publisher-2",
+        rollback_owner="publisher-3",
+        observation_window_minutes=60,
+        blocked_reason="影子校验未通过",
+    )
+    db.add(batch)
+    db.flush()
+    evidence = WarehouseMigrationEvidence(
+        batch_id=batch.id,
+        step=4,
+        attempt=1,
+        status="fail",
+        report_json="{}",
+        checksum="checksum-4",
+        recorded_by="publisher-2",
+    )
+    db.add(evidence)
+    db.commit()
+
+    try:
+        hidden, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            args={"family": "migration", "batch_id": batch.id},
+        )
+        assert is_error is False
+        assert "当前范围内没有" in (hidden.get("note") or "")
+
+        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
+            db,
+            ontology_id=ontology_id,
+            args={"family": "migration", "batch_id": batch.id, "scope": "all"},
+        )
+        assert is_error is False
+        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
+        assert facts["status"] == "blocked"
+        assert facts["current_step"] == 4
+        assert facts["blocked_reason"] == "影子校验未通过"
+        assert result["items"][0]["recorded_by"] == "publisher-2"
+    finally:
+        db.delete(evidence)
+        db.delete(batch)
+        db.commit()

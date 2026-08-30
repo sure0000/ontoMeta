@@ -13,10 +13,14 @@ import "./styles/chat-bi.css";
 import "./styles/dashboard.css";
 import "./styles/big-screen.css";
 import "./styles/materialize.css";
+
+// 从 CSS 变量动态读取设计令牌，保证单一真源
+const rootStyle = getComputedStyle(document.documentElement);
+const getCssVar = (name: string) => rootStyle.getPropertyValue(name).trim();
+
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
-const CODE_FONT_FAMILY =
-  '"SF Mono", "JetBrains Mono", "Fira Code", Menlo, Monaco, Consolas, "Courier New", monospace';
+const CODE_FONT_FAMILY = getCssVar("--om-font-mono") || '"SF Mono", Monaco, monospace';
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -24,19 +28,19 @@ createRoot(document.getElementById("root")!).render(
       locale={zhCN}
       theme={{
         token: {
-          colorPrimary: "#2563eb",
-          colorInfo: "#2563eb",
-          colorSuccess: "#16a34a",
-          colorWarning: "#d97706",
-          colorError: "#dc2626",
-          colorTextBase: "#0f172a",
-          colorBgLayout: "#f6f8fb",
-          borderRadius: 10,
-          borderRadiusLG: 12,
-          borderRadiusSM: 8,
+          colorPrimary: getCssVar("--om-primary") || "#2563eb",
+          colorInfo: getCssVar("--om-primary") || "#2563eb",
+          colorSuccess: getCssVar("--om-success") || "#16a34a",
+          colorWarning: getCssVar("--om-warning") || "#d97706",
+          colorError: getCssVar("--om-error") || "#dc2626",
+          colorTextBase: getCssVar("--om-text") || "#0f172a",
+          colorBgLayout: getCssVar("--om-bg") || "#f6f8fb",
+          borderRadius: parseInt(getCssVar("--om-radius")) || 8,
+          borderRadiusLG: parseInt(getCssVar("--om-radius-lg")) || 12,
+          borderRadiusSM: parseInt(getCssVar("--om-radius-sm")) || 6,
           fontFamily: FONT_FAMILY,
           fontFamilyCode: CODE_FONT_FAMILY,
-          fontSize: 14,
+          fontSize: parseInt(getCssVar("--om-text-base")) || 14,
           controlHeight: 34,
           controlHeightLG: 40,
           controlHeightSM: 28,

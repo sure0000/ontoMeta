@@ -173,9 +173,9 @@ export function TaskDataRangeSelector({
         } else {
           const page = await api.listBusinessLogics({ ontologyId: target.value });
           children = page.items.map((b) => {
-            // 没绑定对象的口径无法确定聚合 SQL 的 FROM 源表，校验闸门会以
-            // missing_required_field 阻断确认——在选之前就说清楚，别等建完才拦。
-            const unbound = !b.bound_object_count;
+            // 没绑定对象且没有形式化 AST 的口径无法确定聚合 SQL 的 FROM 源表；已形式化
+            // 的口径可由 MetricDrafter 从 expression_json 反推对象和字段，不应被误置灰。
+            const unbound = !b.bound_object_count && !b.expression_json;
             return {
               value: b.id,
               label: unbound

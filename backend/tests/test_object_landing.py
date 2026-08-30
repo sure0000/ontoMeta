@@ -21,6 +21,7 @@ from app.models import (
     WarehouseObjectProjection,
 )
 from app.services.ingestion_contract import mirror_contract_to_projection
+from app.services.doris_deployment import prepare_current_deployment
 from app.services.object_landing import (
     FAILED,
     LANDED,
@@ -270,6 +271,10 @@ def test_bulk_lookup_is_two_queries_regardless_of_count(db, landing_seed):
 def test_mirror_propagates_ready_to_projection(db, landing_seed):
     """契约就绪 → Projection 就绪。下游 transform 的 ODS 准入靠这一列。"""
     ontology, obj, doris = landing_seed
+    db.query(DataSource).update(
+        {DataSource.is_default_warehouse: False}, synchronize_session=False
+    )
+    doris.is_default_warehouse = True
     deployment = _deployment(db, ontology, doris)
     projection = _projection(db, deployment, obj, sync_status="empty")
     contract = _contract(
@@ -283,6 +288,49 @@ def test_mirror_propagates_ready_to_projection(db, landing_seed):
     db.refresh(projection)
     assert projection.sync_status == "ready"
     assert projection.last_sync_at == contract.last_success_at
+    assert projection.serving_table == contract.target_ods_table
+    assert projection.queryable is True
+    doris.is_default_warehouse = False
+    db.commit()
+
+
+def test_ready_sync_preserves_separate_transform_serving(db, landing_seed):
+    """已有独立加工表时，同步刷新不能把查询悄悄切回原始 ODS。"""
+    ontology, obj, doris = landing_seed
+    db.query(DataSource).update(
+        {DataSource.is_default_warehouse: False}, synchronize_session=False
+    )
+    doris.is_default_warehouse = True
+    deployment = _deployment(db, ontology, doris)
+    deployment.status = "ready"
+    projection = _projection(
+        db,
+        deployment,
+        obj,
+        sync_status="ready",
+        transform_status="ready",
+        queryable=True,
+    )
+    contract = _contract(
+        db,
+        ontology,
+        obj,
+        doris,
+        status="ready",
+        last_success_at=datetime(2026, 8, 27, 10, 0, 0),
+    )
+    db.commit()
+
+    mirror_contract_to_projection(db, contract)
+    db.commit()
+    db.refresh(projection)
+    assert projection.serving_database == "dwd"
+    assert projection.serving_table == "dwd_customer"
+    assert projection.sync_status == "ready"
+    assert projection.transform_status == "stale"
+    assert projection.queryable is False
+    doris.is_default_warehouse = False
+    db.commit()
 
 
 def test_mirror_propagates_failure(db, landing_seed):
@@ -314,13 +362,69 @@ def test_mirror_ignores_intermediate_status(db, landing_seed):
     assert projection.sync_status == "ready"
 
 
-def test_mirror_without_deployment_is_noop(db, landing_seed):
-    """还没物化过（无部署）时同步对账不应炸——只是没有可镜像的目标。"""
+def test_mirror_without_deployment_registers_direct_sync(db, landing_seed):
+    """同步成功本身完成源对象的直接 serving，不需要先跑独立物化。"""
     ontology, obj, doris = landing_seed
-    contract = _contract(db, ontology, obj, doris, status="ready")
+    db.query(DataSource).update(
+        {DataSource.is_default_warehouse: False}, synchronize_session=False
+    )
+    doris.is_default_warehouse = True
+    contract = _contract(
+        db,
+        ontology,
+        obj,
+        doris,
+        status="ready",
+        last_success_at=datetime(2026, 8, 27, 9, 0, 0),
+    )
     db.commit()
 
-    assert mirror_contract_to_projection(db, contract) is None
+    projection = mirror_contract_to_projection(db, contract)
+    db.commit()
+    assert projection is not None
+    assert projection.ods_database == "ods"
+    assert projection.ods_table == "ods_erp_customer"
+    assert projection.serving_layer == "ods"
+    assert projection.serving_database == "ods"
+    assert projection.serving_table == "ods_erp_customer"
+    assert projection.schema_status == "ready"
+    assert projection.sync_status == "ready"
+    assert projection.queryable is True
+    doris.is_default_warehouse = False
+    db.commit()
+
+
+def test_prepare_deployment_preserves_direct_sync_serving(db, landing_seed):
+    """物化配置重放不能把已同步的统一表切回尚未建出的 dim 表。"""
+    ontology, obj, doris = landing_seed
+    db.query(DataSource).update(
+        {DataSource.is_default_warehouse: False}, synchronize_session=False
+    )
+    doris.is_default_warehouse = True
+    contract = _contract(
+        db,
+        ontology,
+        obj,
+        doris,
+        status="ready",
+        last_success_at=datetime(2026, 8, 27, 11, 0, 0),
+    )
+    db.commit()
+
+    projection = mirror_contract_to_projection(db, contract)
+    db.commit()
+    assert projection is not None
+
+    prepare_current_deployment(
+        db, ontology_id=ontology.id, datasource_id=doris.id, database_prefix="erp"
+    )
+    db.refresh(projection)
+    assert projection.serving_layer == "ods"
+    assert projection.serving_database == "ods"
+    assert projection.serving_table == "ods_erp_customer"
+    assert projection.queryable is True
+    doris.is_default_warehouse = False
+    db.commit()
 
 
 # --- 端到端：落点确实到得了前端 ------------------------------------------------

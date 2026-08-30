@@ -302,7 +302,7 @@ def prove_sql_sound(
     aggregations: list[str] = []
     for agg in tree.find_all(exp.AggFunc):
         agg_key = (agg.key or "").lower()
-        for c in agg.find_all(exp.Column):
+        for c in _aggregated_columns(agg):
             obj = col_obj.get(id(c))
             if obj is None:
                 continue
@@ -447,6 +447,34 @@ def _aggregated_measure_objects(
             if obj is not None:
                 result[obj.name] = obj
     return list(result.values())
+
+
+def _aggregated_columns(agg: exp.AggFunc) -> list[exp.Column]:
+    """取聚合函数**真正被聚合的那些列**——CASE 的判定条件里的列不算。
+
+    与 :func:`_group_by_columns` 同一条判据：看这一列是不是被聚合的**值**，而不是
+    「有没有出现在聚合函数里」。``SUM(CASE WHEN payment_terms IS NULL THEN 1 ELSE 0 END)``
+    求和的是 1/0 这两个字面量，``payment_terms`` 只是谓词——它是空值率统计的标准写法。
+    此前递归收集全部列，这条 SQL 会被判成「对非度量字段 payment_terms 做 SUM」而拒掉，
+    于是数据质量分析在真实本体上根本跑不完。
+
+    仍然拦得住 ``SUM(CASE WHEN … THEN amount ELSE 0 END)``：amount 在分支**取值**里，
+    照收不误。
+    """
+    cols: list[exp.Column] = []
+    for c in agg.find_all(exp.Column):
+        node: exp.Expression | None = c
+        in_predicate = False
+        while node is not None and node is not agg:
+            parent = node.parent
+            if isinstance(parent, (exp.If, exp.Case)) and parent.args.get("this") is node:
+                # If.this = WHEN 谓词；Case.this = CASE <expr> 的switch 表达式，都是判定用的
+                in_predicate = True
+                break
+            node = parent
+        if not in_predicate:
+            cols.append(c)
+    return cols
 
 
 def _group_by_columns(tree: exp.Expression) -> list[exp.Column]:

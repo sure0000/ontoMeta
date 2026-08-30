@@ -116,10 +116,6 @@ async function resolveBreadcrumbs(
     return [{ label: "Data Agent" }];
   }
 
-  if (pathname === "/tasks/pipelines") {
-    return [{ label: "任务管理", path: "/tasks/materialize" }, { label: "任务链" }];
-  }
-
   if (pathname.startsWith("/tasks/")) {
     const TASK_KIND_LABEL: Record<string, string> = {
       materialize: "物化任务",

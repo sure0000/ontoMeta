@@ -1,6 +1,8 @@
+import asyncio
 import json
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -9,10 +11,17 @@ from sqlalchemy.orm import Session
 from app.api.deps import chat_bi_service
 from app.database import get_db
 from app.services import agent_telemetry, chat_bi_ledger
+from app.services.agent_run_store import (
+    attach_agent_run,
+    failed_run_payload,
+    sanitize_run_error,
+)
 from app.services.chat_bi_blocks import answer_to_blocks
 from app.services.data_app_executor import ExecutionError
 from app.schemas import (
     ChatBiAnswer,
+    ChatBiAgentRunDetail,
+    ChatBiAgentRunSummary,
     ChatBiAskRequest,
     ChatBiCategoryDeleteRequest,
     ChatBiCategoryList,
@@ -115,7 +124,12 @@ def chat_bi_link_conversation_task(
     """
     try:
         result = chat_bi_service.link_conversation_task(
-            db, conversation_id, data.artifact_id, kind=data.kind, intent=data.intent
+            db,
+            conversation_id,
+            data.artifact_id,
+            kind=data.kind,
+            intent=data.intent,
+            confirmation_id=data.confirmation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -258,6 +272,37 @@ def chat_bi_get_messages(
     return chat_bi_service.get_messages(db, conversation_id)
 
 
+@router.get(
+    "/chat-bi/conversations/{conversation_id}/runs",
+    response_model=list[ChatBiAgentRunSummary],
+)
+def chat_bi_list_agent_runs(
+    conversation_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    if not chat_bi_service.get_conversation(db, conversation_id):
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return chat_bi_service.list_agent_runs(db, conversation_id, limit=limit)
+
+
+@router.get(
+    "/chat-bi/conversations/{conversation_id}/runs/{run_id}",
+    response_model=ChatBiAgentRunDetail,
+)
+def chat_bi_get_agent_run(
+    conversation_id: str,
+    run_id: str,
+    db: Session = Depends(get_db),
+):
+    if not chat_bi_service.get_conversation(db, conversation_id):
+        raise HTTPException(status_code=404, detail="对话不存在")
+    result = chat_bi_service.get_agent_run(db, conversation_id, run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Agent run 不存在")
+    return result
+
+
 # ---- Ask
 
 
@@ -282,13 +327,52 @@ def _principal_id(request: Request) -> str | None:
     return getattr(request.state, "principal_id", None)
 
 
+def _persist_failed_agent_run(
+    db: Session,
+    *,
+    conversation_id: str,
+    run_id: str,
+    question: str,
+    started_at: datetime,
+    error: Exception | str,
+    status: str = "failed",
+) -> dict:
+    """Best-effort failure persistence without masking the original error."""
+    try:
+        db.rollback()
+        payload = failed_run_payload(
+            run_id=run_id,
+            question=question,
+            started_at=started_at,
+            error=error,
+            intent=chat_bi_service._classify_intent(question),
+            status=status,
+        )
+        payload["blocks"] = answer_to_blocks(payload)
+        chat_bi_service.save_message(
+            db,
+            conversation_id,
+            "assistant",
+            payload["answer"],
+            payload=payload,
+            message_id=run_id,
+        )
+        return payload
+    except Exception:  # noqa: BLE001 - persistence must not replace the original failure
+        db.rollback()
+        logger.exception("Failed to persist Data Agent failed run")
+        return {}
+
+
 @router.post("/chat-bi/ask", response_model=ChatBiAnswer)
 async def chat_bi_ask(
     data: ChatBiAskRequest, request: Request, db: Session = Depends(get_db)
 ):
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    conversation_id = data.conversation_id
+    user_saved = False
     try:
-        conversation_id = data.conversation_id
-
         if conversation_id:
             conv = chat_bi_service.get_conversation(db, conversation_id)
             if not conv:
@@ -297,6 +381,8 @@ async def chat_bi_ask(
             # 请求体中的瞬时 domain_ids 不应打断既有会话。
             effective_domain_ids = list(conv.domain_ids)
             conversation_title = conv.title
+            persisted_history = chat_bi_service.get_agent_history(db, conversation_id)
+            effective_history = persisted_history
         else:
             effective_domain_ids = list(data.domain_ids)
             conv_dict = chat_bi_service.create_conversation(
@@ -304,20 +390,29 @@ async def chat_bi_ask(
             )
             conversation_id = conv_dict["id"]
             conversation_title = conv_dict["title"]
+            effective_history = data.history or []
 
         chat_bi_service.save_message(
             db, conversation_id, "user", data.question
         )
+        user_saved = True
 
         payload = await chat_bi_service.ask(
             db,
             domain_ids=effective_domain_ids,
             question=data.question,
-            history=data.history,
+            history=effective_history,
             principal_role=_principal_role(request),
             conversation_id=conversation_id,
         )
 
+        payload = attach_agent_run(
+            payload,
+            run_id=run_id,
+            question=data.question,
+            started_at=started_at,
+            intent=chat_bi_service._classify_intent(data.question),
+        )
         # V3 S0：终态 payload 投影成渲染块（双写，旧字段保留）。落库与返回都含 blocks。
         payload["blocks"] = answer_to_blocks(payload)
 
@@ -331,6 +426,7 @@ async def chat_bi_ask(
                 for k, v in payload.items()
                 if k not in ("domain_id", "domain_name", "domain_ids", "domain_names")
             },
+            message_id=run_id,
         )
 
         # P3：跨会话记忆——把本次已接地命中的对象/口径按各涉及域累加使用度（best-effort）。
@@ -340,7 +436,30 @@ async def chat_bi_ask(
         payload["conversation_title"] = conversation_title
         return payload
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if user_saved and conversation_id:
+            _persist_failed_agent_run(
+                db,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                question=data.question,
+                started_at=started_at,
+                error=exc,
+            )
+        raise HTTPException(status_code=400, detail=sanitize_run_error(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if user_saved and conversation_id:
+            _persist_failed_agent_run(
+                db,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                question=data.question,
+                started_at=started_at,
+                error=exc,
+            )
+        logger.exception("ChatBI endpoint failed")
+        raise
 
 
 @router.post("/chat-bi/ask/stream")
@@ -354,6 +473,8 @@ async def chat_bi_ask_stream(
     ``repair``（P4.3）表示答案未过可靠性校验、正在让模型重写一次。
     会话创建与 user 消息在流开始前落库；assistant 消息在 done 后落库。
     """
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
     conversation_id = data.conversation_id
     if conversation_id:
         conv = chat_bi_service.get_conversation(db, conversation_id)
@@ -361,6 +482,8 @@ async def chat_bi_ask_stream(
             raise HTTPException(status_code=404, detail="对话不存在")
         effective_domain_ids = list(conv.domain_ids)
         conversation_title = conv.title
+        persisted_history = chat_bi_service.get_agent_history(db, conversation_id)
+        effective_history = persisted_history
     else:
         effective_domain_ids = list(data.domain_ids)
         conv_dict = chat_bi_service.create_conversation(
@@ -368,6 +491,7 @@ async def chat_bi_ask_stream(
         )
         conversation_id = conv_dict["id"]
         conversation_title = conv_dict["title"]
+        effective_history = data.history or []
 
     chat_bi_service.save_message(db, conversation_id, "user", data.question)
 
@@ -375,27 +499,35 @@ async def chat_bi_ask_stream(
         return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     async def event_gen():
+        run_saved = False
         yield sse({
             "type": "meta",
             "conversation_id": conversation_id,
             "conversation_title": conversation_title,
+            "run_id": run_id,
         })
         try:
             async for ev in chat_bi_service.ask_stream(
                 db,
                 domain_ids=effective_domain_ids,
                 question=data.question,
-                history=data.history,
+                history=effective_history,
                 principal_role=_principal_role(request),
                 conversation_id=conversation_id,
             ):
                 if ev.get("type") == "done":
-                    payload = ev["payload"]
+                    payload = attach_agent_run(
+                        ev["payload"],
+                        run_id=run_id,
+                        question=data.question,
+                        started_at=started_at,
+                        intent=chat_bi_service._classify_intent(data.question),
+                    )
+                    ev["payload"] = payload
                     # V3 S0：终态 payload 投影成渲染块（双写）。SSE 下发与落库都含 blocks。
                     payload["blocks"] = answer_to_blocks(payload)
                     payload["conversation_id"] = conversation_id
                     payload["conversation_title"] = conversation_title
-                    yield sse(ev)
                     chat_bi_service.save_message(
                         db,
                         conversation_id,
@@ -405,16 +537,53 @@ async def chat_bi_ask_stream(
                             k: v for k, v in payload.items()
                             if k not in ("domain_id", "domain_name", "domain_ids", "domain_names")
                         },
+                        message_id=run_id,
                     )
+                    run_saved = True
                     # P3：跨会话记忆——本次已接地命中的对象/口径按各涉及域累加使用度（best-effort）。
                     chat_bi_service.record_domain_memory(db, effective_domain_ids, payload)
+                    yield sse(ev)
                 else:
                     yield sse(ev)
+        except asyncio.CancelledError:
+            if not run_saved:
+                _persist_failed_agent_run(
+                    db,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    question=data.question,
+                    started_at=started_at,
+                    error="客户端取消了本次回答",
+                    status="cancelled",
+                )
+            raise
         except ValueError as exc:
-            yield sse({"type": "error", "message": str(exc)})
-        except Exception:  # noqa: BLE001
+            if not run_saved:
+                _persist_failed_agent_run(
+                    db,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    question=data.question,
+                    started_at=started_at,
+                    error=exc,
+                )
+            yield sse({
+                "type": "error",
+                "message": sanitize_run_error(exc),
+                "run_id": run_id,
+            })
+        except Exception as exc:  # noqa: BLE001
             logger.exception("ChatBI stream endpoint failed")
-            yield sse({"type": "error", "message": "服务异常，请重试"})
+            if not run_saved:
+                _persist_failed_agent_run(
+                    db,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    question=data.question,
+                    started_at=started_at,
+                    error=exc,
+                )
+            yield sse({"type": "error", "message": "服务异常，请重试", "run_id": run_id})
 
     return StreamingResponse(
         event_gen(),

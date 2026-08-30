@@ -144,6 +144,20 @@ def test_sync_form_covers_every_load_strategy(sync_domain):
     }
 
 
+def test_sync_form_covers_task_level_flink_overrides(sync_domain):
+    """Data Agent 与手动同步向导都能覆盖任务级 Flink 参数。"""
+    fields = _sync_form_fields(sync_domain["ontology_id"])
+    assert {
+        "flink_parallelism",
+        "flink_yarn_queue",
+        "flink_deploy_target",
+        "flink_extra_args",
+    } <= set(fields)
+    assert [o["value"] for o in fields["flink_deploy_target"]["options"]] == [
+        "yarn-per-job", "yarn-session", "remote", "local"
+    ]
+
+
 def test_sync_form_scopes_column_candidates_to_the_chosen_object(sync_domain):
     """主键/增量字段/sequence 列的候选必须是**所选那张表**的列，且随对象实时取。"""
     fields = _sync_form_fields(sync_domain["ontology_id"])

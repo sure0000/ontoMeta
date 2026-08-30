@@ -15,7 +15,7 @@ import { ApiError, api } from "../api";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard } from "../components/SectionCard";
-import { ClosureCard } from "./chat-bi/ClosureCard";
+import { ClosureCards } from "./chat-bi/ClosureCard";
 import {
   NODE_LABEL,
   NODE_SEQUENCE,
@@ -284,7 +284,16 @@ export function DecisionsPage() {
           <div className="om-muted">加载中…</div>
         ) : closure ? (
           <Space direction="vertical" size="large" style={{ width: "100%" }}>
-            <ClosureCard closure={closure} />
+            {/*
+              闭环按任务分开画：一条会话可能建了好几条任务，也可能通篇只是查数、
+              一条任务都没建。后者只有留痕、没有闭环——摆一张全灰的六环图会让人
+              以为这次会话漏掉了五个确认，而它根本没有要闭的环。
+            */}
+            {closure.tasks.length > 0 ? (
+              <ClosureCards tasks={closure.tasks} />
+            ) : (
+              <div className="om-muted">本会话没有数据任务，只有下列决策留痕。</div>
+            )}
             <div>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>决策时间线</div>
               {closure.records.map((rec) => (

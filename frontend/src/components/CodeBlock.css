@@ -1,0 +1,94 @@
+/* CodeBlock - 统一代码块样式
+ * 深色主题 + 头部栏 + 语法高亮 */
+
+.code-block {
+  margin: var(--om-space-3) 0;
+  border-radius: var(--om-radius-md);
+  overflow: hidden;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+}
+
+/* 头部栏：语言标签 + 复制按钮 */
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--om-space-2) var(--om-space-3);
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.code-block-lang {
+  font-size: var(--om-text-xs);
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  font-family: var(--om-font-mono);
+  color: #94a3b8;
+}
+
+.code-block-copy {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  font-size: var(--om-text-xs);
+  padding: 3px 12px;
+  border-radius: var(--om-radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-weight: 500;
+}
+
+.code-block-copy:hover {
+  background: #334155;
+  color: #f8fafc;
+}
+
+/* 代码主体 */
+.code-block-pre {
+  margin: 0;
+  padding: var(--om-space-4) 18px;
+  overflow-x: auto;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-base);
+  line-height: 1.7;
+  color: #e2e8f0;
+}
+
+.code-block-code {
+  font-family: inherit;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.code-line {
+  white-space: pre;
+}
+
+/* 语法高亮色板（与原 SQL 块保持一致）*/
+.code-keyword {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.code-string {
+  color: #fcd34d;
+}
+
+.code-number {
+  color: #f0abfc;
+}
+
+.code-comment {
+  color: #64748b;
+  font-style: italic;
+}
+
+.code-function {
+  color: #a78bfa;
+}
+
+.code-operator {
+  color: #94a3b8;
+}

@@ -109,6 +109,10 @@ const LAYER_OPTIONS = [
   { value: "ads", label: "应用层 ADS" },
 ];
 
+// Transform 是 Doris 内加工，产物落在 DIM/DWD/DWS；ADS 由 metric 任务负责。
+const TRANSFORM_LAYER_OPTIONS = LAYER_OPTIONS.filter((option) => option.value !== "ads");
+const METRIC_LAYER_OPTIONS = LAYER_OPTIONS.filter((option) => option.value === "ads");
+
 /** flink run -t 的取值闭集：与后端 `flink_params.DEPLOY_TARGETS`、设置页下拉同源。 */
 const DEPLOY_TARGET_OPTIONS = [
   { value: "yarn-per-job", label: "yarn-per-job" },
@@ -144,7 +148,7 @@ const targetDatasourceField = (note: string): SpecFieldDef => ({
  * 一条搬 300 张表的同步和一条小指标聚合，对并行度/队列/checkpoint 的要求不是一回事。
  * 留空 = 跟随设置页（后端 `flink_params.normalize` 直接丢弃空值，不落进 Spec）。
  *
- * 只给**真的经 Flink 跑**的三类任务（sync/transform/metric）。物化只建表
+ * 只给**真的经 Flink 跑**的同步任务。物化只建表
  * （Airflow SQLExecuteQueryOperator 直连目标仓），给它摆一组 Flink 参数等于让人白填。
  *
  * 不含 SqlRunner JAR / main class / flink 命令路径：那是「Flink 装在哪」的部署事实
@@ -210,11 +214,11 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       key: "target_layer",
       label: "目标层",
       control: "select",
-      optionSource: { kind: "static", options: LAYER_OPTIONS },
+      optionSource: { kind: "static", options: METRIC_LAYER_OPTIONS },
       default: "ads",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
-    { key: "schedule", label: "Airflow 调度", control: "cron" },
+    { key: "refresh_cron", label: "调度频率", control: "cron", help: "留空 = 仅手动触发" },
   ],
   transform: [
     {
@@ -229,7 +233,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       key: "target_layer",
       label: "目标层",
       control: "select",
-      optionSource: { kind: "static", options: LAYER_OPTIONS },
+      optionSource: { kind: "static", options: TRANSFORM_LAYER_OPTIONS },
       default: "dim",
     },
     {
@@ -240,7 +244,7 @@ export const SPEC_FIELDS: Record<string, SpecFieldDef[]> = {
       help: "每条对应一个确定性清洗算子",
     },
     { key: "database_prefix", label: "库名前缀", control: "text" },
-    { key: "schedule", label: "Airflow 调度", control: "cron" },
+    { key: "refresh_cron", label: "调度频率", control: "cron", help: "留空 = 仅手动触发" },
     { key: "notes", label: "备注", control: "textarea" },
   ],
   sync: [
@@ -388,10 +392,7 @@ export function requiredSpecKeys(
   values?: Record<string, unknown>,
 ): SpecFieldDef[] {
   return (SPEC_FIELDS[kind] ?? []).filter(
-    (f) =>
-      f.required &&
-      !(skipKeys?.has(f.key) ?? false) &&
-      (!values || isFieldVisible(f, values)),
+    (f) => f.required && !(skipKeys?.has(f.key) ?? false) && (!values || isFieldVisible(f, values)),
   );
 }
 

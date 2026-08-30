@@ -32,7 +32,6 @@ from app.services.install_platforms import (
     detect_platform,
     ensure_python,
     home_dir,
-    require_debian,
     service_check_hint,
     shell_quote,
     start_service,
@@ -40,19 +39,10 @@ from app.services.install_platforms import (
 )
 from app.services.ssh_installer import CommandResult, SSHError, SSHSession
 
-# 既有调用点继续用 _sq / _require_debian 的名字（实现已上收到平台层）
-_sq = shell_quote
-_require_debian = require_debian
-
 __all__ = ["CommandResult", "SSHError", "SSHSession", "INSTALL_RECIPES", "run_install", "run_teardown"]
 
 REAL = "real"
 BEST_EFFORT = "best_effort"
-
-# 自动选端口的扫描范围。8098 是 runner 惯例端口优先试；8088 是 YARN RM 默认端口
-# （docker/sync-runner/Dockerfile 实测必撞），扫描刻意避开。
-_AUTO_PORT_CANDIDATES = [8098, *range(8100, 9000)]
-
 
 @dataclass
 class Recipe:
@@ -87,31 +77,6 @@ def _wait_http(ssh: SSHSession, plat: Platform, url: str, attempts: int = 30, in
             return True
         time.sleep(interval)
     return False
-
-
-def _port_free(ssh: SSHSession, plat: Platform, port: int) -> bool:
-    """目标机上该端口当前是否可 bind（>=1024 无需 root）。"""
-    expr = f"import socket; s=socket.socket(); s.bind(('0.0.0.0', {port})); s.close()"
-    return ssh.run(plat.py_run(expr)).ok
-
-
-def _find_free_port(ssh: SSHSession, plat: Platform, spec: dict[str, Any]) -> int:
-    """端口解析：spec 给了就用（校验空闲，占用即明确报错）；留空自动探测。通用，供各配方复用。"""
-    given = spec.get("port")
-    if given is not None and str(given).strip() != "":
-        port = int(given)
-        if not (1 <= port <= 65535):
-            raise SSHError(f"端口 {port} 非法：须在 1-65535")
-        if not _port_free(ssh, plat, port):
-            raise SSHError(
-                f"端口 {port} 已被占用：改填其他端口，或清空让系统自动选择；"
-                "如上次部署未卸载，请先卸载再重装"
-            )
-        return port
-    for port in _AUTO_PORT_CANDIDATES:
-        if _port_free(ssh, plat, port):
-            return port
-    raise SSHError("未找到可用端口：8098 与 8100-8999 均被占用")
 
 
 # --------------------------------------------------------------------- REAL 配方
@@ -159,7 +124,7 @@ def _install_airflow(ssh: SSHSession, spec: dict[str, Any]) -> dict[str, Any]:
     # 覆写 admin 密码为我们持有的值（standalone 自动生成的密码在 standalone_admin_password.txt）
     ssh.run(
         f"AIRFLOW_HOME={af_home} {venvpy} -m airflow users create "
-        f"--username {admin_user} --password {_sq(admin_pwd)} --firstname a --lastname b "
+        f"--username {admin_user} --password {shell_quote(admin_pwd)} --firstname a --lastname b "
         f"--role Admin --email admin@example.com || true",
         timeout=120,
     )

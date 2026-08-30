@@ -16,7 +16,6 @@ import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
 import { PipelinesPage } from "./pages/PipelinesPage";
-import { TasksPage } from "./pages/TasksPage";
 import { TasksOverviewPage } from "./pages/TasksOverviewPage";
 import { TaskCreatePage } from "./pages/TaskCreatePage";
 import { RelationGroupDetailPage } from "./pages/RelationGroupDetailPage";
@@ -61,12 +60,6 @@ export default function App() {
         <Route path="/tasks/create" element={<TaskCreatePage />} />
         <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />
         <Route path="/tasks/orchestration" element={<PipelinesPage />} />
-        {/* 保留旧路由以兼容 */}
-        <Route path="/tasks/materialize" element={<TasksPage kind="materialize" />} />
-        <Route path="/tasks/sync" element={<TasksPage kind="sync" />} />
-        <Route path="/tasks/transform" element={<TasksPage kind="transform" />} />
-        <Route path="/tasks/metric" element={<TasksPage kind="metric" />} />
-        <Route path="/tasks/pipelines" element={<PipelinesPage />} />
         <Route path="/data-apps" element={<DataAppsPage />} />
         <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />
         <Route path="/settings" element={<SettingsPage />} />

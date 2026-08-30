@@ -1,9 +1,9 @@
 """⑤ 物化 Executor —— 只**建结构**：把本体想要的表在目标数据源里建出来。
 
-物化 = 建表（DDL），同步 = 搬数据（DML），且物化在先。故这里只调
-``materialization_runner.run_materialize``，产出的 DAG 只有 ``create_tables``：
-**不产任何搬运作业、不产 staging/swap，一行数据都不动**。要把数据搬进来是
-同步制品（``executors/sync``）的事。
+物化只为没有物理源表的人工建模对象建表（DDL）。有真实源表的对象由同步任务幂等建表、
+搬数据并登记为可查询 serving 表，不需要先执行物化。故这里只调
+``materialization_runner.run_materialize``，产出的 DAG 只有 ``create_tables``，
+不产任何搬运作业、不产 staging/swap，一行数据都不动。
 
 建表幂等（``CREATE TABLE IF NOT EXISTS``），重复物化跳过已存在的表。
 dry-run 只渲染将建的表清单，不触碰目标库。
@@ -35,7 +35,7 @@ class MaterializeExecutor(Executor):
             raise ValueError("Spec 缺少 ontology_id")
         selected = set(spec.get("selected_targets") or []) or None
         with SessionLocal() as db:
-            # 引擎由目标数据源类型推定（旧制品显式给了则优先），不再靠表单单选。
+            # 引擎由目标数据源类型推定，显式值只用于一致性校验。
             engine = materialization_runner.resolve_engine(
                 db, spec.get("target_datasource_id"), spec.get("engine")
             )

@@ -73,10 +73,10 @@ def _carry_over_env_values() -> None:
     # 会演进的活代码——_default_jobs_dir 后来随 seatunnel 组件一起下线，那次删除
     # 曾让本迁移 ImportError、整套 alembic upgrade head 直接炸掉。
     _repo_root = Path(__file__).resolve().parents[3]
-    dags_dir = env.airflow_dags_dir or str(
+    dags_dir = getattr(env, "airflow_dags_dir", "") or str(
         _repo_root / "docker" / "orchestration" / "dags"
     )
-    jobs_dir = env.airflow_jobs_dir or str(
+    jobs_dir = getattr(env, "airflow_jobs_dir", "") or str(
         _repo_root / "docker" / "orchestration" / "seatunnel" / "jobs"
     )
 
@@ -100,15 +100,19 @@ def _carry_over_env_values() -> None:
         ).bindparams(
             dags_dir=dags_dir,
             jobs_dir=jobs_dir,
-            sync_channel=env.sync_channel or "runner",
-            sync_runner_endpoint=env.sync_runner_endpoint or "",
-            docker_network=env.airflow_docker_network or "bridge",
-            drivers_dir=env.airflow_sync_drivers_dir or "",
-            sync_tool_images=env.sync_tool_images or "",
+            sync_channel=getattr(env, "sync_channel", "runner") or "runner",
+            sync_runner_endpoint=getattr(env, "sync_runner_endpoint", "") or "",
+            docker_network=getattr(env, "airflow_docker_network", "bridge") or "bridge",
+            drivers_dir=getattr(env, "airflow_sync_drivers_dir", "") or "",
+            sync_tool_images=getattr(env, "sync_tool_images", "") or "",
             max_tasks_per_dag=env.ontometa_max_tasks_per_dag,
             max_active_tasks_per_dag=env.ontometa_max_active_tasks_per_dag,
             dag_parse_timeout=env.ontometa_dag_parse_timeout,
-            preflight_sentinel_timeout=env.ontometa_preflight_sentinel_timeout,
+            # This setting was removed from the runtime before the migration was
+            # retired; keep historical upgrades replayable with its old default.
+            preflight_sentinel_timeout=getattr(
+                env, "ontometa_preflight_sentinel_timeout", 20.0
+            ),
             staging_swap=bool(env.ontometa_staging_swap),
         )
     )

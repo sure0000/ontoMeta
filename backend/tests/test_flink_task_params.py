@@ -9,8 +9,7 @@
 
 from __future__ import annotations
 
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -20,27 +19,12 @@ from app.agents.validation import validate_spec
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
 from app.services import flink_params
-from app.services.airflow_dag_builder import FlinkSqlTask
-from app.services.flink_job_runner import FlinkJobError, run_flink_sql
-from tests.support.delivery import LocalTransportDelivery, make_runner_jar
-
-
-def _delivered_command(tmp_path) -> str:
-    """投递到"Airflow 主机"的 spec.json 里，这个任务的 flink run 命令行。"""
-    spec_file = next((tmp_path / "dags").rglob("*.json"))
-    spec = json.loads(spec_file.read_text())
-    return spec["tasks"][0]["command"]
 
 
 def _airflow(tmp_path, **over):
-    """设置页那份 Flink 默认值（get_airflow_runtime 的返回）。"""
+    """设置页 Flink 默认值，供参数优先级单元测试使用。"""
     defaults = dict(
-        available=True,
-        dags_dir=str(tmp_path / "dags"),
-        endpoint="http://airflow",
-        max_active_tasks_per_dag=16,
-        dag_parse_timeout=0.1,
-        flink_sql_runner_jar=make_runner_jar(tmp_path),
+        flink_sql_runner_jar=str(tmp_path / "flink-sql-runner.jar"),
         flink_sql_runner_class="com.ontometa.flink.SqlRunner",
         flink_bin="flink",
         flink_deploy_target="yarn-per-job",
@@ -158,81 +142,6 @@ def test_resolve_checkpoint_dir_prefers_task(tmp_path):
         )
         == "hdfs://ns/task"
     )
-
-
-# ---------- 参数真的到达产物 ----------
-
-
-def test_task_params_reach_the_flink_run_command(tmp_path):
-    """这个任务填的并行度/队列/额外参数，出现在投递的 DAG 的 flink run 命令里。"""
-    with patch("app.services.flink_job_runner._settings") as settings:
-        airflow = _airflow(tmp_path, flink_parallelism=1, flink_yarn_queue="global")
-        airflow.build_delivery.return_value = LocalTransportDelivery()
-        settings.get_airflow_runtime.return_value = airflow
-        with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
-            client = MagicMock()
-            client_cls.return_value = client
-            client.dag_exists.return_value = True
-            client.trigger_dag.return_value = {"state": "queued"}
-            receipt = run_flink_sql(
-                MagicMock(),
-                base="artifact-abc",
-                tasks=(FlinkSqlTask(task_id="big_move", sql="INSERT INTO t SELECT 1;"),),
-                warehouse_conn_id="warehouse",
-                artifact_id="artifact-abc",
-                flink_task_params={
-                    "flink_parallelism": 16,
-                    "flink_yarn_queue": "etl_heavy",
-                    "flink_extra_args": ["-Dtaskmanager.memory.process.size=4g"],
-                },
-            )
-
-    # flink run 命令在生成期就拼好写进 spec.json，DAG 运行期原样交给 BashOperator。
-    command = _delivered_command(tmp_path)
-    assert "-p 16" in command
-    assert "-Dyarn.application.queue=etl_heavy" in command
-    assert "-Dtaskmanager.memory.process.size=4g" in command
-    # 回执自己说清用了什么——参数逐任务不同，"去设置页看一眼"已不是答案。
-    assert receipt["flink"]["parallelism"] == 16
-    assert receipt["flink"]["yarn_queue"] == "etl_heavy"
-    assert "flink_parallelism" in receipt["flink"]["overrides"]
-
-
-def test_unset_task_params_follow_settings(tmp_path):
-    """没填的项跟随设置页：设置页 4 → 命令行 -p 4。"""
-    with patch("app.services.flink_job_runner._settings") as settings:
-        airflow = _airflow(tmp_path, flink_parallelism=4, flink_yarn_queue="global")
-        airflow.build_delivery.return_value = LocalTransportDelivery()
-        settings.get_airflow_runtime.return_value = airflow
-        with patch("app.services.flink_job_runner.AirflowClient") as client_cls:
-            client_cls.return_value = MagicMock(**{"dag_exists.return_value": True})
-            run_flink_sql(
-                MagicMock(),
-                base="artifact-def",
-                tasks=(FlinkSqlTask(task_id="t", sql="SELECT 1;"),),
-                warehouse_conn_id="warehouse",
-                artifact_id="artifact-def",
-            )
-    command = _delivered_command(tmp_path)
-    assert "-p 4" in command
-    assert "-Dyarn.application.queue=global" in command
-
-
-def test_invalid_task_params_fail_before_delivery(tmp_path):
-    """非法参数在投递之前就报错，不产出一条跑不起来的 DAG。"""
-    with patch("app.services.flink_job_runner._settings") as settings:
-        airflow = _airflow(tmp_path)
-        settings.get_airflow_runtime.return_value = airflow
-        with pytest.raises(FlinkJobError) as exc:
-            run_flink_sql(
-                MagicMock(),
-                base="artifact-bad",
-                tasks=(FlinkSqlTask(task_id="t", sql="SELECT 1;"),),
-                warehouse_conn_id="warehouse",
-                flink_task_params={"flink_parallelism": 0},
-            )
-    assert "Flink 执行参数非法" in str(exc.value)
-    assert not (tmp_path / "dags").exists()
 
 
 # ---------- drafter 收下 + 闸门拦住 ----------

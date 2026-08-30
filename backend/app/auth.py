@@ -143,9 +143,8 @@ _ROLE_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     (r"^POST$", r"/execute(/|$)", "publisher"),
     # 物化类：一键落库，直接对目标数据源建表/写数
     (r"^POST$", r"/warehouse/materialize(/|$)", "publisher"),
-    # 设置类：改 LLM/DataHub/Cube 连接与凭据
+    # 设置类：改 LLM/DataHub/Airflow 连接与凭据
     (r"^(POST|PATCH|PUT|DELETE)$", r"^/api/settings(/|$)", "publisher"),
-    (r"^(POST|PATCH|PUT|DELETE)$", r"^/api/(llm-services|datahub|cube)", "publisher"),
     # 复核类：二次确认与冲突裁决
     (r".*", r"^/api/confirmations(/|$)", "reviewer"),
     (r"^(POST|PATCH|PUT)$", r"/conflicts?(/|$)", "reviewer"),

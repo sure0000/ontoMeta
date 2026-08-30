@@ -1,6 +1,6 @@
 # Data Agent V6 计划：运行记录可问答（Operational Recall）
 
-> 状态：🟡 **P0/P1 已落地，P2（两类运行记录）已落地**——其余运行记录族仍按需扩展。
+> 状态：✅ **P0/P1/P2/P3 已落地并完成本地回归**。
 > 日期：2026-08-28
 > 承接 [DATA_AGENT_V5_OPTIMIZATION.md](./DATA_AGENT_V5_OPTIMIZATION.md)（工具收窄 38→9）与 [DATA_AGENT_V5_PLAN.md](./DATA_AGENT_V5_PLAN.md)。
 > 主战场：`backend/app/services/chat_bi.py`、`chat_bi_tool_schemas.py`、`chat_bi_skills.py`、
@@ -141,11 +141,11 @@ REGISTRY: dict[str, RecordFamily] = {...}   # 13 个 reader，全部委托既有
 | `ontology_version` | `version_diff` + `publish` | `VersionRecord` |
 | `draft_run` | `draft_task_service.list_tasks/get_task_logs/get_progress` | `DraftGenerationTask` |
 | `merge_report` | `provenance_service.get_merge_report` | `DraftGenerationTask.merge_report_json` |
-| `unmodeled` | `unmodeled_tables` | 派生（排除已建模/已删/平台自造） |
 | `conflict` | `provenance_service` | ProvenanceMixin 字段级 |
 | `decision` | `chat_bi_ledger.list_decisions/build_closure` | `ChatBiDecisionRecord`（append-only） |
 | `standard` | `governance_standard.history/relint` | `GovernanceStandardRecord` |
 | `data_app` | `data_app` | `DataAppVersion` |
+| `component` | `dependency_service.list_components/to_out` | `DependencyComponent.deploy_status`（脱敏投影） |
 | `migration` | `warehouse_migration` | `WarehouseMigrationEvidence`（不可变） |
 
 ### 5.2 工具面：2 个新读工具
@@ -236,11 +236,11 @@ for rec in payload.get("ops_records") or []:
 | --- | --- | --- | --- | --- |
 | **P0 止血** | S3（拆假信息源）→ S1 → S2。**零新工具、零新概念** | 无 | 低 | ✅ |
 | **P1 骨架** | `ops_records.py` 注册表 + `landing`/`task_run` 两族 reader + `get_landing` 工具 + `ops` 技能 + **账本登记（F0）** | P0 | 中 | ✅ |
-| **P2 铺开** | 其余 11 族 reader + `get_ops_record` + `operational` 意图 + 路由读/写判别 + `record` 块 + 前端 | P1 | 中 | 🟡 |
-| **P3 验收** | 运维问题集实测 + golden 扩例 | P2 | 低 | ⬜ |
+| **P2 铺开** | 其余 11 族 reader + `get_ops_record` + `operational` 意图 + 路由读/写判别 + `record` 块 + 前端 | P1 | 中 | ✅ |
+| **P3 验收** | 运维问题集实测 + golden 扩例 | P2 | 低 | ✅ |
 
-P2 记 🟡 而非 ✅：机制（`get_ops_record` 分发 + `operational` 意图 + `record` 块）已通，
-但注册表里只有 `landing`/`task_run` 两族，§3 表格中的 C/D/E/F/H/J 等族尚未接 reader。
+P2 已完成：`get_ops_record` 暴露 12 个低频运行记录 family，另以独立的 `get_landing`
+覆盖最高频物理落点；全部复用既有权威服务并按会话/本体/全局收紧 scope。
 
 ### 本地落地进度（2026-08-28）
 
@@ -248,15 +248,23 @@ P2 记 🟡 而非 ✅：机制（`get_ops_record` 分发 + `operational` 意图
 - ✅ P1：新增 `get_landing`、`get_ops_record(family=task_run)` 两个只读工具；接入 `ops` 技能、FactLedger 登记和本体作用域校验。
 - ✅ P2（首批）：新增 `operational` 意图与读/写路由判别；运行记录统一返回 `as_of`、`observed_at`、`source`；前端新增 `record` 块展示事实和来源。
 - ✅ P2（第二批）：`get_ops_record` 接入 `pipeline`、`decision`、`ontology_version`、`standard`；分别复用任务链服务、追加式决策账本、本体版本服务和规约服务。scope 按族收紧（会话/本体/全局），FactLedger 同时登记具名事实与原始数值。
-- ⏳ 后续：扩展其余运行记录族、完整的生产问题集回放，以及跨轮 Agent run/artifact 持久化。
+- ✅ P2（第三批）：接入 `draft_run`、`merge_report`、`conflict`、`datasource`、`data_app`、`component`、`migration`；数据源与组件强制走脱敏投影，割接批次按本体防越界，所有列表上限 20。
+- ✅ P3：新增 13 个 reader × 8 种自然语言问法（104 题）的确定性评测；正确 intent、skill、tool/family 为 104/104，13/13 reader 信封保留 `as_of`、`observed_at`、`source`；补齐无工具拒答与空记录可答 golden。
+- ✅ P3.1 入口：新增 `services/ops_live_eval.py` 与 `scripts/run_ops_live_eval.py`。默认 dry-run，设置 `DATA_AGENT_LIVE=1` 才调用真实 LLM；逐题使用临时会话并清理，输出不含回答正文或凭据的 JSON 指标。
+- ✅ P3.1 冒烟（2026-08-29）：真实 `glm-5.2-fp8` 分别回放 `landing-01` 与 `task_run-01`，2/2 `ANSWERABLE`，正确 reader/family 与权威信封均为 2/2，`unsafe_non_refusal=0`，平均每题 2 次 LLM 调用。兼容网关忽略 `tool_choice` 时由服务端强制首个 reader，reader 返回后无工具收尾，避免重复搜索。
+- ✅ P3.1 全量（2026-08-29）：真实 `glm-5.2-fp8` 串行回放 104 题，单次全量为 103/104 `ANSWERABLE`（99.04%），正确 reader/family 与权威信封均为 103/104，`explicit_refusal=1`、`unsafe_non_refusal=0`；平均每题 2.24 次 LLM 调用、20.57 秒。唯一拒答 `task_run-01` 随后定点复放为 1/1 `ANSWERABLE`（2 次调用），说明不是稳定路由缺陷；单次全量仍按 103/104 如实记录，不与定点复放拼成 104/104。
+- ✅ P3.1 收敛修复：确定性路由接管 reader family 时同步归一不兼容的 scope；任意一轮成功返回目标 family 后立即无工具收尾。原失败 `draft_run-05` 定点及全量复放均通过，reader 调用由重复两次收敛为一次。
+- ✅ 后续能力：跨轮 Agent run/artifact 持久化已在 [V7](./DATA_AGENT_V7_RUN_PERSISTENCE.md) 落地；复用消息 payload，不复制 `GovernanceArtifact` 状态机，动态事实续聊时仍重新读取权威 reader。
 
 ### 验收标准
 
-- **覆盖率**：新建 `docs/DATA_AGENT_OPS_QUESTIONS.md`，11 族每族 8 题（约 90 题）。
+- **覆盖率**：已新建 `docs/DATA_AGENT_OPS_QUESTIONS.md`。原方案 11 个业务族在实现层拆为
+  13 个权威 reader，按 reader 每族 8 题，共 104 题。
   指标 = **可答率**（命中正确 family + 答案接地 + 带 `as_of`/`source`）。
-  P2 完成目标 ≥ 80%；剩余 20% 必须是**明确拒答**，不允许编造。
-- **不回归**：全套件 1578 个 test functions 全绿。
-- **不回涨**：`avg_llm_calls` 不高于 V5 基线（V5 的验收护栏，见 `config.py:143-152` 那段实测记录）。
+  确定性本地实测 104/104（100%）；真实模型单次全量 103/104（99.04%），唯一拒答定点复放通过。空记录仍是权威答案，未调用 reader 则明确拒答。
+- **不回归**：本地全后端 `1966 passed, 3 skipped`。
+- **不回涨**：运营正常回答 golden 平均 `2.0` 次 LLM 调用，未高于 V5 基线 `2.6`。
+- **真实回放**：使用 `cd backend && DATA_AGENT_LIVE=1 python scripts/run_ops_live_eval.py --domain-id <id> --output /tmp/ops-live.json`；104 题全量和失败题定点复放均已执行，不设置开关时为 dry-run，不产生网络请求。
 - **守卫不动**：只读 SQL 校验、RBAC、六环治理闸门一律不碰。
 
 ---

@@ -32,9 +32,30 @@
   --om-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06);
   --om-shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08);
 
-  --om-radius: 10px;
+  --om-radius-sm: 6px;
+  --om-radius: 8px;
+  --om-radius-md: 10px;
   --om-radius-lg: 12px;
-  --om-radius-sm: 8px;
+  --om-radius-full: 9999px;
+
+  --om-text-xs: 11px;
+  --om-text-sm: 12px;
+  --om-text-base: 14px;
+  --om-text-md: 15px;
+  --om-text-lg: 16px;
+  --om-text-xl: 18px;
+
+  --om-code-sm: 12px;
+  --om-code-base: 13px;
+
+  --om-space-1: 4px;
+  --om-space-2: 8px;
+  --om-space-3: 12px;
+  --om-space-4: 16px;
+  --om-space-5: 20px;
+  --om-space-6: 24px;
+  --om-space-8: 32px;
+  --om-space-10: 40px;
 
   --om-sidebar-w: 232px;
   --om-sidebar-collapsed-w: 64px;

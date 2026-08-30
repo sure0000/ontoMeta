@@ -1,9 +1,9 @@
-import { RobotOutlined } from "@ant-design/icons";
+import { ArrowUpOutlined, RobotOutlined } from "@ant-design/icons";
 import { Spin, message } from "antd";
 import type { RefObject } from "react";
 import { api } from "../../api";
 import { ChatBubble, useArtifactDrawer } from "./ChatBiReferences";
-import { ClosureCard } from "./ClosureCard";
+import { ClosureCards } from "./ClosureCard";
 import { useDecisionLedger } from "./DecisionLedger";
 import type { ChatMessage } from "./utils";
 
@@ -52,24 +52,22 @@ export function ChatBiMessages({
         </div>
       ) : messages.length === 0 ? (
         <div className="chatbi-welcome">
-          <div className="chatbi-welcome-icon">
-            <RobotOutlined />
+          <div className="chatbi-welcome-kicker">
+            <span className="chatbi-welcome-icon" aria-hidden>
+              <RobotOutlined />
+            </span>
+            <span className="chatbi-welcome-kicker-label">DATA AGENT</span>
+            <span className="chatbi-welcome-scope">{scopeLabel}</span>
           </div>
-          <div className="chatbi-welcome-title">Data Agent · {scopeLabel}</div>
+          <h1 className="chatbi-welcome-title">从数据问题开始</h1>
           <div className="chatbi-welcome-desc">
-            面向数据工程师、业务、运营与管理者的统一数据入口。用自然语言问数， 获取口径解读与可执行
-            SQL，并可一键把结果沉淀为数据表格或可视化大屏。
-          </div>
-          <div className="chatbi-welcome-caps">
-            <span className="chatbi-welcome-cap">自然语言问数</span>
-            <span className="chatbi-welcome-cap">口径拆解·本体落地</span>
-            <span className="chatbi-welcome-cap">生成数据表格</span>
-            <span className="chatbi-welcome-cap">生成可视化大屏</span>
+            用自然语言探索当前数据域，Data Agent 会整理口径、检索本体并给出可核验的结果。
           </div>
           {loadingSuggestions ? (
             <Spin size="small" style={{ marginTop: 8 }} />
           ) : suggestions.length > 0 ? (
-            <div className="chatbi-suggestions">
+            <div className="chatbi-suggestions" aria-label="推荐问题">
+              <div className="chatbi-suggestions-label">推荐问题</div>
               {suggestions.map((s, i) => (
                 <button
                   key={i}
@@ -78,7 +76,8 @@ export function ChatBiMessages({
                   disabled={submitting}
                   type="button"
                 >
-                  {s}
+                  <span>{s}</span>
+                  <ArrowUpOutlined className="chatbi-suggestion-arrow" aria-hidden />
                 </button>
               ))}
             </div>
@@ -111,8 +110,8 @@ export function ChatBiMessages({
         })
       )}
       {/*
-        确认闭环总结（P2）：**整个对话只有一份，钉在末尾**。
-        它是会话级的当前状态，不是某一条消息的属性——做成随消息落库的块，就得在
+        确认闭环（P2）：**一条数据任务一张卡，钉在对话末尾**。
+        它是任务的当前状态，不是某一条消息的属性——做成随消息落库的块，就得在
         「每轮都重复同一张图」和「靠时间戳猜有没有新决策」之间二选一，两条都不成立。
         数据来自 DecisionLedgerProvider，每次留痕写入后自动重取，故恒为最新。
       */}
@@ -121,13 +120,19 @@ export function ChatBiMessages({
   );
 }
 
-/** 会话闭环卡；一环未达则整块不渲染——随口一问不该顶着一张全灰的六环图。 */
+/**
+ * 本会话建过的每条数据任务各一张闭环卡。
+ *
+ * **没建任务就一张都不画**：闭环是"要落一条数据任务"才谈得上的东西。此前只要账本里有
+ * 任何一条记录就出卡，于是随口问一句数、在结果上点个「认可」，对话末尾就顶出一张
+ * 「1/6 环已确认」——那次查询没有任何要闭的环，卡片只是在自说自话。
+ */
 function ConversationClosure() {
   const { closure } = useDecisionLedger();
-  // 后三环都在这个抽屉里确认。闭环卡是**会话级**的，抽屉挂在它身上就与任何一条消息块的
-  // 生命周期无关了——人关掉窗口、甚至刷新页面，任务行还在，点一下就重新进来。
+  // 后三环都在这个抽屉里确认。抽屉挂在闭环卡这一层，就与任何一条消息块的生命周期
+  // 无关了——人关掉窗口、甚至刷新页面，卡片还在，点一下就重新进来。
   const drawer = useArtifactDrawer(undefined, closure?.conversation_id);
-  if (!closure || closure.reached_count === 0) return null;
+  if (!closure?.tasks?.length) return null;
   const enterTask = (artifactId: string) => {
     void api
       .getArtifact(artifactId)
@@ -138,7 +143,7 @@ function ConversationClosure() {
   };
   return (
     <>
-      <ClosureCard closure={closure} onEnterTask={enterTask} />
+      <ClosureCards tasks={closure.tasks} onEnterTask={enterTask} />
       {drawer.node}
     </>
   );

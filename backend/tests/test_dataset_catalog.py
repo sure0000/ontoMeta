@@ -142,7 +142,7 @@ def test_landed_object_yields_ods_and_serving_entries(db, catalog_seed):
     assert ods.ref == dataset_ref(KIND_OBJECT, obj.id, SLOT_ODS)
     assert serving.physical == "dwd.dwd_customer"
     assert serving.layer == "dwd"
-    # ODS 不对外服务；能查的是服务层那张。
+    # 两张表分离时，原始 ODS 只作为下游加工源；能查的是服务层那张。
     assert (ods.queryable, serving.queryable) == (False, True)
 
 

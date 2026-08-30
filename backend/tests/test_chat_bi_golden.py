@@ -154,6 +154,7 @@ class _StubCompletions:
         self._last_final: FinalTurn | None = None
         self._final_served = False  # 收尾轮 content 是否已交付（用于区分兜底/自愈）
         self.calls = 0
+        self.requests: list[dict] = []
 
     def _resolve(self, args: dict) -> dict:
         return {
@@ -163,6 +164,7 @@ class _StubCompletions:
 
     async def create(self, **kwargs):
         self.calls += 1
+        self.requests.append(kwargs)
         if kwargs.get("stream"):
             # 流式调用有两种来源：①收尾轮 content 为空时的兜底；②P4.3 自愈重写。
             # 后者要能吐出**不同的**答案，否则重写必然重蹈覆辙，测不出自愈是否有效。
@@ -242,7 +244,7 @@ async def _run_case(case: GoldenCase, domain_id: str, aliases: dict[str, str]) -
     # 一个 DataSource（服务层已注明的 P1 取舍）。不钉的话，别的测试建了数据源，
     # 这里就会真去执行，基线随测试顺序漂移，就不成其为基线了。
     svc._resolve_domain_data_source = (
-        lambda _db, target_catalog=None: None  # type: ignore[assignment]
+        lambda _db: None  # type: ignore[assignment]
     )
     # 取前后差值而不是 reset：累计基线测试要靠全局计数不断累加
     before = agent_telemetry.snapshot()
@@ -266,7 +268,7 @@ def _svc_without_data_source() -> ChatBiService:
     """golden 域不绑数据源的服务实例（理由同 `_run_case` 里的说明）。"""
     svc = ChatBiService()
     svc._resolve_domain_data_source = (
-        lambda _db, target_catalog=None: None  # type: ignore[assignment]
+        lambda _db: None  # type: ignore[assignment]
     )
     return svc
 
@@ -330,6 +332,21 @@ def test_golden_case(case: GoldenCase, golden_domain):
             f"{case.id}: 答案未包含 {case.expect_answer_contains!r}；"
             f"answer={payload.get('answer')!r}"
         )
+
+    if case.expect_ops_family:
+        records = payload.get("ops_records") or []
+        record = next(
+            (item for item in records if item.get("family") == case.expect_ops_family),
+            None,
+        )
+        assert record is not None, (
+            f"{case.id}: 缺少 family={case.expect_ops_family} 的运行记录；records={records}"
+        )
+        if case.expect_record_source:
+            assert record.get("source"), f"{case.id}: record.source 缺失"
+        if case.expect_record_observed_at:
+            assert record.get("observed_at"), f"{case.id}: record.observed_at 缺失"
+        assert "as_of" in record, f"{case.id}: record.as_of 键缺失"
 
     tel = payload["_telemetry"]
     if case.expect_repairs is not None:

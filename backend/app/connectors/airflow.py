@@ -3,7 +3,7 @@
 **ontoMeta 不做运行时执行器**（见 `MATERIALIZE_ORCHESTRATION.md` §2）：物化提交后由
 Airflow 负责重试、补数、水位与并发，本模块只做两件事——把 DagRun 触发起来、把状态读回来。
 
-凭据不入产物：连接信息来自 ``settings``（比照 DatahubSetting/CubeSetting 的 DB-backed 做法），
+凭据不入产物：连接信息来自 ``settings`` 的数据库配置，
 生成的 DAG 里只有 conn_id，不含任何账号密码。
 
 ⚠ **REST 版本**：Airflow 2.x 为 ``/api/v1``，3.x 为 ``/api/v2``。**不要用户去配**——
@@ -76,7 +76,7 @@ class AirflowClient:
         self._version_negotiated = False
         # trust_env=False：Airflow 是内网服务，绝不该走开发机的 HTTP(S)_PROXY / ALL_PROXY。
         # 尤其 ALL_PROXY=socks5://… 时 httpx 会直接抛 ImportError（缺 socksio），
-        # 连通性测试因此永远失败。与 cube/datahub 连接器、services.common 同一处置。
+        # 连通性测试因此永远失败，与其它连接器统一处理。
         self._client = client or httpx.Client(trust_env=False, timeout=timeout)
 
     def close(self) -> None:
@@ -201,7 +201,7 @@ class AirflowClient:
         )
 
     def dag_exists(self, dag_id: str) -> bool:
-        """DAG 是否已被 Airflow 解析并登记。用于 preflight 的 sentinel 探测。
+        """DAG 是否已被 Airflow 解析并登记。
 
         ``GET /dags/{id}`` 对未解析的 DAG 返回 404——把它翻成布尔，其余错误（鉴权、
         网络）照旧抛出，不吞。
@@ -217,9 +217,8 @@ class AirflowClient:
     def list_dag_ids(self, *, limit: int = 200, pattern: str | None = None) -> list[str]:
         """Airflow 已登记的 dag_id 列表。
 
-        用途是判定「我们投出去的 DAG，Airflow 到底看没看见」——比 sentinel 的定时轮询
-        强得多：sentinel 只等 20s，分不清「路径错」和「扫得慢」；而**历史**投过的 DAG
-        若一个都不在册，那就与扫描间隔无关了。
+        用途是核对「我们投出去的 DAG，Airflow 到底看没看见」；若历史投过的 DAG
+        一个都不在册，就与扫描间隔无关了。
         """
         params: dict[str, Any] = {"limit": limit}
         if pattern:

@@ -159,6 +159,30 @@ def resolve_fields(db: Session, *, ontology_id: str, fields: list[dict]) -> list
     return refs
 
 
+# 三种 logic_type 的表达式体形状——出错时随错误回给调用方，让它照着改而不是再猜一轮。
+_BODY_TEMPLATES: dict[str, dict] = {
+    "metric": {
+        "operation": "count",
+        "args": [{"ref": "别名"}],
+        "group_by": [{"ref": "别名"}],
+        "filter": {"left": {"ref": "别名"}, "op": "=", "right": {"value": 0}},
+    },
+    "tag": {
+        "cases": [
+            {
+                "when": {"left": {"ref": "别名"}, "op": ">", "right": {"value": 1000}},
+                "then": {"value": "大额"},
+            },
+            {"when": None, "then": {"value": "普通"}},
+        ]
+    },
+    "rule": {
+        "condition": {"left": {"ref": "别名"}, "op": ">=", "right": {"value": 0}},
+        "message": "违规说明",
+    },
+}
+
+
 def build_ast(
     *, logic_type: str, refs: list[dict], body: dict
 ) -> dict:
@@ -176,6 +200,20 @@ def build_ast(
     declared = {str(r["ref_id"]) for r in refs}
     used: set[str] = set()
     _walk_ref_ids(body, used)
+    if declared and not used:
+        # 声明了字段却一个 {"ref": …} 都没用到 = 表达式体写成了别的形状（实测常见：
+        # {"aggregation": "count", "measure": "cg.name", "filter": {"field": "…"}}）。
+        # 不在这里拦的话，后面 _ref_of 全解析成 None，报出来的是「不支持的聚合算子」
+        # 这种指不到病根的错，调用方改不动。
+        raise CandidateError(
+            "body_shape",
+            "表达式体没有引用任何 fields 里的别名——引用一律写成 {\"ref\": \"别名\"}，"
+            "不要用 \"对象.字段\" 这种点号串，也不要用 measure/field 之类的键名。",
+            {
+                "declared": sorted(declared),
+                "expected_body": _BODY_TEMPLATES.get(lt, {}),
+            },
+        )
     unknown = sorted(used - declared)
     if unknown:
         # 不拦的话，未声明的引用会被 _ref_of 静默解析成 None——SUM 退化成 COUNT(*)

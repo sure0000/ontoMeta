@@ -38,7 +38,10 @@ export function ChatBiPage() {
   // 会让下游依赖 [domainIds] 的 effect 无限重跑——表现为右侧消息区/推荐永远 loading。
   const domainIds = useMemo(() => {
     const requested = domainsParam
-      ? domainsParam.split(",").map((s) => s.trim()).filter(Boolean)
+      ? domainsParam
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
       : [];
     // 过滤掉已不存在的域 id
     return requested.filter((id) => domainList.some((d) => d.id === id));
@@ -61,9 +64,7 @@ export function ChatBiPage() {
   const activeDomains = domainIds
     .map((id) => domainList.find((d) => d.id === id))
     .filter((d): d is DomainContext => Boolean(d));
-  const scopeLabel = activeDomains.length
-    ? activeDomains.map((d) => d.name).join("、")
-    : "全域";
+  const scopeLabel = activeDomains.length ? activeDomains.map((d) => d.name).join("、") : "全域";
 
   const [conversations, setConversations] = useState<ChatBiConversation[]>([]);
   const [archivedConversations, setArchivedConversations] = useState<ChatBiConversation[]>([]);
@@ -71,7 +72,9 @@ export function ChatBiPage() {
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [sidebarVisible, setSidebarVisible] = useState(
+    () => typeof window === "undefined" || window.innerWidth > 768,
+  );
   const [showArchived, setShowArchived] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
 
@@ -151,6 +154,7 @@ export function ChatBiPage() {
 
   const handleSelectConversation = useCallback((id: string) => {
     setActiveConversationId(id);
+    if (window.innerWidth <= 768) setSidebarVisible(false);
     setShowArchived(false);
   }, []);
 
@@ -160,6 +164,7 @@ export function ChatBiPage() {
       const conv = await api.createChatBiConversation({ domain_ids: domainIds });
       prependConversation(conv);
       setActiveConversationId(conv.id);
+      if (window.innerWidth <= 768) setSidebarVisible(false);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "创建对话失败");
     }
@@ -598,6 +603,7 @@ export function ChatBiPage() {
               onToggleBatchSelect={handleToggleBatchSelect}
               onBatchSelectAll={handleBatchSelectAll}
               onBatchDelete={handleBatchDelete}
+              onClose={() => setSidebarVisible(false)}
             />
           )}
           <ChatBiMain
@@ -623,7 +629,7 @@ export function ChatBiPage() {
         }}
         okText="确认"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           placeholder="对话名称"
@@ -648,7 +654,7 @@ export function ChatBiPage() {
         okText={catDialogMode === "delete" ? "删除" : "确认"}
         okType={catDialogMode === "delete" ? "danger" : "primary"}
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         {catDialogMode === "create" && (
           <Input
@@ -960,8 +966,11 @@ const ChatBiMain = memo(function ChatBiMain({
       const userMsg: ChatMessage = { role: "user", content: trimmed };
       const pendingMsg: ChatMessage = {
         role: "assistant",
-        content: "思考中…",
+        // 正文留空：等待期的交代由 pending 的打字点和思考流水折叠头的「正在思考…」负责，
+        // 再放一句「思考中…」就是同一件事在同一屏说两遍。
+        content: "",
         pending: true,
+        live: true,
       };
       const history: ChatBiHistoryItem[] = messages
         .filter((m) => !m.pending && !m.error)
@@ -969,6 +978,9 @@ const ChatBiMain = memo(function ChatBiMain({
 
       setMessages((prev) => [...prev, userMsg, pendingMsg]);
       setSubmitting(true);
+      // 思考流水折叠头显示的耗时锚点。落库的 agent_run 也有起止时间，但那要等这一轮结束
+      // 才回来；现场展示需要一个此刻就能读的秒表。
+      const askedAt = Date.now();
 
       try {
         const requestDomainIds = activeConversation?.domain_ids ?? domainIds;
@@ -1006,6 +1018,10 @@ const ChatBiMain = memo(function ChatBiMain({
               const cur = { ...last };
               // 收到任一事件即退出纯 pending（typing dots）态，转为实时展示步骤/答案
               cur.pending = false;
+              // 每个事件都推进秒表，最后一个事件的读数就是这一轮的总耗时。
+              cur.thinkingMs = Date.now() - askedAt;
+              // done/error 之外都还在路上——含「最后一步跑完、答案未出」的那段校验空档。
+              cur.live = ev.type !== "done" && ev.type !== "error";
               const payload: ChatBiAnswer = {
                 domain_ids: activeConversation?.domain_ids ?? domainIds,
                 domain_id: (activeConversation?.domain_ids ?? domainIds)[0],
@@ -1047,23 +1063,30 @@ const ChatBiMain = memo(function ChatBiMain({
                   ];
                   cur.payload = payload;
                   break;
-                case "repair":
+                case "repair": {
                   // 校验未过、正在重写。不展示是最差的选择——用户只会看到一段
                   // 无解释的停顿；这里如实说明「在核对」，而不是假装无事发生。
+                  // 后端发的是具体哪几处没被证实，用它，不要在前端另编一句更含糊的。
+                  const reasons = (ev.reasons ?? []).filter(Boolean);
+                  const shown = reasons.slice(0, 2).join("、");
+                  const more = reasons.length > 2 ? `等 ${reasons.length} 处` : "";
                   payload.steps = [
                     ...(payload.steps ?? []),
                     {
                       index: (payload.steps ?? []).length,
                       kind: "repair",
                       tool: "",
-                      text: "答案未通过可靠性核验，正在依据已检索到的事实重写",
+                      text: shown
+                        ? `${shown}${more}，正在依据已查到的事实重写`
+                        : "答案未通过可靠性核验，正在依据已检索到的事实重写",
                       status: "running",
                     } as ChatBiAgentStep,
                   ];
                   cur.payload = payload;
                   break;
+                }
                 case "token":
-                  cur.content = (cur.content === "思考中…" ? "" : cur.content) + ev.delta;
+                  cur.content = cur.content + ev.delta;
                   cur.streaming = true;
                   cur.payload = payload;
                   break;
@@ -1096,6 +1119,15 @@ const ChatBiMain = memo(function ChatBiMain({
         });
       } finally {
         setSubmitting(false);
+        // 流被掐断（网络断、服务重启）时不会有 done/error 事件，live 会一直挂着，
+        // 折叠头就永远停在「正在思考…」。这里兜底收尾。
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (!last || last.role !== "assistant" || !last.live) return prev;
+          const next = [...prev];
+          next[next.length - 1] = { ...last, live: false };
+          return next;
+        });
       }
     },
     [
@@ -1112,70 +1144,70 @@ const ChatBiMain = memo(function ChatBiMain({
   return (
     <DecisionLedgerProvider conversationId={activeConversationId ?? undefined}>
       <section className="chatbi-shell">
-      <div className="chatbi-shell-topbar">
-        <Tooltip title={sidebarVisible ? "收起侧栏" : "展开侧栏"}>
-          <Button
-            type="text"
-            icon={sidebarVisible ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
-            onClick={onToggleSidebar}
-          />
-        </Tooltip>
-        {activeConversation && (
-          <div className="chatbi-shell-topbar-title">{activeConversation.title}</div>
-        )}
-        <div className="chatbi-shell-domain">
-          <Tag color="blue" style={{ borderRadius: 6 }}>
-            {scopeLabel}
-          </Tag>
+        <div className="chatbi-shell-topbar">
+          <Tooltip title={sidebarVisible ? "收起侧栏" : "展开侧栏"}>
+            <Button
+              type="text"
+              icon={sidebarVisible ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
+              onClick={onToggleSidebar}
+            />
+          </Tooltip>
+          {activeConversation && (
+            <div className="chatbi-shell-topbar-title">{activeConversation.title}</div>
+          )}
+          <div className="chatbi-shell-domain">
+            <Tag color="blue" style={{ borderRadius: 6 }}>
+              {scopeLabel}
+            </Tag>
+          </div>
         </div>
-      </div>
 
-      <ChatBiMessages
-        scrollRef={scrollRef}
-        loadingMessages={loadingMessages}
-        messages={messages}
-        activeConversationId={activeConversationId}
-        scopeLabel={scopeLabel}
-        loadingSuggestions={loadingSuggestions}
-        suggestions={suggestions}
-        submitting={submitting}
-        onSuggestionClick={submit}
-        onGenerateApp={handleGenerateApp}
-        onAddToDashboard={openAddToDashboard}
-        onProposeApp={handleProposeApp}
-      />
-
-      <ChatBiComposer
-        scopeLabel={scopeLabel}
-        input={input}
-        submitting={submitting}
-        onInputChange={setInput}
-        onSubmit={submit}
-      />
-
-      <Modal
-        title="加入看板"
-        open={addDashOpen}
-        onCancel={() => setAddDashOpen(false)}
-        onOk={confirmAddToDashboard}
-        okText="生成图表并加入"
-        confirmLoading={addingDash}
-      >
-        <div style={{ marginBottom: 8, color: "var(--om-text-tertiary)" }}>
-          基于当前回答的口径生成一个可复用图表，并加入选定看板（不重调模型）。
-        </div>
-        <Select
-          style={{ width: "100%" }}
-          placeholder="选择目标看板（或新建）"
-          value={addDashTarget}
-          onChange={setAddDashTarget}
-          options={[
-            { label: "＋ 新建看板", value: "__new__" },
-            ...dashboards.map((d) => ({ label: d.name, value: d.id })),
-          ]}
+        <ChatBiMessages
+          scrollRef={scrollRef}
+          loadingMessages={loadingMessages}
+          messages={messages}
+          activeConversationId={activeConversationId}
+          scopeLabel={scopeLabel}
+          loadingSuggestions={loadingSuggestions}
+          suggestions={suggestions}
+          submitting={submitting}
+          onSuggestionClick={submit}
+          onGenerateApp={handleGenerateApp}
+          onAddToDashboard={openAddToDashboard}
+          onProposeApp={handleProposeApp}
         />
-      </Modal>
-    </section>
+
+        <ChatBiComposer
+          scopeLabel={scopeLabel}
+          input={input}
+          submitting={submitting}
+          onInputChange={setInput}
+          onSubmit={submit}
+        />
+
+        <Modal
+          title="加入看板"
+          open={addDashOpen}
+          onCancel={() => setAddDashOpen(false)}
+          onOk={confirmAddToDashboard}
+          okText="生成图表并加入"
+          confirmLoading={addingDash}
+        >
+          <div style={{ marginBottom: 8, color: "var(--om-text-tertiary)" }}>
+            基于当前回答的口径生成一个可复用图表，并加入选定看板（不重调模型）。
+          </div>
+          <Select
+            style={{ width: "100%" }}
+            placeholder="选择目标看板（或新建）"
+            value={addDashTarget}
+            onChange={setAddDashTarget}
+            options={[
+              { label: "＋ 新建看板", value: "__new__" },
+              ...dashboards.map((d) => ({ label: d.name, value: d.id })),
+            ]}
+          />
+        </Modal>
+      </section>
     </DecisionLedgerProvider>
   );
 });

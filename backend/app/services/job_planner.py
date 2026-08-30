@@ -5,7 +5,7 @@ SELECT ... FROM erp_ods.tab_customer``（``warehouse_generator.generate_etl_sql`
 并在**目标数仓**的连接上执行——这隐含假设源表在目标数仓里可见。真实拓扑是源库
 （ERP 的 MySQL/MariaDB）与数仓分处两侧，除非配了外部 Catalog，这条 SQL 必然报表不存在。
 跨库搬运本就不是一条 INSERT…SELECT 能干的事，故改由专业搬运工具执行，本模块负责
-把「搬什么、从哪到哪、怎么搬」编译成工具无关的 ``JobSpec``。
+把「搬什么、从哪到哪、怎么搬」编译成 Flink ``JobSpec``。
 
 **同源约束**：列映射、装载方式、分区键全部取自与 M3 相同的事实源
 （``LogicalTable`` + ``warehouse_generator._field_refs``），不另算一套——否则
@@ -31,8 +31,8 @@ from app.warehouse.jobs import (
     JobEndpoint,
     JobPlan,
     JobSpec,
-    get_job_adapter,
 )
+from app.warehouse.jobs.flink import FlinkAdapter
 from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse.logical_schema import LogicalConstraint
 
@@ -42,6 +42,7 @@ DEFAULT_SOURCE_ALIAS = "erp_readonly"
 DEFAULT_TARGET_ALIAS = "warehouse_default"
 
 _generator = WarehouseGenerator()
+_flink_adapter = FlinkAdapter()
 
 
 class JobPlanningError(ValueError):
@@ -126,43 +127,6 @@ def _deduplicate_jobs(jobs: list[JobSpec]) -> tuple[JobSpec, ...]:
     return tuple(unique)
 
 
-def _runner_reject(
-    capabilities: dict, mode: str, source_platform: str, target_engine: str
-) -> str | None:
-    """runner 通道的可搬性门禁：按 runner 如实声明的 capabilities 判，不静默降级。
-
-    返回拒绝原因（进 unsupported）或 None（可搬）。替代 docker 通道那套「工具适配器
-    硬编码平台表」——能不能搬由**执行侧实际装了什么**说了算（§3.1）。
-    """
-    modes = set(capabilities.get("modes") or [])
-    sources = set(capabilities.get("sources") or [])
-    sinks = set(capabilities.get("sinks") or [])
-    sink_modes = capabilities.get("sink_modes") or {}
-    engine = target_engine.lower()
-
-    if source_platform.lower() not in sources:
-        return f"runner 无 {source_platform} 源连接器（支持：{', '.join(sorted(sources)) or '无'}）"
-    if engine not in sinks:
-        return f"runner 无 {target_engine} 目标连接器（支持：{', '.join(sorted(sinks)) or '无'}）"
-
-    if sink_modes:
-        # 按**组合**判：扁平的 modes/sinks 分别判会放过实际不存在的组合——runner 可能
-        # 一个档能写 hive 但只做全量、另一个档能做增量但写不了 hive，合看「hive + 增量」
-        # 会通过门禁、跑到执行侧才失败（contract v2 起 runner 会声明 sink_modes）。
-        allowed = set(sink_modes.get(engine) or [])
-        if mode not in allowed:
-            return (
-                f"runner 写 {target_engine} 时不支持装载方式 {mode}"
-                f"（该目标支持：{', '.join(sorted(allowed)) or '无'}）"
-            )
-        return None
-
-    # 旧 runner（无 sink_modes）：只能退回扁平判断。
-    if mode not in modes:
-        return f"runner 不支持装载方式 {mode}（支持：{', '.join(sorted(modes)) or '无'}）"
-    return None
-
-
 class JobPlanner:
     def build(
         self,
@@ -170,14 +134,12 @@ class JobPlanner:
         ontology_id: str,
         *,
         engine: str,
-        tool: str | None = None,
         source_alias: str = DEFAULT_SOURCE_ALIAS,
         target_alias: str = DEFAULT_TARGET_ALIAS,
         database_prefix: str | None = None,
         database_overrides: dict[str, str] | None = None,
         table_overrides: dict[str, str] | None = None,
         selected_targets: list[str] | None = None,
-        runner_capabilities: dict | None = None,
         load_strategy: str | None = None,
         target_ods_database: str | None = None,
         target_ods_tables: dict[str, str] | None = None,
@@ -194,14 +156,11 @@ class JobPlanner:
         ``engine`` 为目标数仓引擎（决定 sink 连接器）；``database_overrides`` /
         ``table_overrides`` 与物化弹窗同义，保证作业写入的库表与 DDL 建的完全一致。
         ``selected_targets`` 按**本体实体名**裁剪（不是物理表名，故改过表名也不会误裁）。
-        ``runner_capabilities`` 给了则走 runner 通道的可搬性门禁（按执行侧实际能力判），
-        为 None 则沿用 docker 通道的工具适配器门禁。
-
         ``load_strategy``：**本次运行的全局装载方式覆盖**，缺省 None = 逐表按契约。
         给了它，物化 Spec 上那个 ``load_strategy`` 才真的作数——此前它传到 runner
         就没了，界面显示「全量覆盖」而作业按契约跑增量，两边说的不是一回事。
         """
-        adapter = get_job_adapter(tool)
+        adapter = _flink_adapter
         logical = _generator.build_logical_schema(
             db,
             ontology_id,
@@ -262,23 +221,16 @@ class JobPlanner:
 
             # 显式覆盖 > 该表契约 > full。覆盖是「这一次这么跑」，不写回契约。
             mode = (load_strategy or table.load_strategy or "full").strip().lower()
-            # 可搬性门禁：runner 通道按执行侧 capabilities，docker 通道按工具适配器。
-            if runner_capabilities is not None:
-                reason = _runner_reject(runner_capabilities, mode, platform, engine)
-                if reason:
-                    plan.note(table.qualified_name, reason)
-                    continue
-            else:
-                if not adapter.supports(mode):
-                    plan.note(table.qualified_name, f"{adapter.name} 不支持装载方式 {mode}")
-                    continue
-                if mode == "cdc" and not adapter.supports_cdc_from(platform):
-                    # 不静默退回全量：CDC 退成全量会改变数据语义，必须让人看见。
-                    plan.note(
-                        table.qualified_name,
-                        f"契约要求 CDC，但 {adapter.name} 无 {platform} 的 CDC 连接器",
-                    )
-                    continue
+            if not adapter.supports(mode):
+                plan.note(table.qualified_name, f"{adapter.name} 不支持装载方式 {mode}")
+                continue
+            if mode == "cdc" and not adapter.supports_cdc_from(platform):
+                # 不静默退回全量：CDC 退成全量会改变数据语义，必须让人看见。
+                plan.note(
+                    table.qualified_name,
+                    f"契约要求 CDC，但 {adapter.name} 无 {platform} 的 CDC 连接器",
+                )
+                continue
             if mode == "incremental" and not table.partition_key:
                 # 与 M3 的 warning 同义：允许生成，但必须显式提示可能重复。
                 plan.note(
@@ -320,7 +272,7 @@ class JobPlanner:
                     source_urn=urn,
                     entity_name=entity,
                     # 带类型目标表：Flink SQL 编译要列类型，planner 此刻正持有它，顺手带上
-                    # （避免下游 build_flink_etl_input 逐实体重建 schema，见统一执行重构 B）。
+                    # （避免下游逐实体重建 schema）。
                     target_table=table,
                 )
             )
@@ -343,10 +295,9 @@ class JobPlanner:
             if has_physical_source(obj.source_ref)
         }
 
-    def render(self, plan: JobPlan, *, tool: str | None = None) -> dict[str, dict]:
-        """JobPlan → ``{作业名: 工具配置}``。工具特定逻辑全在 Adapter 里。"""
-        adapter = get_job_adapter(tool)
-        return {job.name: adapter.render(job) for job in plan.jobs}
+    def render(self, plan: JobPlan) -> dict[str, dict]:
+        """JobPlan → Flink 作业配置。"""
+        return {job.name: _flink_adapter.render(job) for job in plan.jobs}
 
 
 # 与 warehouse_generator 同样的模块级单例用法，便于 runner/executor 直接引用。

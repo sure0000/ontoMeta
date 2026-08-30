@@ -98,18 +98,6 @@ class DraftGenerationSettingsUpdate(BaseModel):
     relation_chunk_concurrency: int = Field(ge=1, le=32)
 
 
-class CubeSettingsOut(BaseModel):
-    api_url: str
-    secret_set: bool
-    secret_hint: str | None = None
-    preagg_refresh: str
-    tenant_dimension: str | None = None
-    timeout_seconds: int
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
 class AirflowSettingsOut(BaseModel):
     """Airflow 编排配置。凭据只回传「是否已设 + 掩码」，不回明文。
 
@@ -140,7 +128,6 @@ class AirflowSettingsOut(BaseModel):
     max_tasks_per_dag: int = 50
     max_active_tasks_per_dag: int = 16
     dag_parse_timeout: float = 60.0
-    preflight_sentinel_timeout: float = 20.0
     staging_swap: bool = True
     updated_at: datetime
 
@@ -163,35 +150,4 @@ class AirflowSettingsUpdate(BaseModel):
     max_active_tasks_per_dag: int = Field(default=16, ge=1, le=256)
     # 要大于 Airflow 的 dag_dir_list_interval，否则首次提交必报「尚未解析到」。
     dag_parse_timeout: float = Field(default=60.0, ge=0, le=3600)
-    preflight_sentinel_timeout: float = Field(default=20.0, ge=0, le=600)
     staging_swap: bool = True
-
-
-class CubeSettingsUpdate(BaseModel):
-    api_url: str
-    api_secret: str | None = None
-    preagg_refresh: str = "1 hour"
-    tenant_dimension: str | None = None
-    timeout_seconds: int = Field(default=30, ge=1, le=600)
-
-
-class SyncRunnerSecretOut(BaseModel):
-    """runner 侧一个别名的配置概览。**不含任何机密明文**——机密键只回「已设置」。"""
-
-    alias: str
-    # store：由设置页写入 runner 自己的存储，可改；env：部署时钉死的环境变量，只读。
-    source: str
-    values: dict[str, str] = Field(default_factory=dict)
-
-
-class SyncRunnerSecretUpdate(BaseModel):
-    """写一个别名的连接配置。
-
-    值**穿透到 runner 就没了**：ontoMeta 不落库、不缓存——设置页只是代填的输入框，
-    不是凭据库（凭据只有一个归属地，见 MATERIALIZE_SYNC_STABILITY.md §3.1）。
-    传空串表示清掉该项。
-    """
-
-    values: dict[str, str] = Field(
-        description="如 {'url': 'mysql+pymysql://u:p@h:3306/db', 'metastore_uri': 'thrift://h:9083'}"
-    )

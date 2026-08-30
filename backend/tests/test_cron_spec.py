@@ -85,3 +85,26 @@ def test_gate_accepts_empty_and_valid_schedule():
                 ontology_id=None,
             )
             assert not [i for i in issues if i.code == "schedule_invalid"]
+
+
+def test_gate_enforces_task_target_layer_boundaries():
+    """目标层边界必须由后端执行，不能只依赖手动/Data Agent 下拉框。"""
+    from app.agents.validation import validate_spec
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        transform_issues = validate_spec(
+            db,
+            kind="transform",
+            spec={"target_table": "customer", "engine": "doris", "target_layer": "ads"},
+            ontology_id=None,
+        )
+        metric_issues = validate_spec(
+            db,
+            kind="metric",
+            spec={"metric_name": "gmv", "engine": "doris", "target_layer": "dim"},
+            ontology_id=None,
+        )
+
+    assert any(i.code == "transform_target_layer_forbidden" for i in transform_issues)
+    assert any(i.code == "metric_target_layer_forbidden" for i in metric_issues)

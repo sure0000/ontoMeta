@@ -59,6 +59,13 @@ def test_classify_intent_operational_is_read_only_and_specific():
     assert cls("当前六环进度到哪一环") == "operational"
     assert cls("本体发布版本和上一版有什么差异") == "operational"
     assert cls("当前生效规约是哪版") == "operational"
+    assert cls("上次草稿生成进度怎么样") == "operational"
+    assert cls("重新生成的合并报告是什么") == "operational"
+    assert cls("当前有哪些待复核冲突") == "operational"
+    assert cls("ERP 数据源上次测通了吗") == "operational"
+    assert cls("经营看板版本发布了几版") == "operational"
+    assert cls("Airflow 组件部署状态是什么") == "operational"
+    assert cls("生产割接到哪一步了") == "operational"
     assert cls("近30天任务失败次数是多少") == "analytical"
 
 

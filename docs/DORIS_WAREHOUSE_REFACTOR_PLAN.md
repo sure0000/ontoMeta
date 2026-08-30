@@ -225,7 +225,7 @@ ads_erp.gmv
 | 业务明细、事实、桥表 | DWD |
 | 主题汇总对象 | DWS |
 | metric/tag/rule | ADS |
-| 尚未加工、只有 ODS 的对象 | 默认不可查询；人工允许后才可作为 serving |
+| 无独立加工、只有同步 ODS 的源对象 | 同步验证成功后，同一张表直接作为 serving |
 
 Data Agent 不自行猜 ODS/DWD/ADS，查询映射由部署元数据明确给出。
 
@@ -254,7 +254,7 @@ Data Agent 不自行猜 ODS/DWD/ADS，查询映射由部署元数据明确给出
 - 成功后状态为 `schema_ready`，不能直接标记 `queryable=true`；
 - ODS 接入表与语义层表均通过确定性 DDL 创建。
 
-## 5.2 Sync：Flink 只同步到 Doris ODS
+## 5.2 Sync：Flink 同步到 Doris ODS 并直接登记源对象 serving
 
 ```text
 业务源物理表
@@ -1555,7 +1555,7 @@ DataHub 血缘目标：
 | Full swap 对 Doris 表属性有限制 | 真实实例验证 `REPLACE WITH TABLE` |
 | 734+ 表 DAG 规模过大 | 按 cron、域和 max tasks 分批 |
 | 本体更新后旧投影仍被查询 | Deployment 绑定 ontology_version，版本不符 fail-closed |
-| 只有 ODS、无 serving 表 | 默认不可查询，明确配置 serving 后放行 |
+| 同步 ODS、无独立加工表 | 验证成功后 ODS 与 serving 指向同一张表并放行 |
 | 查询全部集中 Doris 后容量不足 | 压测 QPS、并发、资源组和超时 |
 | transform/metric 从 Flink 改 Doris 后 SQL 方言差异 | golden SQL + 真实 Doris integration tests |
 | 旧测试大量依赖 Hive/Flink | 分 Phase 更新，禁止一次性删除全部旧保护网 |

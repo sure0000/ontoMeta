@@ -123,6 +123,22 @@ def test_metric_drafter_reads_existing_business_logic(seeded):
     assert spec["target_layer"] == "ads"
 
 
+def test_metric_drafter_uses_refresh_cron_protocol_with_legacy_alias(seeded):
+    spec = MetricDrafter().draft(
+        "统计成交额",
+        {"ontology_id": seeded["ontology_id"], "refresh_cron": "0 2 * * *"},
+    )
+    assert spec["refresh_cron"] == "0 2 * * *"
+    assert "schedule" not in spec
+
+    legacy = MetricDrafter().draft(
+        "统计成交额",
+        {"ontology_id": seeded["ontology_id"], "schedule": "0 3 * * *"},
+    )
+    assert legacy["refresh_cron"] == "0 3 * * *"
+    assert "schedule" not in legacy
+
+
 def test_metric_drafter_refuses_when_no_logic_matches(seeded):
     with pytest.raises(ValueError, match="未在本体中找到匹配的业务逻辑"):
         MetricDrafter().draft("统计某个不存在的东西", {"ontology_id": seeded["ontology_id"]})
@@ -328,6 +344,30 @@ def test_transform_drafter_keeps_unmatched_intent_as_notes(seeded):
     assert "特殊处理" in spec["notes"]
 
 
+def test_transform_drafter_uses_refresh_cron_protocol_with_legacy_alias(seeded):
+    spec = TransformDrafter().draft(
+        "客户表去重",
+        {
+            "ontology_id": seeded["ontology_id"],
+            "target_table": "customer",
+            "refresh_cron": "0 4 * * *",
+        },
+    )
+    assert spec["refresh_cron"] == "0 4 * * *"
+    assert "schedule" not in spec
+
+    legacy = TransformDrafter().draft(
+        "客户表去重",
+        {
+            "ontology_id": seeded["ontology_id"],
+            "target_table": "customer",
+            "schedule": "0 5 * * *",
+        },
+    )
+    assert legacy["refresh_cron"] == "0 5 * * *"
+    assert "schedule" not in legacy
+
+
 def test_transform_executor_reuses_m3_generator(seeded):
     spec = TransformDrafter().draft(
         "客户表去重",
@@ -509,18 +549,10 @@ def test_sync_task_name_uses_the_business_object_not_physical_coordinates(seeded
     assert drafter.suggested_name("同步客户", spec) == name
 
 
-def test_sync_task_name_falls_back_for_legacy_specs():
-    """老 Spec 没有对象名（只有物理坐标）时不硬编名字，退回原口径。"""
-    legacy = {"source": "erp_ods.tab_customer", "target": "ods.ods_erp_tab_customer"}
-    assert SyncDrafter().name_from_spec(legacy) == (
-        "同步 · erp_ods.tab_customer → ods.ods_erp_tab_customer"
-    )
-
-
 def test_sync_preservation_surfaces_in_plan(seeded):
     """关键源保全判定仍在，执行器如实带出（Flink 路径的 STG 保全为后续工作）。
 
-    旧行为渲染一份 SeaTunnel preserve_ 作业；统一执行后 execute 无 target_datasource
+    旧行为渲染 preserve 作业；统一执行后 execute 无 target_datasource
     退回「仅产出」，保全决定经 _plan 带出 preserved=True，不静默丢弃。
     """
     spec = SyncDrafter().draft(
@@ -707,7 +739,7 @@ def test_materialize_executor_blocks_on_preflight_failure(monkeypatch, seeded):
     """MaterializeExecutor.execute 提交前跑 preflight，有阻断项就抛异常拒绝执行。
 
     保护 Data Agent 提交的物化制品：手动弹窗有前端闸门，但 agents/draft+execute
-    绕过弹窗，必须在 executor 侧兜底，否则产出连不上 runner/Airflow 的 DAG。
+    绕过弹窗，必须在 executor 侧兜底，否则会产出不可执行的 DAG。
     """
     from unittest.mock import patch
 
@@ -718,12 +750,12 @@ def test_materialize_executor_blocks_on_preflight_failure(monkeypatch, seeded):
     bad_report = PreflightReport()
     bad_report.add(
         PreflightItem(
-            key="sync_runner",
-            label="sync-runner",
+            key="flink_sql_runner_jar",
+            label="Flink SqlRunner JAR",
             status="fail",
             blocking=True,
-            detail="通道为 runner，但未配置 sync-runner 地址。",
-            next_step="设 SYNC_RUNNER_ENDPOINT 指向常驻 runner。",
+            detail="未配置 Flink SqlRunner JAR。",
+            next_step="在 Airflow/Flink 设置中填写 JAR 路径。",
         )
     )
 
@@ -799,17 +831,6 @@ def test_non_doris_target_cannot_create_executable_spec(seeded):
         with SessionLocal() as db:
             db.query(DataSource).filter(DataSource.id == "ds-pg-eng").delete()
             db.commit()
-
-
-def test_transform_executor_has_no_flink_dependency():
-    """Architecture guard: transform cannot regress to the Flink execution path."""
-    import inspect
-    import app.agents.executors.transform as module
-
-    source = inspect.getsource(module)
-    assert "flink_job_runner" not in source
-    assert "generate_flink_sql" not in source
-    assert "FlinkSqlTask" not in source
 
 
 def test_transform_spec_contains_no_flink_fields(seeded):

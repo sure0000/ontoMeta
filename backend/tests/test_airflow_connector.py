@@ -257,9 +257,9 @@ def test_xcom_parses_python_repr_value():
     """2.x 有的版本存的是 repr 过的 Python 字面量（单引号），JSON 解不动，要退到字面量解析。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"value": "{'backend': 'seatunnel'}"})
+        return httpx.Response(200, json={"value": "{'flink_job_id': 'j1'}"})
 
-    assert _client(handler).get_xcom("dag1", "r1", "t") == {"backend": "seatunnel"}
+    assert _client(handler).get_xcom("dag1", "r1", "t") == {"flink_job_id": "j1"}
 
 
 def test_xcom_unparseable_value_is_returned_raw():

@@ -1,11 +1,12 @@
 """① 同步作业 Executor —— 确保目标表后搬数据，统一走 Flink SQL on YARN。
 
-同步 DAG 先用幂等 ``CREATE TABLE IF NOT EXISTS`` 确保 ODS 目标，再执行 Flink SQL 搬运
-（全量走 staging + 原子切换）。目标表不存在时自动创建，已存在时不改写。顶层回执的
-``tables`` 仍恒为空（前端拿它判独立物化），本次确保的目标通过 ``ensured_tables`` 返回。
+同步 DAG 先用幂等 ``CREATE TABLE IF NOT EXISTS`` 确保目标，再执行 Flink SQL 搬运
+（全量走 staging + 原子切换）。目标表不存在时自动创建，已存在时不改写。对没有独立加工
+的源表对象，同步目标同时就是本体 serving 表；顶层回执的 ``tables`` 仍恒为空，本次
+确保的目标通过 ``ensured_tables`` 返回。
 
 与 transform/metric 同一条执行路径（Flink SQL → BashOperator ``flink run``）。
-不再渲染 SeaTunnel/DataX 作业配置——那套多通道已废除。
+同步只编译 Flink SQL 作业。
 
 **凭据不进产物**：生成的 Flink SQL 里只有 `${别名_*}` 占位符，运行期由 Airflow
 Connection 解析（见 flink_sql_generator / endpoint_credential_env）。
@@ -116,6 +117,7 @@ class SyncExecutor(Executor):
         if not ontology_id:
             raise ValueError("Spec 缺 ontology_id")
         engine = spec.get("engine") or "doris"
+        mode = str(spec.get("mode") or "full").lower()
 
         from app.database import SessionLocal
 
@@ -164,7 +166,7 @@ class SyncExecutor(Executor):
                     # 与下面 run_sync 传的是同一套装载参数：自检预演的必须就是这次要提交的
                     # 作业，否则它按契约预演出 CDC/增量，拦下一条其实是全量的同步。
                     emit="dml",
-                    load_strategy=spec.get("mode"),
+                    load_strategy=mode,
                     incremental_column=spec.get("incremental_column"),
                     initial_watermark=spec.get("initial_watermark"),
                     flink_task_params=flink_params.from_spec(spec, context),
@@ -197,7 +199,7 @@ class SyncExecutor(Executor):
                     # IngestionContractService 会按 ods_{数据域}_{原始表名} 强制重算；
                     # Spec 里的历史值只为兼容旧制品传入，不能覆盖后端规则。
                     "target_ods_table": spec.get("target_ods_table"),
-                    "mode": spec.get("mode") or "full",
+                    "mode": mode,
                     "primary_keys": spec.get("primary_keys") or [],
                     "sequence_column": spec.get("sequence_column"),
                     "incremental_column": spec.get("incremental_column"),
@@ -266,7 +268,7 @@ class SyncExecutor(Executor):
                     engine=engine,
                     # 同步不带库名前缀：落点恒为 ODS_DATABASE（见 ods_naming）。
                     database_prefix=None,
-                    load_strategy=spec.get("mode"),
+                    load_strategy=mode,
                     # 调度频率：写回本次选中实体的契约，再由 `_cron_by_entity` 决定这条
                     # 搬运 DAG 的 schedule（一个 cron 一个 DAG）。不传的话产出的永远是
                     # schedule=None 的手动 DAG——同步任务就此只能靠人点。

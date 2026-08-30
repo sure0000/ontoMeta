@@ -50,12 +50,11 @@ class MaterializeDrafter(Drafter):
             "ontology_id": context["ontology_id"],
             "target_datasource_id": context["target_datasource_id"],
             # 引擎不再进表单：由目标数据源类型推定（执行/校验侧 resolve_engine）。
-            # 对话/旧制品若显式给了 engine 则尊重其值，否则置空交下游推定。
+            # 显式 engine 交下游做一致性校验，否则由目标数据源推定。
             "engine": context.get("engine") or None,
             "database_prefix": context.get("database_prefix"),
             "database_overrides": _database_overrides(context),
             "table_overrides": dict(context.get("table_overrides") or {}),
-            "load_strategy": context.get("load_strategy"),
             "selected_targets": selected or None,
             "overrides": dict(context.get("overrides") or {}),
             # 整批调度：弹窗是逐实体配 cron（写进各自契约的 refresh_cron），要求调用方先知道

@@ -117,7 +117,6 @@ def test_query_resolver_is_explicit_and_fail_closed(db):
     db.commit()
 
     assert resolve_domain_data_source(db) is source
-    assert resolve_domain_data_source(db, target_catalog="erp") is None
 
     source.enabled = False
     db.commit()

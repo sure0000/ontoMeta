@@ -83,6 +83,9 @@ export interface AckTarget {
  * 同一位置在每一轮里都叫同一个名字。只按 blockId 归并，第三轮的结果表会顶着
  * 第一轮的「已认可」出现。
  *
+ * **同一块里逐条表态时还要带 refId**：任务状态块一行一条任务、各自验收各自的结果环，
+ * 少了 refId 三行共用一个键——认可第一条，另外两条跟着一起点亮。
+ *
  * 流式刚产出的消息还没落库、拿不到 id，此时返回 null——调用方退回纯本地态。
  * 宁可这一轮不回显，也不能张冠李戴。
  */
@@ -91,9 +94,10 @@ export function ackKey(
   node: string,
   stage: string,
   blockId: string | undefined,
+  refId?: string | null,
 ): string | null {
   if (!messageId || !blockId) return null;
-  return `${messageId}:${node}:${stage}:${blockId}`;
+  return `${messageId}:${node}:${stage}:${blockId}:${refId ?? ""}`;
 }
 
 /**

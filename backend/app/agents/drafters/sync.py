@@ -165,6 +165,5 @@ class SyncDrafter(Drafter):
         """
         label = spec.get("object_display_name") or spec.get("object_type")
         if not label:
-            # 极旧的 Spec 没有对象名（只有物理坐标）时不硬编一个名字，退回原口径。
-            return f"同步 · {spec.get('source')} → {spec.get('target')}"
+            raise ValueError("同步 Spec 缺少 object_type，无法生成任务名称")
         return f"同步 · {label} → 数仓 ODS"

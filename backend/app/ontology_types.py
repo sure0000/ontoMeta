@@ -53,8 +53,22 @@ class SemanticType(str, enum.Enum):
 # 保守原则：UNKNOWN 一律返回 False（拿不准即禁止 → 拒答优先，绝不错答）。
 # ---------------------------------------------------------------------------
 _AGGREGATABLE = frozenset({SemanticType.MEASURE})
+# TEXTUAL 可分组：按名称/编码分组（「按上级客户分组统计下级数量」）是常规分析，不是口径错误。
+# 真正要拦的是 **按度量原值分组**（仍拦）与 **SUM 非度量**（仍拦）。
+#
+# 排除 TEXTUAL 曾让证明器在真实本体上几乎拦下一切分组：本体生成把绝大多数字段标成
+# attribute（→ TEXTUAL），实测某 ERP 本体 2466 个已发布字段里 2016 个是 attribute，
+# 可分组的只剩 17%。后果不是「更安全」，而是模型绕过守卫——被拒后改成拉明细行自己
+# 心算，再被答案校验判成「未经查询证实的数值」。守卫把它想防的行为逼了出来。
+#
+# UNKNOWN 仍不可分组：那是「归一不出来」的占位，保守原则照旧（拿不准即禁止）。
 _GROUPABLE = frozenset(
-    {SemanticType.IDENTIFIER, SemanticType.TEMPORAL, SemanticType.CATEGORICAL}
+    {
+        SemanticType.IDENTIFIER,
+        SemanticType.TEMPORAL,
+        SemanticType.CATEGORICAL,
+        SemanticType.TEXTUAL,
+    }
 )
 _JOINABLE = frozenset({SemanticType.IDENTIFIER})
 _FILTERABLE = frozenset(
@@ -73,7 +87,7 @@ def can_aggregate(st: SemanticType) -> bool:
 
 
 def can_group_by(st: SemanticType) -> bool:
-    """可否作 GROUP BY 维度（标识/时间/类别可以；度量/文本不可）。"""
+    """可否作 GROUP BY 维度（标识/时间/类别/文本可以；度量与 UNKNOWN 不可）。"""
     return st in _GROUPABLE
 
 

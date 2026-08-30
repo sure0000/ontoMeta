@@ -380,6 +380,9 @@ def draft_confirmed_artifact(
         artifact.id,
         kind=artifact.kind,
         intent=artifact.intent,
+        # 前三环是按这张表单的 confirmation_id 记的账；不把它落到关联上，这条任务的
+        # 闭环就只剩后三环，前三环明明确认过却在界面上恒灰。
+        confirmation_id=data.confirmation_id,
     )
     artifact = _guard(lambda: agent_pipeline.validate(db, artifact.id, context={}))
     return _to_out(artifact)
@@ -582,6 +585,8 @@ def advance_pipeline_confirmed(
         artifact.id,
         kind=artifact.kind,
         intent=artifact.intent,
+        # 链上的每一步都是一条独立任务、各有自己的六环，故也各带自己的 confirmation_id。
+        confirmation_id=data.confirmation_id,
     )
     artifact = _guard(lambda: agent_pipeline.validate(db, artifact.id, context={}))
     return TaskPipelineAdvanceOut(

@@ -15,7 +15,7 @@
 - 每一步仍是独立 `GovernanceArtifact`，各自经过校验、dry-run、人工确认和执行；
 - 可将整条已走通的链编译成 Airflow DAG 并设置周期调度；
 - sync 使用 Flink SQL 写默认 Doris ODS；transform 与 metric/tag/rule 使用 Doris 原生 SQL；旧 Flink metric 路径不可用于新任务；
-- materialize 只建结构，sync 只搬数据，两者语义分离；
+- materialize 只为无源对象建结构；sync 幂等确保源对象目标表、搬数据并直接登记 serving；
 - 链状态由步骤制品聚合推导，不保存第二份权威状态。
 
 当前实际写侧类型：
@@ -86,8 +86,8 @@ GovernanceArtifact Spec
 
 | kind | 做什么 | 不做什么 | 主要实现 |
 |---|---|---|---|
-| materialize | 根据本体和契约创建物理表结构 | 不搬数据 | `agents/executors/materialize.py` |
-| sync | 将真实源表数据按本体映射搬到已物化目标表 | 不创建业务表 | `agents/executors/sync.py` |
+| materialize | 为没有物理源表的本体对象创建物理表结构 | 不搬数据 | `agents/executors/materialize.py` |
+| sync | 幂等创建目标表、搬运真实源表数据，并将同一张表登记为 serving | 不创建第二张空服务表 | `agents/executors/sync.py` |
 | transform | 对 ready Doris ODS Projection 生成并执行 Doris SQL 清洗 | 不直连业务源、不调用 Flink | `agents/executors/transform.py` |
 | metric | MetricCompiler(doris) 编译并执行 ADS 聚合/标签/规则 SQL | 不替用户发明口径、不调用 Flink | `agents/executors/metric.py` |
 
@@ -261,7 +261,7 @@ Data Agent propose_pipeline
 3. 依赖环在编译前拒绝；
 4. 上游失败时下游不执行；
 5. 凭据不进入 Spec、DAG 产物和对话；
-6. materialize 只建结构，sync 只搬数据；
+6. materialize 只建无源对象结构，sync 负责源对象目标表、数据和 serving 登记；
 7. transform/metric 的 SQL 结构复用本体、WarehouseGenerator 与 MetricCompiler，不另写第二套权威；
 8. 未真实执行必须在回执中明确，禁止假成功；
 9. 相同制品执行保持幂等；

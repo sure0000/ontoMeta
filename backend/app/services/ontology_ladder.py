@@ -178,7 +178,7 @@ class OntologyLadderLoader:
     def __init__(self, query_service: Any | None = None) -> None:
         if query_service is None:
             # 与 chat_bi 同源的聚合门面（同时拥有 list_object_types / list_business_logics）。
-            from app.services.query import OntologyQueryService
+            from app.services.logic_query import OntologyQueryService
 
             query_service = OntologyQueryService()
         self.qs = query_service
@@ -359,7 +359,9 @@ class OntologyLadderLoader:
         with_profiles: bool,
     ) -> LoadedObject:
         """组装单个对象的完整信息：字段 + 关系 + 口径 + 数据画像 + 物化。"""
-        detail = self.qs.get_object_type(db, obj.id)
+        # 深加载的内容会作为「已深加载的相关本体」进入 system 消息被当作事实引用，
+        # 故与 Data Agent 接地集同口径：只取已发布的关系/邻居（见 get_object_type 文档）。
+        detail = self.qs.get_object_type(db, obj.id, published_only=True)
 
         properties = [
             {

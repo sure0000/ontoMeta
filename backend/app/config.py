@@ -21,20 +21,6 @@ class Settings(BaseSettings):
     # 只在给新库播种 Airflow 设置行时读一次，缺省落到 docker/orchestration 下的本地
     # 验证栈目录；此后以设置页（DB）为权威，运行期不再读本变量。
     airflow_dags_dir: str = ""
-    airflow_jobs_dir: str = ""
-    # 搬运任务容器接哪张 Docker 网络。默认 bridge 保持原行为；真实部署里源库与目标仓
-    # 多以容器名互访（如 hive-metastore / hadoop-namenode），默认 bridge 解析不了，
-    # 需指到与它们同一张网络上。同属部署基础设施，不进设置页。
-    airflow_docker_network: str = "bridge"
-    # JDBC 驱动 jar 目录（宿主机路径）。搬运镜像因授权不带驱动，缺了就是
-    # ClassNotFoundException: …jdbc.Driver。空 = 不挂。
-    airflow_sync_drivers_dir: str = ""
-    # 搬运工具的执行镜像覆盖：``工具名=镜像[,工具名=镜像…]``，如
-    # ``datax=registry.internal/datax:3.0``。适配器只给得出「官方镜像叫什么」，
-    # 而**镜像在这套部署里叫什么、拉不拉得到**是部署事实——DataX 无官方镜像
-    # （见 warehouse/jobs/datax.py），不在这里指一个自建镜像，任务只会在 Airflow
-    # 侧因 pull 404 失败。同属部署基础设施，不进设置页。
-    sync_tool_images: str = ""
 
     # 单个物化 DAG 的任务上限。M16 据此把大本体拆成多个 DAG；M13 只用于 preflight
     # 预警「本次表数超限、当前仍会塞进一个 DAG」。默认 50。
@@ -45,41 +31,14 @@ class Settings(BaseSettings):
     # 落盘 DAG 后等 Airflow 解析到它再触发的最长秒数（替代「立刻触发、404 被吞」）。
     # ⚠ Airflow dag_dir_list_interval 默认 300s（§8.1），若解析慢需相应放大。
     ontometa_dag_parse_timeout: float = 60.0
-    # preflight 写 sentinel DAG 后，等 Airflow 解析到它的最长秒数（专治「dags 目录
-    # 两侧不一致」失败模式 #3）。Airflow 的 dag_dir_list_interval 默认 300s（⚠ 见
-    # MATERIALIZE_SYNC_STABILITY.md §8.1），故超时不作硬失败、只降级为提醒。
-    ontometa_preflight_sentinel_timeout: float = 20.0
     # 全量装载是否走 staging + 原子切换（M15）：搬进 ``<表>__stg_<批次>``，成功后由
     # Dialect Adapter 的切换语句换到正式表——搬到一半失败时正式表原封不动。关掉则退回
     # 直接写正式表（失败即半张表/空表）。留这个开关是因为各引擎切换的原子性与代价需在
     # 真实实例核实（⚠ MATERIALIZE_SYNC_STABILITY.md §8.3），真出问题要能一键退回。
     ontometa_staging_swap: bool = True
 
-    # 搬运执行通道（M14）：
-    # - ``runner``：向常驻 sync-runner 发一次 HTTP，凭据由 runner 自解析，无宿主机路径/
-    #   docker.sock/驱动挂载（消失败模式 #2/#3/#4/#5）。M14 起的默认。
-    # - ``docker``：旧通道，worker 经 docker.sock 起一次性搬运容器。已跑通过的路径保留作
-    #   对照（比照 M9 保留 direct），出问题可一键切回。
-    sync_channel: str = "runner"
-    # runner 通道下 sync-runner 的地址。runner 通道选中但此项为空，物化会在提交前报错
-    # 让人去配（而不是产出一个连不上 runner 的 DAG）。
-    sync_runner_endpoint: str = ""
-
     # Flink 执行引擎参数已迁到【设置页 → Airflow/Flink】（落库，见 AirflowRuntimeConfig）。
     # 不再从 env 读——遵循 docs/DEVELOPMENT_PRINCIPLES.md P1（配置只在 Web 端）。
-
-    @property
-    def sync_tool_image_map(self) -> dict[str, str]:
-        """``sync_tool_images`` → ``{工具名: 镜像}``。格式不对的项直接跳过，不猜。"""
-        mapping: dict[str, str] = {}
-        for item in (self.sync_tool_images or "").split(","):
-            name, sep, image = item.partition("=")
-            if not sep:
-                continue
-            name, image = name.strip().lower(), image.strip()
-            if name and image:
-                mapping[name] = image
-        return mapping
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
@@ -92,15 +51,6 @@ class Settings(BaseSettings):
     llm_connect_timeout_seconds: float = 10.0
     llm_http_keepalive_expiry_seconds: float = 15.0
     llm_http_max_keepalive: int = 8
-
-    # Cube 语义层（可选外挂）：ontoMeta 生成 Cube data model 并调用其 Load API。
-    cube_api_url: str = "http://localhost:4000"
-    cube_api_secret: str | None = None
-    cube_timeout_seconds: float = 30.0
-    # 预聚合定时刷新间隔（交给 Cube Refresh Worker）
-    cube_preagg_refresh: str = "1 hour"
-    # 行级权限：租户隔离列名（各对象若含此属性则自动生成 RLS 过滤）；为空则不启用
-    cube_tenant_dimension: str | None = None
 
     # 草稿生成时单次 LLM 证据 payload 的字符预算：超过则自动分块 Map-Reduce。
     # 用字符长度做保守估计（宁可多切一块也不冒超长风险），按模型上下文调优：

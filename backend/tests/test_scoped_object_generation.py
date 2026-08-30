@@ -268,7 +268,7 @@ def test_unmodeled_excludes_platform_created_landing_tables(
 @pytest.fixture
 def workspace_service(monkeypatch):
     """绕开 LLM 就绪检查：本组用例测的是范围如何落库，不是 LLM。"""
-    from app.services.query import WorkspaceService
+    from app.services.workspace_service import WorkspaceService
 
     service = WorkspaceService()
     monkeypatch.setattr(type(service), "_ensure_llm_ready", lambda self, db: None)

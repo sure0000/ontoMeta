@@ -260,11 +260,6 @@ def _extract_step_dags(steps: list[dict], artifacts: dict[str, GovernanceArtifac
             # materialize 有 batches，每个 batch 一个 DAG
             batches = receipt.get("batches") or []
             dag_ids = [b.get("dag_id") for b in batches if b.get("dag_id")]
-            if not dag_ids:
-                # fallback：单 DAG 回执
-                dag_id = receipt.get("dag_id")
-                if dag_id:
-                    dag_ids = [dag_id]
         else:
             # transform / metric / sync 单 DAG
             dag_id = receipt.get("dag_id")

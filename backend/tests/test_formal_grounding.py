@@ -459,3 +459,31 @@ def test_pct_echoed_from_question_not_flagged():
     assert v.ok, v.unverified
 
 
+
+
+# ---------------------------------------------------------------------------
+# 状态断言：模型如实转述**系统自己**给出的拒绝理由，不是编造实体。
+# 实测事故：run_sql 被就绪闸门挡下后返回「对象 customer_group 尚未同步或加工完成，
+# 不可查询」，模型在答案里引用这句话（转述时删掉了对象名），F4 拿去账本里核一个句子
+# 当然核不到 → 一次完全诚实的解释被判成幻觉整条拒答。
+# ---------------------------------------------------------------------------
+
+
+def test_status_assertion_quoted_from_tool_not_flagged():
+    led = _ledger_with_order()
+    for sent in (
+        "查询未执行：「对象尚未同步或加工完成，不可查询」。",
+        "工具返回「Doris 未就绪」，因此这次没有取到数。",
+        "「暂不可查」——同步任务还在跑。",
+        "该字段「未配置」默认值。",
+    ):
+        v = verify_answer(sent, led, strict_numbers=False)
+        assert v.ok, (sent, v.unverified)
+
+
+def test_status_marker_does_not_whitelist_a_plausible_fabricated_name():
+    """留窄：单字否定不豁免——「未完成订单」是模型真编得出来的名字，照拦。"""
+    led = _ledger_with_order()
+    v = verify_answer("可以看看「未完成订单」这张表。", led, strict_numbers=False)
+    assert not v.ok
+    assert any("未完成订单" in u for u in v.unverified)

@@ -306,7 +306,7 @@ class MaterializationContractService:
         ).all()
         # 防御性深度过滤：外键关系是列上的声明，永远不应作为物化源表。
         # 即使 materialized 标志因遗留数据/直接改库而为 True，也在这里挡住，
-        # 不让它进入同步工具解析、批次计数、cron 分组、Chat BI 实体列表等下游。
+        # 不让它进入 Flink 作业解析、批次计数、cron 分组、Chat BI 实体列表等下游。
         if materialized_only:
             rows = self._exclude_foreign_key_relations(db, rows)
         return rows

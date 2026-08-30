@@ -1,4 +1,4 @@
-"""P3-1：sync 进链测试——sync executor 走 run_sync（只搬数据）产 dag_id。"""
+"""sync 进链测试——sync executor 走 run_sync 产数据搬运 DAG。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def test_sync_without_target_datasource_fallback_handoff():
     }
     receipt = executor.execute(spec, context={})
     assert "handoff" in receipt
-    # 统一执行架构：退回「仅产出」走 Flink 路径，不再是 SeaTunnel
+    # 统一执行架构：退回「仅产出」走 Flink 路径
     assert receipt["handoff"] == "flink_sql"
     assert "未配置" in receipt["note"]
 
@@ -30,8 +30,8 @@ def test_sync_without_target_datasource_fallback_handoff():
 def test_sync_with_target_datasource_calls_run_sync(monkeypatch):
     """配了 target_datasource，sync 走 run_sync 对单对象搬运。
 
-    **必须是 run_sync 而不是 run_materialize**：同步只搬数据，不建表——建表是物化任务
-    的事，且同步的回执若报告建了表，前端会把一次搬运当成「已物化」。
+    **必须是 run_sync 而不是 run_materialize**：同步任务负责确保并写入自己的统一目标表；
+    独立物化入口只服务于没有源表的人工建模对象。
     """
     ontology_id = "sync-onto"
     object_name = "Customer"

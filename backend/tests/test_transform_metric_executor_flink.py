@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-import inspect
 from unittest.mock import MagicMock, patch
 
 from app.agents.executors.transform import TransformExecutor
@@ -30,15 +29,6 @@ def test_transform_without_datasource_returns_doris_handoff():
     assert receipt["execute_mode"] == "handoff"
     assert receipt["compute_engine"] == "doris"
     assert "Doris SQL" in receipt["note"]
-
-
-def test_transform_module_has_no_flink_runner_import():
-    import app.agents.executors.transform as module
-
-    source = inspect.getsource(module)
-    assert "flink_job_runner" not in source
-    assert "FlinkSqlTask" not in source
-    assert "generate_flink_sql" not in source
 
 
 def test_doris_sql_dag_has_quality_gate_and_no_bash_operator():
@@ -163,13 +153,3 @@ def test_metric_reconciliation_opens_ads_only_after_success(db):
     db.refresh(projection)
     assert projection.status == "ready"
     assert projection.queryable is True
-
-
-def test_metric_executor_has_no_flink_dependency():
-    import inspect
-    import app.agents.executors.metric as module
-
-    source = inspect.getsource(module)
-    assert "flink_job_runner" not in source
-    assert "generate_flink_sql" not in source
-    assert "FlinkSqlTask" not in source

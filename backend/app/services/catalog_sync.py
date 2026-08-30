@@ -14,7 +14,7 @@ postgres → ``org.postgresql.Driver``。``driver_url`` 必须能被 FE/BE 节�
 （http(s) 或 file:// 路径；本地单机开发把 jar 放到 BE 同机即可）。
 
 写侧约束：本模块只做**建目录**（catalog 级别的 DDL），不做数据搬运——源库数据
-进数仓仍走 Flink/SeaTunnel/runner（见 all-movement-through-transfer-tools），
+进数仓统一走 Flink SQL，
 JDBC catalog 只读。
 """
 

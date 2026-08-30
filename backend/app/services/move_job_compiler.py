@@ -29,9 +29,8 @@ def _source_logical_table(job: JobSpec) -> LogicalTable:
     """从带类型的目标表 + 列名映射，重建**源端**逻辑表。
 
     源列名 = 源物理列名（JDBC/CDC 从物理表读，列名须匹配），类型沿用目标列的
-    ``data_type``/``semantic_type``——这与 ``build_flink_etl_input`` 同口径：本体记录的
-    列类型即源库物理类型，源端按物理类型声明、目标端再经引擎 Adapter 映射，
-    :func:`build_identity_select` 两边算出的类型不同就 CAST。
+    ``data_type``/``semantic_type``——本体记录的列类型即源库物理类型，源端按物理类型
+    声明、目标端再经引擎 Adapter 映射，:func:`build_identity_select` 两边算出的类型不同就 CAST。
 
     Flink 逻辑表名加 ``src_`` 前缀，避免与目标表（同名实体常见）在同一脚本里撞名。
     """
@@ -72,9 +71,9 @@ def compile_move_task(
 
     Args:
         job: 搬运声明（planner 产物，须带 ``target_table``）。
-        engine: 目标引擎（hive/doris/postgres…），决定目标列类型与 sink 连接器。
+        engine: 目标引擎（当前为 Doris），决定目标列类型与 sink 连接器。
         checkpoint_dir: CDC 作业的 checkpoint 目录（``file://…``）；full/incremental 忽略。
-            新 incremental 契约使用持久化水位的有界 batch；历史无水位契约保留 CDC 兼容重放。
+            incremental 契约使用持久化水位的有界 batch。
         target_benodes: 目标 Doris 是否已在设置页配了 BE 地址。配了才在 sink 上发
             ``benodes``（部署事实由调用方查，planner/编译器不查库）。
 
@@ -86,24 +85,13 @@ def compile_move_task(
     target_table = job.target_table
 
     column_map = {c.target: c.source for c in job.columns}
-    # Historical incremental JobSpecs predate IngestionContract and carry no
-    # persisted watermark. Keep their former CDC-streaming behavior for replay;
-    # every new Doris ODS contract supplies incremental_column+initial_watermark
-    # and therefore takes the bounded batch branch.
-    effective_mode = (
-        "cdc"
-        if job.mode == "incremental"
-        and not job.incremental_column
-        and job.initial_watermark in (None, "")
-        else job.mode
-    )
     sql = generate_move_sql(
         source_table=source_table,
         target_table=target_table,
         source=FlinkEndpoint(job.source.alias, job.source.platform),
         target=FlinkEndpoint(job.target.alias, job.target.platform, benodes=target_benodes),
         target_engine=engine,
-        mode=effective_mode,
+        mode=job.mode,
         column_map=column_map,
         source_physical=job.source.qualified,
         target_physical=job.target.qualified,
@@ -142,7 +130,7 @@ def compile_move_task(
     )
     # 全量是有界批作业（跑完即退，SqlRunner await 到结束）；增量/cdc 是常驻流式，
     # 提交即 detach（-d），否则 Airflow 任务会永远阻塞在一个不会结束的流作业上。
-    detached = effective_mode == "cdc"
+    detached = job.mode == "cdc"
     return FlinkSqlTask(
         task_id=job.name,
         sql=sql,

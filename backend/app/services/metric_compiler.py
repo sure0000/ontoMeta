@@ -286,10 +286,29 @@ def _compile_aggregate(
 ) -> exp.Expression:
     op = (operation or "").strip().lower()
     if op not in _METRIC_OPS:
+        # 错误必须能被照着改：只回「支持哪些算子」时，键名写错（aggregation/op 之类）的
+        # 调用方会拿着一份正确的算子表反复改 value，改不到问题上——实测连挂三轮。
         raise MetricCompileError(
             "unsupported_operation",
-            f"不支持的聚合算子「{operation}」。",
-            {"supported": sorted(_METRIC_OPS)},
+            (
+                f"不支持的聚合算子「{operation}」。"
+                if op
+                else "metric 的表达式体缺少聚合算子：键名是 operation（不是 aggregation/op/agg）。"
+            ),
+            {
+                "supported": sorted(_METRIC_OPS),
+                "expected_body_keys": ["operation", "args", "group_by", "filter"],
+                "example_body": {
+                    "operation": "count",
+                    "args": [{"ref": "别名"}],
+                    "group_by": [],
+                    "filter": {
+                        "left": {"ref": "别名"},
+                        "op": "=",
+                        "right": {"value": 0},
+                    },
+                },
+            },
         )
     if measure is None or measure.prop is None:
         if op != "count":

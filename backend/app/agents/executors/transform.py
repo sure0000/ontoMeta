@@ -552,6 +552,13 @@ class TransformExecutor(Executor):
                     .first()
                 )
                 if projection:
+                    # A direct-sync projection initially serves the ODS table.
+                    # Once a transform is submitted, its target becomes the
+                    # serving table; final Airflow success is still required
+                    # before queryability is restored.
+                    projection.serving_layer = table.layer
+                    projection.serving_database = table.database
+                    projection.serving_table = table.name
                     projection.transform_status = "running" if receipt.get("ok") else "failed"
                     projection.queryable = False
                     db.commit()

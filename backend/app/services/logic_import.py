@@ -117,7 +117,7 @@ class LogicImportService:
         source_type: str = "sql",
         operator: str | None = None,
     ) -> BusinessLogicDetail:
-        from app.services.query import OntologyQueryService
+        from app.services.logic_query import OntologyQueryService
 
         ontology = self._resolve_published_ontology(db, domain_id)
         code = (code or "").strip()
@@ -158,7 +158,7 @@ class LogicImportService:
         domain = db.get(DomainContext, domain_id)
         if not domain:
             raise ValueError("数据域不存在")
-        from app.services.query import OntologyQueryService
+        from app.services.logic_query import OntologyQueryService
 
         ontology = OntologyQueryService().get_published_ontology(db, domain_id)
         if not ontology:

@@ -31,11 +31,7 @@ COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
     "llm": ("LLM / 嵌入服务", True),
     "datahub": ("DataHub（GMS + 前端）", False),
     "airflow": ("Airflow 调度", False),
-    # 已移除：
-    # - sync_runner: 新架构统一走 Flink SQL，不再需要独立搬运服务
-    # - seatunnel: 已被 Flink 完全替代，不再作为独立组件
-    # - cube: 语义层可选，不是核心依赖，配置生成接口保留供手动部署
-    # - postgres: ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
+    # postgres：ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
     # - warehouse: 目标数仓连接由「数据源」标签页统一管理（DataSourcesPanel 完整 CRUD+测试）
 }
 
@@ -768,13 +764,9 @@ class DependencyComponentService:
             af_row = self._get_singleton(db, "airflow")
             if af_row:
                 af_row.deploy_spec_json = _dumps({"extra": {
-                    "dags_dir": af.dags_dir, "jobs_dir": af.jobs_dir,
-                    "sync_channel": af.sync_channel, "docker_network": af.docker_network,
-                    "drivers_dir": af.drivers_dir, "sync_tool_images": af.sync_tool_images,
-                    "sync_tool": af.sync_tool, "max_tasks_per_dag": af.max_tasks_per_dag,
+                    "dags_dir": af.dags_dir, "max_tasks_per_dag": af.max_tasks_per_dag,
                     "max_active_tasks_per_dag": af.max_active_tasks_per_dag,
                     "dag_parse_timeout": af.dag_parse_timeout,
-                    "preflight_sentinel_timeout": af.preflight_sentinel_timeout,
                     "staging_swap": af.staging_swap,
                 }})
                 db.commit()
@@ -783,7 +775,7 @@ class DependencyComponentService:
     _AIRFLOW_EXTRA_FIELDS = (
         "dags_dir",
         "max_tasks_per_dag", "max_active_tasks_per_dag",
-        "dag_parse_timeout", "preflight_sentinel_timeout", "staging_swap",
+        "dag_parse_timeout", "staging_swap",
         # DAG 投递（SSH 单通道）：产物 rsync 到 Airflow 主机后原子切换。
         # ontoMeta / Airflow / Flink 常分处三台机器，故没有"写本地"这种通道。
         # 密码是机密，走 CONNECTION_SCHEMAS 而非这里（extra 不脱敏）。
@@ -975,7 +967,7 @@ class DependencyComponentService:
 
                 conn = run_install(row.key, spec, log=log)
                 row.connection_json = _dumps(_validate_connection(row.key, conn))
-                # 回写配方解析出的端口等运行期值（sync_runner 自动选端口），重装/卸载保持一致。
+                # 回写配方解析出的端口等运行期值，重装/卸载保持一致。
                 # 对不改 spec 的既有配方是无害 no-op。
                 row.deploy_spec_json = _dumps(spec)
                 row.deploy_log = "\n".join(log)

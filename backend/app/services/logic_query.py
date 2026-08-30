@@ -272,12 +272,11 @@ class OntologyQueryService(_OntologyQueryBase):
         ]
 
     def _related_properties_for_logic(
-        self, db: Session, logic: BusinessLogic, objects: list[ObjectType]
+        self, db: Session, logic: BusinessLogic
     ) -> list[Property]:
         """返回与该业务逻辑关联的字段。
 
         关联判定 = 显式绑定（BusinessLogicPropertyBinding）∪ 表达式引用。
-        objects 参数保留以兼容调用方签名，不再参与计算。
         """
         bound_ids = {
             r[0]
@@ -538,17 +537,7 @@ class OntologyQueryService(_OntologyQueryBase):
             return None
 
         related_objects = self._related_objects_for_logic(db, logic)
-        related_objects_with_props = (
-            db.query(ObjectType)
-            .options(joinedload(ObjectType.properties))
-            .filter(ObjectType.id.in_([o.id for o in related_objects]))
-            .all()
-            if related_objects
-            else []
-        )
-        related_properties = self._related_properties_for_logic(
-            db, logic, related_objects_with_props
-        )
+        related_properties = self._related_properties_for_logic(db, logic)
         object_bindings = self._object_bindings_for_logic(db, logic)
         property_bindings = self._property_bindings_for_logic(db, logic)
         versions = self.list_versions(db, logic.id)

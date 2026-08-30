@@ -146,6 +146,22 @@ class FactLedger:
             for v in values:
                 self.cells.append(v)
                 self._cell_numbers |= _numeric_tokens(v)
+        # 结果集的**形状**同样是被查询证实的事实：「返回 5 行」「这张表 19 个字段」
+        # 里的数字来自结果本身，不是模型编的。此前只登记单元格值，于是复述行数/列数
+        # 会被 F4 判成「未经查询证实的数值」而整轮拒答。
+        if rows:
+            self._cell_numbers |= _numeric_tokens(len(rows))
+        if columns:
+            self._cell_numbers |= _numeric_tokens(len(columns))
+
+    def provable_numbers(self, limit: int = 24) -> list[str]:
+        """本轮**可被引用**的数值（来自已执行查询）。供自愈回环告诉模型「能说哪些数」。
+
+        只说「这个数没凭证」时，模型往往换一种说法再算一遍同一个派生值；把可引用的
+        数值集合一并给它，它才知道该改成引用哪个。
+        """
+        nums = sorted(self._cell_numbers, key=lambda x: (len(x), x))
+        return nums[:limit]
 
     def _index_names(self, *names: str) -> None:
         for n in names:

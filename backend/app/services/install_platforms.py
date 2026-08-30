@@ -110,9 +110,8 @@ def require_debian(ssh: SSHSession) -> None:
 def _warn_if_py39(ssh: SSHSession, plat: Platform) -> None:
     """探测 python3 版本；<3.10 只写一条软告警到部署日志（不硬卡）。
 
-    macOS 自带 python3 常是 Xcode CLT 的 3.9，跑 sync-runner 的 Pydantic v2 + PEP 604
-    联合注解会崩（Unable to evaluate type annotation）。运行期已靠 eval_type_backport
-    兜底，这里只提醒运维尽量用 3.10+，让「能装但有隐患」可见而非事后天书。
+    macOS 自带 python3 常是 Xcode CLT 的 3.9，现代依赖的 PEP 604 联合注解可能无法
+    解析。这里仅提醒运维尽量使用 3.10+，让「能装但有隐患」可见而非事后天书。
     """
     r = ssh.run(f'{plat.py} -c "import sys; print(sys.version_info[0], sys.version_info[1])"')
     if not r.ok:
@@ -124,8 +123,7 @@ def _warn_if_py39(ssh: SSHSession, plat: Platform) -> None:
     if (major, minor) < (3, 10):
         ssh.note(
             f"注意：目标机 {plat.py} 版本为 {major}.{minor}（<3.10）。"
-            "sync-runner 依赖 eval_type_backport 兜底 PEP 604 注解才能在此版本运行；"
-            "建议 brew install python@3.12 或改用 3.10+ 以免其他组件踩坑。"
+            "建议 brew install python@3.12 或改用 3.10+ 以免依赖解析失败。"
         )
 
 
@@ -162,8 +160,8 @@ def ensure_python(ssh: SSHSession, plat: Platform) -> None:
 class ServiceSpec:
     """一个常驻服务的完整描述，由 start_service 按平台落地。"""
 
-    unit_name: str            # systemd / sc.exe 服务名，如 "ontometa-sync-runner"
-    label: str                # launchd label，如 "com.ontometa.sync-runner"
+    unit_name: str            # systemd / sc.exe 服务名
+    label: str                # launchd label
     python_exe: str           # venv python 绝对路径
     run_args: list[str]       # python 之后的参数，如 ["-m", "uvicorn", "…", "--port", "8098"]
     workdir: str
@@ -271,15 +269,11 @@ def _start_service_launchd(ssh: SSHSession, plat: Platform, spec: dict[str, Any]
     ssh.run(plat.mkdir_cmd(agents_dir)).check("建 LaunchAgents 目录")
     ssh.put_file(plist, plat.sftp_path(plist_path))
     # 关键：走 per-user 域 user/<uid>，不用 gui/<uid>。
-    # SSH 登录没有 Aqua(GUI)会话，gui 域不存在 → bootstrap 失败退回 legacy load，
-    # 而 load 在无头会话里常「注册了但不真正拉起进程」——表现就是 healthz 连接被拒、
-    # 启动超时。user 域对任何登录上下文（含 SSH）都存在，headless 守护进程应落在这里。
+    # SSH 登录没有 Aqua(GUI)会话，因此使用对无头上下文有效的 user 域。
     domain = "user/$(id -u)"
-    # 先摘掉旧的再装新的（幂等）；bootstrap 是现代 API，老系统退 load
+    # 先摘掉旧的再装新的（幂等）。
     ssh.run(f"launchctl bootout {domain}/{svc.label} 2>/dev/null || true")
-    r = ssh.run(f"launchctl bootstrap {domain} {plist_path}")
-    if not r.ok:
-        ssh.run(f"launchctl load {plist_path}").check("launchctl load LaunchAgent")
+    ssh.run(f"launchctl bootstrap {domain} {plist_path}").check("bootstrap LaunchAgent")
     # enable 清掉可能残留的 disabled 记录；kickstart 立即拉起，不等 RunAtLoad 的时机
     # （best-effort：RunAtLoad 已能起活，kickstart 只是把「起不起来」尽早暴露到日志）
     ssh.run(f"launchctl enable {domain}/{svc.label} 2>/dev/null || true")

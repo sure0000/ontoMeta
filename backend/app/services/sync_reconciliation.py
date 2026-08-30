@@ -100,8 +100,8 @@ def reconcile_sync_receipt(
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     contract.status = "ready"
     contract.last_success_at = now
-    # 落数验证通过才算真成功：此时才把「已落地」镜像给 Projection，本体工作区的
-    # 落点、下游 transform 的 ODS 准入、查询网关的 queryable 共用这一处结论。
+    # 落数验证通过才算真成功：同步目标就是没有独立加工步骤的源对象的 serving 表。
+    # 共同镜像函数会创建/补齐当前版本的 Deployment/Projection，再让各读侧共用这一结论。
     mirror_contract_to_projection(db, contract)
     db.commit()
     return {

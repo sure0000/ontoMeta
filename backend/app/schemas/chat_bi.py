@@ -27,10 +27,20 @@ class ChatBiCaliberItem(BaseModel):
 
 
 class ChatBiAgentStep(BaseModel):
-    """Agent 工具编排的一步轨迹（供前端可折叠步骤条 + 审计回放）。"""
+    """Agent 工具编排的一步轨迹（供前端可折叠步骤条 + 审计回放）。
+
+    并非每一步都是工具调用：`kind="thought"` 是模型在调工具前写下的一句自述（`text` 为句子、
+    `tool` 为空），`kind="repair"` 是自愈重写。流式路径发的是裸 dict 所以一直带着这两个字段，
+    但非流式 `POST /chat-bi/ask` 声明了 `response_model=ChatBiAnswer`——模型里缺字段就会被
+    **静默剥掉**，同一次问答两条路径给出的轨迹不一致，thought 步在那边退化成空白工具行。
+    """
 
     index: int
     tool: str
+    # tool | thought | repair
+    kind: str = "tool"
+    # 仅 thought / repair 有：那一步的人话；工具步的说明在 summary 里。
+    text: str | None = None
     arguments: dict[str, Any] = Field(default_factory=dict)
     status: str = "succeeded"  # succeeded / failed
     summary: str | None = None
@@ -166,6 +176,32 @@ class ChatBiBlock(BaseModel):
     type: str  # markdown|sql|table|mapping|steps|notice|clarify|refs
 
 
+class ChatBiAgentRunInfo(BaseModel):
+    """One durable Data Agent turn. Its id is the assistant message id."""
+
+    id: str
+    status: str  # succeeded | refused | waiting_input | failed | cancelled
+    question: str
+    intent: str | None = None
+    skill: str | None = None
+    grounded: bool = False
+    started_at: datetime
+    finished_at: datetime
+    error: str | None = None
+
+
+class ChatBiAgentArtifactRef(BaseModel):
+    """Safe index entry pointing into fields already stored in the run payload."""
+
+    id: str
+    kind: str
+    label: str
+    payload_path: str
+    snapshot: dict[str, Any] | None = None
+    source: str | None = None
+    as_of: Any | None = None
+
+
 class ChatBiAnswer(BaseModel):
     # 多域：domain_ids 为本次接地的域集合（空=全域通盘）；domain_id/domain_name 保留首域作锚点兼容。
     domain_ids: list[str] = Field(default_factory=list)
@@ -192,6 +228,9 @@ class ChatBiAnswer(BaseModel):
     # V3 S0 渲染块协议：由 chat_bi_blocks.answer_to_blocks 从上述扁平字段投影而来。
     # 双写——旧字段全部保留，前端优先用 blocks、缺失时本地 answerToBlocks 兜底旧消息。
     blocks: list[ChatBiBlock] = Field(default_factory=list)
+    # Persistent run envelope. Legacy messages created before P4 may omit both fields.
+    agent_run: ChatBiAgentRunInfo | None = None
+    agent_artifacts: list[ChatBiAgentArtifactRef] = Field(default_factory=list)
     conversation_id: str | None = None
     conversation_title: str | None = None
 
@@ -244,6 +283,8 @@ class ChatBiTaskLinkRequest(BaseModel):
     artifact_id: str
     kind: str | None = None
     intent: str | None = None
+    # 催生这条任务的表单向导 id。闭环按任务分开时，前三环靠它归属到这条任务上。
+    confirmation_id: str | None = None
     # 决策留痕：提案原样 vs 人确认前改成的样子。两份都在前端手上（proposal.context 与
     # 本地编辑态），顺这一次已有的往返带回来，无需额外请求。
     proposed_context: dict[str, Any] | None = None
@@ -307,16 +348,32 @@ class ChatBiClosureNode(BaseModel):
 
 
 class ChatBiClosureTask(BaseModel):
-    """本会话催生的一条数据任务。闭环卡据此给出「重新进入某一环」的入口。"""
+    """本会话催生的一条数据任务**及它自己的六环闭环**。
+
+    闭环的粒度是任务，不是会话：一条会话可能连着建好几条任务，也可能通篇只是查数
+    什么都没建。前者混成一组六环就读不出"哪一环是给哪条任务走的"，后者压根没有要
+    闭的环。卡片一条任务一张，并据此给出「重新进入某一环」的入口。
+    """
 
     artifact_id: str
     name: str
     kind: str | None = None
     status: str | None = None
+    #: 催生它的表单向导 id；历史关联为空，此时前三环无从归属，如实标灰。
+    confirmation_id: str | None = None
+    nodes: list[ChatBiClosureNode] = []
+    reached_count: int = 0
+    total_count: int = 6
+    dangling: list[str] = []
 
 
 class ChatBiDecisionClosure(BaseModel):
-    """一次对话的确认闭环总结。恒六环——未到达的标灰而非隐藏。"""
+    """一次对话的决策总结。
+
+    ``tasks`` 是给人看的闭环——**一条任务一组六环**（恒六环，未到达的标灰而非隐藏）。
+    会话级的 ``nodes``/``reached_count``/``dangling`` 是审计聚合，供跨会话统计与
+    运行记录问答；界面不拿它当"闭环"画，否则一次纯查询也会顶着一张六环卡。
+    """
 
     conversation_id: str
     nodes: list[ChatBiClosureNode]
@@ -343,6 +400,21 @@ class ChatBiMessageOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ChatBiAgentRunSummary(ChatBiAgentRunInfo):
+    message_id: str
+    artifact_count: int = 0
+    answer_preview: str = ""
+    created_at: datetime
+
+
+class ChatBiAgentRunDetail(BaseModel):
+    message_id: str
+    run: ChatBiAgentRunInfo
+    artifacts: list[ChatBiAgentArtifactRef] = Field(default_factory=list)
+    payload: dict[str, Any]
+    created_at: datetime
 
 
 # --- ChatBI · Category Management ---

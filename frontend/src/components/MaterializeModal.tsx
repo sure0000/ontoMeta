@@ -33,7 +33,6 @@ import type {
   MaterializePreflightResult,
   LineageEmitResult,
   MaterializeTaskResult,
-  SyncToolPlan,
 } from "../types";
 import { LABELS, StatusBadge } from "./StatusBadge";
 
@@ -41,7 +40,7 @@ import { LABELS, StatusBadge } from "./StatusBadge";
 const ENGINE_OPTIONS = [{ value: "doris", label: "Doris（统一数仓）" }];
 // 引擎名集合：选中数据源时其 kind 命中则据此推导引擎。
 const ENGINE_VALUES = new Set(ENGINE_OPTIONS.map((e) => e.value));
-// 推导不出引擎时的回退（与后端 DEFAULT_ENGINE 对齐）。
+// 目标数仓固定使用 Doris。
 const DEFAULT_ENGINE = "doris";
 
 // 数仓分层（阶段）顺序与展示名。
@@ -192,9 +191,6 @@ export function MaterializeModal({
   const [activeLayer, setActiveLayer] = useState<string | null>(null);
   const [result, setResult] = useState<MaterializationRun | null>(null);
   const [runs, setRuns] = useState<MaterializationRun[]>([]);
-  // 本次会用什么搬（后端决策的结果，不是选项）+ 目标引擎实际支持的装载方式。
-  const [syncPlan, setSyncPlan] = useState<SyncToolPlan | null>(null);
-  const [syncPlanError, setSyncPlanError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"run" | "history">("run");
   // 单实体物化：命中契约不可物化 / 尚未生成时的原因，禁用执行并提示。
   const [scopeError, setScopeError] = useState<string | null>(null);
@@ -206,17 +202,6 @@ export function MaterializeModal({
   const isDraft = Boolean(ontologyStatus && ontologyStatus !== "published");
   const dsId = Form.useWatch("target_datasource_id", form);
   const targetDb = Form.useWatch("target_database", form);
-  // 目标引擎由所选数据源类型推导（与提交时同一口径），决定执行侧支持哪些装载方式。
-  const engine = useMemo(
-    () => engineOfKind(dataSources.find((d) => d.id === dsId)?.kind) ?? DEFAULT_ENGINE,
-    [dataSources, dsId],
-  );
-  /** 执行侧真正支持的装载方式。问不到（null）时不设限——凭猜锁死比不锁更糟。 */
-  const supportedModes = useMemo(
-    () => (syncPlan?.modes ? new Set(syncPlan.modes) : null),
-    [syncPlan],
-  );
-
   // 目标库里已有的表：推荐表名与「已存在」提示都据此。
   const existingTables = useMemo(
     () => tablesByDb[`${dsId}::${targetDb}`] ?? [],
@@ -319,28 +304,6 @@ export function MaterializeModal({
       }
     })();
   }, [open, ontologyId, scopeTargetId]);
-
-  // 本次会用什么搬。随目标引擎变（不同引擎在执行侧的能力不同），故选完数据源要重问。
-  // **不静默吞异常**：这个端点曾长期 500，前端一个 catch(() => null) 把它变成「工具列表
-  // 为空」，谁也没发现坏了。
-  useEffect(() => {
-    if (!open) return;
-    let stale = false;
-    setSyncPlanError(null);
-    api
-      .getSyncTools({ ontologyId, engine })
-      .then((plan) => {
-        if (!stale) setSyncPlan(plan);
-      })
-      .catch((err: unknown) => {
-        if (stale) return;
-        setSyncPlan(null);
-        setSyncPlanError(err instanceof Error ? err.message : "无法读取本次的搬运方式");
-      });
-    return () => {
-      stale = true;
-    };
-  }, [open, ontologyId, engine]);
 
   // 选定数据源 → 读它上面的库列表。目标库只能从中选，故读不到就得显式报错。
   useEffect(() => {
@@ -482,8 +445,7 @@ export function MaterializeModal({
     try {
       const run = await api.materializeOntology(ontologyId, {
         target_datasource_id: values.target_datasource_id,
-        engine,
-        // 搬运工具不传：由后端决策（设置页可强制指定）。前端传了反而会盖过它。
+        engine: DEFAULT_ENGINE,
         // 同步方式逐实体来自各自契约（上面已写回），故不传全局覆盖。
         ...(Object.keys(databaseOverrides).length ? { database_overrides: databaseOverrides } : {}),
         ...(Object.keys(tableOverrides).length ? { table_overrides: tableOverrides } : {}),
@@ -561,17 +523,7 @@ export function MaterializeModal({
         size="small"
         style={{ width: 120 }}
         value={rowStrategy[c.id]}
-        // 执行侧搬不了的装载方式置灰：选了也只会被 planner 记进「未生成作业」，
-        // 让人以为配好了却没搬。依据必须是**执行侧对这个目标引擎**声明的能力
-        // （如 SeaTunnel 档写 Hive 只做全量），按工具适配器的 modes 判是错的。
-        options={LOAD_STRATEGY_OPTIONS.map((o) => ({
-          ...o,
-          disabled: Boolean(supportedModes && !supportedModes.has(o.value)),
-          label:
-            supportedModes && !supportedModes.has(o.value)
-              ? `${o.label}（${engine} 目标不支持）`
-              : o.label,
-        }))}
+        options={LOAD_STRATEGY_OPTIONS}
         onChange={(v) => setRowStrategy((m) => ({ ...m, [c.id]: v }))}
       />
     </Tooltip>
@@ -715,72 +667,6 @@ export function MaterializeModal({
     />
   );
 
-  // 搬运方式：**只读**。工具不再由人逐次选——它是部署事实，且在默认的 runner 通道下
-  // 压根不参与执行（档位由执行侧逐表自选）。这里只说清「这次会怎么搬」，改它去设置页。
-  const syncMethod = (
-    <div style={{ marginBottom: 24 }}>
-      <div style={{ marginBottom: 4 }}>搬运方式</div>
-      {syncPlanError ? (
-        // 读不到就明说。此前这里是 catch(() => null)，端点 500 被吞成「工具列表为空」。
-        <Alert
-          type="warning"
-          showIcon
-          message="无法读取本次的搬运方式"
-          description={
-            <>
-              {syncPlanError}
-              <div style={{ marginTop: 4 }}>
-                不拦截物化：搬运方式由后端决定，提交前自检会再查一次。
-              </div>
-            </>
-          }
-        />
-      ) : syncPlan?.error ? (
-        <Alert
-          type="error"
-          showIcon
-          message="选不出可用的搬运工具"
-          description={
-            <>
-              {syncPlan.error}
-              <div style={{ marginTop: 4 }}>
-                到 <Link to="/settings">系统设置 → Airflow 编排</Link> 配置后重试。
-              </div>
-            </>
-          }
-        />
-      ) : (
-        <div className="om-muted" style={{ fontSize: 12 }}>
-          <Tag color={syncPlan?.auto === false ? "orange" : "blue"}>
-            {syncPlan
-              ? syncPlan.resolved === "auto"
-                ? "自动"
-                : (syncPlan.resolved ?? "—")
-              : "读取中…"}
-          </Tag>
-          {syncPlan?.auto === false && <Tag style={{ marginInlineEnd: 6 }}>设置页已指定</Tag>}
-          {syncPlan?.detail}
-          {syncPlan && (
-            <div style={{ marginTop: 4 }}>
-              {syncPlan.modes_detail}
-              {syncPlan.modes && syncPlan.modes.length > 0 && (
-                <>
-                  {" "}
-                  可用装载方式：
-                  {syncPlan.modes
-                    .map((m) => LOAD_STRATEGY_OPTIONS.find((o) => o.value === m)?.label ?? m)
-                    .join(" / ")}
-                  。
-                </>
-              )}{" "}
-              需要指定工具请到 <Link to="/settings">系统设置 → Airflow 编排</Link>。
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-
   const runTab = (
     <>
       {/* 破坏性操作的告知放 Alert 而不是一行小字：它是这个弹窗里后果最重的一句话，
@@ -875,7 +761,6 @@ export function MaterializeModal({
               description={dbError}
             />
           )}
-          {syncMethod}
         </div>
 
         {step === 1 &&
@@ -1326,17 +1211,6 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
           {statusError && <div className="mtz-warn">{statusError}</div>}
         </dd>
 
-        <dt>搬运方式</dt>
-        <dd>
-          {/* 工具已不由人选，回执里这句话就是事后对账「为什么这批表没搬」的起点。 */}
-          {r.sync_tool ?? "—"}
-          {r.sync_tool_detail && (
-            <div className="om-muted" style={{ fontSize: 12 }}>
-              {r.sync_tool_detail}
-            </div>
-          )}
-        </dd>
-
         <dt>调度</dt>
         <dd>
           {r.schedule ? (
@@ -1480,7 +1354,7 @@ function OrchestratedReceiptView({ run }: { run: MaterializationRun }) {
   );
 }
 
-/** 一个搬运任务的执行结果：实际用了哪一档、搬了多少行。**点开才读**。
+/** 一个搬运任务的执行结果：搬了多少行。**点开才读**。
  *
  * 不跟着状态轮询一起拉：Airflow 没有跨任务批量读 XCom 的端点，一次一请求，整轮几百个
  * 任务每 5 秒全读一遍会把 Airflow 打垮。这是排查时才看的信息，按需付费即可。
@@ -1503,7 +1377,6 @@ function TaskResult({
 
   if (data) {
     const parts = [
-      data.backend ? `档位 ${data.backend}` : null,
       data.rows_written != null ? `写入 ${data.rows_written} 行` : null,
       data.watermark_after ? `水位 ${data.watermark_after}` : null,
     ].filter(Boolean);

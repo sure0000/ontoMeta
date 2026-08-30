@@ -168,3 +168,40 @@ def test_order_by_output_alias_not_a_fabricated_column(sql):
 def test_alias_does_not_launder_fabricated_columns(sql):
     r = prove_sql_sound(sql, _proj())
     assert isinstance(r, SqlRejection) and r.code == "unknown_column"
+
+
+def test_textual_column_is_groupable_but_measure_is_not():
+    """按名称/文本列分组是常规分析；只有按度量原值分组才是口径错误。
+
+    回归：证明器曾把 TEXTUAL 也判成不可分组，而本体生成把绝大多数字段标成 attribute
+    （→ TEXTUAL），于是真实本体上几乎任何 GROUP BY 都被拒，模型转而拉明细自己心算。
+    """
+    ok = prove_sql_sound(
+        "SELECT name, COUNT(*) FROM customer GROUP BY name", _proj()
+    )
+    assert isinstance(ok, SqlCertificate), getattr(ok, "message", ok)
+
+    bad = prove_sql_sound(
+        "SELECT amount, COUNT(*) FROM order GROUP BY amount", _proj()
+    )
+    assert isinstance(bad, SqlRejection) and bad.code == "illegal_group_by"
+
+
+def test_case_predicate_columns_are_not_aggregated():
+    """`SUM(CASE WHEN x IS NULL THEN 1 ELSE 0 END)` 求和的是 1/0，x 只是谓词。
+
+    回归：证明器曾递归收集聚合函数里的全部列，把空值率统计的标准写法判成
+    「对非度量字段做 SUM」——数据质量分析在真实本体上一步都走不出去。
+    """
+    ok = prove_sql_sound(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN status IS NULL THEN 1 ELSE 0 END) AS null_cnt FROM order",
+        _proj(),
+    )
+    assert isinstance(ok, SqlCertificate), getattr(ok, "message", ok)
+
+    # 分支**取值**是非度量列时仍须拒（那才是真的在对它求和）
+    bad = prove_sql_sound(
+        "SELECT SUM(CASE WHEN amount > 0 THEN status ELSE 0 END) FROM order", _proj()
+    )
+    assert isinstance(bad, SqlRejection) and bad.code == "illegal_aggregation"

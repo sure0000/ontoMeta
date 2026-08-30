@@ -60,6 +60,9 @@ class GoldenCase:
     expect_repairs: int | None = None                  # P4.3 触发了几次自愈重写
     expect_repairs_succeeded: int | None = None        # 其中几次把答案救回来了
     expect_clarification: bool = False                 # P4.1 是否以澄清反问收场
+    expect_ops_family: str | None = None                # V6 P3：record 块应来自哪个 reader
+    expect_record_source: bool = False                  # record 必须保留权威来源
+    expect_record_observed_at: bool = False             # record 必须保留读取时点
     principal_role: str = "publisher"
     note: str = ""
 
@@ -189,6 +192,55 @@ GOLDEN_CASES: list[GoldenCase] = [
         expect_tools=["find_join_path"],
         expect_refused=False,
         note="导航器返回的关系名必须入事实账本，否则答案一引用就被判幻觉→误拒答",
+    ),
+    # ---------------- 运行记录（V6 P3）----------------
+    GoldenCase(
+        id="ops_landing_grounded",
+        category="ops",
+        question="订单对象的物理落点是什么？",
+        script=[
+            ToolTurn([("get_landing", {"target_kind": "object", "target_id": "@order"})]),
+            FinalTurn("「订单」当前没有物理落点登记，记录本身没有成功时点。"),
+        ],
+        expect_tools=["get_landing"],
+        expect_refused=False,
+        expect_llm_calls=2,
+        expect_ops_family="landing",
+        expect_record_source=True,
+        expect_record_observed_at=True,
+        note="空落点是权威答案，不能推测表名；正常工具轮 + 收尾轮仍为 2 次 LLM 调用",
+    ),
+    GoldenCase(
+        id="ops_task_run_empty_grounded",
+        category="ops",
+        question="最近数据任务的执行状态是什么？",
+        script=[
+            ToolTurn([("get_ops_record", {"family": "task_run"})]),
+            FinalTurn("当前数据域没有数据任务记录，因此也没有可报告的执行时点。"),
+        ],
+        expect_tools=["get_ops_record"],
+        expect_refused=False,
+        expect_llm_calls=2,
+        expect_ops_family="task_run",
+        expect_record_source=True,
+        expect_record_observed_at=True,
+        note="权威空记录仍算接地，不能把没查到改写成成功或失败",
+    ),
+    GoldenCase(
+        id="ops_no_tool_call_forces_reader",
+        category="ops",
+        question="订单同步任务跑完了吗？",
+        script=[
+            FinalTurn("订单同步任务已经执行成功。"),
+            FinalTurn("当前数据域没有匹配的同步任务运行记录，无法确认是否跑完。"),
+        ],
+        expect_tools=["get_ops_record"],
+        expect_refused=False,
+        expect_llm_calls=2,
+        expect_ops_family="task_run",
+        expect_record_source=True,
+        expect_record_observed_at=True,
+        note="模型即使直接编造运行状态，服务端也先补执行确定性 reader",
     ),
     GoldenCase(
         id="query_profile_before_literal",

@@ -1,6 +1,7 @@
 import {
   DeleteOutlined,
   EditOutlined,
+  CloseOutlined,
   FolderAddOutlined,
   FolderOpenOutlined,
   FolderOutlined,
@@ -61,6 +62,7 @@ export interface ChatBiSidebarProps {
   onToggleBatchSelect: (id: string) => void;
   onBatchSelectAll: (selectAll: boolean) => void;
   onBatchDelete: () => void;
+  onClose?: () => void;
 }
 
 export const ChatBiSidebar = memo(function ChatBiSidebar({
@@ -101,6 +103,7 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
   onToggleBatchSelect,
   onBatchSelectAll,
   onBatchDelete,
+  onClose,
 }: ChatBiSidebarProps) {
   return (
     <aside className="chatbi-sidebar">
@@ -115,6 +118,15 @@ export const ChatBiSidebar = memo(function ChatBiSidebar({
             {archivedConversations.length > 0 ? ` · ${archivedConversations.length} 归档` : ""}
           </div>
         </div>
+        {onClose && (
+          <Button
+            type="text"
+            className="chatbi-sidebar-close"
+            icon={<CloseOutlined />}
+            onClick={onClose}
+            aria-label="关闭侧栏"
+          />
+        )}
       </div>
       <div className="chatbi-sidebar-header">
         <Select

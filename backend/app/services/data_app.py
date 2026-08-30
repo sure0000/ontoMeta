@@ -47,9 +47,7 @@ from app.services.data_app_executor import (
     list_databases as execute_list_databases,
     list_tables as execute_list_tables,
 )
-from app.connectors.cube import CubeConnector, CubeExecutionError
 from app.services.ontology_query import OntologyQueryService
-from app.services.settings_service import SettingsService
 
 logger = logging.getLogger("ontometa.data_app")
 
@@ -75,7 +73,7 @@ def _merge_dsn_password(new_dsn: str, old_dsn: str | None) -> str:
     """编辑时连接字段回显但密码不回显：若新 DSN 没带密码而旧 DSN 有，则沿用旧密码。
 
     这样用户改了主机/端口/库却把密码留空时不会把密码清掉（对齐「留空＝保持不变」）。
-    非 URL 形态（如 cube 的裸地址）解析失败时原样返回，不做合并。
+    非 SQLAlchemy URL 解析失败时原样返回，不做合并。
     """
     if not old_dsn:
         return new_dsn
@@ -106,18 +104,12 @@ def _dumps(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
-def resolve_domain_data_source(
-    db: Session, target_catalog: str | None = None
-) -> DataSource | None:
+def resolve_domain_data_source(db: Session) -> DataSource | None:
     """Resolve the explicit default Doris warehouse, fail-closed.
 
-    ``target_catalog`` remains in the internal signature only while old callers
-    are being removed. It is never a routing hint: business sources, catalog
-    names, timestamps and row order cannot affect a query target.
+    Business sources, catalog names, timestamps and row order cannot affect a
+    query target.
     """
-    if target_catalog:
-        logger.warning("query target is unsupported; refusing %r", target_catalog)
-        return None
     explicit = db.query(DataSource).filter(
         (DataSource.purpose == "warehouse") | DataSource.is_default_warehouse.is_(True)
     ).all()
@@ -147,15 +139,6 @@ class DataAppService:
 
     def __init__(self) -> None:
         self.query_service = OntologyQueryService()
-        self.settings_service = SettingsService()
-
-    def _cube_connector(self, db: Session, source: "DataSource | None" = None) -> CubeConnector:
-        """从设置页（DB）构造 Cube 连接器；数据源可覆盖 api_url。"""
-        runtime = self.settings_service.get_cube_runtime(db)
-        conn = CubeConnector.from_runtime(runtime)
-        if source and source.dsn_secret_ref:
-            conn.api_url = source.dsn_secret_ref.rstrip("/")
-        return conn
 
     # ------------------------------------------------------------- data sources
 
@@ -228,7 +211,6 @@ class DataAppService:
 
         - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号
         - 文件类（sqlite/duckdb）：取文件路径
-        - cube：dsn 存的就是 API 地址，原样给 url
         解析失败时静默降级为空，不影响其它字段返回。
         """
         out: dict[str, Any] = {
@@ -241,7 +223,6 @@ class DataAppService:
             "password_set": False,
             "password_hint": None,
             "path": None,
-            "url": None,
         }
         if not dsn:
             return out
@@ -265,8 +246,6 @@ class DataAppService:
                 out["path"] = make_url(dsn).database
             except Exception:  # noqa: BLE001
                 out["path"] = None
-        elif kind == "cube":
-            out["url"] = dsn
         return out
 
     @staticmethod
@@ -752,7 +731,7 @@ class DataAppService:
         result = self._compile_sql(db, effective, ontology_id=ontology_id)
         warnings = list(result.get("warnings", []))
         # Phase 6 query execution ignores a saved data_source_id. It may be a
-        # historical ERP/Cube binding and must never become a source fallback.
+        # historical bindings must never become a source fallback.
         # Current ontology/version Projection metadata is the only authority.
         if ontology_id and result.get("sql"):
             from app.services.query_routing import (
@@ -852,134 +831,6 @@ class DataAppService:
             if any(col in r for r in rows):
                 rows = [r for r in rows if str(r.get(col)) == str(value)]
         return rows
-
-    def _cube_execute(
-        self, db: Session, binding: dict, source: DataSource,
-        *, security_context: dict | None = None,
-    ) -> tuple[list[dict], list[dict]]:
-        """把数据集绑定翻译为 Cube 查询并执行。"""
-        obj = db.get(ObjectType, binding.get("primary_object_type_id"))
-        if not obj:
-            raise CubeExecutionError("未解析主对象，无法构造 Cube 查询")
-        connector = self._cube_connector(db, source)
-        cube_query = connector.build_query(
-            object_name=obj.name,
-            measures=binding.get("measures") or [],
-            dimensions=binding.get("dimensions") or [],
-            filters=binding.get("filters") or [],
-            time_range=binding.get("time_range"),
-            limit=int(binding.get("row_limit") or 100),
-        )
-        return connector.query(cube_query, security_context=security_context)
-
-    def _build_cube_objects(self, db: Session, ontology_id: str) -> list[dict]:
-        """汇总本体对象/属性/业务逻辑/关系，组装为 CubeConnector.generate_model 的输入。"""
-        from app.models import RelationType
-
-        objects_rows = (
-            db.query(ObjectType)
-            .options(joinedload(ObjectType.properties))
-            .filter(ObjectType.ontology_id == ontology_id)
-            .all()
-        )
-        obj_by_id = {o.id: o for o in objects_rows}
-        logics = (
-            db.query(BusinessLogic)
-            .filter(BusinessLogic.ontology_id == ontology_id)
-            .all()
-        )
-        logic_by_obj: dict[str, list[dict]] = {}
-        for logic in logics:
-            for b in getattr(logic, "object_bindings", []) or []:
-                logic_by_obj.setdefault(b.object_type_id, []).append(
-                    {
-                        "name": logic.name,
-                        "display_name": logic.display_name,
-                        "agg": "sum",
-                        "sql": logic.expression_summary or logic.name,
-                    }
-                )
-        # 关系 → joins（挂在 source 对象上）
-        relations = (
-            db.query(RelationType)
-            .filter(RelationType.ontology_id == ontology_id)
-            .all()
-        )
-        joins_by_obj: dict[str, list[dict]] = {}
-        for rel in relations:
-            src = obj_by_id.get(rel.source_object_type_id)
-            tgt = obj_by_id.get(rel.target_object_type_id)
-            if not src or not tgt:
-                continue
-            join = self._relation_to_join(rel, src, tgt)
-            if join:
-                joins_by_obj.setdefault(src.id, []).append(join)
-        return [
-            {
-                "name": o.name,
-                "display_name": o.display_name,
-                "sql_table": o.name,
-                "properties": [
-                    {
-                        "name": p.name,
-                        "display_name": p.display_name,
-                        "data_type": p.data_type,
-                        "semantic_type": p.semantic_type,
-                    }
-                    for p in o.properties
-                ],
-                "measures": logic_by_obj.get(o.id, []),
-                "joins": joins_by_obj.get(o.id, []),
-            }
-            for o in objects_rows
-        ]
-
-    @staticmethod
-    def _relation_to_join(rel, src, tgt) -> dict | None:
-        from app.connectors.cube import cube_name
-
-        # 关系基数 → Cube relationship
-        card = (rel.cardinality or "").lower().replace(" ", "")
-        if card in {"n:1", "many_to_one", "many-to-one", "n-1"}:
-            relationship = "many_to_one"
-        elif card in {"1:n", "one_to_many", "one-to-many", "1-n"}:
-            relationship = "one_to_many"
-        elif card in {"1:1", "one_to_one", "one-to-one"}:
-            relationship = "one_to_one"
-        else:
-            # N:N 需桥接表，此处不自动生成
-            return None
-        src_cube = cube_name(src.name)
-        tgt_cube = cube_name(tgt.name)
-        # 外键：优先从 source_evidence 推断，否则约定 <target>_id = <target>.id
-        fk = None
-        pk = "id"
-        try:
-            ev = _loads(rel.source_evidence, {}) or {}
-            fk = ev.get("foreign_key") or ev.get("source_field") or ev.get("fk_column")
-            pk = ev.get("target_field") or ev.get("pk_column") or pk
-        except Exception:  # noqa: BLE001
-            pass
-        if not fk:
-            fk = f"{tgt.name}_id"
-        return {
-            "target_cube": tgt_cube,
-            "relationship": relationship,
-            "sql": f"${{{src_cube}}}.{fk} = ${{{tgt_cube}}}.{pk}",
-        }
-
-    def generate_cube_model(self, db: Session, ontology_id: str) -> dict:
-        """为一个本体生成 Cube data model（含预聚合/refreshKey/joins）。"""
-        objects = self._build_cube_objects(db, ontology_id)
-        return self._cube_connector(db).generate_model(objects=objects)
-
-    def generate_cube_model_files(self, db: Session, ontology_id: str) -> dict:
-        """生成可直接部署的 Cube 文件（model/cubes/*.js + cube.js，含 RLS）。"""
-        connector = self._cube_connector(db)
-        model = connector.generate_model(
-            objects=self._build_cube_objects(db, ontology_id)
-        )
-        return connector.generate_model_files(model)
 
     def _mock_execute(
         self, db: Session, binding: dict, *, limit: int
@@ -1743,21 +1594,20 @@ class DataAppService:
 
     @staticmethod
     def _spec_panels(spec: dict) -> list[dict]:
-        """读取看板面板（Panel）列表，兼容旧字段 tiles。"""
+        """读取看板面板（Panel）列表。"""
         if not isinstance(spec, dict):
             return []
-        return spec.get("panels") or spec.get("tiles") or []
+        return spec.get("panels") or []
 
     @staticmethod
     def _panel_ref_id(panel: dict) -> str | None:
-        """面板引用的可复用图表(Panel)ID，兼容旧字段 widget_id。"""
-        return panel.get("panel_id") or panel.get("widget_id")
+        """面板引用的可复用图表(Panel)ID。"""
+        return panel.get("panel_id")
 
     @staticmethod
     def _set_spec_panels(spec: dict, panels: list[dict]) -> None:
-        """写入 panels 并清理旧 tiles 字段。"""
+        """写入 panels。"""
         spec["panels"] = panels
-        spec.pop("tiles", None)
 
     @staticmethod
     def _default_spec(app_type: str) -> dict:

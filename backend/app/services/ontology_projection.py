@@ -14,6 +14,8 @@ Agent 写的 SQL 用的是**本体标识符**（ObjectType.name / Property.name�
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -122,7 +124,7 @@ def foreign_key_names(
 ) -> tuple[str, str]:
     """外键关系的 (源端列, 目标端列)。
 
-    取值优先级沿用 ``connectors/cube.py`` 的既有约定：
+    取值优先级遵循本体投影的既有约定：
     源端 ``foreign_key`` → ``source_field`` → ``fk_column`` → ``<目标对象>_id``；
     目标端 ``target_field`` → ``pk_column`` → 目标对象身份属性 → ``id``。
     """
@@ -140,6 +142,53 @@ def foreign_key_names(
         or DEFAULT_REF_COLUMN
     )
     return str(fk), str(ref)
+
+
+# 关系证据里「外键列」的两种历史写法。``source_evidence`` 的契约是 JSON
+# （warehouse_generator 就按 JSON 读），但草稿生成实际写进去的是人话描述——
+# 于是 JSON 解析失败 → 证据为空 → 外键退化成猜 ``<目标对象>_id``，而真实列叫
+# ``country``/``bank_name``，猜的列在对象上不存在 → ON 一律给不出来。
+# 结果：本体里明明记着「通过引用字段 X 关联 Y」，导航器却说推不出 ON。
+#
+# 这里不做任何**推断**：只把我们自己写进去的那个列名读回来（模板见
+# evidence_builder 的 FK 证据描述、以及 evidence_refs 的 ``urn#column`` 片段）。
+# 读回来的列还要过 `_join_keys_of` 的存在性校验，读错了也只会退回「给不出 ON」。
+_FK_IN_PROSE = re.compile(r"引用字段\s*[`\"']?([A-Za-z_][A-Za-z0-9_]*)[`\"']?\s*关联")
+_FK_IN_URN_REF = re.compile(r"#([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|$)")
+#: 证据里记着这条关系是哪套源画像推出来的（evidence_builder 写的「来源 X 源画像」）。
+_PROFILE_IN_EVIDENCE = re.compile(r"来源\s*([A-Za-z_][A-Za-z0-9_]*)\s*源画像")
+#: 源画像**声明**的主键列（不是猜的：见 source_profile.FrappeProfile.primary_key_names
+#: ——「Frappe 以 name 为字符串主键」）。外键的被引用列取这里，仅在该列真实存在时生效。
+_PROFILE_PK_COLUMN: dict[str, str] = {"frappe": "name"}
+
+
+def parse_relation_evidence(raw: str | None) -> dict:
+    """``RelationType.source_evidence`` → 结构化证据。认不出的部分不臆造。
+
+    优先 JSON（既有契约）；否则从人话描述/证据引用里把外键列名读回来。
+    """
+    if not raw:
+        return {}
+    text = str(raw).strip()
+    if not text:
+        return {}
+    try:
+        loaded = json.loads(text)
+    except (TypeError, ValueError):
+        loaded = None
+    if isinstance(loaded, dict):
+        return loaded
+
+    out: dict = {}
+    for pattern in (_FK_IN_PROSE, _FK_IN_URN_REF):
+        hit = pattern.search(text)
+        if hit:
+            out["foreign_key"] = hit.group(1)
+            break
+    profile = _PROFILE_IN_EVIDENCE.search(text)
+    if profile:
+        out["source_profile"] = profile.group(1).lower()
+    return out
 
 
 def other_is_many(r: RelView, m: ObjView) -> bool | None:
@@ -201,17 +250,23 @@ class OntologyProjection:
         return obj.name in self.mapping_tables
 
 
-def _identity_of(obj: ObjView) -> str | None:
-    """对象的身份属性（投影侧按归一语义类型判定标识字段）。"""
-    return primary_key_name(
-        obj.name,
-        [pv.name for pv in obj.props.values()],
-        [
-            pv.name
-            for pv in obj.props.values()
-            if pv.semantic_type is SemanticType.IDENTIFIER
-        ],
-    )
+def _referenced_key_of(tgt: ObjView, evidence: dict) -> str | None:
+    """外键**被引用**的那一列。取不到就回 None——不拿「像个 id 的列」顶替。
+
+    与 ``primary_key_name`` 的「身份属性」不同：那个可以退回「首个标识语义字段」，
+    对展示/去重够用；但 JOIN 的被引用列取错就是**连错行**。实测里 code_list 的
+    身份属性被判成 publisher_id，据此拼出的 ON 是一条会算错数的连接。
+
+    取值顺序：命名约定的强主键（``<对象>_id`` / ``id``）→ 源画像声明的主键列
+    （如 Frappe 的 ``name``，见 source_profile）。两者都要求该列真实存在于已发布属性里。
+    """
+    names = [pv.name for pv in tgt.props.values()]
+    if primary_key_is_confident(tgt.name, names, []):
+        return primary_key_name(tgt.name, names, [])
+    profile_pk = _PROFILE_PK_COLUMN.get(str(evidence.get("source_profile") or "").lower())
+    if profile_pk and tgt.resolve_property(profile_pk):
+        return profile_pk
+    return None
 
 
 def _join_keys_of(
@@ -222,17 +277,9 @@ def _join_keys_of(
     推出来的列名若不是该对象的已发布属性，一律回 None——宁可说「有关系但给不出 ON」，
     也不能吐一个 SQL 证明器随后会以 ``unknown_column`` 拒掉的 ON，那只会让模型空转。
     """
-    import json
-
-    try:
-        evidence = json.loads(rel.source_evidence) if rel.source_evidence else {}
-    except (TypeError, ValueError):
-        evidence = {}
-    if not isinstance(evidence, dict):
-        evidence = {}
-
+    evidence = parse_relation_evidence(rel.source_evidence)
     src_key, tgt_key = foreign_key_names(
-        evidence, target_name=tgt.name, target_pk=_identity_of(tgt)
+        evidence, target_name=tgt.name, target_pk=_referenced_key_of(tgt, evidence)
     )
     return (
         src_key if src.resolve_property(src_key) else None,

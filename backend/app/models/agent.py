@@ -25,9 +25,9 @@ def _uuid() -> str:
 class ArtifactKind(str, enum.Enum):
     # 物化与同步是本体两种来源的两种去处，不要混为一谈：
     #   物化 = 把本体建成物理表（只出 DDL）。人工建模的本体只有元数据，必须先物化出表给业务用。
-    #   同步 = 把源库已有的数据搬进来（只出 DML）。前置条件是目标表已物化。
+    #   同步 = 确保目标表并把源库已有的数据搬进来。同步成功后该表直接成为本体 serving 表。
     # 二者都编译成 Flink SQL / DDL 交 Airflow 执行（统一执行架构），本进程不落库。
-    SYNC = "sync"  # 数据同步 → 只出 DML；前置：目标表已存在
+    SYNC = "sync"  # 数据同步 → 幂等建目标表 + 搬数据
     TRANSFORM = "transform"  # ETL 任务 → Flink SQL
     METRIC = "metric"  # 指标任务 → 聚合 Flink SQL
     MATERIALIZE = "materialize"  # 本体物化 → 只出建表 DDL，不搬数据、不触碰已有数据

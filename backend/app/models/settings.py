@@ -67,9 +67,8 @@ class AirflowSetting(Base):
     从 ``config.Settings`` 取一次初值，此后以本行为准。这样既能让已有部署平滑过渡，
     又不会出现「改了 .env 却不生效」这种两个事实源打架的情况。
 
-    仍**不在**这里的：搬运工具与同步策略由物化弹窗逐次选；目标仓的 Airflow Connection id
-    由目标数据源推导；源库/目标库的凭据分别归 Airflow Connection（docker 通道）与
-    sync-runner 的 secrets（runner 通道）——凭据只有一个归属地，产物里只出现别名。
+    仍**不在**这里的：搬运策略由 Flink 作业编译器统一决定；目标仓的 Airflow
+    Connection id 由目标数据源推导，源库/目标库凭据只通过 Airflow Connection 别名注入。
     """
 
     __tablename__ = "airflow_settings"
@@ -88,24 +87,6 @@ class AirflowSetting(Base):
     # 必须是 Airflow 真正挂进容器的那个目录，否则 DAG 落了盘也没人解析
     # （preflight 的「DAG 目录双向可见」专治这一项）。
     dags_dir: Mapped[str] = mapped_column(String(512), default="")
-    jobs_dir: Mapped[str] = mapped_column(String(512), default="")
-
-    # ---- 执行通道 ----
-    # runner：Airflow 任务向常驻 sync-runner 发 HTTP（默认）；
-    # docker：Airflow 经 docker.sock 起搬运容器（旧通道，保留作回退）。
-    sync_channel: Mapped[str] = mapped_column(String(16), default="runner")
-    sync_runner_endpoint: Mapped[str] = mapped_column(String(512), default="")
-    # ontoMeta 调 runner 的 Bearer token。runner 侧设了 SYNC_RUNNER_TOKEN 才需要；
-    # **写连接配置必须有它**（runner 没配 token 时写接口直接 403，不敞着）。
-    sync_runner_token: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    # 强制指定搬运工具。空 = 自动（见 services/sync_tool_resolver）：物化弹窗不再让人
-    # 逐次选工具——工具是部署事实，且 runner 通道下它压根不参与执行。
-    sync_tool: Mapped[str] = mapped_column(String(32), default="")
-    # 下面三项只服务 docker 通道，runner 通道下不生效。
-    docker_network: Mapped[str] = mapped_column(String(128), default="bridge")
-    drivers_dir: Mapped[str] = mapped_column(String(512), default="")
-    # ``工具名=镜像`` 逗号分隔。无官方镜像的工具（DataX）只有在这里配了才可选。
-    sync_tool_images: Mapped[str] = mapped_column(String(1024), default="")
 
     # ---- DAG 形状与时序 ----
     max_tasks_per_dag: Mapped[int] = mapped_column(Integer, default=50)
@@ -113,7 +94,6 @@ class AirflowSetting(Base):
     # 落盘后等 Airflow 解析到 DAG 的超时。要大于 Airflow 的 dag_dir_list_interval，
     # 否则首次提交必然报「尚未解析到」（该值默认 300s，按你的部署实测调）。
     dag_parse_timeout: Mapped[float] = mapped_column(Float, default=60.0)
-    preflight_sentinel_timeout: Mapped[float] = mapped_column(Float, default=20.0)
     # 全量装载是否走 staging + 原子切换（搬到一半失败时正式表原封不动）。
     staging_swap: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -122,27 +102,11 @@ class AirflowSetting(Base):
     )
 
 
-class CubeSetting(Base):
-    """Cube 语义层外挂配置：单例配置行，在设置页管理，无需环境变量/配置文件。"""
-
-    __tablename__ = "cube_settings"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
-    api_url: Mapped[str] = mapped_column(String(512), default="http://localhost:4000")
-    api_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    preagg_refresh: Mapped[str] = mapped_column(String(50), default="1 hour")
-    tenant_dimension: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    )
-
-
 class DependencyComponent(Base):
     """依赖组件统一注册表（DEPENDENCY_DEPLOYMENT_REDESIGN §3）。
 
-    除 ontoMeta 自身前后端外，所有依赖组件（LLM / DataHub / Airflow / SeaTunnel /
-    目标数仓 / sync-runner / Cube / PG）在此统一管理部署方式与连接信息。
+    除 ontoMeta 自身前后端外，所有依赖组件（LLM / DataHub / Airflow / 目标数仓）
+    在此统一管理部署方式与连接信息。
 
     - ``deploy_mode`` 决定「怎么来的」：external(已有)/docker/k8s/bare_metal。
     - ``connection`` 记「怎么连」：部署成功自动回写，或 external 时手填。
@@ -155,7 +119,7 @@ class DependencyComponent(Base):
     __tablename__ = "dependency_components"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    # 组件类型：llm/datahub/airflow/seatunnel/warehouse/sync_runner/cube/postgres
+    # 组件类型：llm/datahub/airflow
     key: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(255))
     # 部署：external | docker | k8s | bare_metal

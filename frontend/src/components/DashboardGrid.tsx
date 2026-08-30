@@ -1,6 +1,5 @@
-import { useMemo, type ComponentType } from "react";
-// react-grid-layout v2 默认入口不再导出 WidthProvider；使用 legacy 子路径保留 v1 扁平 props API。
-import { WidthProvider, Responsive } from "react-grid-layout/legacy";
+import { useMemo } from "react";
+import { Responsive, useContainerWidth, type Layout } from "react-grid-layout";
 import { Card, Empty, Select } from "antd";
 import { DeleteOutlined } from "@ant-design/icons";
 import { BarChartRender, DataTableRender, KpiRender } from "./DataAppRenderer";
@@ -13,19 +12,7 @@ import type { DataAppPreviewResult } from "../types";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 
-const ResponsiveGrid = (
-  WidthProvider as unknown as (c: unknown) => ComponentType<Record<string, unknown>>
-)(Responsive as unknown);
-
-type RGLItem = {
-  i: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  minW?: number;
-  minH?: number;
-};
+type RGLItem = Layout[number];
 
 export interface DashboardTile {
   id: string;
@@ -33,7 +20,6 @@ export interface DashboardTile {
   title?: string;
   datasetIndex?: number;
   panel_id?: string; // 引用可复用面板（Panel）资产（优先于 datasetIndex）
-  widget_id?: string; // 旧字段，兼容读取
   rect?: { x: number; y: number; w: number; h: number }; // canvas 布局下的像素坐标
   x: number;
   y: number;
@@ -41,17 +27,15 @@ export interface DashboardTile {
   h: number;
 }
 
-/** 读取看板面板列表，兼容旧字段 spec.tiles。 */
+/** 读取当前看板面板列表。 */
 export function getSpecPanels(spec: Record<string, unknown> | null | undefined): DashboardTile[] {
   if (!spec) return [];
-  return ((spec.panels as DashboardTile[]) ??
-    (spec.tiles as DashboardTile[]) ??
-    []) as DashboardTile[];
+  return (spec.panels as DashboardTile[]) ?? [];
 }
 
-/** 面板引用的可复用图表 ID，兼容旧字段 widget_id。 */
-export function getPanelRefId(tile: { panel_id?: string; widget_id?: string }): string | undefined {
-  return tile.panel_id ?? tile.widget_id;
+/** 面板引用的可复用图表 ID。 */
+export function getPanelRefId(tile: { panel_id?: string }): string | undefined {
+  return tile.panel_id;
 }
 
 export interface DashboardGridProps {
@@ -92,6 +76,7 @@ export function DashboardGrid({
   const cols = grid?.cols ?? 12;
   const rowHeight = grid?.rowHeight ?? 40;
   const margin = grid?.gap ?? 12;
+  const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true });
 
   const layout = useMemo<RGLItem[]>(
     () =>
@@ -107,7 +92,7 @@ export function DashboardGrid({
     [tiles],
   );
 
-  const applyLayout = (next: RGLItem[]): DashboardTile[] => {
+  const applyLayout = (next: Layout): DashboardTile[] => {
     const byId = new Map(next.map((l) => [l.i, l]));
     return tiles.map((t) => {
       const l = byId.get(t.id);
@@ -115,12 +100,12 @@ export function DashboardGrid({
     });
   };
 
-  const handleLayoutChange = (next: RGLItem[]) => {
+  const handleLayoutChange = (next: Layout) => {
     onLayoutChange?.(applyLayout(next));
   };
 
   // 拖拽/缩放松手即持久化布局（无需手动“保存布局”）
-  const handleDragResizeStop = (next: RGLItem[]) => {
+  const handleDragResizeStop = (next: Layout) => {
     onPersist?.(applyLayout(next));
   };
 
@@ -154,25 +139,27 @@ export function DashboardGrid({
 
   return (
     <div
+      ref={containerRef}
       className={rt.dark ? "dashboard-canvas dashboard-canvas--dark" : "dashboard-canvas"}
       style={{ ...dashboardThemeVars(rt), padding: 12, borderRadius: 12 }}
     >
-      <ResponsiveGrid
-        className="dashboard-grid"
-        layouts={{ lg: layout, md: layout, sm: layout, xs: layout }}
-        breakpoints={{ lg: 1200, md: 900, sm: 640, xs: 0 }}
-        cols={{ lg: cols, md: cols, sm: Math.max(2, Math.round(cols / 2)), xs: 1 }}
-        rowHeight={rowHeight}
-        margin={[margin, margin]}
-        isDraggable={editable}
-        isResizable={editable}
-        draggableHandle=".dashboard-tile-drag"
-        onLayoutChange={handleLayoutChange as (l: unknown) => void}
-        onDragStop={((l: RGLItem[]) => handleDragResizeStop(l)) as (l: unknown) => void}
-        onResizeStop={((l: RGLItem[]) => handleDragResizeStop(l)) as (l: unknown) => void}
-      >
-        {tiles.map((t) => (
-          <div key={t.id}>
+      {mounted && (
+        <Responsive
+          width={width}
+          className="dashboard-grid"
+          layouts={{ lg: layout, md: layout, sm: layout, xs: layout }}
+          breakpoints={{ lg: 1200, md: 900, sm: 640, xs: 0 }}
+          cols={{ lg: cols, md: cols, sm: Math.max(2, Math.round(cols / 2)), xs: 1 }}
+          rowHeight={rowHeight}
+          margin={[margin, margin]}
+          dragConfig={{ enabled: editable, handle: ".dashboard-tile-drag" }}
+          resizeConfig={{ enabled: editable }}
+          onLayoutChange={handleLayoutChange}
+          onDragStop={(next) => handleDragResizeStop(next)}
+          onResizeStop={(next) => handleDragResizeStop(next)}
+        >
+          {tiles.map((t) => (
+            <div key={t.id}>
             <Card
               size="small"
               title={
@@ -218,9 +205,10 @@ export function DashboardGrid({
             >
               {renderBody(t)}
             </Card>
-          </div>
-        ))}
-      </ResponsiveGrid>
+            </div>
+          ))}
+        </Responsive>
+      )}
     </div>
   );
 }

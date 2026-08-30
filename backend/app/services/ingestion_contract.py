@@ -41,14 +41,21 @@ _PROJECTION_SYNC_STATUS = {
 def mirror_contract_to_projection(
     db: Session, contract: IngestionContract
 ) -> WarehouseObjectProjection | None:
-    """把接入契约的落数状态镜像到同版本部署的对象 Projection。**不提交事务。**
+    """把接入契约的落数状态镜像到同版本对象 Projection。**不提交事务。**
 
     两条对账路径都得走这里：``IngestionContractService.reconcile_task_result``（仓库 API
     回传 Airflow task 结果）和 ``sync_reconciliation.reconcile_sync_receipt``（制品流水线
-    按 DagRun 对账）。此前只有前者镜像，于是走制品流水线的同步跑成功后
-    ``projection.sync_status`` 仍停在 ``empty``——下游 transform 直接拒绝
-    「对象 X 的 ODS 尚未同步完成」，读侧也看不到落点。
+    按 DagRun 对账）。同步成功即完成源表对象的直接 serving：如果当前版本还没有
+    Deployment/Projection，这里会用已验证的同步目标表创建它；如果已有独立 transform
+    serving，则只更新 ODS 状态，由 transform 继续拥有查询权。
     """
+    if contract.status == "ready":
+        # Sync is the materialization boundary for source-backed objects.  Keep
+        # this in the shared mirror path so API and artifact reconciliation agree.
+        from app.services.doris_deployment import publish_direct_sync_ready
+
+        return publish_direct_sync_ready(db, contract=contract)
+
     deployment = (
         db.query(OntologyWarehouseDeployment)
         .filter(
@@ -79,10 +86,10 @@ def mirror_contract_to_projection(
     if contract.status == "ready":
         projection.last_sync_at = contract.last_success_at
         projection.sync_watermark = contract.sync_watermark
-    # ODS 本身不对外服务。要 queryable 得再经一次 transform 或显式把服务层设为 ods。
-    projection.queryable = bool(
-        projection.serving_layer == "ods" and contract.status == "ready"
-    )
+    # A non-ready contract must never make an existing serving projection
+    # queryable.  Ready contracts are handled above so direct sync can create
+    # and align the serving target before this mirror runs.
+    projection.queryable = False
     return projection
 
 

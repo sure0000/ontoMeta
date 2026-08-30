@@ -5,7 +5,7 @@ SshDelivery 把子进程调用收在 ``_run`` 一处，替身覆盖它就能让 
 断言），又不需要真开一个 sshd。
 
 用在两类地方：
-- 需要验证产物真的落位的用例（flink_job_runner / materialization_runner）
+- 需要验证产物真的落位的用例（materialization_runner）
 - 只需要投递别炸的用例（MagicMock 的 deliver() 什么都不写，落盘断言会变成空转）
 """
 

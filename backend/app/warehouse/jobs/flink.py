@@ -1,4 +1,4 @@
-"""Flink 作业渲染器（工具可插拔的第三个实现）。
+"""Flink 作业渲染器。
 
 Flink 既能做批量（有界流），又是 CDC 的主力（Flink CDC 连接器覆盖 MySQL/Postgres 等），
 故三种装载方式都支持，CDC 源平台由 ``_CDC_PLATFORMS`` 声明。
@@ -11,7 +11,7 @@ Flink 既能做批量（有界流），又是 CDC 的主力（Flink CDC 连接�
 
 from __future__ import annotations
 
-from app.warehouse.jobs.base import JobSpec, SyncToolAdapter
+from app.warehouse.jobs.base import JobSpec, _alias_token
 
 # Flink CDC 有连接器的源平台。未列出的平台不支持 CDC，由 supports_cdc_from 拦下。
 _CDC_PLATFORMS: dict[str, str] = {
@@ -31,30 +31,19 @@ _SINKS: dict[str, str] = {
 }
 
 
-class FlinkAdapter(SyncToolAdapter):
+class FlinkAdapter:
     name = "flink"
-    docker_image = "apache/flink:1.18"
-    jobs_mount_dir = "/opt/flink/jobs"
-    driver_lib_dir = "/opt/flink/lib"
+
+    @staticmethod
+    def placeholder(alias: str, field_name: str) -> str:
+        token = _alias_token(alias)
+        return f"${{{token}_{field_name.upper()}}}"
 
     def supports(self, mode: str) -> bool:
         return mode in {"full", "incremental", "cdc"}
 
     def supports_cdc_from(self, platform: str) -> bool:
         return platform.lower() in _CDC_PLATFORMS
-
-    def airflow_command(
-        self, config_path: str, variables: dict[str, str] | None = None
-    ) -> list[str]:
-        # 水位经 -D 传入，供批量 source 的 scan 条件里 ${watermark} 取值。
-        return [
-            "/opt/flink/bin/flink",
-            "run",
-            "-p",
-            "1",
-            config_path,
-            "-Dwatermark={{ data_interval_start }}",
-        ]
 
     # ---------- 渲染 ----------
 

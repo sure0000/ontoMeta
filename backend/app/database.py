@@ -92,6 +92,7 @@ def init_db() -> None:
         SettingsService().ensure_defaults(db)
 
     _backfill_relation_structure_types()
+    _backfill_ready_sync_projections()
     recover_stale_draft_tasks()
 
 
@@ -118,4 +119,38 @@ def _backfill_relation_structure_types() -> None:
             db.commit()
             logger.info("Backfilled structure_type on %s relation_types", updated)
 
+
+def _backfill_ready_sync_projections() -> None:
+    """Register serving mappings for syncs completed before direct-sync support.
+
+    A verified source sync is sufficient for a source-backed object that has no
+    independent transform.  Older versions only updated ``IngestionContract``
+    and left the query Projection absent when materialization had not run first.
+    The operation is idempotent and only changes control-plane metadata; it does
+    not issue SQL to Doris or alter any physical table.
+    """
+    from app.models import IngestionContract
+    from app.services.ingestion_contract import mirror_contract_to_projection
+
+    with SessionLocal() as db:
+        contracts = (
+            db.query(IngestionContract)
+            .filter(IngestionContract.status == "ready")
+            .all()
+        )
+        updated = 0
+        for contract in contracts:
+            try:
+                if mirror_contract_to_projection(db, contract) is not None:
+                    db.commit()
+                    updated += 1
+            except Exception as exc:  # noqa: BLE001 - one stale contract must not block startup
+                db.rollback()
+                logger.warning(
+                    "Could not backfill direct sync projection for contract %s: %s",
+                    contract.id,
+                    exc,
+                )
+        if updated:
+            logger.info("Backfilled direct sync projections for %s ready contracts", updated)
 

@@ -65,7 +65,7 @@ def _configure_logging() -> None:
 
 async def _execute(task_id: str) -> None:
     from app.services.draft_generation_queue import await_running_slot
-    from app.services.query import WorkspaceService
+    from app.services.workspace_service import WorkspaceService
 
     from app.database import SessionLocal
     from app.models import DraftGenerationTask
@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # 顶层兜底：准入/导入/未预期崩溃时也把任务落 failed
         logging.exception("draft_worker: crashed task_id=%s: %s", task_id, exc)
         try:
-            from app.services.query import WorkspaceService
+            from app.services.workspace_service import WorkspaceService
 
             WorkspaceService._mark_task_failed(
                 task_id, f"生成子进程异常退出：{WorkspaceService._describe_exc(exc)}"

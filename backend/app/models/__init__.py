@@ -58,7 +58,6 @@ from app.models.governance import GovernanceStandardRecord
 from app.models.semantic_index import SemanticIndexEntry
 from app.models.settings import (
     AirflowSetting,
-    CubeSetting,
     DatahubSetting,
     DependencyComponent,
     DraftGenerationSetting,
@@ -111,7 +110,6 @@ __all__ = [
     "AirflowSetting",
     "DatahubSetting",
     "DraftGenerationSetting",
-    "CubeSetting",
     "ChatBiConversation",
     "ChatBiConversationTask",
     "ChatBiDomainMemory",

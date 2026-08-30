@@ -350,6 +350,23 @@ def test_transform_template_uses_default_doris_dropdown():
     assert result["form"]["confirmation_id"]
 
 
+def test_transform_template_matches_manual_spec_protocol():
+    """Data Agent 加工表单与手动 Spec 共用可生效的字段协议。"""
+    from app.database import SessionLocal
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db, ontology_id=onto_id,
+            args={"title": "加工参数", "task_kind": "transform"},
+        )
+    assert is_error is False
+    fields = {f["name"]: f for f in result["form"]["fields"]}
+    assert {"database_prefix", "refresh_cron", "notes"} <= set(fields)
+    assert "schedule" not in fields
+    assert [o["value"] for o in fields["target_layer"]["options"]] == ["dim", "dwd", "dws"]
+
+
 def test_metric_template_selects_formal_logic_not_object():
     """聚合任务选择已形式化业务口径，不复用对象模板。"""
     from uuid import uuid4
@@ -390,6 +407,23 @@ def test_metric_template_selects_formal_logic_not_object():
     assert by_name["business_logic_id"]["default"] == aliases["@order_total"]
     assert by_name["target_datasource_id"]["default"] == target_id
     assert by_name["target_layer"]["options"] == [{"label": "应用层 ADS", "value": "ads"}]
+
+
+def test_metric_template_matches_manual_spec_protocol():
+    """Data Agent 指标表单使用手动端相同的调度/库名前缀字段。"""
+    from app.database import SessionLocal
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        result, _s, is_error = ChatBiService()._dispatch_request_form(
+            db, ontology_id=onto_id,
+            args={"title": "指标参数", "task_kind": "metric"},
+        )
+    assert is_error is False
+    fields = {f["name"]: f for f in result["form"]["fields"]}
+    assert {"database_prefix", "refresh_cron"} <= set(fields)
+    assert "schedule" not in fields
+    assert fields["target_layer"]["options"] == [{"label": "应用层 ADS", "value": "ads"}]
 
 
 def test_sync_template_recommends_ontology_and_keeps_all_objects_searchable():

@@ -234,3 +234,114 @@ def test_undeclared_join_hint_offers_multi_hop_route(client):
     assert paths, f"应给出可执行的多跳路径，实际 hint={verdict.hint}"
     assert paths[0]["objects"] == ["order", "customer", "region"]
     assert paths[0]["sql_hint"]
+
+
+# --------------------------------------------------------------------- 证据里的 JOIN 键
+
+
+def test_parse_relation_evidence_recovers_foreign_key():
+    """``source_evidence`` 的契约是 JSON，实际写进去的是人话——两种都要读得回来。
+
+    读不回来时外键退化成猜 ``<目标对象>_id``，而真实列叫 country/bank_name，
+    猜的列在对象上不存在 → ON 一律给不出来：本体明明记着「通过引用字段 X 关联 Y」，
+    导航器却说推不出。
+    """
+    from app.services.ontology_projection import parse_relation_evidence as parse
+
+    assert parse('{"foreign_key": "cust_id"}')["foreign_key"] == "cust_id"
+
+    prose = parse("tabManufacturer 通过引用字段 country 关联 tabCountry（推断，来源 frappe 源画像）")
+    assert prose["foreign_key"] == "country"
+    assert prose["source_profile"] == "frappe"   # 源画像也记在证据里
+
+    assert parse(
+        "urn:li:dataset:(urn:li:dataPlatform:mysql,tabCode List,PROD)#version"
+    )["foreign_key"] == "version"
+
+    # 读不出就是读不出，不臆造
+    assert parse("两表按业务含义相关") == {}
+    assert parse(None) == {}
+
+
+def test_referenced_key_never_falls_back_to_any_identifier_column():
+    """外键**被引用**的列取错就是连错行——取不到宁可回 None。
+
+    回归：曾用「身份属性」顶替，于是 code_list 的被引用列被判成 publisher_id
+    （一个恰好是标识语义的无关列），据此拼出的 ON 是会算错数的连接。
+    """
+    from app.services.ontology_projection import ObjView, PropView, _referenced_key_of
+    from app.ontology_types import SemanticType
+
+    def _obj(name, props):
+        return ObjView(
+            id=name, name=name, display_name=name,
+            props={
+                p: PropView(p, name, SemanticType.IDENTIFIER if p.endswith("_id")
+                            else SemanticType.TEXTUAL, "varchar")
+                for p in props
+            },
+        )
+
+    # 无命名约定主键、只有一个无关的标识列 → 给不出
+    assert _referenced_key_of(_obj("code_list", ["name", "publisher_id"]), {}) is None
+    # 命名约定的强主键 → 用它
+    assert _referenced_key_of(_obj("code_list", ["code_list_id", "publisher_id"]), {}) == "code_list_id"
+    # 源画像声明的主键列（Frappe 以 name 为主键）→ 用它，且该列必须真实存在
+    assert _referenced_key_of(
+        _obj("code_list", ["name", "publisher_id"]), {"source_profile": "frappe"}
+    ) == "name"
+    assert _referenced_key_of(
+        _obj("code_list", ["publisher_id"]), {"source_profile": "frappe"}
+    ) is None
+
+
+def test_prose_evidence_yields_join_keys_end_to_end():
+    """带人话证据的关系：导航器给得出 ON，且证明器接受它。"""
+    pub = EntityStatus.PUBLISHED.value
+    uniq = uuid.uuid4().hex[:8]
+    with SessionLocal() as db:
+        domain = DomainContext(
+            datahub_domain_id=f"urn:li:domain:ev-{uniq}", name=f"证据域-{uniq}"
+        )
+        db.add(domain)
+        db.flush()
+        onto = Ontology(
+            domain_context_id=domain.id, status=OntologyStatus.PUBLISHED.value, version=1
+        )
+        db.add(onto)
+        db.flush()
+        maker = ObjectType(ontology_id=onto.id, name="manufacturer", display_name="制造商",
+                           table_role="business_object", status=pub)
+        country = ObjectType(ontology_id=onto.id, name="country", display_name="国家",
+                             table_role="business_object", status=pub)
+        db.add_all([maker, country])
+        db.flush()
+        db.add_all([
+            Property(object_type_id=maker.id, name="name", display_name="编号",
+                     semantic_type="attribute", data_type="varchar", status=pub),
+            Property(object_type_id=maker.id, name="country", display_name="国家",
+                     semantic_type="attribute", data_type="varchar", status=pub),
+            Property(object_type_id=country.id, name="name", display_name="编号",
+                     semantic_type="attribute", data_type="varchar", status=pub),
+        ])
+        db.add(RelationType(
+            ontology_id=onto.id, name="manufacturer_to_country", display_name="位于",
+            source_object_type_id=maker.id, target_object_type_id=country.id,
+            cardinality="many_to_one", structure_type="foreign_key", status=pub,
+            source_evidence="tabManufacturer 通过引用字段 country 关联 tabCountry（推断，来源 frappe 源画像）",
+        ))
+        db.commit()
+        onto_id = onto.id
+
+    with SessionLocal() as db:
+        proj = build_projection(db, onto_id, None)
+        paths = find_join_path(proj, "manufacturer", "country")
+        assert paths, "已声明关系应给得出路径"
+        hop = paths[0].hops[0]
+        assert hop.from_key == "country" and hop.to_key == "name"
+        assert hop.on == "manufacturer.country = country.name"
+        # 导航器给的 ON 必须过证明器——这是本文件锁的架构不变式
+        cert = prove_sql_sound(
+            f"SELECT COUNT(*) FROM manufacturer JOIN country ON {hop.on}", proj
+        )
+        assert isinstance(cert, SqlCertificate), getattr(cert, "message", cert)

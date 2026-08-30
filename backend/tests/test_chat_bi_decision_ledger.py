@@ -235,6 +235,107 @@ def test_closure_tasks_dedupe_same_artifact(db, conv):
     assert len(ledger.build_closure(db, conv.id)["tasks"]) == 1
 
 
+# ---------------------------------------------------------------- 闭环按任务分开
+#
+# 闭环此前是**会话级**的一组六环，两处都错：随口问一句数、在结果上点个「认可」就点亮
+# 一环，于是一次纯查询也顶着闭环卡；一条会话连建三条任务，三份确认混成一组六环，
+# 「哪一环是给哪条任务走的」从图上根本读不出来。下面四条钉住新粒度。
+
+
+def _link(db, conv, artifact_id, *, confirmation_id=None, kind="sync", intent=None):
+    db.add(
+        ChatBiConversationTask(
+            conversation_id=conv.id,
+            artifact_id=artifact_id,
+            kind=kind,
+            intent=intent,
+            confirmation_id=confirmation_id,
+        )
+    )
+    db.commit()
+
+
+def test_plain_query_acks_form_no_closure(db, conv):
+    """纯查询留下的表态不构成任何闭环——没建任务就一张卡都不该出。
+
+    这是本次改造的立论：对 SQL / 结果 / 映射点「认可」记的是留痕，不是某条任务的环。
+    它们照常进时间线（追踪页看得到），但绝不能凭空拼出一组六环。
+    """
+    for node, stage in (("data", "sql"), ("data", "data_result"), ("ontology", "mapping")):
+        ledger.record_decision(
+            db, conversation_id=conv.id, node=node, stage=stage, trigger="ack_accept"
+        )
+    closure = ledger.build_closure(db, conv.id)
+    assert closure["tasks"] == []  # 前端据此整块不渲染
+    assert len(closure["records"]) == 3  # 留痕本身一条不少
+    # 会话级聚合仍在（跨会话统计与 F 族问答要用），但它不是界面上的"闭环"。
+    assert closure["reached_count"] == 2
+
+
+def test_task_closures_are_isolated_from_each_other(db, conv):
+    """同一会话的两条任务各算各的六环：A 的确认绝不能点亮 B 的环。"""
+    _link(db, conv, "art-a", confirmation_id="conf-a")
+    _link(db, conv, "art-b", confirmation_id="conf-b")
+    # A 走完前三环（表单向导按 confirmation_id 记账，此时制品还不存在）
+    for node in ("requirement", "ontology", "data"):
+        ledger.record_decision(
+            db,
+            conversation_id=conv.id,
+            node=node,
+            chosen={"task_confirmation_id": "conf-a"},
+        )
+    # A 又确认了执行方案（制品建出来之后，按 artifact 软引用记账）
+    ledger.record_decision(
+        db, conversation_id=conv.id, node="plan", ref_kind="artifact", ref_id="art-a"
+    )
+    # B 只确认了需求
+    ledger.record_decision(
+        db,
+        conversation_id=conv.id,
+        node="requirement",
+        chosen={"task_confirmation_id": "conf-b"},
+    )
+
+    tasks = {t["artifact_id"]: t for t in ledger.build_closure(db, conv.id)["tasks"]}
+    assert tasks["art-a"]["reached_count"] == 4
+    assert tasks["art-b"]["reached_count"] == 1
+    assert [n["node"] for n in tasks["art-b"]["nodes"] if n["reached"]] == ["requirement"]
+    assert all(t["total_count"] == 6 and len(t["nodes"]) == 6 for t in tasks.values())
+
+
+def test_task_dangling_does_not_leak_across_tasks(db, conv):
+    """悬挂告警也按任务算：A 确认了方案没执行，不该让 B 也顶着一条告警。"""
+    _link(db, conv, "art-a", confirmation_id="conf-a")
+    _link(db, conv, "art-b", confirmation_id="conf-b")
+    ledger.record_decision(
+        db, conversation_id=conv.id, node="plan", ref_kind="artifact", ref_id="art-a"
+    )
+    tasks = {t["artifact_id"]: t for t in ledger.build_closure(db, conv.id)["tasks"]}
+    assert any("尚未执行" in d for d in tasks["art-a"]["dangling"])
+    assert tasks["art-b"]["dangling"] == []
+    # 卡片自带任务名，告警文案里不必再念一遍 uuid
+    assert all("art-a" not in d for d in tasks["art-a"]["dangling"])
+
+
+def test_task_without_confirmation_id_greys_its_form_rings(db, conv):
+    """历史关联没有 confirmation_id：前三环无从归属，如实标灰而不是猜。
+
+    宁可显示"还差三环"也不能把别的任务（甚至纯查询）的确认扣到它头上——那才是真的
+    让人对不上账。后三环照常按 artifact 归属，不受影响。
+    """
+    _link(db, conv, "art-legacy")
+    ledger.record_decision(
+        db, conversation_id=conv.id, node="requirement", chosen={"task_confirmation_id": "conf-x"}
+    )
+    ledger.record_decision(
+        db, conversation_id=conv.id, node="plan", ref_kind="artifact", ref_id="art-legacy"
+    )
+    task = ledger.build_closure(db, conv.id)["tasks"][0]
+    reached = {n["node"]: n["reached"] for n in task["nodes"]}
+    assert reached["requirement"] is False
+    assert reached["plan"] is True
+
+
 def test_search_decisions_filters(db, conv):
     ledger.record_decision(db, conversation_id=conv.id, node="plan", ref_kind="artifact")
     ledger.record_decision(db, conversation_id=conv.id, node="data")

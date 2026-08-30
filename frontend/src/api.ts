@@ -11,6 +11,8 @@ import type {
   MergeReport,
   OntologyConflicts,
   ChatBiAnswer,
+  ChatBiAgentRunDetail,
+  ChatBiAgentRunSummary,
   ChatBiCategoryList,
   ChatBiConversation,
   ChatBiDecision,
@@ -29,7 +31,6 @@ import type {
   UnclaimedTables,
   AirflowSettings,
   DatahubSettings,
-  CubeSettings,
   DomainContext,
   DomainContextDetail,
   DraftGenerationScope,
@@ -63,7 +64,6 @@ import type {
   MaterializeStatus,
   MaterializeTaskResult,
   MaterializePreflightResult,
-  SyncToolPlan,
   LineageEmitResult,
   Principal,
   PrincipalCreated,
@@ -779,7 +779,6 @@ export const api = {
     max_tasks_per_dag?: number;
     max_active_tasks_per_dag?: number;
     dag_parse_timeout?: number;
-    preflight_sentinel_timeout?: number;
     staging_swap?: boolean;
   }) =>
     request<AirflowSettings>("/api/settings/airflow", {
@@ -796,19 +795,6 @@ export const api = {
   testAirflowSshDelivery: () =>
     request<{ ok: boolean; detail: string }>("/api/settings/airflow/test-ssh", {
       method: "POST",
-    }),
-
-  getCubeSettings: () => request<CubeSettings>("/api/settings/cube"),
-  updateCubeSettings: (body: {
-    api_url: string;
-    api_secret?: string;
-    preagg_refresh: string;
-    tenant_dimension?: string | null;
-    timeout_seconds: number;
-  }) =>
-    request<CubeSettings>("/api/settings/cube", {
-      method: "PUT",
-      body: JSON.stringify(body),
     }),
 
   // ===== 依赖组件统一部署管理 =====
@@ -962,6 +948,16 @@ export const api = {
 
   getChatBiMessages: (id: string) =>
     request<ChatBiMessageItem[]>(`/api/chat-bi/conversations/${id}/messages`),
+
+  getChatBiAgentRuns: (id: string, limit = 20) =>
+    request<ChatBiAgentRunSummary[]>(
+      `/api/chat-bi/conversations/${id}/runs?limit=${encodeURIComponent(String(limit))}`,
+    ),
+
+  getChatBiAgentRun: (conversationId: string, runId: string) =>
+    request<ChatBiAgentRunDetail>(
+      `/api/chat-bi/conversations/${conversationId}/runs/${runId}`,
+    ),
 
   /** P1：记录「本会话催生了某数据任务（治理制品）」，使会话可免 id 追踪任务。 */
   linkChatBiTask: (
@@ -1336,14 +1332,6 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** 本次物化会用什么搬 + 目标引擎实际支持的装载方式（工具已改为自动决策）。 */
-  getSyncTools: (params?: { ontologyId?: string; engine?: string }) => {
-    const q = new URLSearchParams();
-    if (params?.ontologyId) q.set("ontology_id", params.ontologyId);
-    if (params?.engine) q.set("engine", params.engine);
-    const qs = q.toString();
-    return request<SyncToolPlan>(`/api/warehouse/sync-tools${qs ? `?${qs}` : ""}`);
-  },
   /** 本体一键物化：生成 DDL/ETL 并对目标数据源真正建表落数。需 publisher 角色。 */
   /** 编排物化的运行状态（Airflow DagRun）。仅 orchestrated 回执可查。 */
   getMaterializeStatus: (artifactId: string) =>

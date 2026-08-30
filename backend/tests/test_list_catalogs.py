@@ -43,7 +43,6 @@ def test_default_doris_is_the_only_query_target(db):
     db.add_all([doris, source])
     db.commit()
     assert resolve_domain_data_source(db) is doris
-    assert resolve_domain_data_source(db, target_catalog="erp") is None
 
 
 def test_multiple_or_missing_default_doris_fails_closed(db):

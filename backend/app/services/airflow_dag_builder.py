@@ -7,9 +7,8 @@
 DDL 放同目录的 JSON。真实本体有 734 张表，把 SQL 内联进 .py 会得到一个巨型文件；
 拆开后 DAG 稳定、JSON 可 diff，两者都是制品。
 
-**统一执行架构**：搬运 = Flink SQL on YARN（与 transform/metric 同一执行路径），不再有
-runner/docker 多通道、不再有 SeaTunnel/DataX 工具选择。本模块只保留 Flink DAG 构建逻辑，
-docker/runner 旧通道代码已删除（见统一执行 F/G 阶段）。
+**统一执行架构**：搬运 = Flink SQL on YARN（与 transform/metric 同一执行路径）。
+本模块只保留 Flink DAG 构建逻辑。
 """
 
 from __future__ import annotations
@@ -118,7 +117,7 @@ def _constraint_list(constraints: dict[str, list[str]] | None) -> list[str]:
 class FlinkSubmitConfig:
     """Flink 提交的基础配置（SqlRunner JAR、YARN 队列、checkpoint 目录）。
 
-    字段与两处调用方（flink_job_runner / materialization_runner）对齐：
+    字段与物化执行器对齐：
     runner_jar 是通用 SqlRunner JAR（读 SQL 文件、替换占位符后逐条 executeSql），
     runner_class 是其 main class，flink_bin 是 flink 命令路径。
 

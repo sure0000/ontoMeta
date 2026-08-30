@@ -56,8 +56,7 @@ class HiveAdapter(DialectAdapter):
     def map_type(self, data_type: str | None, semantic_type: str | None) -> str:
         """本体类型 → Hive 类型。
 
-        判定顺序沿用 ``connectors/cube.py::_dim_type``（语义优先于物理类型），
-        但落到 Hive 原生类型而非 Cube 的维度类别。
+        判定顺序遵循本体语义优先于物理类型，并落到 Hive 原生类型。
         """
         # 去参数再判：INTEGER(11) / DECIMAL(21, 9) 这类原样类型精确查表命中不了，
         # 会被整体误判成文本列（见 base.base_type）。

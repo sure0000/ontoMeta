@@ -883,7 +883,6 @@ const INTERNAL_SPEC_KEYS = new Set([
   "table_overrides",
   "overrides",
   "preservation",
-  "sync_tool",
   // 同步 Spec 里由 drafter 填死、执行器再没读过的几项。此前它们以**英文键名原样**
   // 摆在任务详情里（"idempotency_strategy  primary_key_upsert"、"late_arrival_policy
   // strict"、"target_ods_database  ods"），既看不懂也不代表任何可改的选择：

@@ -340,53 +340,6 @@ def reconcile_ingestion_contract(
 # ---------- M3：本体 → 物理正向生成 ----------
 
 
-@router.get("/warehouse/sync-tools")
-def list_warehouse_sync_tools(
-    ontology_id: str | None = Query(
-        None, description="本次要物化的本体；给了才能按其装载方式算出会选哪个工具"
-    ),
-    engine: str = Query(DEFAULT_ENGINE, description="目标数仓引擎，决定可用的装载方式"),
-    db: Session = Depends(get_db),
-):
-    """本次物化**会用什么搬**，以及目标引擎实际支持哪些装载方式。
-
-    统一执行架构下搬运恒为 Flink SQL on YARN，不再有工具选择。本端点只**告知恒定结果**：
-    ``resolved`` 恒为 flink，``modes`` 恒为 full/incremental/cdc 全集（供弹窗置灰「同步方式」，
-    当前不过滤）。保留作弹窗初始化读取。
-    """
-    from app.services.sync_tool_resolver import (
-        engine_modes,
-        required_modes,
-        resolve_sync_tool,
-    )
-    from app.warehouse.jobs.registry import DEFAULT_SYNC_TOOL
-
-    # 与提交时同一个决策函数、同一批装载方式：这里显示什么，那边就会用什么。
-    modes_wanted = (
-        required_modes(materialization_contract_service.list_selected(db, ontology_id))
-        if ontology_id
-        else ()
-    )
-    choice = resolve_sync_tool(None, modes=modes_wanted)
-    resolved = {
-        "resolved": choice.label,
-        "auto": choice.auto,
-        "detail": choice.detail,
-        "uncovered_modes": list(choice.uncovered_modes),
-        "error": None,
-    }
-
-    supported, modes_detail = engine_modes(None, engine, choice_tool=resolved["resolved"])
-    return {
-        # 统一执行架构：搬运通道恒为 flink_on_yarn。
-        "channel": "flink_on_yarn",
-        "default": DEFAULT_SYNC_TOOL,
-        "modes": supported,
-        "modes_detail": modes_detail,
-        **resolved,
-    }
-
-
 @router.get("/warehouse/engines")
 def list_warehouse_engines():
     """可用引擎及其能力矩阵。``verified=false`` 表示条目未逐项核实。"""
@@ -530,11 +483,11 @@ def materialize_preflight(
 
     **只读**：不落产物、不触发运行，可随便重跑。逐项返回 ``status``（pass/warn/fail）与
     失败时可照做的 ``next_step``；前端据 ``ok``（无阻断失败）决定是否放行「提交」。
-    覆盖 Airflow 可达/鉴权/REST 版本/建表 Connection/DAG 目录双向可见/批次规模——
-    #2 docker.sock、#4 网络名、#5 驱动这类只有真起容器才知道的，M13 不假装能查。
+    覆盖 Airflow 可达/鉴权/REST 版本/建表与 Flink Connection/SSH 投递目录/批次规模，
+    并在同步任务上检查 Flink JAR、checkpoint 等执行前置条件。
     """
     _require_ontology(db, ontology_id)
-    _require_engine(payload.engine)
+    _require_new_warehouse_engine(payload.engine)
 
     from app.services.materialize_preflight import run_preflight
 
@@ -571,7 +524,7 @@ def materialize_ontology(
     payload: MaterializeRequest,
     db: Session = Depends(get_db),
 ):
-    """把本体物化到目标数据源：生成 DDL/ETL 并真正建表落数。
+    """把本体物化到默认 Doris：生成 DDL 并提交 Airflow 建表任务。
 
     可对当前工作本体（草稿或已发布）执行——门槛仅在于 ``publisher`` 角色与所选目标库；
     归档本体不可物化。弹窗即人工确认面，故直接置 ``confirmed`` 后执行（物化非高危，无
@@ -581,10 +534,7 @@ def materialize_ontology(
     ontology = _require_ontology(db, ontology_id)
     if ontology.status == OntologyStatus.ARCHIVED.value:
         raise HTTPException(status_code=400, detail="归档本体不可物化")
-    # The UI submits Doris for new work.  Keep the legacy HTTP shape readable
-    # during migration; the Gate and runner reject non-Doris once an explicit
-    # default warehouse is configured.
-    _require_engine(payload.engine)
+    _require_new_warehouse_engine(payload.engine)
 
     context = {
         "ontology_id": ontology_id,
@@ -593,7 +543,6 @@ def materialize_ontology(
         "database_prefix": payload.database_prefix,
         "database_overrides": payload.database_overrides,
         "table_overrides": payload.table_overrides,
-        "load_strategy": payload.load_strategy,
         "selected_targets": payload.selected_targets,
         "overrides": payload.overrides,
     }
@@ -623,7 +572,7 @@ def materialize_ontology(
 
 
 def _receipt_batches(db: Session, artifact_id: str) -> list[dict]:
-    """制品回执里的批次列表（新回执带 batches；旧的单 DAG 回执按单批兜底）。"""
+    """读取物化制品回执里的批次列表。"""
     import json
 
     from app.models.agent import GovernanceArtifact
@@ -635,15 +584,7 @@ def _receipt_batches(db: Session, artifact_id: str) -> list[dict]:
         receipt = json.loads(artifact.execution_receipt_json or "{}")
     except (TypeError, ValueError):
         receipt = {}
-    batches = receipt.get("batches") or [
-        {
-            "dag_id": receipt.get("dag_id"),
-            "dag_run_id": receipt.get("dag_run_id"),
-            "run_url": receipt.get("run_url"),
-            "state": receipt.get("state"),
-            "error": receipt.get("error"),
-        }
-    ]
+    batches = receipt.get("batches") or []
     if not any(b.get("dag_id") and b.get("dag_run_id") for b in batches):
         raise HTTPException(status_code=400, detail="回执里没有 DagRun 信息，可能提交未成功")
     return batches
@@ -653,11 +594,9 @@ def _receipt_batches(db: Session, artifact_id: str) -> list[dict]:
 def get_materialize_task_result(
     artifact_id: str, task_id: str, db: Session = Depends(get_db)
 ):
-    """一个搬运任务的执行结果：**实际用了哪一档**、搬了多少行、水位到哪。
+    """一个搬运任务的执行结果：搬了多少行、水位到哪。
 
-    值来自该任务的 XCom（runner 通道的搬运任务把 runner 回执作为返回值）。runner 逐表
-    自选档位（native 优先，搬不了的交 seatunnel），这个选择此前只进过 runner 的日志——
-    「为什么这张表没有水位/搬得慢」在 ontoMeta 侧无从对账，这个端点补上那一环。
+    值来自该任务的 XCom。当前同步任务统一由 Flink SQL 执行，回执不再携带执行档位。
 
     **按需读，不进轮询**：Airflow 没有跨任务批量读 XCom 的端点，一次一请求；整轮几百个
     任务在 5 秒一次的状态轮询里全读一遍会把 Airflow 打垮。故由前端在展开单个任务时调。
@@ -727,7 +666,6 @@ def get_materialize_task_result(
                 "dag_id": bid,
                 "task_state": task_state,
                 "ingestion_status": ingestion_status,
-                "backend": value.get("backend"),
                 "job_id": value.get("flink_job_id") or value.get("job_id"),
                 "rows_read": value.get("rows_read"),
                 "rows_written": value.get("rows_written"),
@@ -736,7 +674,7 @@ def get_materialize_task_result(
     finally:
         client.close()
     # 没有值 ≠ 出错：任务还没跑完、或它是建表/切换任务（不产 XCom）。
-    return {"task_id": task_id, "dag_id": None, "backend": None}
+    return {"task_id": task_id, "dag_id": None}
 
 
 @router.get("/warehouse/materialize/{artifact_id}/status")
@@ -747,7 +685,7 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
     运行到哪一步随时可能变，缓存一份只会出现两个互相矛盾的事实。
 
     M16：一次物化可产多个 DAG（按 cron 分组 + 分批）。逐个回读 DagRun 并聚合出整轮状态，
-    同时返回 ``batches`` 明细供弹窗按批展示；旧的单 DAG 回执按单批处理，向后兼容。
+    同时返回 ``batches`` 明细供弹窗按批展示。
     """
     from app.connectors.airflow import AirflowClient, AirflowError, is_terminal
 
@@ -831,7 +769,7 @@ def get_materialize_status(artifact_id: str, db: Session = Depends(get_db)):
     first = batch_out[0]
     return {
         "artifact_id": artifact_id,
-        # 顶层向后兼容单 DAG 前端：指向首批 + 整轮聚合状态。
+        # 顶层摘要指向首批，完整运行信息在 batches。
         "dag_id": first.get("dag_id"),
         "dag_run_id": first.get("dag_run_id"),
         "state": agg,

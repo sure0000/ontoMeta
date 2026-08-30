@@ -38,7 +38,7 @@ function getSelectedKey(pathname: string, search: string) {
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
   if (pathname.startsWith("/decisions")) return "/decisions";
-  if (pathname.startsWith("/tasks/orchestration") || pathname.startsWith("/tasks/pipelines")) {
+  if (pathname.startsWith("/tasks/orchestration")) {
     return "/tasks/orchestration";
   }
   if (pathname.startsWith("/tasks")) return "/tasks";
@@ -68,7 +68,9 @@ function countLabel(count: number) {
 }
 
 export function AppLayout() {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 768,
+  );
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -122,7 +124,7 @@ export function AppLayout() {
         icon: <ProfileOutlined />,
         label: "任务中心",
         children: [
-          { key: "/tasks", label: "📋 我的任务" },
+          { key: "/tasks/list", label: "📋 我的任务" },
           { key: "/tasks/orchestration", label: "🔧 任务编排" },
         ],
       },
@@ -133,6 +135,10 @@ export function AppLayout() {
 
   const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
     if (key === "/ontology-empty") return;
+    if (key === "/tasks/list") {
+      navigate("/tasks");
+      return;
+    }
     if (key.startsWith("/ontology?")) {
       const [, query] = key.split("?");
       const params = new URLSearchParams(query);

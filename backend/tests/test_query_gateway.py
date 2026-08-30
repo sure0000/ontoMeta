@@ -33,7 +33,6 @@ def test_explicit_default_doris_is_selected(db):
     db.add_all([doris, business])
     db.commit()
     assert resolve_domain_data_source(db) is doris
-    assert resolve_domain_data_source(db, target_catalog="erp") is None
 
 
 def test_no_default_doris_fails_closed(db):

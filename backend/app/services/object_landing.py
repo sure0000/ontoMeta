@@ -4,7 +4,8 @@
 
 - 物化：``doris_deployment.ensure_deployment`` 按本体建 ``WarehouseObjectProjection``，
   写死 ODS 落点（``ods_naming``）与服务层落点（层/库/表）。
-- 同步：``IngestionContract`` 记 (本体, 版本, 对象) → ``ods.ods_{域}_{原表}``。
+- 同步：``IngestionContract`` 记 (本体, 版本, 对象) → ``ods.ods_{域}_{原表}``；对没有
+  独立加工的源表对象，同步成功后这张表同时登记为 serving 落点。
 - 清洗：目标必须是**已存在**的 ``ObjectType.name``（见 ``executors/transform``），
   推进的是同一条 Projection 的 ``transform_status``。
 - 指标：``WarehouseLogicProjection`` 挂在 BusinessLogic 上（ADS 表是口径的物化，

@@ -10,11 +10,11 @@
 | DataHub | ✅ v1.6.0 在跑 | GMS `:8080`，前端 `:9002` | 血缘上报目标 |
 | ERPNext + MariaDB 11.8 | ✅ 在跑 | MariaDB `:3308` | 真实源库（本体「数据域-ERP-全量」即来自它） |
 | Airflow | ❌ 缺 | 本栈提供 `:8081` | 调度 + 血缘自动注册 |
-| SeaTunnel | ❌ 缺 | 本栈提供 | 跨源搬运 |
+| Flink | 由 Airflow 提交 | 设置页配置 SqlRunner JAR | 跨源搬运 |
 | 目标数仓 | ❌ 缺 | 本栈提供 Doris `:9030` | 物化落库目标 |
 
 > ⚠ **镜像拉取是第一道坎**：本机 Docker Hub 直连可用但极慢——`alpine:3.20`（约 4MB）实测
-> **6 分 03 秒**。airflow(~1.5GB)/seatunnel(~1GB)/doris(~3GB) 按此速率拉不下来。
+> **6 分 03 秒**。airflow(~1.5GB)/doris(~3GB) 按此速率拉不下来。
 > 起栈前先配镜像源（见 `.env.example`），`make orch-preflight` 会测速并在过慢时直接拦下。
 
 ## 用法
@@ -23,7 +23,6 @@
 cp docker/orchestration/.env.example docker/orchestration/.env   # 按需改镜像源与源库凭据
 make orch-preflight        # 镜像/网络/端口/已有服务检查，全过再往下
 make orch-up-airflow       # Airflow + 元数据库（含 DataHub 插件，镜像本地构建）
-make orch-up-sync          # SeaTunnel
 make orch-up-warehouse     # Doris（可选，见下方目标数仓三案）
 make orch-logs             # 跟日志
 make orch-down             # 停
@@ -43,8 +42,7 @@ Airflow Web：http://localhost:8081 （admin/admin，`standalone` 模式，仅�
 | 路径 | 说明 |
 |---|---|
 | `dags/` | ontoMeta 生成的 DAG 落盘处（方案 A：产物即制品，可 diff 可回滚），挂载进 Airflow |
-| `seatunnel/jobs/` | 生成的 SeaTunnel 作业配置，Airflow 任务容器挂载读取 |
-| `airflow.Dockerfile` | Airflow + `acryl-datahub-airflow-plugin` + docker/mysql provider |
+| `airflow.Dockerfile` | Airflow + `acryl-datahub-airflow-plugin` |
 | `preflight.sh` | 起栈前检查，`make orch-preflight` 调它 |
 
 ## 版本对照（已核实）
@@ -62,5 +60,5 @@ Airflow Web：http://localhost:8081 （admin/admin，`standalone` 模式，仅�
 
 1. `curl localhost:8081/openapi.json | grep dagRuns` —— 确认 REST 版本与触发路径。
 2. Airflow 里 `datahub_rest_default` 连接可用：跑一个 hello DAG，看 DataHub 是否出现 DataFlow/DataJob。
-3. SeaTunnel 版本的配置格式（HOCON/JSON）与 Hive/Doris Sink 对分区覆盖写的支持。
+3. Flink SqlRunner JAR、连接器和目标数仓版本与部署环境匹配。
 4. DataHub v1.6.0 的字段级血缘（`fineGrainedLineages`）支持程度。

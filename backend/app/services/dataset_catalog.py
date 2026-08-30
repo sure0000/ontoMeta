@@ -146,7 +146,8 @@ def _object_entries(
                     schema_status=None,
                     has_target=True,
                 ),
-                # ODS 不对外服务（见 ingestion_contract.mirror_contract_to_projection）。
+                # 这是独立的 ODS 槽；如果它同时是 serving 表，same_table 分支只保留下面
+                # 的 serving 槽并使用其 queryable 状态。
                 queryable=False,
                 mode=landing.ods_mode,
                 last_success_at=landing.last_success_at,

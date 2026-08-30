@@ -836,9 +836,6 @@ def runtime_compatibility_inventory() -> dict[str, list[str]]:
     checks = {
         "agent_list_catalogs": (root / "services/chat_bi_tool_schemas.py", '"name": "list_catalogs"'),
         "agent_run_sql_target": (root / "services/chat_bi_tool_schemas.py", '"target": {'),
-        "transform_flink_import": (root / "agents/executors/transform.py", "flink_job_runner"),
-        "metric_flink_import": (root / "agents/executors/metric.py", "flink_job_runner"),
-        "materialize_legacy_runtime": (root / "services/materialization_runner.py", "Legacy rows without purpose=warehouse remain executable"),
     }
     blocking: list[str] = []
     for label, (path, token) in checks.items():

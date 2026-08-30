@@ -58,7 +58,6 @@ class DataSourceOut(BaseModel):
     password_set: bool = False
     password_hint: str | None = None
     path: str | None = None  # 文件类（sqlite/duckdb）的文件路径
-    url: str | None = None  # cube 语义层的 API 地址
 
     model_config = {"from_attributes": True}
 

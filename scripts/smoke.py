@@ -243,7 +243,7 @@ def verify_rows(receipt: dict) -> None:
     if bad:
         die(
             "这些表建出来了但没有数据：" + "、".join(bad),
-            "搬运任务显示成功却没落数，先看 Airflow 里该任务的日志与 SeaTunnel 作业配置",
+            "搬运任务显示成功却没落数，先看 Airflow 里该任务的日志与 Flink SQL 产物",
         )
 
 

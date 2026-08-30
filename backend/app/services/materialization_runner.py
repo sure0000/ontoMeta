@@ -60,9 +60,7 @@ from app.warehouse.jobs import JobPlan
 from app.warehouse.logical_schema import LogicalConstraint
 from app.warehouse.policy import require_doris, require_doris_datasource
 
-# 统一执行架构：搬运一律走 Flink SQL on YARN（与 transform/metric 同一执行路径），
-# 不再有 seatunnel/datax/docker/runner 多通道。工具恒为 flink。
-_SYNC_TOOL = "flink"
+# 统一执行架构：搬运一律走 Flink SQL on YARN（与 transform/metric 同一执行路径）。
 
 # 本次编排产出什么：``ddl`` = 只建结构（物化），``dml`` = 确保同步目标表后搬数据。
 Emit = Literal["ddl", "dml"]
@@ -682,13 +680,11 @@ def _run_orchestrated(
     YARN（与 transform/metric 同一路径）。
     """
     if emit == "dml":
-        # 搬运工具恒为 flink。planner 用 FlinkAdapter 判可搬性（full/incremental/cdc 均支持），
-        # runner_capabilities 传 None（那套是 sync-runner 通道的遗留，已废）。
+        # planner 用 FlinkAdapter 判可搬性（full/incremental/cdc 均支持）。
         plan = _job_planner.build(
             db,
             ontology_id,
             engine=engine,
-            tool=_SYNC_TOOL,
             target_alias=(
                 _warehouse_flink_conn_id(db, ds)
                 if target_ods_database
@@ -698,7 +694,6 @@ def _run_orchestrated(
             database_overrides=database_overrides,
             table_overrides=table_overrides,
             selected_targets=selected_targets,
-            runner_capabilities=None,
             # 本次运行的装载方式覆盖（Spec 里选的「全量/增量」），缺省 None = 逐表按契约。
             load_strategy=load_strategy,
             source_alias=source_alias or "erp_readonly",
@@ -925,7 +920,7 @@ def _run_orchestrated(
     finally:
         client.close()
 
-    # 顶层字段向后兼容旧回执/前端：指向首批；权威列表是 ``batches``。
+    # 顶层字段指向首批；全量结果在 ``batches``。
     first = batch_results[0] if batch_results else {}
     first_error = next((b["error"] for b in batch_results if b["error"]), None)
     return {
@@ -933,12 +928,10 @@ def _run_orchestrated(
         # 交 Airflow 编排执行。**这个字符串是对账的开关**：agent_pipeline
         # ``_reconcile_orchestrated_status`` 只认 "orchestrated"，而此前这里产的是
         # "flink_on_yarn"（全仓没有一处产 "orchestrated"），于是物化/同步制品从提交那刻起
-        # 就是 SUCCEEDED、从不与真实 DagRun 对账。具体搬运通道另见 sync_tool。
+        # 就是 SUCCEEDED、从不与真实 DagRun 对账。
         "execute_mode": "orchestrated",
         # 本次产出什么：ddl = 只建结构（物化），dml = 只搬数据（同步）。
         "emit": emit,
-        # 搬运一律走 Flink SQL on YARN（统一执行架构），不再有多通道选择。
-        "sync_tool": _SYNC_TOOL,
         # 这次搬运**真正生效**的 Flink 提交参数（设置页默认 + 本任务覆盖后的结果）。
         # 参数已逐任务不同，回执不写清就只能去翻 DAG 源码反推。建表不经 Flink，故只在
         # emit="dml" 时给。
@@ -1018,8 +1011,7 @@ def _handoff_receipt(
 ) -> dict[str, Any]:
     """未配 Flink SqlRunner JAR 时的「仅产出」回执：不投递、不触发，只报会做什么。
 
-    与 flink_job_runner 的 handoff 同义——数据搬运一律走 Flink，缺 JAR 就执行不了，
-    如实说明而不是假装成功（见记忆 receipt-failure-vs-artifact-status）。
+    数据搬运一律走 Flink，缺 JAR 就执行不了，如实说明而不是假装成功。
 
     **只有同步会走到这里**：建表是 ``SQLExecuteQueryOperator`` 直连目标仓，与 Flink 无关。
     """
@@ -1027,7 +1019,6 @@ def _handoff_receipt(
         "ontology_id": ontology_id,
         "execute_mode": "handoff",
         "emit": emit,
-        "sync_tool": _SYNC_TOOL,
         "note": (
             "未配置 Flink SqlRunner JAR（FLINK_SQL_RUNNER_JAR），ontoMeta 只产出搬运计划，"
             "不执行；配上 JAR 后重跑即提交到 YARN。"
@@ -1292,7 +1283,7 @@ def run_sync(
     database_prefix: str | None = None,
     database_overrides: dict[str, str] | None = None,
     table_overrides: dict[str, str] | None = None,
-    load_strategy: str | None = None,
+    load_strategy: str | None = "full",
     selected_targets: list[str] | None = None,
     overrides: dict[str, dict[str, Any]] | None = None,
     refresh_cron: str | None = None,
@@ -1321,8 +1312,8 @@ def run_sync(
     一个作业都编不出来时**抛 ``MaterializationError``**，不回 ``ok: True``：那意味着没有
     任何数据会被搬，最常见的成因是选中的对象都是人工建模的（没有物理源表，只能物化）。
 
-    ``load_strategy``：**本次运行的全局覆盖**（Spec 里选的「全量/增量」），缺省 None
-    = 逐表按契约。它此前只是个签名上的摆设——收下就丢，于是 Spec 上写着 full、
+    ``load_strategy``：**本次运行的全局覆盖**（Spec 里选的「全量/增量」），缺省为
+    ``full``。显式传入 ``None`` 才逐表按契约。它此前只是个签名上的摆设——收下就丢，于是 Spec 上写着 full、
     DAG 里跑的却是契约的 incremental，连带 M15 的 staging+切换（只在全量时挂）
     从来没被触发过。要改某张表的常态策略仍走 ``overrides`` 写回契约，两者不冲突。
 

@@ -43,11 +43,6 @@ from app.services.materialization_runner import (
     build_embedded_airflow_connections,
 )
 from app.services.settings_service import SettingsService
-from app.services.sync_tool_resolver import (
-    SyncToolResolutionError,
-    required_modes,
-    resolve_sync_tool,
-)
 
 _settings = SettingsService()
 _contract_service = MaterializationContractService()
@@ -604,9 +599,8 @@ def _check_dag_dir_visible(
     SSH 投递下这一项验的是**管道本身**：连得上主机吗、DAG 目录可写吗。这两步过了，
     产物就能落到 Airflow 主机的 dags 目录里。
 
-    不再写 sentinel DAG 探测：那套做法假设 ontoMeta 与 Airflow 共享文件系统——往本地
-    dags 目录写个文件再看 Airflow 认不认。SSH 拓扑下本地根本没有那个目录，写了也只是
-    在 ontoMeta 自己机器上留垃圾，必然假 WARN。
+    这里不写测试 DAG；SSH 拓扑下 ontoMeta 本地没有 Airflow 的目录，写入本地只会留下
+    无法被调度器读取的文件。直接探测投递管道才能验证产物确实可达。
     """
     if not getattr(airflow, "ssh_host", ""):
         report.add(
@@ -874,10 +868,8 @@ def _check_execution_channel(
             db,
             ontology_id,
             engine=engine,
-            tool="flink",
             target_alias=_warehouse_conn_id(ds) if ds is not None else DEFAULT_TARGET_ALIAS,
             selected_targets=selected_targets,
-            runner_capabilities=None,
             # 本次运行的装载方式覆盖：人在表单上选的「全量」必须压过契约上的 incremental/cdc，
             # 与 ``materialization_runner.run_sync`` 传的是同一个值。
             load_strategy=load_strategy,

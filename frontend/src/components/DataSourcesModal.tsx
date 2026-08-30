@@ -19,8 +19,8 @@ import type { DataSource } from "../types";
 
 // 各数据源类型的连接表单形态与 DSN 组装方式。
 // host 类：拼 SQLAlchemy URL（账号/密码分列填写、URL 编码）；file 类：填路径；
-// cube：dsn 存 Cube API 地址；mock：内置样例无需连接。
-type ConnField = "path" | "host" | "port" | "database" | "user" | "password" | "url";
+// mock：内置样例无需连接。
+type ConnField = "path" | "host" | "port" | "database" | "user" | "password";
 
 interface ConnFormValues {
   name: string;
@@ -33,7 +33,6 @@ interface ConnFormValues {
   database?: string;
   user?: string;
   password?: string;
-  url?: string;
   raw_dsn?: string;
   mapping?: string;
   fenodes?: string;
@@ -103,11 +102,6 @@ const KIND_PROFILES: Record<
     label: "DuckDB（文件）",
     fields: ["path"],
     build: (v) => (v.path?.trim() ? `duckdb:///${v.path.trim()}` : undefined),
-  },
-  cube: {
-    label: "Cube 语义层",
-    fields: ["url"],
-    build: (v) => v.url?.trim() || undefined,
   },
   mock: { label: "Mock（内置样例）", fields: [] },
 };
@@ -249,8 +243,7 @@ export function DataSourcesPanel({
     setEditingId(row.id);
     setEditingPwSet(Boolean(row.password_set));
     setRawMode(false);
-    // 回显连接字段：host 类给主机/端口/库/账号，文件类给路径，cube 给地址。
-    // 密码明文回显进 Input.Password（眼睛图标控制显隐）；清空时后端沿用旧密码。
+    // 回显连接字段；密码不回传，清空时后端沿用旧密码。
     setInitialVals({
       name: row.name,
       kind: row.kind,
@@ -260,7 +253,6 @@ export function DataSourcesPanel({
       user: row.username ?? undefined,
       password: row.password ?? undefined,
       path: row.path ?? undefined,
-      url: row.url ?? undefined,
       mapping: row.mapping ? JSON.stringify(row.mapping) : "",
     });
     setFormOpen(true);
@@ -376,16 +368,6 @@ export function DataSourcesPanel({
           extra="绝对路径，如 /data/app.db"
         >
           <Input placeholder="/data/app.db" style={{ width: 320 }} />
-        </Form.Item>
-      )}
-      {profile.fields.includes("url") && (
-        <Form.Item
-          name="url"
-          label="Cube API 地址"
-          rules={required ? [{ required: true, message: "请填写 Cube API 地址" }] : undefined}
-          extra="如 https://cube.host/cubejs-api/v1"
-        >
-          <Input placeholder="https://cube.host/cubejs-api/v1" style={{ width: 320 }} />
         </Form.Item>
       )}
       {profile.fields.includes("host") && (

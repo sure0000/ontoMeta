@@ -386,43 +386,6 @@ def test_ods_sync_rejects_different_jobs_writing_the_same_target():
         )
 
 
-def test_runner_capabilities_gate_rejects_unsupported_sink():
-    """runner 通道按执行侧 capabilities 判可搬性：目标引擎不在 sinks 里 → 全列 unsupported。"""
-    ontology_id = _seed("capsink")
-    caps = {
-        "modes": ["full", "incremental"],
-        "sources": ["mysql", "mariadb"],
-        "sinks": ["doris"],  # 没有 hive；_build 的 engine=hive
-    }
-    plan = _build(ontology_id, runner_capabilities=caps)
-    assert plan.jobs == ()
-    assert any("hive" in u["reason"] for u in plan.unsupported)
-
-
-def test_runner_capabilities_gate_allows_supported_combo():
-    ontology_id = _seed("capok")
-    caps = {
-        "modes": ["full", "incremental"],
-        "sources": ["mariadb"],  # _seed 默认 URN 平台是 mariadb
-        "sinks": ["hive"],
-    }
-    plan = _build(ontology_id, runner_capabilities=caps)
-    assert {j.target.table for j in plan.jobs} == {"customer", "sales_order"}
-
-
-def test_runner_capabilities_gate_rejects_cdc_mode():
-    """native 不做 CDC：capabilities.modes 无 cdc → CDC 表进 unsupported，不静默降级。"""
-    ontology_id = _seed("capcdc")
-    _set_cdc(ontology_id, "customer")
-    caps = {"modes": ["full", "incremental"], "sources": ["mariadb"], "sinks": ["hive"]}
-    plan = _build(ontology_id, runner_capabilities=caps)
-    assert not any(j.target.table == "customer" for j in plan.jobs)
-    assert any(
-        "customer" in u["target"] and "cdc" in u["reason"].lower()
-        for u in plan.unsupported
-    )
-
-
 def test_plan_is_idempotent():
     """同一本体重复生成，作业与渲染结果逐字节一致。"""
     ontology_id = _seed("idem")
@@ -439,29 +402,3 @@ def test_rendered_jobs_carry_no_credentials():
     for leaked in ("password=", "jdbc:mysql://", "root", "secret"):
         assert leaked not in blob
     assert "${ERP_READONLY_URL}" in blob
-
-
-def test_runner_gate_judges_sink_and_mode_as_a_combination():
-    """门禁必须按「目标 × 装载方式」判，不能分别判两个扁平集合。
-
-    runner 可能一个档能写 hive 但只做全量、另一个档能做增量但写不了 hive；分别判会让
-    「hive + 增量」通过门禁、跑到执行侧才失败——正是「不静默降级」要避免的那种。
-    """
-    from app.services.job_planner import _runner_reject
-
-    caps = {
-        "sources": ["mariadb"],
-        "sinks": ["hive", "doris"],
-        "modes": ["full", "incremental"],  # 扁平集合合看是「都支持」
-        "sink_modes": {"hive": ["full"], "doris": ["full", "incremental"]},
-    }
-    assert _runner_reject(caps, "full", "mariadb", "hive") is None
-    assert _runner_reject(caps, "incremental", "mariadb", "doris") is None
-
-    reason = _runner_reject(caps, "incremental", "mariadb", "hive")
-    assert reason and "hive" in reason and "full" in reason
-
-    # 旧 runner（无 sink_modes）只能退回扁平判断，不能因此报错
-    old = {k: v for k, v in caps.items() if k != "sink_modes"}
-    assert _runner_reject(old, "incremental", "mariadb", "hive") is None
-    assert _runner_reject(old, "cdc", "mariadb", "hive") is not None

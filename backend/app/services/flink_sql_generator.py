@@ -387,7 +387,7 @@ def build_identity_select(
     这是「搬运 = 恒等投影的 transform」在生成器层的落地：transform 会在这个 body 上再叠
     清洗规则，metric 叠聚合，而搬运（sync/materialize）就用它本身。
 
-    **类型不同必须 CAST**（与 ``build_flink_etl_input`` 同口径）：源列类型由源库物理类型决定，
+    **类型不同必须 CAST**：源列类型由源库物理类型决定，
     目标列类型由本体语义经 Adapter 决定，两者本就允许不同——不 CAST 时 Flink 会在提交期拒绝
     （Column types of query result and sink do not match）或运行期 ClassCastException。
 

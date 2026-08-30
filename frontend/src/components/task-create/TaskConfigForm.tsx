@@ -6,6 +6,9 @@ interface Props {
   ontologyId?: string;
   value: Record<string, unknown>;
   onChange: (value: Record<string, unknown>) => void;
+  /** 任务需求（业务意图），与任务名称分开保存。 */
+  taskRequirement: string;
+  onTaskRequirementChange: (requirement: string) => void;
   /** 任务名。留空则由后端按 spec 派生（物化会派生成同名，故这里给人一个覆盖入口）。 */
   name: string;
   onNameChange: (name: string) => void;
@@ -14,6 +17,8 @@ interface Props {
   extraSkipKeys?: Set<string>;
   /** 是否显示任务名输入框（仅在最后一个配置步骤显示）。 */
   showNameInput?: boolean;
+  /** 是否显示任务需求输入框；sync 只在连接步骤显示一次。 */
+  showRequirement?: boolean;
 }
 
 /** 数据范围步骤已接管的字段，不在参数步骤重复出现。 */
@@ -36,11 +41,14 @@ export function TaskConfigForm({
   ontologyId,
   value,
   onChange,
+  taskRequirement,
+  onTaskRequirementChange,
   name,
   onNameChange,
   namePlaceholder,
   extraSkipKeys,
   showNameInput = true,
+  showRequirement = true,
 }: Props) {
   const handleFieldChange = (key: string, val: unknown) => {
     onChange({ ...value, [key]: val });
@@ -52,6 +60,16 @@ export function TaskConfigForm({
 
   return (
     <Form layout="vertical" style={{ maxWidth: 640 }}>
+      {showRequirement && (
+        <Form.Item label="任务需求" required extra="说明这项任务要完成的业务目标" style={{ marginBottom: 16 }}>
+          <Input.TextArea
+            value={taskRequirement}
+            placeholder="例如：每天同步客户订单到数仓 ODS"
+            onChange={(e) => onTaskRequirementChange(e.target.value)}
+            autoSize={{ minRows: 2, maxRows: 4 }}
+          />
+        </Form.Item>
+      )}
       {showNameInput && (
         <Form.Item label="任务名称" extra="留空则按配置自动命名" style={{ marginBottom: 16 }}>
           <Input

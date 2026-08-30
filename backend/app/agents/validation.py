@@ -257,6 +257,14 @@ def _check_doris_metric(
     db: Session, spec: dict[str, Any]
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
+    target_layer = str(spec.get("target_layer") or "ads").strip().lower()
+    if target_layer != "ads":
+        issues.append(ValidationIssue(
+            code="metric_target_layer_forbidden",
+            message=f"Doris metric 只能写 ADS 层，不能使用 {target_layer or '空'}",
+            entity_type="artifact",
+            entity_name="target_layer",
+        ))
     target = db.get(DataSource, spec.get("target_datasource_id")) if spec.get("target_datasource_id") else None
     if target is not None and not (
         target.kind == "doris" and target.purpose == "warehouse"
@@ -282,6 +290,14 @@ def _check_doris_transform(
     db: Session, spec: dict[str, Any]
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
+    target_layer = str(spec.get("target_layer") or "dim").strip().lower()
+    if target_layer not in {"dim", "dwd", "dws"}:
+        issues.append(ValidationIssue(
+            code="transform_target_layer_forbidden",
+            message=f"Doris transform 只能写 DIM/DWD/DWS 层，不能使用 {target_layer or '空'}",
+            entity_type="artifact",
+            entity_name="target_layer",
+        ))
     target = db.get(DataSource, spec.get("target_datasource_id")) if spec.get("target_datasource_id") else None
     if target is not None and not (
         target.kind == "doris" and target.purpose == "warehouse"

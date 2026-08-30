@@ -12,7 +12,8 @@ from app.services.materialization_contract import MaterializationContractService
 from app.services.provenance_service import ProvenanceService
 from app.services.principal_service import PrincipalService
 from app.services.publish import ConfirmationService, PublishService
-from app.services.query import OntologyQueryService, WorkspaceService
+from app.services.logic_query import OntologyQueryService
+from app.services.workspace_service import WorkspaceService
 from app.services.settings_service import SettingsService
 from app.services.task_pipeline import TaskPipelineService
 from app.services.warehouse_generator import WarehouseGenerator

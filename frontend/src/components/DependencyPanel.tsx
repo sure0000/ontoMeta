@@ -5,7 +5,7 @@
  * （已有服务 / Docker / Kubernetes / 物理机），部署成功自动回写连接信息，
  * 或选「已有」手填连接。ERPNext 等外部源库不在此纳管（走数据源管理）。
  *
- * Phase 0：本面板独立运作，不接既有 LLM/DataHub/Airflow/Cube 读取侧。
+ * 依赖组件面板独立管理 LLM/DataHub/Airflow 注册表。
  * Phase 1 起既有配置迁移进本表、读取侧改为投影。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -65,7 +65,6 @@ const AIRFLOW_EXTRA_FIELDS = [
   "max_tasks_per_dag",
   "max_active_tasks_per_dag",
   "dag_parse_timeout",
-  "preflight_sentinel_timeout",
   "staging_swap",
   // Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）
   "flink_sql_runner_jar",
@@ -911,13 +910,6 @@ export function DependencyPanel() {
                                 extra="要大于 Airflow 的 dag_dir_list_interval（默认 300s）"
                               >
                                 <InputNumber min={0} max={3600} style={{ width: 200 }} />
-                              </Form.Item>
-                              <Form.Item
-                                label="自检探针超时（秒）"
-                                name="extra_preflight_sentinel_timeout"
-                                extra="提交前自检写一个 sentinel DAG，等它被解析到"
-                              >
-                                <InputNumber min={0} max={600} style={{ width: 200 }} />
                               </Form.Item>
                             </Space>
                             <Form.Item

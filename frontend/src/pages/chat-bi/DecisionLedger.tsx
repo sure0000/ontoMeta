@@ -41,7 +41,13 @@ function indexAcks(records: ChatBiDecision[]): Map<string, "accepted" | "rejecte
   const out = new Map<string, "accepted" | "rejected">();
   for (const rec of records) {
     if (rec.trigger !== "ack_accept" && rec.trigger !== "ack_doubt") continue;
-    const key = ackKey(rec.message_id ?? undefined, rec.node, rec.stage ?? "", rec.block_id ?? undefined);
+    const key = ackKey(
+      rec.message_id ?? undefined,
+      rec.node,
+      rec.stage ?? "",
+      rec.block_id ?? undefined,
+      rec.ref_id ?? undefined,
+    );
     if (!key) continue;
     out.set(key, rec.trigger === "ack_accept" ? "accepted" : "rejected");
   }

@@ -98,6 +98,14 @@ class ChatBiConversationTask(Base):
     artifact_id: Mapped[str] = mapped_column(String(36), index=True)
     kind: Mapped[str | None] = mapped_column(String(40), nullable=True, default=None)
     intent: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # 催生这条任务的那张表单向导的 confirmation_id。**闭环按任务分开的唯一接缝**：
+    # 前三环（需求/本体/数据）在制品还不存在时就确认了，只能按 confirmation_id 归属；
+    # 后三环（方案/执行/结果）按 artifact_id 归属。不落这一列，一条会话里建的多个任务
+    # 的前三环就只能混成一坨，谁也说不清哪一环是给哪条任务确认的。
+    # 历史行为空：那些任务的前三环无从归属，闭环里如实标灰，不猜。
+    confirmation_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, default=None, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

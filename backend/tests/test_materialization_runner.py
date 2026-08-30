@@ -1,4 +1,5 @@
-"""物化 / 数据同步编排：``run_materialize``（只建结构）与 ``run_sync``（只搬数据）。
+"""物化 / 数据同步编排：``run_materialize``（只建无源对象结构）与 ``run_sync``（确保
+目标表并搬数据）。
 
 两者总是交 Airflow 编排（不再有直连落库）。验证：各自只产该产的东西（物化无搬运任务、
 同步先确保目标表且回执 tables 为空）、按勾选/覆盖裁剪与重命名、按 cron 分组分批、触发失败不丢
@@ -306,7 +307,7 @@ def _set_airflow(**fields):
 def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
     """把 Airflow 配成可用，把 REST 调用换成记录器，并配上 Flink SqlRunner JAR。
 
-    统一执行架构：搬运一律走 Flink SQL on YARN（无 seatunnel/docker/runner 多通道）。
+    统一执行架构：搬运一律走 Flink SQL on YARN。
     Flink 参数现在也在 Airflow 设置行里（DB，见 DEVELOPMENT_PRINCIPLES P1）：给个非空 JAR
     路径走真实 DAG 生成而非 handoff（不落地执行，只产 DAG + .sql + 触发替身）。
     """
@@ -384,7 +385,7 @@ def test_orchestrated_mode_writes_dag_and_triggers(tmp_path, monkeypatch):
     assert rec.calls == []
     # execute_mode 是**对账的开关**：agent_pipeline._reconcile_orchestrated_status 只认
     # "orchestrated"，此前这里产 "flink_on_yarn"，于是制品从提交那刻起就是 SUCCEEDED、
-    # 从不与真实 DagRun 对账。搬运通道另记在 sync_tool。
+    # 从不与真实 DagRun 对账。
     assert receipt["execute_mode"] == "orchestrated"
     assert receipt["emit"] == "dml"
     assert receipt["ok"] is True
@@ -425,8 +426,6 @@ def test_flink_channel_writes_bashoperator_dag_with_sql_files(tmp_path, monkeypa
 
     assert receipt["ok"] is True
     assert receipt["execute_mode"] == "orchestrated"
-    assert receipt["sync_tool"] == "flink"
-    assert "sync_channel" not in receipt  # 多通道概念已废除
     assert receipt["state"] == "queued"
     # DAG 是 Flink 通道：BashOperator + flink run，无 Docker 兄弟容器。
     # （read_spec 用一个 PythonOperator 读边车 JSON 暴露 sql_dir，属正常编排，不是搬运容器。）
@@ -499,7 +498,7 @@ def test_sync_task_params_override_global_flink_settings(tmp_path, monkeypatch):
 
 
 def test_incremental_uses_task_checkpoint_dir(tmp_path, monkeypatch):
-    """设置页没配 checkpoint，但这条任务自己填了 → CDC 作业照样能编出来，且用的是它。"""
+    """设置页没配 checkpoint，但这条 CDC 任务自己填了 → 作业照样能编出来。"""
     ids = _seed("taskckpt")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     _enable_airflow(tmp_path, monkeypatch, triggered={})
@@ -511,7 +510,7 @@ def test_incremental_uses_task_checkpoint_dir(tmp_path, monkeypatch):
             ids["ontology_id"],
             target_datasource_id=ids["datasource_id"],
             engine="doris",
-            load_strategy="incremental",
+            load_strategy="cdc",
             selected_targets=["customer"],
             artifact_id="artifact-ckpt",
             flink_task_params={"flink_checkpoint_dir": "file:///task/ckpt"},
@@ -522,13 +521,13 @@ def test_incremental_uses_task_checkpoint_dir(tmp_path, monkeypatch):
 
 
 def test_incremental_without_checkpoint_dir_errors(tmp_path, monkeypatch):
-    """增量/CDC 是流式作业需 checkpoint_dir；未配 → 用户可读的物化错误，而非 500。"""
+    """CDC 是流式作业需 checkpoint_dir；未配 → 用户可读的物化错误，而非 500。"""
     ids = _seed("incrnockpt")
     monkeypatch.setattr(data_app_executor, "execute_write", _Recorder())
     _enable_airflow(tmp_path, monkeypatch, triggered={})
     # 清空 checkpoint（DB 设置行）：增量作业缺 checkpoint 应报可读错误
     _set_airflow(flink_checkpoint_dir="")
-    # customer 源平台 mysql 有 CDC 连接器；全局 load_strategy=incremental 触发 CDC 路径
+    # customer 源平台 mysql 有 CDC 连接器；全局 load_strategy=cdc 触发流式路径
     with SessionLocal() as db:
         with pytest.raises(materialization_runner.MaterializationError, match="checkpoint"):
             materialization_runner.run_sync(
@@ -536,7 +535,7 @@ def test_incremental_without_checkpoint_dir_errors(tmp_path, monkeypatch):
                 ids["ontology_id"],
                 target_datasource_id=ids["datasource_id"],
                 engine="doris",  # doris 支持 incremental（hive 只全量）
-                load_strategy="incremental",
+                load_strategy="cdc",
                 selected_targets=["customer"],
             )
 

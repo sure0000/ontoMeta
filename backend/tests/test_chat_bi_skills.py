@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from uuid import uuid4
 from types import SimpleNamespace
 
 from app.api.deps import chat_bi_service as svc
@@ -43,6 +44,7 @@ def test_registry_has_overview_and_query():
     )
     assert SKILLS["ops"].extra_tool_names == (
         "get_landing", "get_ops_record", "get_task_status", "get_lineage",
+        "list_datasets", "lint_against_standard",
     )
     assert "overview" in skill_choices_text() and "query" in skill_choices_text()
 
@@ -311,9 +313,25 @@ def test_propose_draft_rejects_bad_type_and_missing_name():
 
 
 def test_propose_draft_derives_name_when_missing():
-    r, _s, e = svc._dispatch_propose_draft(domain_id="d", args={"display_name": "复购率", "logic_type": "tag"})
+    r, _s, e = svc._dispatch_propose_draft(
+        domain_id="d",
+        args={"display_name": "复购率", "logic_type": "tag", "description": "复购客户数/总客户数"},
+    )
     assert e is False
     assert r["create_payload"]["name"]  # 中文名派生占位标识符，非空
+
+
+def test_propose_draft_requires_description():
+    """口径说明是提案里唯一承载口径含义的字段，缺了它就是「有名字没口径」。
+
+    实测的退化路径：propose_expression 连挂几轮 → 回退 propose_draft 只带名字 →
+    「is_group=0 的分组数量」这层语义在提案里彻底消失，用户点确认建出一条空口径。
+    """
+    r, _s, e = svc._dispatch_propose_draft(
+        domain_id="d", args={"display_name": "活跃客户分组数", "logic_type": "metric"}
+    )
+    assert e is True
+    assert "description" in r["error"]
 
 
 def test_dispatch_lint_flags_non_compliant_table():
@@ -329,17 +347,25 @@ def test_dispatch_lint_flags_non_compliant_table():
     assert all(v.get("fix") for v in result["violations"])  # 每项带修法
 
 
-def test_dispatch_lint_compliant_and_kopi_proposal_is_noop():
+def test_dispatch_lint_compliant_and_kopi_proposal_reports_nothing_checked():
+    """无 target_table 的 spec 一条规则都没跑过——不能回「合规」。
+
+    Spec 层可校验的只有物理标识符命名（governance/lint.lint_spec）。口径提案没有物理
+    表名，旧实现回 compliant=True，被转述成「已通过治理规范校验」——一个空洞的通过。
+    """
     with SessionLocal() as db:
         clean, _s, _e = svc._dispatch_lint(
             db, args={"spec": {"target_table": "dim_customer"}}
         )
-        # 口径提案无 target_table → 无可查项，视为合规
-        kopi, _s2, _e2 = svc._dispatch_lint(
+        kopi, kopi_summary, _e2 = svc._dispatch_lint(
             db, args={"spec": {"display_name": "复购率"}}
         )
     assert clean["compliant"] is True and clean["violations"] == []
-    assert kopi["compliant"] is True
+    assert clean["checked_rules"]  # 真查了命名条款
+    assert kopi["compliant"] is None  # 既不是合规也不是违规：没查
+    assert kopi["checked_rules"] == []
+    assert "没有校验任何条款" in kopi["note"]
+    assert "无可校验条款" in kopi_summary
 
 
 def test_dispatch_lint_rejects_non_object_spec():
@@ -566,6 +592,16 @@ def test_sync_proposal_requires_conversation_confirmations(
                     **({"task_requirement": "同步已确认的订单到数仓"} if node == "requirement" else {}),
                 },
             )
+        proposal, _summary, is_error = svc._dispatch_propose_action(
+            db, ontology_id=ontology_id, domain_id=domain_id, conversation_id=conv.id,
+            args={"kind": "sync", "intent": "同步订单到数仓", "context": {
+                "task_confirmation_id": confirmation_id,
+                "object_type": "order", "source_datasource_id": source_id,
+                "target_datasource_id": target_id, "mode": "full",
+            }},
+        )
+        assert is_error is False
+        assert proposal["confirmation_id"] == confirmation_id
         conversation_id = conv.id
 
     response = client.post(
@@ -594,6 +630,22 @@ def test_sync_proposal_requires_conversation_confirmations(
     assert artifact["validation_report"]["dry_run"]["target_ods_table"].endswith("_order")
     assert artifact["spec"]["target_ods_table"].endswith("_order")
     assert artifact["spec"]["target_ods_table"] != "caller_defined"
+
+    # 闭环按任务分开：前三环在制品还不存在时就确认了，只带表单的 confirmation_id。
+    # draft-confirmed 必须把它落到 (会话, 制品) 关联上，否则这条任务的卡片只剩后三环，
+    # 明明逐环确认过的需求/本体/数据在界面上恒灰。
+    closure = client.get(
+        f"/api/chat-bi/conversations/{conversation_id}/closure", headers=admin_headers
+    ).json()
+    assert [t["artifact_id"] for t in closure["tasks"]] == [artifact["id"]]
+    task = closure["tasks"][0]
+    assert task["confirmation_id"] == confirmation_id
+    assert task["reached_count"] == 3
+    assert [n["node"] for n in task["nodes"] if n["reached"]] == [
+        "requirement",
+        "ontology",
+        "data",
+    ]
 
     with SessionLocal() as db:
         db.query(DataSource).filter(DataSource.id.in_([source_id, target_id])).delete(
@@ -980,6 +1032,31 @@ def test_task_options_transform_exposes_cleansing_vocabulary(client):
     assert [x["rule"] for x in r["cleansing_rules"]] == [c for c, _d in SUPPORTED_CLEANSING_RULES]
 
 
+def test_task_options_transform_keeps_derived_objects_without_own_ods(client):
+    """派生对象的加工源来自定义中的多个上游，不要求它自己有 ODS projection。"""
+    from app.models import ObjectType
+
+    _domain_id, onto_id, _aliases = _seed_golden_domain()
+    name = f"customer_rollup_{uuid4().hex[:8]}"
+    with SessionLocal() as db:
+        db.add(
+            ObjectType(
+                ontology_id=onto_id,
+                name=name,
+                display_name="客户汇总",
+                table_role="business_object",
+                source_ref=f"derived:{onto_id}:{name}",
+            )
+        )
+        db.commit()
+        r, _s, is_error = svc._dispatch_get_task_options(
+            db, ontology_id=onto_id, args={"kind": "transform"},
+        )
+
+    assert is_error is False
+    assert any(item["name"] == name for item in r["objects"])
+
+
 def test_task_options_rejects_unknown_kind(client):
     with SessionLocal() as db:
         _r, _s, is_error = svc._dispatch_get_task_options(
@@ -1043,6 +1120,40 @@ def test_link_conversation_task_is_idempotent(client):
         svc.link_conversation_task(db, cid, a_id, kind="materialize", intent="i")
         ids = svc.list_conversation_task_ids(db, cid)
         assert ids == [a_id]  # 幂等：不重复
+
+
+def test_link_conversation_task_backfills_confirmation_id(client):
+    """幂等命中时补上缺失的 confirmation_id，但绝不覆盖已有的。
+
+    关联可能先由别的路径建过（链推进、前端补登记）；不补，这条任务的前三环就永远
+    归属不上、闭环卡上恒灰。而覆盖已有值等于把 A 表单的确认扣到 B 任务头上——
+    宁可空着，也不能记错谁确认了什么。
+    """
+    from app.models.agent import ArtifactStatus, GovernanceArtifact
+    from app.models.chat_bi import ChatBiConversationTask
+
+    domain_id, onto_id, _aliases = _seed_golden_domain()
+    with SessionLocal() as db:
+        conv = svc.create_conversation(db, domain_ids=[domain_id], title="t")
+        cid = conv["id"]
+        a = GovernanceArtifact(
+            kind="sync", name="同步客户", ontology_id=onto_id,
+            intent="i", spec_json="{}", status=ArtifactStatus.DRAFTED.value,
+        )
+        db.add(a)
+        db.commit()
+        a_id = a.id
+
+        svc.link_conversation_task(db, cid, a_id, kind="sync")
+        svc.link_conversation_task(db, cid, a_id, kind="sync", confirmation_id="conf-1")
+        svc.link_conversation_task(db, cid, a_id, kind="sync", confirmation_id="conf-2")
+
+        rows = (
+            db.query(ChatBiConversationTask)
+            .filter(ChatBiConversationTask.conversation_id == cid)
+            .all()
+        )
+        assert [r.confirmation_id for r in rows] == ["conf-1"]
 
 
 def test_get_task_status_prefers_conversation_scope(client):
@@ -1935,3 +2046,168 @@ def test_react_thinking_extraction():
     thinking, clean = ChatBiService._extract_thinking(upper_case)
     assert thinking == "大写也可以"
     assert clean == "内容"
+
+
+# --------------------------------------------------------------------------- 接地泄漏回归
+
+
+def test_get_object_hides_unpublished_relations():
+    """get_object 只能给已发布关系——它是 Data Agent 的接地集，不是浏览视图。
+
+    实测缺陷：dispatch 调 get_object_type 时没传 published_only（该参数默认 False），
+    未发布关系照样返回，且 _compact_relation 不带 status，模型无从分辨，于是答出
+    「该对象挂载 17 条已发布关系」——而那 17 条一条都没发布。
+    """
+    from app.models import EntityStatus, ObjectType, RelationType
+
+    domain_id, ontology_id, _ids = _seed_golden_domain()
+    with SessionLocal() as db:
+        order = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == ontology_id, ObjectType.name == "order")
+            .one()
+        )
+        customer = (
+            db.query(ObjectType)
+            .filter(ObjectType.ontology_id == ontology_id, ObjectType.name == "customer")
+            .one()
+        )
+        db.add(RelationType(
+            ontology_id=ontology_id, name="order_draft_link", display_name="草稿关系",
+            source_object_type_id=order.id, target_object_type_id=customer.id,
+            cardinality="many_to_one", structure_type="foreign_key",
+            status=EntityStatus.SUGGESTED.value,
+        ))
+        db.commit()
+        order_id = order.id
+
+    with SessionLocal() as db:
+        result, _summary, is_error = svc._dispatch_agent_tool(
+            db, domain_ids=[domain_id], ontology_ids=[ontology_id],
+            name="get_object", args={"object_id": order_id},
+        )
+    assert is_error is False
+    names = {r.get("name") for r in result["relations"]}
+    assert "order_of_customer" in names       # 已发布的还在
+    assert "order_draft_link" not in names    # 未发布的不得出现
+
+
+# --------------------------------------------------------------------------- 表达式契约
+
+
+def test_propose_expression_contract_survives_tool_compaction():
+    """表达式体的形状必须由 schema 承载，且该工具不被压缩掉 description。
+
+    运行时每轮都会跑 _compact_tools_for_prompt_retry 递归删 description；此前 body 是
+    裸 {"type": "object"}，压缩后模型看不到任何形状说明，只能猜（实测连挂三轮
+    unsupported_operation）。
+    """
+    tools = c._tools_for_skill(SKILLS["create"])
+    compact = ChatBiService._compact_tools_for_prompt_retry(tools)
+    by_name = {t["function"]["name"]: t for t in compact}
+    body = by_name["propose_expression"]["function"]["parameters"]["properties"]["body"]
+    # 结构承载契约：属性名与算子枚举都在
+    assert "operation" in body["properties"] and "args" in body["properties"]
+    assert "count" in body["properties"]["operation"]["enum"]
+    # 该工具豁免压缩，自然语言部分也还在
+    assert body.get("description")
+
+
+def test_build_ast_rejects_wrong_body_shape():
+    """体里一个 {"ref": …} 都没有 = 形状写错了，要当场说清怎么改。"""
+    import pytest
+
+    from app.services.expression_candidate import CandidateError, build_ast
+
+    refs = [{"ref_id": "cg", "object_type_id": "o1", "object_name": "customer_group"}]
+    # 这是真实模型产出的错误形状
+    bad = {"aggregation": "count", "measure": "cg.name",
+           "filter": {"field": "cg.is_group", "operator": "=", "value": 0}}
+    with pytest.raises(CandidateError) as ei:
+        build_ast(logic_type="metric", refs=refs, body=bad)
+    assert ei.value.code == "body_shape"
+    assert ei.value.detail["expected_body"]["operation"]  # 附了可照抄的模板
+
+
+# --------------------------------------------------------------------------- 落点列举路由
+
+
+def test_landing_listing_routes_to_ops_lane():
+    """「数仓里已经落地、能直接查的表有哪些」是落点列举，不是域概览。
+
+    此前判成 structural → overview，被域概览拿本体对象清单当「数仓里的表」答掉。
+    """
+    for q in ("现在数仓里已经落地、能直接查的表有哪些？", "数仓里有哪些表"):
+        assert ChatBiService._classify_intent(q) == "operational"
+        assert ChatBiService._auto_select_skill(q) == "ops"
+    # 写意图不能被吸进只读车道
+    assert ChatBiService._auto_select_skill("帮我把客户分组同步到 ODS") == "task"
+    ops_tools = {t["function"]["name"] for t in c._tools_for_skill(SKILLS["ops"])}
+    assert "list_datasets" in ops_tools
+    assert "lint_against_standard" in ops_tools  # 合规判定要能实跑校验器
+
+
+# --------------------------------------------------------------------------- 拒答保留证据
+
+
+def test_refusal_keeps_executed_result():
+    """F4 拒的是「那句话没凭证」，不是「本轮什么都没证实」——已执行的结果要留下。"""
+    refusal = {"answer": "为避免给出不准确信息…", "grounding_refused": True}
+    previous = {
+        "suggested_sql": "SELECT COUNT(*) FROM customer_group",
+        "data_result": {"columns": [{"key": "c"}], "rows": [{"c": 5}], "truncated": False},
+    }
+    out = ChatBiService._carry_verified_evidence(dict(refusal), previous)
+    assert out["data_result"]["rows"] == [{"c": 5}]
+    assert out["suggested_sql"]
+    assert "已执行" in out["answer"]
+    blocks = {b["type"] for b in answer_to_blocks(out)}
+    assert {"notice", "markdown", "sql", "table"} <= blocks
+
+    # 没真跑过就不留：suggested_sql 可能是从正文里收割的、从未执行的语句
+    only_prose = ChatBiService._carry_verified_evidence(
+        dict(refusal), {"suggested_sql": "SELECT 1", "data_result": None}
+    )
+    assert only_prose.get("data_result") is None
+    assert only_prose.get("suggested_sql") is None
+
+
+def test_ledger_registers_result_shape_numbers():
+    """行数/列数来自结果本身，复述它们不该被判成「未经查询证实的数值」。"""
+    from app.services.agent_grounding import FactLedger
+
+    ledger = FactLedger()
+    ledger.add_cells(
+        [{"key": "a"}, {"key": "b"}],
+        [{"a": 1, "b": 2}, {"a": 3, "b": 4}, {"a": 5, "b": 6}],
+    )
+    assert ledger.has_numeric("3")  # 3 行
+    assert ledger.has_numeric("2")  # 2 列（同时也是单元格值）
+    assert "3" in ledger.provable_numbers()
+
+
+def test_render_chart_rejects_non_numeric_y():
+    """y 轴是柱子的高度：拿名称列当 y 画出来的图没有意义。
+
+    回归：分组被语义证明器拦下后，模型退化成「拉明细 + 用名称列当 y」，还在正文里
+    宣称「柱状图已渲染」。列名存在不等于能作图。
+    """
+    data_result = {
+        "columns": [{"key": "parent"}, {"key": "name"}, {"key": "cnt"}],
+        "rows": [
+            {"parent": "All", "name": "Commercial", "cnt": 4},
+            {"parent": "All", "name": "Individual", "cnt": 2},
+        ],
+    }
+    charts: list[dict] = []
+    bad, summary, is_error = svc._dispatch_render_chart(
+        {"kind": "bar", "x": "parent", "y": "name"}, data_result, charts
+    )
+    assert is_error is True and charts == []
+    assert "cnt" in bad["numeric_columns"]
+    assert "非数值列" in summary
+
+    ok, _s, err = svc._dispatch_render_chart(
+        {"kind": "bar", "x": "parent", "y": "cnt"}, data_result, charts
+    )
+    assert err is False and charts == [{"kind": "bar", "x": "parent", "y": "cnt"}]

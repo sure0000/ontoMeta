@@ -25,7 +25,7 @@ for n in "${DATAHUB_NETWORK:-datahub_network}" "${ERPNEXT_NETWORK:-erpnext_frapp
 done
 
 echo "== 2. 端口占用 =="
-for p in 8081 5801 8030 9030 8040; do
+for p in 8081 8030 9030 8040; do
   if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
     say_fail "端口 $p 已被占用 —— 改 docker-compose.yml 的端口映射"
   else say_ok "端口 $p 空闲"; fi
@@ -48,7 +48,7 @@ else
   if docker image inspect "$probe" >/dev/null 2>&1 && [ "$elapsed" -lt 60 ]; then
     say_ok "镜像拉取正常（${elapsed}s）"
   else
-    say_fail "镜像拉取过慢/失败（已耗 ${elapsed}s）。airflow/seatunnel/doris 按此速率拉不下来：
+    say_fail "镜像拉取过慢/失败（已耗 ${elapsed}s）。airflow/doris 按此速率拉不下来：
        给 .env 的 IMG_* 加镜像源前缀（如 docker.m.daocloud.io/apache/airflow:2.10.5），
        或在 Docker Desktop → Settings → Docker Engine 配 registry-mirrors"
   fi
@@ -56,7 +56,7 @@ fi
 
 echo "== 4. 本地已有可复用的镜像 =="
 for i in "${IMG_POSTGRES:-postgres:16-alpine}" "${IMG_AIRFLOW:-apache/airflow:2.10.5}" \
-         "${IMG_SEATUNNEL:-apache/seatunnel:2.3.11}" "${IMG_DORIS:-apache/doris:doris-all-in-one-2.1.0}"; do
+         "${IMG_DORIS:-apache/doris:doris-all-in-one-2.1.0}"; do
   if docker image inspect "$i" >/dev/null 2>&1; then say_ok "$i 已在本地"
   else say_warn "$i 需要拉取"; fi
 done

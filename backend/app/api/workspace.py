@@ -31,7 +31,8 @@ from app.schemas import (
 from app.services.draft_generation_queue import run_draft_generation_limited
 from app.services.draft_generator import LlmNotConfiguredError
 from app.services.manual_creation import ManualCreationService, ManualPropertyInput
-from app.services.query import DraftGenerationAlreadyRunning, WorkspaceService
+from app.services.draft_task_service import DraftGenerationAlreadyRunning
+from app.services.workspace_service import WorkspaceService
 
 router = APIRouter()
 
@@ -418,5 +419,4 @@ def get_task_merge_report(domain_id: str, task_id: str, db: Session = Depends(ge
         return provenance_service.get_merge_report(db, domain_id, task_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
 

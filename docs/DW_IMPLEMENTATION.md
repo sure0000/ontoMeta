@@ -237,7 +237,7 @@ drafted → validated → confirmed → executing → succeeded | failed
 边界：
 
 - 只适用于有真实物理源表的本体对象；
-- 只搬数据，不建业务表；
+- 幂等确保同步目标表并搬数据；无独立加工时，同一张表直接作为本体 serving 表；
 - 统一走 `materialization_runner.run_sync` 的 Flink SQL 通道；
 - 连接信息以 alias/ref 传递；
 - 关键源保全判定已进入 Spec，但额外 STG 副本尚未在 Flink 路径实现，回执会显式 `preservation_pending`。
@@ -292,7 +292,7 @@ drafted → validated → confirmed → executing → succeeded | failed
 主要实现：
 
 - `services/flink_sql_generator.py`
-- `services/flink_job_runner.py`
+- `services/move_job_compiler.py`
 - `services/airflow_dag_builder.py`
 - `services/materialization_runner.py`
 - `services/pipeline_compiler.py`
@@ -429,7 +429,7 @@ cd frontend && npm run lint && npm run build
 - `DEFAULT_ENGINE` 与新物化契约默认值已切换为 `doris`；新 materialize/transform/metric/sync 规格默认不再生成 Hive；
 - `DataSource` 增加显式 `purpose`、`is_default_warehouse`、`enabled`，不再把 `catalog_name` 作为新路由事实源；
 - 新增 `DorisWarehouseConfig`、`OntologyWarehouseDeployment`、`WarehouseObjectProjection` 的模型与 Alembic 迁移；
-- 新增 `query_routing.py` 的 Doris-only readiness/receipt 门禁；物化只推进 `schema_ready`，未同步/加工 Projection 保持 `queryable=false`；
+- 新增 `query_routing.py` 的 Doris-only readiness/receipt 门禁；无源对象物化只推进 `schema_ready`，源对象同步成功后直接推进统一表 Projection 为 `queryable=true`；
 - 增加 Doris warehouse policy 与 Gate 约束；显式默认 Doris 后新 materialize/transform/metric 制品不得使用其他数仓引擎；
 - 前端物化引擎选择已收敛为 Doris，旧引擎保留只用于历史读取/迁移期间审计。
 
@@ -438,7 +438,7 @@ Phase 2 已完成的接入基础：
 - 新增版本化 `IngestionContract` 与 API，显式绑定 business-source DataSource、默认 Doris 和 ODS 物理表；
 - 新 Doris sync 只允许写 `ods*` 数据库，Flink Doris Connector 的 `FENODES` 从 Airflow Connection extra 注入；
 - full 使用 ODS 正式表 + staging + Doris atomic replace；incremental 使用有界 JDBC 水位 batch；CDC 使用 detached 流作业、checkpoint/savepoint 与真实 Flink Job ID；
-- IngestionContract/Projection 状态只由 Airflow task 最终态对账推进，提交成功不等于 data ready；ODS 默认不作为 serving，保持 `queryable=false`；
+- IngestionContract/Projection 状态只由 Airflow task 最终态和 Doris 表验证推进，提交成功不等于 data ready；无独立加工的源对象以同步 ODS 表直接 serving，需要加工时再切换到独立服务表；
 - detached CDC 的 BashOperator 最终输出结构化真实 Flink Job ID；缺 Job ID 则任务失败。`flink_rest_endpoint` 由 Web/DB 配置，健康 API 查询 Flink REST 并推进 running/failed/stale；
 - reader DSN 不再通过 Doris 配置 API 回显，新增 Doris 时 Web 表单同时配置 9030 SQL 与多 FE 8030 fenodes；
 - Data Agent system prompt、query skill 与任务提案工具已固化 Doris-only 边界；sync 提案缺业务源/默认 Doris/ODS 或 incremental/CDC 必填参数时会在提案阶段被确定性拒绝。

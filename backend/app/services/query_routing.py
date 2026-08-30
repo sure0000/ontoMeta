@@ -77,6 +77,37 @@ def _deployments(
     return deployments, None
 
 
+def owning_ontology_ids(
+    db: Session, *, ontology_ids: list[str], object_names: list[str]
+) -> list[str]:
+    """在场本体里，真正拥有被引用对象的那些。
+
+    会话可以不选域（「全域通盘」），此时在场本体是**全部**已发布本体。若就绪校验对
+    在场本体一视同仁地要求 Doris Deployment，那么只要任何一个域还没建仓，跨域会话里
+    的**任何** SQL 都查不了——哪怕它只碰了一张早已就绪的表。实测踩到的就是这条：
+    一个未绑定域的会话把一个 2 对象的测试域也算进在场本体，于是 erpnext 里就绪多时的
+    客户分组被判「未就绪」。
+
+    收窄到「这条 SQL 真的碰了的本体」。解析不到任何归属时退回原列表，让下游按老路
+    报「对象未覆盖」，而不是在这里静默放行。
+    """
+    wanted = {str(n).strip().lower() for n in object_names if str(n).strip()}
+    if not wanted or not ontology_ids:
+        return list(ontology_ids)
+    scoped = list(dict.fromkeys(ontology_ids))
+    owners = {
+        obj.ontology_id
+        for obj in db.query(ObjectType)
+        .filter(
+            ObjectType.ontology_id.in_(scoped),
+            ObjectType.status == "published",
+        )
+        .all()
+        if (obj.name or "").strip().lower() in wanted
+    }
+    return [oid for oid in scoped if oid in owners] or scoped
+
+
 def readiness_error(
     db: Session,
     *,
@@ -92,8 +123,13 @@ def readiness_error(
     if not ontology_ids:
         return "查询未绑定已发布本体，禁止执行 SQL"
 
+    scoped = (
+        owning_ontology_ids(db, ontology_ids=ontology_ids, object_names=object_names)
+        if object_names
+        else list(ontology_ids)
+    )
     deployments, error = _deployments(
-        db, datasource=datasource, ontology_ids=ontology_ids
+        db, datasource=datasource, ontology_ids=scoped
     )
     if error:
         return error
@@ -103,7 +139,7 @@ def readiness_error(
         projection_mapping(
             db,
             datasource=datasource,
-            ontology_ids=ontology_ids,
+            ontology_ids=scoped,
             object_names=object_names,
             deployments=deployments,
         )
@@ -141,7 +177,13 @@ def projection_mapping(
     intentionally ignored: it is historical metadata, not a query authority.
     """
     deployments = deployments or _deployments(
-        db, datasource=datasource, ontology_ids=ontology_ids
+        db,
+        datasource=datasource,
+        # 与 readiness_error 同口径：只要求这条 SQL 真的碰了的本体已建仓，
+        # 否则跨域会话里一个未建仓的域会连坐所有查询（见 owning_ontology_ids）。
+        ontology_ids=owning_ontology_ids(
+            db, ontology_ids=ontology_ids, object_names=object_names
+        ),
     )[0]
     wanted = {str(name).strip().lower() for name in object_names if str(name).strip()}
     if not wanted:

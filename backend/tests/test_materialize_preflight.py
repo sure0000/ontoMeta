@@ -1,10 +1,10 @@
 """物化提交前自检（Preflight Gate，M13）。
 
 不起真实 Airflow、不建真实库：用 httpx.MockTransport 伪造 Airflow REST（比照
-test_airflow_connector.py），并把 preflight 依赖的 settings / 契约服务 / sentinel 超时
-这几个 seam monkeypatch 掉，专测「每类失败是否在提交前被如实分类、给出可照做的下一步」。
+test_airflow_connector.py），并把 preflight 依赖的 settings / 契约服务 monkeypatch
+掉，专测「每类失败是否在提交前被如实分类、给出可照做的下一步」。
 
-统一执行架构后（D/F 提交）：sync_runner/docker 通道已废除，preflight 只查 Flink 前置
+统一执行架构后（D/F 提交）：preflight 只查 Flink 前置
 （flink_jar / flink_checkpoint），movability 独立项已并入 execution_channel 的可搬性预演。
 """
 
@@ -36,7 +36,6 @@ def _runtime(dags_dir, **over) -> SimpleNamespace:
         max_tasks_per_dag=50,
         max_active_tasks_per_dag=16,
         dag_parse_timeout=60.0,
-        preflight_sentinel_timeout=20.0,
         staging_swap=True,
         # Flink 执行参数现在也在设置行上（不再有环境变量）。
         flink_sql_runner_jar="/opt/flink/runner.jar",
@@ -62,7 +61,6 @@ def _make_handler(
     ping=200,
     openapi_version="v1",
     connection=200,
-    sentinel_found=True,
     dag_list=(),
     dag_filelocs=(),
     dags_folder=None,
@@ -101,8 +99,6 @@ def _make_handler(
             )
         if path.startswith("/api/v1/connections/"):
             return httpx.Response(connection, json={"connection_id": path.rsplit("/", 1)[-1]})
-        if path.startswith("/api/v1/dags/"):  # dag_exists（sentinel 探测）
-            return httpx.Response(200 if sentinel_found else 404, json={"dag_id": "x"})
         return httpx.Response(404, text=f"unrouted {path}")
 
     return handler
@@ -118,7 +114,6 @@ def _install(
     contracts=(),
     names=None,
     runtime_over=None,
-    sentinel_timeout=0.3,
     max_tasks=50,
 ):
     def factory(endpoint, **kwargs):
@@ -129,8 +124,6 @@ def _install(
 
     runtime_over = dict(runtime_over or {})
     runtime_dir = runtime_over.pop("dags_dir", str(tmp_path))
-    # 这两个旋钮已从环境变量搬进设置行，故由 runtime 携带（用例仍可用同名参数覆盖）。
-    runtime_over.setdefault("preflight_sentinel_timeout", sentinel_timeout)
     runtime_over.setdefault("max_tasks_per_dag", max_tasks)
     runtime = _runtime(runtime_dir, **runtime_over)
     monkeypatch.setattr(pf, "AirflowClient", factory)

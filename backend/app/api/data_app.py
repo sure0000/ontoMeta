@@ -317,24 +317,6 @@ def disable_share(app_id: str, db: Session = Depends(get_db)):
     return data_app_service.public_share_status(app)
 
 
-# ------------------------------------------------------------- cube model gen
-
-
-@router.get("/ontologies/{ontology_id}/cube-model")
-def get_ontology_cube_model(ontology_id: str, db: Session = Depends(get_db)):
-    """为已发布本体生成 Cube data model（含预聚合/refreshKey/joins）。"""
-    return data_app_service.generate_cube_model(db, ontology_id)
-
-
-@router.get("/ontologies/{ontology_id}/cube-model/files")
-def get_ontology_cube_model_files(ontology_id: str, db: Session = Depends(get_db)):
-    """生成可直接部署的 Cube 文件（model/cubes/*.js + cube.js，含 RLS queryRewrite）。
-
-    运维把返回的每个文件落盘到 Cube 的挂载目录（./cube）即可。
-    """
-    return {"files": data_app_service.generate_cube_model_files(db, ontology_id)}
-
-
 # ----------------------------------------------------------------- widgets
 
 

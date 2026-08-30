@@ -213,7 +213,8 @@ class MetricDrafter(Drafter):
             "target_layer": context.get("target_layer")
             or (contract.target_layer if contract else "ads"),
             "database_prefix": context.get("database_prefix"),
-            "schedule": context.get("schedule") or context.get("refresh_cron"),
+            # 新任务协议统一使用 refresh_cron；读取旧 schedule 仅为兼容历史调用方。
+            "refresh_cron": context.get("refresh_cron") or context.get("schedule"),
         }
 
     def suggested_name(self, intent: str, spec: dict[str, Any]) -> str:

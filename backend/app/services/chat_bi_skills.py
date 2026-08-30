@@ -261,6 +261,8 @@ SKILLS: dict[str, Skill] = {
             "   - 表建了吗？数搬了吗？现在能不能查？\n"
             "   - 工作流：search_objects → get_landing(object_id)\n"
             "   - 返回 ODS 表、服务层表、装载模式、最近成功搬数时间\n"
+            "   - **列举**全部落点（「数仓里已经落地/能直接查的表有哪些」）→ list_datasets；\n"
+            "     本体对象 ≠ 物理落点，不要拿域概览里的对象清单当「数仓里的表」\n"
             "   - **重要**：没有落点登记 ≠ 错误 — 正是这条信息挡住了「推测表名」\n\n"
 
             "2. **任务执行**（get_task_status）：\n"
@@ -272,6 +274,12 @@ SKILLS: dict[str, Skill] = {
             "   - 这个对象的上游是谁、下游影响谁？\n"
             "   - 工作流：search_objects → get_lineage(center_id, depth)\n\n"
 
+            "4. **合规判定**（lint_against_standard）：\n"
+            "   - 「这个提案/这张表符合治理规约吗」是**校验**，不是读记录\n"
+            "   - 必须把要校验的 spec 交给 lint_against_standard 实跑，并按它返回的\n"
+            "     checked_rules / note 如实说明「校验了什么、没校验什么」\n"
+            "   - **绝不允许**读出规约条款后凭条款正文推断某个提案是否满足——那是编结论\n\n"
+
             "回答原则：\n"
             "- 基于工具真实返回的记录；没查到就说没查到，不许推测\n"
             "- 必须说清「截至 XX 时间」和「数据来源：XX」\n"
@@ -280,6 +288,8 @@ SKILLS: dict[str, Skill] = {
         ),
         extra_tool_names=(
             "get_landing", "get_ops_record", "get_task_status", "get_lineage",
+            # 落点的列举形态走目录；合规判定要实跑校验器（两者都只读，属于本车道）
+            "list_datasets", "lint_against_standard",
         ),
         block_types=("markdown", "record", "task_status", "lineage"),
     ),

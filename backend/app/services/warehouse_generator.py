@@ -9,7 +9,7 @@ LogicalSchema，再交给 Dialect Adapter 渲染 DDL；同时产出 ETL SQL、�
 - **不可生成的东西必须显式列进 ``unsupported``，绝不静默跳过。**
 - **幂等**：同一本体重复生成，产出逐字节一致。
 
-遍历模式与外键推断沿用 ``services/data_app.py`` 的 ``_build_cube_objects`` /
+遍历模式与外键推断沿用 Data App 的对象建模约定，
 ``_relation_to_join``——那是本仓库既有的「本体 → 可部署物理产物」先例。
 """
 
@@ -54,7 +54,7 @@ from app.warehouse import (
 # 生成期只 surface 的规约码：命名类（违规罕见、信号高）。comment/pk 等 advisory 不逐表刷。
 _GENERATOR_SURFACED_CODES = frozenset({"naming_snake_case", "naming_reserved_word"})
 
-# 缺乏证据时的外键回退约定，与 connectors/cube.py 保持一致。
+# 缺乏证据时的外键回退约定。
 _DEFAULT_REF_COLUMN = "id"
 
 
@@ -360,7 +360,7 @@ class WarehouseGenerator:
     ) -> dict[str, list[LogicalConstraint]]:
         """外键型关系 → 源对象上的外键声明。
 
-        字段推断沿用 ``connectors/cube.py``：从 ``source_evidence`` 取
+        字段推断从 ``source_evidence`` 取
         ``foreign_key``/``source_field``/``fk_column``，目标列取
         ``target_field``/``pk_column``，缺失时回退 ``<target>_id`` = ``id``。
         """
@@ -376,7 +376,7 @@ class WarehouseGenerator:
             if card in {"n:n", "m:n", "many_to_many", "many-to-many"}:
                 plan.note(
                     rel.name,
-                    "N:N 关系需桥接表，不自动生成（与 connectors/cube.py 约定一致）",
+                    "N:N 关系需桥接表，不自动生成",
                 )
                 continue
             tgt_contract = contracts.get((TargetKind.OBJECT_TYPE.value, tgt.id))
@@ -746,7 +746,7 @@ class WarehouseGenerator:
                             "target": table.qualified_name,
                             "feature": "cdc",
                             "detail": "CDC 无法用同库 INSERT 表达，本次按全量覆盖执行；"
-                            "如需变更捕获请改用同步作业（SeaTunnel）",
+                            "如需变更捕获请配置 Flink CDC 同步作业",
                         }
                     )
                 sql = adapter.render_load(
@@ -989,117 +989,3 @@ class WarehouseGenerator:
                 db, ontology_id, database_prefix=database_prefix
             ),
         }
-
-    def build_flink_etl_input(
-        self,
-        db: Session,
-        ontology_id: str,
-        target_table_name: str,
-        engine: str,
-        *,
-        database_prefix: str | None = None,
-        database_overrides: dict[str, str] | None = None,
-        table_overrides: dict[str, str] | None = None,
-    ) -> dict:
-        """为单个目标表生成 Flink ETL 的结构化输入（P1-4）。
-
-        返回源表 LogicalTable、目标表 LogicalTable、源/目标物理名、平台、SELECT 体，
-        供 transform executor 调 flink_sql_generator。复用 build_logical_schema 与
-        _source_refs / _field_refs，守住「映射逻辑不重写一份」原则。
-
-        Args:
-            target_table_name: 目标表的实体名（ObjectType.name）
-            engine: 引擎（hive/doris...）
-
-        Returns:
-            dict: {
-                "source_table": LogicalTable,  # Flink 逻辑表名 src_<entity>，列用源物理列名
-                "target_table": LogicalTable,  # 目标表（逻辑名就是实体名，列用本体属性名）
-                "source_physical": str,        # 源表物理库表名（erp_ods.tab_xxx）
-                "target_physical": str,        # 目标表物理库表名（dim_erp.customer）
-                "source_platform": str,        # 源平台（从 URN 提取，回退 engine）
-                "target_platform": str,        # 目标平台（即 engine）
-                "select_body": str,            # SELECT ... FROM `src_<entity>`，引用 Flink 逻辑表名
-            }
-
-        Raises:
-            ValueError: 目标表不存在 / 无 source_ref
-        """
-        plan = self.build_logical_schema(
-            db,
-            ontology_id,
-            database_prefix=database_prefix,
-            database_overrides=database_overrides,
-            table_overrides=table_overrides,
-        )
-        target = plan.schema.table(target_table_name)
-        if target is None:
-            raise ValueError(f"目标表 {target_table_name} 不在本体的逻辑 schema 中（请先执行物化契约推导）")
-
-        source_refs = self._source_refs(db, ontology_id)
-        source_physical = source_refs.get(target.source_name)
-        if not source_physical:
-            raise ValueError(f"目标表 {target_table_name} 对应的对象无 source_ref，无法定位源表")
-
-        field_refs = self._field_refs(db, ontology_id)
-        mapping = field_refs.get(target.source_name, {})
-
-        # 源平台：从 source_ref（URN）提取，缺失回退 engine
-        obj = (
-            db.query(ObjectType)
-            .filter(ObjectType.ontology_id == ontology_id, ObjectType.name == target.source_name)
-            .first()
-        )
-        source_platform = source_platform_of(obj.source_ref if obj else None) or engine
-
-        # 源表 LogicalTable：列用源物理列名（JDBC 从物理表读，列名须匹配）
-        source_columns = tuple(
-            LogicalColumn(
-                name=mapping.get(c.name) or c.name,  # 源物理列名
-                data_type=c.data_type,
-                semantic_type=c.semantic_type,
-                comment=c.comment,
-                nullable=c.nullable,
-            )
-            for c in target.columns
-        )
-        # Flink 逻辑表名加 src_ 前缀避免与目标表同名冲突
-        source_table = LogicalTable(
-            name=f"src_{target.source_name}",
-            database=None,  # Flink 表无 database 概念，物理名单独指定
-            layer="ods",
-            columns=source_columns,
-        )
-
-        # SELECT 体：FROM 引用 Flink 源表逻辑名，列映射 源物理列 AS 目标列。
-        # **类型不同就显式 CAST**：源列类型由源库的物理类型决定，目标列类型由本体语义
-        # 经 Adapter 决定（见 semantic-type 那条设计），两者本来就允许不同——不 CAST 的话
-        # Flink 直接拒绝提交（Column types of query result and sink do not match），
-        # 或在运行期 ClassCastException。
-        from app.services.flink_sql_generator import (
-            source_flink_type,
-            target_flink_type,
-        )
-
-        select_lines = []
-        for c in target.columns:
-            src_col = mapping.get(c.name) or c.name
-            src_type = source_flink_type(c)
-            tgt_type = target_flink_type(c, engine)
-            expr = f"`{src_col}`"
-            if src_type != tgt_type:
-                expr = f"CAST({expr} AS {tgt_type})"
-            select_lines.append(f"  {expr} AS `{c.name}`")
-        select_body = "SELECT\n" + ",\n".join(select_lines) + f"\nFROM `{source_table.name}`"
-
-        return {
-            "source_table": source_table,
-            "target_table": target,
-            "source_physical": source_physical,
-            "target_physical": target.qualified_name,
-            "source_platform": source_platform,
-            "target_platform": engine,
-            "select_body": select_body,
-        }
-
-

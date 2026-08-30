@@ -12,7 +12,7 @@
 """
 
 from app.database import SessionLocal
-from app.services.query import WorkspaceService
+from app.services.workspace_service import WorkspaceService
 
 
 def main() -> None:

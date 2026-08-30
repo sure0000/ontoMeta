@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import router
+from app.api.router import router
 from app.auth import AdminAuthMiddleware
 from app.config import settings
 from app.database import init_db

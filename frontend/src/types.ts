@@ -786,16 +786,6 @@ export interface DraftGenerationSettings {
   updated_at: string;
 }
 
-export interface CubeSettings {
-  api_url: string;
-  secret_set: boolean;
-  secret_hint?: string | null;
-  preagg_refresh: string;
-  tenant_dimension?: string | null;
-  timeout_seconds: number;
-  updated_at: string;
-}
-
 /** Airflow 编排配置。凭据只回「是否已设 + 掩码」，不回明文。 */
 export interface AirflowSettings {
   /** 连接一：调度 API。没有 token/api_version——前者 Airflow REST 用的是 basic auth，
@@ -819,7 +809,6 @@ export interface AirflowSettings {
   max_tasks_per_dag: number;
   max_active_tasks_per_dag: number;
   dag_parse_timeout: number;
-  preflight_sentinel_timeout: number;
   staging_swap: boolean;
   /** Flink 执行引擎参数（搬运/计算经 Airflow BashOperator 提交 flink run）。 */
   flink_sql_runner_jar?: string;
@@ -973,15 +962,31 @@ export interface ChatBiClosureNode {
   count: number;
 }
 
-/** 一次对话的确认闭环总结。nodes 恒为六项——未到达的标灰而非隐藏。 */
-/** 本会话催生的一条数据任务。闭环卡据此给出「重新进入某一环」的入口。 */
+/**
+ * 本会话催生的一条数据任务**及它自己的六环闭环**。
+ *
+ * 闭环的粒度是任务、不是会话：`nodes` 恒为六项（未到达的标灰而非隐藏），只统计归属
+ * 这条任务的决策记录。卡片一条任务一张，并据此给出「重新进入某一环」的入口。
+ */
 export interface ChatBiClosureTask {
   artifact_id: string;
   name: string;
   kind?: string | null;
   status?: string | null;
+  confirmation_id?: string | null;
+  nodes: ChatBiClosureNode[];
+  reached_count: number;
+  total_count: number;
+  dangling: string[];
 }
 
+/**
+ * 一次对话的决策总结。
+ *
+ * `tasks` 是给人看的闭环——一条任务一组六环。会话级的 `nodes`/`reached_count`/
+ * `dangling` 是审计聚合（决策追踪页的时间线表头、跨会话统计），**不是闭环**：
+ * 拿它画图的话，一次纯查询点个「认可」也会顶出一张六环卡。
+ */
 export interface ChatBiDecisionClosure {
   conversation_id: string;
   nodes: ChatBiClosureNode[];
@@ -1258,6 +1263,8 @@ export type ChatBiBlock =
         intent: string;
         context?: Record<string, unknown>;
         ontology_id?: string | null;
+        /** request_form 生成的确认单号；有它时创建必须走 draft-confirmed。 */
+        confirmation_id?: string | null;
         /** 「去校验并执行」按钮原样传给 api.draftArtifact 的载荷。 */
         draft_payload: {
           kind: string;
@@ -1393,6 +1400,43 @@ export type ChatBiBlock =
   | { id: string; type: "clarify"; clarification: ChatBiClarification }
   | { id: string; type: "form"; form: ChatBiFormRequest };
 
+export interface ChatBiAgentRun {
+  id: string;
+  status: "succeeded" | "refused" | "waiting_input" | "failed" | "cancelled";
+  question: string;
+  intent?: string | null;
+  skill?: string | null;
+  grounded: boolean;
+  started_at: string;
+  finished_at: string;
+  error?: string | null;
+}
+
+export interface ChatBiAgentArtifact {
+  id: string;
+  kind: string;
+  label: string;
+  payload_path: string;
+  snapshot?: Record<string, unknown> | null;
+  source?: string | null;
+  as_of?: unknown;
+}
+
+export interface ChatBiAgentRunSummary extends ChatBiAgentRun {
+  message_id: string;
+  artifact_count: number;
+  answer_preview: string;
+  created_at: string;
+}
+
+export interface ChatBiAgentRunDetail {
+  message_id: string;
+  run: ChatBiAgentRun;
+  artifacts: ChatBiAgentArtifact[];
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface ChatBiAnswer {
   domain_ids?: string[];
   domain_names?: string[];
@@ -1419,12 +1463,15 @@ export interface ChatBiAnswer {
   data_result?: ChatBiDataResult | null;
   /** V3 S0 渲染块（后端双写）；缺失时前端 answerToBlocks 由旧字段兜底。 */
   blocks?: ChatBiBlock[];
+  /** P4：持久化 run 信封与本轮结构化制品索引。 */
+  agent_run?: ChatBiAgentRun | null;
+  agent_artifacts?: ChatBiAgentArtifact[];
   conversation_id?: string | null;
   conversation_title?: string | null;
 }
 
 export type ChatBiStreamEvent =
-  | { type: "meta"; conversation_id: string; conversation_title?: string | null }
+  | { type: "meta"; conversation_id: string; conversation_title?: string | null; run_id?: string }
   | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
   | { type: "step_done"; index: number; status: "succeeded" | "failed"; summary?: string | null }
   | { type: "thought"; index: number; text: string }
@@ -1432,7 +1479,7 @@ export type ChatBiStreamEvent =
   | { type: "repair"; reasons: string[] }
   | { type: "token"; delta: string }
   | { type: "done"; payload: ChatBiAnswer }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; run_id?: string };
 
 export interface ChatBiSuggestions {
   domain_ids?: string[];
@@ -1658,7 +1705,6 @@ export interface DataSource {
   password_set?: boolean;
   password_hint?: string | null;
   path?: string | null; // 文件类（sqlite/duckdb）
-  url?: string | null; // cube 语义层地址
 }
 
 export interface RuntimeFilter {
@@ -1725,33 +1771,6 @@ export interface MaterializeTargetsResult {
 }
 export type MaterializationLayer = "dim" | "dwd" | "dws" | "ads";
 export type MaterializationLoadStrategy = "full" | "incremental" | "cdc";
-export type SyncTool = "flink";
-
-/** 本次物化**会用什么搬**（GET /warehouse/sync-tools）。
- *
- * 统一执行架构下搬运恒为 Flink SQL on YARN，不再有工具选择。这里是恒定结果的告知。
- */
-export interface SyncToolPlan {
-  channel: "flink_on_yarn";
-  /** 本次会用的工具；统一架构下恒为 flink。 */
-  resolved: string | null;
-  /** 是否为自动决策。统一架构下恒为 true。 */
-  auto: boolean;
-  /** 一句可解释的理由，直接展示。 */
-  detail: string;
-  /** 选中的工具覆盖不了的装载方式（统一架构下恒为空）。 */
-  uncovered_modes: MaterializationLoadStrategy[];
-  /** 选不出工具时的原因；正常为 null。 */
-  error: string | null;
-  /**
-   * 目标引擎在执行侧真正支持的装载方式。统一架构下恒为 full/incremental/cdc 全集
-   * （Flink SQL 支持所有引擎），供弹窗置灰「同步方式」。
-   */
-  modes: MaterializationLoadStrategy[] | null;
-  /** modes 的来源说明。 */
-  modes_detail: string;
-  default: SyncTool;
-}
 export type MaterializationScdType = "none" | "scd1" | "scd2";
 
 export interface IngestionContract {
@@ -1849,9 +1868,6 @@ export interface MaterializationReceipt {
    *  下面这些字段都不会有。声明为可选是照实描述，好让 TS 逼出取值处的判空。 */
   target_datasource?: { id: string; name: string; kind: string };
   engine?: string;
-  /** 这次实际用什么搬（"auto" = runner 逐表自选档位）+ 为什么是它。 */
-  sync_tool?: string | null;
-  sync_tool_detail?: string | null;
   database_prefix?: string | null;
   tables?: string[];
   /** orchestrated 提交回执：建表与搬运由 Airflow 执行，成败看 DagRun。 */
@@ -1901,17 +1917,12 @@ export interface MaterializeStatus {
   batches?: MaterializeBatch[];
 }
 
-/** 一个搬运任务的执行结果（来自该任务的 XCom）。
- *
- * runner 逐表自选档位，``backend`` 就是这张表实际用的那一档（native / seatunnel）。
- * 任务还没跑完、或它是建表/切换任务（不产 XCom）时全为 null——这不是错误。
- */
+/** 一个搬运任务的执行结果（来自该任务的 XCom）。 */
 export interface MaterializeTaskResult {
   task_id: string;
   dag_id: string | null;
   task_state?: string | null;
   ingestion_status?: string | null;
-  backend?: string | null;
   job_id?: string | null;
   rows_read?: number | null;
   rows_written?: number | null;
@@ -1967,7 +1978,6 @@ export interface MaterializeRequestInput {
   database_overrides?: Record<string, string>;
   /** 契约 id → 物理表名；缺省用实体技术名。 */
   table_overrides?: Record<string, string>;
-  load_strategy?: MaterializationLoadStrategy | null;
   selected_targets?: string[] | null;
   overrides?: Record<string, MaterializationContractUpdateInput>;
   intent?: string;

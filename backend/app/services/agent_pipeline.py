@@ -362,8 +362,8 @@ class AgentPipelineService:
             db.refresh(artifact)
             return artifact
 
-        # 执行器不抛异常 ≠ 执行成功。materialize/flink 的 runner 约定是「投递失败如实记进
-        # 回执的 error/state，不抛」（见 flink_job_runner 的 test_trigger_error_is_recorded），
+        # 执行器不抛异常 ≠ 执行成功。materialize/sync 的执行器约定是「投递失败如实记进
+        # 回执的 error/state，不抛」，
         # 此前这里一律置 SUCCEEDED，于是「Airflow 根本没解析到 DAG」的任务在列表里显示成功。
         # 而 _reconcile_orchestrated_status 只在有真实 DagRun 时才对账，救不回这种投递期失败。
         failure = _receipt_failure(receipt)
@@ -442,15 +442,16 @@ class AgentPipelineService:
             db.commit()
             return
 
-        # 解析批次：新回执带 batches[]，旧单 DAG 回执按单批兜底
-        batches = receipt.get("batches") or [
-            {
+        # 物化回执按批次记录；其它任务使用单 DAG 顶层标识。
+        if artifact.kind == "materialize":
+            batches = receipt.get("batches") or []
+        else:
+            batches = [{
                 "dag_id": receipt.get("dag_id"),
                 "dag_run_id": receipt.get("dag_run_id"),
                 "state": receipt.get("state"),
                 "error": receipt.get("error"),
-            }
-        ]
+            }]
         if not any(b.get("dag_id") and b.get("dag_run_id") for b in batches):
             return  # 没有真实 DagRun → 提交就失败了，制品已是 FAILED（或不应为 SUCCEEDED）
 

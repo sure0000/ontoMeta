@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import DomainContext, ObjectType, Property
-from app.services.query import OntologyQueryService
+from app.services.logic_query import OntologyQueryService
 from app.services.common import make_http_client
 
 logger = logging.getLogger(__name__)
