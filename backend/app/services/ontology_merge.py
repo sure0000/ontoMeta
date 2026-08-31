@@ -26,6 +26,7 @@ from app.models import (
     DraftEvidence,
     EntityStatus,
     ObjectType,
+    OntologySegment,
     Property,
     RelationType,
 )
@@ -33,6 +34,7 @@ from app.schemas import (
     DraftObjectType,
     DraftProperty,
     DraftRelationType,
+    DraftSegment,
     OntologyDraftOutput,
 )
 from app.services.object_naming import dedupe_object_names, table_name_from_ref
@@ -42,6 +44,7 @@ OBJECT_FIELDS = ["name", "display_name", "description", "table_role", "role_reas
 PROPERTY_FIELDS = ["display_name", "description", "data_type", "semantic_type"]
 RELATION_FIELDS = ["display_name", "description", "cardinality", "structure_type"]
 LOGIC_FIELDS = ["display_name", "description", "expression_summary", "logic_type"]
+SEGMENT_FIELDS = ["name", "display_name", "description"]
 
 # 描述性字段：纯说明文字，下游不依赖，机器可持续刷新（除非人工显式改过而被钉住）。
 # 其余可合并字段都是**结构性**的——投影、建表、SQL 生成都读它们，改动即破坏性变更，
@@ -81,11 +84,54 @@ def _dumps(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _jaccard_similarity(set_a: set[str], set_b: set[str]) -> float:
+    """计算两个集合的 Jaccard 相似度。"""
+    if not set_a and not set_b:
+        return 1.0
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union > 0 else 0.0
+
+
+_SEGMENT_ANCHOR_MATCH_THRESHOLD = 0.5
+
+
+def _best_anchor_match(
+    incoming_anchors: set[str], candidates: list[OntologySegment]
+) -> tuple[OntologySegment | None, float]:
+    """在候选板块中找与 incoming_anchors 重叠度最高的匹配（Jaccard >= 阈值）。"""
+    best: OntologySegment | None = None
+    best_score = _SEGMENT_ANCHOR_MATCH_THRESHOLD
+    for seg in candidates:
+        existing_anchors = set(_loads(seg.anchor_refs, []))
+        score = _jaccard_similarity(incoming_anchors, existing_anchors)
+        if score >= best_score:
+            best = seg
+            best_score = score
+    return best, best_score
+
+
+def _allocate_name(desired: str, used: set[str]) -> str:
+    """分配一个未被占用的名字（撞名加数字后缀）。"""
+    if desired not in used:
+        used.add(desired)
+        return desired
+    suffix = 2
+    while f"{desired}_{suffix}" in used:
+        suffix += 1
+    final = f"{desired}_{suffix}"
+    used.add(final)
+    return final
+
+
 _MERGEABLE_FIELDS_BY_ENTITY = {
     "ObjectType": OBJECT_FIELDS,
     "Property": PROPERTY_FIELDS,
     "RelationType": RELATION_FIELDS,
     "BusinessLogic": LOGIC_FIELDS,
+    "OntologySegment": SEGMENT_FIELDS,
 }
 
 
@@ -787,6 +833,138 @@ class OntologyMergeService:
         return written
 
     # ------------------------------------------------------------------
+    # 板块（按锚点 Jaccard 对齐）
+    # ------------------------------------------------------------------
+    def merge_segments(
+        self,
+        db: Session,
+        ontology_id: str,
+        segments: list[DraftSegment],
+        gen_id: str | None,
+        report: MergeReport,
+    ) -> None:
+        """按锚点重叠度把新板块对齐到旧板块，再逐字段三方合并。
+
+        板块是派生物，没有天然上游标识：序号会随排序漂移，成员集合 hash 加一个成员
+        就换身份。故取度数最高的 K 个成员的 ``source_ref`` 作 ``anchor_refs``，新旧按
+        Jaccard 重叠匹配（阈值 ``_SEGMENT_ANCHOR_MATCH_THRESHOLD``）。匹配上的沿用旧
+        行——人工改过的名字与钉住的成员归属因此跨重算存活；匹配不上的算新板块，旧板块
+        进 ``report.removed``。
+
+        成员归属（``ObjectType.segment_id``）**不在这里写**：钉住 segment_id 的对象要
+        保持人工归属，由 :func:`assign_segment_members` 单独处理。
+        """
+        existing = (
+            db.query(OntologySegment)
+            .filter(OntologySegment.ontology_id == ontology_id)
+            .all()
+        )
+        # 人工新建的板块不参与机器对齐，也不会被机器删除。
+        machine_existing = [s for s in existing if not s.user_created]
+        unmatched = list(machine_existing)
+        used_names = {s.name for s in existing}
+
+        for draft_seg in segments:
+            incoming_anchors = set(draft_seg.anchor_refs or ())
+            match, score = _best_anchor_match(incoming_anchors, unmatched)
+            if match is not None:
+                unmatched.remove(match)
+                outcome, _changed, _conflicts = merge_entity_fields(
+                    match, draft_seg, SEGMENT_FIELDS, gen_id
+                )
+                match.anchor_refs = _dumps(sorted(incoming_anchors))
+                match.member_count = draft_seg.member_count
+                report.record(outcome, "OntologySegment", match.id, match.name)
+                continue
+
+            name = _allocate_name(draft_seg.name, used_names)
+            row = OntologySegment(
+                ontology_id=ontology_id,
+                name=name,
+                display_name=draft_seg.display_name,
+                description=draft_seg.description,
+                anchor_refs=_dumps(sorted(incoming_anchors)),
+                member_count=draft_seg.member_count,
+                origin="machine",
+                last_generation_id=gen_id,
+            )
+            row.machine_baseline = _dumps(
+                {f: getattr(draft_seg, f, None) for f in SEGMENT_FIELDS}
+            )
+            db.add(row)
+            db.flush()
+            report.record("added", "OntologySegment", row.id, row.name)
+
+        # 本轮没被任何新板块认领的旧机器板块：图变了，这块业务不再成形。
+        # 人工改过的（有 overridden_fields）留下并标 upstream_removed，纯机器的直接删。
+        for stale in unmatched:
+            if _loads(stale.overridden_fields, []):
+                stale.upstream_removed = True
+                report.record("kept", "OntologySegment", stale.id, stale.name)
+                continue
+            db.query(ObjectType).filter(
+                ObjectType.ontology_id == ontology_id,
+                ObjectType.segment_id == stale.id,
+            ).update({"segment_id": None}, synchronize_session=False)
+            db.delete(stale)
+            report.record("removed", "OntologySegment", stale.id, stale.name)
+
+    def _assign_segment_members(
+        self,
+        db: Session,
+        ontology_id: str,
+        segments: list[DraftSegment],
+        hub_nodes: list[str],
+        object_types: list[DraftObjectType],
+    ) -> None:
+        """将对象分配到板块，标记枢纽节点。
+
+        只更新未被人工钉住 segment_id 的对象（overridden_fields 不含 'segment_id'）。
+        人工挪过板块的对象保持人工归属。
+        """
+        # 构建 name -> segment_id 映射
+        segment_id_by_name = {
+            seg.name: seg.id
+            for seg in db.query(OntologySegment)
+            .filter(OntologySegment.ontology_id == ontology_id)
+            .all()
+        }
+
+        # 构建板块的成员映射（draft 中的 name -> segment name）
+        object_to_segment: dict[str, str] = {}
+        for draft_seg in segments:
+            for member_name in draft_seg.members:
+                object_to_segment[member_name] = draft_seg.name
+
+        # 枢纽节点集合
+        hub_node_set = set(hub_nodes)
+
+        # 更新对象
+        objects = db.query(ObjectType).filter(
+            ObjectType.ontology_id == ontology_id
+        ).all()
+
+        for obj in objects:
+            # 检查是否被人工钉住
+            overridden = set(_loads(obj.overridden_fields, []))
+            segment_pinned = "segment_id" in overridden
+
+            # 标记枢纽节点（不受钉住影响，is_hub 是事实判定）
+            if obj.name in hub_node_set:
+                obj.is_hub = True
+                if not segment_pinned:
+                    obj.segment_id = None  # 枢纽不属于任何板块
+            else:
+                obj.is_hub = False
+                # 只更新未钉住的对象的 segment_id
+                if not segment_pinned:
+                    target_segment_name = object_to_segment.get(obj.name)
+                    if target_segment_name:
+                        obj.segment_id = segment_id_by_name.get(target_segment_name)
+                    else:
+                        obj.segment_id = None  # 未接入对象
+
+    # ------------------------------------------------------------------
     # 全量合并入口
     # ------------------------------------------------------------------
     def merge_full(
@@ -802,10 +980,26 @@ class OntologyMergeService:
         业务逻辑与绑定保持不变，不被再生成破坏。
         """
         report = MergeReport()
+
+        # 1. 合并板块（在对象之前，segment_id 要有地方可指向）
+        if draft.segments:
+            self.merge_segments(db, ontology_id, draft.segments, gen_id, report)
+            db.flush()
+
+        # 2. 合并对象和属性
         object_ref_to_id = self.merge_objects(
             db, ontology_id, draft.object_types, draft.properties, gen_id, report,
             handle_removal=True,
         )
+
+        # 3. 分配对象到板块（按成员列表）+ 标记枢纽节点
+        if draft.segments or draft.hub_nodes:
+            self._assign_segment_members(
+                db, ontology_id, draft.segments, draft.hub_nodes, draft.object_types
+            )
+            db.flush()
+
+        # 4. 合并关系
         # 关系两端在完整草稿里用的是 LLM 提升后的对象 name，按 name 回链。
         object_id_by_name = {
             o.name: o.id
