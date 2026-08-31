@@ -181,6 +181,20 @@ class DraftBusinessLogicPropertyBinding(BaseModel):
     confidence: float = 0.5
 
 
+class DraftSegment(BaseModel):
+    """业务板块草稿：本体对象按关系紧密度自动聚类的业务子域。"""
+    name: str
+    display_name: str
+    description: str | None = None
+    # 锚点：度数最高的 K 个成员的 source_ref（JSON 序列化后的列表）
+    anchor_refs: list[str] = Field(default_factory=list)
+    member_count: int
+    # 机械名（度数最高成员的 display_name），用于重算时对齐
+    machine_baseline: str | None = None
+    # 成员对象名列表（仅生成时使用，不落库）
+    members: list[str] = Field(default_factory=list)
+
+
 class OntologyDraftOutput(BaseModel):
     object_types: list[DraftObjectType] = Field(default_factory=list)
     properties: list[DraftProperty] = Field(default_factory=list)
@@ -188,6 +202,8 @@ class OntologyDraftOutput(BaseModel):
     business_logics: list[DraftBusinessLogic] = Field(default_factory=list)
     business_logic_object_bindings: list[DraftBusinessLogicObjectBinding] = Field(default_factory=list)
     business_logic_property_bindings: list[DraftBusinessLogicPropertyBinding] = Field(default_factory=list)
+    segments: list[DraftSegment] = Field(default_factory=list)
+    hub_nodes: list[str] = Field(default_factory=list)  # 枢纽节点名列表
     evidence_refs: list[str] = Field(default_factory=list)
 
 

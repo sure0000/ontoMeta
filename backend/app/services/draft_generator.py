@@ -404,10 +404,48 @@ class OntologyDraftGenerator:
             evidence, relation_overrides, resolve_object_name=obj_name
         )
 
+        # 板块生成（第二遍聚类）：只在 business_object + bridge 子图上，剔除 technical 表
+        segments = []
+        hub_nodes = []
+        try:
+            from app.services.segment_generator import (
+                generate_segments,
+                name_segments_with_llm,
+                dedupe_segment_names,
+            )
+
+            segments, hub_nodes_set = generate_segments(
+                object_types, relation_types, self.client
+            )
+
+            # LLM 板块命名
+            if segments and self.client:
+                await name_segments_with_llm(
+                    segments, object_types, relation_types, hub_nodes_set, self.client
+                )
+                dedupe_segment_names(segments)
+
+            hub_nodes = list(hub_nodes_set)
+
+            # 标记对象的枢纽属性（用于后续落库）
+            hub_nodes_set_names = set(hub_nodes)
+            for obj in object_types:
+                if obj.name in hub_nodes_set_names:
+                    # 添加一个属性用于标记枢纽（落库时会用到）
+                    obj.is_hub = True  # type: ignore
+                else:
+                    obj.is_hub = False  # type: ignore
+
+        except Exception as e:
+            logger.warning("Failed to generate segments: %s", e, exc_info=True)
+            # 板块生成失败不影响本体草稿的其他部分
+
         return OntologyDraftOutput(
             object_types=object_types,
             properties=properties,
             relation_types=relation_types,
+            segments=segments,
+            hub_nodes=hub_nodes,
             business_logics=[],
             business_logic_object_bindings=[],
             business_logic_property_bindings=[],

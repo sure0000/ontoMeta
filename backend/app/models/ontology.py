@@ -91,6 +91,40 @@ class Ontology(Base):
     change_confirmations: Mapped[list["ChangeConfirmation"]] = relationship(
         back_populates="ontology"
     )
+    segments: Mapped[list["OntologySegment"]] = relationship(back_populates="ontology")
+
+
+class OntologySegment(Base, ProvenanceMixin):
+    """业务板块：本体对象按关系紧密度自动聚类的业务子域。
+
+    板块是对象分组的单位，提供业务地图视图的骨架。使用锚点成员进行身份匹配，
+    支持重新生成时的增量更新。
+    """
+    __tablename__ = "ontology_segments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 锚点：度数最高的 K 个成员的 source_ref（JSON 数组），重算时的对齐键
+    anchor_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    member_count: Mapped[int] = mapped_column(Integer)
+    # ProvenanceMixin 字段
+    origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
+    machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    ontology: Mapped["Ontology"] = relationship(back_populates="segments")
+    members: Mapped[list["ObjectType"]] = relationship(back_populates="segment")
 
 
 class ObjectType(Base, ProvenanceMixin):
@@ -98,6 +132,10 @@ class ObjectType(Base, ProvenanceMixin):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    segment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ontology_segments.id"), nullable=True, index=True
+    )
+    is_hub: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -151,6 +189,7 @@ class ObjectType(Base, ProvenanceMixin):
     )
 
     ontology: Mapped["Ontology"] = relationship(back_populates="object_types")
+    segment: Mapped["OntologySegment | None"] = relationship(back_populates="members")
     properties: Mapped[list["Property"]] = relationship(back_populates="object_type")
     outgoing_relations: Mapped[list["RelationType"]] = relationship(
         back_populates="source_object_type",
@@ -251,6 +290,10 @@ class RelationType(Base, ProvenanceMixin):
     source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     # 稳定身份键：urn(src)|urn(tgt)|structure_type，合并匹配用，不随可变的 name 变化。
     source_signature: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    # 复核状态：与 object_types 同理，关系也需要人工复核（特别是「修边」是修板块的主入口）
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", index=True
+    )
     status: Mapped[str] = mapped_column(String(50), default=EntityStatus.SUGGESTED.value, index=True)
     # 字段级溯源与三方合并元数据。
     origin: Mapped[str] = mapped_column(String(30), default="machine", server_default="machine")
