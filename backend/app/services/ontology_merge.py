@@ -178,6 +178,7 @@ class MergeReport:
             "properties": _new_report_section(),
             "relation_types": _new_report_section(),
             "business_logics": _new_report_section(),
+            "segments": _new_report_section(),
         }
 
     def record(
@@ -869,12 +870,21 @@ class OntologyMergeService:
             match, score = _best_anchor_match(incoming_anchors, unmatched)
             if match is not None:
                 unmatched.remove(match)
-                outcome, _changed, _conflicts = merge_entity_fields(
-                    match, draft_seg, SEGMENT_FIELDS, gen_id
+                incoming_values = {
+                    "name": draft_seg.name,
+                    "display_name": draft_seg.display_name,
+                    "description": draft_seg.description,
+                }
+                outcome, _changed, _conflicts = _merge_entity_fields(
+                    match, incoming_values, SEGMENT_FIELDS
                 )
                 match.anchor_refs = _dumps(sorted(incoming_anchors))
                 match.member_count = draft_seg.member_count
-                report.record(outcome, "OntologySegment", match.id, match.name)
+                if gen_id:
+                    match.last_generation_id = gen_id
+                report.record(
+                    "segments", outcome, match.id, match.name, match.display_name
+                )
                 continue
 
             name = _allocate_name(draft_seg.name, used_names)
@@ -893,21 +903,21 @@ class OntologyMergeService:
             )
             db.add(row)
             db.flush()
-            report.record("added", "OntologySegment", row.id, row.name)
+            report.record("segments", "added", row.id, row.name, row.display_name)
 
         # 本轮没被任何新板块认领的旧机器板块：图变了，这块业务不再成形。
         # 人工改过的（有 overridden_fields）留下并标 upstream_removed，纯机器的直接删。
         for stale in unmatched:
             if _loads(stale.overridden_fields, []):
                 stale.upstream_removed = True
-                report.record("kept", "OntologySegment", stale.id, stale.name)
+                report.record("segments", "kept", stale.id, stale.name, stale.display_name)
                 continue
             db.query(ObjectType).filter(
                 ObjectType.ontology_id == ontology_id,
                 ObjectType.segment_id == stale.id,
             ).update({"segment_id": None}, synchronize_session=False)
             db.delete(stale)
-            report.record("removed", "OntologySegment", stale.id, stale.name)
+            report.record("segments", "removed", stale.id, stale.name, stale.display_name)
 
     def _assign_segment_members(
         self,

@@ -115,6 +115,10 @@ class OntologySegment(Base, ProvenanceMixin):
     machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
     overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
     conflict_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_created: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    deleted_by_user: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    upstream_removed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    last_generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     needs_review: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0", index=True
     )
