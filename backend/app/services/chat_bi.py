@@ -30,6 +30,7 @@ from app.config import settings as env_settings
 from app.governance import lint_against_standard
 from app.models import (
     BusinessLogic,
+    BusinessLogicCategory,
     ChatBiConversation,
     ChatBiConversationTask,
     ChatBiDecisionRecord,
@@ -43,6 +44,7 @@ from app.models import (
     Property,
     RelationType,
 )
+from app.models.chat_bi import DEFAULT_CONVERSATION_TITLE
 from app.services.common import log_change, make_async_http_client
 from app.services.logic_query import OntologyQueryService
 from app.services.settings_service import SettingsService
@@ -683,6 +685,47 @@ class ChatBiService:
             for c in conversations
         ]
 
+    @staticmethod
+    def derive_conversation_title(question: str | None) -> str:
+        """把一句提问压成会话标题：换行/连续空白折成单空格，取前 50 字。
+
+        不补省略号——侧栏 .chatbi-conv-title 已经用 text-overflow 截了。
+        """
+        return " ".join(str(question or "").split())[:50]
+
+    def ensure_conversation_title(
+        self, db: Session, conversation_id: str, question: str | None = None
+    ) -> str:
+        """标题自愈：仍叫「新对话」的会话，用它最早的那句用户提问命名。
+
+        前端点「新对话」时就先建了空会话，之后每次问答都带着 conversation_id
+        进来，走的是「已有会话」分支——建会话时的命名参数永远轮不到，标题只能
+        在这里补。存量会话按首问命名（不是本次提问），所以老会话下次发言时拿到
+        的也是它当初的话题。
+        """
+        conv = db.get(ChatBiConversation, conversation_id)
+        if conv is None:
+            return DEFAULT_CONVERSATION_TITLE
+        current = (conv.title or "").strip()
+        if current and current != DEFAULT_CONVERSATION_TITLE:
+            return conv.title
+        row = (
+            db.query(ChatBiMessage.content)
+            .filter(
+                ChatBiMessage.conversation_id == conversation_id,
+                ChatBiMessage.role == "user",
+            )
+            .order_by(ChatBiMessage.created_at, ChatBiMessage.id)
+            .first()
+        )
+        title = self.derive_conversation_title(row[0] if row else question)
+        if not title:
+            return conv.title or DEFAULT_CONVERSATION_TITLE
+        conv.title = title
+        db.commit()
+        db.refresh(conv)
+        return conv.title
+
     def create_conversation(
         self,
         db: Session,
@@ -690,7 +733,9 @@ class ChatBiService:
         title: str | None = None,
         category: str | None = None,
     ) -> dict:
-        conv = ChatBiConversation(title=title or "新对话", category=category)
+        conv = ChatBiConversation(
+            title=title or DEFAULT_CONVERSATION_TITLE, category=category
+        )
         conv.set_domain_ids(domain_ids)
         db.add(conv)
         db.commit()
@@ -1144,6 +1189,18 @@ class ChatBiService:
             .order_by(BusinessLogic.updated_at.desc())
             .all()
         )
+
+    @staticmethod
+    def _business_logic_category_options(db: Session | None) -> list[dict[str, str]]:
+        """Return the current logic-category directory for agent proposals and UI review."""
+        if db is None:
+            return []
+        return [
+            {"id": category.id, "name": category.name}
+            for category in db.query(BusinessLogicCategory)
+            .order_by(BusinessLogicCategory.name.asc())
+            .all()
+        ]
 
     @staticmethod
     def _is_prompt_flag_error(exc: Exception) -> bool:
@@ -2912,7 +2969,9 @@ class ChatBiService:
     _PROPOSE_LOGIC_TYPES = ("metric", "tag", "rule")
     _PROPOSE_TYPE_LABEL = {"metric": "指标", "tag": "标签", "rule": "规则"}
 
-    def _dispatch_propose_draft(self, *, domain_id: str, args: dict) -> tuple[dict, str, bool]:
+    def _dispatch_propose_draft(
+        self, *, domain_id: str, args: dict, db: Session | None = None
+    ) -> tuple[dict, str, bool]:
         """V3 S3：为新建口径定义产出**提案**（纯 spec，不写库）。
 
         Data Agent 只出提案；真正建库草稿由用户在前端点「去确认」后走 POST /api/business-logics。
@@ -2948,12 +3007,24 @@ class ChatBiService:
                 "口径提案缺说明",
                 True,
             )
+        category_options = self._business_logic_category_options(db)
+        category_id = str(args.get("category_id") or "").strip() or None
+        if db is not None and category_id and category_id not in {item["id"] for item in category_options}:
+            return (
+                {
+                    "error": "category_id 不属于当前业务逻辑分类目录",
+                    "category_options": category_options,
+                },
+                "口径提案分类无效",
+                True,
+            )
         proposal = {
             "kind": "business_logic",
             "logic_type": logic_type,
             "display_name": display_name,
             "name": name,
             "description": description,
+            "category_options": category_options,
             # 前端「去确认」按钮原样 POST /api/business-logics 的载荷（BusinessLogicCreate）。
             "create_payload": {
                 "domain_id": domain_id,
@@ -2962,6 +3033,7 @@ class ChatBiService:
                 "logic_type": logic_type,
                 "description": description or None,
                 "expression_summary": description or None,
+                "category_id": category_id,
             },
         }
         label = self._PROPOSE_TYPE_LABEL[logic_type]
@@ -3000,6 +3072,17 @@ class ChatBiService:
             name = slug or "new_logic"
         summary = str(args.get("summary") or "").strip()
         logic_id = str(args.get("logic_id") or "").strip() or None
+        category_options = self._business_logic_category_options(db)
+        category_id = str(args.get("category_id") or "").strip() or None
+        if category_id and category_id not in {item["id"] for item in category_options}:
+            return (
+                {
+                    "error": "category_id 不属于当前业务逻辑分类目录",
+                    "category_options": category_options,
+                },
+                "口径提案分类无效",
+                True,
+            )
 
         try:
             candidate = compile_expression(
@@ -3023,6 +3106,7 @@ class ChatBiService:
             "display_name": display_name,
             "name": name,
             "description": summary,
+            "category_options": category_options,
             # 人在卡片上看的就是这两样——不是自然语言承诺。
             "compiled_sql": candidate.sql,
             "caliber_trace": candidate.caliber_trace,
@@ -3035,6 +3119,7 @@ class ChatBiService:
                 "logic_type": logic_type,
                 "expression_summary": summary or display_name,
                 "expression_json": candidate.ast,
+                "category_id": category_id,
             }
             summary_text = f"提案：为{label}「{display_name}」补全表达式"
         else:
@@ -3046,6 +3131,7 @@ class ChatBiService:
                 "description": summary or None,
                 "expression_summary": summary or display_name,
                 "expression_json": candidate.ast,
+                "category_id": category_id,
             }
             summary_text = f"提案：新建{label}「{display_name}」（表达式已编译通过）"
         return proposal, summary_text, False
@@ -6048,7 +6134,9 @@ class ChatBiService:
                     db, ontology_id=anchor_ontology, args=args
                 )
             if name == "propose_draft":
-                return self._dispatch_propose_draft(domain_id=anchor_domain, args=args)
+                return self._dispatch_propose_draft(
+                    domain_id=anchor_domain, args=args, db=db
+                )
             if name == "propose_expression":
                 return self._dispatch_propose_expression(
                     db, domain_id=anchor_domain, ontology_id=anchor_ontology, args=args
@@ -6606,8 +6694,29 @@ class ChatBiService:
             logger.info("domain memory card unavailable: %s", exc)
             memory_text = ""
 
+        # 业务逻辑分类是写入提案的动态目录，给模型真实 ID，避免它猜分类名称或 ID。
+        category_note = ""
+        try:
+            category_options = self._business_logic_category_options(db)
+            if category_options:
+                category_note = (
+                    "\n\n【业务逻辑分类目录】当你调用 propose_draft 或 propose_expression 新建业务逻辑时，"
+                    "如能判断主题，请从以下目录选择 category_id；无法判断时不要填写，交给用户在提案卡片中选择：\n"
+                    + "\n".join(f"- {item['name']} (category_id={item['id']})" for item in category_options)
+                )
+            else:
+                category_note = (
+                    "\n\n【业务逻辑分类目录】当前没有已创建的分类，新建业务逻辑不要填写 category_id，"
+                    "用户可在提案确认后再归类。"
+                )
+        except Exception as exc:  # noqa: BLE001 — 分类目录是增强信息，失败不阻断问答
+            logger.info("business logic category directory unavailable: %s", exc)
+
         messages: list[dict] = [
-            {"role": "system", "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{memory_text}{ladder_note}{seed_note}"}
+            {
+                "role": "system",
+                "content": f"{_AGENT_SYSTEM_PROMPT}{card_text}{memory_text}{category_note}{ladder_note}{seed_note}",
+            }
         ]
         # V4 O1：跨轮 compaction 取代 history[-6:] 硬截断——超预算的旧轮抽取式摘要，
         # 近轮原样保留。摘要不额外调 LLM（护住 avg_llm_calls）。摘要里的实体名稍后入账防误拒答。

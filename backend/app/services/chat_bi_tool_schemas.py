@@ -513,6 +513,10 @@ _PROPOSE_DRAFT_TOOL: dict[str, Any] = {
                         "卡片上看到的就只有一个名字。"
                     ),
                 },
+                "category_id": {
+                    "type": "string",
+                    "description": "可选：业务逻辑分类 ID，必须来自系统提供的业务逻辑分类目录；不填表示未分类",
+                },
             },
             "required": ["display_name", "logic_type", "description"],
         },
@@ -624,6 +628,10 @@ _PROPOSE_EXPRESSION_TOOL: dict[str, Any] = {
                 "display_name": {"type": "string", "description": "口径中文名，如「大额订单」"},
                 "logic_type": {"type": "string", "enum": list(LOGIC_TYPES),
                                "description": "指标 metric / 标签 tag / 规则 rule"},
+                "category_id": {
+                    "type": "string",
+                    "description": "可选：业务逻辑分类 ID，必须来自系统提供的业务逻辑分类目录；不填表示未分类",
+                },
                 "fields": {
                     "type": "array",
                     "description": (

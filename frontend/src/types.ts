@@ -1243,6 +1243,8 @@ export type ChatBiBlock =
         compiled_sql?: string;
         caliber_trace?: string[];
         expression_json?: Record<string, unknown>;
+        /** 当前系统可选的业务逻辑分类目录，供确认前人工调整。 */
+        category_options?: Array<{ id: string; name: string }>;
         /** 新建：POST /api/business-logics。 */
         create_payload?: BusinessLogicCreateInput;
         /** 给已有口径补表达式：PATCH /api/business-logics/{logic_id}。 */
@@ -1251,6 +1253,7 @@ export type ChatBiBlock =
           logic_type?: string;
           expression_summary?: string;
           expression_json?: Record<string, unknown>;
+          category_id?: string | null;
         };
       };
     }

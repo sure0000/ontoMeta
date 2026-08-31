@@ -4,8 +4,20 @@ import {
   PlusOutlined,
   ImportOutlined,
   SearchOutlined,
+  SwapOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Form, Input, Modal, Select, Space, Spin, Table, message } from "antd";
+import {
+  Alert,
+  Button,
+  Form,
+  Input,
+  Modal,
+  Select,
+  Space,
+  Spin,
+  Table,
+  message,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -15,6 +27,7 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
+import { UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID } from "../constants/businessLogic";
 import { useApi } from "../hooks/useApi";
 import type { BusinessLogic, BusinessLogicCategory, DomainContext } from "../types";
 
@@ -40,28 +53,45 @@ export function BusinessLogicCategoryPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [importOpen, setImportOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [movingLogicId, setMovingLogicId] = useState<string | null>(null);
+  const [moveLogic, setMoveLogic] = useState<BusinessLogic | null>(null);
+  const [moveTargetCategoryId, setMoveTargetCategoryId] = useState<string>();
   const [importForm] = Form.useForm();
 
-  const { data: categories } = useApi<BusinessLogicCategory[]>(
+  const { data: categories, loading: categoriesLoading } = useApi<BusinessLogicCategory[]>(
     async () => api.listBusinessLogicCategories(),
     [],
   );
 
+  const isUncategorized = categoryId === UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID;
   const category = (categories ?? []).find((c) => c.id === categoryId);
 
-  const { data: domains } = useApi<DomainContext[]>(async () => api.listDomains(), []);
+  const { data: domains, loading: domainsLoading } = useApi<DomainContext[]>(
+    async () => api.listDomains(),
+    [],
+  );
 
   const {
     data: logics,
     loading,
     error,
+    reload,
   } = useApi<BusinessLogic[]>(async () => {
     if (!categoryId) return [];
-    const page = await api.listBusinessLogics({ categoryId });
+    const page = isUncategorized
+      ? await api.listBusinessLogics({ uncategorized: true })
+      : await api.listBusinessLogics({ categoryId });
     return page.items;
-  }, [categoryId]);
+  }, [categoryId, isUncategorized]);
 
   const domainsWithPublished = (domains ?? []).filter((d) => d.published_count > 0);
+  // 请求尚未完成时允许进入创建页，创建页会继续加载并选择数据域；请求完成后，
+  // 没有已发布本体才禁用，避免按钮因慢请求长时间处于不可点击状态。
+  const createDisabled = !domainsLoading && domainsWithPublished.length === 0;
+  const moveTargets = [
+    { key: UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID, label: "未分类" },
+    ...(categories ?? []).map((item) => ({ key: item.id, label: item.name })),
+  ];
 
   const filteredLogics = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -79,7 +109,11 @@ export function BusinessLogicCategoryPage() {
 
   const openCreate = () => {
     const targetDomainId = domainsWithPublished[0]?.id ?? "";
-    navigate(`/business-logic/create?domain=${targetDomainId}&category=${categoryId ?? ""}`);
+    const params = new URLSearchParams();
+    if (targetDomainId) params.set("domain", targetDomainId);
+    if (!isUncategorized && categoryId) params.set("category", categoryId);
+    const query = params.toString();
+    navigate(`/business-logic/create${query ? `?${query}` : ""}`);
   };
 
   const openImport = () => {
@@ -97,7 +131,7 @@ export function BusinessLogicCategoryPage() {
     try {
       const created = await api.importBusinessLogic({
         ...values,
-        category_id: categoryId,
+        category_id: isUncategorized ? null : categoryId,
       });
       setImportOpen(false);
       message.success("已从代码导入业务逻辑草稿");
@@ -107,6 +141,28 @@ export function BusinessLogicCategoryPage() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleMove = async (logicId: string, targetCategoryId: string) => {
+    const categoryIdForUpdate =
+      targetCategoryId === UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID ? "" : targetCategoryId;
+    setMovingLogicId(logicId);
+    try {
+      await api.updateBusinessLogic(logicId, { category_id: categoryIdForUpdate });
+      message.success(categoryIdForUpdate ? "业务逻辑已迁移" : "业务逻辑已移至未分类");
+      setMoveLogic(null);
+      setMoveTargetCategoryId(undefined);
+      await reload();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "迁移失败");
+    } finally {
+      setMovingLogicId(null);
+    }
+  };
+
+  const openMove = (record: BusinessLogic) => {
+    setMoveLogic(record);
+    setMoveTargetCategoryId(undefined);
   };
 
   const columns: ColumnsType<BusinessLogic> = [
@@ -146,21 +202,36 @@ export function BusinessLogicCategoryPage() {
     {
       title: "操作",
       key: "action",
-      width: 80,
-      render: (_, record) => (
-        <Button
-          type="link"
-          size="small"
-          icon={<EditOutlined />}
-          onClick={() => navigate(`/business-logic/${record.id}?edit=true`)}
-        />
-      ),
+      width: 180,
+      render: (_, record) => {
+        return (
+          <Space size={4}>
+            <Button
+              type="link"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => navigate(`/business-logic/${record.id}?edit=true`)}
+            >
+              编辑
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              icon={<SwapOutlined />}
+              disabled={categoriesLoading || movingLogicId === record.id}
+              onClick={() => openMove(record)}
+            >
+              迁移
+            </Button>
+          </Space>
+        );
+      },
     },
   ];
 
-  if (loading && !category) return <PageSkeleton type="list" full />;
+  if (loading && !category && !isUncategorized) return <PageSkeleton type="list" full />;
 
-  if (!category) {
+  if (!category && !isUncategorized) {
     return (
       <PageContainer>
         <Alert type="error" message="分类不存在" showIcon />
@@ -172,8 +243,10 @@ export function BusinessLogicCategoryPage() {
     <PageContainer full>
       <PageHeader
         icon={<FunctionOutlined />}
-        title={category.name}
-        description={category.description || undefined}
+        title={isUncategorized ? "未分类" : category?.name}
+        description={
+          isUncategorized ? "尚未归类的业务逻辑" : category?.description || undefined
+        }
         extra={
           <Space wrap>
             <Input
@@ -193,7 +266,7 @@ export function BusinessLogicCategoryPage() {
             <Button
               icon={<ImportOutlined />}
               onClick={openImport}
-              disabled={domainsWithPublished.length === 0}
+              disabled={domainsLoading || domainsWithPublished.length === 0}
             >
               导入业务逻辑
             </Button>
@@ -201,7 +274,7 @@ export function BusinessLogicCategoryPage() {
               type="primary"
               icon={<PlusOutlined />}
               onClick={openCreate}
-              disabled={domainsWithPublished.length === 0}
+              disabled={createDisabled}
             >
               新建业务逻辑
             </Button>
@@ -229,7 +302,7 @@ export function BusinessLogicCategoryPage() {
                 <Button
                   icon={<ImportOutlined />}
                   onClick={openImport}
-                  disabled={domainsWithPublished.length === 0}
+                  disabled={domainsLoading || domainsWithPublished.length === 0}
                 >
                   导入业务逻辑
                 </Button>
@@ -237,7 +310,7 @@ export function BusinessLogicCategoryPage() {
                   type="primary"
                   icon={<PlusOutlined />}
                   onClick={openCreate}
-                  disabled={domainsWithPublished.length === 0}
+                  disabled={createDisabled}
                 >
                   新建业务逻辑
                 </Button>
@@ -262,6 +335,49 @@ export function BusinessLogicCategoryPage() {
           />
         )}
       </Spin>
+
+      <Modal
+        title={`迁移业务逻辑「${moveLogic?.display_name ?? ""}」`}
+        open={moveLogic !== null}
+        onCancel={() => {
+          if (!movingLogicId) {
+            setMoveLogic(null);
+            setMoveTargetCategoryId(undefined);
+          }
+        }}
+        maskClosable={!movingLogicId}
+        closable={!movingLogicId}
+        onOk={() => {
+          if (moveLogic && moveTargetCategoryId) {
+            void handleMove(moveLogic.id, moveTargetCategoryId);
+          }
+        }}
+        okText="确认迁移"
+        cancelText="取消"
+        confirmLoading={movingLogicId !== null}
+        okButtonProps={{ disabled: !moveTargetCategoryId }}
+        destroyOnClose
+      >
+        <Form layout="vertical">
+          <Form.Item label="目标分类" required>
+            <Select
+              autoFocus
+              placeholder="请选择目标分类"
+              value={moveTargetCategoryId}
+              options={moveTargets
+                .filter(
+                  (item) =>
+                    item.key !==
+                    (moveLogic?.category_id || UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID),
+                )
+                .map((item) => ({ label: item.label, value: item.key }))}
+              loading={categoriesLoading}
+              disabled={categoriesLoading || movingLogicId !== null}
+              onChange={setMoveTargetCategoryId}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         title="导入业务逻辑"

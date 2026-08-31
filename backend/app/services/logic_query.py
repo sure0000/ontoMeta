@@ -439,6 +439,7 @@ class OntologyQueryService(_OntologyQueryBase):
         ontology_id: str | None = None,
         domain_context_id: str | None = None,
         category_id: str | None = None,
+        uncategorized: bool = False,
         published_only: bool = False,
         *,
         q: str | None = None,
@@ -454,7 +455,9 @@ class OntologyQueryService(_OntologyQueryBase):
             published_only=published_only,
             ontology_model=BusinessLogic,
         )
-        if category_id is not None:
+        if uncategorized:
+            query = query.filter(BusinessLogic.category_id.is_(None))
+        elif category_id is not None:
             query = query.filter(BusinessLogic.category_id == category_id)
         if q and q.strip():
             like = f"%{q.strip()}%"

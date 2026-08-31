@@ -3,6 +3,7 @@ import type { ItemType } from "antd/es/breadcrumb/Breadcrumb";
 import { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { api } from "../api";
+import { UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID } from "../constants/businessLogic";
 
 interface Crumb {
   label: string;
@@ -78,7 +79,14 @@ async function resolveBreadcrumbs(
     if (catId) {
       const cats = await api.listBusinessLogicCategories();
       const cat = cats.find((c) => c.id === catId);
-      return [BL_BASE, { label: cat?.name ?? "分类" }];
+      return [
+        BL_BASE,
+        {
+          label:
+            cat?.name ??
+            (catId === UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID ? "未分类" : "分类"),
+        },
+      ];
     }
     return [BL_BASE, { label: "分类" }];
   }
@@ -106,6 +114,11 @@ async function resolveBreadcrumbs(
       crumbs.push({
         label: logic.category_name,
         path: `/business-logic/category/${logic.category_id}`,
+      });
+    } else {
+      crumbs.push({
+        label: "未分类",
+        path: `/business-logic/category/${UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID}`,
       });
     }
     crumbs.push({ label: logic.display_name });

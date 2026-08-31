@@ -468,8 +468,7 @@ export function ExpressionRichEditor({
     return props
       .filter(
         (p) => !q || p.name.toLowerCase().includes(q) || p.display_name.toLowerCase().includes(q),
-      )
-      .slice(0, 8);
+      );
   }, [popup, propCache]);
 
   useEffect(() => {

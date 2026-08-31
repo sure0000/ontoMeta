@@ -13,6 +13,11 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+# 会话未命名时的占位标题。判定「这个会话还没被命名过」只认这一个值，
+# 服务层的标题自愈据此决定要不要用首问覆写。
+DEFAULT_CONVERSATION_TITLE = "新对话"
+
+
 class ChatBiConversation(Base):
     __tablename__ = "chat_bi_conversations"
 
@@ -24,7 +29,7 @@ class ChatBiConversation(Base):
     domain_id: Mapped[str | None] = mapped_column(
         ForeignKey("domain_contexts.id"), index=True, nullable=True
     )
-    title: Mapped[str] = mapped_column(String(255), default="新对话")
+    title: Mapped[str] = mapped_column(String(255), default=DEFAULT_CONVERSATION_TITLE)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -37,6 +37,7 @@ def list_business_logics(
     ontology_id: str | None = Query(None),
     domain_id: str | None = Query(None),
     category_id: str | None = Query(None),
+    uncategorized: bool = Query(False),
     published_only: bool = Query(False),
     q: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
@@ -48,6 +49,7 @@ def list_business_logics(
         ontology_id=ontology_id,
         domain_context_id=domain_id,
         category_id=category_id,
+        uncategorized=uncategorized,
         published_only=published_only,
         q=q,
         limit=limit,
@@ -203,6 +205,7 @@ async def import_business_logic(data: BusinessLogicImportRequest, db: Session = 
             domain_id=data.domain_id,
             code=data.code,
             source_type=data.source_type,
+            category_id=data.category_id,
             operator=data.operator,
         )
     except ValueError as exc:

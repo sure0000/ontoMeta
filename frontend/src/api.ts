@@ -567,6 +567,7 @@ export const api = {
     ontologyId?: string;
     domainId?: string;
     categoryId?: string;
+    uncategorized?: boolean;
     publishedOnly?: boolean;
     q?: string;
     limit?: number;
@@ -577,6 +578,7 @@ export const api = {
         ontology_id: params?.ontologyId,
         domain_id: params?.domainId,
         category_id: params?.categoryId,
+        uncategorized: params?.uncategorized,
         published_only: params?.publishedOnly,
         q: params?.q,
         limit: params?.limit,

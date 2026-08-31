@@ -12,7 +12,7 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import BusinessLogic, DomainContext, EntityStatus, Ontology
+from app.models import BusinessLogic, BusinessLogicCategory, DomainContext, EntityStatus, Ontology
 from app.schemas import BusinessLogicDetail
 from app.services.common import make_http_client
 
@@ -115,11 +115,14 @@ class LogicImportService:
         domain_id: str,
         code: str,
         source_type: str = "sql",
+        category_id: str | None = None,
         operator: str | None = None,
     ) -> BusinessLogicDetail:
         from app.services.logic_query import OntologyQueryService
 
         ontology = self._resolve_published_ontology(db, domain_id)
+        if category_id is not None and not db.get(BusinessLogicCategory, category_id):
+            raise ValueError("分类不存在")
         code = (code or "").strip()
         if not code:
             raise ValueError("待解析的代码不能为空")
@@ -134,6 +137,7 @@ class LogicImportService:
 
         logic = BusinessLogic(
             ontology_id=ontology.id,
+            category_id=category_id,
             name=name,
             display_name=parsed["display_name"],
             logic_type=parsed["logic_type"],

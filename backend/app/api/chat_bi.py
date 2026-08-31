@@ -386,7 +386,9 @@ async def chat_bi_ask(
         else:
             effective_domain_ids = list(data.domain_ids)
             conv_dict = chat_bi_service.create_conversation(
-                db, domain_ids=effective_domain_ids, title=data.question[:50]
+                db,
+                domain_ids=effective_domain_ids,
+                title=chat_bi_service.derive_conversation_title(data.question),
             )
             conversation_id = conv_dict["id"]
             conversation_title = conv_dict["title"]
@@ -396,6 +398,10 @@ async def chat_bi_ask(
             db, conversation_id, "user", data.question
         )
         user_saved = True
+        # 未命名会话在这里补标题：前端预建会话导致上面的命名分支走不到。
+        conversation_title = chat_bi_service.ensure_conversation_title(
+            db, conversation_id, data.question
+        )
 
         payload = await chat_bi_service.ask(
             db,
@@ -487,13 +493,20 @@ async def chat_bi_ask_stream(
     else:
         effective_domain_ids = list(data.domain_ids)
         conv_dict = chat_bi_service.create_conversation(
-            db, domain_ids=effective_domain_ids, title=data.question[:50]
+            db,
+            domain_ids=effective_domain_ids,
+            title=chat_bi_service.derive_conversation_title(data.question),
         )
         conversation_id = conv_dict["id"]
         conversation_title = conv_dict["title"]
         effective_history = data.history or []
 
     chat_bi_service.save_message(db, conversation_id, "user", data.question)
+    # 未命名会话在这里补标题：前端预建会话导致上面的命名分支走不到。
+    # 必须在 meta 事件发出前落定，侧栏才能当场改名。
+    conversation_title = chat_bi_service.ensure_conversation_title(
+        db, conversation_id, data.question
+    )
 
     def sse(event: dict) -> str:
         return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

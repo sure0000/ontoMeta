@@ -21,12 +21,14 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import type { BusinessLogicCategory } from "../types";
+import { UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID } from "../constants/businessLogic";
 
 const { Paragraph } = Typography;
 
 export function BusinessLogicPage() {
   const navigate = useNavigate();
   const [categories, setCategories] = useState<BusinessLogicCategory[]>([]);
+  const [uncategorizedCount, setUncategorizedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,9 +39,16 @@ export function BusinessLogicPage() {
 
   const load = () => {
     setLoading(true);
-    api
-      .listBusinessLogicCategories()
-      .then(setCategories)
+    Promise.all([
+      api.listBusinessLogicCategories(),
+      api.listBusinessLogics({ uncategorized: true, limit: 1 }),
+    ])
+      .then(([nextCategories, uncategorizedPage]) => {
+        setCategories(nextCategories);
+        // Data Agent proposals are intentionally created without a category. Keep
+        // them visible here so they are not lost between confirmation and manual categorization.
+        setUncategorizedCount(uncategorizedPage.total);
+      })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   };
@@ -96,7 +105,27 @@ export function BusinessLogicPage() {
     }
   };
 
-  if (loading && categories.length === 0) return <PageSkeleton type="list" full />;
+  const categoryCards = [
+    ...categories.map((category) => ({ category, virtual: false })),
+    ...(uncategorizedCount > 0
+      ? [
+          {
+            category: {
+              id: UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID,
+              name: "未分类",
+              description: "尚未归类的业务逻辑",
+              logic_count: uncategorizedCount,
+              created_at: "",
+              updated_at: "",
+            },
+            virtual: true,
+          },
+        ]
+      : []),
+  ];
+  const hasVisibleContent = categoryCards.length > 0;
+
+  if (loading && !hasVisibleContent) return <PageSkeleton type="list" full />;
 
   return (
     <PageContainer full>
@@ -124,7 +153,7 @@ export function BusinessLogicPage() {
       )}
 
       <Spin spinning={loading}>
-        {categories.length === 0 ? (
+        {!hasVisibleContent ? (
           <Empty description="暂无分类" style={{ marginTop: 80 }}>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
               创建第一个分类
@@ -132,32 +161,36 @@ export function BusinessLogicPage() {
           </Empty>
         ) : (
           <Row gutter={[16, 16]}>
-            {categories.map((cat) => (
+            {categoryCards.map(({ category: cat, virtual }) => (
               <Col key={cat.id} xs={24} sm={12} md={8} lg={6}>
                 <Card
                   hoverable
                   className="om-category-card"
                   onClick={() => navigate(`/business-logic/category/${cat.id}`)}
-                  actions={[
-                    <EditOutlined
-                      key="edit"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openEdit(cat);
-                      }}
-                    />,
-                    <Popconfirm
-                      key="delete"
-                      title={`确认删除分类「${cat.name}」？分类下的业务逻辑将移出该分类。`}
-                      onConfirm={(e) => {
-                        e?.stopPropagation();
-                        handleDelete(cat.id);
-                      }}
-                      onCancel={(e) => e?.stopPropagation()}
-                    >
-                      <DeleteOutlined onClick={(e) => e.stopPropagation()} />
-                    </Popconfirm>,
-                  ]}
+                  actions={
+                    virtual
+                      ? undefined
+                      : [
+                          <EditOutlined
+                            key="edit"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEdit(cat);
+                            }}
+                          />,
+                          <Popconfirm
+                            key="delete"
+                            title={`确认删除分类「${cat.name}」？分类下的业务逻辑将移出该分类。`}
+                            onConfirm={(e) => {
+                              e?.stopPropagation();
+                              handleDelete(cat.id);
+                            }}
+                            onCancel={(e) => e?.stopPropagation()}
+                          >
+                            <DeleteOutlined onClick={(e) => e.stopPropagation()} />
+                          </Popconfirm>,
+                        ]
+                  }
                 >
                   <Card.Meta
                     title={

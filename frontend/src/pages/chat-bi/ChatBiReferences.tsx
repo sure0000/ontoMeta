@@ -61,6 +61,7 @@ import type {
   ChatBiFormRequest,
   ChatBiOpsRecord,
   ChatBiReference,
+  BusinessLogicCategory,
   GovernanceArtifact,
   GraphEdge,
   GraphNode,
@@ -1357,12 +1358,42 @@ function DraftProposalBlock({
 }) {
   const navigate = useNavigate();
   const [state, setState] = useState<"idle" | "creating" | "done" | "error">("idle");
+  const [categoryId, setCategoryId] = useState<string | null>(
+    proposal.create_payload?.category_id ?? null,
+  );
+  const [categories, setCategories] = useState<BusinessLogicCategory[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
   const typeLabel = DRAFT_TYPE_LABEL[proposal.logic_type] ?? proposal.logic_type;
   // 带表达式的提案(propose_expression):表达式已过编译器与语义证明,人审的是**真 SQL**。
   const formalized = Boolean(proposal.compiled_sql);
   const patching = Boolean(proposal.logic_id && proposal.update_payload);
+  const hasCategoryDirectory = proposal.category_options !== undefined;
+
+  useEffect(() => {
+    if (patching || hasCategoryDirectory) return;
+    let active = true;
+    setCategoriesLoading(true);
+    api
+      .listBusinessLogicCategories()
+      .then((items) => {
+        if (active) setCategories(items);
+      })
+      .catch(() => {
+        if (active) setCategories([]);
+      })
+      .finally(() => {
+        if (active) setCategoriesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasCategoryDirectory, patching]);
+
+  const categoryOptions =
+    proposal.category_options ??
+    categories.map((category) => ({ id: category.id, name: category.name }));
   // 留痕:此前这个确认完全绕开会话——点完就 navigate 走人,会话里看不出用户点没点。
-  const recordOntologyDecision = (logicId: string) =>
+  const recordOntologyDecision = (logicId: string, proposed?: unknown) =>
     recordDecisionQuietly(conversationId, {
       node: "ontology",
       stage: "draft_proposal",
@@ -1370,7 +1401,7 @@ function DraftProposalBlock({
       message_id: messageId,
       block_id: blockId,
       summary: `${patching ? "补全" : "新建"}${typeLabel}「${proposal.name ?? ""}」`,
-      proposed: (proposal.update_payload ?? proposal.create_payload) as unknown,
+      proposed: proposed ?? ((proposal.update_payload ?? proposal.create_payload) as unknown),
       ref_kind: "business_logic",
       ref_id: logicId,
       dedup_key: `${conversationId}:ontology:draft:${logicId}`,
@@ -1385,9 +1416,13 @@ function DraftProposalBlock({
         navigate(`/business-logic/${proposal.logic_id}`);
         return;
       }
-      const created = await api.createBusinessLogic(proposal.create_payload!);
+      const createPayload = {
+        ...proposal.create_payload!,
+        category_id: categoryId,
+      };
+      const created = await api.createBusinessLogic(createPayload);
       setState("done");
-      recordOntologyDecision(created.id);
+      recordOntologyDecision(created.id, createPayload);
       navigate(`/business-logic/${created.id}`);
     } catch {
       setState("error");
@@ -1413,7 +1448,7 @@ function DraftProposalBlock({
       type="primary"
       size="small"
       loading={state === "creating"}
-      disabled={state === "done"}
+      disabled={state === "done" || (!patching && categoriesLoading)}
       onClick={() => void onConfirm()}
     >
       {state === "done" ? "已保存,跳转中…" : patching ? "去确认写入" : "去确认创建"}
@@ -1424,6 +1459,23 @@ function DraftProposalBlock({
     <BlockCard variant="success" title={title} actions={actions}>
       <div className="chatbi-draft-name">{proposal.display_name}</div>
       {proposal.description && <div className="chatbi-draft-desc">{proposal.description}</div>}
+      {!patching && proposal.create_payload && (
+        <div className="chatbi-draft-category">
+          <span className="chatbi-draft-category-label">业务逻辑分类</span>
+          <Select
+            allowClear
+            value={categoryId ?? undefined}
+            placeholder="未分类"
+            loading={categoriesLoading}
+            options={categoryOptions.map((category) => ({
+              label: category.name,
+              value: category.id,
+            }))}
+            onChange={(value) => setCategoryId(value ?? null)}
+            style={{ minWidth: 220 }}
+          />
+        </div>
+      )}
       {formalized && (
         <>
           {/* 口径展开轨迹由编译器确定性产出(聚合了谁,按什么分组,走了哪条关联), */}
