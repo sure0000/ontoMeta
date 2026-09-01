@@ -44,6 +44,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { ProvenanceBadge } from "../components/ProvenanceBadge";
+import { RelationTriples } from "../components/RelationTriples";
 import { useDebouncedCallback } from "../hooks/useApi";
 import { extractDataHubBase, resolveDataHubDatasetUrl } from "../utils/datahub";
 import { suggestEndpoints } from "../utils/endpointSuggest";
@@ -999,6 +1000,22 @@ export function ObjectTypeDetailPage() {
                         objectId={obj.id}
                         provenance={obj.source_provenance}
                       />
+                      {/* 关系三元组：最小可读单元是「对象-关系-对象」，基本信息 Tab
+                          必须让人看到完整的三元组，不能只给计数。文档 §2.F1 */}
+                      {relationCount > 0 && (
+                        <div style={{ marginTop: 24 }}>
+                          <h3 style={{ marginBottom: 12, fontSize: 14, fontWeight: 600 }}>
+                            关系 ({relationCount})
+                          </h3>
+                          <RelationTriples
+                            relations={allRelations}
+                            currentObjectId={obj.id}
+                            objectDetailPath={objectDetailPath}
+                            relationDetailPath={relationDetailPath}
+                            limit={10}
+                          />
+                        </div>
+                      )}
                     </div>
                   </>
                 ),
