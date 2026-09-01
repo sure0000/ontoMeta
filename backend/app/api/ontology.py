@@ -613,6 +613,7 @@ def update_object_type(
             display_name=data.display_name,
             description=data.description,
             table_role=data.table_role,
+            segment_id=data.segment_id,
             needs_review=data.needs_review,
             operator=data.operator,
         )

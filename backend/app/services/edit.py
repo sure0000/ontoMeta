@@ -11,6 +11,7 @@ from app.models import (
     EntityStatus,
     ObjectType,
     Ontology,
+    OntologySegment,
     Property,
     RelationType,
 )
@@ -168,6 +169,7 @@ class EditService:
         display_name: str | None = None,
         description: str | None = None,
         table_role: str | None = None,
+        segment_id: str | None = None,
         needs_review: bool | None = None,
         operator: str | None = None,
     ) -> ObjectTypeDetail:
@@ -196,6 +198,18 @@ class EditService:
             changed.append("table_role")
             # 人工改判角色即视为复核通过。
             role_confirmed = True
+
+        # 板块归属（人工修改板块分配）
+        if segment_id is not None and segment_id != obj.segment_id:
+            # 验证板块存在且属于同一本体
+            if segment_id != "":  # 空字符串表示移出板块
+                segment = db.get(OntologySegment, segment_id)
+                if not segment:
+                    raise ValueError(f"板块不存在：{segment_id}")
+                if segment.ontology_id != obj.ontology_id:
+                    raise ValueError("不能将对象移动到其他本体的板块")
+            obj.segment_id = segment_id if segment_id else None
+            changed.append("segment_id")
 
         # 复核状态：显式 needs_review 优先；否则改角色时自动置为已确认。
         # 它是独立列，**不计入 changed**——changed 会被 _mark_overridden 永久钉住，

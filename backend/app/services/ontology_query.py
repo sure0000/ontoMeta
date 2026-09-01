@@ -1320,6 +1320,14 @@ class OntologyQueryService:
         # 都不会静默退化成「全部未落地」（``source_provenance`` 曾栽在这上面）。
         if landing is None and not landing_loaded:
             landing = bulk_object_landings(db, [obj.id]).get(obj.id)
+
+        # 查询板块信息
+        segment_name = None
+        if obj.segment_id:
+            segment = db.get(OntologySegment, obj.segment_id)
+            if segment:
+                segment_name = segment.display_name
+
         return ObjectTypeSummary(
             id=obj.id,
             name=obj.name,
@@ -1339,6 +1347,8 @@ class OntologyQueryService:
             table_role=obj.table_role,
             role_confidence=obj.role_confidence,
             role_reason=obj.role_reason,
+            segment_id=obj.segment_id,
+            segment_name=segment_name,
             domain_context_id=domain_id,
             domain_name=domain_name,
             landing=(

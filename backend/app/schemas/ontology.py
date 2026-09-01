@@ -406,6 +406,9 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     table_role: str = "business_object"
     role_confidence: float | None = None
     role_reason: str | None = None
+    # 板块归属
+    segment_id: str | None = None
+    segment_name: str | None = None
     domain_context_id: str | None = None
     domain_name: str | None = None
     # 物理落点：这个对象落到哪张表了。``None`` = 还没有任何落点登记（未物化/未同步），
@@ -660,6 +663,8 @@ class ObjectTypeUpdate(BaseModel):
     description: str | None = None
     # 人工改判对象角色（业务对象/数据表/关系表/技术表）。
     table_role: str | None = None
+    # 板块归属（人工修改板块分配）
+    segment_id: str | None = None
     # 复核状态开关：True=标记为待复核；False=标记为已确认（清除 [待复核]）。
     needs_review: bool | None = None
     operator: str | None = None
