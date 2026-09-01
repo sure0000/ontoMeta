@@ -363,9 +363,23 @@ class OntologyDraftGenerator:
                 await self._llm_overrides_chunked(evidence, progress_cb, checkpoint)
             )
         # 结构始终由全量证据确定性组装：对象/属性/关系一个都不会丢。
-        return self._build_draft_from_evidence(
+        draft = self._build_draft_from_evidence(
             evidence, overrides, property_overrides, relation_overrides, role_overrides
         )
+
+        # LLM 板块命名（需要 async 上下文）
+        if draft.segments and self.client:
+            try:
+                from app.services.segment_generator import name_segments_with_llm, dedupe_segment_names
+                await name_segments_with_llm(
+                    draft.segments, draft.object_types, draft.relation_types,
+                    set(draft.hub_nodes), self.client
+                )
+                dedupe_segment_names(draft.segments)
+            except Exception as e:
+                logger.warning("Failed to name segments with LLM: %s", e)
+
+        return draft
 
     # ------------------------------------------------------------------
     # 确定性组装(零丢失核心)
@@ -408,22 +422,11 @@ class OntologyDraftGenerator:
         segments = []
         hub_nodes = []
         try:
-            from app.services.segment_generator import (
-                generate_segments,
-                name_segments_with_llm,
-                dedupe_segment_names,
-            )
+            from app.services.segment_generator import generate_segments
 
             segments, hub_nodes_set = generate_segments(
                 object_types, relation_types, self.client
             )
-
-            # LLM 板块命名
-            if segments and self.client:
-                await name_segments_with_llm(
-                    segments, object_types, relation_types, hub_nodes_set, self.client
-                )
-                dedupe_segment_names(segments)
 
             hub_nodes = list(hub_nodes_set)
 

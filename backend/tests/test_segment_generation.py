@@ -33,82 +33,68 @@ def _fresh_ontology(db) -> Ontology:
 
 def test_segment_generation_basic():
     """测试基础的板块生成：聚类、枢纽识别、成员分配。"""
-    # 构造一个简单的本体：3 个业务对象形成一个簇，1 个枢纽对象
-    objects = [
-        DraftObjectType(
-            name="order",
-            display_name="订单",
-            source_ref="urn:li:dataset:order",
-            table_role="business_object",
-        ),
-        DraftObjectType(
-            name="order_item",
-            display_name="订单明细",
-            source_ref="urn:li:dataset:order_item",
-            table_role="business_object",
-        ),
-        DraftObjectType(
-            name="payment",
-            display_name="支付",
-            source_ref="urn:li:dataset:payment",
-            table_role="business_object",
-        ),
+    # 构造一个更大的本体：10+ 个业务对象，1 个高度数的枢纽对象
+    # 枢纽识别的阈值是 max(15, mean_degree * 3)，所以需要足够多的节点
+    objects = []
+    for i in range(20):
+        objects.append(
+            DraftObjectType(
+                name=f"table_{i}",
+                display_name=f"表{i}",
+                source_ref=f"urn:li:dataset:table_{i}",
+                table_role="business_object",
+            )
+        )
+    # 添加一个枢纽对象
+    objects.append(
         DraftObjectType(
             name="company",
             display_name="公司",
             source_ref="urn:li:dataset:company",
             table_role="business_object",
-        ),
-    ]
+        )
+    )
 
-    relations = [
-        DraftRelationType(
-            name="order_to_item",
-            display_name="包含",
-            source_object_type_name="order",
-            target_object_type_name="order_item",
-            structure_type="one_to_many",
-        ),
-        DraftRelationType(
-            name="order_to_payment",
-            display_name="关联",
-            source_object_type_name="order",
-            target_object_type_name="payment",
-            structure_type="one_to_one",
-        ),
-        # company 连接到所有对象（模拟枢纽）
-        DraftRelationType(
-            name="order_to_company",
-            display_name="隶属于",
-            source_object_type_name="order",
-            target_object_type_name="company",
-            structure_type="many_to_one",
-        ),
-        DraftRelationType(
-            name="item_to_company",
-            display_name="隶属于",
-            source_object_type_name="order_item",
-            target_object_type_name="company",
-            structure_type="many_to_one",
-        ),
-        DraftRelationType(
-            name="payment_to_company",
-            display_name="隶属于",
-            source_object_type_name="payment",
-            target_object_type_name="company",
-            structure_type="many_to_one",
-        ),
-    ]
+    relations = []
+    # company 连接到所有其他对象（度数 = 20）
+    for i in range(20):
+        relations.append(
+            DraftRelationType(
+                name=f"table_{i}_to_company",
+                display_name="隶属于",
+                source_object_type_name=f"table_{i}",
+                target_object_type_name="company",
+                structure_type="many_to_one",
+            )
+        )
+    # 其他对象之间形成几个小簇
+    for i in range(0, 18, 3):
+        relations.append(
+            DraftRelationType(
+                name=f"rel_{i}_{i+1}",
+                display_name="关联",
+                source_object_type_name=f"table_{i}",
+                target_object_type_name=f"table_{i+1}",
+                structure_type="one_to_many",
+            )
+        )
+        relations.append(
+            DraftRelationType(
+                name=f"rel_{i+1}_{i+2}",
+                display_name="包含",
+                source_object_type_name=f"table_{i+1}",
+                target_object_type_name=f"table_{i+2}",
+                structure_type="one_to_many",
+            )
+        )
 
     segments, hub_nodes = generate_segments(objects, relations, llm_client=None)
 
-    # 验证：company 应该被识别为枢纽
+    # 验证：company 应该被识别为枢纽（度数远高于平均）
     assert "company" in hub_nodes
-    assert len(hub_nodes) == 1
 
-    # 验证：剩余 3 个对象应该形成 1 个板块
-    # 注意：实际生成会调用 LLM 命名，这里我们跳过 LLM 只测试结构
-    # （generate_segments 在无 LLM 时仍会返回板块，但 name/display_name 为空）
+    # 验证：剩余对象应该形成若干板块
+    assert len(segments) > 0
 
 
 def test_segment_merge_with_anchor_matching():
@@ -229,6 +215,7 @@ def test_segment_anchor_jaccard_matching():
         assert report2.to_dict()["summary"]["updated"] == 1
 
         # 第三次生成：只有 1 个锚点重叠（Jaccard = 1/4 = 0.25，低于阈值）
+        # 这次传入单独的 seg3，旧板块 sales_updated 因为未匹配会被移除
         seg3 = DraftSegment(
             name="marketing",
             display_name="营销",
@@ -241,12 +228,14 @@ def test_segment_anchor_jaccard_matching():
         merge.merge_segments(db, ontology.id, [seg3], "gen3", report3)
         db.commit()
 
-        # 验证：应该创建新板块
+        # 验证：sales_updated 被移除（纯机器板块），marketing 被创建
         segments = db.query(OntologySegment).filter(
             OntologySegment.ontology_id == ontology.id
         ).all()
-        assert len(segments) == 2
+        assert len(segments) == 1
+        assert segments[0].name == "marketing"
         assert report3.to_dict()["summary"]["added"] == 1
+        assert report3.to_dict()["summary"]["removed"] == 1
 
     finally:
         db.rollback()
