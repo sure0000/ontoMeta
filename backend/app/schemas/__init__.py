@@ -193,6 +193,12 @@ from app.schemas.settings import (
     LlmServiceConfigOut,
     LlmServiceConfigUpdate,
 )
+from app.schemas.verb_refiner import (
+    VerbRefinementApplyRequest,
+    VerbRefinementBatchApplyRequest,
+    VerbRefinementBatchOut,
+    VerbSuggestion,
+)
 from app.schemas.doris import DorisWarehouseConfigOut, DorisWarehouseConfigUpdate
 from app.schemas.dependencies import (
     DependencyComponentCreate,
@@ -477,6 +483,10 @@ __all__ = [
     "TaskPipelineOut",
     "TaskPipelineAdvanceOut",
     "TaskPipelineDraftAllOut",
+    "VerbRefinementApplyRequest",
+    "VerbRefinementBatchApplyRequest",
+    "VerbRefinementBatchOut",
+    "VerbSuggestion",
 ]
 
 
