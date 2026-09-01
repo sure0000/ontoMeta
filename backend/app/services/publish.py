@@ -474,6 +474,8 @@ class PublishService:
 
         存在的理由是一个真实故障模式——源库无主键导致对象 100% 被打上待复核，
         发布提升 0 个、本体浏览页一片空白，而用户只看到一句「发布成功」。
+
+        S4 发布门禁：检测孤点——即将发布的对象若一跳邻居都未发布，发布后就是孤点。
         """
         ontology = db.get(Ontology, ontology_id)
         if not ontology:
@@ -489,6 +491,10 @@ class PublishService:
                 )
                 .count()
             )
+
+        # S4: 孤点检测——即将发布的对象，若其一跳邻居都不在发布集合中，就是孤点
+        isolated_objects = self._detect_isolated_objects(db, ontology_id, sel)
+
         return {
             "ontology_id": ontology_id,
             "current_version": ontology.version,
@@ -500,7 +506,70 @@ class PublishService:
             "skipped_non_business": sel.skipped_non_business,
             "skipped_relation_endpoint": sel.skipped_relation_endpoint,
             "unresolved_conflicts": conflicts,
+            "isolated_objects": isolated_objects,
         }
+
+    def _detect_isolated_objects(
+        self, db: Session, ontology_id: str, selection: PublishSelection
+    ) -> list[dict]:
+        """检测即将发布的对象中，哪些会成为孤点（S4）。
+
+        孤点定义：对象在草稿中有关系，但这些关系的另一端都不在发布集合中；
+        或者对象根本没有任何关系连接。
+        """
+        publishable_object_ids = {
+            obj.id for obj in selection.entities if isinstance(obj, ObjectType)
+        }
+        if not publishable_object_ids:
+            return []
+
+        # 查询草稿中所有涉及这些对象的关系（包括不会被发布的关系）
+        all_relations = (
+            db.query(RelationType)
+            .filter(
+                RelationType.ontology_id == ontology_id,
+                (
+                    RelationType.source_object_type_id.in_(publishable_object_ids)
+                    | RelationType.target_object_type_id.in_(publishable_object_ids)
+                ),
+            )
+            .all()
+        )
+
+        # 构建邻接表：object_id -> set of neighbor_ids
+        neighbors_map: dict[str, set[str]] = {oid: set() for oid in publishable_object_ids}
+        for rel in all_relations:
+            if rel.source_object_type_id in publishable_object_ids:
+                neighbors_map[rel.source_object_type_id].add(rel.target_object_type_id)
+            if rel.target_object_type_id in publishable_object_ids:
+                neighbors_map[rel.target_object_type_id].add(rel.source_object_type_id)
+
+        # 检测孤点：没有邻居，或所有邻居都不在发布集合中
+        isolated = []
+        for obj in selection.entities:
+            if not isinstance(obj, ObjectType):
+                continue
+            neighbors = neighbors_map.get(obj.id, set())
+            published_neighbors = neighbors & publishable_object_ids
+
+            if not neighbors:
+                # 根本没有关系连接
+                isolated.append({
+                    "object_id": obj.id,
+                    "object_name": obj.display_name or obj.name,
+                    "reason": "no_relations",
+                    "unpublished_neighbor_count": 0,
+                })
+            elif not published_neighbors:
+                # 有关系，但所有邻居都不在发布集合中
+                isolated.append({
+                    "object_id": obj.id,
+                    "object_name": obj.display_name or obj.name,
+                    "reason": "all_neighbors_unpublished",
+                    "unpublished_neighbor_count": len(neighbors),
+                })
+
+        return isolated
 
     def publish(self, db: Session, ontology_id: str, operator: str | None = None) -> Ontology:
         ontology = db.get(Ontology, ontology_id)

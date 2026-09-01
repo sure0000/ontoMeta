@@ -58,6 +58,13 @@ export interface DomainContextDetail extends DomainContext {
   unresolved_conflict_count?: number;
 }
 
+export interface IsolatedObject {
+  object_id: string;
+  object_name: string;
+  reason: "no_relations" | "all_neighbors_unpublished";
+  unpublished_neighbor_count: number;
+}
+
 export interface PublishPreflight {
   ontology_id: string;
   current_version: number;
@@ -69,6 +76,7 @@ export interface PublishPreflight {
   skipped_non_business: number;
   skipped_relation_endpoint: number;
   unresolved_conflicts: number;
+  isolated_objects: IsolatedObject[];
 }
 
 export type DraftGenerationScope = "full" | "objects" | "relations";

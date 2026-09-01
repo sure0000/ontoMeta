@@ -140,6 +140,8 @@ function PublishPreflightSummary({ preflight }: { preflight: PublishPreflight })
       `端点未发布的关系 ${preflight.skipped_relation_endpoint}`,
   ].filter(Boolean) as string[];
 
+  const hasIsolatedObjects = preflight.isolated_objects && preflight.isolated_objects.length > 0;
+
   return (
     <div style={{ fontSize: 13, lineHeight: 1.9 }}>
       <div>
@@ -160,6 +162,37 @@ function PublishPreflightSummary({ preflight }: { preflight: PublishPreflight })
           showIcon
           message="本次不会提升任何业务对象"
           description="发布后本体浏览页仍会是空的。先在工作区把对象标为已确认（或改判角色）再发布。"
+        />
+      )}
+      {hasIsolatedObjects && (
+        <Alert
+          style={{ marginTop: 8 }}
+          type="warning"
+          showIcon
+          message={`检测到 ${preflight.isolated_objects.length} 个孤点对象`}
+          description={
+            <div>
+              <div style={{ marginBottom: 8 }}>
+                这些对象的一跳邻居都不在发布集合中，发布后它们将成为孤立节点：
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 20, maxHeight: 120, overflowY: "auto" }}>
+                {preflight.isolated_objects.slice(0, 10).map((obj) => (
+                  <li key={obj.object_id}>
+                    <strong>{obj.object_name}</strong>
+                    {obj.reason === "no_relations" && " (无任何关系)"}
+                    {obj.reason === "all_neighbors_unpublished" &&
+                      ` (${obj.unpublished_neighbor_count} 个邻居均未发布)`}
+                  </li>
+                ))}
+                {preflight.isolated_objects.length > 10 && (
+                  <li>... 还有 {preflight.isolated_objects.length - 10} 个</li>
+                )}
+              </ul>
+              <div style={{ marginTop: 8, fontSize: 12 }}>
+                建议：先审核并发布这些对象的核心邻居（如公司、客户、商品等枢纽对象），再发布它们。
+              </div>
+            </div>
+          }
         />
       )}
     </div>
