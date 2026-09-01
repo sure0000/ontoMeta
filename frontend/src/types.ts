@@ -315,6 +315,22 @@ export interface ObjectTypeSummary extends FieldProvenance {
   updated_at: string;
 }
 
+export interface SegmentSummary extends FieldProvenance {
+  id: string;
+  name: string;
+  display_name: string;
+  description?: string;
+  member_count: number;
+  ontology_id: string;
+  needs_review: boolean;
+  updated_at: string;
+}
+
+export interface SegmentDetail extends SegmentSummary {
+  members: ObjectTypeSummary[];
+  internal_relation_count: number;
+}
+
 export interface Property extends FieldProvenance {
   id: string;
   name: string;

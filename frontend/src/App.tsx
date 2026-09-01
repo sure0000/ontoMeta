@@ -20,6 +20,8 @@ import { TasksOverviewPage } from "./pages/TasksOverviewPage";
 import { TaskCreatePage } from "./pages/TaskCreatePage";
 import { RelationGroupDetailPage } from "./pages/RelationGroupDetailPage";
 import { RelationTypeDetailPage } from "./pages/RelationTypeDetailPage";
+import { SegmentsPage } from "./pages/SegmentsPage";
+import { SegmentDetailPage } from "./pages/SegmentDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
 
@@ -40,6 +42,8 @@ export default function App() {
           path="/workspace/:domainId/relation-groups/:displayName"
           element={<RelationGroupDetailPage />}
         />
+        <Route path="/workspace/:domainId/segments" element={<SegmentsPage />} />
+        <Route path="/segments/:id" element={<SegmentDetailPage />} />
         <Route path="/ontology" element={<OntologyPage />} />
         <Route path="/ontology/relations/:relationId" element={<RelationTypeDetailPage />} />
         <Route

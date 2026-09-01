@@ -1,5 +1,6 @@
 import {
   ApartmentOutlined,
+  AppstoreOutlined,
   CheckCircleOutlined,
   DeleteOutlined,
   DeploymentUnitOutlined,
@@ -646,6 +647,11 @@ export function DomainDetailPage() {
             <Link to={`/workspace/${domainId}/executions`}>
               <Tooltip title="执行记录">
                 <Button icon={<HistoryOutlined />} aria-label="执行记录" />
+              </Tooltip>
+            </Link>
+            <Link to={`/workspace/${domainId}/segments`}>
+              <Tooltip title="业务板块">
+                <Button icon={<AppstoreOutlined />} aria-label="业务板块" />
               </Tooltip>
             </Link>
             {domain.published_ontology_id && (

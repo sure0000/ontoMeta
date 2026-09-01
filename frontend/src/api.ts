@@ -78,6 +78,8 @@ import type {
   LlmConnectionTestResult,
   ObjectTypeDetail,
   ObjectTypeSummary,
+  SegmentSummary,
+  SegmentDetail,
   OntologyGraph,
   OntologyGroupedGraph,
   ClusterDetail,
@@ -562,6 +564,24 @@ export const api = {
     request<ObjectTypeDetail>(
       `/api/object-types/${id}${buildQuery({ published_only: publishedOnly })}`,
     ),
+
+  listSegments: (params?: {
+    ontologyId: string;
+    publishedOnly?: boolean;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
+    request<PageResult<SegmentSummary>>(
+      `/api/ontologies/${params?.ontologyId}/segments${buildQuery({
+        published_only: params?.publishedOnly,
+        q: params?.q,
+        limit: params?.limit,
+        offset: params?.offset,
+      })}`,
+    ),
+
+  getSegment: (id: string) => request<SegmentDetail>(`/api/segments/${id}`),
 
   listBusinessLogics: (params?: {
     ontologyId?: string;
