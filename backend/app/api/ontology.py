@@ -249,8 +249,17 @@ def get_ontology_graph(
 
 
 @router.get("/ontologies/{ontology_id}/grouped-graph", response_model=OntologyGroupedGraph)
-def get_ontology_grouped_graph(ontology_id: str, db: Session = Depends(get_db)):
-    return query.get_ontology_grouped_graph(db, ontology_id)
+def get_ontology_grouped_graph(
+    ontology_id: str,
+    published_only: bool = False,
+    db: Session = Depends(get_db)
+):
+    """获取本体的板块地图视图。
+
+    Args:
+        published_only: True = 只读已发布状态，False = 读草稿态（默认）
+    """
+    return query.get_ontology_grouped_graph(db, ontology_id, published_only=published_only)
 
 
 @router.get(

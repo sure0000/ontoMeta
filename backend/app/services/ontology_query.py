@@ -15,6 +15,7 @@ from app.models import (
     EntityStatus,
     ObjectType,
     Ontology,
+    OntologySegment,
     OntologyStatus,
     Property,
     RelationType,
@@ -892,59 +893,153 @@ class OntologyQueryService:
         db: Session,
         ontology_id: str,
         *,
+        published_only: bool = False,
         max_cluster_nodes: int = _DEFAULT_CLUSTER_MAX_NODES,
     ) -> OntologyGroupedGraph:
-        """域层级概览图：自动将 ObjectType 聚类为业务子域，聚合跨簇关系。"""
-        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
-        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
+        """域层级概览图：读取落库的板块数据，聚合跨簇关系。
+
+        Args:
+            published_only: True = 只读已发布状态的对象/关系/板块，False = 读草稿态
+        """
+        # 构建对象/关系查询
+        obj_query = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+        rel_query = db.query(RelationType).filter(RelationType.ontology_id == ontology_id)
+
+        if published_only:
+            obj_query = obj_query.filter(ObjectType.status == EntityStatus.PUBLISHED)
+            rel_query = rel_query.filter(RelationType.status == EntityStatus.PUBLISHED)
+
+        objects = obj_query.all()
+        relations = rel_query.all()
         total_object_count = len(objects)
         total_relation_count = len(relations)
 
-        part = self._compute_cluster_partition(
-            objects, relations, max_cluster_nodes=max_cluster_nodes
-        )
-        obj_by_id = part.obj_by_id
-        adjacency = part.adjacency
+        # 读取落库的板块数据
+        segments = db.query(OntologySegment).filter(
+            OntologySegment.ontology_id == ontology_id
+        ).all()
 
-        def to_cluster_node(oid: str) -> ClusterNode:
-            obj = obj_by_id[oid]
-            return ClusterNode(
-                id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+        # 如果没有落库的板块，回退到旧的聚类算法
+        if not segments:
+            part = self._compute_cluster_partition(
+                objects, relations, max_cluster_nodes=max_cluster_nodes
             )
+            obj_by_id = part.obj_by_id
+            adjacency = part.adjacency
 
-        clusters: list[GraphCluster] = []
-        for cid in part.cluster_order:
-            members = part.cluster_members[cid]
-            truncated = len(members) > max_cluster_nodes
-            shown_members = members[:max_cluster_nodes]
-            clusters.append(
-                GraphCluster(
-                    id=cid,
-                    name=part.cluster_names[cid],
-                    nodes=[to_cluster_node(oid) for oid in shown_members],
-                    node_count=len(members),
-                    truncated=truncated,
+            # 使用旧的聚类结果构建返回数据
+            def to_cluster_node(oid: str) -> ClusterNode:
+                obj = obj_by_id[oid]
+                return ClusterNode(
+                    id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
                 )
-            )
 
-        hub_nodes: list[HubNode] = []
-        for hub_id in part.hub_ids_ordered:
-            obj = obj_by_id[hub_id]
-            hub_nodes.append(
-                HubNode(
-                    id=hub_id,
-                    label=obj.name,
-                    display_name=obj.display_name,
-                    status=obj.status,
-                    degree=len(adjacency.get(hub_id, ())),
+            clusters: list[GraphCluster] = []
+            for cid in part.cluster_order:
+                members = part.cluster_members[cid]
+                truncated = len(members) > max_cluster_nodes
+                shown_members = members[:max_cluster_nodes]
+                clusters.append(
+                    GraphCluster(
+                        id=cid,
+                        name=part.cluster_names[cid],
+                        nodes=[to_cluster_node(oid) for oid in shown_members],
+                        node_count=len(members),
+                        truncated=truncated,
+                    )
                 )
-            )
+
+            hub_nodes: list[HubNode] = []
+            for hub_id in part.hub_ids_ordered:
+                obj = obj_by_id[hub_id]
+                hub_nodes.append(
+                    HubNode(
+                        id=hub_id,
+                        label=obj.name,
+                        display_name=obj.display_name,
+                        status=obj.status,
+                        degree=len(adjacency.get(hub_id, ())),
+                    )
+                )
+        else:
+            # 使用落库的板块数据
+            obj_by_id = {obj.id: obj for obj in objects}
+
+            # 构建邻接表
+            adjacency: dict[str, set[str]] = {}
+            for rel in relations:
+                adjacency.setdefault(rel.source_object_type_id, set()).add(rel.target_object_type_id)
+                adjacency.setdefault(rel.target_object_type_id, set()).add(rel.source_object_type_id)
+
+            def to_cluster_node(obj: ObjectType) -> ClusterNode:
+                return ClusterNode(
+                    id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+                )
+
+            # 构建板块节点
+            clusters: list[GraphCluster] = []
+            for seg in segments:
+                # 通过 relationship 获取成员对象
+                member_objects = seg.members  # 这是 ObjectType 列表
+
+                # 按度数排序
+                ranked_members = sorted(
+                    member_objects,
+                    key=lambda obj: len(adjacency.get(obj.id, set())),
+                    reverse=True,
+                )
+
+                truncated = len(ranked_members) > max_cluster_nodes
+                shown_members = ranked_members[:max_cluster_nodes]
+
+                clusters.append(
+                    GraphCluster(
+                        id=seg.id,
+                        name=seg.display_name,
+                        nodes=[to_cluster_node(obj) for obj in shown_members],
+                        node_count=len(member_objects),
+                        truncated=truncated,
+                    )
+                )
+
+            # 识别枢纽节点（is_hub=True）
+            hub_objects = [obj for obj in objects if getattr(obj, 'is_hub', False)]
+            hub_nodes: list[HubNode] = []
+            for obj in hub_objects:
+                hub_nodes.append(
+                    HubNode(
+                        id=obj.id,
+                        label=obj.name,
+                        display_name=obj.display_name,
+                        status=obj.status,
+                        degree=len(adjacency.get(obj.id, set())),
+                    )
+                )
+
+            # 识别孤立节点（未分配到板块且非枢纽）
+            hub_ids = {h.id for h in hub_nodes}
+            part_isolated_ids = [
+                obj.id for obj in objects
+                if obj.segment_id is None and obj.id not in hub_ids
+            ]
 
         # 跨版块关系聚合（同一宏观节点内部的关系不展示，只关心宏观关系）
         edge_agg: dict[tuple[str, str], GroupedGraphEdge] = {}
+
+        # 构建对象到板块/枢纽的映射
+        cluster_of: dict[str, str] = {}
+        if segments:
+            for seg in segments:
+                for obj in seg.members:
+                    cluster_of[obj.id] = seg.id
+            for hub in hub_nodes:
+                cluster_of[hub.id] = hub.id
+        else:
+            cluster_of = part.cluster_of
+
         for rel in relations:
-            s_cluster = part.cluster_of.get(rel.source_object_type_id)
-            t_cluster = part.cluster_of.get(rel.target_object_type_id)
+            s_cluster = cluster_of.get(rel.source_object_type_id)
+            t_cluster = cluster_of.get(rel.target_object_type_id)
             if not s_cluster or not t_cluster or s_cluster == t_cluster:
                 continue
             key = tuple(sorted((s_cluster, t_cluster)))
@@ -961,14 +1056,12 @@ class OntologyQueryService:
                     relation_ids=[rel.id],
                 )
 
-        # 稳定坐标：对"聚类 + 枢纽"构成的宏观图跑一次确定性力导向布局，
-        # 让同一份数据每次打开每个版块都落在同一位置（数字孪生式的空间记忆）。
+        # 稳定坐标：对"聚类 + 枢纽"构成的宏观图跑一次确定性力导向布局
         layout_nodes = [c.id for c in clusters] + [h.id for h in hub_nodes]
         layout_edges = [
             (e.source_cluster_id, e.target_cluster_id, float(e.weight))
             for e in edge_agg.values()
         ]
-        # 每个宏观节点的展开占地半径，用于布局的尺寸感知去重叠（避免大版块展开后压到邻居）。
         layout_sizes = {c.id: _cluster_layout_radius(c.node_count) for c in clusters}
         layout_sizes.update({h.id: _OVERVIEW_HUB_RADIUS_UNITS for h in hub_nodes})
         positions = compute_graph_layout(layout_nodes, layout_edges, sizes=layout_sizes)
@@ -981,11 +1074,31 @@ class OntologyQueryService:
             if pos:
                 hub.layout = GraphPoint(x=pos[0], y=pos[1])
 
+        # 孤立节点列表
+        isolated_nodes = []
+        if segments:
+            def to_isolated_node(oid: str) -> ClusterNode | None:
+                obj = obj_by_id.get(oid)
+                if not obj:
+                    return None
+                return ClusterNode(
+                    id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+                )
+            isolated_nodes = [to_isolated_node(oid) for oid in part_isolated_ids]
+            isolated_nodes = [n for n in isolated_nodes if n is not None]
+        else:
+            def to_cluster_node_old(oid: str) -> ClusterNode:
+                obj = obj_by_id[oid]
+                return ClusterNode(
+                    id=obj.id, label=obj.name, display_name=obj.display_name, status=obj.status
+                )
+            isolated_nodes = [to_cluster_node_old(oid) for oid in part.isolated_ids]
+
         return OntologyGroupedGraph(
             clusters=clusters,
             hub_nodes=hub_nodes,
             edges=list(edge_agg.values()),
-            isolated_nodes=[to_cluster_node(oid) for oid in part.isolated_ids],
+            isolated_nodes=isolated_nodes,
             total_object_count=total_object_count,
             total_relation_count=total_relation_count,
         )
