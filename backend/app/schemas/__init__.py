@@ -165,6 +165,8 @@ from app.schemas.ontology import (
     RelationTypeOut,
     RelationTypeUpdate,
     ReviewUpdate,
+    SegmentDetail,
+    SegmentSummary,
     OntologyValidationResult,
     ValidationIssueOut,
     FormalIssueOut,

@@ -39,6 +39,8 @@ from app.schemas import (
     RelationGroupOut,
     RelationTypeOut,
     RelationTypeUpdate,
+    SegmentDetail,
+    SegmentSummary,
     ValidationIssueOut,
     VersionDiffOut,
     VersionRecordOut,
@@ -790,4 +792,42 @@ def pre_publish_relation_type(
         return edit_service.pre_publish_relation_type(db, relation_type_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ------------------------------------------------------------------
+# 板块 (Segments)
+# ------------------------------------------------------------------
+
+
+@router.get("/ontologies/{ontology_id}/segments", response_model=PageResult[SegmentSummary])
+def list_segments(
+    ontology_id: str,
+    published_only: bool = Query(False),
+    q: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """列出本体的业务板块。"""
+    return query.list_segments(
+        db,
+        ontology_id=ontology_id,
+        published_only=published_only,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/segments/{segment_id}", response_model=SegmentDetail)
+def get_segment(
+    segment_id: str,
+    db: Session = Depends(get_db),
+):
+    """获取板块详情（包含成员列表）。"""
+    segment = query.get_segment_detail(db, segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    return segment
+
 

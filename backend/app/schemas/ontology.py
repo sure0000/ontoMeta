@@ -416,6 +416,28 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     model_config = {"from_attributes": True}
 
 
+class SegmentSummary(_ProvenanceReadMixin):
+    """业务板块摘要（列表视图）。"""
+    id: str
+    name: str
+    display_name: str
+    description: str | None = None
+    member_count: int
+    ontology_id: str
+    needs_review: bool = False
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SegmentDetail(SegmentSummary):
+    """业务板块详情（包含成员列表）。"""
+    # 成员对象列表（ObjectTypeSummary）
+    members: list[ObjectTypeSummary] = Field(default_factory=list)
+    # 板块内关系数量
+    internal_relation_count: int = 0
+
+
 class ObjectTypeLogicBindingOut(BaseModel):
     """对象视角下：这个对象作为什么角色参与了哪条业务逻辑。"""
 

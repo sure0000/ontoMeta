@@ -1309,6 +1309,121 @@ class OntologyQueryService:
 
         return None, None
 
+    def list_segments(
+        self,
+        db: Session,
+        ontology_id: str,
+        published_only: bool = False,
+        q: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ):
+        """列出本体的业务板块。"""
+        from app.models import OntologySegment
+        from app.schemas import PageResult, SegmentSummary
+
+        query_obj = db.query(OntologySegment).filter(
+            OntologySegment.ontology_id == ontology_id
+        )
+
+        # 搜索过滤
+        if q:
+            q_lower = q.lower()
+            query_obj = query_obj.filter(
+                (OntologySegment.name.ilike(f"%{q}%"))
+                | (OntologySegment.display_name.ilike(f"%{q}%"))
+                | (OntologySegment.description.ilike(f"%{q}%"))
+            )
+
+        # 软删除过滤
+        if not published_only:
+            query_obj = query_obj.filter(OntologySegment.deleted_by_user == False)
+
+        # 总数
+        total = query_obj.count()
+
+        # 分页
+        if limit is not None:
+            query_obj = query_obj.offset(offset).limit(limit)
+
+        segments = query_obj.order_by(OntologySegment.display_name).all()
+
+        # 构建 SegmentSummary
+        items = []
+        for seg in segments:
+            items.append(
+                SegmentSummary(
+                    id=seg.id,
+                    name=seg.name,
+                    display_name=seg.display_name,
+                    description=seg.description,
+                    member_count=seg.member_count,
+                    ontology_id=seg.ontology_id,
+                    needs_review=seg.needs_review,
+                    updated_at=seg.updated_at,
+                    origin=seg.origin or "machine",
+                    upstream_removed=bool(seg.upstream_removed),
+                    has_conflict=bool(seg.conflict_json),
+                    pinned_fields=_loads(seg.overridden_fields, []),
+                    conflicts=_loads_json(seg.conflict_json) or {},
+                )
+            )
+
+        return PageResult(items=items, total=total, limit=limit, offset=offset)
+
+    def get_segment_detail(self, db: Session, segment_id: str):
+        """获取板块详情（包含成员列表）。"""
+        from app.models import OntologySegment, ObjectType, RelationType
+        from app.schemas import SegmentDetail
+
+        segment = db.query(OntologySegment).filter(OntologySegment.id == segment_id).first()
+        if not segment:
+            return None
+
+        # 获取成员对象
+        members = (
+            db.query(ObjectType)
+            .filter(
+                ObjectType.segment_id == segment_id,
+                ObjectType.deleted_by_user == False,
+            )
+            .all()
+        )
+
+        # 转换为 ObjectTypeSummary
+        member_summaries = [self._to_object_summary(db, obj) for obj in members]
+
+        # 统计板块内关系数量
+        member_ids = {obj.id for obj in members}
+        internal_relation_count = (
+            db.query(RelationType)
+            .filter(
+                RelationType.ontology_id == segment.ontology_id,
+                RelationType.source_object_type_id.in_(member_ids),
+                RelationType.target_object_type_id.in_(member_ids),
+                RelationType.deleted_by_user == False,
+            )
+            .count()
+        )
+
+        return SegmentDetail(
+            id=segment.id,
+            name=segment.name,
+            display_name=segment.display_name,
+            description=segment.description,
+            member_count=segment.member_count,
+            ontology_id=segment.ontology_id,
+            needs_review=segment.needs_review,
+            updated_at=segment.updated_at,
+            origin=segment.origin or "machine",
+            upstream_removed=bool(segment.upstream_removed),
+            has_conflict=bool(segment.conflict_json),
+            pinned_fields=_loads(segment.overridden_fields, []),
+            conflicts=_loads_json(segment.conflict_json) or {},
+            members=member_summaries,
+            internal_relation_count=internal_relation_count,
+        )
+
 
 def _refers_to_dataset(ref: str | None) -> bool:
     """这个 source_ref 在 DataHub 里是否可能对应一个数据集。
