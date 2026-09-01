@@ -22,8 +22,8 @@ class VerbRefinementBatchOut(BaseModel):
     fallback_count: int
 
 
-class VerbRefinementApplyRequest(BaseModel):
-    """应用动词细化建议的请求。"""
+class VerbRefinementApplyItem(BaseModel):
+    """应用动词细化建议的单项请求。"""
     relation_id: str
     new_verb: str
     operator: str | None = None
@@ -31,5 +31,5 @@ class VerbRefinementApplyRequest(BaseModel):
 
 class VerbRefinementBatchApplyRequest(BaseModel):
     """批量应用动词细化建议的请求。"""
-    items: list[VerbRefinementApplyRequest]
+    items: list[VerbRefinementApplyItem]
     operator: str | None = None

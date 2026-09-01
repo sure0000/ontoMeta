@@ -43,6 +43,9 @@ from app.schemas import (
     SegmentDetail,
     SegmentSummary,
     ValidationIssueOut,
+    VerbRefinementBatchApplyRequest,
+    VerbRefinementBatchOut,
+    VerbSuggestion,
     VersionDiffOut,
     VersionRecordOut,
     VersionSnapshotOut,
@@ -849,5 +852,124 @@ def get_review_stats(
 ):
     """获取审核模式的全局统计和板块级进度。"""
     return query.get_review_mode_stats(db, ontology_id)
+
+
+@router.post("/ontologies/{ontology_id}/verb-refinement/suggest")
+def suggest_verb_refinements(
+    ontology_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    生成空动词细化建议（S2）。
+
+    扫描本体中空泛动词的关系（"属于"、"引用"、"关联"），
+    根据外键列名规则推断精确动词，返回建议列表。
+    """
+    from app.models import RelationType
+    from app.services.verb_refiner import suggest_verb_refinements as generate_suggestions
+    from app.schemas import VerbRefinementBatchOut, VerbSuggestion
+
+    # 查询需要细化的关系：空泛动词
+    empty_verbs = {"属于", "引用", "关联", "关系", "连接"}
+    relations = (
+        db.query(RelationType)
+        .filter(
+            RelationType.ontology_id == ontology_id,
+            RelationType.deleted_by_user == False,
+        )
+        .all()
+    )
+
+    # 过滤出空泛动词的关系
+    candidates = [
+        rel for rel in relations
+        if not rel.display_name or rel.display_name in empty_verbs
+    ]
+
+    # 生成建议
+    raw_suggestions = generate_suggestions(candidates)
+
+    # 转换为响应格式
+    suggestions = []
+    for sug in raw_suggestions:
+        rel = next((r for r in candidates if r.id == sug["relation_id"]), None)
+        if not rel:
+            continue
+
+        suggestions.append(VerbSuggestion(
+            relation_id=sug["relation_id"],
+            current_verb=sug["current_verb"],
+            suggested_verb=sug["suggested_verb"],
+            method=sug["method"],
+            confidence=sug["confidence"],
+            source_object_name=rel.source_object_type.display_name or rel.source_object_type.name,
+            target_object_name=rel.target_object_type.display_name or rel.target_object_type.name,
+        ))
+
+    # 统计
+    rule_count = sum(1 for s in suggestions if s.method == "rule")
+    llm_count = sum(1 for s in suggestions if s.method == "llm")
+    fallback_count = sum(1 for s in suggestions if s.method == "fallback")
+
+    return VerbRefinementBatchOut(
+        suggestions=suggestions,
+        total=len(suggestions),
+        rule_count=rule_count,
+        llm_count=llm_count,
+        fallback_count=fallback_count,
+    )
+
+
+@router.post("/ontologies/{ontology_id}/verb-refinement/apply")
+def apply_verb_refinements(
+    ontology_id: str,
+    request: VerbRefinementBatchApplyRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    批量应用动词细化建议（S2）。
+
+    更新关系的 display_name，并标记为 needs_review=True，
+    让人工确认后再发布。
+    """
+    from app.models import RelationType
+    from app.services.common import log_change
+
+    updated_count = 0
+    errors = []
+
+    for item in request.items:
+        rel = db.get(RelationType, item.relation_id)
+        if not rel:
+            errors.append(f"关系 {item.relation_id} 不存在")
+            continue
+
+        if rel.ontology_id != ontology_id:
+            errors.append(f"关系 {item.relation_id} 不属于本体 {ontology_id}")
+            continue
+
+        # 更新动词
+        old_verb = rel.display_name
+        rel.display_name = item.new_verb
+        rel.needs_review = True  # 标记为待复核
+
+        log_change(
+            db,
+            "relation_type",
+            rel.id,
+            "update",
+            item.operator or request.operator or "system",
+            summary=f"动词细化: {old_verb} -> {item.new_verb}",
+        )
+
+        updated_count += 1
+
+    db.commit()
+
+    return {
+        "updated_count": updated_count,
+        "total_requested": len(request.items),
+        "errors": errors,
+    }
 
 

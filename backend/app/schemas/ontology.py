@@ -892,4 +892,5 @@ class ReviewModeStats(BaseModel):
     needs_review_count: int
     reviewed_count: int
     progress_ratio: float
+
     segment_progress: list[SegmentReviewProgress] = Field(default_factory=list)

@@ -194,7 +194,7 @@ from app.schemas.settings import (
     LlmServiceConfigUpdate,
 )
 from app.schemas.verb_refiner import (
-    VerbRefinementApplyRequest,
+    VerbRefinementApplyItem,
     VerbRefinementBatchApplyRequest,
     VerbRefinementBatchOut,
     VerbSuggestion,
@@ -483,7 +483,7 @@ __all__ = [
     "TaskPipelineOut",
     "TaskPipelineAdvanceOut",
     "TaskPipelineDraftAllOut",
-    "VerbRefinementApplyRequest",
+    "VerbRefinementApplyItem",
     "VerbRefinementBatchApplyRequest",
     "VerbRefinementBatchOut",
     "VerbSuggestion",
