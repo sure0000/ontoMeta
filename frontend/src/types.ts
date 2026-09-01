@@ -305,6 +305,8 @@ export interface ObjectTypeSummary extends FieldProvenance {
   table_role?: string;
   role_confidence?: number;
   role_reason?: string;
+  segment_id?: string;
+  segment_name?: string;
   domain_context_id?: string;
   domain_name?: string;
   /**

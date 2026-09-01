@@ -357,6 +357,7 @@ export const api = {
       description?: string;
       table_role?: string;
       needs_review?: boolean;
+      segment_id?: string;
     },
   ) =>
     request<ObjectTypeDetail>(`/api/object-types/${objectTypeId}`, {

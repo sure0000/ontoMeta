@@ -84,6 +84,7 @@ interface BasicForm {
   description?: string;
   table_role: string;
   needs_review: boolean;
+  segment_id?: string;
 }
 
 function DirectionTag({ direction }: { direction: SignalDirection }) {
@@ -244,6 +245,7 @@ export function ObjectTypeDetailPage() {
   const [datasetOptions, setDatasetOptions] = useState<DataHubDatasetOption[]>([]);
   const [datasetSearching, setDatasetSearching] = useState(false);
   const [ensuringDataset, setEnsuringDataset] = useState(false);
+  const [segments, setSegments] = useState<Array<{ id: string; display_name: string }>>([]);
   const inWorkspace = Boolean(domainId);
 
   const watchedStructureType = Form.useWatch("structure_type", relationForm) as string | undefined;
@@ -263,6 +265,7 @@ export function ObjectTypeDetailPage() {
       description: detail.description,
       table_role: detail.table_role || "business_object",
       needs_review: (detail.role_reason ?? "").includes("待复核"),
+      segment_id: detail.segment_id || "",
     });
     return detail;
   };
@@ -286,6 +289,13 @@ export function ObjectTypeDetailPage() {
             setPeerObjects(peers.items);
           } catch {
             setPeerObjects([]);
+          }
+          // 加载板块列表
+          try {
+            const segmentList = await api.listSegments(detail.ontology_id);
+            setSegments(segmentList.map((s) => ({ id: s.id, display_name: s.display_name })));
+          } catch {
+            setSegments([]);
           }
         }
       } catch (err) {
@@ -924,6 +934,21 @@ export function ObjectTypeDetailPage() {
                               </Form.Item>
                             </Col>
                             <Col xs={24} md={8}>
+                              <Form.Item label="板块归属" name="segment_id">
+                                <Select
+                                  allowClear
+                                  placeholder="未分配板块"
+                                  options={[
+                                    { label: "（移出板块）", value: "" },
+                                    ...segments.map((s) => ({
+                                      label: s.display_name,
+                                      value: s.id,
+                                    })),
+                                  ]}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} md={8}>
                               <Form.Item
                                 label="复核状态"
                                 name="needs_review"
@@ -949,6 +974,15 @@ export function ObjectTypeDetailPage() {
                             <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
                             <Descriptions.Item label="命名置信度">
                               {obj.source_confidence?.toFixed(2) ?? "-"}
+                            </Descriptions.Item>
+                            <Descriptions.Item label="所属板块">
+                              {obj.segment_id ? (
+                                <Link to={`/segments/${obj.segment_id}`}>
+                                  {obj.segment_name || obj.segment_id}
+                                </Link>
+                              ) : (
+                                "-"
+                              )}
                             </Descriptions.Item>
                             <Descriptions.Item label="描述" span={4}>
                               {obj.description || "暂无描述"}
