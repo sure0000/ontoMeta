@@ -2,6 +2,7 @@ import json
 import math
 from collections import Counter
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -393,6 +394,7 @@ class OntologyQueryService:
             db, [obj.ontology_id for obj in objects]
         )
         landings = bulk_object_landings(db, [o.id for o in objects])
+        top_neighbors_map = self._bulk_top_neighbors(db, [o.id for o in objects])
         items = [
             self._to_object_summary(
                 db,
@@ -401,6 +403,7 @@ class OntologyQueryService:
                 domain=domain_map.get(obj.ontology_id),
                 landing=landings.get(obj.id),
                 landing_loaded=True,
+                top_neighbors=top_neighbors_map.get(obj.id, []),
             )
             for obj in objects
         ]
@@ -1297,6 +1300,73 @@ class OntologyQueryService:
             business_logic_count=business_logic_count,
         )
 
+    def _bulk_top_neighbors(
+        self, db: Session, object_ids: list[str], top_n: int = 3
+    ) -> dict[str, list[dict[str, Any]]]:
+        """批量获取每个对象的 Top N 邻居（按关系权重排序）。
+
+        返回 object_id -> [{id, name, display_name, relation_name, direction}]
+        direction: 'outbound' | 'inbound'
+        """
+        if not object_ids:
+            return {}
+
+        # 查询所有相关的关系（出边 + 入边）
+        outbound = (
+            db.query(
+                RelationType.source_object_type_id,
+                RelationType.target_object_type_id,
+                RelationType.display_name.label("relation_name"),
+                ObjectType.id.label("neighbor_id"),
+                ObjectType.name.label("neighbor_name"),
+                ObjectType.display_name.label("neighbor_display_name"),
+            )
+            .join(ObjectType, ObjectType.id == RelationType.target_object_type_id)
+            .filter(RelationType.source_object_type_id.in_(object_ids))
+            .all()
+        )
+
+        inbound = (
+            db.query(
+                RelationType.target_object_type_id.label("source_object_type_id"),
+                RelationType.source_object_type_id.label("target_object_type_id"),
+                RelationType.display_name.label("relation_name"),
+                ObjectType.id.label("neighbor_id"),
+                ObjectType.name.label("neighbor_name"),
+                ObjectType.display_name.label("neighbor_display_name"),
+            )
+            .join(ObjectType, ObjectType.id == RelationType.source_object_type_id)
+            .filter(RelationType.target_object_type_id.in_(object_ids))
+            .all()
+        )
+
+        # 构建结果
+        result: dict[str, list[dict[str, Any]]] = {oid: [] for oid in object_ids}
+
+        for row in outbound:
+            result[row.source_object_type_id].append({
+                "id": row.neighbor_id,
+                "name": row.neighbor_name,
+                "display_name": row.neighbor_display_name,
+                "relation_name": row.relation_name,
+                "direction": "outbound",
+            })
+
+        for row in inbound:
+            result[row.source_object_type_id].append({
+                "id": row.neighbor_id,
+                "name": row.neighbor_name,
+                "display_name": row.neighbor_display_name,
+                "relation_name": row.relation_name,
+                "direction": "inbound",
+            })
+
+        # 截取 top_n（简单按查询顺序，未来可加权重排序）
+        for oid in result:
+            result[oid] = result[oid][:top_n]
+
+        return result
+
     def _to_object_summary(
         self,
         db: Session,
@@ -1306,6 +1376,7 @@ class OntologyQueryService:
         domain: tuple[str | None, str | None] | None = None,
         landing: ObjectLanding | None = None,
         landing_loaded: bool = False,
+        top_neighbors: list[dict[str, Any]] | None = None,
     ) -> ObjectTypeSummary:
         if stats is None:
             stats = self._bulk_object_stats(db, [obj.id]).get(obj.id, (0, 0, 0))
@@ -1328,6 +1399,10 @@ class OntologyQueryService:
             if segment:
                 segment_name = segment.display_name
 
+        # 获取 top_neighbors（如果未传入则按需查询）
+        if top_neighbors is None:
+            top_neighbors = self._bulk_top_neighbors(db, [obj.id]).get(obj.id, [])
+
         return ObjectTypeSummary(
             id=obj.id,
             name=obj.name,
@@ -1349,6 +1424,7 @@ class OntologyQueryService:
             role_reason=obj.role_reason,
             segment_id=obj.segment_id,
             segment_name=segment_name,
+            top_neighbors=top_neighbors,
             domain_context_id=domain_id,
             domain_name=domain_name,
             landing=(

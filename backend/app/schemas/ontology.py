@@ -409,6 +409,8 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     # 板块归属
     segment_id: str | None = None
     segment_name: str | None = None
+    # Top N 邻居对象（用于卡片脚注展示关系）
+    top_neighbors: list[dict[str, Any]] = Field(default_factory=list)
     domain_context_id: str | None = None
     domain_name: str | None = None
     # 物理落点：这个对象落到哪张表了。``None`` = 还没有任何落点登记（未物化/未同步），
