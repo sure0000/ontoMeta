@@ -2024,12 +2024,12 @@
   border: 1px solid var(--om-border, var(--om-border-strong));
   border-left: 3px solid var(--om-primary, var(--om-primary));
   border-radius: 8px;
-  background: var(--om-neutral-subtle, var(--om-surface-muted));
+  background: var(--om-surface-muted);
 }
 .chatbi-clarify-q {
   font-size: 14px;
   font-weight: 600;
-  color: var(--om-text-primary, var(--om-text));
+  color: var(--om-text);
 }
 .chatbi-clarify-why {
   font-size: 12px;

@@ -89,6 +89,23 @@ def _set_review_mark(obj: ObjectType, needs_review: bool) -> None:
     obj.needs_review = bool(needs_review)
 
 
+def _refresh_segment_member_counts(db: Session, ontology_id: str, segment_ids=None) -> None:
+    """Refresh derived member counts after an incremental assignment change."""
+    query = db.query(OntologySegment).filter(OntologySegment.ontology_id == ontology_id)
+    if segment_ids:
+        query = query.filter(OntologySegment.id.in_(set(segment_ids)))
+    for segment in query.all():
+        segment.member_count = (
+            db.query(ObjectType)
+            .filter(
+                ObjectType.ontology_id == ontology_id,
+                ObjectType.segment_id == segment.id,
+                ObjectType.deleted_by_user == False,
+            )
+            .count()
+        )
+
+
 def _auto_assign_segment_by_neighbors(db: Session, obj: ObjectType) -> None:
     """邻居投票单节点：根据邻居的板块归属，自动分配该对象的板块。
 
@@ -97,12 +114,15 @@ def _auto_assign_segment_by_neighbors(db: Session, obj: ObjectType) -> None:
     """
     if not obj.ontology_id:
         return
+    if "segment_id" in set(json.loads(obj.overridden_fields or "[]")):
+        return
 
     # 构建邻接表：获取该对象的所有关系
     relations = (
         db.query(RelationType)
         .filter(
             RelationType.ontology_id == obj.ontology_id,
+            RelationType.deleted_by_user == False,
             (RelationType.source_object_type_id == obj.id)
             | (RelationType.target_object_type_id == obj.id),
         )
@@ -141,6 +161,25 @@ def _auto_assign_segment_by_neighbors(db: Session, obj: ObjectType) -> None:
     voted_segment = vote_segment_for_node(obj.id, adjacency, node_to_segment)
     if voted_segment:
         obj.segment_id = voted_segment
+
+
+def _refresh_related_segments(db: Session, object_ids: set[str]) -> None:
+    """Re-vote only endpoints affected by a relation edit."""
+    if not object_ids:
+        return
+    objects = db.query(ObjectType).filter(ObjectType.id.in_(object_ids)).all()
+    changed: set[str | None] = set()
+    for obj in objects:
+        if obj.table_role not in {"business_object", "bridge"}:
+            continue
+        previous = obj.segment_id
+        _auto_assign_segment_by_neighbors(db, obj)
+        if obj.segment_id != previous:
+            changed.update({previous, obj.segment_id})
+    if objects:
+        _refresh_segment_member_counts(
+            db, objects[0].ontology_id, [segment_id for segment_id in changed if segment_id]
+        )
 
 
 def _log_change(
@@ -233,6 +272,7 @@ class EditService:
             raise ValueError("Object type not found")
 
         changed: list[str] = []
+        previous_segment_id = obj.segment_id
         if name is not None:
             if name != obj.name:
                 _assert_object_name_free(db, obj.ontology_id, name, exclude_id=obj.id)
@@ -278,6 +318,11 @@ class EditService:
         if role_changed_to_business and not segment_explicitly_set and not obj.segment_id:
             _auto_assign_segment_by_neighbors(db, obj)
             # 注意：自动分配的板块不计入 overridden_fields，允许未来机器重新分配
+
+        if obj.segment_id != previous_segment_id:
+            _refresh_segment_member_counts(
+                db, obj.ontology_id, [previous_segment_id, obj.segment_id]
+            )
 
         # 复核状态：显式 needs_review 优先；否则改角色时自动置为已确认。
         # 它是独立列，**不计入 changed**——changed 会被 _mark_overridden 永久钉住，
@@ -554,9 +599,70 @@ class EditService:
         )
         db.add(rel)
         db.flush()
+        _refresh_related_segments(db, {source_object_type_id, target_object_type_id})
         _log_change(db, "relation_type", rel.id, "create", operator, f"新建关系：{compacted}")
         db.commit()
         return self.query._to_relation_out(db, rel)
+
+    def update_segment(
+        self,
+        db: Session,
+        segment_id: str,
+        *,
+        name: str | None = None,
+        display_name: str | None = None,
+        description: str | None = None,
+        operator: str | None = None,
+    ):
+        segment = db.get(OntologySegment, segment_id)
+        if not segment or segment.deleted_by_user:
+            raise ValueError("Segment not found")
+        changed: list[str] = []
+        if name is not None and name != segment.name:
+            clash = db.query(OntologySegment).filter(
+                OntologySegment.ontology_id == segment.ontology_id,
+                OntologySegment.name == name,
+                OntologySegment.id != segment.id,
+                OntologySegment.deleted_by_user == False,
+            ).first()
+            if clash:
+                raise ValueError(f"板块标识名「{name}」已被占用")
+            segment.name = name
+            changed.append("name")
+        if display_name is not None and display_name != segment.display_name:
+            segment.display_name = display_name
+            changed.append("display_name")
+        if description is not None and description != segment.description:
+            segment.description = description
+            changed.append("description")
+        if changed:
+            _mark_overridden(segment, changed)
+            _mark_edited(segment)
+            _log_change(db, "ontology_segment", segment.id, "edit", operator, "更新业务板块")
+            db.commit()
+        return self.query.get_segment_detail(db, segment.id)
+
+    def delete_relation_type(
+        self,
+        db: Session,
+        relation_type_id: str,
+        *,
+        operator: str | None = None,
+    ) -> dict:
+        """Soft-delete a relation and retain its audit/provenance record."""
+        rel = db.get(RelationType, relation_type_id)
+        if not rel:
+            raise ValueError("Relation type not found")
+        previous_endpoint_ids = {rel.source_object_type_id, rel.target_object_type_id}
+        if rel.deleted_by_user:
+            return {"id": rel.id, "deleted": True}
+        rel.deleted_by_user = True
+        rel.status = EntityStatus.DEPRECATED.value
+        _refresh_related_segments(db, previous_endpoint_ids)
+        _mark_edited(rel)
+        _log_change(db, "relation_type", rel.id, "delete", operator, "删除关系")
+        db.commit()
+        return {"id": rel.id, "deleted": True}
 
     def convert_object_to_relation(
         self,
@@ -691,6 +797,7 @@ class EditService:
         mapping_object_type_id: str | None = None,
         source_object_type_id: str | None = None,
         target_object_type_id: str | None = None,
+        needs_review: bool | None = None,
         operator: str | None = None,
     ) -> RelationTypeOut:
         from app.services.relation_structure import validate_relation_structure_type
@@ -746,11 +853,52 @@ class EditService:
                 raise ValueError("Source and target object cannot be the same")
             rel.target_object_type_id = target_object_type_id
 
+        if needs_review is not None:
+            rel.needs_review = bool(needs_review)
+
+        _refresh_related_segments(
+            db,
+            previous_endpoint_ids
+            | {rel.source_object_type_id, rel.target_object_type_id},
+        )
+
         _mark_edited(rel)
 
         _log_change(db, "relation_type", rel.id, "edit", operator, "更新关系")
         db.commit()
         return self.query._to_relation_out(db, rel)
+
+    def batch_update_relation_types(
+        self,
+        db: Session,
+        ids: list[str],
+        *,
+        needs_review: bool | None = None,
+        operator: str | None = None,
+    ) -> list[RelationTypeOut]:
+        """批量置关系的复核状态（审核工作台的关系队列用）。
+
+        与对象批量端点对称。关系没有「角色」可改判，判定就是「这条关系成立吗」——
+        成立即确认，不成立走删除，故这里只收 needs_review。
+        """
+        if needs_review is None:
+            return []
+        ids = [i for i in ids if i]
+        if not ids:
+            return []
+
+        rels = db.query(RelationType).filter(RelationType.id.in_(ids)).all()
+        updated: list[RelationType] = []
+        for rel in rels:
+            if bool(rel.needs_review) == bool(needs_review):
+                continue
+            rel.needs_review = bool(needs_review)
+            _mark_edited(rel)
+            _log_change(db, "relation_type", rel.id, "edit", operator, "批量更新关系复核状态")
+            updated.append(rel)
+
+        db.commit()
+        return [self.query._to_relation_out(db, rel) for rel in updated]
 
     def pre_publish_relation_type(
         self,

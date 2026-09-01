@@ -773,6 +773,10 @@ class OntologyMergeService:
                     source_confidence=item.confidence,
                     source_signature=sig,
                     status=EntityStatus.SUGGESTED.value,
+                    # 新生成的机器关系一律待复核——与对象同一条规矩：机器只在**新建**
+                    # 时给初值，再生成不回写（下面的 existing 分支不碰 needs_review），
+                    # 人的确认因此不会被下一轮生成推翻。
+                    needs_review=True,
                     origin="machine",
                     machine_baseline=_dumps(incoming),
                     last_generation_id=gen_id,
@@ -973,6 +977,19 @@ class OntologyMergeService:
                         obj.segment_id = segment_id_by_name.get(target_segment_name)
                     else:
                         obj.segment_id = None  # 未接入对象
+
+        # member_count is derived from actual assignments, not the draft's
+        # stale count. Recompute after all objects have been assigned.
+        db.flush()
+        for segment in db.query(OntologySegment).filter(
+            OntologySegment.ontology_id == ontology_id,
+            OntologySegment.deleted_by_user == False,
+        ).all():
+            segment.member_count = db.query(ObjectType).filter(
+                ObjectType.ontology_id == ontology_id,
+                ObjectType.segment_id == segment.id,
+                ObjectType.deleted_by_user == False,
+            ).count()
 
     # ------------------------------------------------------------------
     # 全量合并入口

@@ -3,6 +3,7 @@ import {
   BranchesOutlined,
   BulbOutlined,
   DatabaseOutlined,
+  DeleteOutlined,
   LinkOutlined,
 } from "@ant-design/icons";
 import {
@@ -60,6 +61,7 @@ interface RelationForm {
   mapping_object_type_id?: string | null;
   source_object_type_id: string;
   target_object_type_id: string;
+  needs_review?: boolean;
 }
 
 const STRUCTURE_TYPES_REQUIRING_MAPPING_TABLE = new Set(["bridge_table", "fact_table"]);
@@ -219,6 +221,7 @@ export function RelationTypeDetailPage() {
       mapping_object_type_id: detail.mapping_object_type_id ?? null,
       source_object_type_id: detail.source_object_type_id,
       target_object_type_id: detail.target_object_type_id,
+      needs_review: Boolean(detail.needs_review),
     });
     // 承载表(mapping)已设置就把它塞进下拉选项——即便后端 mapping_object 引用解析为空
     // (对象跨域/未解析)，也用 mapping_object_name 兜底，避免 Select 有值却无对应选项
@@ -458,6 +461,7 @@ export function RelationTypeDetailPage() {
         extra={
           <Space>
             <StatusBadge status={rel.status} />
+            {rel.needs_review && <Tag color="orange">待复核</Tag>}
             {rel.mapping_object_type_id && (
               <Tooltip title="把该业务关系物化到目标存储（建表落数，需 publisher 角色）">
                 <Button icon={<DatabaseOutlined />} onClick={() => setMaterializeOpen(true)}>
@@ -478,7 +482,35 @@ export function RelationTypeDetailPage() {
                   </Link>
                 }
               />
-            ) : null}
+              ) : null}
+            {inWorkspace && (
+              <Tooltip title="删除关系">
+                <Button
+                  danger
+                  icon={<DeleteOutlined />}
+                  aria-label="删除关系"
+                  onClick={() => {
+                    Modal.confirm({
+                      title: "确认删除关系？",
+                      content: "删除后关系会从本体浏览中隐藏，但保留审计记录。",
+                      okText: "删除",
+                      okType: "danger",
+                      cancelText: "取消",
+                      onOk: async () => {
+                        try {
+                          if (!relationId) return;
+                          await api.deleteRelationType(relationId);
+                          message.success("关系已删除");
+                          window.history.back();
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : "删除失败");
+                        }
+                      },
+                    });
+                  }}
+                />
+              </Tooltip>
+            )}
           </Space>
         }
       />
@@ -562,6 +594,14 @@ export function RelationTypeDetailPage() {
                         }))}
                       />
                     </Form.Item>
+                    <Form.Item label="复核状态" name="needs_review">
+                      <Select
+                        options={[
+                          { label: "已确认", value: false },
+                          { label: "待复核", value: true },
+                        ]}
+                      />
+                    </Form.Item>
                     <Descriptions column={1} size="small" labelStyle={{ width: 96 }}>
                       <Descriptions.Item label="置信度">
                         {rel.source_confidence?.toFixed(2) ?? "-"}
@@ -592,6 +632,9 @@ export function RelationTypeDetailPage() {
                     </Descriptions.Item>
                     <Descriptions.Item label="置信度">
                       {rel.source_confidence?.toFixed(2) ?? "-"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="复核状态">
+                      {rel.needs_review ? <Tag color="orange">待复核</Tag> : "已确认"}
                     </Descriptions.Item>
                   </Descriptions>
                 )}

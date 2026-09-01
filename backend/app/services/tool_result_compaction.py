@@ -17,8 +17,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# 第 1 级丢弃：纯说明性长文本，去掉不影响模型定位实体
-_VERBOSE_KEYS = ("description", "note", "values_note", "role_reason", "expression_draft")
+# 第 1 级丢弃：纯说明性长文本，去掉不影响模型定位实体。
+# role_signals 是给人看的判定证据（复核界面用），对模型定位实体毫无用处，
+# 却会随对象列表成倍放大 —— 与长文本同级先丢。
+_VERBOSE_KEYS = (
+    "description", "note", "values_note", "role_reason", "role_signals", "expression_draft",
+)
 # 第 2 级丢弃：辅助元数据，保留后仍能作答
 _SECONDARY_KEYS = (
     "data_type", "semantic_type", "structure_type", "table_role",

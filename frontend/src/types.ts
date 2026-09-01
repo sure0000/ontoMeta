@@ -313,8 +313,20 @@ export interface ObjectTypeSummary extends FieldProvenance {
   table_role?: string;
   role_confidence?: number;
   role_reason?: string;
+  needs_review?: boolean;
+  /** 分类证据快照：审核界面的判据。列表接口现在也带它，不必再跳详情页看。 */
+  role_signals?: RoleSignals;
+  /** DataHub profiling 沉淀的行数：判「是不是日志/流水表」最直接的一列。 */
+  row_count?: number;
   segment_id?: string;
   segment_name?: string;
+  top_neighbors?: Array<{
+    id: string;
+    name: string;
+    display_name: string;
+    relation_name: string;
+    direction: "outbound" | "inbound";
+  }>;
   domain_context_id?: string;
   domain_name?: string;
   /**
@@ -332,6 +344,8 @@ export interface SegmentSummary extends FieldProvenance {
   description?: string;
   member_count: number;
   ontology_id: string;
+  /** 所属数据域：板块页返回工作区要用它（ontology_id 不是 domainId）。 */
+  domain_context_id?: string;
   needs_review: boolean;
   updated_at: string;
 }
@@ -340,6 +354,83 @@ export interface SegmentDetail extends SegmentSummary {
   members: ObjectTypeSummary[];
   internal_relation_count: number;
   edges?: GraphEdge[];
+  cross_relation_count?: number;
+  relation_sentences?: string[];
+}
+
+export interface SegmentReviewProgress {
+  segment_id: string;
+  segment_name: string;
+  total_count: number;
+  needs_review_count: number;
+  reviewed_count: number;
+  progress_ratio: number;
+}
+
+export interface ReviewModeStats {
+  /** 覆盖全部角色（与审核队列同口径），不再只数业务对象。 */
+  total_objects: number;
+  needs_review_count: number;
+  reviewed_count: number;
+  progress_ratio: number;
+  /** 待复核按角色拆分 */
+  pending_by_role?: Record<string, number>;
+  /** 其中会卡住发布的部分（待复核的业务对象不随本体发布） */
+  business_object_pending?: number;
+  total_relations: number;
+  relation_needs_review_count: number;
+  reviewed_relation_count: number;
+  /** 未接入板块的对象：不在任何 segment_progress 行里，队列侧用 segment_id="-" 指代 */
+  unsegmented_total?: number;
+  unsegmented_pending?: number;
+  segment_progress: SegmentReviewProgress[];
+}
+
+/** 一组同类待复核对象——审核工作台的最小工作单元。 */
+export interface ReviewGroup {
+  key: string;
+  segment_id?: string | null;
+  segment_name: string;
+  table_role: string;
+  name_family: string;
+  score_band: "strong" | "near" | "weak" | "unknown";
+  score_band_label: string;
+  size: number;
+  /** 这一组里已经判过的个数（判定自我加强：同族前面都确认了，后面多半一样）。 */
+  reviewed_in_group: number;
+  truncated: boolean;
+  members: ObjectTypeSummary[];
+  /** kind=relation 时成员装在这里（关系没有对象摘要那套字段）。 */
+  relation_members: RelationType[];
+}
+
+export interface ReviewQueue {
+  kind: "object" | "relation";
+  groups: ReviewGroup[];
+  group_total: number;
+  /** 本页首组在整条队列里的位置（0 基） */
+  group_offset: number;
+  pending_total: number;
+  pending_by_role: Record<string, number>;
+  next_cursor?: string | null;
+}
+
+export interface VerbSuggestion {
+  relation_id: string;
+  current_verb: string;
+  suggested_verb: string;
+  method: string;
+  confidence: number;
+  source_object_name: string;
+  target_object_name: string;
+}
+
+export interface VerbRefinementBatch {
+  suggestions: VerbSuggestion[];
+  total: number;
+  rule_count: number;
+  llm_count: number;
+  fallback_count: number;
 }
 
 export interface Property extends FieldProvenance {
@@ -371,6 +462,7 @@ export interface RelationType extends FieldProvenance {
   source_evidence?: string;
   status: string;
   source_confidence?: number;
+  needs_review?: boolean;
 }
 
 export interface RelationObjectRef {
@@ -411,6 +503,8 @@ export interface RelationGroup {
   confidence_min?: number | null;
   confidence_max?: number | null;
   statuses: string[];
+  needs_review_count: number;
+  target_groups: Array<{ display_name: string; count: number }>;
 }
 
 /** 对象角色分类的结构化证据快照（后端 object_classifier 产出，仅详情返回）。 */
@@ -1556,6 +1650,7 @@ export interface MergeReport {
   properties: MergeReportSection;
   relation_types: MergeReportSection;
   business_logics: MergeReportSection;
+  segments: MergeReportSection;
 }
 
 export interface ConflictItem {

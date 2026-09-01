@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, aliased, joinedload
 
 from app.models import (
     BusinessLogic,
@@ -84,6 +84,15 @@ def _loads_json(value: str | None) -> dict | None:
         return json.loads(value)
     except (TypeError, ValueError):
         return None
+
+
+def _loads(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default
 
 
 
@@ -351,6 +360,7 @@ class OntologyQueryService:
         q: str | None = None,
         role_in: list[str] | None = None,
         needs_review: bool | None = None,
+        segment_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> PageResult[ObjectTypeSummary]:
@@ -368,6 +378,8 @@ class OntologyQueryService:
             query = query.filter(ObjectType.table_role.in_(role_in))
         if needs_review is not None:
             query = query.filter(ObjectType.needs_review.is_(bool(needs_review)))
+        if segment_id:
+            query = query.filter(ObjectType.segment_id == segment_id)
         normalized_q = (q or "").strip()
         # Agent/搜索框约定 ``*`` 表示不限定关键词，不能把它当成字面星号去做 ILIKE。
         if normalized_q and normalized_q != "*":
@@ -395,6 +407,7 @@ class OntologyQueryService:
         )
         landings = bulk_object_landings(db, [o.id for o in objects])
         top_neighbors_map = self._bulk_top_neighbors(db, [o.id for o in objects])
+        segment_names = self._bulk_segment_names(db, [o.segment_id for o in objects])
         items = [
             self._to_object_summary(
                 db,
@@ -404,10 +417,25 @@ class OntologyQueryService:
                 landing=landings.get(obj.id),
                 landing_loaded=True,
                 top_neighbors=top_neighbors_map.get(obj.id, []),
+                segment_names=segment_names,
             )
             for obj in objects
         ]
         return PageResult(items=items, total=total, limit=limit, offset=offset)
+
+    def _bulk_segment_names(
+        self, db: Session, segment_ids: list[str | None]
+    ) -> dict[str, str]:
+        """batch: segment_id -> display_name（跳过 None，空输入不发查询）。"""
+        ids = {sid for sid in segment_ids if sid}
+        if not ids:
+            return {}
+        rows = (
+            db.query(OntologySegment.id, OntologySegment.display_name)
+            .filter(OntologySegment.id.in_(ids))
+            .all()
+        )
+        return {sid: name for sid, name in rows}
 
     def _bulk_object_stats(
         self, db: Session, object_ids: list[str]
@@ -505,6 +533,7 @@ class OntologyQueryService:
         *,
         q: str | None = None,
         display_name: str | None = None,
+        needs_review: bool | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> PageResult[RelationTypeOut]:
@@ -523,6 +552,8 @@ class OntologyQueryService:
         )
         if display_name is not None:
             query = query.filter(RelationType.display_name == display_name)
+        if needs_review is not None:
+            query = query.filter(RelationType.needs_review.is_(bool(needs_review)))
         if q and q.strip():
             like = f"%{q.strip()}%"
             query = query.filter(
@@ -548,6 +579,7 @@ class OntologyQueryService:
         published_only: bool = False,
         *,
         q: str | None = None,
+        needs_review: bool | None = None,
     ) -> list[RelationGroupOut]:
         """按 display_name 折叠关系为分组（关系去重列表用）。
 
@@ -571,6 +603,8 @@ class OntologyQueryService:
                 | (RelationType.display_name.ilike(like))
                 | (RelationType.description.ilike(like))
             )
+        if needs_review is not None:
+            query = query.filter(RelationType.needs_review.is_(bool(needs_review)))
 
         groups: dict[str, dict] = {}
         for rel in query.all():
@@ -582,6 +616,8 @@ class OntologyQueryService:
                     "structure_types": set(),
                     "cardinalities": set(),
                     "statuses": set(),
+                    "needs_review_count": 0,
+                    "target_groups": Counter(),
                     "conf_min": None,
                     "conf_max": None,
                     "descriptions": Counter(),
@@ -598,6 +634,13 @@ class OntologyQueryService:
                 g["cardinalities"].add(cardinality)
             if rel.status:
                 g["statuses"].add(rel.status)
+            if rel.needs_review:
+                g["needs_review_count"] += 1
+            target = rel.target_object_type if "target_object_type" in rel.__dict__ else db.get(
+                ObjectType, rel.target_object_type_id
+            )
+            target_name = target.display_name if target else rel.target_object_type_id
+            g["target_groups"][target_name] += 1
             if rel.source_confidence is not None:
                 c = rel.source_confidence
                 g["conf_min"] = c if g["conf_min"] is None else min(g["conf_min"], c)
@@ -615,6 +658,11 @@ class OntologyQueryService:
                 confidence_min=g["conf_min"],
                 confidence_max=g["conf_max"],
                 statuses=sorted(g["statuses"]),
+                needs_review_count=g["needs_review_count"],
+                target_groups=[
+                    {"display_name": target_name, "count": count}
+                    for target_name, count in g["target_groups"].most_common()
+                ],
             )
             for name, g in groups.items()
         ]
@@ -918,9 +966,12 @@ class OntologyQueryService:
         total_relation_count = len(relations)
 
         # 读取落库的板块数据
-        segments = db.query(OntologySegment).filter(
-            OntologySegment.ontology_id == ontology_id
-        ).all()
+        segment_query = db.query(OntologySegment).filter(
+            OntologySegment.ontology_id == ontology_id,
+            OntologySegment.deleted_by_user == False,
+            OntologySegment.upstream_removed == False,
+        )
+        segments = segment_query.all()
 
         # 如果没有落库的板块，回退到旧的聚类算法
         if not segments:
@@ -983,7 +1034,9 @@ class OntologyQueryService:
             clusters: list[GraphCluster] = []
             for seg in segments:
                 # 通过 relationship 获取成员对象
-                member_objects = seg.members  # 这是 ObjectType 列表
+                member_objects = [obj for obj in seg.members if obj.id in obj_by_id]
+                if not member_objects:
+                    continue
 
                 # 按度数排序
                 ranked_members = sorted(
@@ -1034,6 +1087,8 @@ class OntologyQueryService:
         if segments:
             for seg in segments:
                 for obj in seg.members:
+                    if obj.id not in obj_by_id:
+                        continue
                     cluster_of[obj.id] = seg.id
             for hub in hub_nodes:
                 cluster_of[hub.id] = hub.id
@@ -1112,6 +1167,7 @@ class OntologyQueryService:
         ontology_id: str,
         cluster_id: str,
         *,
+        published_only: bool = False,
         max_cluster_nodes: int = _DEFAULT_CLUSTER_MAX_NODES,
     ) -> ClusterDetail | None:
         """单个聚类的下钻详情：全量成员 + 簇内关系边（供邻接矩阵）。
@@ -1119,28 +1175,62 @@ class OntologyQueryService:
         cluster_id 必须来自同一 max_cluster_nodes 下的 grouped-graph（默认 50）——聚类确定性
         保证同一份数据得到同样的簇划分。找不到该簇返回 None（由路由转 404）。
         """
-        objects = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id).all()
-        relations = db.query(RelationType).filter(RelationType.ontology_id == ontology_id).all()
+        obj_query = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
+        rel_query = db.query(RelationType).filter(RelationType.ontology_id == ontology_id)
+        if published_only:
+            obj_query = obj_query.filter(ObjectType.status == EntityStatus.PUBLISHED)
+            rel_query = rel_query.filter(RelationType.status == EntityStatus.PUBLISHED)
+        objects = obj_query.all()
+        relations = rel_query.all()
 
-        part = self._compute_cluster_partition(
-            objects, relations, max_cluster_nodes=max_cluster_nodes
-        )
-        members = part.cluster_members.get(cluster_id)
-        if members is None:
-            return None
+        # Persisted segment ids are the stable identity used by the overview
+        # graph. Only fall back to the legacy computed partition for old
+        # ontologies that have not generated segments yet.
+        segment = db.query(OntologySegment).filter(
+            OntologySegment.id == cluster_id,
+            OntologySegment.ontology_id == ontology_id,
+            OntologySegment.deleted_by_user == False,
+        ).first()
+        if published_only and segment and segment.upstream_removed:
+            segment = None
+        if segment is not None:
+            object_by_id = {obj.id: obj for obj in objects}
+            member_objects = [obj for obj in segment.members if obj.id in object_by_id]
+            if not member_objects:
+                return None
+            member_ids = {obj.id for obj in member_objects}
+            member_objects.sort(
+                key=lambda obj: sum(
+                    1
+                    for rel in relations
+                    if rel.source_object_type_id == obj.id
+                    or rel.target_object_type_id == obj.id
+                ),
+                reverse=True,
+            )
+            name = segment.display_name
+        else:
+            part = self._compute_cluster_partition(
+                objects, relations, max_cluster_nodes=max_cluster_nodes
+            )
+            members = part.cluster_members.get(cluster_id)
+            if members is None:
+                return None
+            object_by_id = part.obj_by_id
+            member_ids = set(members)
+            member_objects = [object_by_id[oid] for oid in members]
+            name = part.cluster_names[cluster_id]
 
-        member_set = set(members)
-        obj_by_id = part.obj_by_id
         nodes = [
             GraphNode(
-                id=obj_by_id[oid].id,
-                label=obj_by_id[oid].name,
-                display_name=obj_by_id[oid].display_name,
-                status=obj_by_id[oid].status,
-                table_role=obj_by_id[oid].table_role,
-                needs_review=bool(obj_by_id[oid].needs_review),
+                id=obj.id,
+                label=obj.name,
+                display_name=obj.display_name,
+                status=obj.status,
+                table_role=obj.table_role,
+                needs_review=bool(obj.needs_review),
             )
-            for oid in members
+            for obj in member_objects
         ]
         edges = [
             GraphEdge(
@@ -1153,15 +1243,17 @@ class OntologyQueryService:
                 structure_type=rel.structure_type,
             )
             for rel in relations
-            if rel.source_object_type_id in member_set
-            and rel.target_object_type_id in member_set
+            if rel.source_object_type_id in member_ids
+            and rel.target_object_type_id in member_ids
         ]
         return ClusterDetail(
             id=cluster_id,
-            name=part.cluster_names[cluster_id],
-            node_count=len(members),
+            name=name,
+            node_count=len(member_objects),
             nodes=nodes,
             edges=edges,
+            ontology_id=ontology_id,
+            published_only=published_only,
         )
 
     def list_versions(self, db: Session, entity_id: str) -> list[VersionRecordOut]:
@@ -1377,6 +1469,7 @@ class OntologyQueryService:
         landing: ObjectLanding | None = None,
         landing_loaded: bool = False,
         top_neighbors: list[dict[str, Any]] | None = None,
+        segment_names: dict[str, str] | None = None,
     ) -> ObjectTypeSummary:
         if stats is None:
             stats = self._bulk_object_stats(db, [obj.id]).get(obj.id, (0, 0, 0))
@@ -1392,12 +1485,16 @@ class OntologyQueryService:
         if landing is None and not landing_loaded:
             landing = bulk_object_landings(db, [obj.id]).get(obj.id)
 
-        # 查询板块信息
+        # 板块名：列表页批量传入（一次查全本体的板块），单对象调用就地补查。
+        # 逐个 db.get 会在千对象的列表上打出上千次查询——审核队列每翻一页都吃这笔账。
         segment_name = None
         if obj.segment_id:
-            segment = db.get(OntologySegment, obj.segment_id)
-            if segment:
-                segment_name = segment.display_name
+            if segment_names is not None:
+                segment_name = segment_names.get(obj.segment_id)
+            else:
+                segment = db.get(OntologySegment, obj.segment_id)
+                if segment:
+                    segment_name = segment.display_name
 
         # 获取 top_neighbors（如果未传入则按需查询）
         if top_neighbors is None:
@@ -1422,6 +1519,9 @@ class OntologyQueryService:
             table_role=obj.table_role,
             role_confidence=obj.role_confidence,
             role_reason=obj.role_reason,
+            needs_review=bool(obj.needs_review),
+            role_signals=_loads_json(obj.role_signals),
+            row_count=obj.row_count,
             segment_id=obj.segment_id,
             segment_name=segment_name,
             top_neighbors=top_neighbors,
@@ -1462,6 +1562,7 @@ class OntologyQueryService:
             source_evidence=rel.source_evidence,
             status=rel.status,
             source_confidence=rel.source_confidence,
+            needs_review=bool(rel.needs_review),
             origin=rel.origin or "machine",
             upstream_removed=bool(rel.upstream_removed),
             has_conflict=rel.has_conflict,
@@ -1522,8 +1623,15 @@ class OntologyQueryService:
         from app.schemas import PageResult, SegmentSummary
 
         query_obj = db.query(OntologySegment).filter(
-            OntologySegment.ontology_id == ontology_id
+            OntologySegment.ontology_id == ontology_id,
+            OntologySegment.deleted_by_user == False,
+            OntologySegment.upstream_removed == False,
         )
+
+        if published_only:
+            query_obj = query_obj.join(
+                ObjectType, ObjectType.segment_id == OntologySegment.id
+            ).filter(ObjectType.status == EntityStatus.PUBLISHED).distinct()
 
         # 搜索过滤
         if q:
@@ -1534,10 +1642,6 @@ class OntologyQueryService:
                 | (OntologySegment.description.ilike(f"%{q}%"))
             )
 
-        # 软删除过滤
-        if not published_only:
-            query_obj = query_obj.filter(OntologySegment.deleted_by_user == False)
-
         # 总数
         total = query_obj.count()
 
@@ -1546,6 +1650,9 @@ class OntologyQueryService:
             query_obj = query_obj.offset(offset).limit(limit)
 
         segments = query_obj.order_by(OntologySegment.display_name).all()
+
+        # 板块回工作区要用数据域 id（不是本体 id）——整页共用一次解析。
+        domain_context_id, _ = self._resolve_domain_context(db, ontology_id)
 
         # 构建 SegmentSummary
         items = []
@@ -1556,8 +1663,14 @@ class OntologyQueryService:
                     name=seg.name,
                     display_name=seg.display_name,
                     description=seg.description,
-                    member_count=seg.member_count,
+                    member_count=db.query(ObjectType).filter(
+                        ObjectType.ontology_id == ontology_id,
+                        ObjectType.segment_id == seg.id,
+                        ObjectType.deleted_by_user == False,
+                        *( [ObjectType.status == EntityStatus.PUBLISHED] if published_only else [] ),
+                    ).count(),
                     ontology_id=seg.ontology_id,
+                    domain_context_id=domain_context_id,
                     needs_review=seg.needs_review,
                     updated_at=seg.updated_at,
                     origin=seg.origin or "machine",
@@ -1570,7 +1683,9 @@ class OntologyQueryService:
 
         return PageResult(items=items, total=total, limit=limit, offset=offset)
 
-    def get_segment_detail(self, db: Session, segment_id: str):
+    def get_segment_detail(
+        self, db: Session, segment_id: str, *, published_only: bool = False
+    ):
         """获取板块详情（包含成员列表）。
 
         对于稠密板块（成员 > 40），返回边数据以支持矩阵视图。
@@ -1578,26 +1693,30 @@ class OntologyQueryService:
         from app.models import OntologySegment, ObjectType, RelationType
         from app.schemas import SegmentDetail, GraphEdge
 
-        segment = db.query(OntologySegment).filter(OntologySegment.id == segment_id).first()
+        segment_query = db.query(OntologySegment).filter(
+            OntologySegment.id == segment_id,
+            OntologySegment.deleted_by_user == False,
+            OntologySegment.upstream_removed == False,
+        )
+        segment = segment_query.first()
         if not segment:
             return None
 
         # 获取成员对象
-        members = (
-            db.query(ObjectType)
-            .filter(
-                ObjectType.segment_id == segment_id,
-                ObjectType.deleted_by_user == False,
-            )
-            .all()
+        member_query = db.query(ObjectType).filter(
+            ObjectType.segment_id == segment_id,
+            ObjectType.deleted_by_user == False,
         )
+        if published_only:
+            member_query = member_query.filter(ObjectType.status == EntityStatus.PUBLISHED)
+        members = member_query.all()
 
         # 转换为 ObjectTypeSummary
         member_summaries = [self._to_object_summary(db, obj) for obj in members]
 
         # 获取板块内关系
         member_ids = {obj.id for obj in members}
-        internal_relations = (
+        relation_query = (
             db.query(RelationType)
             .filter(
                 RelationType.ontology_id == segment.ontology_id,
@@ -1605,8 +1724,10 @@ class OntologyQueryService:
                 RelationType.target_object_type_id.in_(member_ids),
                 RelationType.deleted_by_user == False,
             )
-            .all()
         )
+        if published_only:
+            relation_query = relation_query.filter(RelationType.status == EntityStatus.PUBLISHED)
+        internal_relations = relation_query.all()
 
         internal_relation_count = len(internal_relations)
 
@@ -1626,13 +1747,39 @@ class OntologyQueryService:
                 for rel in internal_relations
             ]
 
+        all_segment_relations = db.query(RelationType).filter(
+            RelationType.ontology_id == segment.ontology_id,
+            RelationType.deleted_by_user == False,
+            (RelationType.source_object_type_id.in_(member_ids))
+            | (RelationType.target_object_type_id.in_(member_ids)),
+        )
+        if published_only:
+            all_segment_relations = all_segment_relations.filter(
+                RelationType.status == EntityStatus.PUBLISHED
+            )
+        cross_relations = [
+            rel
+            for rel in all_segment_relations.all()
+            if (rel.source_object_type_id in member_ids)
+            != (rel.target_object_type_id in member_ids)
+        ]
+        names = {obj.id: obj.display_name for obj in members}
+        relation_sentences = [
+            f"{names.get(rel.source_object_type_id, rel.source_object_type_id)} "
+            f"{rel.display_name or '关联'} "
+            f"{names.get(rel.target_object_type_id, rel.target_object_type_id)}"
+            f"{(' · ' + ' · '.join(filter(None, [rel.cardinality, rel.source_evidence]))) if (rel.cardinality or rel.source_evidence) else ''}"
+            for rel in internal_relations[:20]
+        ]
+
         return SegmentDetail(
             id=segment.id,
             name=segment.name,
             display_name=segment.display_name,
             description=segment.description,
-            member_count=segment.member_count,
+            member_count=len(members),
             ontology_id=segment.ontology_id,
+            domain_context_id=self._resolve_domain_context(db, segment.ontology_id)[0],
             needs_review=segment.needs_review,
             updated_at=segment.updated_at,
             origin=segment.origin or "machine",
@@ -1643,10 +1790,286 @@ class OntologyQueryService:
             members=member_summaries,
             internal_relation_count=internal_relation_count,
             edges=edges,
+            cross_relation_count=len(cross_relations),
+            relation_sentences=relation_sentences,
+        )
+
+    # 「未接入板块」这一桶的哨兵 id（与 review_queue.group_key 对 None 的写法一致）。
+    UNSEGMENTED = "-"
+
+    def _pending_review_rows(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        segment_id: str | None = None,
+        role_in: list[str] | None = None,
+        needs_review: bool = True,
+    ) -> list:
+        """对象的轻量行（``review_queue.QueueRow``，只取分组要用的列）。
+
+        ``needs_review=False`` 取的是已判的那一半——用来数「本组已经判了几个」，
+        那是判定自我加强的依据（同族同板块的表既然前面都确认了，后面多半一样）。
+
+        不构造摘要：分组要看全量（近千行），而摘要每行都要带统计/落点/邻居，
+        全量materialize会把翻一页变成上千次查询。摘要只给本页命中的组补。
+        """
+        from app.services.review_queue import QueueRow
+
+        query = db.query(
+            ObjectType.id,
+            ObjectType.name,
+            ObjectType.display_name,
+            ObjectType.segment_id,
+            ObjectType.table_role,
+            ObjectType.role_signals,
+        ).filter(
+            ObjectType.ontology_id == ontology_id,
+            ObjectType.needs_review.is_(bool(needs_review)),
+            ObjectType.deleted_by_user == False,
+        )
+        if segment_id == self.UNSEGMENTED:
+            query = query.filter(ObjectType.segment_id.is_(None))
+        elif segment_id:
+            query = query.filter(ObjectType.segment_id == segment_id)
+        if role_in:
+            query = query.filter(ObjectType.table_role.in_(role_in))
+        return [
+            QueueRow(
+                id=row[0],
+                name=row[1],
+                display_name=row[2],
+                segment_id=row[3],
+                table_role=row[4],
+                role_signals=_loads_json(row[5]),
+            )
+            for row in query.all()
+        ]
+
+    def _object_summaries_for_ids(
+        self, db: Session, object_ids: list[str]
+    ) -> dict[str, ObjectTypeSummary]:
+        """按 id 批量构造对象摘要（走与列表页同一套批量取数）。"""
+        if not object_ids:
+            return {}
+        objects = db.query(ObjectType).filter(ObjectType.id.in_(object_ids)).all()
+        stats = self._bulk_object_stats(db, [o.id for o in objects])
+        domain_map = self._bulk_resolve_domain_context(
+            db, [o.ontology_id for o in objects]
+        )
+        landings = bulk_object_landings(db, [o.id for o in objects])
+        top_neighbors_map = self._bulk_top_neighbors(db, [o.id for o in objects])
+        segment_names = self._bulk_segment_names(db, [o.segment_id for o in objects])
+        return {
+            obj.id: self._to_object_summary(
+                db,
+                obj,
+                stats=stats.get(obj.id),
+                domain=domain_map.get(obj.ontology_id),
+                landing=landings.get(obj.id),
+                landing_loaded=True,
+                top_neighbors=top_neighbors_map.get(obj.id, []),
+                segment_names=segment_names,
+            )
+            for obj in objects
+        }
+
+    def _pending_relation_rows(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        segment_id: str | None = None,
+        needs_review: bool = True,
+    ) -> list:
+        """关系的轻量行。
+
+        关系的判定单元是**去重组**：同一个动词（display_name）在同一板块内的一批边
+        通常同真同假。族名直接用动词本身——切词会把「发起支付」和「发起审批」并到
+        一起，而动词的整体才是这条边的身份。板块取源端对象的板块。
+        """
+        from app.services.review_queue import QueueRow
+
+        source = aliased(ObjectType)
+        query = (
+            db.query(
+                RelationType.id,
+                RelationType.name,
+                RelationType.display_name,
+                RelationType.structure_type,
+                RelationType.source_confidence,
+                source.segment_id,
+            )
+            .join(source, source.id == RelationType.source_object_type_id)
+            .filter(
+                RelationType.ontology_id == ontology_id,
+                RelationType.needs_review.is_(bool(needs_review)),
+                RelationType.deleted_by_user == False,
+            )
+        )
+        if segment_id == self.UNSEGMENTED:
+            query = query.filter(source.segment_id.is_(None))
+        elif segment_id:
+            query = query.filter(source.segment_id == segment_id)
+        return [
+            QueueRow(
+                id=row[0],
+                name=row[1],
+                display_name=row[2],
+                segment_id=row[5],
+                table_role=row[3] or "unknown",
+                family=(row[2] or "").strip() or "-",
+                score=row[4],
+            )
+            for row in query.all()
+        ]
+
+    def get_review_queue(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        kind: str = "object",
+        segment_id: str | None = None,
+        role_in: list[str] | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ):
+        """审核队列的一页：成组、确定性排序、可重放游标。
+
+        与 ``list_object_types`` 的分页有本质区别——那边按 ``updated_at DESC`` 排，
+        而判定动作会改写 ``updated_at`` 并把行移出 ``needs_review`` 结果集，翻页因此
+        会静默跳过。这里的排序键里没有任何随判定变化的字段：判掉一批后拿同一个
+        cursor 再请求，只会少掉已判的组，不会错位。
+        """
+        import bisect
+
+        from app.schemas import ReviewGroupOut, ReviewQueueOut
+        from app.services.review_queue import (
+            BAND_LABELS,
+            MAX_GROUP_MEMBERS,
+            build_groups,
+            cursor_sort_key,
+            sort_key,
+        )
+
+        is_relation = kind == "relation"
+        rows = (
+            self._pending_relation_rows(db, ontology_id, segment_id=segment_id)
+            if is_relation
+            else self._pending_review_rows(
+                db, ontology_id, segment_id=segment_id, role_in=role_in
+            )
+        )
+        pending_by_role: dict[str, int] = {}
+        for row in rows:
+            pending_by_role[row.table_role] = pending_by_role.get(row.table_role, 0) + 1
+
+        # 已判的那一半也要参与分组，原因有两个：
+        # 1) 「本组已判 N 个」是判据——同族同板块前面都确认了，后面多半一样；
+        # 2) 更要紧的是**分组必须在完整人口上做一次**。长尾并桶的阈值看的是族有多大，
+        #    只拿待判的那一半来分，族会随着判定不断缩水、掉进零散桶，键跟着变，
+        #    游标就又开始漂了。在 待判+已判 上分组，键从此完全不动。
+        reviewed_rows = (
+            self._pending_relation_rows(
+                db, ontology_id, segment_id=segment_id, needs_review=False
+            )
+            if is_relation
+            else self._pending_review_rows(
+                db, ontology_id, segment_id=segment_id, role_in=role_in, needs_review=False
+            )
+        )
+        all_rows = rows + reviewed_rows
+        pending_ids = {row.id for row in rows}
+        segment_names = self._bulk_segment_names(db, [row.segment_id for row in all_rows])
+        groups = []
+        reviewed_by_key: dict[str, int] = {}
+        for group in build_groups(all_rows, segment_names=segment_names):
+            pending_members = [oid for oid in group.member_ids if oid in pending_ids]
+            if not pending_members:
+                continue  # 整组判完了，不必再出现在队列里
+            reviewed_by_key[group.key] = group.size - len(pending_members)
+            group.member_ids = pending_members
+            groups.append(group)
+
+        start = 0
+        if cursor:
+            keys = [g.key for g in groups]
+            if cursor in keys:
+                start = keys.index(cursor)
+            else:
+                # 游标指向的组已被判完而消失：按排序键二分回到它原来的位置，
+                # 而不是把人踢回队首。键里编码了 segment/role/family/band，
+                # 足以还原排序元组。
+                target = cursor_sort_key(cursor, segment_names=segment_names)
+                start = (
+                    bisect.bisect_left([sort_key(g) for g in groups], target)
+                    if target is not None
+                    else 0
+                )
+
+        page = groups[start : start + max(1, limit)]
+        member_ids = [
+            oid for group in page for oid in group.member_ids[:MAX_GROUP_MEMBERS]
+        ]
+        summaries = {} if is_relation else self._object_summaries_for_ids(db, member_ids)
+        relation_outs = (
+            {
+                rel.id: self._to_relation_out(db, rel)
+                for rel in db.query(RelationType)
+                .options(
+                    joinedload(RelationType.source_object_type),
+                    joinedload(RelationType.target_object_type),
+                )
+                .filter(RelationType.id.in_(member_ids))
+                .all()
+            }
+            if is_relation and member_ids
+            else {}
+        )
+
+        items = [
+            ReviewGroupOut(
+                key=group.key,
+                segment_id=group.segment_id,
+                segment_name=group.segment_name,
+                table_role=group.table_role,
+                name_family=group.name_family,
+                score_band=group.score_band,
+                score_band_label=BAND_LABELS.get(group.score_band, group.score_band),
+                size=group.size,
+                reviewed_in_group=reviewed_by_key.get(group.key, 0),
+                truncated=group.size > MAX_GROUP_MEMBERS,
+                members=[
+                    summaries[oid]
+                    for oid in group.member_ids[:MAX_GROUP_MEMBERS]
+                    if oid in summaries
+                ],
+                relation_members=[
+                    relation_outs[rid]
+                    for rid in group.member_ids[:MAX_GROUP_MEMBERS]
+                    if rid in relation_outs
+                ],
+            )
+            for group in page
+        ]
+        next_index = start + len(page)
+        return ReviewQueueOut(
+            kind="relation" if is_relation else "object",
+            groups=items,
+            group_total=len(groups),
+            group_offset=start,
+            pending_total=len(rows),
+            pending_by_role=pending_by_role,
+            next_cursor=groups[next_index].key if next_index < len(groups) else None,
         )
 
     def get_review_mode_stats(self, db: Session, ontology_id: str):
-        """获取审核模式的全局统计和板块级进度。"""
+        """获取审核模式的全局统计和板块级进度。
+
+        统计覆盖全部角色（与审核队列同口径）；卡发布的那部分单独给
+        ``business_object_pending``。
+        """
         from app.models import OntologySegment, ObjectType
         from app.schemas import ReviewModeStats, SegmentReviewProgress
 
@@ -1655,7 +2078,6 @@ class OntologyQueryService:
             db.query(ObjectType)
             .filter(
                 ObjectType.ontology_id == ontology_id,
-                ObjectType.table_role == "business_object",
                 ObjectType.deleted_by_user == False,
             )
             .all()
@@ -1665,6 +2087,17 @@ class OntologyQueryService:
         needs_review_count = sum(1 for obj in all_objects if obj.needs_review)
         reviewed_count = total_objects - needs_review_count
         progress_ratio = reviewed_count / total_objects if total_objects > 0 else 1.0
+        pending_by_role: dict[str, int] = {}
+        for obj in all_objects:
+            if obj.needs_review:
+                role = obj.table_role or "business_object"
+                pending_by_role[role] = pending_by_role.get(role, 0) + 1
+
+        all_relations = db.query(RelationType).filter(
+            RelationType.ontology_id == ontology_id,
+            RelationType.deleted_by_user == False,
+        ).all()
+        relation_needs_review_count = sum(1 for rel in all_relations if rel.needs_review)
 
         # 板块级统计
         segments = (
@@ -1703,6 +2136,15 @@ class OntologyQueryService:
             needs_review_count=needs_review_count,
             reviewed_count=reviewed_count,
             progress_ratio=progress_ratio,
+            pending_by_role=pending_by_role,
+            business_object_pending=pending_by_role.get("business_object", 0),
+            unsegmented_total=sum(1 for obj in all_objects if not obj.segment_id),
+            unsegmented_pending=sum(
+                1 for obj in all_objects if not obj.segment_id and obj.needs_review
+            ),
+            total_relations=len(all_relations),
+            relation_needs_review_count=relation_needs_review_count,
+            reviewed_relation_count=len(all_relations) - relation_needs_review_count,
             segment_progress=segment_progress_list,
         )
 

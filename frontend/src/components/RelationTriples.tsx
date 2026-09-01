@@ -64,10 +64,27 @@ export function RelationTriples({
         {displayRelations.map((rel) => {
           // 判断方向：当前对象是源还是目标
           const isOutgoing = rel.source_object_type_id === currentObjectId;
-          const subjectId = isOutgoing ? rel.source_object_type_id : rel.target_object_type_id;
-          const subjectName = isOutgoing ? rel.source_object_name : rel.target_object_name;
-          const objectId = isOutgoing ? rel.target_object_type_id : rel.source_object_type_id;
-          const objectName = isOutgoing ? rel.target_object_name : rel.source_object_name;
+          const isImplemented = rel.mapping_object_type_id === currentObjectId;
+          const subjectId = isImplemented
+            ? rel.source_object_type_id
+            : isOutgoing
+              ? rel.source_object_type_id
+              : rel.target_object_type_id;
+          const subjectName = isImplemented
+            ? rel.source_object_name
+            : isOutgoing
+              ? rel.source_object_name
+              : rel.target_object_name;
+          const objectId = isImplemented
+            ? rel.target_object_type_id
+            : isOutgoing
+              ? rel.target_object_type_id
+              : rel.source_object_type_id;
+          const objectName = isImplemented
+            ? rel.target_object_name
+            : isOutgoing
+              ? rel.target_object_name
+              : rel.source_object_name;
 
           return (
             <div key={rel.id} className="relation-triple">
@@ -100,7 +117,7 @@ export function RelationTriples({
       </Space>
 
       {hasMore && (
-        <div style={{ marginTop: 12, color: "var(--om-color-text-tertiary)", fontSize: 13 }}>
+        <div style={{ marginTop: 12, color: "var(--om-text-tertiary)", fontSize: 13 }}>
           还有 {relations.length - limit} 条关系，切换到「关系列表」Tab 查看全部
         </div>
       )}
@@ -113,32 +130,32 @@ export function RelationTriples({
         .relation-triple {
           padding: 8px 12px;
           border-radius: 6px;
-          background: var(--om-color-fill-quaternary);
+          background: var(--om-surface-muted);
           transition: background 0.2s;
         }
 
         .relation-triple:hover {
-          background: var(--om-color-fill-tertiary);
+          background: var(--om-bg-soft);
         }
 
         .relation-triple__subject,
         .relation-triple__object {
           font-weight: 500;
-          color: var(--om-color-text);
+          color: var(--om-text);
         }
 
         .relation-triple__subject:hover,
         .relation-triple__object:hover {
-          color: var(--om-color-primary);
+          color: var(--om-primary);
         }
 
         .relation-triple__predicate {
-          color: var(--om-color-primary);
+          color: var(--om-primary);
           font-weight: 500;
         }
 
         .relation-triple__arrow {
-          color: var(--om-color-text-tertiary);
+          color: var(--om-text-tertiary);
           font-size: 12px;
         }
 

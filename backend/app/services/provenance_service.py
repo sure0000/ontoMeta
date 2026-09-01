@@ -241,4 +241,5 @@ class ProvenanceService:
             properties=data.get("properties", {}),
             relation_types=data.get("relation_types", {}),
             business_logics=data.get("business_logics", {}),
+            segments=data.get("segments", {}),
         )

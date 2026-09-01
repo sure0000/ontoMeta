@@ -41,7 +41,16 @@ import { getRoleMeta } from "../utils/role";
  *
  *  数仓落点排在最后且**是一个 Tab 而不是页面下方的一块**：它与对象列表争的是同一片
  *  垂直空间，摆在下面会把主内容（对象网格）挤成两行。 */
-type ViewTab = "relations" | "business_object" | "data_table" | "technical" | "datasets";
+export type ViewTab = "relations" | "business_object" | "data_table" | "technical" | "datasets";
+
+/** 可出现在 URL 里的 Tab 取值（供上层校验脏参数）。 */
+export const VIEW_TABS: readonly ViewTab[] = [
+  "business_object",
+  "relations",
+  "data_table",
+  "technical",
+  "datasets",
+];
 
 /** 三个按角色分的对象 Tab。关系与落点各有自己的渲染路径，不走对象网格。 */
 type ObjectTab = Exclude<ViewTab, "relations" | "datasets">;
@@ -105,7 +114,7 @@ function matchObjectFilters(
   if (typeFilter.length && !typeFilter.includes(obj.table_role || "business_object")) {
     return false;
   }
-  if (needsReviewOnly && !(obj.role_reason ?? "").includes("待复核")) return false;
+  if (needsReviewOnly && !obj.needs_review) return false;
   return true;
 }
 
@@ -152,6 +161,13 @@ interface Props {
     ids: string[],
     patch: { table_role?: string; needs_review?: boolean },
   ) => Promise<void>;
+  /** Resolve every object matching the current review/search filters for cross-page selection. */
+  onSelectAllMatching?: () => Promise<string[]>;
+  /** Review mode uses segment and naming-family order for batch decisions. */
+  reviewMode?: boolean;
+  /** 视图 Tab 受控（供上层同步进 URL）；未传则由组件自持。 */
+  viewTab?: ViewTab;
+  onViewTabChange?: (tab: ViewTab) => void;
 }
 
 export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
@@ -173,11 +189,16 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   onNeedsReviewOnlyChange,
   showRoleClassification = true,
   onBatchUpdateObjects,
+  onSelectAllMatching,
+  reviewMode = false,
+  viewTab: controlledViewTab,
+  onViewTabChange,
 }: Props) {
   const serverMode = Boolean(objectPaging || relationPaging);
   // 关系去重列表：传入 scope + 详情路径即启用（否则回退旧的逐条关系表）。
   const useRelationGroups = Boolean(relationScope && relationGroupDetailPath);
-  const [viewTab, setViewTab] = useState<ViewTab>("business_object");
+  const [localViewTab, setLocalViewTab] = useState<ViewTab>("business_object");
+  const viewTab = controlledViewTab ?? localViewTab;
   const [localQuery, setLocalQuery] = useState("");
   const [localTypeFilter, setLocalTypeFilter] = useState<string[]>([]);
   const [localNeedsReview, setLocalNeedsReview] = useState(false);
@@ -215,7 +236,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   const filterKey = `${typeFilter.join(",")}|${needsReview}`;
 
   const filteredObjects = useMemo(() => {
-    // 卡片按显示名称字典序排列（缺显示名时退回标识名），稳定可预期。
+    // Browse is alphabetical; review groups nearby segment/name families so
+    // batch decisions stay local and comparable.
     const byDisplayName = (a: ObjectTypeSummary, b: ObjectTypeSummary) =>
       (a.display_name || a.name || "").localeCompare(b.display_name || b.name || "", undefined, {
         numeric: true,
@@ -224,8 +246,14 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     // 防御性角色过滤：对象 Tab 只显示与当前 Tab 角色一致的对象——即便服务端首帧
     // 竞态返回了其它角色(如切换 Tab 触发的 role_in 重查尚未回来)，也不会混入
     // 关系表/技术表，避免「刷新后才正常归属」。
+    const reviewFamily = (obj: ObjectTypeSummary) =>
+      (obj.name || obj.display_name || "").split(/[_\-\s]/)[0].toLowerCase();
+    const byReviewOrder = (a: ObjectTypeSummary, b: ObjectTypeSummary) =>
+      (a.segment_name || "未接入").localeCompare(b.segment_name || "未接入", undefined, {
+        numeric: true,
+      }) || reviewFamily(a).localeCompare(reviewFamily(b)) || byDisplayName(a, b);
     if (serverMode) {
-      const sorted = [...objects].sort(byDisplayName);
+      const sorted = [...objects].sort(reviewMode ? byReviewOrder : byDisplayName);
       return viewTab !== "relations"
         ? sorted.filter((o) => (o.table_role || "business_object") === viewTab)
         : sorted;
@@ -234,8 +262,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       .filter(
         (o) => matchObject(o, normalizedQuery) && matchObjectFilters(o, typeFilter, needsReview),
       )
-      .sort(byDisplayName);
-  }, [objects, normalizedQuery, typeFilter, needsReview, serverMode, viewTab]);
+      .sort(reviewMode ? byReviewOrder : byDisplayName);
+  }, [objects, normalizedQuery, typeFilter, needsReview, serverMode, viewTab, reviewMode]);
 
   const filteredRelations = useMemo(() => {
     if (serverMode) return relations;
@@ -295,6 +323,12 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
         : Array.from(new Set([...prev, ...pageIds])),
     );
   }, [allPageSelected, pageIds]);
+
+  const selectAllMatching = useCallback(async () => {
+    if (!onSelectAllMatching) return;
+    const ids = await onSelectAllMatching();
+    setSelectedIds(ids);
+  }, [onSelectAllMatching]);
 
   const applyBatch = useCallback(async () => {
     if (!onBatchUpdateObjects || selectedIds.length === 0) return;
@@ -402,7 +436,14 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     [objectDetailPath, relationDetailPath],
   );
 
-  const handleViewTab = useCallback((value: string) => setViewTab(value as ViewTab), []);
+  const handleViewTab = useCallback(
+    (value: string) => {
+      const next = value as ViewTab;
+      if (onViewTabChange) onViewTabChange(next);
+      else setLocalViewTab(next);
+    },
+    [onViewTabChange],
+  );
   const handleQueryChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const next = e.target.value;
@@ -552,6 +593,11 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
             >
               全选本页
             </Checkbox>
+            {onSelectAllMatching && (
+              <Button type="link" size="small" onClick={() => void selectAllMatching()}>
+                全选符合条件
+              </Button>
+            )}
             <span className="om-muted">已选 {selectedIds.length}</span>
             <Select
               allowClear
@@ -695,8 +741,8 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                     {obj.name}
                   </div>
                   <div className="entity-card-flags">
-                    {showRoleClassification && (obj.role_reason ?? "").includes("待复核") && (
-                      <Tooltip title={(obj.role_reason ?? "").replace(/^\[待复核\]\s*/, "")}>
+                    {showRoleClassification && obj.needs_review && (
+                      <Tooltip title={obj.role_reason || "需要人工复核"}>
                         <span className="entity-card-review">待复核</span>
                       </Tooltip>
                     )}
@@ -704,6 +750,17 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                         整域近千个对象里多数还没物化，逐个显示「未落地」只是噪声。 */}
                     <LandingBadge landing={obj.landing} />
                   </div>
+                  {obj.top_neighbors && obj.top_neighbors.length > 0 && (
+                    <div className="entity-card-neighbors" title="关联对象">
+                      {obj.top_neighbors.slice(0, 2).map((neighbor, index) => (
+                        <span key={`${neighbor.id}-${index}`}>
+                          {index > 0 && " · "}
+                          {neighbor.direction === "inbound" ? "← " : "→ "}
+                          {neighbor.display_name || neighbor.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className="entity-card-foot">
                     <span className="entity-card-foot-item">
                       <strong>{obj.property_count}</strong> 属性

@@ -124,6 +124,7 @@ class DraftObjectType(BaseModel):
     # DataHub profiling：导入时沉淀，供落库到 ObjectType 表。
     row_count: int | None = None
     role_signals: dict | None = None
+    is_hub: bool = False
 
 
 class DraftProperty(BaseModel):
@@ -406,6 +407,14 @@ class ObjectTypeSummary(_ProvenanceReadMixin):
     table_role: str = "business_object"
     role_confidence: float | None = None
     role_reason: str | None = None
+    needs_review: bool = False
+    # 分类证据快照（score / signals{pk_columns, fk_in_degree, technical_ratio…}）。
+    # 审核界面的判据就是它——放进摘要，复核者才能在列表里横向比较、按信号排序，
+    # 而不必逐个点进详情页的第 3 个 Tab。数据库里一直有这列，只是此前没往外发。
+    # Agent 的工具结果里它是噪声，由 tool_result_compaction 的 _VERBOSE_KEYS 先行丢弃。
+    role_signals: dict | None = None
+    # DataHub profiling 沉淀的行数：判「这是不是日志/流水表」最直接的一列。
+    row_count: int | None = None
     # 板块归属
     segment_id: str | None = None
     segment_name: str | None = None
@@ -429,6 +438,9 @@ class SegmentSummary(_ProvenanceReadMixin):
     description: str | None = None
     member_count: int
     ontology_id: str
+    # 所属数据域：板块页的「返回工作区」要用它。此前前端拿 ontology_id 当 domainId
+    # 拼 /workspace/:domainId，是一条断链。
+    domain_context_id: str | None = None
     needs_review: bool = False
     updated_at: datetime
 
@@ -443,6 +455,60 @@ class SegmentDetail(SegmentSummary):
     internal_relation_count: int = 0
     # 板块内的边数据（可选，仅当成员数 > 40 时提供，用于矩阵视图）
     edges: list["GraphEdge"] | None = None
+    cross_relation_count: int = 0
+    relation_sentences: list[str] = Field(default_factory=list)
+
+
+class ReviewGroupOut(BaseModel):
+    """一组同类待复核对象——审核工作台的最小工作单元。
+
+    同板块 + 同命名族 + 同判定强度的表几乎总是同一个判定，所以一组给一次裁决，
+    例外靠反选。分组与排序规则见 ``services/review_queue``。
+    """
+
+    key: str
+    segment_id: str | None = None
+    segment_name: str
+    table_role: str
+    name_family: str
+    score_band: str
+    score_band_label: str
+    size: int
+    # 这一组里**已经判过**的个数（按同一套分组规则、按当前角色归组）。
+    # 「本组已判 11 个」本身就是判据：同族同板块的表前面都确认了，后面多半一样。
+    reviewed_in_group: int = 0
+    # 成员超过单组上限时截断（size 仍是真实总数），判完这批下次进来会补上。
+    truncated: bool = False
+    members: list[ObjectTypeSummary] = Field(default_factory=list)
+    # kind=relation 时装这里（关系没有对象摘要那套字段，塞不进 members）
+    relation_members: list["RelationTypeOut"] = Field(default_factory=list)
+
+
+class ReviewQueueOut(BaseModel):
+    """审核队列的一页。
+
+    ``next_cursor`` 是下一页首组的 key：分组排序不含任何随判定变化的字段，
+    因此判掉一批后重放同一游标不会跳过任何组。
+    """
+
+    # object=对象队列，relation=关系队列。两者共用分组与排序，只是成员类型不同。
+    kind: str = "object"
+    groups: list[ReviewGroupOut] = Field(default_factory=list)
+    group_total: int = 0
+    # 本页首组在整条队列里的位置（0 基），用于「第 N / M 组」这类进度显示
+    group_offset: int = 0
+    # 队列里还剩多少个待判**个体**（不是组数）
+    pending_total: int = 0
+    # 按角色拆分的待判数：非业务对象也要能被判，否则它们永远不可见
+    pending_by_role: dict[str, int] = Field(default_factory=dict)
+    next_cursor: str | None = None
+
+
+class SegmentUpdate(BaseModel):
+    name: str | None = None
+    display_name: str | None = None
+    description: str | None = None
+    operator: str | None = None
 
 
 class ObjectTypeLogicBindingOut(BaseModel):
@@ -466,9 +532,6 @@ class ObjectTypeDetail(ObjectTypeSummary):
     ontology_id: str | None = None
     source_ref: str | None = None
     datahub_url: str | None = None
-    # 分类证据快照：score / needs_review / signals（主键、外键入度、字段占比、
-    # tech_score、连通性等）。仅详情返回，供「判定依据」面板展示。
-    role_signals: dict | None = None
     properties: list[PropertyOut] = Field(default_factory=list)
     outgoing_relations: list["RelationTypeOut"] = Field(default_factory=list)
     incoming_relations: list["RelationTypeOut"] = Field(default_factory=list)
@@ -496,6 +559,7 @@ class RelationTypeOut(_ProvenanceReadMixin):
     source_evidence: str | None = None
     status: str
     source_confidence: float | None = None
+    needs_review: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -531,6 +595,8 @@ class RelationGroupOut(BaseModel):
     confidence_min: float | None = None
     confidence_max: float | None = None
     statuses: list[str] = []
+    needs_review_count: int = 0
+    target_groups: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class VersionRecordOut(BaseModel):
@@ -657,6 +723,7 @@ class MergeReportOut(BaseModel):
     properties: dict = Field(default_factory=dict)
     relation_types: dict = Field(default_factory=dict)
     business_logics: dict = Field(default_factory=dict)
+    segments: dict = Field(default_factory=dict)
 
 
 class ObjectTypeUpdate(BaseModel):
@@ -683,6 +750,19 @@ class ObjectTypeBatchUpdate(BaseModel):
 class ObjectTypeBatchUpdateResult(BaseModel):
     updated: int
     items: list[ObjectTypeSummary] = Field(default_factory=list)
+
+
+class RelationTypeBatchUpdate(BaseModel):
+    """批量置关系复核状态。关系没有角色可改判，判定就是「这条关系成不成立」。"""
+
+    ids: list[str] = Field(default_factory=list)
+    needs_review: bool | None = None
+    operator: str | None = None
+
+
+class RelationTypeBatchUpdateResult(BaseModel):
+    updated: int
+    items: list["RelationTypeOut"] = Field(default_factory=list)
 
 
 class PropertyUpdate(BaseModel):
@@ -714,6 +794,7 @@ class RelationTypeUpdate(BaseModel):
     mapping_object_type_id: str | None = None
     source_object_type_id: str | None = None
     target_object_type_id: str | None = None
+    needs_review: bool | None = None
     operator: str | None = None
 
 
@@ -872,6 +953,8 @@ class ClusterDetail(BaseModel):
     node_count: int = 0
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
+    ontology_id: str | None = None
+    published_only: bool = False
 
 
 class SegmentReviewProgress(BaseModel):
@@ -886,11 +969,28 @@ class SegmentReviewProgress(BaseModel):
 
 
 class ReviewModeStats(BaseModel):
-    """审核模式的全局统计。"""
+    """审核模式的全局统计。
+
+    口径：``total_objects`` / ``needs_review_count`` 覆盖**全部角色**，与审核队列
+    一致。此前只统计 business_object，于是「桥表未能塌缩→重判为数据表/技术表」的那批
+    对象（全部 needs_review=True）既不在分母里也不在队列里，事实上不可见。
+    发布门禁只卡业务对象，那个数字单独由 ``business_object_pending`` 给出。
+    """
 
     total_objects: int
     needs_review_count: int
     reviewed_count: int
     progress_ratio: float
+    # 待复核按角色拆分（business_object / data_table / bridge / technical）
+    pending_by_role: dict[str, int] = Field(default_factory=dict)
+    # 其中会卡住发布的部分：待复核的业务对象不随本体发布（见 publish 的部分发布门禁）
+    business_object_pending: int = 0
+    total_relations: int = 0
+    relation_needs_review_count: int = 0
+    reviewed_relation_count: int = 0
+    # 未接入板块的对象：它们不在任何 segment_progress 行里，但同样要判。
+    # 队列侧用 segment_id="-" 指代这一桶。
+    unsegmented_total: int = 0
+    unsegmented_pending: int = 0
 
     segment_progress: list[SegmentReviewProgress] = Field(default_factory=list)

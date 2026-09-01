@@ -1,32 +1,49 @@
-import { AppstoreOutlined, ArrowLeftOutlined } from "@ant-design/icons";
-import { Alert, Descriptions, Segmented, Tag } from "antd";
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { AppstoreOutlined, ArrowLeftOutlined, EditOutlined } from "@ant-design/icons";
+import { Alert, Button, Descriptions, Form, Input, Modal, Segmented, Tag, message } from "antd";
+import { useEffect, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { ClusterMatrixView } from "../components/graph/ClusterMatrixView";
+import { OntologyGraphView } from "../components/graph/OntologyGraphView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { SectionCard } from "../components/SectionCard";
 import { useApi } from "../hooks/useApi";
 import { formatDateTime } from "../utils/format";
-import type { SegmentDetail, ClusterDetail, GraphNode } from "../types";
+import type { SegmentDetail, ClusterDetail, GraphNode, OntologyGraph } from "../types";
 
 // 稠密板块阈值：成员 > 40 时默认显示矩阵视图
 const DENSE_THRESHOLD = 40;
 
 export function SegmentDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
+  const publishedOnly = searchParams.get("published") === "1";
   const [viewMode, setViewMode] = useState<"cards" | "matrix">("cards");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form] = Form.useForm();
 
   const {
     data: segment,
     loading,
     error,
   } = useApi<SegmentDetail>(
-    () => (id ? api.getSegment(id) : Promise.reject(new Error("缺少 id"))),
-    [id],
+    () => (id ? api.getSegment(id, publishedOnly) : Promise.reject(new Error("缺少 id"))),
+    [id, publishedOnly],
   );
+
+  useEffect(() => {
+    if (segment) {
+      form.setFieldsValue({
+        name: segment.name,
+        display_name: segment.display_name,
+        description: segment.description || "",
+      });
+    }
+  }, [segment, form]);
 
   if (loading) return <PageSkeleton type="detail" />;
   if (error)
@@ -36,6 +53,20 @@ export function SegmentDetailPage() {
       </PageContainer>
     );
   if (!segment) return null;
+
+  const saveSegment = async () => {
+    if (!id) return;
+    try {
+      setSaving(true);
+      await api.updateSegment(id, await form.validateFields());
+      message.success("板块已更新");
+      setEditing(false);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "更新板块失败");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const isDense = segment.members.length > DENSE_THRESHOLD;
   const hasEdges = Boolean(segment.edges && segment.edges.length > 0);
@@ -63,16 +94,36 @@ export function SegmentDetailPage() {
           edges: segment.edges,
         }
       : null;
+  const segmentGraph: OntologyGraph | null =
+    hasEdges && segment.edges
+      ? {
+          nodes: segment.members.map((member) => ({
+            id: member.id,
+            label: member.name,
+            display_name: member.display_name,
+            status: member.status,
+          })),
+          edges: segment.edges,
+        }
+      : null;
 
   return (
     <PageContainer>
       <div style={{ marginBottom: 16 }}>
         <Link
-          to={`/workspace/${segment.ontology_id}`}
+          // 工作区路由的参数是 domainId，不是 ontology_id——传错会把「返回工作区」
+          // 变成一条死链（数据域不存在）。后端已在板块摘要里带上 domain_context_id。
+          to={
+            publishedOnly
+              ? "/ontology"
+              : segment.domain_context_id
+                ? `/workspace/${segment.domain_context_id}`
+                : "/workspace"
+          }
           style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
         >
           <ArrowLeftOutlined />
-          返回工作区
+          {publishedOnly ? "返回本体浏览" : "返回工作区"}
         </Link>
       </div>
 
@@ -80,8 +131,37 @@ export function SegmentDetailPage() {
         icon={<AppstoreOutlined />}
         title={segment.display_name}
         description={segment.description || "暂无描述"}
-        extra={segment.needs_review && <Tag color="warning">待复核</Tag>}
+        extra={
+          <>
+            {segment.needs_review && <Tag color="warning">待复核</Tag>}
+            {!publishedOnly && (
+              <Button icon={<EditOutlined />} onClick={() => setEditing(true)}>
+                编辑
+              </Button>
+            )}
+          </>
+        }
       />
+
+      <Modal
+        title="编辑业务板块"
+        open={editing}
+        onOk={() => void saveSegment()}
+        onCancel={() => setEditing(false)}
+        confirmLoading={saving}
+      >
+        <Form form={form} layout="vertical">
+          <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="name" label="标识名" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <div style={{ marginBottom: 24 }}>
         <Descriptions column={2} bordered size="small">
@@ -90,11 +170,42 @@ export function SegmentDetailPage() {
           <Descriptions.Item label="内部关系数">
             {segment.internal_relation_count}
           </Descriptions.Item>
+          <Descriptions.Item label="跨板块关系数">
+            {segment.cross_relation_count}
+          </Descriptions.Item>
           <Descriptions.Item label="更新时间">
             {formatDateTime(segment.updated_at)}
           </Descriptions.Item>
         </Descriptions>
       </div>
+
+      {(segment.relation_sentences ?? []).length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>板块内关系</h3>
+          <div style={{ display: "grid", gap: 8 }}>
+            {(segment.relation_sentences ?? []).map((sentence) => (
+              <div key={sentence} className="entity-card-desc" style={{ padding: "10px 12px" }}>
+                {sentence}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {segmentGraph && (
+        <div style={{ marginBottom: 24 }}>
+          <SectionCard title="板块关系图" bodyFlush>
+            <OntologyGraphView
+              graph={segmentGraph}
+              height={420}
+              objectDetailPath={(objectId) =>
+                publishedOnly ? `/ontology/${objectId}` : `/workspace/${segment.ontology_id}/objects/${objectId}`
+              }
+              embedded
+            />
+          </SectionCard>
+        </div>
+      )}
 
       <div style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>

@@ -144,11 +144,13 @@ def test_apply_verb_refinements(client, admin_headers):
         rel1 = db.get(RelationType, rel1_id)
         rel2 = db.get(RelationType, rel2_id)
 
+        # 采纳即已复核：调用方是人在审核台勾选的，采纳本身就是一次判定。
+        # 旧行为置 True，等于每跑一次细化就把这批关系重新打成待复核（净增审核债）。
         assert rel1.display_name == "下单于"
-        assert rel1.needs_review is True  # 标记为待复核
+        assert rel1.needs_review is False
 
         assert rel2.display_name == "拥有"
-        assert rel2.needs_review is True
+        assert rel2.needs_review is False
 
     finally:
         db.rollback()

@@ -603,6 +603,42 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.entity-card-neighbors {
+  margin-top: 6px;
+  min-height: 17px;
+  color: var(--om-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-profile {
+  display: grid;
+  gap: 20px;
+}
+.object-profile-section {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--om-border);
+}
+.object-profile-section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.object-profile-section h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.object-profile-relations {
+  display: grid;
+  gap: 14px;
+}
+.object-profile-relations h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
 .entity-card-foot {
   margin-top: 6px;
   padding-top: 6px;
@@ -1185,4 +1221,503 @@
 /* 六环确认进度条（TaskRingSteps）：对话表单与任务详情抽屉共用，故间距定在这里。 */
 .task-ring-steps {
   margin-bottom: 16px;
+}
+
+
+/* ---------------------------------------------------------------------------
+   审核工作台
+   ---------------------------------------------------------------------------
+   审核是**扫读 + 重复裁决**，不是阅读。所以这里的每条视觉决定都服务于两件事：
+   让例外一眼跳出来（等宽数字 + 异常值着色 + 反选行留在原位压暗），
+   让下一次判定不用找（判定条常驻底部、键位印在按钮上）。
+
+   三栏各自滚动、页面本身不滚——判到第 40 组时还得往下翻页找按钮，是最蠢的损耗。
+   --------------------------------------------------------------------------- */
+
+.review-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: var(--om-space-3);
+  height: calc(100vh - var(--om-header-h) - 56px);
+  min-height: 520px;
+}
+
+/* ---------- 顶栏：进度 + 全局动作 ---------- */
+
+.review-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-4);
+  flex-wrap: wrap;
+  padding: 10px var(--om-space-4);
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
+  box-shadow: var(--om-shadow-sm);
+}
+
+.review-topbar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--om-text-md);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.review-topbar-progress {
+  flex: 1 1 220px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 180px;
+}
+
+.review-topbar-progress .ant-progress {
+  flex: 1;
+  margin: 0;
+}
+
+/* 剩余量是这块屏幕上最该被看见的数字：它是「还要判多久」。 */
+.review-topbar-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+}
+
+.review-topbar-count b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-lg);
+  font-weight: 600;
+  color: var(--om-text);
+}
+
+/* ---------- 三栏 ---------- */
+
+.review-panes {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /* 中栏给足最小宽度：判据表被挤窄时对象名会被压成竖排单字。
+     两侧是辅助信息，宽度固定；中栏是工作面，吃掉全部余量。 */
+  grid-template-columns: 200px minmax(440px, 1fr) 288px;
+  gap: var(--om-space-3);
+  align-items: stretch;
+}
+
+.review-pane {
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.review-pane--queue,
+.review-pane--evidence {
+  overflow-y: auto;
+  padding: var(--om-space-3);
+}
+
+.review-pane--group {
+  overflow: hidden;
+  box-shadow: var(--om-shadow-md);
+}
+
+.review-pane-label {
+  font-size: var(--om-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--om-text-tertiary);
+  text-transform: uppercase;
+  padding-bottom: var(--om-space-2);
+  margin-bottom: var(--om-space-2);
+  border-bottom: 1px solid var(--om-border);
+  flex: none;
+}
+
+/* ---------- 左栏：进度地形 ----------
+   判完的板块留在原位折叠成 ✓ 而不是消失或重排——空间记忆是提速的一部分。 */
+
+.review-seg {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  padding: 7px 8px;
+  margin-bottom: 1px;
+  border-radius: var(--om-radius-sm);
+  cursor: pointer;
+  color: var(--om-text-secondary);
+  font: inherit;
+  font-size: var(--om-text-base);
+  transition: background 0.15s, color 0.15s;
+}
+
+.review-seg:hover {
+  background: var(--om-surface-muted);
+  color: var(--om-text);
+}
+
+.review-seg:focus-visible {
+  outline: 2px solid var(--om-primary);
+  outline-offset: 1px;
+}
+
+.review-seg--on {
+  background: var(--om-primary-soft);
+  border-left-color: var(--om-primary);
+  color: var(--om-primary);
+  font-weight: 600;
+}
+
+.review-seg--done {
+  color: var(--om-text-tertiary);
+}
+
+.review-seg-name {
+  display: inline-block;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.review-seg-num {
+  float: right;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+}
+
+.review-seg--on .review-seg-num {
+  color: var(--om-primary);
+}
+
+.review-seg-bar {
+  display: block;
+  clear: both;
+  height: 3px;
+  margin-top: 5px;
+  background: var(--om-bg-soft);
+  border-radius: var(--om-radius-full);
+  overflow: hidden;
+}
+
+.review-seg-bar i {
+  display: block;
+  height: 100%;
+  border-radius: var(--om-radius-full);
+  background: var(--om-warning);
+  transition: width 0.25s ease;
+}
+
+.review-seg--done .review-seg-bar i {
+  background: var(--om-success);
+}
+
+.review-seg-divider {
+  margin: var(--om-space-3) 0 var(--om-space-2);
+  border-top: 1px dashed var(--om-border-strong);
+}
+
+/* ---------- 中栏：当前组 ---------- */
+
+.review-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--om-space-3);
+  padding: var(--om-space-3) var(--om-space-4);
+  border-bottom: 1px solid var(--om-border);
+  background: linear-gradient(180deg, #fbfcfe 0%, #ffffff 100%);
+  flex: none;
+}
+
+.review-group-title {
+  font-size: var(--om-text-lg);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.review-group-title em {
+  font-style: normal;
+  font-family: var(--om-font-mono);
+  color: var(--om-text-tertiary);
+  font-weight: 500;
+}
+
+.review-group-pos {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 组内信号跨度：一眼看出这组齐不齐。全组同值就不必逐行看，有跨度才去排序找例外。 */
+.review-group-spread {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+}
+
+.review-group-spread b {
+  font-family: var(--om-font-mono);
+  font-weight: 600;
+  color: var(--om-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.review-group-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 var(--om-space-2);
+}
+
+.review-group-table .ant-table-cell {
+  padding-top: 7px !important;
+  padding-bottom: 7px !important;
+}
+
+.review-group-table tbody tr {
+  cursor: pointer;
+}
+
+/* 数字列等宽：扫一列的时候位数对齐，异常值自己会跳出来。 */
+.review-num {
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--om-code-base);
+}
+
+/* 零主键/零入度/超大行数这类「不像业务对象」的观测值直接染色，
+   不用等复核者去排序才发现。 */
+.review-num--flag {
+  color: var(--om-warning);
+  font-weight: 600;
+}
+
+.review-row--active td {
+  background: var(--om-primary-soft) !important;
+}
+
+.review-row--active td:first-child {
+  box-shadow: inset 2px 0 0 var(--om-primary);
+}
+
+/* 反选掉的行压暗但**留在原位**：例外要看得见，一勾就消失等于看不见自己排除了什么。 */
+.review-row--excluded td {
+  opacity: 0.42;
+}
+
+.review-row--excluded .review-obj-name {
+  text-decoration: line-through;
+}
+
+.review-obj-name {
+  display: block;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.review-obj-sub {
+  display: block;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  line-height: 1.5;
+}
+
+.review-triple-verb {
+  color: var(--om-text-tertiary);
+  padding: 0 4px;
+}
+
+/* ---------- 判定条：常驻底部，永远不用滚回去找 ---------- */
+
+.review-actions {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: var(--om-space-3) var(--om-space-4);
+  border-top: 1px solid var(--om-border);
+  background: var(--om-surface-muted);
+}
+
+.review-actions-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--om-border-strong);
+  margin: 0 2px;
+}
+
+.review-actions-label {
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+}
+
+.review-actions .review-spacer {
+  flex: 1;
+}
+
+/* 键位印在按钮上，而不是只写在下面那行提示里——审核提速主要靠键盘，
+   而键盘只有被看见才会被用。 */
+.review-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-inline-end: 7px;
+  border-radius: 4px;
+  border: 1px solid var(--om-border-strong);
+  background: var(--om-surface);
+  color: var(--om-text-secondary);
+  font-family: var(--om-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.ant-btn-primary .review-key {
+  border-color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.review-hint {
+  flex: none;
+  padding: 0 var(--om-space-4) var(--om-space-3);
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  background: var(--om-surface-muted);
+}
+
+.review-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--om-space-3);
+  padding: var(--om-space-8);
+  text-align: center;
+}
+
+/* ---------- 右栏：判据 ---------- */
+
+.review-evidence-title {
+  font-size: var(--om-text-md);
+  font-weight: 600;
+  margin-bottom: var(--om-space-1);
+}
+
+.review-evidence-body {
+  font-size: var(--om-text-base);
+  line-height: 1.85;
+}
+
+.review-evidence-body .ant-table-cell {
+  padding: 5px 8px !important;
+  font-size: var(--om-text-sm);
+}
+
+.review-evidence-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--om-space-2);
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--om-border);
+}
+
+.review-evidence-row span:last-child {
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--om-text);
+}
+
+.review-evidence-note {
+  margin-top: var(--om-space-3);
+  padding: var(--om-space-2) var(--om-space-3);
+  background: var(--om-surface-muted);
+  border-radius: var(--om-radius-sm);
+  font-size: var(--om-text-sm);
+  line-height: 1.75;
+  color: var(--om-text-secondary);
+}
+
+/* 同组已判结果：让判定自我加强——「这组前 11 个都确认了」本身就是判据。 */
+.review-evidence-streak {
+  margin-top: var(--om-space-3);
+  padding: var(--om-space-2) var(--om-space-3);
+  border-radius: var(--om-radius-sm);
+  background: var(--om-success-soft);
+  color: #14532d;
+  font-size: var(--om-text-sm);
+}
+
+.review-evidence-foot {
+  margin-top: var(--om-space-4);
+  padding-top: var(--om-space-3);
+  border-top: 1px solid var(--om-border);
+  font-size: var(--om-text-base);
+}
+
+/* ---------- 窄屏：判据折到下面，队列与当前组保持并排 ---------- */
+
+@media (max-width: 1360px) {
+  .review-workbench {
+    height: auto;
+  }
+  .review-panes {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+  .review-pane--evidence {
+    grid-column: 1 / -1;
+  }
+  .review-pane--queue {
+    max-height: 460px;
+  }
+  .review-pane--group {
+    min-height: 480px;
+  }
+}
+
+@media (max-width: 860px) {
+  .review-panes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .review-pane--queue {
+    max-height: 220px;
+  }
+}
+
+/* 表头随滚动容器吸顶：一组 100+ 行时，往下扫还得看得见列名。
+   用 CSS sticky 而不是 antd 的 scroll.y——后者要固定像素高度，和弹性三栏打架。 */
+.review-group-body .ant-table-thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--om-surface-muted);
 }

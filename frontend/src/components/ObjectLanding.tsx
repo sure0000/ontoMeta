@@ -107,7 +107,7 @@ export function ObjectLandingPanel({ landing }: PanelProps) {
     return (
       <Descriptions column={1} size="small" title="物理落点">
         <Descriptions.Item label="状态">
-          <span style={{ color: "var(--om-text-muted, #999)" }}>
+          <span style={{ color: "var(--om-text-tertiary)" }}>
             尚未落地：该对象还没有被物化或同步任务落成物理表。
           </span>
         </Descriptions.Item>

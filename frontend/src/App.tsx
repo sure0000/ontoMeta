@@ -13,6 +13,7 @@ import { DataAppPublicPage } from "./pages/DataAppPublicPage";
 import { DecisionsPage } from "./pages/DecisionsPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
+import { ReviewWorkbenchPage } from "./pages/ReviewWorkbenchPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
 import { PipelinesPage } from "./pages/PipelinesPage";
@@ -32,6 +33,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/ontology" replace />} />
         <Route path="/workspace" element={<WorkspacePage />} />
         <Route path="/workspace/:domainId" element={<DomainDetailPage />} />
+        <Route path="/workspace/:domainId/review" element={<ReviewWorkbenchPage />} />
         <Route path="/workspace/:domainId/executions" element={<ExecutionRecordsPage />} />
         <Route path="/workspace/:domainId/objects/:objectId" element={<ObjectTypeDetailPage />} />
         <Route

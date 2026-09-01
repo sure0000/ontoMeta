@@ -19,6 +19,7 @@ from app.services.community_detection import (
     label_propagation_clusters,
     split_dominant_clusters,
 )
+from app.services.draft_checkpoint import chunk_key
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,9 @@ def generate_segments(
         max_cluster_nodes=min(50, max(10, total_nodes // 5)),
         total_clustered=len(non_hub_nodes),
     )
+    # A single object does not provide a readable business segment. Keep it as
+    # an unassigned object rather than creating hundreds of one-item panels.
+    clusters = [cluster for cluster in clusters if len(cluster) > 1]
 
     logger.info(
         "Generated %d segments from %d non-hub objects", len(clusters), len(non_hub_nodes)
@@ -127,7 +131,9 @@ def generate_segments(
                 anchor_refs=anchor_refs,
                 member_count=len(cluster),
                 machine_baseline=machine_name,
-                members=list(cluster),
+                # Keep the degree-ranked order so LLM prompts and top-N views
+                # receive the same stable, meaningful members on every run.
+                members=members_by_degree,
             )
         )
 
@@ -140,6 +146,8 @@ async def name_segments_with_llm(
     relation_types: list[DraftRelationType],
     hub_nodes: set[str],
     llm_client: AsyncOpenAI,
+    model: str | None = None,
+    checkpoint: Any | None = None,
 ) -> None:
     """使用 LLM 为板块命名（就地修改 segments）。
 
@@ -174,7 +182,7 @@ async def name_segments_with_llm(
             if rel.source_object_type_name in segment.members
             and rel.target_object_type_name in segment.members
         ]
-        top_verbs = list(set(relation_verbs))[:5]
+        top_verbs = sorted(set(relation_verbs))[:5]
 
         # 提取该板块连接的枢纽
         connected_hubs = set()
@@ -191,11 +199,22 @@ async def name_segments_with_llm(
             list(connected_hubs)[:5],
             segment.machine_baseline or "",
         )
+        checkpoint_key = chunk_key(prompt)
+        if checkpoint is not None:
+            cached = checkpoint.load(checkpoint_key)
+            if cached:
+                cached_display = str(cached.get("display_name", "")).strip()
+                cached_name = str(cached.get("name", "")).strip()
+                if cached_display and cached_name and cached_name.replace("_", "").isalnum():
+                    segment.display_name = cached_display
+                    segment.name = cached_name
+                    segment.description = str(cached.get("description", "")).strip() or None
+                    continue
 
         # 调用 LLM
         try:
             completion = await llm_client.chat.completions.create(
-                model="glm-4-plus",  # 与对象命名保持一致
+                model=model or "glm-4-plus",
                 messages=[
                     {
                         "role": "system",
@@ -204,10 +223,12 @@ async def name_segments_with_llm(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                response_format={"type": "json_object"},
             )
 
-            result_text = completion.choices[0].message.content or "{}"
+            result_text = (completion.choices[0].message.content or "{}").strip()
+            if result_text.startswith("```"):
+                lines = result_text.splitlines()
+                result_text = "\n".join(lines[1:-1]).strip()
             result = json.loads(result_text)
 
             display_name = result.get("display_name", "").strip()
@@ -229,6 +250,15 @@ async def name_segments_with_llm(
             segment.display_name = display_name
             segment.name = name
             segment.description = description
+            if checkpoint is not None:
+                checkpoint.save(
+                    checkpoint_key,
+                    {
+                        "display_name": display_name,
+                        "name": name,
+                        "description": description,
+                    },
+                )
 
         except Exception as e:
             logger.error("Failed to name segment: %s", e)

@@ -45,6 +45,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { ProvenanceBadge } from "../components/ProvenanceBadge";
 import { RelationTriples } from "../components/RelationTriples";
+import { DecisionEvidencePanel } from "../components/review/DecisionEvidence";
 import { useDebouncedCallback } from "../hooks/useApi";
 import { extractDataHubBase, resolveDataHubDatasetUrl } from "../utils/datahub";
 import { suggestEndpoints } from "../utils/endpointSuggest";
@@ -67,15 +68,7 @@ import type {
   RelationType,
   VersionRecord,
 } from "../types";
-import {
-  describeSignals,
-  getRoleMeta,
-  isNeedsReview,
-  reasonClauses,
-  ROLE_OPTIONS,
-  ROLE_SCORE_THRESHOLD,
-} from "../utils/role";
-import type { SignalDirection, SignalItem } from "../utils/role";
+import { ROLE_OPTIONS } from "../utils/role";
 
 const { Text } = Typography;
 
@@ -86,83 +79,6 @@ interface BasicForm {
   table_role: string;
   needs_review: boolean;
   segment_id?: string;
-}
-
-function DirectionTag({ direction }: { direction: SignalDirection }) {
-  if (direction === "business") return <Tag color="green">↑ 倾向业务对象</Tag>;
-  if (direction === "nonbusiness") return <Tag color="orange">↓ 倾向非业务</Tag>;
-  return <Tag>中性</Tag>;
-}
-
-const EVIDENCE_COLUMNS: ColumnsType<SignalItem> = [
-  { title: "信号", dataIndex: "label", key: "label" },
-  { title: "观测值", dataIndex: "value", key: "value", width: 130 },
-  {
-    title: "倾向",
-    key: "direction",
-    width: 150,
-    render: (_, r) => <DirectionTag direction={r.direction} />,
-  },
-];
-
-// 判定依据面板：把 object_classifier 的结构化证据（role_signals）与逐条理由
-// （role_reason）摊开展示，让复核者据证据快速确认或改判。role_signals 为空
-// （存量未重生成）时优雅降级为「判定说明」清单，功能不缺失。
-function DecisionEvidencePanel({ obj }: { obj: ObjectTypeDetail }) {
-  const meta = getRoleMeta(obj.table_role);
-  const needsReview = isNeedsReview(obj.role_reason);
-  const clauses = reasonClauses(obj.role_reason);
-  const evidence = describeSignals(obj.role_signals);
-  const hasSignals = evidence.items.length > 0;
-  return (
-    <>
-      <Descriptions column={{ xs: 1, md: 3 }} size="small" style={{ marginBottom: 12 }}>
-        <Descriptions.Item label="对象角色">
-          <Tag color={meta.color}>{meta.label}</Tag>
-        </Descriptions.Item>
-        <Descriptions.Item label="角色置信度">
-          {obj.role_confidence != null ? `${(obj.role_confidence * 100).toFixed(0)}%` : "-"}
-        </Descriptions.Item>
-        <Descriptions.Item label="复核状态">
-          {needsReview ? <Tag color="gold">待复核</Tag> : <Tag color="green">已确认</Tag>}
-        </Descriptions.Item>
-      </Descriptions>
-
-      {evidence.score != null && (
-        <div style={{ marginBottom: 12 }}>
-          <Text type="secondary">综合得分 </Text>
-          <Text strong>{evidence.score.toFixed(1)}</Text>
-          <Text type="secondary"> （≥ {ROLE_SCORE_THRESHOLD.toFixed(1)} 判为业务对象）</Text>
-        </div>
-      )}
-
-      {hasSignals && (
-        <Table
-          className="om-table"
-          size="small"
-          rowKey="key"
-          pagination={false}
-          dataSource={evidence.items}
-          columns={EVIDENCE_COLUMNS}
-        />
-      )}
-
-      {clauses.length > 0 && (
-        <div style={{ marginTop: hasSignals ? 14 : 0 }}>
-          <Text type="secondary">判定说明</Text>
-          <ul style={{ margin: "4px 0 0", paddingInlineStart: 18, lineHeight: 1.8 }}>
-            {clauses.map((c, i) => (
-              <li key={i}>{c}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {!hasSignals && clauses.length === 0 && (
-        <Text type="secondary">暂无判定证据（下次重新生成后可见结构化信号）。</Text>
-      )}
-    </>
-  );
 }
 
 interface RelationForm {
@@ -221,6 +137,13 @@ function DataHubSourceLink({
   );
 }
 
+function propertyRole(property: Property): "主键" | "外键" | "普通属性" {
+  const name = (property.name || "").toLowerCase();
+  if (name === "id") return "主键";
+  if (name.endsWith("_id") || property.semantic_type === "identifier") return "外键";
+  return "普通属性";
+}
+
 export function ObjectTypeDetailPage() {
   const { objectId, domainId } = useParams<{ objectId: string; domainId?: string }>();
   const navigate = useNavigate();
@@ -249,6 +172,10 @@ export function ObjectTypeDetailPage() {
   const [segments, setSegments] = useState<Array<{ id: string; display_name: string }>>([]);
   const inWorkspace = Boolean(domainId);
 
+  useEffect(() => {
+    if (!inWorkspace) setActiveTab("profile");
+  }, [inWorkspace]);
+
   const watchedStructureType = Form.useWatch("structure_type", relationForm) as string | undefined;
   const needsMappingTable =
     watchedStructureType === "bridge_table" || watchedStructureType === "fact_table";
@@ -265,7 +192,7 @@ export function ObjectTypeDetailPage() {
       display_name: detail.display_name,
       description: detail.description,
       table_role: detail.table_role || "business_object",
-      needs_review: (detail.role_reason ?? "").includes("待复核"),
+      needs_review: Boolean(detail.needs_review),
       segment_id: detail.segment_id || "",
     });
     return detail;
@@ -293,8 +220,10 @@ export function ObjectTypeDetailPage() {
           }
           // 加载板块列表
           try {
-            const segmentList = await api.listSegments(detail.ontology_id);
-            setSegments(segmentList.map((s) => ({ id: s.id, display_name: s.display_name })));
+            const segmentList = await api.listSegments({ ontologyId: detail.ontology_id });
+            setSegments(
+              segmentList.items.map((s) => ({ id: s.id, display_name: s.display_name })),
+            );
           } catch {
             setSegments([]);
           }
@@ -810,6 +739,10 @@ export function ObjectTypeDetailPage() {
     ...implementedRelations,
   ];
   const versionRecords = obj.version_records ?? [];
+  const propertyGroups = ["主键", "外键", "普通属性"].map((label) => ({
+    label,
+    items: properties.filter((property) => propertyRole(property) === label),
+  }));
 
   return (
     <PageContainer full>
@@ -877,6 +810,110 @@ export function ObjectTypeDetailPage() {
             activeKey={activeTab}
             onChange={setActiveTab}
             items={[
+              ...(!inWorkspace
+                ? [
+                    {
+                      key: "profile",
+                      label: (
+                        <span>
+                          <ApartmentOutlined style={{ marginRight: 6 }} />
+                          对象档案
+                        </span>
+                      ),
+                      children: (
+                        <div className="object-profile">
+                          <section className="object-profile-section">
+                            <h3>对象概览</h3>
+                            <Descriptions column={{ xs: 1, md: 2, xl: 4 }} size="small">
+                              <Descriptions.Item label="数据域">{obj.domain_name || "-"}</Descriptions.Item>
+                              <Descriptions.Item label="标识名">{obj.name}</Descriptions.Item>
+                              <Descriptions.Item label="所属板块">
+                                {obj.segment_id ? (
+                                  <Link to={`/segments/${obj.segment_id}?published=1`}>
+                                    {obj.segment_name || obj.segment_id}
+                                  </Link>
+                                ) : "未接入"}
+                              </Descriptions.Item>
+                              <Descriptions.Item label="复核状态">
+                                {obj.needs_review ? <Tag color="orange">待复核</Tag> : <Tag color="green">已确认</Tag>}
+                              </Descriptions.Item>
+                              <Descriptions.Item label="描述" span={4}>
+                                {obj.description || "暂无描述"}
+                              </Descriptions.Item>
+                            </Descriptions>
+                          </section>
+                          <section className="object-profile-section">
+                            <h3>属性{properties.length > 0 ? ` (${properties.length})` : ""}</h3>
+                            {propertyGroups.map((group) => (
+                              <div key={group.label} style={{ marginBottom: 12 }}>
+                                <div style={{ marginBottom: 6, fontSize: 12, color: "var(--om-text-secondary)" }}>
+                                  {group.label} ({group.items.length})
+                                </div>
+                                <Table
+                                  className="om-table"
+                                  rowKey="id"
+                                  size="small"
+                                  columns={readOnlyPropertyColumns}
+                                  dataSource={group.items}
+                                  pagination={false}
+                                />
+                              </div>
+                            ))}
+                          </section>
+                          <section className="object-profile-section">
+                            <h3>关系三元组{relationCount > 0 ? ` (${relationCount})` : ""}</h3>
+                            <div className="object-profile-relations">
+                              <div>
+                                <h4>出向关系 ({obj.outgoing_relations.length})</h4>
+                                <RelationTriples
+                                  relations={obj.outgoing_relations}
+                                  currentObjectId={obj.id}
+                                  objectDetailPath={objectDetailPath}
+                                  relationDetailPath={relationDetailPath}
+                                  limit={0}
+                                />
+                              </div>
+                              <div>
+                                <h4>入向关系 ({obj.incoming_relations.length})</h4>
+                                <RelationTriples
+                                  relations={obj.incoming_relations}
+                                  currentObjectId={obj.id}
+                                  objectDetailPath={objectDetailPath}
+                                  relationDetailPath={relationDetailPath}
+                                  limit={0}
+                                />
+                              </div>
+                              {implementedRelations.length > 0 && (
+                                <div>
+                                  <h4>承载关系 ({implementedRelations.length})</h4>
+                                  <RelationTriples
+                                    relations={implementedRelations}
+                                    currentObjectId={obj.id}
+                                    objectDetailPath={objectDetailPath}
+                                    relationDetailPath={relationDetailPath}
+                                    limit={0}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          </section>
+                          {relationCount > 0 && (
+                            <section className="object-profile-section">
+                              <h3>邻域图</h3>
+                              <ObjectRelationGraph
+                                obj={obj}
+                                objectDetailPath={objectDetailPath}
+                                relationDetailPath={relationDetailPath}
+                                height={520}
+                                embedded
+                              />
+                            </section>
+                          )}
+                        </div>
+                      ),
+                    },
+                  ]
+                : []),
               {
                 key: "basic",
                 label: (

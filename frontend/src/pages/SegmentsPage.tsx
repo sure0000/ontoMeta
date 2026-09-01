@@ -107,7 +107,7 @@ export function SegmentsPage() {
                         style={{
                           padding: "2px 8px",
                           borderRadius: 4,
-                          background: "var(--om-warning-bg)",
+                          background: "var(--om-warning-soft)",
                           color: "var(--om-warning)",
                           fontSize: 12,
                         }}

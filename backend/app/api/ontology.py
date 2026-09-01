@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -39,9 +41,13 @@ from app.schemas import (
     RelationGroupOut,
     RelationTypeOut,
     RelationTypeUpdate,
+    RelationTypeBatchUpdate,
+    RelationTypeBatchUpdateResult,
     ReviewModeStats,
+    ReviewQueueOut,
     SegmentDetail,
     SegmentSummary,
+    SegmentUpdate,
     ValidationIssueOut,
     VerbRefinementBatchApplyRequest,
     VerbRefinementBatchOut,
@@ -139,6 +145,7 @@ def list_object_types_by_ontology(
         None, description="对象角色多选(逗号分隔)：business_object,data_table,bridge,technical"
     ),
     needs_review: bool | None = Query(None, description="仅看待复核=true"),
+    segment_id: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -149,6 +156,7 @@ def list_object_types_by_ontology(
         q=q,
         role_in=_parse_role_in(role_in),
         needs_review=needs_review,
+        segment_id=segment_id,
         limit=limit,
         offset=offset,
     )
@@ -255,7 +263,7 @@ def get_ontology_graph(
 @router.get("/ontologies/{ontology_id}/grouped-graph", response_model=OntologyGroupedGraph)
 def get_ontology_grouped_graph(
     ontology_id: str,
-    published_only: bool = False,
+    published_only: bool = Query(False),
     db: Session = Depends(get_db)
 ):
     """获取本体的板块地图视图。
@@ -271,13 +279,18 @@ def get_ontology_grouped_graph(
     response_model=ClusterDetail,
 )
 def get_ontology_cluster_detail(
-    ontology_id: str, cluster_id: str, db: Session = Depends(get_db)
+    ontology_id: str,
+    cluster_id: str,
+    published_only: bool = Query(False),
+    db: Session = Depends(get_db),
 ):
     """单个聚类下钻：全量成员 + 簇内关系边，供前端邻接矩阵视图。
 
     cluster_id 取自同一本体的 grouped-graph 返回（默认聚类粒度）。
     """
-    detail = query.get_ontology_cluster_detail(db, ontology_id, cluster_id)
+    detail = query.get_ontology_cluster_detail(
+        db, ontology_id, cluster_id, published_only=published_only
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="聚类不存在或已随数据变化失效，请刷新概览图")
     return detail
@@ -551,6 +564,7 @@ def list_object_types(
         None, description="对象角色多选(逗号分隔)：business_object,data_table,bridge,technical"
     ),
     needs_review: bool | None = Query(None, description="仅看待复核=true"),
+    segment_id: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -563,6 +577,7 @@ def list_object_types(
         q=q,
         role_in=_parse_role_in(role_in),
         needs_review=needs_review,
+        segment_id=segment_id,
         limit=limit,
         offset=offset,
     )
@@ -692,12 +707,21 @@ def list_relation_types_by_ontology(
     ontology_id: str,
     q: str | None = Query(None),
     display_name: str | None = Query(None),
+    published_only: bool = Query(False),
+    needs_review: bool | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     return query.list_relation_types(
-        db, ontology_id=ontology_id, q=q, display_name=display_name, limit=limit, offset=offset
+        db,
+        ontology_id=ontology_id,
+        published_only=published_only,
+        needs_review=needs_review,
+        q=q,
+        display_name=display_name,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -728,6 +752,7 @@ def list_relation_types(
     published_only: bool = Query(False),
     q: str | None = Query(None),
     display_name: str | None = Query(None),
+    needs_review: bool | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -737,6 +762,7 @@ def list_relation_types(
         ontology_id=ontology_id,
         domain_context_id=domain_id,
         published_only=published_only,
+        needs_review=needs_review,
         q=q,
         display_name=display_name,
         limit=limit,
@@ -750,6 +776,7 @@ def list_relation_groups(
     domain_id: str | None = Query(None),
     published_only: bool = Query(False),
     q: str | None = Query(None),
+    needs_review: bool | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """按 display_name 去重的关系分组列表（关系 Tab 用）。"""
@@ -759,6 +786,7 @@ def list_relation_groups(
         domain_context_id=domain_id,
         published_only=published_only,
         q=q,
+        needs_review=needs_review,
     )
 
 
@@ -772,6 +800,25 @@ def get_relation_type(
     if not rel:
         raise HTTPException(status_code=404, detail="Relation type not found")
     return rel
+
+
+@router.patch("/relation-types/batch", response_model=RelationTypeBatchUpdateResult)
+def batch_update_relation_types(
+    data: RelationTypeBatchUpdate,
+    db: Session = Depends(get_db),
+):
+    """批量置关系复核状态（审核工作台的关系队列）。
+
+    与 ``/object-types/batch`` 对称；同样必须声明在 ``/{relation_type_id}`` 之前，
+    否则 "batch" 会被当成 id 捕获。
+    """
+    try:
+        items = edit_service.batch_update_relation_types(
+            db, data.ids, needs_review=data.needs_review, operator=data.operator
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RelationTypeBatchUpdateResult(updated=len(items), items=items)
 
 
 @router.patch("/relation-types/{relation_type_id}", response_model=RelationTypeOut)
@@ -791,10 +838,23 @@ def update_relation_type(
             mapping_object_type_id=data.mapping_object_type_id,
             source_object_type_id=data.source_object_type_id,
             target_object_type_id=data.target_object_type_id,
+            needs_review=data.needs_review,
             operator=data.operator,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/relation-types/{relation_type_id}")
+def delete_relation_type(
+    relation_type_id: str,
+    operator: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.delete_relation_type(db, relation_type_id, operator=operator)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.patch("/relation-types/{relation_type_id}/pre-publish", response_model=RelationTypeOut)
@@ -836,16 +896,39 @@ def list_segments(
 @router.get("/segments/{segment_id}", response_model=SegmentDetail)
 def get_segment(
     segment_id: str,
+    published_only: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     """获取板块详情（包含成员列表）。"""
-    segment = query.get_segment_detail(db, segment_id)
+    segment = query.get_segment_detail(db, segment_id, published_only=published_only)
     if not segment:
         raise HTTPException(status_code=404, detail="Segment not found")
     return segment
 
 
-@router.get("/{ontology_id}/review-stats", response_model=ReviewModeStats)
+@router.patch("/segments/{segment_id}", response_model=SegmentDetail)
+def update_segment(
+    segment_id: str,
+    data: SegmentUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = edit_service.update_segment(
+            db,
+            segment_id,
+            name=data.name,
+            display_name=data.display_name,
+            description=data.description,
+            operator=data.operator,
+        )
+        if result is None:
+            raise ValueError("Segment not found")
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/ontologies/{ontology_id}/review-stats", response_model=ReviewModeStats)
 def get_review_stats(
     ontology_id: str,
     db: Session = Depends(get_db),
@@ -854,8 +937,37 @@ def get_review_stats(
     return query.get_review_mode_stats(db, ontology_id)
 
 
+@router.get("/ontologies/{ontology_id}/review-queue", response_model=ReviewQueueOut)
+def get_review_queue(
+    ontology_id: str,
+    kind: str = Query("object", pattern="^(object|relation)$", description="队列类型"),
+    segment_id: str | None = Query(
+        None, description='只看某板块；"-" 表示未接入板块的对象'
+    ),
+    role_in: list[str] | None = Query(None, description="只看这些角色（默认全部角色）"),
+    limit: int = Query(20, ge=1, le=100, description="返回多少**组**"),
+    cursor: str | None = Query(None, description="上一页返回的 next_cursor（组 key）"),
+    db: Session = Depends(get_db),
+):
+    """审核队列：把待复核对象按「板块 × 角色 × 命名族 × 判定强度」聚成组。
+
+    为什么不复用 ``GET /object-types?needs_review=true``：那条路按 ``updated_at DESC``
+    排序，而判定动作既改写 ``updated_at`` 又把行移出结果集，翻页会静默跳过整页。
+    本接口的排序键不含任何随判定变化的字段，游标可重放。
+    """
+    return query.get_review_queue(
+        db,
+        ontology_id,
+        kind=kind,
+        segment_id=segment_id,
+        role_in=role_in,
+        limit=limit,
+        cursor=cursor,
+    )
+
+
 @router.post("/ontologies/{ontology_id}/verb-refinement/suggest")
-def suggest_verb_refinements(
+async def suggest_verb_refinements(
     ontology_id: str,
     db: Session = Depends(get_db),
 ):
@@ -886,8 +998,62 @@ def suggest_verb_refinements(
         if not rel.display_name or rel.display_name in empty_verbs
     ]
 
-    # 生成建议
+    # 生成规则建议；规则未覆盖的关系随后一次性送入 LLM。
     raw_suggestions = generate_suggestions(candidates)
+
+    fallback_relations = [
+        rel for rel, suggestion in zip(candidates, raw_suggestions)
+        if suggestion.get("method") == "fallback"
+    ]
+    if fallback_relations:
+        from app.services.settings_service import SettingsService
+
+        runtime = SettingsService().get_llm_runtime(db)
+        if runtime.api_key and runtime.model:
+            from openai import AsyncOpenAI
+            from app.services.common import make_async_http_client
+            from app.services.verb_refiner import build_llm_renaming_prompt
+
+            client = AsyncOpenAI(
+                api_key=runtime.api_key,
+                base_url=runtime.api_base_url or None,
+                timeout=30,
+                max_retries=1,
+                http_client=make_async_http_client(),
+            )
+            try:
+                completion = await client.chat.completions.create(
+                    model=runtime.model,
+                    messages=[
+                        {"role": "system", "content": "你是数据治理专家，只输出合法 JSON 数组。"},
+                        {"role": "user", "content": build_llm_renaming_prompt(fallback_relations)},
+                    ],
+                    temperature=0.1,
+                )
+                response_text = (completion.choices[0].message.content or "{}").strip()
+                if response_text.startswith("```"):
+                    lines = response_text.splitlines()
+                    response_text = "\n".join(lines[1:-1]).strip()
+                payload = json.loads(response_text)
+                llm_items = payload if isinstance(payload, list) else payload.get("items", [])
+                by_index = {
+                    int(item["index"]): str(item["verb"]).strip()
+                    for item in llm_items
+                    if isinstance(item, dict) and str(item.get("verb", "")).strip()
+                }
+                fallback_ids = {rel.id: i for i, rel in enumerate(fallback_relations)}
+                for suggestion in raw_suggestions:
+                    index = fallback_ids.get(suggestion["relation_id"])
+                    verb = by_index.get(index) if index is not None else None
+                    if verb:
+                        suggestion["suggested_verb"] = verb
+                        suggestion["method"] = "llm"
+                        suggestion["confidence"] = 0.7
+            except Exception:
+                # Suggestions remain actionable through the deterministic fallback.
+                pass
+            finally:
+                await client.close()
 
     # 转换为响应格式
     suggestions = []
@@ -929,11 +1095,14 @@ def apply_verb_refinements(
     """
     批量应用动词细化建议（S2）。
 
-    更新关系的 display_name，并标记为 needs_review=True，
-    让人工确认后再发布。
+    **采纳即已复核**：调用方是人（在审核台勾选了这些建议），采纳就是一次判定动作，
+    落 ``needs_review=False``。此前这里置 True——于是「细化动词」每跑一次就把 1288 条
+    关系重新打成待复核，净增审核债，而人明明刚刚看过它们。
     """
     from app.models import RelationType
+    from app.services.edit import _mark_edited, _mark_overridden
     from app.services.common import log_change
+    from app.services.relation_terms import compact_relation_term, validate_relation_term
 
     updated_count = 0
     errors = []
@@ -948,18 +1117,25 @@ def apply_verb_refinements(
             errors.append(f"关系 {item.relation_id} 不属于本体 {ontology_id}")
             continue
 
-        # 更新动词
-        old_verb = rel.display_name
-        rel.display_name = item.new_verb
-        rel.needs_review = True  # 标记为待复核
+        term_error = validate_relation_term(item.new_verb)
+        if term_error:
+            errors.append(f"关系 {item.relation_id}：{term_error}")
+            continue
 
+        # 更新动词并钉住人工值，避免下一轮机器生成覆盖采纳结果。
+        old_verb = rel.display_name
+        rel.display_name = compact_relation_term(item.new_verb)
+        _mark_overridden(rel, ["display_name"])
+        # 人采纳了这条建议 = 这条关系的动词已经过人工确认。
+        rel.needs_review = False
+        _mark_edited(rel)
         log_change(
             db,
             "relation_type",
             rel.id,
             "update",
             item.operator or request.operator or "system",
-            summary=f"动词细化: {old_verb} -> {item.new_verb}",
+            f"动词细化: {old_verb} -> {rel.display_name}",
         )
 
         updated_count += 1
@@ -971,5 +1147,3 @@ def apply_verb_refinements(
         "total_requested": len(request.items),
         "errors": errors,
     }
-
-

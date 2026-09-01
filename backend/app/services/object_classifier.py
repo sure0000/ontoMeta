@@ -82,6 +82,11 @@ def _detect_reference_values(fields: "list[FieldSignal]") -> set[str]:
 # 可能是业务对象。孤立表（1 成员）与孤对（2 成员）不构成一个业务环节。
 _MIN_SEGMENT_SIZE = 3
 
+# 业务对象判定阈值：综合得分 >= 该值判为业务对象。审核队列的「判定强度分带」
+# （review_queue.score_band）与前端 utils/role.ts 的 ROLE_SCORE_THRESHOLD 都对齐它，
+# 三处必须是同一个数——否则复核界面标注的「刚过线/未过线」与实际分类结果对不上。
+ROLE_SCORE_THRESHOLD = 2.0
+
 # DataHub tag / subType 名称里出现这些词元，视为系统/技术资产的显式标注。
 _TECHNICAL_TAG_HINTS = {
     "system",
@@ -398,7 +403,7 @@ def classify_object_role(
         )
 
     # 打分归类：正分→业务对象；负分→数据表；中间地带看技术信号决定默认方向。
-    if score >= 2.0:
+    if score >= ROLE_SCORE_THRESHOLD:
         role = ROLE_BUSINESS_OBJECT
     elif score <= -1.0:
         role = ROLE_DATA_TABLE

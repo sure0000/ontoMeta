@@ -124,6 +124,23 @@ export function RelationGroupList({ scope, query, detailPath, objectDetailPath }
                 <span>
                   {g.display_name || <span className="om-muted">（未命名）</span>}
                   <Tag style={{ marginInlineStart: 8 }}>×{g.count}</Tag>
+                  {g.needs_review_count > 0 && (
+                    <Tag color="orange" style={{ marginInlineStart: 8 }}>
+                      {g.needs_review_count} 待复核
+                    </Tag>
+                  )}
+                  {(g.target_groups ?? []).length > 0 && (
+                    <Tooltip
+                      title={(g.target_groups ?? [])
+                        .slice(0, 8)
+                        .map((target) => `${target.display_name} ${target.count}`)
+                        .join("、")}
+                    >
+                      <Tag color="blue" style={{ marginInlineStart: 8 }}>
+                        {(g.target_groups ?? []).length} 类目标
+                      </Tag>
+                    </Tooltip>
+                  )}
                 </span>
               </Link>
             );
@@ -203,7 +220,7 @@ export function RelationGroupList({ scope, query, detailPath, objectDetailPath }
         width: 120,
         render: (_, row) => {
           if (row.kind === "bridge") {
-            const pending = (row.obj.role_reason || "").includes("待复核");
+            const pending = Boolean(row.obj.needs_review);
             return pending ? (
               <Tag color="orange">待复核</Tag>
             ) : (

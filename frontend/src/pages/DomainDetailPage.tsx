@@ -1,6 +1,7 @@
 import {
   ApartmentOutlined,
   AppstoreOutlined,
+  AuditOutlined,
   CheckCircleOutlined,
   DeleteOutlined,
   DeploymentUnitOutlined,
@@ -18,6 +19,7 @@ import {
   Dropdown,
   Modal,
   Progress,
+  Segmented,
   Space,
   Spin,
   Table,
@@ -29,7 +31,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
-import { OntologyWorkspaceView } from "../components/OntologyWorkspaceView";
+import {
+  OntologyWorkspaceView,
+  VIEW_TABS,
+  type ViewTab,
+} from "../components/OntologyWorkspaceView";
+import { OntologyOverviewPanel } from "../components/OntologyOverviewPanel";
 import { ConflictsPanel } from "../components/ConflictsPanel";
 import { IncrementalModelingModal } from "../components/IncrementalModelingModal";
 import { ManualCreateModal } from "../components/ManualCreateModal";
@@ -38,6 +45,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { useApi } from "../hooks/useApi";
+import { useEffectAfterMount, useUrlNumber, useUrlState } from "../hooks/useUrlState";
 import type {
   DomainContextDetail,
   DraftGenerationScope,
@@ -49,6 +57,7 @@ import type {
   RelationType,
   VersionDiff,
   VersionRecord,
+  ReviewModeStats,
 } from "../types";
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -78,6 +87,7 @@ async function fetchOntologyLists(
     q?: string;
     roleIn?: string[];
     needsReview?: boolean;
+    segmentId?: string;
   },
 ): Promise<Omit<DomainBundle, "domain">> {
   const objectOffset = (opts.objectPage - 1) * opts.pageSize;
@@ -88,12 +98,14 @@ async function fetchOntologyLists(
       q: opts.q || undefined,
       roleIn: opts.roleIn,
       needsReview: opts.needsReview,
+      segmentId: opts.segmentId,
       limit: opts.pageSize,
       offset: objectOffset,
     }),
     api.listRelationTypes({
       ontologyId,
       q: opts.q || undefined,
+      needsReview: opts.needsReview,
       limit: opts.pageSize,
       offset: relationOffset,
     }),
@@ -115,6 +127,7 @@ async function fetchDomainBundle(
     q?: string;
     roleIn?: string[];
     needsReview?: boolean;
+    segmentId?: string;
   },
 ): Promise<DomainBundle> {
   const domain = await api.getDomain(domainId);
@@ -271,26 +284,40 @@ function MergeReportDrawer({
 
 export function DomainDetailPage() {
   const { domainId } = useParams<{ domainId: string }>();
-  const [objectPage, setObjectPage] = useState(1);
+  // 视图状态进 URL：点进对象详情再返回、或直接刷新，都要回到原来那一屏。
+  // 审核每判一个对象就要返回一次，状态只活在组件里等于每次从头再来。
+  const [objectPage, setObjectPage] = useUrlNumber("page", 1);
   const [relationPage, setRelationPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState("");
+  const [pageSize, setPageSize] = useUrlNumber("size", DEFAULT_PAGE_SIZE);
+  const [urlQuery, setUrlQuery] = useUrlState<string>("q", "");
+  // 输入框自持，去抖后的值才写进 URL 与请求参数（免得逐键写一次历史）。
+  const [searchQuery, setSearchQuery] = useState(urlQuery);
+  const [debouncedQ, setDebouncedQ] = useState(urlQuery);
   // 默认 Tab 为「业务对象」：初始就按该角色过滤，避免首帧拉到全部角色（含关系表）后再收窄。
   const [typeFilter, setTypeFilter] = useState<string[]>(["business_object"]);
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+  const [workspaceView, setWorkspaceView] = useUrlState<"map" | "list">("view", "map", [
+    "map",
+    "list",
+  ]);
+  const [viewTab, setViewTab] = useUrlState<ViewTab>("tab", "business_object", VIEW_TABS);
 
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedQ(searchQuery.trim()), 300);
+    const t = setTimeout(() => {
+      const next = searchQuery.trim();
+      setDebouncedQ(next);
+      setUrlQuery(next);
+    }, 300);
     return () => clearTimeout(t);
-  }, [searchQuery]);
+  }, [searchQuery, setUrlQuery]);
 
-  useEffect(() => {
+  // 跳过挂载那一次：否则从 URL 恢复出来的页码会被这两条「回到第 1 页」立刻抹掉。
+  useEffectAfterMount(() => {
     setObjectPage(1);
     setRelationPage(1);
   }, [debouncedQ, domainId]);
 
-  useEffect(() => {
+  useEffectAfterMount(() => {
     setObjectPage(1);
   }, [typeFilter, needsReviewOnly]);
 
@@ -310,13 +337,38 @@ export function DomainDetailPage() {
       roleIn: typeFilter.length ? typeFilter : undefined,
       needsReview: needsReviewOnly || undefined,
     });
-  }, [domainId, objectPage, relationPage, pageSize, debouncedQ, typeFilter, needsReviewOnly]);
+  }, [
+    domainId,
+    objectPage,
+    relationPage,
+    pageSize,
+    debouncedQ,
+    typeFilter,
+    needsReviewOnly,
+  ]);
 
   const domain = bundle?.domain ?? null;
   const objects = bundle?.objects ?? [];
   const relations = bundle?.relations ?? [];
   const objectTotal = bundle?.objectTotal ?? 0;
   const relationTotal = bundle?.relationTotal ?? 0;
+
+  const reviewStats = useApi<ReviewModeStats>(
+    () =>
+      domain?.working_ontology_id
+        ? api.getReviewStats(domain.working_ontology_id)
+        : Promise.resolve({
+            total_objects: 0,
+            needs_review_count: 0,
+            reviewed_count: 0,
+            progress_ratio: 1,
+            total_relations: 0,
+            relation_needs_review_count: 0,
+            reviewed_relation_count: 0,
+            segment_progress: [],
+          }),
+    [domain?.working_ontology_id],
+  );
 
   const [generating, setGenerating] = useState<Record<DraftGenerationScope, boolean>>({
     full: false,
@@ -649,6 +701,8 @@ export function DomainDetailPage() {
   const pendingCount = domain.unpublished_change_count ?? 0;
   const pendingPublish = domain.pending_publish_count ?? 0;
   const needsReviewCount = domain.needs_review_count ?? 0;
+  // 域上的计数只算业务对象（发布门禁口径）；审核队列覆盖全部角色，用它当入口数字。
+  const pendingReviewAll = reviewStats.data?.needs_review_count ?? 0;
   const conflictCount = domain.unresolved_conflict_count ?? 0;
 
   return (
@@ -676,6 +730,13 @@ export function DomainDetailPage() {
                   aria-label="在 DataHub 中打开"
                 />
               </Tooltip>
+            )}
+            {domain.working_ontology_id && (needsReviewCount > 0 || pendingReviewAll > 0) && (
+              <Link to={`/workspace/${domainId}/review`}>
+                <Button type="primary" ghost icon={<AuditOutlined />}>
+                  审核 {pendingReviewAll || needsReviewCount} 个
+                </Button>
+              </Link>
             )}
             <Link to={`/workspace/${domainId}/executions`}>
               <Tooltip title="执行记录">
@@ -802,7 +863,13 @@ export function DomainDetailPage() {
             <Space size={8} wrap>
               {pendingCount > 0 && <Tag color="orange">{pendingCount} 项已发布内容被修改</Tag>}
               {pendingPublish > 0 && <Tag color="blue">{pendingPublish} 项待提升</Tag>}
-              {needsReviewCount > 0 && <Tag>{needsReviewCount} 个待复核对象（发布会跳过）</Tag>}
+              {needsReviewCount > 0 && (
+                <Link to={`/workspace/${domainId}/review`}>
+                  <Tag style={{ cursor: "pointer" }}>
+                    {needsReviewCount} 个待复核业务对象（发布会跳过）→ 去审核
+                  </Tag>
+                </Link>
+              )}
               {conflictCount > 0 && <Tag color="red">{conflictCount} 处字段冲突</Tag>}
               <span style={{ color: "var(--om-text-secondary)", fontSize: 13 }}>
                 尚未固化为新版本
@@ -875,46 +942,71 @@ export function DomainDetailPage() {
           />
         ) : (
           <>
-            <OntologyWorkspaceView
-              objects={objects}
-              relations={relations}
-              objectDetailPath={objectDetailPath}
-              relationDetailPath={relationDetailPath}
-              relationScope={{ ontologyId: domain.working_ontology_id ?? undefined }}
-              datasetOntologyId={domain.working_ontology_id}
-              onDerivedObjectCreated={reloadBundle}
-              relationGroupDetailPath={relationGroupDetailPath}
-              workspaceMode
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              objectTypeFilter={typeFilter}
-              onObjectTypeFilterChange={setTypeFilter}
-              needsReviewOnly={needsReviewOnly}
-              onNeedsReviewOnlyChange={setNeedsReviewOnly}
-              onBatchUpdateObjects={async (ids, patch) => {
-                const res = await api.batchUpdateObjectTypes({ ids, ...patch });
-                message.success(`已更新 ${res.updated} 个对象`);
-                reloadBundle();
-              }}
-              objectPaging={{
-                total: objectTotal,
-                page: objectPage,
-                pageSize,
-                onChange: (page, size) => {
-                  setObjectPage(page);
-                  setPageSize(size);
-                },
-              }}
-              relationPaging={{
-                total: relationTotal,
-                page: relationPage,
-                pageSize,
-                onChange: (page, size) => {
-                  setRelationPage(page);
-                  setPageSize(size);
-                },
-              }}
-            />
+            {/* 「审核」不再是这一页上的一个开关：它是另一件事——面对的是待判队列、
+                排序键不同、做完的标志是队列清空。它有自己的页面（下方入口 + 顶栏按钮），
+                这里只留浏览用的地图/清单切换。 */}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
+              <Segmented
+                value={workspaceView}
+                onChange={(value) => setWorkspaceView(value as "map" | "list")}
+                options={[
+                  { label: "业务地图", value: "map" },
+                  { label: "对象清单", value: "list" },
+                ]}
+              />
+            </div>
+
+            {workspaceView === "map" ? (
+              <OntologyOverviewPanel
+                ontologyId={domain.working_ontology_id}
+                objectDetailPath={objectDetailPath}
+                segmentPath={(segmentId) => `/segments/${segmentId}`}
+              />
+            ) : (
+              <OntologyWorkspaceView
+                objects={objects}
+                relations={relations}
+                objectDetailPath={objectDetailPath}
+                relationDetailPath={relationDetailPath}
+                relationScope={{ ontologyId: domain.working_ontology_id ?? undefined }}
+                datasetOntologyId={domain.working_ontology_id}
+                onDerivedObjectCreated={reloadBundle}
+                relationGroupDetailPath={relationGroupDetailPath}
+                viewTab={viewTab}
+                onViewTabChange={setViewTab}
+                workspaceMode
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                objectTypeFilter={typeFilter}
+                onObjectTypeFilterChange={setTypeFilter}
+                needsReviewOnly={needsReviewOnly}
+                onNeedsReviewOnlyChange={setNeedsReviewOnly}
+                onBatchUpdateObjects={async (ids, patch) => {
+                  const res = await api.batchUpdateObjectTypes({ ids, ...patch });
+                  message.success(`已更新 ${res.updated} 个对象`);
+                  // 进度数字在页头的提示条里，批量改完必须一起重取。
+                  await Promise.all([reloadBundle(), reviewStats.reload()]);
+                }}
+                objectPaging={{
+                  total: objectTotal,
+                  page: objectPage,
+                  pageSize,
+                  onChange: (page, size) => {
+                    setObjectPage(page);
+                    setPageSize(size);
+                  },
+                }}
+                relationPaging={{
+                  total: relationTotal,
+                  page: relationPage,
+                  pageSize,
+                  onChange: (page, size) => {
+                    setRelationPage(page);
+                    setPageSize(size);
+                  },
+                }}
+              />
+            )}
           </>
         )}
       </Spin>

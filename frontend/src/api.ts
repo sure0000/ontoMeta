@@ -80,6 +80,9 @@ import type {
   ObjectTypeSummary,
   SegmentSummary,
   SegmentDetail,
+  ReviewModeStats,
+  ReviewQueue,
+  VerbRefinementBatch,
   OntologyGraph,
   OntologyGroupedGraph,
   ClusterDetail,
@@ -442,6 +445,7 @@ export const api = {
       mapping_object_type_id?: string | null;
       source_object_type_id?: string;
       target_object_type_id?: string;
+      needs_review?: boolean;
     },
   ) =>
     request<RelationType>(`/api/relation-types/${relationTypeId}`, {
@@ -454,12 +458,19 @@ export const api = {
       method: "PATCH",
     }),
 
+  deleteRelationType: (relationTypeId: string, operator?: string) =>
+    request<{ id: string; deleted: boolean }>(
+      `/api/relation-types/${relationTypeId}${buildQuery({ operator })}`,
+      { method: "DELETE" },
+    ),
+
   listRelationTypes: (params?: {
     ontologyId?: string;
     domainId?: string;
     publishedOnly?: boolean;
     q?: string;
     displayName?: string;
+    needsReview?: boolean;
     limit?: number;
     offset?: number;
   }) =>
@@ -470,6 +481,7 @@ export const api = {
         published_only: params?.publishedOnly,
         q: params?.q,
         display_name: params?.displayName,
+        needs_review: params?.needsReview,
         limit: params?.limit,
         offset: params?.offset,
       })}`,
@@ -480,6 +492,7 @@ export const api = {
     domainId?: string;
     publishedOnly?: boolean;
     q?: string;
+    needsReview?: boolean;
   }) =>
     request<RelationGroup[]>(
       `/api/relation-groups${buildQuery({
@@ -487,6 +500,7 @@ export const api = {
         domain_id: params?.domainId,
         published_only: params?.publishedOnly,
         q: params?.q,
+        needs_review: params?.needsReview,
       })}`,
     ),
 
@@ -534,10 +548,14 @@ export const api = {
         published_only: params?.publishedOnly,
       })}`,
     ),
-  getOntologyGroupedGraph: (id: string) =>
-    request<OntologyGroupedGraph>(`/api/ontologies/${id}/grouped-graph`),
-  getOntologyCluster: (id: string, clusterId: string) =>
-    request<ClusterDetail>(`/api/ontologies/${id}/clusters/${clusterId}`),
+  getOntologyGroupedGraph: (id: string, publishedOnly?: boolean) =>
+    request<OntologyGroupedGraph>(
+      `/api/ontologies/${id}/grouped-graph${buildQuery({ published_only: publishedOnly })}`,
+    ),
+  getOntologyCluster: (id: string, clusterId: string, publishedOnly?: boolean) =>
+    request<ClusterDetail>(
+      `/api/ontologies/${id}/clusters/${clusterId}${buildQuery({ published_only: publishedOnly })}`,
+    ),
 
   listObjectTypes: (params?: {
     ontologyId?: string;
@@ -546,6 +564,7 @@ export const api = {
     q?: string;
     roleIn?: string[];
     needsReview?: boolean;
+    segmentId?: string;
     limit?: number;
     offset?: number;
   }) =>
@@ -557,6 +576,7 @@ export const api = {
         q: params?.q,
         role_in: params?.roleIn?.length ? params.roleIn.join(",") : undefined,
         needs_review: params?.needsReview,
+        segment_id: params?.segmentId,
         limit: params?.limit,
         offset: params?.offset,
       })}`,
@@ -582,7 +602,69 @@ export const api = {
       })}`,
     ),
 
-  getSegment: (id: string) => request<SegmentDetail>(`/api/segments/${id}`),
+  getSegment: (id: string, publishedOnly?: boolean) =>
+    request<SegmentDetail>(
+      `/api/segments/${id}${buildQuery({ published_only: publishedOnly })}`,
+    ),
+  updateSegment: (
+    id: string,
+    body: { name?: string; display_name?: string; description?: string; operator?: string },
+  ) =>
+    request<SegmentDetail>(`/api/segments/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  getReviewStats: (ontologyId: string) =>
+    request<ReviewModeStats>(`/api/ontologies/${ontologyId}/review-stats`),
+
+  /** 审核队列：成组、确定性排序、游标可重放（segmentId 传 "-" 看未接入板块）。 */
+  getReviewQueue: (
+    ontologyId: string,
+    params?: {
+      kind?: "object" | "relation";
+      segmentId?: string;
+      roleIn?: string[];
+      limit?: number;
+      cursor?: string;
+    },
+  ) =>
+    request<ReviewQueue>(
+      `/api/ontologies/${ontologyId}/review-queue` +
+        buildQuery({
+          kind: params?.kind,
+          segment_id: params?.segmentId,
+          role_in: params?.roleIn,
+          limit: params?.limit,
+          cursor: params?.cursor,
+        }),
+    ),
+
+  /** 批量置关系复核状态（与对象批量对称）。 */
+  batchUpdateRelationTypes: (body: {
+    ids: string[];
+    needs_review?: boolean;
+    operator?: string;
+  }) =>
+    request<{ updated: number; items: RelationType[] }>(`/api/relation-types/batch`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  suggestVerbRefinements: (ontologyId: string) =>
+    request<VerbRefinementBatch>(`/api/ontologies/${ontologyId}/verb-refinement/suggest`, {
+      method: "POST",
+    }),
+
+  applyVerbRefinements: (
+    ontologyId: string,
+    items: Array<{ relation_id: string; new_verb: string; operator?: string }>,
+    operator?: string,
+  ) =>
+    request<{ updated_count: number; total_requested: number; errors: string[] }>(
+      `/api/ontologies/${ontologyId}/verb-refinement/apply`,
+      { method: "POST", body: JSON.stringify({ items, operator }) },
+    ),
 
   listBusinessLogics: (params?: {
     ontologyId?: string;

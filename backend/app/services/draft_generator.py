@@ -368,16 +368,22 @@ class OntologyDraftGenerator:
         )
 
         # LLM 板块命名（需要 async 上下文）
-        if draft.segments and self.client:
+        # Segment naming is part of the production OpenAI pipeline. Test
+        # doubles used for object/property/relation naming intentionally do
+        # not implement the separate segment response contract.
+        if draft.segments and isinstance(self.client, AsyncOpenAI):
             try:
                 from app.services.segment_generator import name_segments_with_llm, dedupe_segment_names
                 await name_segments_with_llm(
                     draft.segments, draft.object_types, draft.relation_types,
-                    set(draft.hub_nodes), self.client
+                    set(draft.hub_nodes), self.client, model=self.model, checkpoint=checkpoint
                 )
                 dedupe_segment_names(draft.segments)
             except Exception as e:
-                logger.warning("Failed to name segments with LLM: %s", e)
+                # A generated segment without a semantic name is not a valid
+                # draft: do not persist an empty or mechanical identity.
+                logger.error("Failed to name segments with LLM: %s", e)
+                raise
 
         return draft
 
@@ -441,7 +447,7 @@ class OntologyDraftGenerator:
 
         except Exception as e:
             logger.warning("Failed to generate segments: %s", e, exc_info=True)
-            # 板块生成失败不影响本体草稿的其他部分
+            raise
 
         return OntologyDraftOutput(
             object_types=object_types,

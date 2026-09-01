@@ -6,11 +6,13 @@ export type { RoleSignals };
 //
 // 后端 object_classifier 不依赖表名，用结构/内容/拓扑/语义信号给每张表打分并分类，
 // 产出两份可展示的东西：
-//   - role_reason：人类可读理由，子句以「；」分隔，待复核前缀 [待复核]；
+//   - role_reason：人类可读理由，子句以「；」分隔（**不再**编码复核状态——
+//     复核状态是 object_types.needs_review 独立列，读它，别去 role_reason 里找前缀）；
 //   - role_signals：结构化证据 JSON（score / needs_review / signals{...}）。
 // 这里把它们规整成前端可直接渲染的结构，供角色徽章与详情「判定依据」面板复用，
 // 避免在多处重复散落映射。阈值与 backend/app/services/object_classifier.py 对齐。
 
+/** 存量 role_reason 里可能还残留的旧前缀，仅用于展示时剥除。 */
 export const REVIEW_MARK = "待复核";
 
 /** 业务环节最小成员数（与后端 object_classifier._MIN_SEGMENT_SIZE 对齐）。 */
@@ -41,11 +43,6 @@ export const ROLE_OPTIONS = [
 
 export function getRoleMeta(role?: string): RoleMeta {
   return ROLE_META[role || "business_object"] ?? ROLE_META.business_object;
-}
-
-/** 复核状态以 role_reason 是否含 [待复核] 为唯一真源（与后端一致）。 */
-export function isNeedsReview(reason?: string | null): boolean {
-  return (reason ?? "").includes(REVIEW_MARK);
 }
 
 /**
