@@ -436,6 +436,8 @@ class SegmentDetail(SegmentSummary):
     members: list[ObjectTypeSummary] = Field(default_factory=list)
     # 板块内关系数量
     internal_relation_count: int = 0
+    # 板块内的边数据（可选，仅当成员数 > 40 时提供，用于矩阵视图）
+    edges: list["GraphEdge"] | None = None
 
 
 class ObjectTypeLogicBindingOut(BaseModel):

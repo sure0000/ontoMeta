@@ -329,6 +329,7 @@ export interface SegmentSummary extends FieldProvenance {
 export interface SegmentDetail extends SegmentSummary {
   members: ObjectTypeSummary[];
   internal_relation_count: number;
+  edges?: GraphEdge[];
 }
 
 export interface Property extends FieldProvenance {

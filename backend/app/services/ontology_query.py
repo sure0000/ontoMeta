@@ -1485,9 +1485,12 @@ class OntologyQueryService:
         return PageResult(items=items, total=total, limit=limit, offset=offset)
 
     def get_segment_detail(self, db: Session, segment_id: str):
-        """获取板块详情（包含成员列表）。"""
+        """获取板块详情（包含成员列表）。
+
+        对于稠密板块（成员 > 40），返回边数据以支持矩阵视图。
+        """
         from app.models import OntologySegment, ObjectType, RelationType
-        from app.schemas import SegmentDetail
+        from app.schemas import SegmentDetail, GraphEdge
 
         segment = db.query(OntologySegment).filter(OntologySegment.id == segment_id).first()
         if not segment:
@@ -1506,9 +1509,9 @@ class OntologyQueryService:
         # 转换为 ObjectTypeSummary
         member_summaries = [self._to_object_summary(db, obj) for obj in members]
 
-        # 统计板块内关系数量
+        # 获取板块内关系
         member_ids = {obj.id for obj in members}
-        internal_relation_count = (
+        internal_relations = (
             db.query(RelationType)
             .filter(
                 RelationType.ontology_id == segment.ontology_id,
@@ -1516,8 +1519,26 @@ class OntologyQueryService:
                 RelationType.target_object_type_id.in_(member_ids),
                 RelationType.deleted_by_user == False,
             )
-            .count()
+            .all()
         )
+
+        internal_relation_count = len(internal_relations)
+
+        # 对于稠密板块（> 40 成员），返回边数据用于矩阵视图
+        edges = None
+        if len(members) > 40:
+            edges = [
+                GraphEdge(
+                    id=rel.id,
+                    source=rel.source_object_type_id,
+                    target=rel.target_object_type_id,
+                    label=rel.display_name,
+                    cardinality=_normalize_cardinality(rel.cardinality),
+                    relation_id=rel.id,
+                    structure_type=rel.structure_type,
+                )
+                for rel in internal_relations
+            ]
 
         return SegmentDetail(
             id=segment.id,
@@ -1535,6 +1556,7 @@ class OntologyQueryService:
             conflicts=_loads_json(segment.conflict_json) or {},
             members=member_summaries,
             internal_relation_count=internal_relation_count,
+            edges=edges,
         )
 
 

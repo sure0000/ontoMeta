@@ -1,17 +1,23 @@
 import { AppstoreOutlined, ArrowLeftOutlined } from "@ant-design/icons";
-import { Alert, Descriptions, Tag } from "antd";
+import { Alert, Descriptions, Segmented, Tag } from "antd";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import { ClusterMatrixView } from "../components/graph/ClusterMatrixView";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { useApi } from "../hooks/useApi";
 import { formatDateTime } from "../utils/format";
-import type { SegmentDetail } from "../types";
+import type { SegmentDetail, ClusterDetail, GraphNode } from "../types";
+
+// 稠密板块阈值：成员 > 40 时默认显示矩阵视图
+const DENSE_THRESHOLD = 40;
 
 export function SegmentDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const [viewMode, setViewMode] = useState<"cards" | "matrix">("cards");
 
   const {
     data: segment,
@@ -30,6 +36,33 @@ export function SegmentDetailPage() {
       </PageContainer>
     );
   if (!segment) return null;
+
+  const isDense = segment.members.length > DENSE_THRESHOLD;
+  const hasEdges = Boolean(segment.edges && segment.edges.length > 0);
+
+  // 如果是稠密板块且有边数据，默认使用矩阵视图
+  const effectiveMode = isDense && hasEdges && viewMode === "cards" ? "matrix" : viewMode;
+
+  // 将 SegmentDetail 转换为 ClusterDetail 以供 ClusterMatrixView 使用
+  const clusterDetail: ClusterDetail | null =
+    hasEdges && segment.edges
+      ? {
+          id: segment.id,
+          name: segment.display_name,
+          node_count: segment.members.length,
+          nodes: segment.members.map(
+            (m): GraphNode => ({
+              id: m.id,
+              label: m.name,
+              display_name: m.display_name,
+              status: m.status,
+              table_role: m.table_role,
+              needs_review: m.needs_review || false,
+            }),
+          ),
+          edges: segment.edges,
+        }
+      : null;
 
   return (
     <PageContainer>
@@ -63,12 +96,27 @@ export function SegmentDetailPage() {
         </Descriptions>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <h3 style={{ fontSize: 16, fontWeight: 600 }}>成员对象</h3>
+      <div style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
+          成员对象
+          {isDense && <Tag color="blue" style={{ marginLeft: 8 }}>稠密板块</Tag>}
+        </h3>
+        {isDense && hasEdges && (
+          <Segmented
+            value={viewMode}
+            onChange={(v) => setViewMode(v as "cards" | "matrix")}
+            options={[
+              { label: "卡片视图", value: "cards" },
+              { label: "矩阵视图", value: "matrix" },
+            ]}
+          />
+        )}
       </div>
 
       {segment.members.length === 0 ? (
         <EmptyState title="暂无成员对象" description="此板块尚未分配任何成员对象。" />
+      ) : effectiveMode === "matrix" && clusterDetail ? (
+        <ClusterMatrixView detail={clusterDetail} />
       ) : (
         <div className="workspace-domain-grid">
           {segment.members.map((member) => (
