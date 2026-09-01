@@ -18,6 +18,7 @@ from app.models import (
 from app.services.object_landing import bulk_object_landings
 from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.services.common import log_change
+from app.services.community_detection import vote_segment_for_node
 from app.ontology_types import is_valid_cardinality, is_valid_semantic_type
 from app.schemas import (
     BusinessLogicDetail,
@@ -86,6 +87,60 @@ def _validate_semantic_type_or_raise(value: str | None) -> None:
 def _set_review_mark(obj: ObjectType, needs_review: bool) -> None:
     """置复核状态。独立布尔列，不再动 role_reason——那是描述性字段，归机器刷新。"""
     obj.needs_review = bool(needs_review)
+
+
+def _auto_assign_segment_by_neighbors(db: Session, obj: ObjectType) -> None:
+    """邻居投票单节点：根据邻居的板块归属，自动分配该对象的板块。
+
+    当对象被提升为 business_object 时调用。如果邻居中没有板块信息，则不分配。
+    这是增量板块分配的实现，复杂度 O(邻居数)。
+    """
+    if not obj.ontology_id:
+        return
+
+    # 构建邻接表：获取该对象的所有关系
+    relations = (
+        db.query(RelationType)
+        .filter(
+            RelationType.ontology_id == obj.ontology_id,
+            (RelationType.source_object_type_id == obj.id)
+            | (RelationType.target_object_type_id == obj.id),
+        )
+        .all()
+    )
+
+    neighbors = set()
+    for rel in relations:
+        if rel.source_object_type_id == obj.id:
+            neighbors.add(rel.target_object_type_id)
+        if rel.target_object_type_id == obj.id:
+            neighbors.add(rel.source_object_type_id)
+
+    if not neighbors:
+        return
+
+    # 获取邻居的板块归属
+    neighbor_objects = (
+        db.query(ObjectType)
+        .filter(
+            ObjectType.id.in_(neighbors),
+            ObjectType.table_role == "business_object",
+            ObjectType.segment_id.isnot(None),
+        )
+        .all()
+    )
+
+    node_to_segment = {o.id: o.segment_id for o in neighbor_objects if o.segment_id}
+    if not node_to_segment:
+        return
+
+    # 构建简化的邻接表（只包含当前节点）
+    adjacency = {obj.id: neighbors}
+
+    # 投票
+    voted_segment = vote_segment_for_node(obj.id, adjacency, node_to_segment)
+    if voted_segment:
+        obj.segment_id = voted_segment
 
 
 def _log_change(
@@ -191,15 +246,22 @@ class EditService:
             changed.append("description")
 
         role_confirmed = False
+        role_changed_to_business = False
         if table_role is not None and table_role != obj.table_role:
             if table_role not in _ALLOWED_TABLE_ROLES:
                 raise ValueError(f"非法对象角色：{table_role}")
+            old_role = obj.table_role
             obj.table_role = table_role
             changed.append("table_role")
             # 人工改判角色即视为复核通过。
             role_confirmed = True
+            # 记录是否从非业务对象变为业务对象
+            role_changed_to_business = (
+                old_role != "business_object" and table_role == "business_object"
+            )
 
         # 板块归属（人工修改板块分配）
+        segment_explicitly_set = False
         if segment_id is not None and segment_id != obj.segment_id:
             # 验证板块存在且属于同一本体
             if segment_id != "":  # 空字符串表示移出板块
@@ -210,6 +272,12 @@ class EditService:
                     raise ValueError("不能将对象移动到其他本体的板块")
             obj.segment_id = segment_id if segment_id else None
             changed.append("segment_id")
+            segment_explicitly_set = True
+
+        # 自动板块分配：当对象提升为业务对象且未显式设置板块时，基于邻居投票分配
+        if role_changed_to_business and not segment_explicitly_set and not obj.segment_id:
+            _auto_assign_segment_by_neighbors(db, obj)
+            # 注意：自动分配的板块不计入 overridden_fields，允许未来机器重新分配
 
         # 复核状态：显式 needs_review 优先；否则改角色时自动置为已确认。
         # 它是独立列，**不计入 changed**——changed 会被 _mark_overridden 永久钉住，

@@ -16,6 +16,48 @@ def _stable_rank(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
+def vote_segment_for_node(
+    node_id: str,
+    adjacency: dict[str, set[str]],
+    node_to_segment: dict[str, str],
+) -> str | None:
+    """单节点邻居投票：根据邻居的板块归属，投票决定该节点应该属于哪个板块。
+
+    这是增量板块分配的核心：当用户把一个对象提升为业务对象、或需要重新分配时，
+    只对这一个节点跑邻居投票，而不是全量重跑整个聚类算法。
+
+    Args:
+        node_id: 待分配的节点 ID
+        adjacency: 邻接表（节点 -> 邻居集合）
+        node_to_segment: 已知的节点到板块的映射（板块 ID）
+
+    Returns:
+        投票得出的板块 ID，如果没有邻居或所有邻居都没有板块则返回 None
+    """
+    neighbors = [n for n in adjacency.get(node_id, ()) if n != node_id]
+    if not neighbors:
+        return None
+
+    # 统计邻居的板块归属
+    segment_votes: list[str] = []
+    for neighbor in neighbors:
+        segment = node_to_segment.get(neighbor)
+        if segment:
+            segment_votes.append(segment)
+
+    if not segment_votes:
+        return None
+
+    # 找出票数最多的板块
+    votes = Counter(segment_votes)
+    top_count = max(votes.values())
+    candidates = sorted(
+        (seg for seg, count in votes.items() if count == top_count),
+        key=_stable_rank,
+    )
+    return candidates[0]
+
+
 def label_propagation_clusters(
     node_ids: list[str], adjacency: dict[str, set[str]]
 ) -> list[set[str]]:
