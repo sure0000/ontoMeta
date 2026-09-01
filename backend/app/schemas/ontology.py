@@ -872,3 +872,24 @@ class ClusterDetail(BaseModel):
     node_count: int = 0
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
+
+
+class SegmentReviewProgress(BaseModel):
+    """板块的审核进度统计。"""
+
+    segment_id: str
+    segment_name: str
+    total_count: int
+    needs_review_count: int
+    reviewed_count: int
+    progress_ratio: float = Field(description="已审核比例 (0.0-1.0)")
+
+
+class ReviewModeStats(BaseModel):
+    """审核模式的全局统计。"""
+
+    total_objects: int
+    needs_review_count: int
+    reviewed_count: int
+    progress_ratio: float
+    segment_progress: list[SegmentReviewProgress] = Field(default_factory=list)

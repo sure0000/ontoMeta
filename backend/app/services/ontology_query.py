@@ -1645,6 +1645,67 @@ class OntologyQueryService:
             edges=edges,
         )
 
+    def get_review_mode_stats(self, db: Session, ontology_id: str):
+        """获取审核模式的全局统计和板块级进度。"""
+        from app.models import OntologySegment, ObjectType
+        from app.schemas import ReviewModeStats, SegmentReviewProgress
+
+        # 全局统计
+        all_objects = (
+            db.query(ObjectType)
+            .filter(
+                ObjectType.ontology_id == ontology_id,
+                ObjectType.table_role == "business_object",
+                ObjectType.deleted_by_user == False,
+            )
+            .all()
+        )
+
+        total_objects = len(all_objects)
+        needs_review_count = sum(1 for obj in all_objects if obj.needs_review)
+        reviewed_count = total_objects - needs_review_count
+        progress_ratio = reviewed_count / total_objects if total_objects > 0 else 1.0
+
+        # 板块级统计
+        segments = (
+            db.query(OntologySegment)
+            .filter(
+                OntologySegment.ontology_id == ontology_id,
+                OntologySegment.deleted_by_user == False,
+            )
+            .all()
+        )
+
+        segment_progress_list = []
+        for segment in segments:
+            segment_objects = [obj for obj in all_objects if obj.segment_id == segment.id]
+            seg_total = len(segment_objects)
+            seg_needs_review = sum(1 for obj in segment_objects if obj.needs_review)
+            seg_reviewed = seg_total - seg_needs_review
+            seg_ratio = seg_reviewed / seg_total if seg_total > 0 else 1.0
+
+            segment_progress_list.append(
+                SegmentReviewProgress(
+                    segment_id=segment.id,
+                    segment_name=segment.display_name,
+                    total_count=seg_total,
+                    needs_review_count=seg_needs_review,
+                    reviewed_count=seg_reviewed,
+                    progress_ratio=seg_ratio,
+                )
+            )
+
+        # 按待审核数量降序排序（未完成的排在前面）
+        segment_progress_list.sort(key=lambda x: (-x.needs_review_count, x.segment_name))
+
+        return ReviewModeStats(
+            total_objects=total_objects,
+            needs_review_count=needs_review_count,
+            reviewed_count=reviewed_count,
+            progress_ratio=progress_ratio,
+            segment_progress=segment_progress_list,
+        )
+
 
 def _refers_to_dataset(ref: str | None) -> bool:
     """这个 source_ref 在 DataHub 里是否可能对应一个数据集。

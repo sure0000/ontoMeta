@@ -39,6 +39,7 @@ from app.schemas import (
     RelationGroupOut,
     RelationTypeOut,
     RelationTypeUpdate,
+    ReviewModeStats,
     SegmentDetail,
     SegmentSummary,
     ValidationIssueOut,
@@ -839,5 +840,14 @@ def get_segment(
     if not segment:
         raise HTTPException(status_code=404, detail="Segment not found")
     return segment
+
+
+@router.get("/{ontology_id}/review-stats", response_model=ReviewModeStats)
+def get_review_stats(
+    ontology_id: str,
+    db: Session = Depends(get_db),
+):
+    """获取审核模式的全局统计和板块级进度。"""
+    return query.get_review_mode_stats(db, ontology_id)
 
 
