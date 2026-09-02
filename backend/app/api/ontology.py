@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -51,6 +51,7 @@ from app.schemas import (
     ValidationIssueOut,
     VerbRefinementBatchApplyRequest,
     VerbRefinementBatchOut,
+    VerbRefinementSuggestRequest,
     VerbSuggestion,
     VersionDiffOut,
     VersionRecordOut,
@@ -594,16 +595,21 @@ def batch_update_object_types(
     否则 "batch" 会被当作 object_type_id 捕获。
     """
     try:
-        items = edit_service.batch_update_object_types(
+        outcome = edit_service.batch_update_object_types(
             db,
             data.ids,
             table_role=data.table_role,
+            segment_id=data.segment_id,
             needs_review=data.needs_review,
             operator=data.operator,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ObjectTypeBatchUpdateResult(updated=len(items), items=items)
+    return ObjectTypeBatchUpdateResult(
+        updated=len(outcome.items),
+        pending_classification=outcome.pending_classification,
+        items=outcome.items,
+    )
 
 
 @router.get("/object-types/{object_type_id}", response_model=ObjectTypeDetail)
@@ -941,6 +947,11 @@ def get_review_stats(
 def get_review_queue(
     ontology_id: str,
     kind: str = Query("object", pattern="^(object|relation)$", description="队列类型"),
+    status: str = Query(
+        "pending",
+        pattern="^(pending|reviewed)$",
+        description="pending=待判（默认）；reviewed=已判过的，用于回看与重新复核",
+    ),
     segment_id: str | None = Query(
         None, description='只看某板块；"-" 表示未接入板块的对象'
     ),
@@ -954,11 +965,15 @@ def get_review_queue(
     为什么不复用 ``GET /object-types?needs_review=true``：那条路按 ``updated_at DESC``
     排序，而判定动作既改写 ``updated_at`` 又把行移出结果集，翻页会静默跳过整页。
     本接口的排序键不含任何随判定变化的字段，游标可重放。
+
+    ``status=reviewed`` 返回**已判过**的那一半，分组与排序完全相同（分组本来就在
+    待判+已判的完整人口上做一次）：判完的板块能原样回看，判错的能退回重判。
     """
     return query.get_review_queue(
         db,
         ontology_id,
         kind=kind,
+        status=status,
         segment_id=segment_id,
         role_in=role_in,
         limit=limit,
@@ -969,20 +984,28 @@ def get_review_queue(
 @router.post("/ontologies/{ontology_id}/verb-refinement/suggest")
 async def suggest_verb_refinements(
     ontology_id: str,
+    payload: VerbRefinementSuggestRequest | None = Body(None),
     db: Session = Depends(get_db),
 ):
     """
     生成空动词细化建议（S2）。
 
-    扫描本体中空泛动词的关系（"属于"、"引用"、"关联"），
-    根据外键列名规则推断精确动词，返回建议列表。
+    两种范围：
+
+    - ``relation_ids`` 给出时**只对这一批**关系出建议，且不套空动词过滤——调用方是
+      审核台上刚看过这批三元组的人，选谁就细化谁。
+    - 不给时退回全本体扫描：找空泛动词的关系（"属于"、"引用"、"关联"）。
+
+    两种范围都按外键列名规则推断精确动词，规则未覆盖的一次性送 LLM。
+    改不动的（建议词与现动词相同）不返回——那不是建议，是噪声。
     """
     from app.models import RelationType
+    from app.services.verb_refiner import EMPTY_VERBS
     from app.services.verb_refiner import suggest_verb_refinements as generate_suggestions
     from app.schemas import VerbRefinementBatchOut, VerbSuggestion
 
-    # 查询需要细化的关系：空泛动词
-    empty_verbs = {"属于", "引用", "关联", "关系", "连接"}
+    requested_ids = [rid for rid in (payload.relation_ids or []) if rid] if payload else []
+
     relations = (
         db.query(RelationType)
         .filter(
@@ -992,11 +1015,15 @@ async def suggest_verb_refinements(
         .all()
     )
 
-    # 过滤出空泛动词的关系
-    candidates = [
-        rel for rel in relations
-        if not rel.display_name or rel.display_name in empty_verbs
-    ]
+    if requested_ids:
+        # 按请求顺序返回：抽屉里的行序与审核台那一屏一致，人能逐行对上。
+        by_id = {rel.id: rel for rel in relations}
+        candidates = [by_id[rid] for rid in dict.fromkeys(requested_ids) if rid in by_id]
+    else:
+        candidates = [
+            rel for rel in relations
+            if not rel.display_name or rel.display_name in EMPTY_VERBS
+        ]
 
     # 生成规则建议；规则未覆盖的关系随后一次性送入 LLM。
     raw_suggestions = generate_suggestions(candidates)
@@ -1005,20 +1032,28 @@ async def suggest_verb_refinements(
         rel for rel, suggestion in zip(candidates, raw_suggestions)
         if suggestion.get("method") == "fallback"
     ]
+    # 规则没覆盖到的那批，只有 LLM 能给出更好的说法。它有没有真的跑，决定了
+    # 「一条建议都没有」该怎么解释——是本批本来就没得改，还是模型没配/没答上。
+    llm_status = "unused"
     if fallback_relations:
         from app.services.settings_service import SettingsService
 
         runtime = SettingsService().get_llm_runtime(db)
+        if not (runtime.api_key and runtime.model):
+            llm_status = "unavailable"
         if runtime.api_key and runtime.model:
             from openai import AsyncOpenAI
             from app.services.common import make_async_http_client
             from app.services.verb_refiner import build_llm_renaming_prompt
 
+            # max_retries=0：这条路是人点着「动词建议」在等的（审核台一批一批地点），
+            # 模型不通时自动重试只会把 30 秒的转圈变成 60 秒。抽屉上的「重新生成」
+            # 就是重试，交给人按比自己偷偷试一遍强。
             client = AsyncOpenAI(
                 api_key=runtime.api_key,
                 base_url=runtime.api_base_url or None,
                 timeout=30,
-                max_retries=1,
+                max_retries=0,
                 http_client=make_async_http_client(),
             )
             try:
@@ -1034,8 +1069,10 @@ async def suggest_verb_refinements(
                 if response_text.startswith("```"):
                     lines = response_text.splitlines()
                     response_text = "\n".join(lines[1:-1]).strip()
-                payload = json.loads(response_text)
-                llm_items = payload if isinstance(payload, list) else payload.get("items", [])
+                llm_payload = json.loads(response_text)
+                llm_items = (
+                    llm_payload if isinstance(llm_payload, list) else llm_payload.get("items", [])
+                )
                 by_index = {
                     int(item["index"]): str(item["verb"]).strip()
                     for item in llm_items
@@ -1049,17 +1086,30 @@ async def suggest_verb_refinements(
                         suggestion["suggested_verb"] = verb
                         suggestion["method"] = "llm"
                         suggestion["confidence"] = 0.7
+                llm_status = "ok"
             except Exception:
                 # Suggestions remain actionable through the deterministic fallback.
-                pass
+                llm_status = "failed"
             finally:
                 await client.close()
 
     # 转换为响应格式
+    by_candidate_id = {rel.id: rel for rel in candidates}
     suggestions = []
     for sug in raw_suggestions:
-        rel = next((r for r in candidates if r.id == sug["relation_id"]), None)
+        rel = by_candidate_id.get(sug["relation_id"])
         if not rel:
+            continue
+
+        # 建议词与现动词一样 = 改不动这条。列出来只会让人白勾一遍，
+        # 还会把「采纳 N 条」的数字撑大成假进度。
+        suggested = sug["suggested_verb"].strip()
+        if not suggested or suggested == sug["current_verb"].strip():
+            continue
+
+        # 建议词本身还是空泛词 = 没细化（「引用」→「属于」）。只有当这条关系
+        # 眼下一个字都没有时，空泛词才算改进。
+        if suggested in EMPTY_VERBS and (rel.display_name or "").strip():
             continue
 
         suggestions.append(VerbSuggestion(
@@ -1083,6 +1133,8 @@ async def suggest_verb_refinements(
         rule_count=rule_count,
         llm_count=llm_count,
         fallback_count=fallback_count,
+        candidate_count=len(candidates),
+        llm_status=llm_status,
     )
 
 

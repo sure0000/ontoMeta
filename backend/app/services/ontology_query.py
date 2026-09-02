@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session, aliased, joinedload
 
 from app.models import (
@@ -44,6 +44,7 @@ from app.schemas import (
     VersionRecordOut,
 )
 from app.services.object_landing import ObjectLanding, bulk_object_landings
+from app.services.segment_kinds import SEGMENT_KIND_BUSINESS
 from app.services.community_detection import (
     compute_graph_layout,
     identify_hub_nodes,
@@ -67,6 +68,12 @@ _OVERVIEW_CELL_W = 196.0
 _OVERVIEW_CELL_H = 96.0
 _OVERVIEW_SPACING = 340.0
 _OVERVIEW_HUB_RADIUS_UNITS = 0.3
+
+# 板块视图带回的跨板块邻居上限。跨板块关系普遍多于板块内关系（销售与服务：140 vs 51），
+# 全画出来就退回毛线球；按连接条数取前 N 个外部对象，剩下的靠「查看全部关系」翻列表。
+_SEGMENT_NEIGHBOR_CAP = 12
+# 板块内关系句子上限。句子比图更精确，稠密板块靠它读关系，所以给到能覆盖整块的量。
+_SEGMENT_SENTENCE_CAP = 200
 
 
 def _cluster_layout_radius(node_count: int) -> float:
@@ -436,6 +443,23 @@ class OntologyQueryService:
             .all()
         )
         return {sid: name for sid, name in rows}
+
+    def _bulk_segment_kinds(
+        self, db: Session, segment_ids: list[str | None]
+    ) -> dict[str, str]:
+        """batch: segment_id -> kind（business / shared / pending / technical / system）。
+
+        审核台要认出「待归类业务对象」那一组：它不能只确认角色，必须先归位。
+        """
+        ids = {sid for sid in segment_ids if sid}
+        if not ids:
+            return {}
+        rows = (
+            db.query(OntologySegment.id, OntologySegment.kind)
+            .filter(OntologySegment.id.in_(ids))
+            .all()
+        )
+        return {sid: kind for sid, kind in rows}
 
     def _bulk_object_stats(
         self, db: Session, object_ids: list[str]
@@ -1052,6 +1076,7 @@ class OntologyQueryService:
                     GraphCluster(
                         id=seg.id,
                         name=seg.display_name,
+                        kind=seg.kind,
                         nodes=[to_cluster_node(obj) for obj in shown_members],
                         node_count=len(member_objects),
                         truncated=truncated,
@@ -1081,21 +1106,42 @@ class OntologyQueryService:
 
         # 跨版块关系聚合（同一宏观节点内部的关系不展示，只关心宏观关系）
         edge_agg: dict[tuple[str, str], GroupedGraphEdge] = {}
+        # 每个版块自己的关系账：内部条数决定「这块能不能读出业务」，是板块目录的排序键。
+        internal_counts: dict[str, int] = {}
+        cross_counts: dict[str, int] = {}
 
-        # 构建对象到板块/枢纽的映射
+        # 两张映射，别混用：
+        # - segment_of：对象 → 它所属的板块。板块的关系账（内部/跨块条数）按它算，
+        #   否则枢纽的关系全记不到「公共主数据」头上，那块会显示成 0 关系。
+        # - cluster_of：对象 → 宏观图上的节点。枢纽在宏观图里是独立节点（不并进板块），
+        #   宏观边按它聚合。
+        segment_of: dict[str, str] = {}
         cluster_of: dict[str, str] = {}
         if segments:
             for seg in segments:
                 for obj in seg.members:
                     if obj.id not in obj_by_id:
                         continue
+                    segment_of[obj.id] = seg.id
                     cluster_of[obj.id] = seg.id
             for hub in hub_nodes:
                 cluster_of[hub.id] = hub.id
         else:
             cluster_of = part.cluster_of
+            segment_of = part.cluster_of
 
         for rel in relations:
+            s_seg = segment_of.get(rel.source_object_type_id)
+            t_seg = segment_of.get(rel.target_object_type_id)
+            # 关系账按板块归属算，并且要覆盖「一端在板块、另一端没归属」的情况。
+            if s_seg and s_seg == t_seg:
+                internal_counts[s_seg] = internal_counts.get(s_seg, 0) + 1
+            else:
+                if s_seg:
+                    cross_counts[s_seg] = cross_counts.get(s_seg, 0) + 1
+                if t_seg:
+                    cross_counts[t_seg] = cross_counts.get(t_seg, 0) + 1
+
             s_cluster = cluster_of.get(rel.source_object_type_id)
             t_cluster = cluster_of.get(rel.target_object_type_id)
             if not s_cluster or not t_cluster or s_cluster == t_cluster:
@@ -1114,13 +1160,26 @@ class OntologyQueryService:
                     relation_ids=[rel.id],
                 )
 
-        # 稳定坐标：对"聚类 + 枢纽"构成的宏观图跑一次确定性力导向布局
-        layout_nodes = [c.id for c in clusters] + [h.id for h in hub_nodes]
+        for cluster in clusters:
+            cluster.internal_relation_count = internal_counts.get(cluster.id, 0)
+            cluster.cross_relation_count = cross_counts.get(cluster.id, 0)
+
+        # 稳定坐标：对"业务模块 + 枢纽"构成的宏观图跑一次确定性力导向布局。
+        # 兜底板块（系统表/技术表/待归类）不参与——它们不画进概览图，让它们占位只会
+        # 在业务模块之间留下大片空洞。它们的 layout 保持 None，前端也不会去读。
+        layout_cluster_ids = {c.id for c in clusters if c.kind == SEGMENT_KIND_BUSINESS}
+        layout_nodes = sorted(layout_cluster_ids) + [h.id for h in hub_nodes]
+        layout_node_set = set(layout_nodes)
         layout_edges = [
             (e.source_cluster_id, e.target_cluster_id, float(e.weight))
             for e in edge_agg.values()
+            if e.source_cluster_id in layout_node_set and e.target_cluster_id in layout_node_set
         ]
-        layout_sizes = {c.id: _cluster_layout_radius(c.node_count) for c in clusters}
+        layout_sizes = {
+            c.id: _cluster_layout_radius(c.node_count)
+            for c in clusters
+            if c.id in layout_cluster_ids
+        }
         layout_sizes.update({h.id: _OVERVIEW_HUB_RADIUS_UNITS for h in hub_nodes})
         positions = compute_graph_layout(layout_nodes, layout_edges, sizes=layout_sizes)
         for cluster in clusters:
@@ -1645,11 +1704,19 @@ class OntologyQueryService:
         # 总数
         total = query_obj.count()
 
+        # 排序必须在分页之前：SQLAlchemy 2 对已经 limit/offset 过的 Query 再调
+        # order_by 会直接抛 InvalidRequestError（整页「加载失败」）。
+        # 业务模块排在兜底板块之前，与业务地图目录同一口径。
+        query_obj = query_obj.order_by(
+            case((OntologySegment.kind == SEGMENT_KIND_BUSINESS, 0), else_=1),
+            OntologySegment.display_name,
+        )
+
         # 分页
         if limit is not None:
             query_obj = query_obj.offset(offset).limit(limit)
 
-        segments = query_obj.order_by(OntologySegment.display_name).all()
+        segments = query_obj.all()
 
         # 板块回工作区要用数据域 id（不是本体 id）——整页共用一次解析。
         domain_context_id, _ = self._resolve_domain_context(db, ontology_id)
@@ -1662,6 +1729,7 @@ class OntologyQueryService:
                     id=seg.id,
                     name=seg.name,
                     display_name=seg.display_name,
+                    kind=seg.kind,
                     description=seg.description,
                     member_count=db.query(ObjectType).filter(
                         ObjectType.ontology_id == ontology_id,
@@ -1686,12 +1754,15 @@ class OntologyQueryService:
     def get_segment_detail(
         self, db: Session, segment_id: str, *, published_only: bool = False
     ):
-        """获取板块详情（包含成员列表）。
+        """获取板块详情：成员 + 板块内的边 + 跨板块邻居。
 
-        对于稠密板块（成员 > 40），返回边数据以支持矩阵视图。
+        板块内的边**恒返回**——它是板块视图的主画面（业务地图默认就落在这里）。
+        跨板块关系不整条泼出来（最大的板块有 140 条），而是按外部对象聚合成
+        ``neighbors``、按连接条数降序截断到 ``_SEGMENT_NEIGHBOR_CAP``，只带回
+        这些邻居对应的边，保证画布还读得动。
         """
         from app.models import OntologySegment, ObjectType, RelationType
-        from app.schemas import SegmentDetail, GraphEdge
+        from app.schemas import SegmentDetail, GraphEdge, SegmentNeighbor
 
         segment_query = db.query(OntologySegment).filter(
             OntologySegment.id == segment_id,
@@ -1731,21 +1802,18 @@ class OntologyQueryService:
 
         internal_relation_count = len(internal_relations)
 
-        # 对于稠密板块（> 40 成员），返回边数据用于矩阵视图
-        edges = None
-        if len(members) > 40:
-            edges = [
-                GraphEdge(
-                    id=rel.id,
-                    source=rel.source_object_type_id,
-                    target=rel.target_object_type_id,
-                    label=rel.display_name,
-                    cardinality=_normalize_cardinality(rel.cardinality),
-                    relation_id=rel.id,
-                    structure_type=rel.structure_type,
-                )
-                for rel in internal_relations
-            ]
+        def _to_graph_edge(rel: RelationType) -> GraphEdge:
+            return GraphEdge(
+                id=rel.id,
+                source=rel.source_object_type_id,
+                target=rel.target_object_type_id,
+                label=rel.display_name,
+                cardinality=_normalize_cardinality(rel.cardinality),
+                relation_id=rel.id,
+                structure_type=rel.structure_type,
+            )
+
+        edges = [_to_graph_edge(rel) for rel in internal_relations]
 
         all_segment_relations = db.query(RelationType).filter(
             RelationType.ontology_id == segment.ontology_id,
@@ -1763,19 +1831,70 @@ class OntologyQueryService:
             if (rel.source_object_type_id in member_ids)
             != (rel.target_object_type_id in member_ids)
         ]
+        # 跨板块关系按外部对象聚合：同一个「公司」被引 20 次算一个邻居、20 条边，
+        # 而不是 20 个散点。截断发生在邻居这一层，边跟着邻居走。
+        neighbor_links: dict[str, list[RelationType]] = {}
+        for rel in cross_relations:
+            outside_id = (
+                rel.target_object_type_id
+                if rel.source_object_type_id in member_ids
+                else rel.source_object_type_id
+            )
+            neighbor_links.setdefault(outside_id, []).append(rel)
+
+        neighbors: list[SegmentNeighbor] = []
+        cross_edges: list[GraphEdge] = []
+        if neighbor_links:
+            neighbor_objects = {
+                obj.id: obj
+                for obj in db.query(ObjectType)
+                .filter(ObjectType.id.in_(neighbor_links.keys()))
+                .all()
+            }
+            segment_names = {
+                seg_id: display
+                for seg_id, display in db.query(
+                    OntologySegment.id, OntologySegment.display_name
+                ).filter(OntologySegment.ontology_id == segment.ontology_id)
+            }
+            ranked = sorted(
+                neighbor_links.items(),
+                # 连接条数降序；同分时按 id 定序，保证同一份数据每次返回同样的邻居集合
+                key=lambda item: (-len(item[1]), item[0]),
+            )[:_SEGMENT_NEIGHBOR_CAP]
+            for outside_id, rels in ranked:
+                obj = neighbor_objects.get(outside_id)
+                if obj is None:
+                    continue
+                neighbors.append(
+                    SegmentNeighbor(
+                        id=obj.id,
+                        label=obj.name,
+                        display_name=obj.display_name,
+                        status=obj.status,
+                        is_hub=bool(getattr(obj, "is_hub", False)),
+                        segment_id=obj.segment_id,
+                        segment_name=segment_names.get(obj.segment_id),
+                        link_count=len(rels),
+                    )
+                )
+                cross_edges.extend(_to_graph_edge(rel) for rel in rels)
+
         names = {obj.id: obj.display_name for obj in members}
+        names.update({n.id: n.display_name for n in neighbors})
         relation_sentences = [
             f"{names.get(rel.source_object_type_id, rel.source_object_type_id)} "
             f"{rel.display_name or '关联'} "
             f"{names.get(rel.target_object_type_id, rel.target_object_type_id)}"
             f"{(' · ' + ' · '.join(filter(None, [rel.cardinality, rel.source_evidence]))) if (rel.cardinality or rel.source_evidence) else ''}"
-            for rel in internal_relations[:20]
+            for rel in internal_relations[:_SEGMENT_SENTENCE_CAP]
         ]
 
         return SegmentDetail(
             id=segment.id,
             name=segment.name,
             display_name=segment.display_name,
+            kind=segment.kind,
             description=segment.description,
             member_count=len(members),
             ontology_id=segment.ontology_id,
@@ -1792,6 +1911,8 @@ class OntologyQueryService:
             edges=edges,
             cross_relation_count=len(cross_relations),
             relation_sentences=relation_sentences,
+            neighbors=neighbors,
+            cross_edges=cross_edges,
         )
 
     # 「未接入板块」这一桶的哨兵 id（与 review_queue.group_key 对 None 的写法一致）。
@@ -1930,6 +2051,7 @@ class OntologyQueryService:
         ontology_id: str,
         *,
         kind: str = "object",
+        status: str = "pending",
         segment_id: str | None = None,
         role_in: list[str] | None = None,
         limit: int = 20,
@@ -1941,6 +2063,11 @@ class OntologyQueryService:
         而判定动作会改写 ``updated_at`` 并把行移出 ``needs_review`` 结果集，翻页因此
         会静默跳过。这里的排序键里没有任何随判定变化的字段：判掉一批后拿同一个
         cursor 再请求，只会少掉已判的组，不会错位。
+
+        ``status="reviewed"`` 给出**已经判过**的那一半，组织方式完全相同：分组本来就在
+        「待判 + 已判」的完整人口上做（见下），所以回看已判不是另建一条队列，只是把
+        同一批组的成员换成已判的那些。审核完一个板块之后还能回去看判了什么、把判错的
+        退回重判——判定可逆是敢于快判的前提。
         """
         import bisect
 
@@ -1952,6 +2079,8 @@ class OntologyQueryService:
             cursor_sort_key,
             sort_key,
         )
+        from app.services.segment_kinds import SEGMENT_KIND_PENDING
+        from app.services.segment_placement import role_stays_pending
 
         is_relation = kind == "relation"
         rows = (
@@ -1981,15 +2110,22 @@ class OntologyQueryService:
         )
         all_rows = rows + reviewed_rows
         pending_ids = {row.id for row in rows}
+        # 看已判时成员换成另一半，分组与排序一个字不改——组 key 因此在两个视图里通用。
+        scope_ids = (
+            {row.id for row in reviewed_rows} if status == "reviewed" else pending_ids
+        )
         segment_names = self._bulk_segment_names(db, [row.segment_id for row in all_rows])
+        segment_kinds = self._bulk_segment_kinds(db, [row.segment_id for row in all_rows])
         groups = []
         reviewed_by_key: dict[str, int] = {}
         for group in build_groups(all_rows, segment_names=segment_names):
-            pending_members = [oid for oid in group.member_ids if oid in pending_ids]
-            if not pending_members:
-                continue  # 整组判完了，不必再出现在队列里
-            reviewed_by_key[group.key] = group.size - len(pending_members)
-            group.member_ids = pending_members
+            in_scope = [oid for oid in group.member_ids if oid in scope_ids]
+            if not in_scope:
+                continue  # 这一组在当前视图里是空的（整组判完 / 一个都还没判）
+            reviewed_by_key[group.key] = group.size - sum(
+                1 for oid in group.member_ids if oid in pending_ids
+            )
+            group.member_ids = in_scope
             groups.append(group)
 
         start = 0
@@ -2033,6 +2169,13 @@ class OntologyQueryService:
                 key=group.key,
                 segment_id=group.segment_id,
                 segment_name=group.segment_name,
+                # 未接入板块的那一桶没有 kind（它压根不在任何板块里），给空串。
+                segment_kind=segment_kinds.get(group.segment_id or "", ""),
+                requires_classification=(
+                    not is_relation
+                    and segment_kinds.get(group.segment_id or "") == SEGMENT_KIND_PENDING
+                    and role_stays_pending(group.table_role)
+                ),
                 table_role=group.table_role,
                 name_family=group.name_family,
                 score_band=group.score_band,
@@ -2056,10 +2199,12 @@ class OntologyQueryService:
         next_index = start + len(page)
         return ReviewQueueOut(
             kind="relation" if is_relation else "object",
+            status="reviewed" if status == "reviewed" else "pending",
             groups=items,
             group_total=len(groups),
             group_offset=start,
             pending_total=len(rows),
+            reviewed_total=len(reviewed_rows),
             pending_by_role=pending_by_role,
             next_cursor=groups[next_index].key if next_index < len(groups) else None,
         )
@@ -2088,9 +2233,11 @@ class OntologyQueryService:
         reviewed_count = total_objects - needs_review_count
         progress_ratio = reviewed_count / total_objects if total_objects > 0 else 1.0
         pending_by_role: dict[str, int] = {}
+        total_by_role: dict[str, int] = {}
         for obj in all_objects:
+            role = obj.table_role or "business_object"
+            total_by_role[role] = total_by_role.get(role, 0) + 1
             if obj.needs_review:
-                role = obj.table_role or "business_object"
                 pending_by_role[role] = pending_by_role.get(role, 0) + 1
 
         all_relations = db.query(RelationType).filter(
@@ -2098,6 +2245,17 @@ class OntologyQueryService:
             RelationType.deleted_by_user == False,
         ).all()
         relation_needs_review_count = sum(1 for rel in all_relations if rel.needs_review)
+
+        # 关系按**源端对象的板块**归集——与关系队列 segment_id 的筛选口径一致，
+        # 否则侧栏数字点进去对不上。
+        segment_of_object = {obj.id: obj.segment_id for obj in all_objects}
+        relation_total_by_seg: dict[str | None, int] = {}
+        relation_pending_by_seg: dict[str | None, int] = {}
+        for rel in all_relations:
+            seg = segment_of_object.get(rel.source_object_type_id)
+            relation_total_by_seg[seg] = relation_total_by_seg.get(seg, 0) + 1
+            if rel.needs_review:
+                relation_pending_by_seg[seg] = relation_pending_by_seg.get(seg, 0) + 1
 
         # 板块级统计
         segments = (
@@ -2117,19 +2275,50 @@ class OntologyQueryService:
             seg_reviewed = seg_total - seg_needs_review
             seg_ratio = seg_reviewed / seg_total if seg_total > 0 else 1.0
 
+            rel_total = relation_total_by_seg.get(segment.id, 0)
+            rel_pending = relation_pending_by_seg.get(segment.id, 0)
+            seg_role_total: dict[str, int] = {}
+            seg_role_pending: dict[str, int] = {}
+            for obj in segment_objects:
+                role = obj.table_role or "business_object"
+                seg_role_total[role] = seg_role_total.get(role, 0) + 1
+                if obj.needs_review:
+                    seg_role_pending[role] = seg_role_pending.get(role, 0) + 1
             segment_progress_list.append(
                 SegmentReviewProgress(
                     segment_id=segment.id,
                     segment_name=segment.display_name,
+                    kind=segment.kind or "business",
                     total_count=seg_total,
                     needs_review_count=seg_needs_review,
                     reviewed_count=seg_reviewed,
                     progress_ratio=seg_ratio,
+                    relation_total=rel_total,
+                    relation_needs_review=rel_pending,
+                    relation_reviewed=rel_total - rel_pending,
+                    relation_progress_ratio=(
+                        (rel_total - rel_pending) / rel_total if rel_total else 1.0
+                    ),
+                    role_total=seg_role_total,
+                    role_pending=seg_role_pending,
                 )
             )
 
         # 按待审核数量降序排序（未完成的排在前面）
         segment_progress_list.sort(key=lambda x: (-x.needs_review_count, x.segment_name))
+
+        # 「待归类业务对象」板块：判成业务对象却连不成簇的表都压在这里。它们即使角色
+        # 被确认过也没有真正判完——不属于任何业务模块，进不了业务地图。门禁上线前留下
+        # 的那批（已确认却仍在这个板块里）要能被单独捞出来重判，所以单列一个数。
+        from app.services.segment_kinds import SEGMENT_KIND_PENDING
+
+        pending_segment_ids = {
+            seg.id for seg in segments if (seg.kind or "") == SEGMENT_KIND_PENDING
+        }
+        unclassified = [
+            obj for obj in all_objects if obj.segment_id in pending_segment_ids
+        ]
+        unclassified_reviewed = sum(1 for obj in unclassified if not obj.needs_review)
 
         return ReviewModeStats(
             total_objects=total_objects,
@@ -2137,11 +2326,16 @@ class OntologyQueryService:
             reviewed_count=reviewed_count,
             progress_ratio=progress_ratio,
             pending_by_role=pending_by_role,
+            total_by_role=total_by_role,
             business_object_pending=pending_by_role.get("business_object", 0),
             unsegmented_total=sum(1 for obj in all_objects if not obj.segment_id),
             unsegmented_pending=sum(
                 1 for obj in all_objects if not obj.segment_id and obj.needs_review
             ),
+            unsegmented_relation_total=relation_total_by_seg.get(None, 0),
+            unsegmented_relation_pending=relation_pending_by_seg.get(None, 0),
+            unclassified_total=len(unclassified),
+            unclassified_reviewed=unclassified_reviewed,
             total_relations=len(all_relations),
             relation_needs_review_count=relation_needs_review_count,
             reviewed_relation_count=len(all_relations) - relation_needs_review_count,

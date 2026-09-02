@@ -106,6 +106,11 @@ class OntologySegment(Base, ProvenanceMixin):
     ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
+    # business = 聚类得出的业务模块；其余为兜底板块（shared/pending/technical/system），
+    # 保证「每个对象恰好属于一个板块」。取值与语义见 services/segment_kinds。
+    kind: Mapped[str] = mapped_column(
+        String(30), default="business", server_default="business", index=True
+    )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 锚点：度数最高的 K 个成员的 source_ref（JSON 数组），重算时的对齐键
     anchor_refs: Mapped[str | None] = mapped_column(Text, nullable=True)

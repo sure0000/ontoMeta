@@ -1,6 +1,9 @@
 import type { NodeData, NodeOptions } from "@antv/g6";
 import {
+  EXTERNAL_COLORS,
   HUB_COLORS,
+  NODE_COMPACT_HEIGHT,
+  NODE_COMPACT_WIDTH,
   HUB_HEIGHT,
   HUB_WIDTH,
   NODE_COLORS,
@@ -20,6 +23,14 @@ export interface OntologyNodeDatum {
   degree?: number;
   /** 副标题：物理表名等次要标识，填充卡片、提升信息密度 */
   subLabel?: string;
+  /** 板块视图：本节点在板块之外，虚线弱化，让「板块内 vs 板块外」一眼分得开 */
+  external?: boolean;
+  /** 外部节点与当前板块的连接条数（徽标） */
+  linkCount?: number;
+  /** 外部节点所属板块名（徽标），答「连到哪块业务去了」 */
+  externalGroup?: string | null;
+  /** 紧凑卡片：只画名字，用于一屏塞下整个模块的关系图 */
+  compact?: boolean;
 }
 
 function datum(data: NodeData): OntologyNodeDatum {
@@ -30,7 +41,89 @@ function datum(data: NodeData): OntologyNodeDatum {
 export const ontologyNodeOptions: NodeOptions = {
   type: "rect",
   style: (data) => {
-    const { label, status, isCenter, kind, degree, subLabel } = datum(data);
+    const {
+      label,
+      status,
+      isCenter,
+      kind,
+      degree,
+      subLabel,
+      external,
+      linkCount,
+      externalGroup,
+      compact,
+    } = datum(data);
+    if (compact) {
+      // 紧凑卡片：名字撑满，状态退成描边色。外部邻居用虚线 + 灰调，仍然一眼分得开。
+      const colors = statusColors(status);
+      return {
+        size: [NODE_COMPACT_WIDTH, NODE_COMPACT_HEIGHT],
+        radius: 6,
+        fill: external ? EXTERNAL_COLORS.bg : isCenter ? NODE_COLORS.centerBgFrom : NODE_COLORS.bg,
+        stroke: external
+          ? EXTERNAL_COLORS.border
+          : isCenter
+            ? NODE_COLORS.centerBorder
+            : colors.border,
+        lineWidth: isCenter ? 1.6 : 1,
+        lineDash: external ? [4, 3] : undefined,
+        cursor: "pointer",
+        labelText: external && linkCount ? `${label} ×${linkCount}` : label,
+        labelPlacement: "center",
+        labelFontSize: 13,
+        labelFontWeight: isCenter ? 700 : 500,
+        labelFill: external
+          ? EXTERNAL_COLORS.title
+          : isCenter
+            ? NODE_COLORS.centerTitle
+            : NODE_COLORS.title,
+        labelWordWrap: true,
+        labelWordWrapWidth: NODE_COMPACT_WIDTH - 12,
+        labelMaxLines: 1,
+        labelTextOverflow: "ellipsis",
+        port: false,
+      };
+    }
+    if (external) {
+      // 板块外的邻居：虚线描边 + 灰底，读作「这不是本块的成员，只是本块连出去的地方」。
+      // 徽标写「N 条 · 所属板块」，把跨板块关系的量和去向压进同一张卡。
+      return {
+        size: [NODE_WIDTH, NODE_HEIGHT],
+        radius: 10,
+        fill: EXTERNAL_COLORS.bg,
+        stroke: EXTERNAL_COLORS.border,
+        lineWidth: 1,
+        lineDash: [4, 3],
+        cursor: "pointer",
+        labelText: label,
+        labelPlacement: "center",
+        labelOffsetY: -13,
+        labelFontSize: 13,
+        labelFontWeight: 600,
+        labelFill: EXTERNAL_COLORS.title,
+        labelWordWrap: true,
+        labelWordWrapWidth: NODE_WIDTH - 24,
+        labelMaxLines: 2,
+        labelTextOverflow: "ellipsis",
+        badge: true,
+        badges: [
+          {
+            text: externalGroup
+              ? `${linkCount ?? 0} 条 · ${externalGroup}`
+              : `${linkCount ?? 0} 条 · 板块外`,
+            placement: "bottom",
+            offsetY: -15,
+            fill: EXTERNAL_COLORS.badgeText,
+            fontSize: 11,
+            fontWeight: 500,
+            padding: [1, 8],
+            backgroundFill: EXTERNAL_COLORS.badgeBg,
+            backgroundRadius: 999,
+          },
+        ],
+        port: false,
+      };
+    }
     if (kind === "hub") {
       return {
         size: [HUB_WIDTH, HUB_HEIGHT],

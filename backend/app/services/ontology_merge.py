@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
@@ -38,6 +39,10 @@ from app.schemas import (
     OntologyDraftOutput,
 )
 from app.services.object_naming import dedupe_object_names, table_name_from_ref
+from app.services.segment_kinds import SEGMENT_KIND_BUSINESS
+from app.services.segment_placement import place_unsegmented
+
+logger = logging.getLogger(__name__)
 
 # 各实体的可合并字段（与 alembic c1d2e3f4a5b6 回填保持一致）
 OBJECT_FIELDS = ["name", "display_name", "description", "table_role", "role_reason"]
@@ -868,10 +873,18 @@ class OntologyMergeService:
         machine_existing = [s for s in existing if not s.user_created]
         unmatched = list(machine_existing)
         used_names = {s.name for s in existing}
+        # 兜底板块（system/technical/pending/shared）成员天然大进大出，锚点匹配不可靠；
+        # 它们的标识名是固定的，直接按 name 对齐。
+        fallback_by_name = {
+            s.name: s for s in machine_existing if s.kind != SEGMENT_KIND_BUSINESS
+        }
 
         for draft_seg in segments:
             incoming_anchors = set(draft_seg.anchor_refs or ())
-            match, score = _best_anchor_match(incoming_anchors, unmatched)
+            if draft_seg.kind != SEGMENT_KIND_BUSINESS:
+                match = fallback_by_name.get(draft_seg.name)
+            else:
+                match, _score = _best_anchor_match(incoming_anchors, unmatched)
             if match is not None:
                 unmatched.remove(match)
                 incoming_values = {
@@ -884,6 +897,7 @@ class OntologyMergeService:
                 )
                 match.anchor_refs = _dumps(sorted(incoming_anchors))
                 match.member_count = draft_seg.member_count
+                match.kind = draft_seg.kind
                 if gen_id:
                     match.last_generation_id = gen_id
                 report.record(
@@ -891,11 +905,17 @@ class OntologyMergeService:
                 )
                 continue
 
-            name = _allocate_name(draft_seg.name, used_names)
+            # 兜底板块的标识名不能被 _allocate_name 加后缀：它就是下一轮的对齐键。
+            name = (
+                draft_seg.name
+                if draft_seg.kind != SEGMENT_KIND_BUSINESS
+                else _allocate_name(draft_seg.name, used_names)
+            )
             row = OntologySegment(
                 ontology_id=ontology_id,
                 name=name,
                 display_name=draft_seg.display_name,
+                kind=draft_seg.kind,
                 description=draft_seg.description,
                 anchor_refs=_dumps(sorted(incoming_anchors)),
                 member_count=draft_seg.member_count,
@@ -952,6 +972,7 @@ class OntologyMergeService:
 
         # 枢纽节点集合
         hub_node_set = set(hub_nodes)
+        unplaced: list[str] = []
 
         # 更新对象
         objects = db.query(ObjectType).filter(
@@ -963,20 +984,31 @@ class OntologyMergeService:
             overridden = set(_loads(obj.overridden_fields, []))
             segment_pinned = "segment_id" in overridden
 
-            # 标记枢纽节点（不受钉住影响，is_hub 是事实判定）
-            if obj.name in hub_node_set:
-                obj.is_hub = True
-                if not segment_pinned:
-                    obj.segment_id = None  # 枢纽不属于任何板块
-            else:
-                obj.is_hub = False
-                # 只更新未钉住的对象的 segment_id
-                if not segment_pinned:
-                    target_segment_name = object_to_segment.get(obj.name)
-                    if target_segment_name:
-                        obj.segment_id = segment_id_by_name.get(target_segment_name)
-                    else:
-                        obj.segment_id = None  # 未接入对象
+            # is_hub 是事实判定（度数远高于均值），与「属于哪个板块」正交：
+            # 枢纽不并入业务模块（并进去会把大半张图粘成一块），但它归公共主数据板块。
+            obj.is_hub = obj.name in hub_node_set
+            if not segment_pinned:
+                target_segment_name = object_to_segment.get(obj.name)
+                # 划分是全覆盖分区，generate_segments 已把每个对象都装进某个板块；
+                # 取不到只可能是上游漏了，留 None 并记一笔，别悄悄吞掉。
+                obj.segment_id = (
+                    segment_id_by_name.get(target_segment_name)
+                    if target_segment_name
+                    else None
+                )
+                if obj.segment_id is None:
+                    unplaced.append(obj.name)
+
+        if unplaced:
+            # 草稿的板块没覆盖到（旧草稿、或生成器那一侧漏了）：就地补进兜底板块，
+            # 不变量必须在合并结束时成立，而不是靠下游脚本事后擦屁股。
+            logger.warning(
+                "板块划分未覆盖 %d 个对象，按兜底规则补齐：%s",
+                len(unplaced),
+                ", ".join(unplaced[:10]),
+            )
+            db.flush()
+            place_unsegmented(db, ontology_id)
 
         # member_count is derived from actual assignments, not the draft's
         # stale count. Recompute after all objects have been assigned.

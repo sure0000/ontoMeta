@@ -24,6 +24,7 @@ from app.models import DomainContext, ObjectType, Ontology, Property
 from app.models.ontology import EntityStatus, OntologyStatus
 from app.services import ontology_workspace
 from app.services.edit import _assert_object_name_free
+from app.services.segment_placement import place_unsegmented
 
 # 语义类型 → 各数据源方言的物理列类型映射。仅覆盖常见方言，未知方言退回 ANSI。
 _TYPE_BY_DIALECT: dict[str, dict[str, str]] = {
@@ -198,6 +199,8 @@ class ManualCreationService:
         )
         db.add(obj)
         db.flush()
+        # 人工建的对象同样要落板块（见 segment_placement）
+        place_unsegmented(db, ontology.id)
 
         for prop in properties:
             pident = _snake(prop.name)

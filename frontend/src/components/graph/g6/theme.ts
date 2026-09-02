@@ -45,6 +45,16 @@ export const HUB_COLORS = {
   badgeText: "#334155",
 };
 
+// 板块视图里「板块外的邻居」：灰调虚线卡片，与实心的板块成员拉开层次，
+// 让「这块业务的边界在哪」不用读文字就看得出来。
+export const EXTERNAL_COLORS = {
+  bg: "#f8fafc",
+  border: "#cbd5e1",
+  title: "#64748b",
+  badgeBg: "#e2e8f0",
+  badgeText: "#475569",
+};
+
 export const HUB_WIDTH = 176;
 export const HUB_HEIGHT = 60;
 
@@ -167,4 +177,8 @@ export function comboColors(index: number): ComboColorSet {
 
 export const NODE_WIDTH = 168;
 export const NODE_HEIGHT = 60;
+// 紧凑卡片：模块关系图专用。一屏要同时容下 30+ 个对象还能读出名字，唯一的办法是
+// 少花像素——只留名字，去掉状态徽标和副标题。卡片小了，同样的画布就能给更高的缩放。
+export const NODE_COMPACT_WIDTH = 140;
+export const NODE_COMPACT_HEIGHT = 38;
 export const COMBO_HEADER_HEIGHT = 32;

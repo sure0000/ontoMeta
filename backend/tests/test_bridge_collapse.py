@@ -5,10 +5,11 @@ from app.schemas import (
     DatasetInput,
     DomainInput,
     FieldInput,
+    ObjectTypeEvidencePack,
 )
 from app.services.bridge_collapse import select_bridge_endpoints
 from app.services.evidence_builder import EvidenceBuilder, _infer_object_name
-from app.services.object_classifier import ROLE_BRIDGE, ROLE_BUSINESS_OBJECT
+from app.services.object_classifier import ROLE_BRIDGE, ROLE_BUSINESS_OBJECT, ROLE_DATA_TABLE
 from app.services.source_profile import FrappeProfile
 
 BO = ROLE_BUSINESS_OBJECT
@@ -162,11 +163,14 @@ def test_pure_child_table_not_materialized():
     soi = _infer_object_name("tabSales Order Item")
     # 没有以该子表为实现表的塌缩关系
     assert not [r for r in evidence.relations if r.mapping_object == soi]
-    # 该子表被智能重判为对象，不再是 bridge
+    # 塌缩不成不等于它是个对象：子表锚点是源 schema 的事实，落数据表(明细)，
+    # 且**绝不能**被「单列业务主键」顶成业务对象——那正是把 227 张明细表推进人工
+    # 队列的老路（见 _reclassify_bridge_to_object）。
     roles = {ot.candidate_name: ot.table_role for ot in evidence.object_types}
-    assert roles[soi] != ROLE_BRIDGE
+    assert roles[soi] == ROLE_DATA_TABLE
     pack = next(ot for ot in evidence.object_types if ot.candidate_name == soi)
-    assert "重判" in (pack.role_reason or "")
+    assert "明细/子表" in (pack.role_reason or "")
+    assert pack.role_signals["signals"].get("is_child_table") is True
 
 
 # --------------------------- parenttype → 父表 解析 ---------------------------
@@ -239,3 +243,57 @@ def test_child_table_collapses_to_parent_via_parenttype():
         assert collapsed[0].source_object == dn  # parent 作 source
         assert collapsed[0].target_object == item
 
+
+
+def test_child_table_not_promoted_by_pk_signal():
+    """子表锚点是源事实，塌缩失败时**不得**被「单列主键+描述性属性」顶成业务对象。
+
+    这是把 227 张明细表推进人工队列的那条路：重判时把 is_child_table 和软信号一起
+    抑制掉重跑分类器，于是「单列业务主键 +2.0」独自越过阈值，明细行变成业务对象，
+    再与 LLM 的语义判定全面冲突。两个方向都钉住：同样的信号，是子表就落数据表，
+    不是子表才走重判。
+    """
+    from app.services.evidence_builder import EvidenceBuilder
+    from app.services.object_classifier import FieldSignal
+
+    fields = [
+        FieldSignal(name="name", semantic_type="identifier", is_primary_key=True),
+        FieldSignal(name="status", semantic_type="category"),
+        FieldSignal(name="remark", semantic_type="attribute"),
+    ]
+    args = dict(
+        fk_in_degree=0,
+        distinct_fk_targets=0,
+        lineage_upstream=0,
+        lineage_downstream=0,
+        glossary_terms=[],
+        row_count=None,
+        has_business_naming=True,
+        subtypes=[],
+        tags=[],
+        segment_size=8,  # 隶属业务环节，不触发 segment 降级
+    )
+
+    def _run(is_child: bool):
+        pack = ObjectTypeEvidencePack(
+            candidate_name="child_entity",
+            display_name="明细",
+            source_dataset_urn="urn:li:dataset:child",
+            table_role=ROLE_BRIDGE,
+        )
+        roles = {"child_entity": ROLE_BRIDGE}
+        EvidenceBuilder()._reclassify_bridge_to_object(
+            pack,
+            roles,
+            {"child_entity": fields},
+            {"child_entity": dict(args)},
+            is_child_table=is_child,
+        )
+        return pack
+
+    child = _run(True)
+    assert child.table_role == ROLE_DATA_TABLE
+    assert child.role_signals["signals"]["is_child_table"] is True
+
+    # 同样的信号，不是子表时才允许重判为业务对象（证明降级来自子表事实本身）
+    assert _run(False).table_role == ROLE_BUSINESS_OBJECT

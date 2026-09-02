@@ -178,6 +178,12 @@
   min-width: 0;
   overflow: hidden;
 }
+/* full 变体的子项默认可被压缩（与普通页面不同，那里统一 flex-shrink:0）。页头必须不可
+   压缩：下方业务地图按「自己的 top 到视口底边」量高度，页头一旦被它挤扁，top 就会跟着
+   动，两者互相追着改高度。页头不参与分配剩余空间，主体（Spin）自己吃满。 */
+.page-container--full > .page-header {
+  flex-shrink: 0;
+}
 .page-container--full > .ant-spin-nested-loading,
 .page-container--full > .ant-spin-section,
 .page-container--full > .ant-spin {
@@ -258,6 +264,80 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* 事实条独占页头的第二行：标题与动作区因此挤在同一行，省下一整行；
+   同时事实条不再受 .page-header-description 的 720px 限宽，能一行放完。 */
+.page-header-meta {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+/* 页头事实条：规模 / 发布状态 / 待办，一行说清「这个域现在是什么样」。
+   这些数字原本散在别处（工作区卡片、独占一行的提示条），或者根本没显示。 */
+.page-meta-strip {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12.5px;
+  color: var(--om-text-secondary);
+  line-height: 20px;
+}
+.page-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--om-text-secondary);
+}
+.page-meta-item strong {
+  color: var(--om-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+a.page-meta-item:hover,
+a.page-meta-chip:hover {
+  color: var(--om-primary);
+}
+a.page-meta-item:hover strong {
+  color: var(--om-primary);
+}
+.page-meta-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--om-border-strong);
+}
+.page-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.page-meta-chip strong {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.page-meta-chip--info {
+  color: var(--om-primary);
+  background: var(--om-primary-soft);
+  border-color: var(--om-primary-border);
+}
+.page-meta-chip--warning {
+  color: var(--om-warning);
+  background: var(--om-warning-soft);
+  border-color: var(--om-warning);
+}
+.page-meta-chip--muted {
+  color: var(--om-text-secondary);
+  background: var(--om-neutral-soft);
+  border-color: var(--om-border-strong);
 }
 
 .page-header--with-border {
@@ -513,11 +593,45 @@
 .entity-card-corner--technical {
   --om-corner: var(--om-neutral);
 }
+/* 卡片描述：两行截断，flex:1 吃掉剩余高度，把下方的标签/统计压到卡片底部对齐 */
+.entity-card-desc {
+  flex: 1 1 auto;
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--om-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+/* 板块等中性小标签：告诉人这个对象归在哪一块业务里 */
+.entity-card-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  max-width: 140px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--om-text-secondary);
+  background: var(--om-neutral-soft);
+  border: 1px solid var(--om-border-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* 待复核：常驻一行占位（保证卡片等高），需复核时在「标识名」下方显示橙色胶囊 */
 .entity-card-flags {
   min-height: 17px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
 }
 .entity-card-review {
   display: inline-flex;
@@ -1088,6 +1202,45 @@
 .om-tabs--switcher .ant-tabs-content-holder {
   display: none;
 }
+/* 与筛选控件同处一行时：下边框交给外层容器画，首个 Tab 与下方内容左对齐 */
+.om-tabs--inline .ant-tabs-nav {
+  border-bottom: none;
+}
+.om-tabs--inline .ant-tabs-tab:first-child {
+  padding-left: 0 !important;
+}
+.om-tab-count {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--om-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.ant-tabs-tab-active .om-tab-count {
+  color: var(--om-primary);
+}
+
+/* Tab + 搜索/筛选合成一行的控制条 */
+.workspace-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+  border-bottom: 1px solid var(--om-border);
+}
+.workspace-controls .ant-tabs {
+  min-width: 0;
+}
+.workspace-controls-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+}
 
 /* Tabs 内容区上方的工具条 */
 .om-tab-toolbar {
@@ -1223,7 +1376,6 @@
   margin-bottom: 16px;
 }
 
-
 /* ---------------------------------------------------------------------------
    审核工作台
    ---------------------------------------------------------------------------
@@ -1266,11 +1418,12 @@
 }
 
 .review-topbar-progress {
-  flex: 1 1 220px;
+  /* 顶栏一折行就吃掉 50px 判据表高度；进度条是最能让步的那一个，给它更小的下限 */
+  flex: 1 1 160px;
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 180px;
+  min-width: 120px;
 }
 
 .review-topbar-progress .ant-progress {
@@ -1304,7 +1457,7 @@
   display: grid;
   /* 中栏给足最小宽度：判据表被挤窄时对象名会被压成竖排单字。
      两侧是辅助信息，宽度固定；中栏是工作面，吃掉全部余量。 */
-  grid-template-columns: 200px minmax(440px, 1fr) 288px;
+  grid-template-columns: 196px minmax(420px, 1fr) 332px;
   gap: var(--om-space-3);
   align-items: stretch;
 }
@@ -1359,7 +1512,9 @@
   color: var(--om-text-secondary);
   font: inherit;
   font-size: var(--om-text-base);
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .review-seg:hover {
@@ -1499,6 +1654,12 @@
   cursor: pointer;
 }
 
+/* 表头不折行：数字列窄，「主键」被排序箭头挤成上下两行会把表头顶成两倍高，
+   而 auto 布局本来就会替不折行的表头挪出宽度（代价由最宽的名称列出）。 */
+.review-group-table thead th {
+  white-space: nowrap;
+}
+
 /* 数字列等宽：扫一列的时候位数对齐，异常值自己会跳出来。 */
 .review-num {
   font-family: var(--om-font-mono);
@@ -1526,7 +1687,14 @@
   opacity: 0.42;
 }
 
-.review-row--excluded .review-obj-name {
+.review-row--excluded /* 固定布局下必须能缩：不给省略号，长表名会把整列撑破，把判据列挤出视口 */
+.review-obj-name,
+.review-obj-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-obj-name {
   text-decoration: line-through;
 }
 
@@ -1556,8 +1724,8 @@
 .review-actions {
   flex: none;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--om-space-2);
   padding: var(--om-space-3) var(--om-space-4);
   border-top: 1px solid var(--om-border);
@@ -1606,12 +1774,115 @@
   color: #fff;
 }
 
-.review-hint {
-  flex: none;
-  padding: 0 var(--om-space-4) var(--om-space-3);
+.review-actions-row {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  flex-wrap: wrap;
+}
+/* 改判是「改结论」，与上面走流程的动作分层：小一号、压低对比度，
+   不跟主操作抢眼，但键位仍在原处 */
+.review-actions-row--recast {
+  padding-top: var(--om-space-2);
+  border-top: 1px dashed var(--om-border);
+}
+
+/* 归类行排在改判之上：这一组缺的是「归到哪个业务模块」，那才是它的主动作。 */
+.review-actions-row--classify {
+  padding-bottom: var(--om-space-2);
+}
+
+/* ---------- 待判 / 已判 ----------
+   判完的板块不消失，只换到另一半——切换器就在板块列表正上方，位置不动。 */
+
+.review-status-switch {
+  margin-bottom: var(--om-space-2);
+}
+
+/* 「已确认却仍压在待归类里」的存量入口。它是个数字，不是装饰：不给入口，
+   这批对象既不在待判队列里、也进不了业务地图，谁也不会再想起它们。 */
+.review-strand-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid #fde68a;
+  border-radius: var(--om-radius-full);
+  background: var(--om-warning-soft);
+  color: #92400e;
+  font: inherit;
   font-size: var(--om-text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.review-strand-chip:hover {
+  border-color: var(--om-warning);
+}
+
+.review-strand-chip b {
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 待归类那一组的说明条：确认按钮被禁掉时，这里说清楚缺的是哪一半。 */
+.review-classify-note {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px var(--om-space-4);
+  border-bottom: 1px solid #fde68a;
+  background: var(--om-warning-soft);
+  color: #92400e;
+  font-size: var(--om-text-sm);
+  line-height: 1.6;
+}
+
+/* ---------- 动词建议抽屉：三元组里直接改词 ---------- */
+
+/* 动词是这张表唯一要改的东西，所以它是行内的输入框而不是只读文字：
+   机器给的是初值，人当场改完就采纳，不必再跳去关系详情页改一遍。 */
+.verb-suggest-triple {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-1);
+  min-width: 0;
+}
+
+.verb-suggest-obj {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verb-suggest-arrow {
+  flex: none;
   color: var(--om-text-tertiary);
-  background: var(--om-surface-muted);
+}
+
+.verb-suggest-input {
+  flex: none;
+  width: 104px;
+  text-align: center;
+}
+
+.verb-suggest-sub {
+  margin-top: 2px;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.verb-suggest-err {
+  margin-inline-start: var(--om-space-2);
+  color: var(--om-error);
+}
+
+/* 反选掉的行压暗但仍可编辑：改一下就自动勾回来（见 setVerb）。 */
+.verb-suggest-off > td {
+  opacity: 0.45;
 }
 
 .review-empty {
@@ -1635,12 +1906,109 @@
 
 .review-evidence-body {
   font-size: var(--om-text-base);
-  line-height: 1.85;
+  /* 1.85 的行距是给长段落的；判据栏是短行密排，松一分就少一条能看见的证据 */
+  line-height: 1.6;
 }
 
-.review-evidence-body .ant-table-cell {
-  padding: 5px 8px !important;
+/* LLM 读出的业务含义：整屏唯一一句「这张表是干什么的」，按头条排版 */
+.review-reading {
+  margin-top: var(--om-space-3);
+  padding: 9px 11px;
+  border: 1px solid var(--om-primary-border);
+  border-radius: var(--om-radius);
+  background: var(--om-primary-soft);
+}
+.review-reading-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--om-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--om-primary);
+}
+.review-reading-label b {
+  padding: 0 6px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-surface);
+  font-size: var(--om-text-xs);
+  font-weight: 600;
+}
+.review-reading p {
+  margin: 4px 0 0;
+  font-size: var(--om-text-base);
+  line-height: 1.65;
+  color: var(--om-text);
+}
+
+/* 信号：三列定义列表。判据栏只有 300 出头，antd Table 的表头与内边距在这个
+   尺度上吃掉近四成宽度，换回来只有一根分割线。 */
+.review-sig {
+  margin-top: var(--om-space-3);
+}
+.review-sig-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--om-border);
   font-size: var(--om-text-sm);
+}
+.review-sig-row:last-of-type {
+  border-bottom: none;
+}
+.review-sig-label {
+  color: var(--om-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-sig-value {
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--om-text);
+  text-align: right;
+}
+/* 无判别力的信号展开后压暗：它在场只是为了回答「是不是漏看了什么」 */
+.review-sig-row--muted .review-sig-label,
+.review-sig-row--muted .review-sig-value {
+  color: var(--om-text-tertiary);
+  font-weight: 400;
+}
+.review-sig-more {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--om-text-tertiary);
+  font: inherit;
+  font-size: var(--om-text-xs);
+  cursor: pointer;
+}
+.review-sig-more:hover {
+  color: var(--om-primary);
+}
+
+/* 结构判据：与信号同源的解释性子句，排版上明确次于信号 */
+.review-clauses {
+  margin-top: var(--om-space-3);
+  padding-top: var(--om-space-3);
+  border-top: 1px solid var(--om-border);
+}
+.review-clauses-label {
+  font-size: var(--om-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--om-text-tertiary);
+}
+.review-clauses ul {
+  margin: 4px 0 0;
+  padding-inline-start: 16px;
+  font-size: var(--om-text-sm);
+  line-height: 1.7;
+  color: var(--om-text-secondary);
 }
 
 .review-evidence-row {
@@ -1682,6 +2050,496 @@
   padding-top: var(--om-space-3);
   border-top: 1px solid var(--om-border);
   font-size: var(--om-text-base);
+}
+
+/* ---------- 机器判定：审核界面的第一信息 ----------
+   队列里每一条都「待复核」，所以「待复核」本身没有信息量；有信息量的是机器自己报告的
+   不确定性（两个判定源打架、证据缺失、分类器推翻了自己）。这些原来只存在于 role_reason
+   那段散文的中后段，要点开逐条读到底才看得见——下面这套件把它做成能扫读的东西。 */
+
+/* 「这是机器说的」的印记：芯片字形 + 冷灰蓝小标签。
+   同一个记号出现在判定卡、组头共性带、表格「机器存疑」列头——反复出现的是同一个
+   图形，复核者第二次见到就学会了「带芯片的都是机器产出」。它刻意不参与语义配色
+   （绿=业务对象、紫=关系表……那是判定结果的颜色），印记只是外框。 */
+.review-machine {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 2px 9px 2px 7px;
+  border: 1px solid var(--om-machine-border);
+  border-radius: var(--om-radius-full);
+  background: var(--om-surface);
+  color: var(--om-machine);
+  font-size: var(--om-text-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.review-machine-glyph {
+  flex: none;
+  opacity: 0.9;
+}
+
+.review-machine-label {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* 状态跟在一条细分隔线之后：来源（机器）与状态（未定）是两件事，别读成一个词。 */
+.review-machine-hint {
+  padding-inline-start: 6px;
+  border-inline-start: 1px solid var(--om-machine-border);
+  color: var(--om-text-tertiary);
+  font-weight: 500;
+}
+
+/* 表头/组头这类本来就密的位置：去掉底与框，只留字形与颜色。 */
+.review-machine--bare {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+/* 表头里的印记跟列名一样按 12px 排，不能比列名还抢眼。 */
+.review-group-table thead th .review-machine {
+  font-size: var(--om-text-sm);
+}
+
+/* 判定卡：角色是这块屏幕上最该被先读到的一句话——但正因为它重，更得说清是谁说的。
+   一枚孤零零的绿色「业务对象」和人工敲定后的结果长得一模一样，所以整条判定装进
+   这张卡里：左侧斜纹导轨（机读、临时）+ 芯片印记 + 「待你确认」，卡内才是结论。 */
+.review-verdict {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--om-space-2) var(--om-space-3);
+  min-width: 0;
+  padding: 7px 12px 7px 15px;
+  border: 1px solid var(--om-machine-border);
+  border-radius: var(--om-radius-md);
+  background: linear-gradient(180deg, var(--om-machine-soft) 0%, var(--om-surface) 72%);
+  overflow: hidden;
+  /* 包住内容而不是撑满整栏：它是盖在这一组上的**印章**，不是横幅——
+     拉通整栏会让它压过下面的组标题，也会在右侧留出一大片没有信息的底色。 */
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* 斜纹导轨：机器产出、尚未落定。用纹理而不是实色条，是因为实色条会被读成
+   「状态色」（绿=通过/红=有问题），而这里要传达的是「材质」不是「结论」。 */
+.review-verdict::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: repeating-linear-gradient(135deg, var(--om-machine) 0 2px, transparent 2px 4.5px);
+  opacity: 0.5;
+}
+
+/* 判定本身成一组：印记换行时结论不会被拆散。 */
+.review-verdict-body {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--om-space-2) var(--om-space-3);
+  min-width: 0;
+}
+
+.review-verdict--lg {
+  padding: 9px 14px 9px 17px;
+  margin-bottom: var(--om-space-2);
+}
+
+/* 判据栏只有 330px，一行放不下「印记 + 角色 + 把握 + 得分」——与其让它按内容
+   长短随机换行（数据表能挤进一行、技术/系统表挤不进，两条卡片长得不一样高），
+   不如钉死成两段：上面一行说来源，下面才是判定。 */
+.review-verdict--md {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.review-verdict--md .review-machine {
+  align-self: flex-start;
+}
+
+.review-verdict-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--om-space-2);
+}
+
+.review-verdict-role {
+  font-size: var(--om-text-md);
+  font-weight: 700;
+  line-height: 1.3;
+  padding: 1px 10px;
+  border-radius: var(--om-radius-full);
+  border: 1px solid transparent;
+}
+
+.review-verdict--lg .review-verdict-role {
+  font-size: var(--om-text-xl);
+  padding: 2px 12px;
+}
+
+.review-verdict-role--business {
+  color: #14532d;
+  background: var(--om-success-soft);
+  border-color: #bbf7d0;
+}
+
+.review-verdict-role--data {
+  color: #1e3a8a;
+  background: var(--om-primary-soft);
+  border-color: var(--om-primary-border);
+}
+
+.review-verdict-role--bridge {
+  color: #5b21b6;
+  background: #f3e8ff;
+  border-color: #ddd6fe;
+}
+
+.review-verdict-role--technical {
+  color: var(--om-text-secondary);
+  background: var(--om-neutral-soft);
+  border-color: var(--om-border-strong);
+}
+
+.review-verdict-conf,
+.review-verdict-score {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  white-space: nowrap;
+}
+
+.review-verdict-conf b,
+.review-verdict-score b {
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--om-text);
+}
+
+.review-verdict-score em {
+  font-style: normal;
+  color: var(--om-text-tertiary);
+}
+
+/* 把握不足：机器自己没底，正是这条被推给人看的理由，给它一个能扫到的底。 */
+.review-verdict-conf--shaky {
+  padding: 0 7px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-warning-soft);
+  color: #92400e;
+}
+
+.review-verdict-conf--shaky b {
+  color: #92400e;
+}
+
+/* 关系分支没有得分刻度，分带自己成标签（原来挂的是 antd Tag，
+   在这张卡里跟角色标签一样圆一样重，两枚同级标签谁是结论就分不出来了）。 */
+.review-verdict-band {
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  white-space: nowrap;
+}
+
+.review-verdict-band::before {
+  content: "证据 ";
+  color: var(--om-text-tertiary);
+}
+
+.review-verdict-band--strong {
+  color: var(--om-success);
+}
+
+.review-verdict-band--near,
+.review-verdict-band--weak {
+  color: var(--om-warning);
+}
+
+/* 得分刻度：一个孤零零的「3.0」说明不了什么，离阈值多远才说明问题。 */
+.review-meter {
+  position: relative;
+  display: inline-block;
+  width: 56px;
+  height: 6px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-bg-soft);
+  overflow: hidden;
+}
+
+.review-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--om-radius-full);
+  background: var(--om-neutral);
+}
+
+.review-meter-fill--strong {
+  background: var(--om-success);
+}
+
+.review-meter-fill--near {
+  background: var(--om-warning);
+}
+
+.review-meter-fill--weak {
+  background: var(--om-error);
+}
+
+/* 阈值刻线：2.0 是分类器判业务对象的门槛，画出来才知道分数「够不够」。 */
+.review-meter-tick {
+  position: absolute;
+  top: -1px;
+  width: 1px;
+  height: 8px;
+  background: var(--om-text-secondary);
+  opacity: 0.55;
+}
+
+/* 旗标 chip：短、密、可扫。muted 是「全组共有」——组头说过一次就够了。 */
+.review-flags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.review-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  height: 20px;
+  border-radius: var(--om-radius-full);
+  border: 1px solid transparent;
+  font-size: var(--om-text-xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.review-flag i {
+  font-style: normal;
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+/* alert = 机器自己拿不准（分歧 / 自我推翻）：这是复核存在的理由，给最强对比。 */
+.review-flag--alert {
+  color: #991b1b;
+  background: var(--om-error-soft);
+  border-color: #fecaca;
+  font-weight: 600;
+}
+
+.review-flag--warn {
+  color: #92400e;
+  background: var(--om-warning-soft);
+  border-color: #fde68a;
+}
+
+.review-flag--info {
+  color: var(--om-text-secondary);
+  background: var(--om-neutral-soft);
+  border-color: var(--om-border-strong);
+}
+
+.review-flag--muted {
+  color: var(--om-text-tertiary);
+  background: transparent;
+  border-color: var(--om-border-strong);
+  border-style: dashed;
+}
+
+.review-flag--clean {
+  color: #14532d;
+  background: var(--om-success-soft);
+  border-color: #bbf7d0;
+}
+
+/* 「为什么要你看」：判据栏的第一块，比任何单个信号数值都更决定要不要多花时间。 */
+.review-why {
+  margin: var(--om-space-2) 0 var(--om-space-3);
+  padding: var(--om-space-2) var(--om-space-3);
+  border-radius: var(--om-radius-sm);
+  background: var(--om-surface-muted);
+  border-inline-start: 3px solid var(--om-warning);
+}
+
+.review-why--clean {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  border-inline-start-color: var(--om-success);
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  line-height: 1.6;
+}
+
+.review-why-title {
+  margin-bottom: 6px;
+}
+
+.review-why-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 5px;
+  line-height: 1.6;
+}
+
+.review-why-item:last-child {
+  margin-bottom: 0;
+}
+
+.review-why-item .review-flag {
+  flex: none;
+  margin-top: 1px;
+}
+
+.review-why-detail {
+  font-size: var(--om-text-sm);
+  color: var(--om-text-secondary);
+  min-width: 0;
+}
+
+/* 分歧并陈：两个判定源各说各的，并排放才看得出分歧在哪。 */
+.review-split {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--om-space-2);
+  margin-bottom: var(--om-space-3);
+}
+
+.review-split-side {
+  padding: var(--om-space-2) var(--om-space-3);
+  border: 1px dashed var(--om-border-strong);
+  border-radius: var(--om-radius-sm);
+  line-height: 1.6;
+}
+
+.review-split-side b {
+  font-size: var(--om-text-base);
+}
+
+.review-split-side p {
+  margin: 4px 0 0;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-secondary);
+}
+
+.review-split-who {
+  display: block;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+/* 组头下面那条：这一组为什么整体在队列里，以及有没有需要单独看的例外。 */
+.review-group-why {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-3);
+  flex-wrap: wrap;
+  padding: 7px var(--om-space-4);
+  border-bottom: 1px solid var(--om-border);
+  background: var(--om-surface-muted);
+  font-size: var(--om-text-sm);
+}
+
+.review-group-why--exception {
+  background: var(--om-warning-soft);
+  border-bottom-color: #fde68a;
+}
+
+.review-group-why-main {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  color: var(--om-text-secondary);
+}
+
+.review-group-why-hint,
+.review-group-why-clean {
+  color: var(--om-text-tertiary);
+}
+
+.review-group-why-exception {
+  font-weight: 600;
+  color: #92400e;
+  white-space: nowrap;
+}
+
+.review-group-aside {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+}
+
+/* 例外行：本组里跟大家不一样的那几条，已排到表首，再给一条竖线钉住视线。 */
+.review-row--exception td:first-child {
+  box-shadow: inset 3px 0 0 var(--om-warning);
+}
+
+.review-row--exception:not(.review-row--active) td {
+  background: #fffbeb;
+}
+
+/* 判据栏紧凑版的方向标：一个箭头就够，砍掉整列的代价是数字失去方向。 */
+.review-dir {
+  font-family: var(--om-font-mono);
+  font-weight: 700;
+  color: var(--om-text-disabled);
+}
+
+.review-dir--up {
+  color: var(--om-success);
+}
+
+.review-dir--down {
+  color: var(--om-warning);
+}
+
+/* 邻居：从中栏让位过来的一列，这里有纵向空间把话说全。 */
+.review-neighbors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--om-space-3);
+}
+
+.review-neighbors-label {
+  font-size: var(--om-text-xs);
+  letter-spacing: 0.06em;
+  color: var(--om-text-tertiary);
+}
+
+.review-neighbor {
+  padding: 1px 7px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-neutral-soft);
+  border: 1px solid var(--om-border-strong);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- 窄屏：判据折到下面，队列与当前组保持并排 ---------- */

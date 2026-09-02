@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,11 @@ from app.services.relation_terms import compact_relation_term, validate_relation
 from app.services.common import log_change
 from app.services.community_detection import vote_segment_for_node
 from app.ontology_types import is_valid_cardinality, is_valid_semantic_type
+from app.services.segment_placement import (
+    needs_classification,
+    place_unsegmented,
+    resettle_fallback_member,
+)
 from app.schemas import (
     BusinessLogicDetail,
     BusinessLogicObjectBindingOut,
@@ -36,6 +42,19 @@ _PROPERTY_BINDING_ROLES = {"input", "output", "filter", "group"}
 
 # 对象角色的合法取值（与前端 ROLE_META 一致）。
 _ALLOWED_TABLE_ROLES = {"business_object", "data_table", "bridge", "technical"}
+
+
+@dataclass
+class BatchObjectUpdateOutcome:
+    """一次批量判定的结果。
+
+    ``updated`` 之外还要给 ``pending_classification``：改判成业务对象的那批可能整批
+    落进「待归类业务对象」，它们**没有**被判完（保持待复核）。只报「改了 12 个」会
+    让人以为这一组处理完了。
+    """
+
+    items: list[ObjectTypeSummary]
+    pending_classification: int = 0
 
 
 def _assert_object_name_free(
@@ -87,6 +106,33 @@ def _validate_semantic_type_or_raise(value: str | None) -> None:
 def _set_review_mark(obj: ObjectType, needs_review: bool) -> None:
     """置复核状态。独立布尔列，不再动 role_reason——那是描述性字段，归机器刷新。"""
     obj.needs_review = bool(needs_review)
+
+
+# 待归类门禁的说辞。审核台会在点之前就禁掉确认按钮，这条是后端的兜底
+# （API、脚本、Agent 都走同一个服务），所以要把两条出路都写清楚。
+_UNCLASSIFIED_HINT = (
+    "「待归类业务对象」不能只确认角色就算判完："
+    "给它选一个业务板块，或改判为数据表/技术表。"
+)
+
+
+def _assert_classified_or_rollback(db: Session, objs: list[ObjectType]) -> None:
+    """显式确认（needs_review=False）时，压在「待归类业务对象」里的对象一个都不放行。
+
+    判成业务对象却连不成簇的表落在 pending 兜底板块里：确认它的角色不会让它出现在
+    任何业务地图、任何板块视图上，那个板块也就永远不会变空。所以「归到哪个业务模块」
+    是判定的一半，缺这一半不算判完。
+
+    判定发生在**改角色、挪板块之后**——「归类到销售 + 确认」是一次调用，那一次必须放行。
+    拒绝前先回滚：调用方已经改过的字段不能半截留在会话里，等下一次 commit 偷偷落库。
+    """
+    blocked = [obj for obj in objs if needs_classification(db, obj)]
+    if not blocked:
+        return
+    names = "、".join(obj.display_name or obj.name for obj in blocked[:3])
+    more = f" 等 {len(blocked)} 个" if len(blocked) > 3 else ""
+    db.rollback()
+    raise ValueError(f"{_UNCLASSIFIED_HINT}（{names}{more}）")
 
 
 def _refresh_segment_member_counts(db: Session, ontology_id: str, segment_ids=None) -> None:
@@ -319,6 +365,14 @@ class EditService:
             _auto_assign_segment_by_neighbors(db, obj)
             # 注意：自动分配的板块不计入 overridden_fields，允许未来机器重新分配
 
+        # 判定时重新落位：兜底板块的类别跟着角色走，否则「技术表」板块里会躺着业务对象。
+        # 只动兜底板块里的对象——业务板块的归属是聚类/人工的判断，改个角色不该把它踢出去。
+        # 不要求角色变了才做：存量里有「重判成技术表却没跟着挪」的对象，它们再点一次
+        # 「改判技术表」是空操作，不自愈就永远卡在待归类门禁上。
+        resettled = False
+        if (role_confirmed or needs_review is not None) and not segment_explicitly_set:
+            resettled = resettle_fallback_member(db, obj) is not None
+
         if obj.segment_id != previous_segment_id:
             _refresh_segment_member_counts(
                 db, obj.ontology_id, [previous_segment_id, obj.segment_id]
@@ -329,16 +383,22 @@ class EditService:
         # 而复核与 role_reason 描述文本无关，钉住它等于让机器再也刷新不了角色依据。
         review_changed = False
         if needs_review is not None:
+            if not needs_review:
+                _assert_classified_or_rollback(db, [obj])
             _set_review_mark(obj, needs_review)
             review_changed = True
         elif role_confirmed:
-            _set_review_mark(obj, False)
+            # 改判即复核通过——除非它落进了「待归类业务对象」：那时判定只完成了一半
+            # （角色定了、归属没定），标回待复核让它在待归类那一组里被归位。
+            _set_review_mark(obj, needs_classification(db, obj))
             review_changed = True
 
         if changed:
             _mark_overridden(obj, changed)
-        elif not review_changed:
+        elif not review_changed and not resettled:
             return self._object_detail_or_raise(db, object_type_id)
+        # 自愈挪板块**不**计入 overridden：那是机器落位的修正，不是人工钉死的归属，
+        # 下次重聚类仍然可以把它收进业务模块。
 
         _mark_edited(obj)
 
@@ -359,43 +419,74 @@ class EditService:
         ids: list[str],
         *,
         table_role: str | None = None,
+        segment_id: str | None = None,
         needs_review: bool | None = None,
         operator: str | None = None,
-    ) -> list[ObjectTypeSummary]:
-        """批量改判对象角色(table_role)与复核状态(needs_review)。
+    ) -> "BatchObjectUpdateOutcome":
+        """批量改判对象角色(table_role)、板块归属(segment_id)与复核状态(needs_review)。
 
         与单条 update_object_type 语义一致：改角色即视为复核通过（自动清除
         needs_review=False），显式 needs_review 优先。跳过不存在或无实际变更的 id，
         一次性提交，返回已更新对象的摘要。
+
+        ``segment_id`` 是审核台「成组归类」用的：一组连不成簇的表一次性归入某个业务
+        板块，与确认是同一次调用——先挪板块再判复核，门禁因此看得到挪过之后的归属。
         """
         if table_role is not None and table_role not in _ALLOWED_TABLE_ROLES:
             raise ValueError(f"非法对象角色：{table_role}")
-        if needs_review is None and table_role is None:
-            return []
+        if needs_review is None and table_role is None and segment_id is None:
+            return BatchObjectUpdateOutcome([], 0)
         ids = [i for i in ids if i]
         if not ids:
-            return []
+            return BatchObjectUpdateOutcome([], 0)
 
         objs = db.query(ObjectType).filter(ObjectType.id.in_(ids)).all()
+        target_segment = None
+        if segment_id:
+            target_segment = db.get(OntologySegment, segment_id)
+            if not target_segment:
+                raise ValueError(f"板块不存在：{segment_id}")
+            if any(o.ontology_id != target_segment.ontology_id for o in objs):
+                raise ValueError("不能将对象移动到其他本体的板块")
+
         updated: list[ObjectType] = []
+        touched_segments: set[str | None] = set()
+        # 改判后仍压在「待归类业务对象」里的：角色改了、归属没定，保持待复核。
+        # 调用方要能说出「改判 12 个，其中 12 个仍待归类」，否则界面上看起来是判完了。
+        still_unclassified = 0
         for obj in objs:
             changed: list[str] = []
             role_confirmed = False
+            resettled = False
             if table_role is not None and table_role != obj.table_role:
                 obj.table_role = table_role
                 changed.append("table_role")
                 role_confirmed = True
 
+            previous_segment_id = obj.segment_id
+            if segment_id is not None and (segment_id or None) != obj.segment_id:
+                obj.segment_id = segment_id or None
+                changed.append("segment_id")
+            elif role_confirmed or needs_review is not None:
+                # 兜底板块的类别跟着角色走，判定时顺手自愈（同 update_object_type）。
+                resettled = resettle_fallback_member(db, obj) is not None
+            if obj.segment_id != previous_segment_id:
+                touched_segments.update({previous_segment_id, obj.segment_id})
+
             # 复核状态是独立列，不计入 changed（同 update_object_type）。
             review_changed = False
+            unclassified = needs_classification(db, obj)
             if needs_review is not None and bool(needs_review) != bool(obj.needs_review):
                 _set_review_mark(obj, needs_review)
                 review_changed = True
-            elif needs_review is None and role_confirmed and obj.needs_review:
-                _set_review_mark(obj, False)
-                review_changed = True
+            elif needs_review is None and role_confirmed:
+                if bool(obj.needs_review) != unclassified:
+                    _set_review_mark(obj, unclassified)
+                    review_changed = True
+            if unclassified and needs_review is None:
+                still_unclassified += 1
 
-            if not changed and not review_changed:
+            if not changed and not review_changed and not resettled:
                 continue
             if changed:
                 _mark_overridden(obj, changed)
@@ -403,14 +494,24 @@ class EditService:
             _log_change(db, "object_type", obj.id, "edit", operator, "批量更新对象类型")
             updated.append(obj)
 
+        if needs_review is False:
+            _assert_classified_or_rollback(db, objs)
+        if touched_segments and objs:
+            _refresh_segment_member_counts(
+                db, objs[0].ontology_id, [sid for sid in touched_segments if sid]
+            )
+
         db.commit()
         landings = bulk_object_landings(db, [o.id for o in updated])
-        return [
-            self.query._to_object_summary(
-                db, o, landing=landings.get(o.id), landing_loaded=True
-            )
-            for o in updated
-        ]
+        return BatchObjectUpdateOutcome(
+            items=[
+                self.query._to_object_summary(
+                    db, o, landing=landings.get(o.id), landing_loaded=True
+                )
+                for o in updated
+            ],
+            pending_classification=still_unclassified,
+        )
 
     async def ensure_object_type_from_dataset(
         self,
@@ -477,6 +578,9 @@ class EditService:
         )
         db.add(obj)
         db.flush()
+        # 新对象必须当场有板块归属，否则界面上又冒出「未接入板块」——
+        # 划分是全覆盖分区，这条不变量由创建方负责，不靠事后脚本兜。
+        place_unsegmented(db, ontology_id)
         _log_change(
             db,
             "object_type",

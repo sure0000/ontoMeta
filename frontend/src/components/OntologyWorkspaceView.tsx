@@ -165,6 +165,9 @@ interface Props {
   onSelectAllMatching?: () => Promise<string[]>;
   /** Review mode uses segment and naming-family order for batch decisions. */
   reviewMode?: boolean;
+  /** 各 Tab 的全量条数（不随搜索/筛选变化），传入即在 Tab 上标出规模。
+   *  「数据表 0」这种事实原本要点进去才知道，标在 Tab 上就省掉这一次空跑。 */
+  tabCounts?: Partial<Record<ViewTab, number>>;
   /** 视图 Tab 受控（供上层同步进 URL）；未传则由组件自持。 */
   viewTab?: ViewTab;
   onViewTabChange?: (tab: ViewTab) => void;
@@ -191,6 +194,7 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
   onBatchUpdateObjects,
   onSelectAllMatching,
   reviewMode = false,
+  tabCounts,
   viewTab: controlledViewTab,
   onViewTabChange,
 }: Props) {
@@ -512,12 +516,18 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
     technical: { label: "技术/系统表", icon: <ToolOutlined /> },
   };
 
+  const tabCount = (key: ViewTab) => {
+    const n = tabCounts?.[key];
+    return n == null ? null : <span className="om-tab-count">{n}</span>;
+  };
+
   const objectTabItem = (role: ObjectTab) => ({
     key: role,
     label: (
       <span>
         <span style={{ marginRight: 6 }}>{OBJECT_TAB_META[role].icon}</span>
         {OBJECT_TAB_META[role].label}
+        {tabCount(role)}
       </span>
     ),
   });
@@ -536,13 +546,14 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
       <span>
         <ApartmentOutlined style={{ marginRight: 6 }} />
         业务关系
+        {tabCount("relations")}
       </span>
     ),
   };
 
   const tabSwitcher = (
     <Tabs
-      className="om-tabs om-tabs--switcher"
+      className="om-tabs om-tabs--switcher om-tabs--inline"
       activeKey={viewTab}
       onChange={handleViewTab}
       // 顺序：业务对象 → 业务关系 → 数据表 → 技术/系统表
@@ -634,17 +645,19 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
 
   return (
     <div className="om-stack">
-      {tabSwitcher}
-      {/* 落点面板自带搜索与分层筛选；再摆一个搜不到东西的框只会让人以为它坏了。 */}
-      {!isDatasetTab && (
-        <div className="toolbar">
-          <div className="toolbar-left">
+      {/* Tab 与筛选同处一行：两者都在回答「现在看哪一批」，各占一行只是把内容
+          往下推。这一页真正稀缺的是纵向空间——地图画布和对象卡片都在它下面。 */}
+      <div className="workspace-controls">
+        {tabSwitcher}
+        {/* 落点面板自带搜索与分层筛选；再摆一个搜不到东西的框只会让人以为它坏了。 */}
+        {!isDatasetTab && (
+          <div className="workspace-controls-filters">
             {searchInput}
             {needsReviewSwitcher}
             {batchToggle}
           </div>
-        </div>
-      )}
+        )}
+      </div>
       {batchBar}
 
       {isDatasetTab && datasetOntologyId ? (
@@ -740,7 +753,17 @@ export const OntologyWorkspaceView = memo(function OntologyWorkspaceView({
                   <div className="entity-card-subtitle" title={obj.name}>
                     {obj.name}
                   </div>
+                  {/* 描述是卡片上信息量最大的一行：名字之外只有它说得清「这张表记什么」。
+                      两行截断，全文走 title——原先它只存在于详情页，列表页整片留白。 */}
+                  <div className="entity-card-desc" title={obj.description || undefined}>
+                    {obj.description || <span className="om-muted">暂无描述</span>}
+                  </div>
                   <div className="entity-card-flags">
+                    {obj.segment_name && (
+                      <span className="entity-card-chip" title={`业务板块：${obj.segment_name}`}>
+                        {obj.segment_name}
+                      </span>
+                    )}
                     {showRoleClassification && obj.needs_review && (
                       <Tooltip title={obj.role_reason || "需要人工复核"}>
                         <span className="entity-card-review">待复核</span>

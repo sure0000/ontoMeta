@@ -13,6 +13,11 @@ from typing import Optional
 from app.models.ontology import RelationType
 
 
+# 空泛动词：说不出业务语义的那几个。既是全本体扫描的候选口径，
+# 也是建议的**下限**——把「引用」换成「属于」不叫细化，队列里那条告警一个字都不会少。
+EMPTY_VERBS = frozenset({"属于", "引用", "关联", "关系", "连接"})
+
+
 # S2 规则：外键列名 -> 精确动词映射
 FOREIGN_KEY_VERB_RULES = {
     # 供应链
@@ -227,6 +232,15 @@ def _extract_foreign_key_column(rel: RelationType) -> Optional[str]:
     fk_match = re.search(r"(?:外键|foreign[_ ]?key)[:：]\s*(\w+)", rel.source_evidence, re.I)
     if fk_match:
         return fk_match.group(1)
+
+    # 本项目的生成器实际写的是这一句：「A 通过引用字段 company 关联 B（推断…）」。
+    # 只认「外键:」的话，规则这一路在真实数据上等于没开——1279 条关系里只有 1 条能命中，
+    # 其余全落到 LLM 兜底，模型一挂就一条建议都给不出。与前端 parseJoinKey 同一口径。
+    ref_match = re.search(
+        r"引用字段\s*[`\"']?([A-Za-z_][A-Za-z0-9_]*)[`\"']?\s*关联", rel.source_evidence
+    )
+    if ref_match:
+        return ref_match.group(1)
 
     # 从关系名称推断（如 order_supplier -> supplier）
     parts = rel.name.split("_")

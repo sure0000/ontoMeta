@@ -54,9 +54,15 @@
   font-size: 12px;
   color: var(--om-text-tertiary);
   flex: 1;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+/* 省略 height 时填满 flex 父容器（业务地图的舞台就靠这个撑满可用高度） */
+.ontology-graph-view--fill {
+  flex: 1;
+  min-height: 0;
 }
 .ontology-graph-canvas {
   flex: 1;
@@ -66,4 +72,278 @@
 }
 .ontology-graph-canvas canvas {
   cursor: default;
+}
+
+/* ============================================================
+ * 业务地图：模块目录 + 模块内关系图
+ * 默认读的是「一个业务模块内部的关系」，不是全域宏观图——上千对象铺一屏只剩色块。
+ * 版面只留两层（目录 / 舞台），舞台的标题+计数+控件并进图的工具条那一行，
+ * 省下的每一行都还给画布。
+ * ============================================================ */
+.business-map-body {
+  display: grid;
+  /* --bm-h 由组件量出「面板顶边到视口底边」下发；两栏各自撑满 */
+  height: var(--bm-h, 560px);
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: var(--om-space-3);
+  min-height: 0;
+}
+/* 收起目录：把 216px 全部让给关系图 */
+.business-map-body.is-collapsed {
+  grid-template-columns: 40px minmax(0, 1fr);
+}
+/* 窄屏改上下堆叠：整体不再固定高（否则目录和图对半分，图被压没），
+   目录限高可滚，舞台自己占满一屏。 */
+@media (max-width: 1100px) {
+  .business-map-body,
+  .business-map-body.is-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .business-map-dir {
+    max-height: 240px;
+  }
+  /* 堆叠时目录已经吃掉一截，舞台不能再要「到视口底」那么高，否则整页拉得很长；
+     给一个仍然够读的固定占比。 */
+  .business-map-stage {
+    height: clamp(420px, 62vh, 720px);
+  }
+  /* 单列下收起目录毫无收益（宽度本来就是满的），直接不给这个开关 */
+  .business-map-pane-head--dir button {
+    display: none;
+  }
+}
+
+.business-map-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
+  overflow: hidden;
+}
+/* 舞台内的图/清单填满剩余高度 */
+.business-map-stage > .ontology-graph-view {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 目录与舞台共用的标题行，和图的工具条同高，两栏顶边对齐 */
+.business-map-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-3);
+  min-height: 49px;
+  padding: 8px 12px 8px 16px;
+  border-bottom: 1px solid var(--om-border);
+  background: var(--om-surface-muted);
+}
+.business-map-pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--om-space-4);
+}
+
+.business-map-head {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-3);
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+}
+.business-map-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--om-text-base);
+  font-weight: 600;
+  color: var(--om-text);
+  white-space: nowrap;
+}
+.business-map-head-meta {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.business-map-head-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--om-space-3);
+  margin-inline-start: auto;
+  font-size: var(--om-text-sm);
+  white-space: nowrap;
+}
+
+/* 收起后的窄条：竖排标题，点一下展开 */
+.business-map-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: 12px 0;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
+  background: var(--om-surface);
+  color: var(--om-text-secondary);
+  cursor: pointer;
+  font: inherit;
+}
+.business-map-rail:hover {
+  border-color: var(--om-primary-border);
+  color: var(--om-primary);
+}
+.business-map-rail-label {
+  writing-mode: vertical-rl;
+  font-size: var(--om-text-sm);
+  letter-spacing: 2px;
+}
+@media (max-width: 1100px) {
+  .business-map-rail-label {
+    display: none;
+  }
+}
+
+.business-map-dir {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.business-map-dir-row {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 8px 12px 10px;
+  border: none;
+  border-bottom: 1px solid var(--om-border);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--om-text);
+}
+.business-map-dir-row:hover {
+  background: var(--om-surface-muted);
+}
+.business-map-dir-row.is-active {
+  background: var(--om-primary-soft);
+}
+/* 选中态左侧竖条：底色差异在浅色表面上不够明确，加一条实色边界 */
+.business-map-dir-row.is-active::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--om-primary);
+}
+.business-map-dir-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.business-map-dir-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--om-text-base);
+}
+.business-map-dir-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 1px;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+}
+.business-map-dir-sep {
+  color: var(--om-text-disabled);
+}
+.business-map-dir-strong {
+  color: var(--om-primary);
+  font-weight: 600;
+}
+/* 「0 关系」要读得出来，不能淡到看不见——它是「这块没东西可看」这条信息本身 */
+.business-map-dir-weak {
+  color: var(--om-text-tertiary);
+}
+/* 关系量条：目录一眼看出「哪块能读出业务、哪块基本是空的」 */
+.business-map-dir-bar {
+  display: block;
+  height: 3px;
+  margin-top: 5px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-bg-soft);
+  overflow: hidden;
+}
+.business-map-dir-bar > span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-primary);
+  opacity: 0.55;
+}
+/* 业务模块 / 兜底板块之间的分节标题：两段读法不同，必须有明确分界 */
+.business-map-dir-section {
+  padding: 10px 12px 5px;
+  font-size: var(--om-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--om-text-tertiary);
+  background: var(--om-surface-muted);
+  border-top: 1px solid var(--om-border);
+  border-bottom: 1px solid var(--om-border);
+}
+.business-map-dir-divider {
+  height: var(--om-space-2);
+  background: var(--om-surface-muted);
+  border-bottom: 1px solid var(--om-border);
+}
+
+.business-map-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--om-text-secondary);
+  cursor: pointer;
+}
+
+.business-map-sentence {
+  padding: 8px 12px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  background: var(--om-surface-muted);
+  color: var(--om-text-secondary);
+  font-size: var(--om-text-base);
+  line-height: 1.6;
+}
+.business-map-sentence + .business-map-sentence {
+  margin-top: 6px;
+}
+
+.business-map-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.business-map-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius-full);
+  background: var(--om-surface-muted);
+  color: var(--om-text-secondary);
+  font-size: var(--om-text-sm);
+}
+.business-map-chip:hover {
+  border-color: var(--om-primary-border);
+  color: var(--om-primary);
 }

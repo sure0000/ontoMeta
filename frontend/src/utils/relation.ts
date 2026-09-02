@@ -1,3 +1,6 @@
+import type { ReviewFlag } from "./role";
+import { LOW_CONFIDENCE } from "./role";
+
 export const RELATION_TERM_MAX_LENGTH = 8;
 
 /** 关系结构类型（SSOT §5.3） */
@@ -123,3 +126,79 @@ export const RELATION_TERM_RULES = [
     },
   },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// 关系侧的「机器为什么要你看」——与对象侧 utils/role.ts 的 reviewFlags 同一套口径
+// ---------------------------------------------------------------------------
+
+/**
+ * 空泛动词：出现它就等于这条关系还没说出业务语义。
+ * 与后端 `api/ontology.py::suggest_verb_refinements` 里的 `empty_verbs` 保持一致。
+ */
+export const EMPTY_VERBS = new Set(["属于", "引用", "关联", "关系", "连接"]);
+
+export function isEmptyVerb(verb?: string | null): boolean {
+  const text = (verb || "").trim();
+  return !text || EMPTY_VERBS.has(text);
+}
+
+/**
+ * 从证据散文里读回连接键。
+ *
+ * 证据句由 backend/app/services/evidence_builder.py 生成：
+ * `A 通过引用字段 x 关联 B`。正则与后端 ontology_projection._FK_IN_PROSE 同源——
+ * 那边靠它推 ON 条件，这边靠它告诉复核者「机器是凭哪一列认定这条关系的」。
+ */
+export function parseJoinKey(evidence?: string | null): string | null {
+  if (!evidence) return null;
+  const match = evidence.match(/引用字段\s*[`"']?([A-Za-z_][A-Za-z0-9_]*)[`"']?\s*关联/);
+  return match ? match[1] : null;
+}
+
+/** 证据是实测的还是推断的：推断出来的关系，人得自己认一遍。 */
+export function isInferredEvidence(evidence?: string | null): boolean {
+  return Boolean(evidence && /推断/.test(evidence));
+}
+
+/** 关系的复核旗标：与对象侧同一套轻重口径（alert=机器拿不准，warn=证据弱，info=提示）。 */
+export function relationReviewFlags(rel: {
+  display_name?: string;
+  source_evidence?: string;
+  description?: string;
+  source_confidence?: number;
+  source_object_type_id?: string;
+  target_object_type_id?: string;
+}): ReviewFlag[] {
+  const flags: ReviewFlag[] = [];
+  const evidence = rel.source_evidence || rel.description;
+  if (isEmptyVerb(rel.display_name)) {
+    flags.push({
+      key: "empty_verb",
+      label: "空动词",
+      tone: "alert",
+      detail: `「${(rel.display_name || "").trim() || "未命名"}」没有说出业务语义，可用「动词建议」批量细化`,
+    });
+  }
+  if (isInferredEvidence(evidence)) {
+    const key = parseJoinKey(evidence);
+    flags.push({
+      key: "inferred",
+      label: "结构推断",
+      tone: "warn",
+      detail: key
+        ? `源库没有真外键，机器凭字段 ${key} 推断出这条关系`
+        : "源库没有真外键，这条关系由结构推断得出",
+    });
+  }
+  if (typeof rel.source_confidence === "number" && rel.source_confidence < LOW_CONFIDENCE) {
+    flags.push({
+      key: "low_confidence",
+      label: `低置信 ${Math.round(rel.source_confidence * 100)}%`,
+      tone: "warn",
+    });
+  }
+  if (rel.source_object_type_id && rel.source_object_type_id === rel.target_object_type_id) {
+    flags.push({ key: "self_loop", label: "自反关系", tone: "info", detail: "两端是同一个对象" });
+  }
+  return flags;
+}

@@ -186,6 +186,9 @@ class DraftSegment(BaseModel):
     """业务板块草稿：本体对象按关系紧密度自动聚类的业务子域。"""
     name: str
     display_name: str
+    #: business = 聚类得出的业务模块（名字来自 LLM）；其余为兜底板块，名字固定。
+    #: 取值见 services/segment_kinds。划分是全覆盖分区，每个对象恰好属于一个板块。
+    kind: str = "business"
     description: str | None = None
     # 锚点：度数最高的 K 个成员的 source_ref（JSON 序列化后的列表）
     anchor_refs: list[str] = Field(default_factory=list)
@@ -435,6 +438,8 @@ class SegmentSummary(_ProvenanceReadMixin):
     id: str
     name: str
     display_name: str
+    #: business / shared / pending / technical / system，见 services/segment_kinds
+    kind: str = "business"
     description: str | None = None
     member_count: int
     ontology_id: str
@@ -447,16 +452,39 @@ class SegmentSummary(_ProvenanceReadMixin):
     model_config = {"from_attributes": True}
 
 
+class SegmentNeighbor(BaseModel):
+    """板块外部、但与板块成员有关系的对象。
+
+    板块视图的默认画面只画板块内部；邻居用来回答「这块业务往外连到谁」，
+    按连接条数降序、由调用方截断，避免把 100+ 跨板块关系一次泼进画布。
+    """
+
+    id: str
+    label: str
+    display_name: str
+    status: str
+    is_hub: bool = False
+    segment_id: str | None = None
+    segment_name: str | None = None
+    #: 该外部对象与本板块成员之间的关系条数
+    link_count: int = 0
+
+
 class SegmentDetail(SegmentSummary):
     """业务板块详情（包含成员列表）。"""
     # 成员对象列表（ObjectTypeSummary）
     members: list[ObjectTypeSummary] = Field(default_factory=list)
     # 板块内关系数量
     internal_relation_count: int = 0
-    # 板块内的边数据（可选，仅当成员数 > 40 时提供，用于矩阵视图）
+    # 板块内的边数据。恒返回——板块视图的主画面就是这张图，早期只在成员 > 40 时
+    # 才给，结果最大的板块（32 成员 / 51 条内部关系）也拿不到边，图从未渲染过。
     edges: list["GraphEdge"] | None = None
     cross_relation_count: int = 0
     relation_sentences: list[str] = Field(default_factory=list)
+    #: 跨板块邻居（按 link_count 降序，已截断到 _SEGMENT_NEIGHBOR_CAP）
+    neighbors: list[SegmentNeighbor] = Field(default_factory=list)
+    #: 连向上述邻居的跨板块边；端点一头在 members 里、一头在 neighbors 里
+    cross_edges: list["GraphEdge"] = Field(default_factory=list)
 
 
 class ReviewGroupOut(BaseModel):
@@ -469,6 +497,12 @@ class ReviewGroupOut(BaseModel):
     key: str
     segment_id: str | None = None
     segment_name: str
+    #: 板块种类（business / shared / pending / technical / system，见 services/segment_kinds）。
+    segment_kind: str = "business"
+    #: 这一组必须先归入业务板块才算判完（在「待归类业务对象」板块里，且角色留在那儿）。
+    #: 由服务端算：判定规则只在 segment_placement 写一次，前端不重算一遍。
+    #: 同在待归类板块、但角色已是数据表/技术表的那些不算——确认它们时会自动挪到技术表板块。
+    requires_classification: bool = False
     table_role: str
     name_family: str
     score_band: str
@@ -493,12 +527,17 @@ class ReviewQueueOut(BaseModel):
 
     # object=对象队列，relation=关系队列。两者共用分组与排序，只是成员类型不同。
     kind: str = "object"
+    #: pending=还没判的，reviewed=已经判过的。分组在「待判+已判」的完整人口上做一次，
+    #: 两种视图因此是同一批组、同一套 key——判完的板块回头看，位置和当初一模一样。
+    status: str = "pending"
     groups: list[ReviewGroupOut] = Field(default_factory=list)
     group_total: int = 0
     # 本页首组在整条队列里的位置（0 基），用于「第 N / M 组」这类进度显示
     group_offset: int = 0
     # 队列里还剩多少个待判**个体**（不是组数）
     pending_total: int = 0
+    # 已判过的个体数（同一筛选范围内）：「已判」这个 tab 的角标
+    reviewed_total: int = 0
     # 按角色拆分的待判数：非业务对象也要能被判，否则它们永远不可见
     pending_by_role: dict[str, int] = Field(default_factory=dict)
     next_cursor: str | None = None
@@ -743,12 +782,18 @@ class ObjectTypeBatchUpdate(BaseModel):
     # 批量改判对象角色与复核状态。ids 为空或全无效则不产生任何变更。
     ids: list[str] = Field(default_factory=list)
     table_role: str | None = None
+    #: 成组归类：把这批对象一次挪进某个业务板块（空串＝移出板块）。
+    #: 与 needs_review=False 同时给出时先挪后判，「归类并确认」因此是一次调用。
+    segment_id: str | None = None
     needs_review: bool | None = None
     operator: str | None = None
 
 
 class ObjectTypeBatchUpdateResult(BaseModel):
     updated: int
+    #: 其中改判后仍压在「待归类业务对象」里的个数——它们保持待复核，没有判完。
+    #: 只报 updated 会让人以为这一组处理完了。
+    pending_classification: int = 0
     items: list[ObjectTypeSummary] = Field(default_factory=list)
 
 
@@ -898,6 +943,13 @@ class GraphCluster(BaseModel):
 
     id: str
     name: str
+    #: business = 真业务模块；shared/pending/technical/system = 兜底板块。
+    #: 前端据此把兜底板块固定排到目录末尾，并且不画进宏观概览图。
+    kind: str = "business"
+    #: 簇内关系条数——板块目录靠它排序：能读出关系的板块排在前面
+    internal_relation_count: int = 0
+    #: 该簇与簇外对象之间的关系条数
+    cross_relation_count: int = 0
     nodes: list[ClusterNode] = Field(default_factory=list)
     node_count: int = 0
     truncated: bool = False
@@ -962,10 +1014,24 @@ class SegmentReviewProgress(BaseModel):
 
     segment_id: str
     segment_name: str
+    #: 板块种类，见 services/segment_kinds。pending 那一行是「待归类业务对象」，
+    #: 它的成员必须先归位才算判完，界面据此单独提示。
+    kind: str = "business"
+    #: 对象口径
     total_count: int
     needs_review_count: int
     reviewed_count: int
     progress_ratio: float = Field(description="已审核比例 (0.0-1.0)")
+    #: 关系口径：按**源端对象所属板块**归集，与关系队列的 segment_id 筛选同口径。
+    #: 关系队列此前只显示板块名不给数字，正是因为拿对象进度顶替会读成假数字。
+    relation_total: int = 0
+    relation_needs_review: int = 0
+    relation_reviewed: int = 0
+    relation_progress_ratio: float = 1.0
+    #: 板块内按角色拆分的对象计数。关系表（bridge）在关系页单独审，侧栏要显示的是
+    #: 「这个板块还有几张关系表待判」，不是板块的对象总数。
+    role_total: dict[str, int] = Field(default_factory=dict)
+    role_pending: dict[str, int] = Field(default_factory=dict)
 
 
 class ReviewModeStats(BaseModel):
@@ -983,6 +1049,8 @@ class ReviewModeStats(BaseModel):
     progress_ratio: float
     # 待复核按角色拆分（business_object / data_table / bridge / technical）
     pending_by_role: dict[str, int] = Field(default_factory=dict)
+    # 全量按角色拆分：对象页要排除 bridge，分母也得跟着排除
+    total_by_role: dict[str, int] = Field(default_factory=dict)
     # 其中会卡住发布的部分：待复核的业务对象不随本体发布（见 publish 的部分发布门禁）
     business_object_pending: int = 0
     total_relations: int = 0
@@ -992,5 +1060,13 @@ class ReviewModeStats(BaseModel):
     # 队列侧用 segment_id="-" 指代这一桶。
     unsegmented_total: int = 0
     unsegmented_pending: int = 0
+    #: 源端对象未接入板块的关系（关系队列 segment_id="-" 那一桶）
+    unsegmented_relation_total: int = 0
+    unsegmented_relation_pending: int = 0
+    #: 压在「待归类业务对象」板块里的对象数，以及其中已被标成已确认的那部分。
+    #: 后者是门禁上线前留下的存量：角色确认过，却仍不属于任何业务模块，
+    #: 于是既不在待判队列里、也进不了业务地图——要单独捞出来重判。
+    unclassified_total: int = 0
+    unclassified_reviewed: int = 0
 
     segment_progress: list[SegmentReviewProgress] = Field(default_factory=list)

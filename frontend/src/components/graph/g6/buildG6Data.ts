@@ -4,8 +4,8 @@ import type { OntologyComboDatum } from "./ontologyCombo";
 import type { OntologyNodeDatum } from "./ontologyNode";
 import { NODE_HEIGHT, NODE_WIDTH } from "./theme";
 
-// 未被聚类算法归入任何业务子域的孤立节点，统一折叠进一个虚拟"聚类"里展示，
-// 与其他聚类一致地默认收起，避免几十上百个散点直接铺满画布。
+// 兜底：后端的板块划分已是全覆盖分区（每个对象恰好属于一个板块），isolated_nodes
+// 正常恒为空。留着这条通路是为了老数据/回填之前的本体不至于把对象整个丢掉。
 export const ISOLATED_CLUSTER_ID = "__isolated__";
 export const ISOLATED_CLUSTER_MAX_NODES = 50;
 
@@ -14,10 +14,14 @@ export function foldIsolatedIntoCluster(groupedGraph: OntologyGroupedGraph): Ont
   if (groupedGraph.isolated_nodes.length === 0) return groupedGraph;
   const isolatedCluster: GraphCluster = {
     id: ISOLATED_CLUSTER_ID,
+    kind: "pending",
     name: "未分类节点",
     nodes: groupedGraph.isolated_nodes.slice(0, ISOLATED_CLUSTER_MAX_NODES),
     node_count: groupedGraph.isolated_nodes.length,
     truncated: groupedGraph.isolated_nodes.length > ISOLATED_CLUSTER_MAX_NODES,
+    // 未分配对象不成块，谈不上「块内/跨块关系」，两个计数恒为 0。
+    internal_relation_count: 0,
+    cross_relation_count: 0,
   };
   return {
     ...groupedGraph,
@@ -26,18 +30,59 @@ export function foldIsolatedIntoCluster(groupedGraph: OntologyGroupedGraph): Ont
   };
 }
 
+/**
+ * 概览图只画业务模块与枢纽。
+ *
+ * 兜底板块（系统表 299 / 技术表 287 / 待归类 304）成员数比真业务模块大一个量级，
+ * 画进宏观图会把业务结构挤成几个小点；它们也不是业务子域。要读它们的内部结构，
+ * 从左侧目录点进去看模块关系图即可。同时丢掉端点落在兜底板块上的宏观边，避免悬空。
+ */
+function businessOnly(groupedGraph: OntologyGroupedGraph): OntologyGroupedGraph {
+  const clusters = groupedGraph.clusters.filter((c) => c.kind === "business");
+  const kept = new Set(clusters.map((c) => c.id));
+  const hubIds = new Set(groupedGraph.hub_nodes.map((h) => h.id));
+  const visible = (id: string) => kept.has(id) || hubIds.has(id);
+  return {
+    ...groupedGraph,
+    clusters,
+    edges: groupedGraph.edges.filter(
+      (e) => visible(e.source_cluster_id) && visible(e.target_cluster_id),
+    ),
+  };
+}
+
 function edgeLabel(edge: OntologyGraph["edges"][number]): string {
   return edge.cardinality ? `${edge.label} (${edge.cardinality})` : edge.label;
 }
 
-/** 详情模式：单个对象邻域图。同一对节点间若存在方向相反的两条关系，合并为一根双箭头线展示。 */
-export function buildDetailData(graph: OntologyGraph, centerNodeId?: string): GraphData {
+/** 超过这个边数就默认藏起动词标签：再多就只剩互相压着的文字，且 ERP 里 67% 的动词是
+ *  「属于/引用」这类空动词，本来也不承载信息。悬浮聚焦时逐条亮出来。 */
+export const EDGE_LABEL_LIMIT = 24;
+
+/**
+ * 详情模式：单个对象邻域图 / 单个业务模块的关系图。
+ * 同一对节点间若存在方向相反的两条关系，合并为一根双箭头线展示。
+ *
+ * `compact` 打开后节点换成只画名字的小卡片——模块图要在同一块画布里同时容下 30+ 个
+ * 对象，省下来的像素直接换成可读的缩放。边标签另按边数决定，两者不绑在一起：
+ * 十几条边的邻域图，动词恰恰是要读的东西。
+ */
+export function buildDetailData(
+  graph: OntologyGraph,
+  centerNodeId?: string,
+  compact = false,
+): GraphData {
+  const hideEdgeLabels = graph.edges.length > EDGE_LABEL_LIMIT;
   const nodes: NodeData[] = graph.nodes.map((node) => ({
     id: node.id,
     data: {
       label: node.display_name,
       status: node.status,
       isCenter: node.id === centerNodeId,
+      external: node.external,
+      linkCount: node.linkCount,
+      externalGroup: node.externalGroup,
+      compact,
     } satisfies OntologyNodeDatum,
   }));
 
@@ -76,7 +121,7 @@ export function buildDetailData(graph: OntologyGraph, centerNodeId?: string): Gr
       source: edge.source,
       target: edge.target,
       type: "line",
-      data: { graphEdge: edge, bidirectional: Boolean(reverse) },
+      data: { graphEdge: edge, bidirectional: Boolean(reverse), hideLabel: hideEdgeLabels },
       style: {
         labelText: label,
         startArrow: Boolean(reverse),
@@ -170,7 +215,7 @@ export function buildOverviewData(
   openClusterIds: ReadonlySet<string> = new Set(),
 ): GraphData {
   const centers = computeClusterCenters(groupedGraph);
-  const folded = foldIsolatedIntoCluster(groupedGraph);
+  const folded = businessOnly(foldIsolatedIntoCluster(groupedGraph));
   const centerOf = (id: string) => centers.get(id) ?? { x: 0, y: 0 };
   const isOpen = (cluster: GraphCluster) =>
     openClusterIds.has(cluster.id) && cluster.nodes.length > 0;

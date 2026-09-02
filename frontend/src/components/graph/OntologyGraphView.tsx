@@ -6,7 +6,7 @@ import {
 } from "@ant-design/icons";
 import { Graph, type GraphOptions, type IElementEvent, type NodeData } from "@antv/g6";
 import { Button, Segmented, Space, Tooltip as AntTooltip } from "antd";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import type { OntologyGraph, OntologyGroupedGraph } from "../../types";
 import {
@@ -23,6 +23,7 @@ export type GraphMode = "detail" | "overview";
 
 export interface OntologyGraphViewProps {
   graph: OntologyGraph;
+  /** 固定像素高度。**省略则填满 flex 父容器**（父容器需为限定高度的 flex column）。 */
   height?: number;
   centerNodeId?: string;
   objectDetailPath?: (objectId: string) => string;
@@ -31,7 +32,8 @@ export interface OntologyGraphViewProps {
   /** 双击节点展开邻域 */
   onExpandNode?: (objectId: string) => void;
   expanding?: boolean;
-  hint?: string;
+  /** 工具条左侧内容。传节点即可把标题/计数/控件并进这一行，避免再叠一层卡片头。 */
+  hint?: ReactNode;
   /** 嵌入 SectionCard / Tabs 时使用，去除外层重复边框 */
   embedded?: boolean;
   /** 域层级概览图数据；未提供时不展示 详情/概览 切换 */
@@ -75,6 +77,25 @@ async function restoreCamera(g: Graph, cam: { zoom: number; center: [number, num
   }
 }
 
+// 详情图切换布局的节点数阈值。层级布局（dagre）在小邻域图上最好读——左→右就是引用方向；
+// 但业务模块的图是「一堆表指向少数几个被引用对象」的星形，dagre 会把二十几个节点塞进同一
+// 个 rank 摞成一根两千多像素高的柱子，fitView 一缩就全糊了。超过这个规模改用力导向，
+// 它会把图铺成接近画布长宽比的一团，节点尺寸才留得住。
+const DETAIL_FORCE_NODE_THRESHOLD = 12;
+
+// 详情图初次适配后的最低缩放。0.8 下 13px 的对象名还剩约 10px，是能读的下限；
+// 再往下就只剩色块了。塞不进一屏的部分靠拖拽/缩小——「看清关系」优先于「一屏看全」。
+const DETAIL_MIN_READABLE_ZOOM = 0.8;
+
+// 力导向的确定性随机源：同一份数据每次打开必须落在同一个位置，否则「上次那张图」找不回来。
+function seededRandom(seed = 0x2f6e2b1): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
 // 语义缩放（LoD）阈值：缩放低于此值只看版块色块（远景地图）；高于此值自动展开视口内的版块成员节点。
 const LOD_OPEN_ZOOM = 0.42;
 // 同时展开的版块数上限：增量渲染虽稳，但节点过多仍会拖慢；放大后视口本就只覆盖少数版块，取其中最大的若干个。
@@ -85,7 +106,7 @@ const LOD_DEBOUNCE_MS = 200;
 // 使用 React.memo 包裹，避免父组件渲染但 props 引用稳定时，整个 G6 画布被无谓地重新创建。
 function OntologyGraphViewInner({
   graph,
-  height = 520,
+  height,
   centerNodeId,
   objectDetailPath,
   relationDetailPath,
@@ -103,6 +124,9 @@ function OntologyGraphViewInner({
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<Graph | null>(null);
+  // 「适配到可读缩放」由建图 effect 装配（它才知道当前是概览还是详情），其余时机复用它。
+  // 直接调 fitView 会把详情图缩回读不出字的比例——这正是之前地图看不清的原因之一。
+  const readableFitRef = useRef<(() => Promise<void>) | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const isOverview = graphMode === "overview";
@@ -173,7 +197,7 @@ function OntologyGraphViewInner({
   useEffect(() => {
     const id = requestAnimationFrame(() => {
       graphRef.current?.resize();
-      graphRef.current?.fitView();
+      void readableFitRef.current?.();
     });
     return () => cancelAnimationFrame(id);
   }, [isFullscreen]);
@@ -191,9 +215,11 @@ function OntologyGraphViewInner({
 
     // 概览数据：openClustersRef 里的版块展开成成员网格，其余折叠成色块（展开态固化进初始数据，
     // 整体重建 —— G6 v5.1 下唯一稳定的路径，见 buildOverviewData 注释）。
+    // 模块级的图（节点多）走紧凑卡片 + 力导向；小邻域图保留大卡片 + 层级布局。
+    const compactDetail = !isOverview && graph.nodes.length > DETAIL_FORCE_NODE_THRESHOLD;
     const data = isOverview
       ? buildOverviewData(groupedGraph!, openClustersRef.current)
-      : buildDetailData(graph, centerNodeId);
+      : buildDetailData(graph, centerNodeId, compactDetail);
 
     const options: GraphOptions = {
       container,
@@ -201,9 +227,11 @@ function OntologyGraphViewInner({
       // 一旦挂起会锁死整个视口系统——表现为画布空白、滚轮无法缩放、后续 fitView/zoomTo 全部失效。
       // 关掉动画后这些视口操作同步生效、promise 立即 resolve，缩放恢复正常。
       animation: false,
-      autoFit: "view",
+      // 详情图不用内置 autoFit：它会在渲染后再自适应一次，把下面「顶回可读缩放」的
+      // 结果覆盖掉，图又缩回读不出字。详情图的初次适配由 render().then 里自己完成。
+      autoFit: isOverview ? "view" : undefined,
       padding: 32,
-      zoomRange: isOverview ? [0.01, 2] : [0.5, 2],
+      zoomRange: isOverview ? [0.01, 2] : [0.25, 2],
       data,
       node: ontologyNodeOptions,
       edge: isOverview ? overviewEdgeOptions : detailEdgeOptions,
@@ -216,8 +244,23 @@ function OntologyGraphViewInner({
       // 让画布直接采用这些坐标——既保证"同一数据每次打开位置不变"的地图感，
       // 也彻底绕开 combo-combined 在动态展开时的卡死风险。
       options.combo = ontologyComboOptions;
+    } else if (compactDetail) {
+      // 力导向：连在一起的对象自然靠拢、被多方引用的对象自然居中，长度接近的边比
+      // dagre 的长距离跨 rank 连线好追。y 向心力比 x 强，把结果压成宽幅，贴合画布长宽比。
+      // 力的尺度跟紧凑卡片走（碰撞半径略大于卡片对角），卡片小了图就密，缩放才留得住。
+      options.layout = {
+        type: "d3-force",
+        randomSource: seededRandom(),
+        link: { distance: 170, strength: 0.45 },
+        manyBody: { strength: -820, distanceMax: 1100 },
+        collide: { radius: 78, strength: 1 },
+        x: { strength: 0.03 },
+        y: { strength: 0.11 },
+        alphaDecay: 0.028,
+      };
     } else {
-      options.layout = { type: "antv-dagre", rankdir: "LR", nodesep: 24, ranksep: 56 };
+      // 小邻域图：层级布局按关系方向分层，左→右直接读作「谁引用谁」。
+      options.layout = { type: "antv-dagre", rankdir: "LR", nodesep: 28, ranksep: 96 };
     }
 
     const g = new Graph(options);
@@ -239,8 +282,38 @@ function OntologyGraphViewInner({
     };
     container.addEventListener("wheel", onWheel, { passive: false });
     cleanups.push(() => container.removeEventListener("wheel", onWheel));
+    // 适配画布，但详情图不允许缩到读不出字：fitView 之后把缩放顶回可读下限，
+    // 塞不下的部分靠拖拽——「看清关系」优先于「一屏看全」。
+    const readableFit = async () => {
+      if (disposed) return;
+      // 布局的收敛是异步的，画布可能在两次 await 之间被销毁（切模块 / 离开页面）；
+      // 对已销毁的实例调视口 API 会抛，这里逐步守 disposed 并兜底 catch。
+      try {
+        await g.fitView();
+        if (disposed || isOverview) return;
+        if (g.getZoom() < DETAIL_MIN_READABLE_ZOOM) {
+          await g.zoomTo(DETAIL_MIN_READABLE_ZOOM, false);
+        }
+      } catch {
+        // 画布已销毁，无需适配
+      }
+    };
+    readableFitRef.current = readableFit;
+    cleanups.push(() => {
+      if (readableFitRef.current === readableFit) readableFitRef.current = null;
+    });
+
+    // 力导向是异步收敛的：render() 的 promise 先于布局落定 resolve，那一刻的包围盒还很小，
+    // fitView 得到的缩放没有意义。等 afterlayout 再适配一次，这才是用户看到的第一屏。
+    if (!isOverview) g.on("afterlayout", () => void readableFit());
+
     void g.render().then(async () => {
       if (disposed) return;
+      // 补一次尺寸同步：容器在 G6 初始化期间还会再长高一次（面板量出「到视口底边」的
+      // 真实可用高度是渲染后的一步）。而 G6 的 resize() 在画布就绪前是**静默空操作**，
+      // ResizeObserver 的那一次因此丢掉，且不会重试——画布就此卡在初始高度，底部空出
+      // 一大片白（容器 656 / 画布 509）。渲染完成后重放一次即可，尺寸没变则内部直接返回。
+      g.resize();
       const camera = pendingCameraRef.current;
       pendingCameraRef.current = null;
       if (isOverview && camera) {
@@ -248,7 +321,7 @@ function OntologyGraphViewInner({
         await restoreCamera(g, camera);
         return;
       }
-      await g.fitView();
+      await readableFit();
       // 概览用预设坐标、无布局：折叠态空壳 combo 的包围盒偶尔在首帧还没算好，
       // 首次 fitView 会框不住内容导致画布看似空白。下一帧再 fit 一次兜底。
       if (isOverview) {
@@ -291,17 +364,67 @@ function OntologyGraphViewInner({
         if (relationDetailPath) navigate(relationDetailPath(resolveRelationId(graphEdge)));
       });
 
+      // 邻域聚焦：悬浮一个对象 → 只留它和它的直接关系，其余压暗。
+      // 30+ 节点的板块图里，这是「这个对象连着谁」唯一读得出来的方式；
+      // 状态一次性批量下发（单次 setElementState → 单次重绘），避免连环重绘卡顿。
+      let focusedId: string | null = null;
+      const clearFocus = () => {
+        if (focusedId === null) return; // 没在聚焦就别白白重绘
+        focusedId = null;
+        const states: Record<string, string[]> = {};
+        g.getNodeData().forEach((n) => (states[String(n.id)] = []));
+        g.getEdgeData().forEach((e) => {
+          if (e.id != null) states[String(e.id)] = [];
+        });
+        void g.setElementState(states, false);
+      };
+      g.on<IElementEvent>("node:pointerenter", (evt) => {
+        const focusId = String(evt.target.id);
+        focusedId = focusId;
+        const neighbors = new Set<string>([focusId]);
+        const activeEdges = new Set<string>();
+        g.getEdgeData().forEach((e) => {
+          const [src, tgt] = [String(e.source), String(e.target)];
+          if (src !== focusId && tgt !== focusId) return;
+          neighbors.add(src);
+          neighbors.add(tgt);
+          if (e.id != null) activeEdges.add(String(e.id));
+        });
+        const states: Record<string, string[]> = {};
+        g.getNodeData().forEach((n) => {
+          const nid = String(n.id);
+          states[nid] = neighbors.has(nid) ? ["active"] : ["dimmed"];
+        });
+        g.getEdgeData().forEach((e) => {
+          if (e.id == null) return;
+          states[String(e.id)] = activeEdges.has(String(e.id)) ? ["active"] : ["dimmed"];
+        });
+        void g.setElementState(states, false);
+      });
+      g.on<IElementEvent>("node:pointerleave", clearFocus);
+      // 关键补漏：指针从一个节点上**直接滑出画布**时，G6 不发 node:pointerleave，
+      // 聚焦态就永久卡在压暗上。用容器自己的原生 pointerleave 收尾——它只在指针
+      // 真的离开容器时触发，语义明确。
+      //
+      // 别用 G6 的 canvas:pointerenter/canvas:pointerleave 代替：canvas 事件会从
+      // 节点冒上来，实测顺序是 node:pointerenter → canvas:pointerenter，
+      // 拿它清理会把刚设好的聚焦立刻擦掉。
+      container.addEventListener("pointerleave", clearFocus);
+      cleanups.push(() => container.removeEventListener("pointerleave", clearFocus));
+
       // 悬停高亮可点击的关系边（描边加粗 + 标签链接色），配合 cursor:pointer 让边的
       // 可点击性可见。仅当边确实可跳转时才亮，避免误导。
+      // 处于邻域聚焦时不接管边的状态：否则扫过一条边会在压暗层上戳个洞。
       const edgeNavigable = () => {
         const { onEdgeClick, relationDetailPath } = latest.current;
         return Boolean(onEdgeClick || relationDetailPath);
       };
       g.on<IElementEvent>("edge:pointerenter", (evt) => {
-        if (!edgeNavigable()) return;
+        if (!edgeNavigable() || focusedId !== null) return;
         void g.setElementState(String(evt.target.id), ["hover"], false);
       });
       g.on<IElementEvent>("edge:pointerleave", (evt) => {
+        if (focusedId !== null) return;
         void g.setElementState(String(evt.target.id), [], false);
       });
     }
@@ -369,18 +492,27 @@ function OntologyGraphViewInner({
       // 概览 hover 联动：悬浮版块/枢纽时高亮相关元素、压暗其余，让单个业务块从密图中凸显。
       // 关键性能点：状态一次性批量下发（单次 setElementState → 单次重绘），
       // 避免逐元素调用导致的连环重绘卡顿。
+      // 与详情图同一条约束：指针从某个版块/枢纽上直接滑出画布时不会发对应元素的
+      // pointerleave —— 不接住这条，整张概览会永久停在压暗态。
+      // hasFocus 守卫避免无谓重绘。
+      let hasFocus = false;
       const applyStates = (states: Record<string, string[]>) => {
+        hasFocus = true;
         void g.setElementState(states, false);
       };
       const clearOverviewStates = () => {
+        if (!hasFocus) return;
+        hasFocus = false;
         const states: Record<string, string[]> = {};
         g.getComboData().forEach((c) => (states[String(c.id)] = []));
         g.getNodeData().forEach((n) => (states[String(n.id)] = []));
         g.getEdgeData().forEach((e) => {
           if (e.id != null) states[String(e.id)] = [];
         });
-        applyStates(states);
+        void g.setElementState(states, false);
       };
+      container.addEventListener("pointerleave", clearOverviewStates);
+      cleanups.push(() => container.removeEventListener("pointerleave", clearOverviewStates));
 
       // 以某个宏观节点(版块/枢纽)为中心，算出所有元素的高亮/压暗批量状态。
       const buildFocusStates = (
@@ -473,17 +605,18 @@ function OntologyGraphViewInner({
     return "悬浮聚类高亮其关系 · 点击聚类展开内部节点 · 双击聚类看矩阵 · 拖拽重排";
   };
 
+  // 悬浮聚焦是稠密图唯一好用的读法，提示语里必须写出来，否则没人会去试。
   const defaultHint = isOverview
     ? overviewHint()
     : onExpandNode
-      ? "双击展开邻域 · Shift+单击查看详情 · 拖拽重排"
+      ? "悬浮对象只看它的关系 · 双击展开邻域 · Shift+单击查看详情"
       : edgeClickEnabled
-        ? "拖拽节点重排 · 点击节点查看详情 · 点击关系边跳转编辑"
-        : "拖拽节点重排 · 点击节点查看详情";
+        ? "悬浮对象只看它的关系 · 点击对象查看详情 · 点击关系边跳转编辑"
+        : "悬浮对象只看它的关系 · 点击对象查看详情 · 拖拽重排";
 
   const layoutButtons = (
     <Space size={4}>
-      <AntTooltip title="重新排布(层级布局)">
+      <AntTooltip title="重新排布">
         <Button size="small" type="text" icon={<LayoutOutlined />} onClick={handleResetLayout} />
       </AntTooltip>
       <AntTooltip title="适应画布">
@@ -508,8 +641,8 @@ function OntologyGraphViewInner({
     <div
       className={`ontology-graph-view${embedded ? " ontology-graph-view--embedded" : ""}${
         isFullscreen ? " ontology-graph-view--fullscreen" : ""
-      }`}
-      style={isFullscreen ? undefined : { height }}
+      }${height == null ? " ontology-graph-view--fill" : ""}`}
+      style={isFullscreen || height == null ? undefined : { height }}
     >
       <div className="ontology-graph-toolbar">
         <span className="ontology-graph-hint">

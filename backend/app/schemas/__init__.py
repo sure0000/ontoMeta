@@ -171,6 +171,7 @@ from app.schemas.ontology import (
     ReviewQueueOut,
     ReviewUpdate,
     SegmentDetail,
+    SegmentNeighbor,
     SegmentReviewProgress,
     SegmentSummary,
     SegmentUpdate,
@@ -202,6 +203,7 @@ from app.schemas.verb_refiner import (
     VerbRefinementApplyItem,
     VerbRefinementBatchApplyRequest,
     VerbRefinementBatchOut,
+    VerbRefinementSuggestRequest,
     VerbSuggestion,
 )
 from app.schemas.doris import DorisWarehouseConfigOut, DorisWarehouseConfigUpdate
@@ -306,6 +308,7 @@ __all__ = [
     "ReviewGroupOut",
     "ReviewQueueOut",
     "SegmentDetail",
+    "SegmentNeighbor",
     "SegmentUpdate",
     "ClaimTableRequest",
     "DerivedDefinitionOut",
@@ -498,6 +501,7 @@ __all__ = [
     "VerbRefinementApplyItem",
     "VerbRefinementBatchApplyRequest",
     "VerbRefinementBatchOut",
+    "VerbRefinementSuggestRequest",
     "VerbSuggestion",
 ]
 

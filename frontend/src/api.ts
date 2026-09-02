@@ -394,16 +394,24 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * 批量判定。`segment_id` 与 `needs_review: false` 同时给出＝「归类并确认」——
+   * 后端先挪板块再判门禁，所以这是一次调用，不是两次。
+   */
   batchUpdateObjectTypes: (body: {
     ids: string[];
     table_role?: string;
+    segment_id?: string;
     needs_review?: boolean;
     operator?: string;
   }) =>
-    request<{ updated: number; items: ObjectTypeSummary[] }>(`/api/object-types/batch`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
+    request<{ updated: number; pending_classification?: number; items: ObjectTypeSummary[] }>(
+      `/api/object-types/batch`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    ),
 
   updateProperty: (
     propertyId: string,
@@ -618,11 +626,15 @@ export const api = {
   getReviewStats: (ontologyId: string) =>
     request<ReviewModeStats>(`/api/ontologies/${ontologyId}/review-stats`),
 
-  /** 审核队列：成组、确定性排序、游标可重放（segmentId 传 "-" 看未接入板块）。 */
+  /**
+   * 审核队列：成组、确定性排序、游标可重放（segmentId 传 "-" 看未接入板块）。
+   * `status="reviewed"` 取已判过的那一半——同一批组、同一套 key，用来回看与重判。
+   */
   getReviewQueue: (
     ontologyId: string,
     params?: {
       kind?: "object" | "relation";
+      status?: "pending" | "reviewed";
       segmentId?: string;
       roleIn?: string[];
       limit?: number;
@@ -633,6 +645,7 @@ export const api = {
       `/api/ontologies/${ontologyId}/review-queue` +
         buildQuery({
           kind: params?.kind,
+          status: params?.status,
           segment_id: params?.segmentId,
           role_in: params?.roleIn,
           limit: params?.limit,
@@ -651,9 +664,14 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  suggestVerbRefinements: (ontologyId: string) =>
+  /**
+   * 生成动词建议。`relationIds` 给出时只细化这一批（审核台当前组），
+   * 省略则退回全本体扫描空泛动词。
+   */
+  suggestVerbRefinements: (ontologyId: string, relationIds?: string[]) =>
     request<VerbRefinementBatch>(`/api/ontologies/${ontologyId}/verb-refinement/suggest`, {
       method: "POST",
+      body: JSON.stringify({ relation_ids: relationIds ?? null }),
     }),
 
   applyVerbRefinements: (

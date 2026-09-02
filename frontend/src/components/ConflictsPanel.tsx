@@ -129,7 +129,11 @@ export function ConflictsPanel({ ontologyId, onChanged }: Props) {
     void load();
   }, [load]);
 
-  const items = data?.items ?? [];
+  // 必须 memo：`data?.items ?? []` 每次渲染都是新数组，会让下面的 filtered 每次都变，
+  // 于是「筛选变化后剔除已选项」那个 effect 每渲染都跑一次 setState——冲突接口还没回来
+  // 的那段窗口里就是一条无限更新链（React 报 Maximum update depth 并**丢弃**这一轮更新，
+  // 顺带把同一轮里业务地图量出的真实高度也丢了，画布因此卡在默认 560）。
+  const items = useMemo(() => data?.items ?? [], [data]);
   const total = data?.total ?? 0;
 
   // 各实体类型计数，用于分段筛选标签上的角标。

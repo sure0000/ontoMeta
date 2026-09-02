@@ -13,6 +13,16 @@ class VerbSuggestion(BaseModel):
     target_object_name: str
 
 
+class VerbRefinementSuggestRequest(BaseModel):
+    """生成建议的范围。
+
+    ``relation_ids`` 为空表示全本体扫描（保留旧行为）；给出时只对这一批关系出建议，
+    对应审核台「一屏判一组」的工作单元——细化的范围必须和人刚看过的那批一致，
+    否则采纳会连带改掉屏幕外的关系。
+    """
+    relation_ids: list[str] | None = None
+
+
 class VerbRefinementBatchOut(BaseModel):
     """批量动词细化结果。"""
     suggestions: list[VerbSuggestion]
@@ -20,6 +30,11 @@ class VerbRefinementBatchOut(BaseModel):
     rule_count: int
     llm_count: int
     fallback_count: int
+    #: 本次扫过的关系条数（含改不动、因此没进 suggestions 的那些）。
+    candidate_count: int = 0
+    #: LLM 这一路的下场：unused（规则全覆盖）/ unavailable（没配模型）/ ok / failed。
+    #: 「一条建议都没有」得能分清是没得改还是没跑成。
+    llm_status: str = "unused"
 
 
 class VerbRefinementApplyItem(BaseModel):

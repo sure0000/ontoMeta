@@ -4,6 +4,12 @@
 - 第一遍聚类已在 evidence_builder.py 完成（产生 segment_size 信号）
 - 这里执行第二遍聚类：只在 business_object + bridge 子图上，剔除 technical 表
 - 实测：48 板块 → 12 板块，机械命名 26 → 5，噪声板块归零
+
+**划分是全覆盖分区**：聚类只覆盖得了一小部分对象（erpnext 实测 1035 个里只有 134 个
+进了业务模块），剩下的不能丢进一个叫「未接入」的隐式垃圾桶——那里面混着四种处置方式
+完全不同的情况。所以聚类之后一定要跑 :func:`build_fallback_segments`，按「为什么没进
+业务模块」把余下对象分派到 shared / pending / technical / system 四个兜底板块。
+种类定义与各自的收敛路径见 :mod:`app.services.segment_kinds`。
 """
 
 import json
@@ -20,6 +26,15 @@ from app.services.community_detection import (
     split_dominant_clusters,
 )
 from app.services.draft_checkpoint import chunk_key
+from app.services.segment_kinds import (
+    FALLBACK_SEGMENT_META,
+    SEGMENT_KIND_BUSINESS,
+    SEGMENT_KIND_PENDING,
+    SEGMENT_KIND_SHARED,
+    SEGMENT_KIND_SYSTEM,
+    SEGMENT_KIND_TECHNICAL,
+    is_system_table,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +120,7 @@ def generate_segments(
     )
 
     # 为每个板块生成元数据
-    segments = []
+    segments: list[DraftSegment] = []
     for cluster in clusters:
         if not cluster:
             continue
@@ -127,6 +142,7 @@ def generate_segments(
             DraftSegment(
                 name="",  # 稍后由 LLM 填充
                 display_name="",  # 稍后由 LLM 填充
+                kind=SEGMENT_KIND_BUSINESS,
                 description=None,
                 anchor_refs=anchor_refs,
                 member_count=len(cluster),
@@ -137,7 +153,77 @@ def generate_segments(
             )
         )
 
+    # 兜底：把没进业务模块的对象按原因分派，保证划分覆盖全部对象。
+    segments.extend(build_fallback_segments(object_types, segments, hub_nodes, adjacency))
+
     return segments, hub_nodes
+
+
+def build_fallback_segments(
+    object_types: list[DraftObjectType],
+    business_segments: list[DraftSegment],
+    hub_nodes: set[str],
+    adjacency: dict[str, set[str]] | None = None,
+) -> list[DraftSegment]:
+    """把没进业务模块的对象分派到四个兜底板块，让划分成为全覆盖分区。
+
+    分派顺序即优先级，先命中先归属：
+
+    1. ``system`` —— 来自数据库自带 schema（不是业务数据，最该被摄取层挡掉）
+    2. ``shared`` —— 枢纽对象（公共主数据，刻意不并入单个模块）
+    3. ``technical`` —— 判为 technical 的框架管道表（不参与业务聚类）
+    4. ``pending`` —— 其余：判为业务对象/桥表却连不成簇的
+
+    先判 system 再判 technical，是因为系统表几乎都会同时被判成 technical，
+    但「不该进本体」比「是技术表」更能说明该怎么处置它。
+
+    空板块不返回：没有系统表的本体不该凭空多出一个「系统表」板块。
+    """
+    claimed = {name for seg in business_segments for name in seg.members}
+    buckets: dict[str, list[DraftObjectType]] = {
+        SEGMENT_KIND_SYSTEM: [],
+        SEGMENT_KIND_SHARED: [],
+        SEGMENT_KIND_TECHNICAL: [],
+        SEGMENT_KIND_PENDING: [],
+    }
+    for obj in object_types:
+        if obj.name in claimed:
+            continue
+        if is_system_table(getattr(obj, "source_ref", None)):
+            buckets[SEGMENT_KIND_SYSTEM].append(obj)
+        elif obj.name in hub_nodes:
+            buckets[SEGMENT_KIND_SHARED].append(obj)
+        elif obj.table_role not in ("business_object", "bridge"):
+            buckets[SEGMENT_KIND_TECHNICAL].append(obj)
+        else:
+            buckets[SEGMENT_KIND_PENDING].append(obj)
+
+    degree = adjacency or {}
+    fallbacks: list[DraftSegment] = []
+    for kind, members in buckets.items():
+        if not members:
+            continue
+        meta = FALLBACK_SEGMENT_META[kind]
+        # 度数降序：与业务板块同一口径，前端 top-N 视图拿到的永远是最核心的成员
+        ranked = sorted(
+            members,
+            key=lambda o: (-len(degree.get(o.name, ())), o.name),
+        )
+        fallbacks.append(
+            DraftSegment(
+                name=meta["name"],
+                display_name=meta["display_name"],
+                kind=kind,
+                description=meta["description"],
+                # 兜底板块的成员天然大进大出，锚点匹配没有意义；
+                # 它们靠固定的 name 对齐（见 ontology_merge._merge_segments）。
+                anchor_refs=[],
+                member_count=len(ranked),
+                machine_baseline=meta["display_name"],
+                members=[o.name for o in ranked],
+            )
+        )
+    return fallbacks
 
 
 async def name_segments_with_llm(
@@ -166,7 +252,9 @@ async def name_segments_with_llm(
 
     obj_by_name = {obj.name: obj for obj in object_types}
 
-    for segment in segments:
+    # 兜底板块（system/technical/pending/shared）名字是固定的，不进命名流程：
+    # 它们不是业务子域，硬给一个业务名只会让人以为那是一块真实业务。
+    for segment in [s for s in segments if s.kind == SEGMENT_KIND_BUSINESS]:
         # 提取板块信息用于 LLM 命名
         members_by_degree = segment.members[:15]  # 取前 15 个成员
         member_names = [
@@ -321,7 +409,9 @@ def dedupe_segment_names(segments: list[DraftSegment]) -> None:
     name_counts: dict[str, int] = {}
     display_name_counts: dict[str, int] = {}
 
-    for segment in segments:
+    # 兜底板块的固定标识名是合并时的对齐键（见 ontology_merge._merge_segments），
+    # 一旦被加上数字后缀就对不回原来那一行，每次重生成都会多出一个空板块。
+    for segment in [s for s in segments if s.kind == SEGMENT_KIND_BUSINESS]:
         # 英文标识符去重
         if segment.name in name_counts:
             name_counts[segment.name] += 1

@@ -118,6 +118,10 @@ class EvidenceBuilder:
         # 判断「若不是关系表，它是业务对象还是数据表」）。
         field_signals_by_name: dict[str, list[FieldSignal]] = {}
         reeval_args_by_name: dict[str, dict] = {}
+        # 子表锚点是**从源里读出来的事实**（Frappe 的 parent/parenttype 列），不是推断。
+        # 桥表重判时必须能拿到它——否则硬事实会被「单列主键」这条软信号覆盖，见
+        # _reclassify_bridge_to_object。
+        child_table_by_name: dict[str, bool] = {}
 
         dataset_name_map = {ds.urn: ds.name for ds in bundle.datasets}
         # 源画像：把 Frappe 等源的建库约定翻译成 PK/FK/子表/系统列信号。默认画像
@@ -206,9 +210,12 @@ class EvidenceBuilder:
                 weak_fact_name_token=weak_fact_name_token,
                 segment_size=segment_size.get(dataset.name),
             )
-            # 存一份分类信号（不含 fact/child 这几个把它推向 bridge 的信号），
-            # 供未能塌缩的桥表「智能重判为对象」时抑制这些信号后重跑分类器。
+            # 存一份分类信号（不含 fact/weak_fact 这些把它推向 bridge 的**软**信号），
+            # 供未能塌缩的桥表「智能重判为对象」时抑制它们后重跑分类器。
+            # is_child_table 是源事实不是软信号，单独存在 child_table_by_name 里，
+            # 重判时必须尊重它——见 _reclassify_bridge_to_object。
             field_signals_by_name[object_name] = field_signals
+            child_table_by_name[object_name] = is_child
             reeval_args_by_name[object_name] = dict(
                 fk_in_degree=fk_in_degree.get(dataset.name, 0),
                 distinct_fk_targets=fk_out_degree.get(dataset.name, 0),
@@ -243,6 +250,9 @@ class EvidenceBuilder:
                         "needs_review": role.needs_review,
                         "role": role.role,
                         "signals": role.signals,
+                        # 弃权标记随证据快照落库：仲裁要靠它区分「判成业务对象」
+                        # 与「没判出来，兜底成业务对象」。
+                        **({"abstained": True} if role.abstained else {}),
                     },
                 )
             )
@@ -391,6 +401,7 @@ class EvidenceBuilder:
                 row_count_by_object=row_count_by_object,
                 field_signals_by_name=field_signals_by_name,
                 reeval_args_by_name=reeval_args_by_name,
+                child_table_by_name=child_table_by_name,
             )
         )
 
@@ -440,6 +451,8 @@ class EvidenceBuilder:
         role_by_object: dict[str, str],
         field_signals_by_name: dict[str, list[FieldSignal]],
         reeval_args_by_name: dict[str, dict],
+        *,
+        is_child_table: bool = False,
     ) -> None:
         """把「连不到两个业务对象、因而不是关系」的桥表智能重判为对象。
 
@@ -447,10 +460,36 @@ class EvidenceBuilder:
         得到它作为**对象**时的角色：达标业务环节→业务对象，否则→数据表（分类器内的
         segment_size 降级已处理）。分类器若仍判 bridge（如多外键主键的关联式结构），
         兜底落数据表——它不是业务关系。全部标 needs_review。
+
+        **例外：明细/子表不参与重判。** 子表锚点（Frappe 的 parent/parenttype 列）是
+        从源 schema 里读出来的**事实**，不是推断出来的倾向。塌缩失败只说明「这条关系
+        我们表达不出来」，不说明这张明细表变成了一个独立业务对象；把硬事实和软信号
+        一起抑制掉重跑，「单列业务主键 +2.0」会独自把明细行顶成业务对象——实测 erpnext
+        上 227 张子表因此被判成业务对象、与 LLM 的语义判定全面冲突，全部涌进人工队列。
+        故子表直接落数据表（父表的明细），保留 is_child_table 证据，不再重跑分类器。
+        人工挂载业务术语者豁免（人已认定它是业务概念）。
         """
         from app.services.object_classifier import ROLE_BRIDGE, ROLE_DATA_TABLE
 
         name = pack.candidate_name
+        if is_child_table and not (reeval_args_by_name[name].get("glossary_terms") or []):
+            pack.table_role = ROLE_DATA_TABLE
+            pack.role_confidence = 0.6
+            pack.role_reason = (
+                "明细/子表（含 parent/parenttype 子表锚点，源 schema 事实）：未能塌缩为"
+                "业务关系（连不到两个业务对象），落数据表——它是父表的明细行，"
+                "不是独立业务对象，真正的业务对象落在其引用的键上"
+            )
+            pack.needs_review = True
+            pack.role_signals = {
+                "score": 0.0,
+                "needs_review": True,
+                "role": ROLE_DATA_TABLE,
+                "signals": {"is_child_table": True},
+                "reclassified_from": "bridge",
+            }
+            role_by_object[name] = ROLE_DATA_TABLE
+            return
         res = classify_object_role(
             field_signals_by_name[name],
             **reeval_args_by_name[name],
@@ -489,6 +528,7 @@ class EvidenceBuilder:
         row_count_by_object: dict[str, int | None],
         field_signals_by_name: dict[str, list[FieldSignal]],
         reeval_args_by_name: dict[str, dict],
+        child_table_by_name: dict[str, bool],
     ) -> list[RelationEvidencePack]:
         """桥表塌缩 + 智能重判，迭代到稳定。
 
@@ -544,7 +584,11 @@ class EvidenceBuilder:
                 if len(hopeful) >= 2:
                     continue  # 推迟：待定桥表引用可能被提升为业务对象
                 self._reclassify_bridge_to_object(
-                    pack_by_name[name], role_by_object, field_signals_by_name, reeval_args_by_name
+                    pack_by_name[name],
+                    role_by_object,
+                    field_signals_by_name,
+                    reeval_args_by_name,
+                    is_child_table=child_table_by_name.get(name, False),
                 )
                 pending.discard(name)
                 changed = True
@@ -554,7 +598,11 @@ class EvidenceBuilder:
         for name in list(pending):
             if endpoints_for(name) is None:
                 self._reclassify_bridge_to_object(
-                    pack_by_name[name], role_by_object, field_signals_by_name, reeval_args_by_name
+                    pack_by_name[name],
+                    role_by_object,
+                    field_signals_by_name,
+                    reeval_args_by_name,
+                    is_child_table=child_table_by_name.get(name, False),
                 )
                 pending.discard(name)
 

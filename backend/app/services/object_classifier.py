@@ -126,6 +126,11 @@ class ClassificationResult:
     score: float = 0.0
     needs_review: bool = False
     signals: dict = field(default_factory=dict)
+    # 弃权：证据不足以支持任何判定，role 只是兜底默认值，**不是**一个主张。
+    # 仲裁时必须与「真的判成了这个角色」区别对待——把弃权当成一方观点，会让
+    # 「启发式没话说」被记成「两源分歧」，凭空造出人工复核（实测 erpnext 上占
+    # 待复核队列的 20%+）。见 draft_generator._resolve_role。
+    abstained: bool = False
 
 
 def classify_object_role(
@@ -403,6 +408,7 @@ def classify_object_role(
         )
 
     # 打分归类：正分→业务对象；负分→数据表；中间地带看技术信号决定默认方向。
+    abstained = False
     if score >= ROLE_SCORE_THRESHOLD:
         role = ROLE_BUSINESS_OBJECT
     elif score <= -1.0:
@@ -417,7 +423,11 @@ def classify_object_role(
         role = ROLE_DATA_TABLE
         reasons.append("与业务图脱节且无显著业务信号，暂判数据表待人工确认")
     else:
+        # 弃权：既没有足够正分说它是业务对象，也没有负分/技术信号说它不是。
+        # 这里的 business_object 是兜底默认值而非结论——用 abstained 标出来，
+        # 别让下游把它当成一方观点去跟 LLM 对撞。
         role = ROLE_BUSINESS_OBJECT
+        abstained = True
         reasons.append("信号不足，暂按业务对象保留，待人工确认")
 
     # 事实/动词命名改判：动词/事件表是「事实关系」而非业务对象——复用 bridge 角色。
@@ -499,6 +509,9 @@ def classify_object_role(
         score=score,
         needs_review=needs_review,
         signals=signals,
+        # 后续几条改判（事实命名/弱事实/环节降级）都是有证据的主张，一旦触发
+        # 就不再是弃权。
+        abstained=abstained and role == ROLE_BUSINESS_OBJECT,
     )
 
 

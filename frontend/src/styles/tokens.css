@@ -28,6 +28,14 @@
   --om-neutral: #64748b;
   --om-neutral-soft: #f1f5f9;
 
+  /* 机器产出的统一色系：审核页要让人一眼分清「机器判的」和「人定的」。
+     刻意选冷灰蓝而不是又一个鲜色——角色标签本身已经在用绿/蓝/紫/灰承载语义，
+     机器印记是「外框」不是「内容」，抢了色就把判定结果盖掉了。 */
+  --om-machine: #5a6b91;
+  --om-machine-strong: #3d4a68;
+  --om-machine-soft: #f4f6fc;
+  --om-machine-border: #dde3f1;
+
   --om-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
   --om-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06);
   --om-shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08);

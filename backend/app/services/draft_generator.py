@@ -292,6 +292,14 @@ _LLM_RELATION_SYSTEM_PROMPT = (
 )
 
 
+_ROLE_LABELS = {
+    ROLE_BUSINESS_OBJECT: "业务对象",
+    ROLE_TECHNICAL: "技术/系统表",
+    # bridge = 业务事实/关系表（记录一次动作/事件，真正的对象是它引用的键）。
+    ROLE_BRIDGE: "业务事实/关系表",
+}
+
+
 class OntologyDraftGenerator:
     """生成本体草稿。
 
@@ -1291,11 +1299,22 @@ class OntologyDraftGenerator:
 
         两个**相互独立**的判定源：结构启发式(object_classifier) 与 LLM 语义判断。
 
-        - 一致：互证信号，保留启发式结果（含其原有置信度/待复核状态）。
-        - 分歧：**不再让 LLM 静默否决**（旧行为把分歧「吃掉」，直接以 0.75 覆盖）。
-          分歧点恰是最该人工看的地方——展示 LLM 的语义判定（对结构贫瘠的源更可信），
-          但**置 needs_review 并下调置信度**，原因里并陈两方观点与 LLM 报告的证据缺口，
-          交人工裁定。置信度是固定的低值，不由 LLM 自身生成物推导（反循环）。
+        - 一致：互证信号，保留启发式结果。两源都指向**非业务对象**时顺手清掉启发式
+          自己挂的待复核——独立互证已是这一步能拿到的最强证据，且这类角色不影响发布。
+        - 启发式弃权（`abstained`，证据不足只好兜底成业务对象）：那不是一方观点，
+          没有「分歧」可言。LLM 说它非业务 → 直接采纳，不占人工队列；LLM 说它是
+          业务对象 → 仍要人确认（**提升为业务对象是会被发布的方向，绝不自动放行**）。
+        - 分歧但两边都判非业务（data_table / technical / bridge 之间）：发布只提升
+          `business_object`（publish.py），这类差异对产出零影响——采纳 LLM 的语义
+          判定，不占人工队列。
+        - 真分歧（跨越业务边界）：**不再让 LLM 静默否决**（旧行为把分歧「吃掉」，
+          直接以 0.75 覆盖）。分歧点恰是最该人工看的地方——展示 LLM 的语义判定
+          （对结构贫瘠的源更可信），但**置 needs_review 并下调置信度**，原因里并陈
+          两方观点与 LLM 报告的证据缺口，交人工裁定。置信度是固定的低值，不由 LLM
+          自身生成物推导（反循环）。
+
+        实测背景（erpnext 866 待复核）：前三条合计消化掉队列的六成以上，剩下的才是
+        真正需要业务判断的跨边界分歧。
         """
         base = {
             "table_role": ot.table_role,
@@ -1308,27 +1327,58 @@ class OntologyDraftGenerator:
         llm_role = (override.get("role") or "").strip()
         if llm_role not in (ROLE_BUSINESS_OBJECT, ROLE_TECHNICAL, ROLE_BRIDGE):
             return base
+
+        signals = getattr(ot, "role_signals", None) or {}
+        abstained = bool(signals.get("abstained"))
+        llm_is_business = llm_role == ROLE_BUSINESS_OBJECT
+        heur_is_business = ot.table_role == ROLE_BUSINESS_OBJECT
+
         if llm_role == ot.table_role:
-            # 一致：保留启发式（若启发式本就待复核，仍保留其待复核状态）。
+            # 一致。两源都说非业务 → 互证，无需人工再看一遍（且不影响发布）。
+            if not llm_is_business and ot.needs_review:
+                return {
+                    **base,
+                    "needs_review": False,
+                    "role_reason": (
+                        f"{(ot.role_reason or '').strip()}；LLM 语义判定同为"
+                        f"{_ROLE_LABELS.get(llm_role, llm_role)}，两源互证，不占人工队列"
+                    ).lstrip("；"),
+                }
             return base
 
         # bridge = 业务事实/关系表（记录一次动作/事件，真正的对象是它引用的键）。
-        role_labels = {
-            ROLE_BUSINESS_OBJECT: "业务对象",
-            ROLE_TECHNICAL: "技术/系统表",
-            ROLE_BRIDGE: "业务事实/关系表",
-        }
-        label = role_labels.get(llm_role, llm_role)
-        heur_label = role_labels.get(ot.table_role, ot.table_role)
-        note = f"启发式↔LLM 角色分歧：LLM 判为{label}"
+        label = _ROLE_LABELS.get(llm_role, llm_role)
+        heur_label = _ROLE_LABELS.get(ot.table_role, ot.table_role)
         llm_reason = (override.get("reason") or "").strip()
+        evidence_gap = (override.get("evidence_gap") or "").strip()
+
+        # 弃权 / 两边都判非业务：都不需要人来裁，采纳 LLM 的语义判定即可。
+        # 唯一的例外是「提升为业务对象」——那是会被发布的方向，必须有人点头。
+        if not llm_is_business and (abstained or not heur_is_business):
+            if abstained:
+                why = f"启发式证据不足未作判定（{(ot.role_reason or '').strip()}）"
+            else:
+                why = f"启发式判为{heur_label}，与 LLM 同属非业务对象，差异不影响发布"
+            note = f"{why}；采纳 LLM 语义判定：{label}"
+            if llm_reason:
+                note += f"（{llm_reason}）"
+            if evidence_gap:
+                note += f"；证据缺口：{evidence_gap}"
+            return {
+                "table_role": llm_role,
+                # 单源结论：比两源互证低，比真分歧高，且不由 LLM 自身生成物推导。
+                "role_confidence": 0.7,
+                "role_reason": note,
+                "needs_review": False,
+            }
+
+        note = f"启发式↔LLM 角色分歧：LLM 判为{label}"
         if llm_reason:
             note += f"（{llm_reason}）"
         note += f"；启发式判为{heur_label}"
         heur_reason = (ot.role_reason or "").strip()
         if heur_reason:
             note += f"（{heur_reason}）"
-        evidence_gap = (override.get("evidence_gap") or "").strip()
         if evidence_gap:
             note += f"；证据缺口：{evidence_gap}"
         # 分歧固定低置信(0.5)——凸显「需人工确认」，且不受 LLM 自身生成物影响。

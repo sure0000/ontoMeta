@@ -337,10 +337,17 @@ export interface ObjectTypeSummary extends FieldProvenance {
   updated_at: string;
 }
 
+/**
+ * 板块种类。划分是全覆盖分区——每个对象恰好属于一个板块，没有「未接入」这一说。
+ * business 之外的四类是兜底板块，各自对应一条不同的收敛路径（见后端 segment_kinds）。
+ */
+export type SegmentKind = "business" | "shared" | "pending" | "technical" | "system";
+
 export interface SegmentSummary extends FieldProvenance {
   id: string;
   name: string;
   display_name: string;
+  kind: SegmentKind;
   description?: string;
   member_count: number;
   ontology_id: string;
@@ -350,21 +357,48 @@ export interface SegmentSummary extends FieldProvenance {
   updated_at: string;
 }
 
+export interface SegmentNeighbor {
+  id: string;
+  label: string;
+  display_name: string;
+  status: string;
+  is_hub: boolean;
+  segment_id?: string | null;
+  segment_name?: string | null;
+  /** 该外部对象与本板块成员之间的关系条数 */
+  link_count: number;
+}
+
 export interface SegmentDetail extends SegmentSummary {
   members: ObjectTypeSummary[];
   internal_relation_count: number;
+  /** 板块内的关系边，恒返回 */
   edges?: GraphEdge[];
   cross_relation_count?: number;
   relation_sentences?: string[];
+  /** 跨板块邻居（按连接条数降序，后端已截断） */
+  neighbors?: SegmentNeighbor[];
+  /** 连向上述邻居的跨板块边 */
+  cross_edges?: GraphEdge[];
 }
 
 export interface SegmentReviewProgress {
   segment_id: string;
   segment_name: string;
+  /** 板块种类：pending 那一行是「待归类业务对象」，它的成员必须先归位才算判完。 */
+  kind?: SegmentKind;
   total_count: number;
   needs_review_count: number;
   reviewed_count: number;
   progress_ratio: number;
+  /** 关系口径：按源端对象所属板块归集，与关系队列筛选同口径 */
+  relation_total: number;
+  relation_needs_review: number;
+  relation_reviewed: number;
+  relation_progress_ratio: number;
+  /** 板块内按角色拆分：关系表在关系页单独审，侧栏要的是该角色的数字 */
+  role_total?: Record<string, number>;
+  role_pending?: Record<string, number>;
 }
 
 export interface ReviewModeStats {
@@ -375,6 +409,8 @@ export interface ReviewModeStats {
   progress_ratio: number;
   /** 待复核按角色拆分 */
   pending_by_role?: Record<string, number>;
+  /** 全量按角色拆分：对象页排除关系表，分母也要跟着排除 */
+  total_by_role?: Record<string, number>;
   /** 其中会卡住发布的部分（待复核的业务对象不随本体发布） */
   business_object_pending?: number;
   total_relations: number;
@@ -383,6 +419,11 @@ export interface ReviewModeStats {
   /** 未接入板块的对象：不在任何 segment_progress 行里，队列侧用 segment_id="-" 指代 */
   unsegmented_total?: number;
   unsegmented_pending?: number;
+  unsegmented_relation_total?: number;
+  unsegmented_relation_pending?: number;
+  /** 压在「待归类业务对象」里的对象数，以及其中已被标成已确认的存量（判完了却没归位）。 */
+  unclassified_total?: number;
+  unclassified_reviewed?: number;
   segment_progress: SegmentReviewProgress[];
 }
 
@@ -391,6 +432,13 @@ export interface ReviewGroup {
   key: string;
   segment_id?: string | null;
   segment_name: string;
+  /** 板块种类（business / shared / pending / technical / system）。 */
+  segment_kind?: string;
+  /**
+   * 这一组必须先归入业务板块才算判完（在「待归类业务对象」里，且角色留在那儿）。
+   * 服务端算好的：判定规则在后端 segment_placement 写一次，前端不重算。
+   */
+  requires_classification?: boolean;
   table_role: string;
   name_family: string;
   score_band: "strong" | "near" | "weak" | "unknown";
@@ -406,11 +454,15 @@ export interface ReviewGroup {
 
 export interface ReviewQueue {
   kind: "object" | "relation";
+  /** pending=待判（默认）；reviewed=已判过的那一半，用同一套组 key 回看。 */
+  status?: "pending" | "reviewed";
   groups: ReviewGroup[];
   group_total: number;
   /** 本页首组在整条队列里的位置（0 基） */
   group_offset: number;
   pending_total: number;
+  /** 同一筛选范围内已判过的个体数（「已判」角标） */
+  reviewed_total?: number;
   pending_by_role: Record<string, number>;
   next_cursor?: string | null;
 }
@@ -431,6 +483,10 @@ export interface VerbRefinementBatch {
   rule_count: number;
   llm_count: number;
   fallback_count: number;
+  /** 本次扫过的关系条数（含「改不动」因而没出现在 suggestions 里的那些）。 */
+  candidate_count?: number;
+  /** LLM 这一路的下场：unused / unavailable / ok / failed，决定空结果怎么解释。 */
+  llm_status?: string;
 }
 
 export interface Property extends FieldProvenance {
@@ -513,6 +569,11 @@ export interface RoleSignals {
   needs_review?: boolean;
   role?: string;
   signals?: Record<string, number | boolean | string | null>;
+  /**
+   * 分类器推翻自己时留下的原判（当前只有 "bridge"：桥表连不到两个业务对象，
+   * 被重判为对象）。有值即代表这条是机器自我改判的结果，审核时最该看。
+   */
+  reclassified_from?: string;
 }
 
 export interface ObjectTypeDetail extends ObjectTypeSummary {
@@ -761,6 +822,12 @@ export interface GraphNode {
   status: string;
   table_role?: string;
   needs_review?: boolean;
+  /** 板块视图：该节点在板块之外（跨板块邻居），画成虚线弱化卡片 */
+  external?: boolean;
+  /** 外部邻居与本板块的连接条数，画在徽标上 */
+  linkCount?: number;
+  /** 外部邻居所属板块名，说明「连到哪块业务去了」 */
+  externalGroup?: string | null;
 }
 
 export interface GraphEdge {
@@ -800,8 +867,13 @@ export interface ClusterNode {
 export interface GraphCluster {
   id: string;
   name: string;
+  kind: SegmentKind;
   nodes: ClusterNode[];
   node_count: number;
+  /** 簇内关系条数——板块目录的排序键 */
+  internal_relation_count: number;
+  /** 该簇与簇外对象之间的关系条数 */
+  cross_relation_count: number;
   truncated: boolean;
   /** 宏观图中的稳定坐标（近邻间距约 1 个单位，前端按固定像素间距放大） */
   layout?: GraphPoint | null;

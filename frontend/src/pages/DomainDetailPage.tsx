@@ -2,7 +2,8 @@ import {
   ApartmentOutlined,
   AppstoreOutlined,
   AuditOutlined,
-  CheckCircleOutlined,
+  BranchesOutlined,
+  CloudUploadOutlined,
   DeleteOutlined,
   DeploymentUnitOutlined,
   DownOutlined,
@@ -23,11 +24,10 @@ import {
   Space,
   Spin,
   Table,
-  Tag,
   Tooltip,
   message,
 } from "antd";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -46,6 +46,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { useApi } from "../hooks/useApi";
 import { useEffectAfterMount, useUrlNumber, useUrlState } from "../hooks/useUrlState";
+import { formatDateTime } from "../utils/format";
 import type {
   DomainContextDetail,
   DraftGenerationScope,
@@ -212,6 +213,96 @@ function PublishPreflightSummary({ preflight }: { preflight: PublishPreflight })
   );
 }
 
+/**
+ * 页头事实条：这个域有多大、发布到哪一版、还欠什么。
+ *
+ * 这些数字原先要么散在别处（对象/关系总数只在工作区列表卡片上，复核进度只在审核页），
+ * 要么由页头下方一条独占整行的提示条承载——而那条提示条里除了三个 Tag，还放了一个与
+ * 页头重复的发布按钮。合并进页头这一行后：少一行、多五个事实、发布入口只剩一个。
+ */
+function DomainMetaStrip({
+  domain,
+  domainId,
+  segmentCount,
+  reviewTotal,
+  reviewDone,
+}: {
+  domain: DomainContextDetail;
+  domainId: string;
+  segmentCount: number;
+  reviewTotal: number;
+  reviewDone: number;
+}) {
+  const pendingPublish = domain.pending_publish_count ?? 0;
+  const changed = domain.unpublished_change_count ?? 0;
+  const needsReview = domain.needs_review_count ?? 0;
+  const publishedAt = formatDateTime(domain.latest_published_at);
+  const reviewPct = reviewTotal > 0 ? Math.round((reviewDone / reviewTotal) * 100) : 100;
+
+  return (
+    <div className="page-meta-strip">
+      <span className="page-meta-item">
+        <strong>{domain.object_type_count}</strong> 对象
+      </span>
+      <span className="page-meta-item">
+        <strong>{domain.relation_type_count}</strong> 关系
+      </span>
+      {segmentCount > 0 && (
+        <Link className="page-meta-item" to={`/workspace/${domainId}/segments`}>
+          <strong>{segmentCount}</strong> 业务板块
+        </Link>
+      )}
+      {reviewTotal > 0 && <span className="page-meta-sep" />}
+      {reviewTotal > 0 && (
+        <Tooltip title="已判定 / 全部对象（含关系表与技术表）">
+          <Link className="page-meta-item" to={`/workspace/${domainId}/review`}>
+            复核&nbsp;
+            <strong>
+              {reviewDone}/{reviewTotal}
+            </strong>
+            <span className="om-muted">（{reviewPct}%）</span>
+          </Link>
+        </Tooltip>
+      )}
+      <span className="page-meta-sep" />
+      {domain.published_ontology_version ? (
+        <span className="page-meta-item">
+          已发布&nbsp;<strong>v{domain.published_ontology_version}</strong>
+          <span className="om-muted">
+            · {domain.published_object_type_count} 对象{publishedAt ? ` · ${publishedAt}` : ""}
+          </span>
+        </span>
+      ) : (
+        <span className="page-meta-item om-muted">尚未发布</span>
+      )}
+      {pendingPublish > 0 && (
+        <Tooltip title="本次发布会新提升的对象与关系">
+          <span className="page-meta-chip page-meta-chip--info">
+            <strong>{pendingPublish}</strong> 待提升
+          </span>
+        </Tooltip>
+      )}
+      {changed > 0 && (
+        <Tooltip title="已发布内容被人工改过，尚未固化为新版本">
+          <span className="page-meta-chip page-meta-chip--info">
+            <strong>{changed}</strong> 项改动待固化
+          </span>
+        </Tooltip>
+      )}
+      {needsReview > 0 && (
+        <Tooltip title="待复核的业务对象不随发布提升，发布时会被跳过">
+          <Link
+            className="page-meta-chip page-meta-chip--warning"
+            to={`/workspace/${domainId}/review`}
+          >
+            <strong>{needsReview}</strong> 待复核业务对象·发布跳过
+          </Link>
+        </Tooltip>
+      )}
+    </div>
+  );
+}
+
 /** 一次生成到底改了什么——机器动过的地方在这里一次性看完。 */
 function MergeReportDrawer({
   report,
@@ -369,6 +460,18 @@ export function DomainDetailPage() {
           }),
     [domain?.working_ontology_id],
   );
+
+  // Tab 上的规模数字：全量口径，不随搜索/仅看待复核变化（那两个由列表自己的
+  // 「共 N 条」回答）。对象是 memo 组件，这里必须 useMemo，否则每次渲染都换新对象。
+  const tabCounts = useMemo(() => {
+    const byRole = reviewStats.data?.total_by_role;
+    if (!byRole) return undefined;
+    return {
+      business_object: byRole.business_object ?? 0,
+      data_table: byRole.data_table ?? 0,
+      technical: byRole.technical ?? 0,
+    };
+  }, [reviewStats.data]);
 
   const [generating, setGenerating] = useState<Record<DraftGenerationScope, boolean>>({
     full: false,
@@ -703,7 +806,13 @@ export function DomainDetailPage() {
   const needsReviewCount = domain.needs_review_count ?? 0;
   // 域上的计数只算业务对象（发布门禁口径）；审核队列覆盖全部角色，用它当入口数字。
   const pendingReviewAll = reviewStats.data?.needs_review_count ?? 0;
-  const conflictCount = domain.unresolved_conflict_count ?? 0;
+  // 发布按钮上的待办数 = 新提升的 + 已发布内容里被改动的（都靠这次发布固化）。
+  const publishPendingTotal = pendingPublish + pendingCount;
+  const publishHint =
+    publishPendingTotal > 0
+      ? `将 ${pendingPublish} 项新内容与 ${pendingCount} 项改动固化为 v${(publishedVersion ?? 0) + 1}` +
+        (needsReviewCount > 0 ? `；${needsReviewCount} 个待复核业务对象会被跳过` : "")
+      : "当前没有待固化的改动";
 
   return (
     <PageContainer full>
@@ -717,9 +826,30 @@ export function DomainDetailPage() {
             )}
           </Space>
         }
-        description={domain.description || "暂无描述"}
+        description={domain.description || undefined}
+        meta={
+          <DomainMetaStrip
+            domain={domain}
+            domainId={domainId!}
+            segmentCount={reviewStats.data?.segment_progress.length ?? 0}
+            reviewTotal={reviewStats.data?.total_objects ?? 0}
+            reviewDone={reviewStats.data?.reviewed_count ?? 0}
+          />
+        }
         extra={
-          <Space wrap>
+          <Space wrap size={8}>
+            {/* 视图切换是「看哪一屏」，属于页头的动作区。它原先独占一整行，
+                而这一页最缺的就是纵向空间——地图画布按剩余高度自适应。 */}
+            {domain.working_ontology_id && (
+              <Segmented
+                value={workspaceView}
+                onChange={(value) => setWorkspaceView(value as "map" | "list")}
+                options={[
+                  { label: "业务地图", value: "map" },
+                  { label: "对象清单", value: "list" },
+                ]}
+              />
+            )}
             {domain.datahub_url && (
               <Tooltip title="在 DataHub 中打开">
                 <Button
@@ -757,7 +887,7 @@ export function DomainDetailPage() {
                 </Link>
                 <Tooltip title={`版本历史${publishedVersion ? ` v${publishedVersion}` : ""}`}>
                   <Button
-                    icon={<HistoryOutlined />}
+                    icon={<BranchesOutlined />}
                     onClick={openVersionHistory}
                     aria-label={`版本历史${publishedVersion ? ` v${publishedVersion}` : ""}`}
                   />
@@ -817,7 +947,6 @@ export function DomainDetailPage() {
               }}
             >
               <Button
-                type="primary"
                 loading={generating.full || generating.objects || generating.relations}
                 icon={<ThunderboltOutlined />}
               >
@@ -835,10 +964,24 @@ export function DomainDetailPage() {
                 }
               />
             )}
+            {/* 「发布」是动作，「确认发布」是二次确认弹窗上的那一下——两个词摆在同一
+                屏上互相打架（还曾经是两个按钮：页头一个、提示条一个，点哪个都一样）。
+                这里只留一个入口，待办数直接写在按钮上。 */}
             {domain.working_ontology_id && workspaceEditable && (
-              <Button onClick={handlePublish} icon={<CheckCircleOutlined />}>
-                确认发布
-              </Button>
+              <Tooltip title={publishHint}>
+                <Button
+                  type={publishPendingTotal > 0 ? "primary" : "default"}
+                  onClick={handlePublish}
+                  icon={<CloudUploadOutlined />}
+                >
+                  发布
+                  {publishPendingTotal > 0 && (
+                    <span style={{ marginInlineStart: 6, opacity: 0.85 }}>
+                      {publishPendingTotal}
+                    </span>
+                  )}
+                </Button>
+              </Tooltip>
             )}
           </Space>
         }
@@ -851,36 +994,6 @@ export function DomainDetailPage() {
           showIcon
           closable
           onClose={() => setActionError(null)}
-        />
-      )}
-
-      {workspaceEditable && (pendingCount > 0 || pendingPublish > 0) && (
-        <Alert
-          style={{ marginTop: 12 }}
-          type="info"
-          showIcon
-          message={
-            <Space size={8} wrap>
-              {pendingCount > 0 && <Tag color="orange">{pendingCount} 项已发布内容被修改</Tag>}
-              {pendingPublish > 0 && <Tag color="blue">{pendingPublish} 项待提升</Tag>}
-              {needsReviewCount > 0 && (
-                <Link to={`/workspace/${domainId}/review`}>
-                  <Tag style={{ cursor: "pointer" }}>
-                    {needsReviewCount} 个待复核业务对象（发布会跳过）→ 去审核
-                  </Tag>
-                </Link>
-              )}
-              {conflictCount > 0 && <Tag color="red">{conflictCount} 处字段冲突</Tag>}
-              <span style={{ color: "var(--om-text-secondary)", fontSize: 13 }}>
-                尚未固化为新版本
-              </span>
-            </Space>
-          }
-          action={
-            <Button size="small" type="primary" onClick={handlePublish}>
-              发布
-            </Button>
-          }
         />
       )}
 
@@ -944,18 +1057,7 @@ export function DomainDetailPage() {
           <>
             {/* 「审核」不再是这一页上的一个开关：它是另一件事——面对的是待判队列、
                 排序键不同、做完的标志是队列清空。它有自己的页面（下方入口 + 顶栏按钮），
-                这里只留浏览用的地图/清单切换。 */}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
-              <Segmented
-                value={workspaceView}
-                onChange={(value) => setWorkspaceView(value as "map" | "list")}
-                options={[
-                  { label: "业务地图", value: "map" },
-                  { label: "对象清单", value: "list" },
-                ]}
-              />
-            </div>
-
+                这里只留浏览用的地图/清单切换，且切换开关已并进页头动作区。 */}
             {workspaceView === "map" ? (
               <OntologyOverviewPanel
                 ontologyId={domain.working_ontology_id}
@@ -974,6 +1076,7 @@ export function DomainDetailPage() {
                 relationGroupDetailPath={relationGroupDetailPath}
                 viewTab={viewTab}
                 onViewTabChange={setViewTab}
+                tabCounts={tabCounts}
                 workspaceMode
                 searchQuery={searchQuery}
                 onSearchChange={setSearchQuery}
