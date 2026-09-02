@@ -51,7 +51,7 @@ def upgrade() -> None:
 
     bind.execute(
         sa.text(
-            "UPDATE object_types SET needs_review = 1 "
+            "UPDATE object_types SET needs_review = true "
             "WHERE role_reason LIKE :pat"
         ),
         {"pat": f"%{_MARK}%"},
@@ -73,7 +73,7 @@ def downgrade() -> None:
         sa.text(
             "UPDATE object_types "
             "SET role_reason = :mark || ' ' || COALESCE(role_reason, '') "
-            "WHERE needs_review = 1"
+            "WHERE needs_review = true"
         ),
         {"mark": _MARK},
     )

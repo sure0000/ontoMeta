@@ -40,8 +40,8 @@ def upgrade() -> None:
             sa.Column("deploy_status", sa.String(length=16), nullable=False, server_default="not_deployed"),
             sa.Column("deploy_error", sa.Text(), nullable=True),
             sa.Column("connection_json", sa.Text(), nullable=True),
-            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
-            sa.Column("is_default", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+            sa.Column("is_default", sa.Boolean(), nullable=False, server_default=sa.text("false")),
             sa.Column("created_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
             sa.Column("updated_at", sa.DateTime(), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
         )

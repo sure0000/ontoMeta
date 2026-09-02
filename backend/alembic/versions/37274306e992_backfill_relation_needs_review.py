@@ -44,11 +44,11 @@ def upgrade() -> None:
         sa.text(
             """
             UPDATE relation_types
-               SET needs_review = 1
-             WHERE needs_review = 0
+               SET needs_review = true
+             WHERE needs_review = false
                AND origin = 'machine'
                AND status = 'suggested'
-               AND deleted_by_user = 0
+               AND deleted_by_user = false
             """
         )
     )
@@ -63,11 +63,11 @@ def downgrade() -> None:
         sa.text(
             """
             UPDATE relation_types
-               SET needs_review = 0
-             WHERE needs_review = 1
+               SET needs_review = false
+             WHERE needs_review = true
                AND origin = 'machine'
                AND status = 'suggested'
-               AND deleted_by_user = 0
+               AND deleted_by_user = false
             """
         )
     )

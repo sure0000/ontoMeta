@@ -38,8 +38,7 @@ _COLUMNS = [
     ("max_active_tasks_per_dag", sa.Integer(), "16"),
     ("dag_parse_timeout", sa.Float(), "60.0"),
     ("preflight_sentinel_timeout", sa.Float(), "20.0"),
-    # SQLite 没有布尔类型，1/0 是它与 Postgres 都认的写法。
-    ("staging_swap", sa.Boolean(), "1"),
+    ("staging_swap", sa.Boolean(), "true"),
 ]
 
 

@@ -47,7 +47,7 @@ def upgrade() -> None:
             server_default="apache/seatunnel:2.3.11",
         ),
         # 默认不启用：没有 Airflow 的环境保持既有 direct 直连行为不变。
-        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
     )
 

@@ -45,9 +45,9 @@ def upgrade() -> None:
         )
     )
     bind.execute(
-        sa.text("UPDATE data_sources SET is_default_warehouse = 0 WHERE is_default_warehouse IS NULL")
+        sa.text("UPDATE data_sources SET is_default_warehouse = false WHERE is_default_warehouse IS NULL")
     )
-    bind.execute(sa.text("UPDATE data_sources SET enabled = 1 WHERE enabled IS NULL"))
+    bind.execute(sa.text("UPDATE data_sources SET enabled = true WHERE enabled IS NULL"))
 
     # Migration-only promotion. Runtime routing never chooses by recency.
     candidate = bind.execute(
