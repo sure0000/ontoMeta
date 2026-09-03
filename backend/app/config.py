@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     mcp_rate_limit_per_minute: int = 120
     # execute_sql 直打数仓、代价最重，单独更严。0 = 跟随 mcp_rate_limit_per_minute。
     mcp_execute_sql_rate_limit_per_minute: int = 30
+    # ---- MCP 远程 HTTP 传输（Phase 5）----
+    # 默认关闭：把 MCP 暴露到网络是安全敏感操作，须显式开启。开启后 MCP 挂在后端的
+    # /mcp 路由（Streamable HTTP，JSON 响应模式），异地 agent 用「服务地址 + 令牌」连接，
+    # 不碰任何本地路径。身份逐请求解析（Authorization: Bearer <令牌>），复用与 REST 同一份
+    # resolve_principal_token；无本地 stdio 的「一进程一 env Token」。
+    mcp_http_enabled: bool = False
+    # 远程是否允许匿名（无令牌）。默认否——公网暴露不该匿名可读；本地 stdio 的匿名 reader
+    # 便利不适用于网络。为真时无令牌回落 mcp_default_role（仍受各工具 required_role 约束）。
+    mcp_http_allow_anonymous: bool = False
 
     datahub_gms_url: str = "http://localhost:8080"
     datahub_frontend_url: str = "http://localhost:9002"

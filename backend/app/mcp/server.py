@@ -24,7 +24,7 @@ import mcp.types as types
 from mcp.server import Server
 
 from .audit import record_call
-from .auth import resolve_auth_context
+from .auth import resolve_auth_context, resolve_http_auth
 from .rate_limit import check_rate_limit
 from .tools import TOOL_REGISTRY, AuthContext, ToolResult, tool_required_role
 
@@ -56,6 +56,18 @@ def _reset_session_auth() -> None:
     """清掉缓存的会话身份（仅供测试在改 env 后重新解析）。"""
     global _session_auth
     _session_auth = None
+
+
+def _auth_for(context) -> AuthContext:
+    """本次调用的身份。
+
+    远程 HTTP 传输会把原始请求挂在 ``context.request`` 上（stdio 下为 None）——据此**逐请求**
+    解析身份；只有 stdio 才用进程级会话身份。绝不能让 HTTP 请求共用 stdio 的单例身份。
+    """
+    request = getattr(context, "request", None) if context is not None else None
+    if request is not None:
+        return resolve_http_auth(request)
+    return session_auth()
 
 
 def _text_result(result: ToolResult) -> types.CallToolResult:
@@ -104,7 +116,7 @@ async def handle_call_tool(
             f"未知工具：{name}（可用：{'、'.join(sorted(TOOL_REGISTRY))}）"
         )
 
-    auth = session_auth()
+    auth = _auth_for(context)
     minimum = tool_required_role(tool)
     started = time.monotonic()
 

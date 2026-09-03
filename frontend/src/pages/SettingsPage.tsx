@@ -23,6 +23,7 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PrincipalsPanel } from "../components/PrincipalsPanel";
+import { McpPanel } from "../components/McpPanel";
 import { DependencyPanel } from "../components/DependencyPanel";
 import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
@@ -308,6 +309,20 @@ export function SettingsPage() {
                   </Form>
                 </SectionCard>
                 <PrincipalsPanel />
+              </div>
+            ),
+          },
+          {
+            key: "mcp",
+            label: (
+              <span>
+                <ApiOutlined style={{ marginRight: 6 }} />
+                MCP 服务
+              </span>
+            ),
+            children: (
+              <div className="om-tab-stack">
+                <McpPanel />
               </div>
             ),
           },

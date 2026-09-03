@@ -110,6 +110,9 @@ import type {
   DependencyProbeResult,
   DependencyDeployResult,
   PublishPreflight,
+  McpServiceInfo,
+  McpStats,
+  McpAuditPage,
 } from "./types";
 import { buildQuery } from "./utils/format";
 
@@ -1607,6 +1610,21 @@ export const api = {
     request<PrincipalCreated>(`/api/principals/${id}/rotate-token`, { method: "POST" }),
   deletePrincipal: (id: string) =>
     request<{ deleted: string }>(`/api/principals/${id}`, { method: "DELETE" }),
+
+  // ---- MCP 服务（Phase 5：远程传输 + 管理页）----
+  getMcpInfo: () => request<McpServiceInfo>("/api/mcp/info"),
+  getMcpStats: (windowMinutes?: number) =>
+    request<McpStats>(
+      `/api/mcp/stats${windowMinutes ? `?window_minutes=${windowMinutes}` : ""}`,
+    ),
+  getMcpAudit: (params?: { toolName?: string; deniedOnly?: boolean; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.toolName) q.set("tool_name", params.toolName);
+    if (params?.deniedOnly) q.set("denied_only", "true");
+    if (params?.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return request<McpAuditPage>(`/api/mcp/audit${qs ? `?${qs}` : ""}`);
+  },
 
   // ---- 治理智能体流水线（M5/M6，写侧；整个命名空间需 publisher 角色）----
   listAgentKinds: () => request<AgentKinds>("/api/agents/kinds"),

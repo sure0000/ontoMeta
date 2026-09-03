@@ -1,15 +1,16 @@
-"""审计查询工具（只读，publisher）。
+"""审计查询工具（薄包装）。
 
 审计若不可读，「全量记录」就只是写进黑洞。开一个 publisher 门控的回读入口，让管理员
-能在同一通道里核对「谁用什么身份调了什么」。仍是只读，且它自己也会被审计。
+能在同一通道里核对「谁用什么身份调了什么」。查询逻辑在 `app.mcp.introspection`
+（与前端 REST 共用）。它自己也会被审计。
 """
 
 from __future__ import annotations
 
-from app.models.mcp_audit import McpAuditLog
+from app.mcp import introspection
 
 from . import AuthContext, ToolResult, register_tool
-from ._common import as_int, loads, session
+from ._common import as_int, session
 
 
 @register_tool
@@ -54,41 +55,17 @@ class ListAuditLogsTool:
 
         try:
             with session() as db:
-                q = db.query(McpAuditLog)
-                if tool_name:
-                    q = q.filter(McpAuditLog.tool_name == tool_name)
-                if success is not None:
-                    q = q.filter(McpAuditLog.success.is_(bool(success)))
-                if denied_only:
-                    q = q.filter(McpAuditLog.denied.is_(True))
-                total = q.count()
-                rows = (
-                    q.order_by(McpAuditLog.created_at.desc()).limit(limit).all()
+                logs, total = introspection.query_audit(
+                    db,
+                    tool_name=tool_name,
+                    success=None if success is None else bool(success),
+                    denied_only=denied_only,
+                    limit=limit,
                 )
-                logs = [
-                    {
-                        "id": r.id,
-                        "created_at": r.created_at.isoformat() if r.created_at else None,
-                        "principal_id": r.principal_id,
-                        "principal_role": r.principal_role,
-                        "client_type": r.client_type,
-                        "tool_name": r.tool_name,
-                        "arguments": loads(r.arguments_json),
-                        "success": r.success,
-                        "denied": r.denied,
-                        "error": r.error,
-                        "duration_ms": r.duration_ms,
-                    }
-                    for r in rows
-                ]
-                return ToolResult(
-                    success=True,
-                    data={"logs": logs},
-                    metadata={
-                        "count": len(logs),
-                        "total": total,
-                        "truncated": total > limit,
-                    },
-                )
+            return ToolResult(
+                success=True,
+                data={"logs": logs},
+                metadata={"count": len(logs), "total": total, "truncated": total > limit},
+            )
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, error=f"查询审计失败：{exc}")

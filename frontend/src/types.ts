@@ -2441,3 +2441,54 @@ export interface ManualLineageEdge {
   target_table: string;
   join_keys: string[];
 }
+
+// ---- MCP 服务（Phase 5：远程传输 + 管理页）----
+export interface McpToolInfo {
+  name: string;
+  description: string;
+  required_role: string;
+}
+export interface McpServiceInfo {
+  server: { name: string; version: string };
+  transports: {
+    stdio: boolean;
+    http: { enabled: boolean; path: string; allow_anonymous: boolean };
+  };
+  default_role: string | null;
+  rate_limit: { default_per_minute: number; execute_sql_per_minute: number; enabled: boolean };
+  tool_count: number;
+  tools: McpToolInfo[];
+  audit: { reachable: boolean; error: string | null };
+}
+export interface McpStats {
+  window_minutes: number | null;
+  totals: {
+    calls: number;
+    succeeded: number;
+    business_failed: number;
+    denied: number;
+    rate_limited: number;
+  };
+  by_tool: { tool_name: string; calls: number; denied: number }[];
+  by_role: { role: string; calls: number }[];
+}
+export interface McpAuditEntry {
+  id: string;
+  created_at: string | null;
+  principal_id: string | null;
+  principal_role: string | null;
+  client_type: string;
+  tool_name: string;
+  arguments: unknown;
+  success: boolean;
+  denied: boolean;
+  rate_limited: boolean;
+  error: string | null;
+  duration_ms: number | null;
+}
+export interface McpAuditPage {
+  logs: McpAuditEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}

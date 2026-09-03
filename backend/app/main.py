@@ -24,10 +24,26 @@ async def lifespan(_: FastAPI):
             "ONTOMETA_ADMIN_TOKEN 未配置：管理 API（/api/* 除 public）将返回 503。"
             "请在 backend/.env 中设置后重启。"
         )
-    yield
+    # MCP 远程 HTTP 传输（默认关闭）：session manager 的 run() 是长驻上下文，必须在
+    # 主 lifespan 里驱动——mount 的子应用 lifespan 不会被 FastAPI 触发。
+    if settings.mcp_http_enabled:
+        from app.mcp.http_app import get_session_manager
+
+        logger.info("MCP 远程 HTTP 传输已启用：POST %s（Streamable HTTP, JSON 响应）", "/mcp")
+        async with get_session_manager().run():
+            yield
+    else:
+        yield
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+# MCP 远程 HTTP 传输：挂到 /mcp（非 /api，AdminAuthMiddleware 自动豁免，由 MCP 自管
+# 逐请求 Bearer 鉴权）。仅在显式开启时挂载——不开则这条网络面根本不存在。
+if settings.mcp_http_enabled:
+    from app.mcp.http_app import MCP_HTTP_PATH, build_mcp_asgi
+
+    app.mount(MCP_HTTP_PATH, build_mcp_asgi())
 
 # 先加 CORS，再加鉴权：鉴权中间件在内层，CORS 能正确处理预检与响应头
 app.add_middleware(AdminAuthMiddleware)

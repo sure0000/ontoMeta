@@ -1,7 +1,6 @@
 # MCP 服务实施状态
 
-**当前阶段**：Phase 4 ✅ 已完成（限流 + 运维自省/监控）
-**下一阶段**：Phase 5 能力补齐与开放（含资源级权限、远程传输）
+**当前阶段**：Phase 5 部分完成（✅ 远程 HTTP 传输 + 前端管理页；建模类工具/资源级权限待做）
 **更新时间**：2026-09-03
 
 ---
@@ -175,21 +174,53 @@ execute_sql，几分钟打爆数仓）。
 
 ---
 
-## 📋 Phase 5: 能力补齐与开放（待实施）
+## ✅ Phase 5（部分）：远程 HTTP 传输 + 前端管理页
 
-设计稿 `docs/MCP_TOOL_DESIGN.md` 列了 20 个工具，Phase 2/4 交付了查询/SQL/任务/提案/
-运维共 16 个。剩下的：
+**动机**：agent 与本项目不在同一台机器时，stdio（本地子进程 + venv 路径）根本连不上。
 
-- [ ] **资源级权限**（某主体只能看某数据域/数据源）：当前是工具级 + 角色级，未到行级。
-      要给 Principal 关联可访问的 domain/datasource，并在所有查询工具注入过滤——工程量
-      不小、在单机可信 stdio 场景收益有限，故留到此处而非硬塞进 Phase 3/4。
+### 远程 HTTP 传输（默认关闭）
+
+- MCP 挂到主 FastAPI 的 `/mcp` 路由（`app/mcp/http_app.py` + `main.py`），Streamable HTTP
+  传输，**`json_response=True` + stateless**——绕开主后端 `AdminAuthMiddleware`
+  （`BaseHTTPMiddleware`）会缓冲、挂住 SSE 长连的坑。异地 agent 用「服务地址 + 令牌」连。
+- **身份逐请求解析**：`server._auth_for` 从 `context.request`（HTTP transport 挂上的原始
+  请求）读 `Authorization: Bearer`，走 `resolve_http_auth` → `resolve_principal_token`
+  （与 REST/stdio 同一份）。绝不复用 stdio 的进程级会话身份。
+- **公网默认不匿名**：`_AnonymousGuardASGI` 在 `mcp_http_allow_anonymous=False`（默认）时把
+  无令牌请求直接 401（连 initialize 都不给）；stdio 的匿名 reader 便利不外延到网络。
+- 开关：`mcp_http_enabled`（默认 False，须显式开）/ `mcp_http_allow_anonymous`（默认 False）。
+- 端点规范用 **`/mcp/`（带尾斜杠）**——Starlette Mount 对 `/mcp` 无斜杠会 307。
+
+### 前端管理页（设置页 →「MCP 服务」Tab）
+
+- `frontend/src/components/McpPanel.tsx`，四块：连接与状态 / 功能清单（工具+最低角色）/
+  审计日志 / 使用统计。
+- 数据走 `GET /api/mcp/{info,stats,audit}`（`app/api/mcp.py`）——info 只读（reader），
+  audit/stats 需 publisher。聚合/目录逻辑集中在 `app/mcp/introspection.py`，与 MCP 工具
+  `server_info`/`get_mcp_stats`/`list_audit_logs` 共用一份（不写两遍）。
+
+### 验证
+
+- `tests/test_mcp_http.py` 12 条：逐请求 HTTP 鉴权、匿名拦截 401、REST info/stats/audit +
+  publisher 门控。全量 2182 passed。
+- stdio-over-HTTP 端到端：真 MCP client 连 `/mcp/`，admin(publisher) 全放行、reader 的
+  execute_sql 被 denied（**逐请求身份隔离**）、无令牌 401。
+- **通用 agent × MCP 端到端**：本机 LLM（GLM-5.2，OpenAI 兼容，DB 配置）经 stdio 拿到 16 个
+  工具，自主链式调用（query_ontology → query_objects；list_tasks）准确回答本体/对象/任务问题，
+  无编造——MCP 改造「通用 agent + 工具 = 专用 agent 能力」的论点得证。
+
+## 📋 Phase 5（剩余）/ Phase 6：待做
+
+- [ ] **资源级权限**（某主体只能看某数据域/数据源）：当前工具级 + 角色级，未到行级。
+      要给 Principal 关联可访问 domain/datasource 并在查询工具注入过滤——工程量不小、
+      单机可信场景收益有限；远程 HTTP 暴露后其价值上升，可作下一步。
 - [ ] 本体建模类（`infer_ontology_from_datahub` / `classify_business_objects` /
-      `infer_relationships` / `validate_ontology`）——都是写侧或长耗时任务，
-      要先想清楚在 MCP 下怎么表达「异步 + 人工确认」
-- [ ] `get_lineage` / `get_landing` / `get_ops_record`
+      `infer_relationships` / `validate_ontology`）——写侧或长耗时，要先想清 MCP 下
+      「异步 + 人工确认」怎么表达。
+- [ ] `get_lineage` / `get_landing` / `get_ops_record`（只读，较直接）。
 - [ ] 治理规约类（`validate_against_policy` / `lint_task_spec` /
-      `get_active_governance_standard`）
-- [ ] 远程传输（streamable HTTP）与对外开放
+      `get_active_governance_standard`）。
+- [ ] 远程传输的生产加固：来源校验 / TLS 终止 / 速率与并发（当前限流是进程内滑动窗口）。
 
 - [ ] 本体建模类（`infer_ontology_from_datahub` / `classify_business_objects` /
       `infer_relationships` / `validate_ontology`）——都是写侧或长耗时任务，

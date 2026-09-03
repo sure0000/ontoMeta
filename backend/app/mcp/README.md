@@ -157,8 +157,44 @@ MCP 这边不开口子。每个工具的最低角色见「身份与权限」。
 `MCP_EXECUTE_SQL_RATE_LIMIT_PER_MINUTE`（默认 30）。命中回 `rate_limited`（与授权的
 `denied` 区分），并做审计去重。
 
-配置建议：给 MCP 单独建一个**最小权限的 Principal**（`POST /api/principals`），而不是把
-`ONTOMETA_ADMIN_TOKEN` 塞进客户端配置——admin token 是 superuser，泄漏面更大。
+配置建议：给 MCP 单独建一个**最小权限的 Principal**（设置页 →「角色与令牌」，或
+`POST /api/principals`），而不是把 `ONTOMETA_ADMIN_TOKEN` 塞进客户端配置——admin token
+是 superuser，泄漏面更大。
+
+## 远程 HTTP 传输（异地 agent）
+
+上面的 stdio 是**本地**用法（客户端把 server 当子进程拉起，要 venv 路径 + 本地 DB）。
+agent 与本项目**不在同一台机器**时，改用远程 HTTP 传输：MCP 挂到后端的 `/mcp/` 路由，
+agent 用「服务地址 + 令牌」连接，不碰任何本地路径。
+
+**默认关闭**（把 MCP 暴露到网络是安全敏感操作）。在 `backend/.env` 开启后重启后端：
+
+```
+MCP_HTTP_ENABLED=true
+# MCP_HTTP_ALLOW_ANONYMOUS=false   # 默认；公网不该匿名可读，无令牌一律 401
+```
+
+客户端配置（以 Claude Desktop 为例，Claude Code 用 `claude mcp add ontometa -t http <url> -H ...`）：
+
+```json
+{
+  "mcpServers": {
+    "ontometa": {
+      "type": "http",
+      "url": "https://<你的后端地址>/mcp/",
+      "headers": { "Authorization": "Bearer <你的令牌>" }
+    }
+  }
+}
+```
+
+要点：
+
+- 端点带**尾斜杠** `/mcp/`（Starlette Mount 对无斜杠的 `/mcp` 会 307 重定向）。
+- 身份**逐请求**从 `Authorization: Bearer` 解析（与 stdio 的「一进程一 env Token」互不干扰），
+  角色判定与 stdio/REST 共用一份；无令牌默认 401。
+- 传输用 JSON 响应模式（非 SSE 流），以兼容主后端的 `BaseHTTPMiddleware`。
+- 前端**设置页 →「MCP 服务」** Tab 展示服务状态、工具清单、连接配置、审计与统计。
 
 ## 目录结构
 
@@ -166,10 +202,12 @@ MCP 这边不开口子。每个工具的最低角色见「身份与权限」。
 backend/app/mcp/
 ├── __init__.py
 ├── __main__.py          # 启动入口
-├── server.py            # MCP 服务器实现（stdio）+ 限流/授权闸门 + 审计包裹
-├── auth.py              # 会话身份解析（env Token → 角色）
+├── server.py            # MCP 服务器实现 + 限流/授权闸门 + 审计包裹 + 逐请求身份
+├── auth.py              # 身份解析（stdio env Token / HTTP 逐请求 Bearer → 角色）
 ├── audit.py             # 审计写入点（append-only，脱敏，吞异常）
 ├── rate_limit.py        # 进程内滑动窗口限流
+├── http_app.py          # 远程 Streamable HTTP 传输（挂 /mcp）+ 匿名拦截
+├── introspection.py     # 自省/审计/统计的共享数据层（MCP 工具与 REST 共用）
 ├── STATUS.md            # 实施状态与阶段计划
 └── tools/
     ├── __init__.py      # 工具注册机制 + ToolResult / AuthContext / required_role
@@ -284,7 +322,8 @@ A: 检查：
 - [x] Phase 2 核心只读工具（16 个）
 - [x] Phase 3 认证（env Token → 4 层角色）+ 授权（工具级 required_role，fail-closed）+ 审计
 - [x] Phase 4 限流（进程内滑动窗口）+ 运维自省（`server_info`）/ 监控（`get_mcp_stats`）
-- [ ] Phase 5 资源级权限、本体建模类工具、血缘/落点工具、远程传输（streamable HTTP）
+- [x] Phase 5（部分）远程 HTTP 传输（`/mcp/`，逐请求鉴权）+ 前端管理页（设置页 MCP Tab）
+- [ ] Phase 5（剩余）资源级权限、本体建模类工具、血缘/落点工具、远程传输生产加固
 
 ## 参考
 

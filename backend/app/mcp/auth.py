@@ -64,3 +64,55 @@ def resolve_auth_context() -> AuthContext:
         principal_name=name,
         user_id=principal_id,
     )
+
+
+def _bearer_from_headers(headers) -> str | None:
+    """从请求头取 Bearer 令牌。``headers`` 可为 Starlette Headers 或 ``(bytes,bytes)`` 列表。"""
+    value = None
+    try:
+        value = headers.get("authorization")  # Starlette Headers（大小写不敏感）
+    except AttributeError:
+        for k, v in headers or []:
+            if k.lower() == b"authorization":
+                value = v.decode("latin-1")
+                break
+    if not value:
+        return None
+    value = value.strip()
+    if value.lower().startswith("bearer "):
+        return value[7:].strip() or None
+    return value or None
+
+
+def resolve_http_auth(request) -> AuthContext:
+    """远程 HTTP 传输的**逐请求**身份。
+
+    与 stdio 的「一进程一 env Token」不同：每个 HTTP 请求各带各的 Authorization 头，
+    绝不能复用进程级会话身份。令牌解析与 REST/stdio 共用 ``resolve_principal_token``。
+
+    无有效令牌时：``mcp_http_allow_anonymous`` 为真才回落 ``mcp_default_role``，否则无身份
+    （role=None）——由服务器的授权闸门 fail-closed 拦下（公网默认不匿名）。
+    """
+    headers = getattr(request, "headers", None)
+    token = _bearer_from_headers(headers) if headers is not None else None
+    role, principal_id = resolve_principal_token(token)
+
+    if role is None and settings.mcp_http_allow_anonymous:
+        role = (settings.mcp_default_role or "").strip() or None
+
+    name = None
+    if principal_id:
+        from app.database import SessionLocal
+        from app.models.principal import Principal
+
+        with SessionLocal() as db:
+            principal = db.get(Principal, principal_id)
+            name = principal.name if principal else None
+
+    return AuthContext(
+        client_type="mcp_remote",
+        role=role,
+        principal_id=principal_id,
+        principal_name=name,
+        user_id=principal_id,
+    )
