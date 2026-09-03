@@ -607,7 +607,7 @@ def batch_update_object_types(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ObjectTypeBatchUpdateResult(
         updated=len(outcome.items),
-        pending_classification=outcome.pending_classification,
+        stranded_in_system=outcome.stranded_in_system,
         items=outcome.items,
     )
 
@@ -993,7 +993,7 @@ async def suggest_verb_refinements(
     两种范围：
 
     - ``relation_ids`` 给出时**只对这一批**关系出建议，且不套空动词过滤——调用方是
-      审核台上刚看过这批三元组的人，选谁就细化谁。
+      审核台上刚看过这批外键的人，选谁就细化谁。
     - 不给时退回全本体扫描：找空泛动词的关系（"属于"、"引用"、"关联"）。
 
     两种范围都按外键列名规则推断精确动词，规则未覆盖的一次性送 LLM。

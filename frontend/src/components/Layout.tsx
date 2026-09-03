@@ -68,9 +68,7 @@ function countLabel(count: number) {
 }
 
 export function AppLayout() {
-  const [collapsed, setCollapsed] = useState(
-    () => typeof window !== "undefined" && window.innerWidth <= 768,
-  );
+  const [collapsed, setCollapsed] = useState(true);
   const location = useLocation();
   const navigate = useNavigate();
 

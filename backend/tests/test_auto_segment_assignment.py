@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import Base, SessionLocal, engine
 from app.models import DomainContext, ObjectType, Ontology, OntologySegment, RelationType
 from app.services.edit import EditService
+from app.services.segment_kinds import SEGMENT_KIND_SYSTEM
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -239,8 +240,12 @@ def test_explicit_segment_overrides_auto_assign():
         db.close()
 
 
-def test_no_auto_assign_when_no_neighbors():
-    """测试：没有邻居时不自动分配板块"""
+def test_falls_back_to_the_system_board_when_no_neighbors():
+    """测试：既无邻居也无同族时落系统表，而不是留成「没有板块」。
+
+    每个对象恰好属于一个板块是硬不变量——留成 ``segment_id=None`` 等于让它从所有
+    板块视图里消失。归不进业务模块的业务对象落系统表，由人在审核台上移出来。
+    """
     db = SessionLocal()
     try:
         ontology, _, seg1, seg2 = _setup_ontology_with_segments(db)
@@ -262,9 +267,10 @@ def test_no_auto_assign_when_no_neighbors():
             db, isolated.id, table_role="business_object", operator="test"
         )
 
-        # 验证：应该保持无板块
+        # 验证：落在系统表板块里，不是无板块
         db.refresh(isolated)
-        assert isolated.segment_id is None
+        assert isolated.segment_id is not None
+        assert db.get(OntologySegment, isolated.segment_id).kind == SEGMENT_KIND_SYSTEM
 
     finally:
         db.rollback()

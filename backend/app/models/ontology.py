@@ -106,8 +106,9 @@ class OntologySegment(Base, ProvenanceMixin):
     ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
-    # business = 聚类得出的业务模块；其余为兜底板块（shared/pending/technical/system），
+    # business = 聚类得出的业务模块；shared = 公共主数据；system = 其余一切，
     # 保证「每个对象恰好属于一个板块」。取值与语义见 services/segment_kinds。
+    # 存量库里可能还有已废弃的 pending / technical，由回填脚本或重生成拆掉。
     kind: Mapped[str] = mapped_column(
         String(30), default="business", server_default="business", index=True
     )

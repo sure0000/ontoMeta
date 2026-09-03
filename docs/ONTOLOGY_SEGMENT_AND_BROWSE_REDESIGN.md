@@ -239,9 +239,12 @@ object_types
 
 混在一起就什么也做不了。现在改成**全覆盖分区：每个对象恰好属于一个板块**。
 
-- `ontology_segments.kind`（迁移 `8c8a5b82add9`）：`business` / `shared` / `pending` / `technical` / `system`，
-  定义与各自的收敛路径见 [`services/segment_kinds.py`](../backend/app/services/segment_kinds.py)。
-- 只有 `business` 走 LLM 命名；其余四类名字固定（`__system_tables__` 这类双下划线标识名
+- `ontology_segments.kind`（迁移 `8c8a5b82add9`）：`business` / `shared` / `system` 三类，
+  定义见 [`services/segment_kinds.py`](../backend/app/services/segment_kinds.py)。规矩一句话：
+  **是业务对象或业务关系表的，一定落在某个业务板块下；其余的落系统表。**
+  中间地带一个都不留——曾经的 `pending`（待归类业务对象）与 `technical`（技术表）
+  两类板块已废弃，前者是个隐式垃圾桶，后者与系统表处置方式相同，见 §4.1.1。
+- 只有 `business` 走 LLM 命名；另两类名字固定（`__system_tables__` 这类双下划线标识名
   同时是重算时的**对齐键**，所以既不进 `dedupe_segment_names` 也不进 `_allocate_name`，
   否则每跑一次就多出一个空板块）。
 - 枢纽从「不属于任何板块」改成归入 `shared`（公共主数据）。`is_hub` 与 `segment_id` 是两个
@@ -338,8 +341,8 @@ AI 生成是提效，不是求一次到位——所以永远会有错，人工�
 | --- | --- | --- |
 | 板块名 / 描述 | 直接改，写进 `overridden_fields` | 不用 |
 | 对象归属（挪到别的板块） | 直接挪，`segment_id` 进 `overridden_fields` | 不用 |
-| 对象判为技术表 | 从当前板块摘掉，成员数 −1 | 不用 |
-| 对象提为业务对象 | 按邻居投票落到某个板块；没邻居进「未接入」 | 不用 |
+| 对象判为技术表 / 数据表 | 移到「系统表」板块（业务板块里也不例外） | 不用 |
+| 对象提为业务对象 | 邻居投票 → 命名族亲和落到某个业务板块；都推不出就留在系统表标红待移 | 不用 |
 | 加 / 删一条关系 | 只重算这两个对象的归属 | 不用 |
 | 重新生成草稿 · 显式点「重算板块」 | 全量重划（先给预览再落） | 是 |
 

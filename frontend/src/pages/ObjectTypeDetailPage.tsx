@@ -861,7 +861,7 @@ export function ObjectTypeDetailPage() {
                             ))}
                           </section>
                           <section className="object-profile-section">
-                            <h3>关系三元组{relationCount > 0 ? ` (${relationCount})` : ""}</h3>
+                            <h3>外键关系{relationCount > 0 ? ` (${relationCount})` : ""}</h3>
                             <div className="object-profile-relations">
                               <div>
                                 <h4>出向关系 ({obj.outgoing_relations.length})</h4>
@@ -972,17 +972,22 @@ export function ObjectTypeDetailPage() {
                               </Form.Item>
                             </Col>
                             <Col xs={24} md={8}>
-                              <Form.Item label="板块归属" name="segment_id">
+                              {/* 每个对象恰好属于一个板块，所以这里没有「移出板块」这个选项
+                                  ——移出等于让它从所有板块视图里消失。分错了就移到别的板块，
+                                  确实不是业务数据的移到「系统表」。 */}
+                              <Form.Item
+                                label="板块归属"
+                                name="segment_id"
+                                extra="分错板块就直接移走；不是业务数据的移到「系统表」"
+                              >
                                 <Select
-                                  allowClear
-                                  placeholder="未分配板块"
-                                  options={[
-                                    { label: "（移出板块）", value: "" },
-                                    ...segments.map((s) => ({
-                                      label: s.display_name,
-                                      value: s.id,
-                                    })),
-                                  ]}
+                                  showSearch
+                                  optionFilterProp="label"
+                                  placeholder="选择板块"
+                                  options={segments.map((s) => ({
+                                    label: s.display_name,
+                                    value: s.id,
+                                  }))}
                                 />
                               </Form.Item>
                             </Col>
@@ -1037,8 +1042,8 @@ export function ObjectTypeDetailPage() {
                         objectId={obj.id}
                         provenance={obj.source_provenance}
                       />
-                      {/* 关系三元组：最小可读单元是「对象-关系-对象」，基本信息 Tab
-                          必须让人看到完整的三元组，不能只给计数。文档 §2.F1 */}
+                      {/* 外键关系：最小可读单元是「对象-关系-对象」，基本信息 Tab
+                          必须让人看到完整的一条，不能只给计数。文档 §2.F1 */}
                       {relationCount > 0 && (
                         <div style={{ marginTop: 24 }}>
                           <h3 style={{ marginBottom: 12, fontSize: 14, fontWeight: 600 }}>

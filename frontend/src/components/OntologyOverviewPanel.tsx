@@ -8,8 +8,6 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   PartitionOutlined,
-  QuestionCircleOutlined,
-  SettingOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import { Alert, Button, Empty, Segmented, Spin, Switch, Tooltip } from "antd";
@@ -100,7 +98,7 @@ const OVERVIEW_KEY = "__overview__";
  * 兜底板块的展示口径。它们不是业务子域，所以在目录里固定排在业务模块之后，
  * 并且各自写清「为什么在这」——这一栏的价值就是让人知道下一步该动哪里。
  */
-const FALLBACK_KINDS: SegmentKind[] = ["shared", "pending", "technical", "system"];
+const FALLBACK_KINDS: SegmentKind[] = ["shared", "system"];
 
 const KIND_META: Record<
   Exclude<SegmentKind, "business">,
@@ -110,17 +108,9 @@ const KIND_META: Record<
     icon: <ClusterOutlined />,
     why: "被多个模块共同引用的枢纽对象，刻意不并入任何单个模块",
   },
-  pending: {
-    icon: <QuestionCircleOutlined />,
-    why: "判为业务对象/桥表，但在关系图上连不成簇——补齐关系推断后会自动归入模块",
-  },
-  technical: {
-    icon: <SettingOutlined />,
-    why: "框架管道表，不参与业务聚类——复核改判角色后会自动归入模块",
-  },
   system: {
     icon: <DatabaseOutlined />,
-    why: "来自数据库自带 schema，不是业务数据——根治办法是收窄摄取范围",
+    why: "不是业务对象也不是业务关系表的一切：框架管道表、数据库自带 schema——分错的可在审核台移到业务板块",
   },
 };
 

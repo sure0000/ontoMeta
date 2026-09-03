@@ -5,7 +5,7 @@ S2 空动词细化服务：根据外键列名规则推断精确动词，剩余�
 - 规则推断：supplier_id → "下给"，company_id → "隶属于"，parent_* → "上级"
 - LLM 批量：规则覆盖不到的，构建 prompt 批量请求 LLM
 - 待复核队列：结果不直接改 display_name，而是生成建议进待复核
-- 三元组展示：改完之前，界面显示三元组短语而非裸动词
+- 外键展示：改完之前，界面显示「源 —动词→ 目标」短语而非裸动词
 """
 import re
 from typing import Optional

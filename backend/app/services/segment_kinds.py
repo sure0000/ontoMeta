@@ -1,20 +1,22 @@
 """板块种类：业务地图的划分必须是**全覆盖分区**——每个对象恰好属于一个板块。
 
-背景（实测 erpnext 本体 1035 对象，890 个未接入，86%）：
-「未接入」曾经是个隐式垃圾桶，把四种完全不同的情况混在一起，谁也不知道该怎么办。
-拆开之后每一类都有明确的处置方式：
+只有三类，判定顺序就是一句话：**是不是业务对象或业务关系表？是就一定落在某个业务
+板块下；不是就落系统表。** 中间地带一个都不留——曾经的「待归类业务对象」是个隐式
+垃圾桶（实测 erpnext 547 个对象压在里面），既进不了业务地图，也没人知道该拿它怎么办。
 
 ====================  ==========================================  ============
 kind                  是什么                                       怎么变少
 ====================  ==========================================  ============
 business              聚类得出的业务模块                            —
 shared                公共主数据（枢纽对象，处处被引用）              —
-pending               判为业务对象/桥表，但连不成簇（零边或单点）      补关系推断
-technical             框架管道表（判为 technical，不参与业务聚类）     人工复核角色
-system                数据库自带 schema，压根不是业务数据             收窄摄取范围
+system                不是业务对象/关系表的一切：框架管道表、数据库
+                      自带 schema，以及归不进任何业务模块的表         人工移板块 / 收窄摄取范围
 ====================  ==========================================  ============
 
-只有 ``business`` 的名字来自 LLM；其余四类名字固定，不进命名流程
+``shared`` 也是业务板块的一种（枢纽对象都是业务对象），只是刻意不并进任何单个模块
+——并进去会把大半张图粘成一块。
+
+只有 ``business`` 的名字来自 LLM；另两类名字固定，不进命名流程
 （它们不是业务子域，硬给业务名反而误导）。
 """
 
@@ -22,17 +24,23 @@ from __future__ import annotations
 
 SEGMENT_KIND_BUSINESS = "business"
 SEGMENT_KIND_SHARED = "shared"
-SEGMENT_KIND_PENDING = "pending"
-SEGMENT_KIND_TECHNICAL = "technical"
 SEGMENT_KIND_SYSTEM = "system"
 
-#: 非业务板块在目录里的固定顺序（业务板块永远排在它们之前）
+#: 非业务模块板块在目录里的固定顺序（业务板块永远排在它们之前）
 FALLBACK_KIND_ORDER = (
     SEGMENT_KIND_SHARED,
-    SEGMENT_KIND_PENDING,
-    SEGMENT_KIND_TECHNICAL,
     SEGMENT_KIND_SYSTEM,
 )
+
+#: 已废弃的板块种类。存量库里还躺着这两种板块，回填脚本按它们找旧板块并搬空。
+#: 判定链路一律不认这两个值——留常量只为迁移与兼容读。
+LEGACY_SEGMENT_KIND_PENDING = "pending"
+LEGACY_SEGMENT_KIND_TECHNICAL = "technical"
+LEGACY_KINDS = (LEGACY_SEGMENT_KIND_PENDING, LEGACY_SEGMENT_KIND_TECHNICAL)
+
+#: 会被归进业务板块的角色。别的角色说明它压根不是业务数据，归宿是「系统表」。
+#: 判定只在这里写一次，落位、回填、队列共用。
+BUSINESS_ROLES = frozenset({"business_object", "bridge"})
 
 #: 兜底板块的固定身份。name 用双下划线包起来，与 LLM 生成的业务板块标识名不可能撞。
 FALLBACK_SEGMENT_META: dict[str, dict[str, str]] = {
@@ -44,31 +52,23 @@ FALLBACK_SEGMENT_META: dict[str, dict[str, str]] = {
             "它们刻意不并入任何单个模块——并进去会把大半张图粘成一块。"
         ),
     },
-    SEGMENT_KIND_PENDING: {
-        "name": "__pending_objects__",
-        "display_name": "待归类业务对象",
-        "description": (
-            "判定为业务对象或桥表，但在关系图上连不成簇：要么一条关系都没有，"
-            "要么只跟自己成一个单点簇。补齐关系推断后它们会自动归入业务模块。"
-        ),
-    },
-    SEGMENT_KIND_TECHNICAL: {
-        "name": "__technical_tables__",
-        "display_name": "技术表",
-        "description": (
-            "判定为技术表的框架管道表（表单配置、队列、路由历史等），不参与业务聚类。"
-            "判定多为机器给出、仍待复核，复核改判后会自动归入业务模块。"
-        ),
-    },
     SEGMENT_KIND_SYSTEM: {
         "name": "__system_tables__",
         "display_name": "系统表",
         "description": (
-            "来自数据库自带 schema（mysql / information_schema / performance_schema / sys 等），"
-            "不是业务数据。根治办法是收窄摄取范围，让它们一开始就不进本体。"
+            "不是业务对象、也不是业务关系表的一切：框架管道表（表单配置、队列、"
+            "路由历史等）、数据库自带 schema（mysql / information_schema 等），"
+            "以及判成了业务对象却归不进任何业务模块的表。"
+            "分错的可以直接移动到对应的业务板块。"
         ),
     },
 }
+
+
+def is_business_role(table_role: str | None) -> bool:
+    """这个角色的对象该不该落在业务板块下。"""
+    return (table_role or "") in BUSINESS_ROLES
+
 
 #: 数据库自带 schema：这些库里的表不是业务数据。小写比较。
 SYSTEM_SCHEMAS = frozenset(

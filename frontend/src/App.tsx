@@ -25,6 +25,7 @@ import { SegmentsPage } from "./pages/SegmentsPage";
 import { SegmentDetailPage } from "./pages/SegmentDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
+import { GraphTestPage } from "./pages/GraphTestPage";
 
 export default function App() {
   return (
@@ -68,6 +69,7 @@ export default function App() {
         <Route path="/tasks/orchestration" element={<PipelinesPage />} />
         <Route path="/data-apps" element={<DataAppsPage />} />
         <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />
+        <Route path="/graph-test" element={<GraphTestPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       <Route path="/apps/:appId" element={<DataAppViewPage />} />

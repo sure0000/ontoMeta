@@ -40,7 +40,7 @@ from app.schemas import (
 )
 from app.services.object_naming import dedupe_object_names, table_name_from_ref
 from app.services.segment_kinds import SEGMENT_KIND_BUSINESS
-from app.services.segment_placement import place_unsegmented
+from app.services.segment_placement import dissolve_legacy_segments, place_unsegmented
 
 logger = logging.getLogger(__name__)
 
@@ -873,7 +873,7 @@ class OntologyMergeService:
         machine_existing = [s for s in existing if not s.user_created]
         unmatched = list(machine_existing)
         used_names = {s.name for s in existing}
-        # 兜底板块（system/technical/pending/shared）成员天然大进大出，锚点匹配不可靠；
+        # 兜底板块（shared/system）成员天然大进大出，锚点匹配不可靠；
         # 它们的标识名是固定的，直接按 name 对齐。
         fallback_by_name = {
             s.name: s for s in machine_existing if s.kind != SEGMENT_KIND_BUSINESS
@@ -998,6 +998,12 @@ class OntologyMergeService:
                 )
                 if obj.segment_id is None:
                     unplaced.append(obj.name)
+
+        # 存量库里可能还留着「待归类业务对象」「技术表」两个已废弃的板块（人工改过名字
+        # 的不会被上面的对齐删掉）。拆掉它们，成员转由下面的兜底落位按新规则重新归位。
+        freed = dissolve_legacy_segments(db, ontology_id)
+        if freed:
+            unplaced.append(f"<{freed} 个来自已废弃板块>")
 
         if unplaced:
             # 草稿的板块没覆盖到（旧草稿、或生成器那一侧漏了）：就地补进兜底板块，

@@ -17,7 +17,7 @@ interface Props {
   scope: RelationScope;
   /** 受控搜索词，透传给后端（按 name/display_name/description 过滤）。 */
   query?: string;
-  /** 关系去重行 → 关系三元组详情页路径（已内置 scope）。 */
+  /** 关系去重行 → 外键关系详情页路径（已内置 scope）。 */
   detailPath: (displayName: string) => string;
   /** 关系表(bridge) 行 → 对象详情页路径。 */
   objectDetailPath?: (objectId: string) => string;
@@ -46,7 +46,7 @@ function renderConfidence(min?: number | null, max?: number | null) {
 
 /**
  * 业务关系列表：一张表混排两类「关系」——
- * 1) RelationType 按 display_name 去重的关系组（点进看源→目标三元组）；
+ * 1) RelationType 按 display_name 去重的关系组（点进看源→目标外键）；
  * 2) 被判定为「关系表/业务事实」的 bridge 对象表（含待复核，点进对象详情）。
  * 数据来自 GET /api/relation-groups 与 GET /api/object-types?role_in=bridge。
  */

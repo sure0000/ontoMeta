@@ -1,7 +1,7 @@
 """关系去重分组：按 display_name 折叠为分组列表，聚合类型/基数/置信度/复核状态。
 
 关系 Tab 用 ``GET /api/relation-groups`` 展示去重后的 ~N 行；关系详情页用
-``GET /api/relation-types?display_name=...`` 精确拉取某关系名下的全部三元组。
+``GET /api/relation-types?display_name=...`` 精确拉取某关系名下的全部外键。
 """
 
 from __future__ import annotations

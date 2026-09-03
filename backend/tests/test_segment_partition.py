@@ -1,7 +1,8 @@
-"""板块划分是全覆盖分区：每个对象恰好属于一个板块，没有「未接入」这一桶。
+"""板块划分是全覆盖分区：每个对象恰好属于一个板块，没有「未接入」「待归类」这种桶。
 
-实测起点（erpnext 本体 1035 对象）：890 个未接入，占 86%。那不是一个桶，
-是四种处置方式完全不同的情况被混在了一起——见 services/segment_kinds。
+规矩一句话：**是业务对象或业务关系表的，一定落在某个业务板块下；其余的落系统表。**
+连不成簇的业务对象靠邻居/命名族亲和收编进业务模块，兜不住的才落系统表等人移出来
+——见 services/segment_kinds 与 services/segment_placement。
 """
 
 import uuid
@@ -23,10 +24,8 @@ from app.services.ontology_merge import MergeReport, OntologyMergeService
 from app.services.segment_generator import build_fallback_segments
 from app.services.segment_kinds import (
     SEGMENT_KIND_BUSINESS,
-    SEGMENT_KIND_PENDING,
     SEGMENT_KIND_SHARED,
     SEGMENT_KIND_SYSTEM,
-    SEGMENT_KIND_TECHNICAL,
     is_system_table,
     schema_of_source_ref,
 )
@@ -69,12 +68,12 @@ def test_schema_parsing_recognises_system_schemas():
 
 
 def test_fallback_segments_cover_every_unclaimed_object():
-    """没进业务模块的对象一个不落，且按原因分开。"""
+    """没进业务模块的对象一个不落，且只有两个去处：公共主数据、系统表。"""
     objects = [
         _draft_obj("customer", "business_object"),
         _draft_obj("order", "business_object"),
         _draft_obj("company", "business_object"),  # 枢纽
-        _draft_obj("lonely_table", "business_object"),  # 有资格但连不成簇
+        _draft_obj("lonely_table", "business_object"),  # 有资格但既无邻居也无同族
         _draft_obj("child_item", "bridge"),  # 同上
         _draft_obj("web_form", "technical"),  # 框架管道
         _draft_obj("column_stats", "technical", schema="mysql"),  # 系统表
@@ -93,23 +92,103 @@ def test_fallback_segments_cover_every_unclaimed_object():
     fallbacks = build_fallback_segments(objects, business, {"company"})
     by_kind = {seg.kind: seg for seg in fallbacks}
 
-    assert set(by_kind) == {
-        SEGMENT_KIND_SHARED,
-        SEGMENT_KIND_PENDING,
-        SEGMENT_KIND_TECHNICAL,
-        SEGMENT_KIND_SYSTEM,
-    }
+    assert set(by_kind) == {SEGMENT_KIND_SHARED, SEGMENT_KIND_SYSTEM}
     assert by_kind[SEGMENT_KIND_SHARED].members == ["company"]
-    assert sorted(by_kind[SEGMENT_KIND_PENDING].members) == ["child_item", "lonely_table"]
-    assert by_kind[SEGMENT_KIND_TECHNICAL].members == ["web_form"]
-    # 系统表优先于角色判定：`events_waits` 被判成 business_object 也照样归系统表，
+    # 「待归类」没有了：连不成簇又没有亲和信号的业务对象一并落系统表，由人移出来。
+    # 系统表判定优先于角色：`events_waits` 被判成 business_object 也照样归系统表，
     # 因为「不该进本体」比「是什么角色」更能说明该怎么处置它。
-    assert sorted(by_kind[SEGMENT_KIND_SYSTEM].members) == ["column_stats", "events_waits"]
+    assert sorted(by_kind[SEGMENT_KIND_SYSTEM].members) == [
+        "child_item",
+        "column_stats",
+        "events_waits",
+        "lonely_table",
+        "web_form",
+    ]
 
     # 全覆盖：业务模块 + 兜底 = 全部对象，且互不重叠
     placed = [n for seg in business + fallbacks for n in seg.members]
     assert sorted(placed) == sorted(o.name for o in objects)
     assert len(placed) == len(set(placed))
+
+
+def test_unclustered_business_objects_are_adopted_by_neighbours():
+    """关系对端已经在某个业务模块里，就跟着去——这是最强的归位信号。"""
+    objects = [
+        _draft_obj("sales_order", "business_object"),
+        _draft_obj("customer", "business_object"),
+        _draft_obj("order_payment", "bridge"),  # 只跟 sales_order 连着
+    ]
+    business = [
+        DraftSegment(
+            name="sales",
+            display_name="销售",
+            kind=SEGMENT_KIND_BUSINESS,
+            member_count=2,
+            members=["sales_order", "customer"],
+        )
+    ]
+    adjacency = {"order_payment": {"sales_order"}, "sales_order": {"order_payment"}}
+
+    fallbacks = build_fallback_segments(objects, business, set(), adjacency)
+
+    assert fallbacks == []  # 没有任何对象需要兜底
+    assert business[0].members == ["sales_order", "customer", "order_payment"]
+    assert business[0].member_count == 3
+
+
+def test_unclustered_business_objects_are_adopted_by_name_family():
+    """没有关系可依时看命名族：tabSales Invoice Item 跟着 tabSales Invoice 走。"""
+    objects = [
+        _draft_obj("tabSales Invoice", "business_object"),
+        _draft_obj("tabPurchase Order", "business_object"),
+        _draft_obj("tabSales Invoice Item", "bridge"),
+    ]
+    business = [
+        DraftSegment(
+            name="sales",
+            display_name="销售",
+            kind=SEGMENT_KIND_BUSINESS,
+            member_count=1,
+            members=["tabSales Invoice"],
+        ),
+        DraftSegment(
+            name="purchase",
+            display_name="采购",
+            kind=SEGMENT_KIND_BUSINESS,
+            member_count=1,
+            members=["tabPurchase Order"],
+            machine_baseline="采购",
+        ),
+    ]
+
+    fallbacks = build_fallback_segments(objects, business, set())
+
+    assert fallbacks == []
+    assert business[0].members == ["tabSales Invoice", "tabSales Invoice Item"]
+    assert business[1].members == ["tabPurchase Order"]
+
+
+def test_non_business_roles_are_never_adopted_into_a_business_segment():
+    """技术表就算跟业务对象同族也不进业务模块——「其余的分配在系统表」。"""
+    objects = [
+        _draft_obj("tabSales Invoice", "business_object"),
+        _draft_obj("tabSales Invoice Log", "technical"),
+    ]
+    business = [
+        DraftSegment(
+            name="sales",
+            display_name="销售",
+            kind=SEGMENT_KIND_BUSINESS,
+            member_count=1,
+            members=["tabSales Invoice"],
+        )
+    ]
+
+    fallbacks = build_fallback_segments(objects, business, set())
+
+    assert business[0].members == ["tabSales Invoice"]
+    assert [seg.kind for seg in fallbacks] == [SEGMENT_KIND_SYSTEM]
+    assert fallbacks[0].members == ["tabSales Invoice Log"]
 
 
 def test_fallback_segments_skip_empty_buckets():
@@ -195,9 +274,9 @@ def test_merge_leaves_no_object_without_a_segment():
                 members=["company"],
             ),
             DraftSegment(
-                name="__technical_tables__",
-                display_name="技术表",
-                kind=SEGMENT_KIND_TECHNICAL,
+                name="__system_tables__",
+                display_name="系统表",
+                kind=SEGMENT_KIND_SYSTEM,
                 member_count=1,
                 members=["web_form"],
             ),
@@ -241,9 +320,9 @@ def test_fallback_segment_name_survives_regeneration():
 
         draft = [
             DraftSegment(
-                name="__technical_tables__",
-                display_name="技术表",
-                kind=SEGMENT_KIND_TECHNICAL,
+                name="__system_tables__",
+                display_name="系统表",
+                kind=SEGMENT_KIND_SYSTEM,
                 member_count=1,
                 members=["web_form"],
             )
@@ -255,9 +334,9 @@ def test_fallback_segment_name_survives_regeneration():
 
         rows = db.query(OntologySegment).filter(
             OntologySegment.ontology_id == ontology.id,
-            OntologySegment.kind == SEGMENT_KIND_TECHNICAL,
+            OntologySegment.kind == SEGMENT_KIND_SYSTEM,
         ).all()
-        assert [r.name for r in rows] == ["__technical_tables__"]
+        assert [r.name for r in rows] == ["__system_tables__"]
     finally:
         db.rollback()
         db.close()
@@ -356,16 +435,29 @@ def test_place_unsegmented_is_idempotent_and_covers_new_objects():
                 table_role="business_object", status=EntityStatus.EDITED.value,
                 source_ref=f"derived:{ontology.id}:wide_order",
             ),
+            ObjectType(
+                id=_uuid(), ontology_id=ontology.id, name="lonely", display_name="孤表",
+                table_role="business_object", status=EntityStatus.SUGGESTED.value,
+                source_ref=_urn("erp_db", "lonely"),
+            ),
         ]
         db.add_all([placed_obj, *newcomers])
+        # 派生宽表跟已归位的订单连着：邻居投票该把它收进「销售」，而不是丢进系统表。
+        db.add(RelationType(
+            id=_uuid(), ontology_id=ontology.id, source_object_type_id=newcomers[2].id,
+            target_object_type_id=placed_obj.id, name="derives", display_name="派生自",
+            status=EntityStatus.SUGGESTED.value,
+        ))
         db.commit()
 
         first = place_unsegmented(db, ontology.id)
+        # 非业务角色（technical）与系统 schema 一律进系统表；业务角色的先走亲和归位，
+        # 有邻居的进业务模块，连不成簇又没同族的（lonely）才落系统表。
         assert first == {
-            SEGMENT_KIND_PENDING: 1,
-            SEGMENT_KIND_TECHNICAL: 1,
-            SEGMENT_KIND_SYSTEM: 1,
+            SEGMENT_KIND_BUSINESS: 1,
+            SEGMENT_KIND_SYSTEM: 3,
         }
+        assert newcomers[2].segment_id == seg_id
         db.flush()
         assert (
             db.query(ObjectType)

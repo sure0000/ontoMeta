@@ -14,7 +14,7 @@ export function foldIsolatedIntoCluster(groupedGraph: OntologyGroupedGraph): Ont
   if (groupedGraph.isolated_nodes.length === 0) return groupedGraph;
   const isolatedCluster: GraphCluster = {
     id: ISOLATED_CLUSTER_ID,
-    kind: "pending",
+    kind: "system",
     name: "未分类节点",
     nodes: groupedGraph.isolated_nodes.slice(0, ISOLATED_CLUSTER_MAX_NODES),
     node_count: groupedGraph.isolated_nodes.length,
@@ -33,9 +33,9 @@ export function foldIsolatedIntoCluster(groupedGraph: OntologyGroupedGraph): Ont
 /**
  * 概览图只画业务模块与枢纽。
  *
- * 兜底板块（系统表 299 / 技术表 287 / 待归类 304）成员数比真业务模块大一个量级，
- * 画进宏观图会把业务结构挤成几个小点；它们也不是业务子域。要读它们的内部结构，
- * 从左侧目录点进去看模块关系图即可。同时丢掉端点落在兜底板块上的宏观边，避免悬空。
+ * 兜底板块（系统表、公共主数据）成员数比真业务模块大一个量级，画进宏观图会把业务
+ * 结构挤成几个小点；它们也不是业务子域。要读它们的内部结构，从左侧目录点进去看
+ * 模块关系图即可。同时丢掉端点落在兜底板块上的宏观边，避免悬空。
  */
 function businessOnly(groupedGraph: OntologyGroupedGraph): OntologyGroupedGraph {
   const clusters = groupedGraph.clusters.filter((c) => c.kind === "business");

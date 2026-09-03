@@ -166,7 +166,7 @@ export function VerbRefinementDrawer({ ontologyId, relationIds, open, onClose, o
       ),
     },
     {
-      title: "改写后的三元组",
+      title: "改写后的外键关系",
       key: "triple",
       render: (_, row) => {
         const value = verbOf(row);

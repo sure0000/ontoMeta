@@ -1,3 +1,8 @@
+// SegmentDetailPage.tsx - 迁移示例
+//
+// 这个文件展示了如何将 OntologyGraphView 替换为 OntologyDetailGraph
+// 原页面只使用详情模式，不需要概览，所以直接使用 OntologyDetailGraph
+
 import { AppstoreOutlined, ArrowLeftOutlined, EditOutlined } from "@ant-design/icons";
 import { Alert, Button, Descriptions, Form, Input, Modal, Segmented, Tag, message } from "antd";
 import { useEffect, useState } from "react";
@@ -5,6 +10,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { ClusterMatrixView } from "../components/graph/ClusterMatrixView";
+// 迁移变化：从 OntologyGraphView 改为 OntologyDetailGraph
 import { OntologyDetailGraph } from "../components/graph/OntologyDetailGraph";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
@@ -94,6 +100,7 @@ export function SegmentDetailPage() {
           edges: segment.edges,
         }
       : null;
+
   const segmentGraph: OntologyGraph | null =
     hasEdges && segment.edges
       ? {
@@ -111,8 +118,6 @@ export function SegmentDetailPage() {
     <PageContainer>
       <div style={{ marginBottom: 16 }}>
         <Link
-          // 工作区路由的参数是 domainId，不是 ontology_id——传错会把「返回工作区」
-          // 变成一条死链（数据域不存在）。后端已在板块摘要里带上 domain_context_id。
           to={
             publishedOnly
               ? "/ontology"
@@ -195,6 +200,7 @@ export function SegmentDetailPage() {
       {segmentGraph && (
         <div style={{ marginBottom: 24 }}>
           <SectionCard title="板块关系图" bodyFlush>
+            {/* 迁移变化：使用 OntologyDetailGraph 替代 OntologyGraphView */}
             <OntologyDetailGraph
               graph={segmentGraph}
               height={420}

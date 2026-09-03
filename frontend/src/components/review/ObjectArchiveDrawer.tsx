@@ -85,7 +85,7 @@ export function ObjectArchiveDrawer({ objectId, open, onClose, domainId }: Props
 
             <section>
               <Text strong>
-                关系三元组（{data.outgoing_relations.length + data.incoming_relations.length}）
+                外键关系（{data.outgoing_relations.length + data.incoming_relations.length}）
               </Text>
               <div style={{ marginTop: 8 }}>
                 <RelationTriples

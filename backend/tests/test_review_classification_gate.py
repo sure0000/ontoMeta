@@ -1,9 +1,10 @@
-"""审核的两条收口：已判可回看重判；「待归类业务对象」必须先归位才算判完。
+"""审核的两条收口：已判可回看重判；角色决定板块，没有第三态。
 
 两件事都在钉同一句话：**判定要能被看见、被追回**。
 - 判完的板块如果从队列里彻底消失，审核就成了单向的——判错了只能靠记忆去翻卡片墙。
-- 「待归类业务对象」里的表判成业务对象却连不成簇，只确认角色的话它既进不了业务地图，
-  也不再出现在待判队列里，那个板块从此永远不会变空。
+- 「待归类业务对象」这个中间板块已经取消：是业务对象/关系表的一定落在业务板块下，
+  其余的落系统表。归不进业务模块又确实是业务对象的，留在系统表里由
+  ``stranded_in_system`` 数出来，审核台标红提示「移动到板块」，而不是拿门禁挡住判定。
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from app.models import (
     OntologyStatus,
 )
 from app.services.segment_kinds import (
-    SEGMENT_KIND_PENDING,
-    SEGMENT_KIND_TECHNICAL,
+    SEGMENT_KIND_BUSINESS,
+    SEGMENT_KIND_SYSTEM,
 )
 from app.services.segment_placement import ensure_fallback_segment
 
@@ -161,14 +162,18 @@ def test_reviewed_members_can_be_sent_back_to_the_queue(client, admin_headers):
     assert [m["name"] for g in queue["groups"] for m in g["members"]] == ["tab_item_price"]
 
 
-# ---------------------------------------------------------------- 待归类门禁
+# --------------------------------------------------- 落位不变量：角色决定板块
 
 
-def test_confirming_an_unclassified_object_is_refused(client, admin_headers):
-    """只确认角色不算判完：它仍然不属于任何业务模块。"""
+def test_confirming_a_stranded_object_is_allowed_but_reported(client, admin_headers):
+    """归不进业务模块的业务对象不再被门禁挡住，但要如实报出来。
+
+    旧行为是 400 拒绝，人只看到一个被禁掉的按钮。现在判定照常成立，返回里带
+    ``stranded_in_system``，审核台据此提示「还有 N 个在系统表里，挑个业务板块移过去」。
+    """
     _seed(
         "gate",
-        objects=[{"name": "tab_orphan_order", "fallback": SEGMENT_KIND_PENDING}],
+        objects=[{"name": "tab_orphan_order", "fallback": SEGMENT_KIND_SYSTEM}],
     )
     obj_id = _object("tab_orphan_order").id
 
@@ -177,25 +182,18 @@ def test_confirming_an_unclassified_object_is_refused(client, admin_headers):
         json={"ids": [obj_id], "needs_review": False},
         headers=admin_headers,
     )
-    assert resp.status_code == 400
-    assert "待归类业务对象" in resp.json()["detail"]
-    # 拒绝之后什么都没改（不留半个改动在会话里）
-    assert _object("tab_orphan_order").needs_review is True
-
-    single = client.patch(
-        f"/api/object-types/{obj_id}",
-        json={"needs_review": False},
-        headers=admin_headers,
-    )
-    assert single.status_code == 400
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["updated"] == 1
+    assert resp.json()["stranded_in_system"] == 1
+    assert _object("tab_orphan_order").needs_review is False
 
 
-def test_classify_and_confirm_is_one_call(client, admin_headers):
-    """「归类到销售 + 确认」是一次调用：门禁看的是挪过板块之后的归属。"""
+def test_moving_to_a_business_segment_is_one_call(client, admin_headers):
+    """「移动到销售 + 确认」是一次调用：先挪板块，再判复核。"""
     _, seg_ids = _seed(
         "classify",
         objects=[
-            {"name": "tab_lead_note", "fallback": SEGMENT_KIND_PENDING},
+            {"name": "tab_lead_note", "fallback": SEGMENT_KIND_SYSTEM},
             {"name": "tab_sales_order", "segment": "销售"},
         ],
     )
@@ -209,22 +207,23 @@ def test_classify_and_confirm_is_one_call(client, admin_headers):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["updated"] == 1
-    assert resp.json()["pending_classification"] == 0
+    assert resp.json()["stranded_in_system"] == 0
 
     moved = _object("tab_lead_note")
     assert moved.segment_id == sales_id
     assert moved.needs_review is False
-    # 人工归类要钉住，机器重生成不能再把它拨回待归类
+    # 人工移板块要钉住，机器重生成不能再把它拨回系统表
     assert "segment_id" in json.loads(moved.overridden_fields or "[]")
 
 
-def test_recasting_to_data_table_resettles_out_of_the_pending_board(
-    client, admin_headers
-):
-    """改判数据表是另一条出路：对象落到「技术表」板块，判定随之成立。"""
-    _seed(
+def test_recasting_to_data_table_resettles_into_the_system_board(client, admin_headers):
+    """改判数据表：对象落到系统表板块，判定随之成立。"""
+    _, seg_ids = _seed(
         "recast-down",
-        objects=[{"name": "tab_sync_log", "fallback": SEGMENT_KIND_PENDING}],
+        objects=[
+            {"name": "tab_sync_log", "segment": "销售"},
+            {"name": "tab_sales_order", "segment": "销售"},
+        ],
     )
     obj_id = _object("tab_sync_log").id
 
@@ -234,25 +233,60 @@ def test_recasting_to_data_table_resettles_out_of_the_pending_board(
         headers=admin_headers,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["pending_classification"] == 0
+    assert resp.json()["stranded_in_system"] == 0
 
     obj = _object("tab_sync_log")
     assert obj.needs_review is False
+    assert obj.segment_id != seg_ids["销售"]
     with SessionLocal() as db:
-        assert db.get(OntologySegment, obj.segment_id).kind == SEGMENT_KIND_TECHNICAL
+        assert db.get(OntologySegment, obj.segment_id).kind == SEGMENT_KIND_SYSTEM
 
 
-def test_recasting_to_business_object_lands_in_pending_and_stays_unreviewed(
+def test_recasting_to_business_object_is_adopted_by_name_family(client, admin_headers):
+    """反过来：技术表改判成业务对象，靠命名族亲和直接落进对应的业务模块。
+
+    这就是「待归类」被取消后的出路——机器不再把它挂起，而是给它一个真实的归属。
+    """
+    _, seg_ids = _seed(
+        "recast-up",
+        objects=[
+            {"name": "tab_sales_order", "segment": "销售"},
+            {
+                "name": "tab_sales_route_history",
+                "role": "technical",
+                "fallback": SEGMENT_KIND_SYSTEM,
+            },
+        ],
+    )
+    obj_id = _object("tab_sales_route_history").id
+
+    resp = client.patch(
+        "/api/object-types/batch",
+        json={"ids": [obj_id], "table_role": "business_object"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["updated"] == 1
+    assert resp.json()["stranded_in_system"] == 0
+
+    obj = _object("tab_sales_route_history")
+    assert obj.segment_id == seg_ids["销售"]
+    assert obj.needs_review is False
+    # 亲和归位是机器落位，不是人工钉死的归属：下次重聚类仍可以改
+    assert "segment_id" not in json.loads(obj.overridden_fields or "[]")
+
+
+def test_recasting_to_business_object_without_affinity_stays_in_system(
     client, admin_headers
 ):
-    """反过来也成立：技术表改判成业务对象只完成了一半，它还得被归位。"""
+    """既无邻居也无同族的，留在系统表——但调用方要能说出「其中 1 个还在系统表里」。"""
     _seed(
-        "recast-up",
+        "recast-up-blind",
         objects=[
             {
                 "name": "tab_route_history",
                 "role": "technical",
-                "fallback": SEGMENT_KIND_TECHNICAL,
+                "fallback": SEGMENT_KIND_SYSTEM,
             }
         ],
     )
@@ -264,47 +298,78 @@ def test_recasting_to_business_object_lands_in_pending_and_stays_unreviewed(
         headers=admin_headers,
     )
     assert resp.status_code == 200, resp.text
-    # 改了，但没判完——界面要能说出「其中 1 个仍待归类」
-    assert resp.json()["updated"] == 1
-    assert resp.json()["pending_classification"] == 1
-
-    obj = _object("tab_route_history")
-    assert obj.needs_review is True
+    assert resp.json()["stranded_in_system"] == 1
     with SessionLocal() as db:
-        assert db.get(OntologySegment, obj.segment_id).kind == SEGMENT_KIND_PENDING
+        obj = _object("tab_route_history")
+        assert db.get(OntologySegment, obj.segment_id).kind == SEGMENT_KIND_SYSTEM
 
 
-def test_business_segment_membership_survives_a_role_change(client, admin_headers):
-    """只动兜底板块：业务板块的归属是聚类/人工的判断，改角色不该把对象踢出去。"""
-    _seed(
-        "keep-segment",
-        objects=[{"name": "tab_purchase_log", "segment": "采购"}],
-    )
+def test_non_business_role_is_evicted_from_a_business_segment(client, admin_headers):
+    """业务板块里不该躺着技术表：改判非业务角色即移出到系统表。
+
+    这是「其余的分配在系统表」这条规矩的另一半——只往里补不往外清，业务地图会
+    慢慢混进一堆管道表。人工钉过板块的除外（见下一条）。
+    """
+    _seed("evict", objects=[{"name": "tab_purchase_log", "segment": "采购"}])
     before = _object("tab_purchase_log")
 
     resp = client.patch(
         "/api/object-types/batch",
-        json={"ids": [before.id], "table_role": "data_table"},
+        json={"ids": [before.id], "table_role": "technical"},
         headers=admin_headers,
     )
     assert resp.status_code == 200, resp.text
-    assert _object("tab_purchase_log").segment_id == before.segment_id
+    after = _object("tab_purchase_log")
+    assert after.segment_id != before.segment_id
+    with SessionLocal() as db:
+        assert db.get(OntologySegment, after.segment_id).kind == SEGMENT_KIND_SYSTEM
+
+
+def test_manual_segment_choice_survives_a_role_change(client, admin_headers):
+    """人工移过板块的对象，机器不再按角色把它挪走——人工归属是最终解释。"""
+    _, seg_ids = _seed(
+        "pinned",
+        objects=[
+            {"name": "tab_manual_pick", "fallback": SEGMENT_KIND_SYSTEM},
+            {"name": "tab_purchase_order", "segment": "采购"},
+        ],
+    )
+    obj_id = _object("tab_manual_pick").id
+    client.patch(
+        "/api/object-types/batch",
+        json={"ids": [obj_id], "segment_id": seg_ids["采购"]},
+        headers=admin_headers,
+    )
+
+    resp = client.patch(
+        "/api/object-types/batch",
+        json={"ids": [obj_id], "table_role": "technical"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert _object("tab_manual_pick").segment_id == seg_ids["采购"]
 
 
 # ---------------------------------------------------------------- 统计口径
 
 
-def test_stats_expose_segment_kind_and_the_unclassified_backlog(client, admin_headers):
-    """存量里「已确认却仍待归类」的那批要能被数出来，否则它们谁也看不见。"""
+def test_stats_expose_segment_kind_and_the_stranded_backlog(client, admin_headers):
+    """「业务对象却压在系统表里」的那批要能被数出来，否则它们谁也看不见。"""
     ontology_id, _ = _seed(
         "stats",
         objects=[
-            {"name": "tab_gate_a", "fallback": SEGMENT_KIND_PENDING},
-            # 门禁上线前留下的：角色确认过，却仍不属于任何业务模块
+            {"name": "tab_gate_a", "fallback": SEGMENT_KIND_SYSTEM},
+            # 已确认过、却仍不属于任何业务模块：不在待判队列里，只能靠这个数字捞回来
             {
                 "name": "tab_gate_b",
-                "fallback": SEGMENT_KIND_PENDING,
+                "fallback": SEGMENT_KIND_SYSTEM,
                 "needs_review": False,
+            },
+            # 系统表里的技术表是正常归宿，不算归错地方
+            {
+                "name": "tab_gate_tech",
+                "role": "technical",
+                "fallback": SEGMENT_KIND_SYSTEM,
             },
             {"name": "tab_gate_c", "segment": "采购", "needs_review": False},
         ],
@@ -313,56 +378,55 @@ def test_stats_expose_segment_kind_and_the_unclassified_backlog(client, admin_he
         f"/api/ontologies/{ontology_id}/review-stats", headers=admin_headers
     ).json()
 
-    assert stats["unclassified_total"] == 2
-    assert stats["unclassified_reviewed"] == 1
+    assert stats["stranded_total"] == 2
+    assert stats["stranded_reviewed"] == 1
     kinds = {row["segment_name"]: row["kind"] for row in stats["segment_progress"]}
-    assert kinds["待归类业务对象"] == SEGMENT_KIND_PENDING
-    assert kinds["采购"] == "business"
+    assert kinds["系统表"] == SEGMENT_KIND_SYSTEM
+    assert kinds["采购"] == SEGMENT_KIND_BUSINESS
 
 
 def test_queue_group_carries_segment_kind(client, admin_headers):
-    """审核台靠 requires_classification 认出「这一组不能只按 A 确认」。"""
+    """审核台靠 stranded_in_system 认出「这一组归错了地方，先移板块」。"""
     ontology_id, _ = _seed(
         "group-kind",
-        objects=[{"name": "tab_gate_d", "fallback": SEGMENT_KIND_PENDING}],
+        objects=[
+            {"name": "tab_gate_d", "fallback": SEGMENT_KIND_SYSTEM},
+            {"name": "tab_gate_tech", "role": "technical", "fallback": SEGMENT_KIND_SYSTEM},
+        ],
     )
     queue = client.get(
         f"/api/ontologies/{ontology_id}/review-queue", headers=admin_headers
     ).json()
-    assert queue["groups"][0]["segment_kind"] == SEGMENT_KIND_PENDING
-    assert queue["groups"][0]["requires_classification"] is True
+    business = next(g for g in queue["groups"] if g["table_role"] == "business_object")
+    assert business["segment_kind"] == SEGMENT_KIND_SYSTEM
+    assert business["stranded_in_system"] is True
+    # 技术表待在系统表里是它的归宿，不该被催着移板块
+    technical = next(g for g in queue["groups"] if g["table_role"] == "technical")
+    assert technical["stranded_in_system"] is False
 
 
 # ------------------------------------------------------- 落位漂移（存量自愈）
 
 
-def test_technical_stranded_in_the_pending_board_heals_on_judgement(
-    client, admin_headers
-):
-    """存量漂移：先落进待归类、后来被重判成技术表却没跟着挪的那批。
+def test_role_board_drift_heals_on_judgement(client, admin_headers):
+    """存量漂移：角色早就改对了、板块却没跟着挪的那批。
 
-    它们的角色已经是对的，「改判技术表」是空操作——不自愈就永远卡在门禁上，
-    既确认不了也归类不动。实测 erpnext 的待归类板块里有 6 张这样的表。
+    它们再点一次同样的改判是空操作——不自愈就永远躺在错板块里。判定发生时顺手对齐，
+    比让人手动挪板块可靠。
     """
     ontology_id, seg_ids = _seed(
         "drift",
         objects=[
-            {
-                "name": "tab_bank_hook",
-                "role": "technical",
-                "fallback": SEGMENT_KIND_PENDING,
-            }
+            {"name": "tab_bank_hook", "role": "technical", "segment": "资金"},
         ],
     )
     obj_id = _object("tab_bank_hook").id
 
-    # 这一组不该被要求归类：确认它会把它挪到「技术表」板块，那才是它的归宿
     queue = client.get(
         f"/api/ontologies/{ontology_id}/review-queue", headers=admin_headers
     ).json()
     group = next(g for g in queue["groups"] if g["table_role"] == "technical")
-    assert group["segment_kind"] == SEGMENT_KIND_PENDING
-    assert group["requires_classification"] is False
+    assert group["stranded_in_system"] is False
 
     resp = client.patch(
         "/api/object-types/batch",
@@ -373,8 +437,8 @@ def test_technical_stranded_in_the_pending_board_heals_on_judgement(
 
     obj = _object("tab_bank_hook")
     assert obj.needs_review is False
-    assert obj.segment_id != seg_ids[SEGMENT_KIND_PENDING]
+    assert obj.segment_id != seg_ids["资金"]
     with SessionLocal() as db:
-        assert db.get(OntologySegment, obj.segment_id).kind == SEGMENT_KIND_TECHNICAL
+        assert db.get(OntologySegment, obj.segment_id).kind == SEGMENT_KIND_SYSTEM
     # 自愈不是人工归属：下次重聚类仍可以把它收编，所以不钉 overridden
     assert "segment_id" not in json.loads(obj.overridden_fields or "[]")

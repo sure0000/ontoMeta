@@ -487,7 +487,7 @@ def test_relation_queue_groups_by_verb(client, admin_headers):
     assert body["pending_total"] == 7
     families = {g["name_family"]: g["size"] for g in body["groups"]}
     assert families == {"属于": 4, "引用": 3}
-    # 关系装在 relation_members 里，且带得出三元组
+    # 关系装在 relation_members 里，且带得出「源 → 目标」
     member = body["groups"][0]["relation_members"][0]
     assert member["source_object_name"] == "采购订单"
     assert member["target_object_name"] == "供应商"

@@ -56,6 +56,14 @@ export const detailEdgeOptions: EdgeOptions = {
       opacity: 0.08,
       labelOpacity: 0,
     },
+    // 默认状态：明确恢复到初始样式，防止 clearFocus 后保持置灰
+    default: (data: EdgeData) => {
+      const dense = Boolean(data.data?.hideLabel);
+      return {
+        opacity: dense ? 0.4 : 1,
+        labelOpacity: dense ? 0 : 1,
+      };
+    },
   },
 };
 

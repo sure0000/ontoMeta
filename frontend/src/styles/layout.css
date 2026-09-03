@@ -1787,9 +1787,44 @@ a.page-meta-item:hover strong {
   border-top: 1px dashed var(--om-border);
 }
 
-/* 归类行排在改判之上：这一组缺的是「归到哪个业务模块」，那才是它的主动作。 */
+/* 移动行排在改判之上：分错板块的对象哪一组里都可能有，所以它是常驻动作。 */
 .review-actions-row--classify {
   padding-bottom: var(--om-space-2);
+}
+
+/* 归错地方的那一组：这一行才是它的主动作，给它一条左边框把视线拉过来。 */
+.review-actions-row--urgent {
+  padding-inline-start: var(--om-space-2);
+  border-left: 3px solid var(--om-error);
+}
+
+.review-actions-hint {
+  font-size: var(--om-text-sm);
+  color: var(--om-error);
+}
+
+/* 待判计数的红色上标。
+   「还剩多少要判」是这一屏唯一持续变化的数字，混在灰色的 12/40 里根本读不出来。
+   提成上标 + 红色之后扫一眼就知道哪几块没判完；判完不留占位，直接消失。 */
+.review-sup {
+  margin-inline-start: 3px;
+  padding: 0 4px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-error-soft);
+  color: var(--om-error);
+  font-family: var(--om-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: super;
+}
+
+/* 选中/判完的行里也要保持红——上标标的是「还没判」，不随行状态褪色。 */
+.review-seg--on .review-sup,
+.ant-segmented-item-selected .review-sup {
+  background: var(--om-error-soft);
+  color: var(--om-error);
 }
 
 /* ---------- 待判 / 已判 ----------
@@ -1799,8 +1834,8 @@ a.page-meta-item:hover strong {
   margin-bottom: var(--om-space-2);
 }
 
-/* 「已确认却仍压在待归类里」的存量入口。它是个数字，不是装饰：不给入口，
-   这批对象既不在待判队列里、也进不了业务地图，谁也不会再想起它们。 */
+/* 「已确认、却还是业务对象压在系统表里」的存量入口。它是个数字，不是装饰：
+   不给入口，这批对象既不在待判队列里、也进不了业务地图，谁也不会再想起它们。 */
 .review-strand-chip {
   display: inline-flex;
   align-items: baseline;
@@ -1825,7 +1860,7 @@ a.page-meta-item:hover strong {
   font-variant-numeric: tabular-nums;
 }
 
-/* 待归类那一组的说明条：确认按钮被禁掉时，这里说清楚缺的是哪一半。 */
+/* 归错地方那一组的说明条：角色判对了、位置没放对，这里说清楚缺的是哪一半。 */
 .review-classify-note {
   flex: none;
   display: flex;

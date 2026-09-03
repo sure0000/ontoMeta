@@ -405,7 +405,7 @@ export const api = {
     needs_review?: boolean;
     operator?: string;
   }) =>
-    request<{ updated: number; pending_classification?: number; items: ObjectTypeSummary[] }>(
+    request<{ updated: number; stranded_in_system?: number; items: ObjectTypeSummary[] }>(
       `/api/object-types/batch`,
       {
         method: "PATCH",

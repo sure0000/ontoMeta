@@ -3,9 +3,12 @@ import {
   FullscreenExitOutlined,
   FullscreenOutlined,
   LayoutOutlined,
+  SearchOutlined,
+  UpOutlined,
+  DownOutlined,
 } from "@ant-design/icons";
 import { Graph, type GraphOptions, type IElementEvent, type NodeData } from "@antv/g6";
-import { Button, Segmented, Space, Tooltip as AntTooltip } from "antd";
+import { Button, Input, Segmented, Space, Tooltip as AntTooltip } from "antd";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import type { OntologyGraph, OntologyGroupedGraph } from "../../types";
@@ -128,6 +131,15 @@ function OntologyGraphViewInner({
   // 直接调 fitView 会把详情图缩回读不出字的比例——这正是之前地图看不清的原因之一。
   const readableFitRef = useRef<(() => Promise<void>) | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // 搜索状态
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<string[]>([]);
+  const [currentResultIndex, setCurrentResultIndex] = useState(0);
+  // 清空搜索时要知道「刚才命中的是哪几个」才能给它们留痕。用 ref 读最新值，
+  // 免得把 searchResults 塞进那两个回调的依赖里、每次搜索都重建回调。
+  const searchResultsRef = useRef<string[]>([]);
+  searchResultsRef.current = searchResults;
 
   const isOverview = graphMode === "overview";
 
@@ -368,11 +380,21 @@ function OntologyGraphViewInner({
       // 30+ 节点的板块图里，这是「这个对象连着谁」唯一读得出来的方式；
       // 状态一次性批量下发（单次 setElementState → 单次重绘），避免连环重绘卡顿。
       let focusedId: string | null = null;
+      // 刚看过的那一组节点。鼠标一移开就全清的话，刚读出来的东西也跟着没了——想再确认
+      // 一眼只能重新找到那个节点再悬浮一次。留个痕，视线可以离开画布去看别处，回头还
+      // 认得住。只留**最后一组**，不累积，否则翻十个节点整张图就黄了。
+      //
+      // **连线不留痕**：边一亮就是一张黄网铺在图上，盖过底下真正要读的结构；
+      // 节点标住就够找回来了。所以移开时边一律复位。
+      let recentNodes = new Set<string>();
       const clearFocus = () => {
         if (focusedId === null) return; // 没在聚焦就别白白重绘
         focusedId = null;
         const states: Record<string, string[]> = {};
-        g.getNodeData().forEach((n) => (states[String(n.id)] = []));
+        g.getNodeData().forEach((n) => {
+          const nid = String(n.id);
+          states[nid] = recentNodes.has(nid) ? ["recent"] : [];
+        });
         g.getEdgeData().forEach((e) => {
           if (e.id != null) states[String(e.id)] = [];
         });
@@ -393,12 +415,16 @@ function OntologyGraphViewInner({
         const states: Record<string, string[]> = {};
         g.getNodeData().forEach((n) => {
           const nid = String(n.id);
-          states[nid] = neighbors.has(nid) ? ["active"] : ["dimmed"];
+          // 指着的那个单独一档：邻居也用 active 的话，「我点的是哪个」就读不出来了。
+          states[nid] =
+            nid === focusId ? ["selected"] : neighbors.has(nid) ? ["active"] : ["dimmed"];
         });
         g.getEdgeData().forEach((e) => {
           if (e.id == null) return;
           states[String(e.id)] = activeEdges.has(String(e.id)) ? ["active"] : ["dimmed"];
         });
+        // 这一组就是「刚看过的」——移开时由 clearFocus 把这些节点留成痕迹。
+        recentNodes = neighbors;
         void g.setElementState(states, false);
       });
       g.on<IElementEvent>("node:pointerleave", clearFocus);
@@ -532,8 +558,13 @@ function OntologyGraphViewInner({
         });
         g.getNodeData().forEach((n) => {
           const nid = String(n.id);
-          if (nid === focusId) return; // 保留 hover 态
-          states[nid] = isMember(n) || neighbors.has(nid) ? ["active"] : ["dimmed"];
+          // 指着的那个（枢纽 hover 时）单独一档：跟邻居同样式的话就看不出焦点在哪。
+          // 版块 hover 时 focusId 是 combo id，这里不会命中，行为不变。
+          states[nid] = nid === focusId
+            ? ["selected"]
+            : isMember(n) || neighbors.has(nid)
+              ? ["active"]
+              : ["dimmed"];
         });
         edges.forEach((e) => {
           if (e.id == null) return;
@@ -591,6 +622,124 @@ function OntologyGraphViewInner({
     setIsFullscreen((v) => !v);
   }, []);
 
+  // 搜索只按节点名匹配，边不参与——但必须把边一并复位：上一次悬浮聚焦在边上留下的
+  // 琥珀色痕迹不清掉，就会跟搜索结果混在同一张图里，看起来像几条无主的黄线。
+  const resetEdgeStates = useCallback((states: Record<string, string[]>) => {
+    graphRef.current?.getEdgeData().forEach((e) => {
+      if (e.id != null) states[String(e.id)] = [];
+    });
+  }, []);
+
+  // 搜索功能
+  const handleSearch = useCallback(
+    (query: string) => {
+      setSearchQuery(query);
+      if (!query.trim() || !graphRef.current) {
+        // 清空搜索：刚命中的那几个留成痕迹，其余整个复位。
+        // 复位要用 []（回落到基础样式），不能用 ["default"]——default 只写了 opacity，
+        // 选中态改过的填充色会原样留在卡片上，看起来像是残留的脏状态。
+        const keep = new Set(searchResultsRef.current);
+        setSearchResults([]);
+        setCurrentResultIndex(0);
+        const states: Record<string, string[]> = {};
+        graphRef.current?.getNodeData().forEach((n) => {
+          const nid = String(n.id);
+          states[nid] = keep.has(nid) ? ["recent"] : [];
+        });
+        // 边也要一起复位：只写节点的话，上一次悬浮留下的琥珀色连线会挂在图上不走，
+        // 看起来像是几条无主的黄线。
+        resetEdgeStates(states);
+        graphRef.current?.setElementState(states);
+        return;
+      }
+
+      // 搜索匹配的节点
+      const lowerQuery = query.toLowerCase();
+      const allNodes = graphRef.current.getNodeData();
+      const matches = allNodes
+        .filter((node: NodeData) => {
+          const label = String(node.data?.label || "").toLowerCase();
+          return label.includes(lowerQuery);
+        })
+        .map((node: NodeData) => String(node.id));
+
+      setSearchResults(matches);
+      setCurrentResultIndex(matches.length > 0 ? 0 : -1);
+
+      // 更新节点状态
+      const states: Record<string, string[]> = {};
+      if (matches.length > 0) {
+        allNodes.forEach((node: NodeData) => {
+          const id = String(node.id);
+          // 当前这一条是"选中"，其余命中是"还在结果里"，两者不能长一样——
+          // 否则按上一条/下一条时看不出光标挪到哪去了。
+          states[id] = id === matches[0]
+            ? ["selected"]
+            : matches.includes(id)
+              ? ["active"]
+              : ["dimmed"];
+        });
+        resetEdgeStates(states);
+        graphRef.current.setElementState(states);
+        // 聚焦到第一个结果
+        graphRef.current.focusElement(matches[0], { duration: 300 });
+      } else {
+        // 没有结果时压暗所有节点
+        allNodes.forEach((n: NodeData) => (states[String(n.id)] = ["dimmed"]));
+        resetEdgeStates(states);
+        graphRef.current.setElementState(states);
+      }
+    },
+    [resetEdgeStates],
+  );
+
+  const handleSearchNavigation = useCallback(
+    (direction: "prev" | "next") => {
+      if (searchResults.length === 0 || !graphRef.current) return;
+
+      const newIndex =
+        direction === "next"
+          ? (currentResultIndex + 1) % searchResults.length
+          : (currentResultIndex - 1 + searchResults.length) % searchResults.length;
+
+      setCurrentResultIndex(newIndex);
+
+      // 更新节点状态
+      const allNodes = graphRef.current.getNodeData();
+      const states: Record<string, string[]> = {};
+      allNodes.forEach((node: NodeData) => {
+        const id = String(node.id);
+        states[id] =
+          id === searchResults[newIndex]
+            ? ["selected"]
+            : searchResults.includes(id)
+              ? ["active"]
+              : ["dimmed"];
+      });
+      resetEdgeStates(states);
+      graphRef.current.setElementState(states);
+
+      // 聚焦到当前结果
+      graphRef.current.focusElement(searchResults[newIndex], { duration: 300 });
+    },
+    [searchResults, currentResultIndex, resetEdgeStates],
+  );
+
+  const handleClearSearch = useCallback(() => {
+    setSearchQuery("");
+    // 刚命中的那几个留成痕迹，其余复位（同 handleSearch 的清空分支）。
+    const keep = new Set(searchResultsRef.current);
+    setSearchResults([]);
+    setCurrentResultIndex(0);
+    const states: Record<string, string[]> = {};
+    graphRef.current?.getNodeData().forEach((n) => {
+      const nid = String(n.id);
+      states[nid] = keep.has(nid) ? ["recent"] : [];
+    });
+    resetEdgeStates(states);
+    graphRef.current?.setElementState(states);
+  }, [resetEdgeStates]);
+
   const edgeClickEnabled = !isOverview && Boolean(onEdgeClick || relationDetailPath);
 
   const overviewHint = (): string => {
@@ -645,9 +794,48 @@ function OntologyGraphViewInner({
       style={isFullscreen || height == null ? undefined : { height }}
     >
       <div className="ontology-graph-toolbar">
-        <span className="ontology-graph-hint">
-          {expanding ? "正在展开邻域…" : (hint ?? defaultHint)}
-        </span>
+        {/* 左侧：搜索框 */}
+        <Space size={8}>
+          <Input
+            size="small"
+            placeholder="搜索节点..."
+            prefix={<SearchOutlined />}
+            suffix={
+              searchResults.length > 0 ? (
+                <Space size={4}>
+                  <span style={{ fontSize: 12, color: "var(--om-text-tertiary)" }}>
+                    {currentResultIndex + 1}/{searchResults.length}
+                  </span>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<UpOutlined />}
+                    onClick={() => handleSearchNavigation("prev")}
+                    style={{ padding: "0 4px", minWidth: 20 }}
+                  />
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<DownOutlined />}
+                    onClick={() => handleSearchNavigation("next")}
+                    style={{ padding: "0 4px", minWidth: 20 }}
+                  />
+                </Space>
+              ) : undefined
+            }
+            value={searchQuery}
+            onChange={(e) => handleSearch(e.target.value)}
+            onPressEnter={() => handleSearchNavigation("next")}
+            allowClear
+            onClear={handleClearSearch}
+            style={{ width: 240 }}
+          />
+          <span className="ontology-graph-hint">
+            {expanding ? "正在展开邻域…" : (hint ?? defaultHint)}
+          </span>
+        </Space>
+
+        {/* 右侧：视图控制 */}
         <Space size={8}>
           {modeSwitcher}
           {!isOverview && layoutButtons}

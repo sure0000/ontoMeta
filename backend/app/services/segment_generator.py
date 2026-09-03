@@ -6,15 +6,16 @@
 - 实测：48 板块 → 12 板块，机械命名 26 → 5，噪声板块归零
 
 **划分是全覆盖分区**：聚类只覆盖得了一小部分对象（erpnext 实测 1035 个里只有 134 个
-进了业务模块），剩下的不能丢进一个叫「未接入」的隐式垃圾桶——那里面混着四种处置方式
-完全不同的情况。所以聚类之后一定要跑 :func:`build_fallback_segments`，按「为什么没进
-业务模块」把余下对象分派到 shared / pending / technical / system 四个兜底板块。
-种类定义与各自的收敛路径见 :mod:`app.services.segment_kinds`。
+进了业务模块），剩下的不能丢进「未接入」或「待归类」这种隐式垃圾桶。所以聚类之后
+一定要跑 :func:`build_fallback_segments`：业务角色的表先靠邻居/命名族亲和收编进业务
+模块，兜不住的和所有非业务角色的表一律落系统表。落位规则与库内回填同源，
+见 :mod:`app.services.segment_kinds` 与 :mod:`app.services.segment_placement`。
 """
 
 import json
 import logging
 import math
+from collections import Counter
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -29,10 +30,9 @@ from app.services.draft_checkpoint import chunk_key
 from app.services.segment_kinds import (
     FALLBACK_SEGMENT_META,
     SEGMENT_KIND_BUSINESS,
-    SEGMENT_KIND_PENDING,
     SEGMENT_KIND_SHARED,
     SEGMENT_KIND_SYSTEM,
-    SEGMENT_KIND_TECHNICAL,
+    is_business_role,
     is_system_table,
 )
 
@@ -165,42 +165,86 @@ def build_fallback_segments(
     hub_nodes: set[str],
     adjacency: dict[str, set[str]] | None = None,
 ) -> list[DraftSegment]:
-    """把没进业务模块的对象分派到四个兜底板块，让划分成为全覆盖分区。
+    """把没进业务模块的对象归位，让划分成为全覆盖分区。
 
+    规矩一句话：**是业务对象或业务关系表的，一定落在某个业务板块下；其余的落系统表。**
     分派顺序即优先级，先命中先归属：
 
     1. ``system`` —— 来自数据库自带 schema（不是业务数据，最该被摄取层挡掉）
-    2. ``shared`` —— 枢纽对象（公共主数据，刻意不并入单个模块）
-    3. ``technical`` —— 判为 technical 的框架管道表（不参与业务聚类）
-    4. ``pending`` —— 其余：判为业务对象/桥表却连不成簇的
+    2. ``system`` —— 非业务角色（数据表 / 技术表）：框架管道表不进业务地图
+    3. ``shared`` —— 枢纽对象（公共主数据，刻意不并入单个模块）
+    4. 业务角色但没被聚类收进去的：**就地收编进已有业务模块**——先看邻居
+       （关系对端在哪个模块就跟着去），再看命名族（``tabSales Invoice Item``
+       跟着 ``tabSales Invoice`` 走）。这一步直接改写 ``business_segments``。
+    5. 连亲和都兜不住的 → ``system``，由人在审核台上移出来
 
-    先判 system 再判 technical，是因为系统表几乎都会同时被判成 technical，
+    先判 system 再判角色，是因为系统表几乎都会同时被判成 technical，
     但「不该进本体」比「是技术表」更能说明该怎么处置它。
 
+    ``business_segments`` 会被就地追加成员（第 4 步），返回值只含兜底板块。
     空板块不返回：没有系统表的本体不该凭空多出一个「系统表」板块。
     """
+    from app.services.review_queue import name_family
+
     claimed = {name for seg in business_segments for name in seg.members}
-    buckets: dict[str, list[DraftObjectType]] = {
-        SEGMENT_KIND_SYSTEM: [],
-        SEGMENT_KIND_SHARED: [],
-        SEGMENT_KIND_TECHNICAL: [],
-        SEGMENT_KIND_PENDING: [],
+    segment_by_member = {
+        name: seg for seg in business_segments for name in seg.members
     }
-    for obj in object_types:
-        if obj.name in claimed:
-            continue
-        if is_system_table(getattr(obj, "source_ref", None)):
-            buckets[SEGMENT_KIND_SYSTEM].append(obj)
-        elif obj.name in hub_nodes:
-            buckets[SEGMENT_KIND_SHARED].append(obj)
-        elif obj.table_role not in ("business_object", "bridge"):
-            buckets[SEGMENT_KIND_TECHNICAL].append(obj)
-        else:
-            buckets[SEGMENT_KIND_PENDING].append(obj)
+    # 命名族投票池：已进业务模块的成员是投票人，收编进来的也算（下面滚动更新）。
+    family_votes: dict[str, Counter] = {}
+    for name, seg in segment_by_member.items():
+        family_votes.setdefault(name_family(name), Counter())[id(seg)] += 1
+    segment_by_key = {id(seg): seg for seg in business_segments}
 
     degree = adjacency or {}
+
+    def adopt_into_business(obj: DraftObjectType) -> DraftSegment | None:
+        """邻居 → 命名族，两级亲和；都没信号返回 ``None``。"""
+        votes: Counter = Counter()
+        for neighbor in degree.get(obj.name, ()):  # 关系对端
+            seg = segment_by_member.get(neighbor)
+            if seg is not None:
+                votes[id(seg)] += 1
+        if not votes:
+            votes = family_votes.get(name_family(obj.name)) or Counter()
+        if not votes:
+            return None
+        # 平票按板块机械名定序，同一批输入两次跑出同一个结果。
+        key = min(
+            votes.most_common(),
+            key=lambda kv: (-kv[1], segment_by_key[kv[0]].machine_baseline or ""),
+        )[0]
+        return segment_by_key[key]
+
+    buckets: dict[str, list[DraftObjectType]] = {
+        SEGMENT_KIND_SHARED: [],
+        SEGMENT_KIND_SYSTEM: [],
+    }
+    # 名字定序：收编会把新成员登记成投票人，顺序不定结果就不定。
+    for obj in sorted(
+        (o for o in object_types if o.name not in claimed), key=lambda o: o.name
+    ):
+        if is_system_table(getattr(obj, "source_ref", None)):
+            buckets[SEGMENT_KIND_SYSTEM].append(obj)
+            continue
+        if not is_business_role(obj.table_role):
+            buckets[SEGMENT_KIND_SYSTEM].append(obj)
+            continue
+        if obj.name in hub_nodes:
+            buckets[SEGMENT_KIND_SHARED].append(obj)
+            continue
+        adopted = adopt_into_business(obj)
+        if adopted is None:
+            buckets[SEGMENT_KIND_SYSTEM].append(obj)
+            continue
+        adopted.members.append(obj.name)
+        adopted.member_count = len(adopted.members)
+        segment_by_member[obj.name] = adopted
+        family_votes.setdefault(name_family(obj.name), Counter())[id(adopted)] += 1
+
     fallbacks: list[DraftSegment] = []
-    for kind, members in buckets.items():
+    for kind in (SEGMENT_KIND_SHARED, SEGMENT_KIND_SYSTEM):
+        members = buckets[kind]
         if not members:
             continue
         meta = FALLBACK_SEGMENT_META[kind]

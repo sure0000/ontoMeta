@@ -1,5 +1,6 @@
 import type { NodeData, NodeOptions } from "@antv/g6";
 import {
+  ACTIVE_COLORS,
   EXTERNAL_COLORS,
   HUB_COLORS,
   NODE_COMPACT_HEIGHT,
@@ -9,6 +10,8 @@ import {
   NODE_COLORS,
   NODE_HEIGHT,
   NODE_WIDTH,
+  RECENT_COLORS,
+  SELECTED_COLORS,
   statusColors,
   statusLabel,
 } from "./theme";
@@ -205,19 +208,80 @@ export const ontologyNodeOptions: NodeOptions = {
   state: {
     hover: {
       stroke: NODE_COLORS.hoverBorder,
+      lineWidth: 2,
       shadowBlur: 16,
       shadowColor: "rgba(37, 99, 235, 0.28)",
     },
-    // 概览 hover 联动：高亮当前簇/枢纽的相关节点，压暗其余，避免一屏噪声。
-    active: {
-      stroke: NODE_COLORS.hoverBorder,
-      lineWidth: 2,
-      shadowBlur: 18,
-      shadowColor: "rgba(37, 99, 235, 0.35)",
+    /**
+     * 选中：指针指着的那一个 / 搜索当前命中的那一个。整张图唯一的实心卡片。
+     *
+     * 三层对比是排定的：**选中（蓝底白字）> 邻居（浅蓝底）> 其余（压到 0.12）**。
+     * 此前选中和邻居共用 `active`，两者长得一模一样，「我点的是哪个」读不出来；
+     * 而两者都只改描边不改填充，在满屏白卡片上又跟压暗层拉不开距离。
+     *
+     * 写成函数是因为枢纽卡片本身是深色的：套一层浅色态会让它的浅色标题直接消失，
+     * 标题色必须跟着填充一起翻。
+     */
+    selected: () => ({
+      fill: SELECTED_COLORS.bg,
+      stroke: SELECTED_COLORS.border,
+      lineWidth: 3,
+      lineDash: undefined, // 板块外的虚线卡片选中时也收成实线，否则选中感被虚线削掉
+      shadowColor: SELECTED_COLORS.ring,
+      shadowBlur: 26,
+      opacity: 1,
+      labelOpacity: 1,
+      labelFill: SELECTED_COLORS.title,
+      labelFontWeight: 700,
+      // 画在邻居之上：选中的卡片被压在别的卡片下面就白选了
+      zIndex: 30,
+    }),
+    // 邻居 / 概览 hover 联动：跟选中的那个连着的，或当前簇里的成员。
+    active: (data) => {
+      const isHub = datum(data).kind === "hub";
+      return {
+        // 枢纽本来就是深色实心，再套浅蓝底会把它降级成普通卡片，只加描边。
+        ...(isHub ? {} : { fill: ACTIVE_COLORS.bg, labelFill: ACTIVE_COLORS.title }),
+        stroke: ACTIVE_COLORS.border,
+        lineWidth: 2,
+        shadowBlur: 14,
+        shadowColor: "rgba(37, 99, 235, 0.25)",
+        opacity: 1,
+        labelOpacity: 1,
+        zIndex: 10,
+      };
     },
+    /**
+     * 刚看过的那一组：鼠标移开 / 清掉搜索之后留下的痕迹。
+     *
+     * 它不跟当前焦点争第一眼——琥珀色和蓝色系分属两条线：蓝的是"现在"，琥珀的是"刚才"。
+     * 色阶刻意压得淡（见 RECENT_COLORS），两组同时在屏上时，正指着的那张仍是最重的
+     * 深蓝底白字，痕迹只在余光里。
+     */
+    recent: (data) => {
+      const isHub = datum(data).kind === "hub";
+      return {
+        ...(isHub ? {} : { fill: RECENT_COLORS.bg, labelFill: RECENT_COLORS.title }),
+        stroke: RECENT_COLORS.border,
+        lineWidth: 1.5,
+        lineDash: undefined, // 板块外的虚线卡片留痕时也收成实线，虚线会把痕迹削没
+        // 不给光晕：痕迹只需要"认得出"，加了辉光就跟当前焦点抢第一眼了
+        shadowBlur: 0,
+        opacity: 1,
+        labelOpacity: 1,
+        zIndex: 5,
+      };
+    },
+    // 压暗层：0.2 时白卡片在白画布上还看得见轮廓，跟"亮着的"分不开。压到 0.12
+    // 之后只剩隐约的底噪，选中/邻居才真正跳出来。
     dimmed: {
-      opacity: 0.2,
-      labelOpacity: 0.35,
+      opacity: 0.12,
+      labelOpacity: 0.22,
+    },
+    // 默认状态：明确设置为完全不透明，确保 clearFocus 后恢复正常
+    default: {
+      opacity: 1,
+      labelOpacity: 1,
     },
   },
 };

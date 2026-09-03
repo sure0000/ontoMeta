@@ -338,10 +338,11 @@ export interface ObjectTypeSummary extends FieldProvenance {
 }
 
 /**
- * 板块种类。划分是全覆盖分区——每个对象恰好属于一个板块，没有「未接入」这一说。
- * business 之外的四类是兜底板块，各自对应一条不同的收敛路径（见后端 segment_kinds）。
+ * 板块种类。划分是全覆盖分区——每个对象恰好属于一个板块，没有「未接入」「待归类」。
+ * 规矩一句话：是业务对象/业务关系表的一定在业务板块下（business 或 shared），
+ * 其余的落 system（见后端 segment_kinds）。
  */
-export type SegmentKind = "business" | "shared" | "pending" | "technical" | "system";
+export type SegmentKind = "business" | "shared" | "system";
 
 export interface SegmentSummary extends FieldProvenance {
   id: string;
@@ -385,7 +386,7 @@ export interface SegmentDetail extends SegmentSummary {
 export interface SegmentReviewProgress {
   segment_id: string;
   segment_name: string;
-  /** 板块种类：pending 那一行是「待归类业务对象」，它的成员必须先归位才算判完。 */
+  /** 板块种类：system 那一行里若躺着业务对象，说明归错了地方，要移出来。 */
   kind?: SegmentKind;
   total_count: number;
   needs_review_count: number;
@@ -421,9 +422,10 @@ export interface ReviewModeStats {
   unsegmented_pending?: number;
   unsegmented_relation_total?: number;
   unsegmented_relation_pending?: number;
-  /** 压在「待归类业务对象」里的对象数，以及其中已被标成已确认的存量（判完了却没归位）。 */
-  unclassified_total?: number;
-  unclassified_reviewed?: number;
+  /** 判成业务对象/关系表却仍压在系统表里的对象数（归错了地方），以及其中已确认的那部分
+   *  ——后者不在待判队列里，只能靠这个数字捞回来。 */
+  stranded_total?: number;
+  stranded_reviewed?: number;
   segment_progress: SegmentReviewProgress[];
 }
 
@@ -432,13 +434,13 @@ export interface ReviewGroup {
   key: string;
   segment_id?: string | null;
   segment_name: string;
-  /** 板块种类（business / shared / pending / technical / system）。 */
+  /** 板块种类（business / shared / system）。 */
   segment_kind?: string;
   /**
-   * 这一组必须先归入业务板块才算判完（在「待归类业务对象」里，且角色留在那儿）。
+   * 这一组归错了地方：业务对象/关系表却压在系统表里，机器推不出该去哪个业务模块。
    * 服务端算好的：判定规则在后端 segment_placement 写一次，前端不重算。
    */
-  requires_classification?: boolean;
+  stranded_in_system?: boolean;
   table_role: string;
   name_family: string;
   score_band: "strong" | "near" | "weak" | "unknown";

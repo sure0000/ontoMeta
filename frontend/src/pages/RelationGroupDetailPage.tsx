@@ -15,7 +15,7 @@ import { getRelationStructureLabel, inferRelationStructureType } from "../utils/
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 /**
- * 关系详情页：一个关系名（display_name）下的全部 (源对象 → 目标对象) 三元组。
+ * 关系详情页：一个关系名（display_name）下的全部 (源对象 → 目标对象) 外键。
  * 由关系去重列表点入；数据用 GET /api/relation-types?display_name=... 服务端分页拉取。
  * scope（ontology / 是否仅已发布）通过 query 参数 oid / pub 传入，避免再次派生本体。
  */
@@ -75,7 +75,7 @@ export function RelationGroupDetailPage() {
         setTotal(res.total);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "加载关系三元组失败");
+        if (!cancelled) setError(err instanceof Error ? err.message : "加载外键关系失败");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -190,8 +190,8 @@ export function RelationGroupDetailPage() {
         title={displayName || "关系详情"}
         description={
           inWorkspace
-            ? `该关系名下共 ${total} 条 (源对象 → 目标对象) 三元组，点击任意行编辑该关系`
-            : `该关系名下共 ${total} 条 (源对象 → 目标对象) 三元组`
+            ? `该关系名下共 ${total} 条 (源对象 → 目标对象) 外键，点击任意行编辑该关系`
+            : `该关系名下共 ${total} 条 (源对象 → 目标对象) 外键`
         }
         extra={
           <Link to={backPath}>
@@ -205,7 +205,7 @@ export function RelationGroupDetailPage() {
       )}
 
       <SectionCard
-        title="关系三元组"
+        title="外键关系"
         count={total}
         countPrimary
         icon={<BranchesOutlined />}

@@ -497,12 +497,12 @@ class ReviewGroupOut(BaseModel):
     key: str
     segment_id: str | None = None
     segment_name: str
-    #: 板块种类（business / shared / pending / technical / system，见 services/segment_kinds）。
+    #: 板块种类（business / shared / system，见 services/segment_kinds）。
     segment_kind: str = "business"
-    #: 这一组必须先归入业务板块才算判完（在「待归类业务对象」板块里，且角色留在那儿）。
+    #: 这一组是「归错了地方」：业务对象/关系表却压在系统表里，机器按邻居与命名族都
+    #: 归不进任何业务模块。判定不因此被拒，但审核台要把「移动到板块」摆到最显眼处。
     #: 由服务端算：判定规则只在 segment_placement 写一次，前端不重算一遍。
-    #: 同在待归类板块、但角色已是数据表/技术表的那些不算——确认它们时会自动挪到技术表板块。
-    requires_classification: bool = False
+    stranded_in_system: bool = False
     table_role: str
     name_family: str
     score_band: str
@@ -621,8 +621,8 @@ class RelationTypeDetail(RelationTypeOut):
 class RelationGroupOut(BaseModel):
     """按 display_name 去重后的关系分组（列表用）。
 
-    一个 display_name（如「属于」）通常对应成百上千条 (源,目标) 三元组，
-    这里把它折叠成一行，聚合展示类型/基数/置信度/复核状态。具体三元组由
+    一个 display_name（如「属于」）通常对应成百上千条 (源,目标) 外键，
+    这里把它折叠成一行，聚合展示类型/基数/置信度/复核状态。具体外键由
     关系详情页按 display_name 精确过滤 list_relation_types 拉取。
     """
 
@@ -791,9 +791,9 @@ class ObjectTypeBatchUpdate(BaseModel):
 
 class ObjectTypeBatchUpdateResult(BaseModel):
     updated: int
-    #: 其中改判后仍压在「待归类业务对象」里的个数——它们保持待复核，没有判完。
-    #: 只报 updated 会让人以为这一组处理完了。
-    pending_classification: int = 0
+    #: 其中判成业务对象/关系表、却被机器归不进任何业务模块而留在系统表里的个数。
+    #: 只报 updated 会让人以为这一组归好位了。
+    stranded_in_system: int = 0
     items: list[ObjectTypeSummary] = Field(default_factory=list)
 
 
@@ -1063,10 +1063,9 @@ class ReviewModeStats(BaseModel):
     #: 源端对象未接入板块的关系（关系队列 segment_id="-" 那一桶）
     unsegmented_relation_total: int = 0
     unsegmented_relation_pending: int = 0
-    #: 压在「待归类业务对象」板块里的对象数，以及其中已被标成已确认的那部分。
-    #: 后者是门禁上线前留下的存量：角色确认过，却仍不属于任何业务模块，
-    #: 于是既不在待判队列里、也进不了业务地图——要单独捞出来重判。
-    unclassified_total: int = 0
-    unclassified_reviewed: int = 0
+    #: 判成业务对象/关系表却仍压在系统表里的对象数（归错了地方，等着被移出去），
+    #: 以及其中已被标成已确认的那部分——后者不在待判队列里，只能靠这个数字捞回来。
+    stranded_total: int = 0
+    stranded_reviewed: int = 0
 
     segment_progress: list[SegmentReviewProgress] = Field(default_factory=list)

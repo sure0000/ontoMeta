@@ -63,7 +63,7 @@ const { Text } = Typography;
 /** 队列成员：对象与关系共用选择/判定逻辑，那部分只认 id 与 needs_review。 */
 type QueueMember = ObjectTypeSummary | RelationType;
 
-/** 审核范围：两个顶层 tab（对象 / 关系），关系页内再分三元组与关系表。 */
+/** 审核范围：两个顶层 tab（对象 / 关系），关系页内再分外键与关系表。 */
 type ReviewScope = "object" | "relation" | "bridge";
 
 /**
@@ -100,9 +100,24 @@ type UndoEntry = {
   kind: ReviewScope;
 };
 
-/** 「待归类业务对象」板块的 kind（后端 services/segment_kinds）。 */
-const PENDING_SEGMENT_KIND = "pending";
-const CLASSIFY_HINT = "「待归类业务对象」要先归入一个业务板块才算判完";
+/** 「系统表」板块的 kind（后端 services/segment_kinds）。 */
+const SYSTEM_SEGMENT_KIND = "system";
+const STRAND_HINT = "业务对象/关系表压在系统表里，说明归错了地方——挑个业务板块移过去";
+
+/**
+ * 待判计数的红色上标。
+ *
+ * 「还剩多少要判」是这一屏唯一持续变化的数字，混在灰色的 12/40 里读不出来。
+ * 提成上标 + 红色之后，扫一眼侧栏就知道哪几块还没判完；判完自动消失（不占位）。
+ */
+function PendingSup({ count }: { count?: number | null }) {
+  if (!count) return null;
+  return (
+    <sup className="review-sup" title={`${count} 个待判`}>
+      {count > 999 ? "999+" : count}
+    </sup>
+  );
+}
 
 function formatCount(value?: number | null) {
   if (value == null) return "-";
@@ -157,12 +172,11 @@ export function ReviewWorkbenchPage() {
   const [cursor, setCursor] = useUrlState<string>("cursor", "");
   // 三种审核范围，两个顶层 tab：
   //   object  → 对象页：业务对象/数据表/技术表
-  //   relation→ 关系页 · 关系三元组（RelationType）
+  //   relation→ 关系页 · 外键关系（RelationType）
   //   bridge  → 关系页 · 关系表（table_role=bridge 的**对象**）
   //
   // 关系表是「表」不是「边」，数据上是 ObjectType；但复核者面对它时问的是关系的问题
-  // （这张表是不是只是把 A 和 B 连起来），所以归到关系页。它此前混在对象页的
-  // 「待归类业务对象」里，和真正的业务对象抢同一屏，两种判断标准打架。
+  // （这张表是不是只是把 A 和 B 连起来），所以归到关系页。
   const [kind, setKind] = useUrlState<ReviewScope>("kind", "object", [
     "object",
     "relation",
@@ -211,38 +225,43 @@ export function ReviewWorkbenchPage() {
     [ontologyId, kind, status, segmentFilter, cursor],
   );
 
-  // 归类的目的地：只给业务板块与公共主数据。技术表/系统表那两个兜底板块不是「归类」，
-  // 想去那边应该改判角色（改判会把对象自动落到对应的兜底板块）。
+  // 移动的目的地：**所有**板块，系统表也在内。分错的要能移出来，也要能被移回去
+  // ——只给业务板块的话，误判成业务对象、被人移进销售的技术表就再也退不回系统表。
+  // 业务板块排在前面（成员多的靠前），系统表垫底。
   const segments = useApi<PageResult<SegmentSummary> | null>(
     () => (ontologyId ? api.listSegments({ ontologyId, limit: 200 }) : Promise.resolve(null)),
     [ontologyId],
   );
-  const classifyTargets = useMemo(
+  const moveTargets = useMemo(
     () =>
       (segments.data?.items ?? [])
-        .filter((seg) => seg.kind === "business" || seg.kind === "shared")
-        .sort((a, b) => b.member_count - a.member_count)
+        .slice()
+        .sort(
+          (a, b) =>
+            (a.kind === "system" ? 1 : 0) - (b.kind === "system" ? 1 : 0) ||
+            b.member_count - a.member_count,
+        )
         .map((seg) => ({
           value: seg.id,
           label: `${seg.display_name}（${seg.member_count}）`,
         })),
     [segments.data],
   );
-  const [classifyTarget, setClassifyTarget] = useState<string | undefined>();
+  const [moveTarget, setMoveTarget] = useState<string | undefined>();
 
   const groups = useMemo(() => queue.data?.groups ?? [], [queue.data]);
   const activeGroup: ReviewGroup | null = groups[0] ?? null;
-  // isRelation 只指「关系三元组」这条队列：关系表虽然挂在关系页，但它是对象，
+  // isRelation 只指「外键」这条队列：关系表虽然挂在关系页，但它是对象，
   // 列、判定接口、改判按钮全走对象那一套——尤其是改判，误判的关系表要能调回业务对象。
   const isRelation = kind === "relation";
   const isBridgeScope = kind === "bridge";
   /** 侧栏与顶栏的计数口径跟着范围走，三者各算各的。 */
   const relationScope = kind !== "object";
   const isReviewedView = status === "reviewed";
-  // 「待归类业务对象」那一组：判成业务对象却连不成簇，只确认角色它仍然进不了任何
-  // 业务地图，那个板块也永远不会变空。所以确认按钮在这里是禁用的，出路是归类或改判。
+  // 这一组归错了地方：业务对象/关系表压在系统表里。不再拿门禁挡确认（那只会留下一个
+  // 被禁掉的按钮），而是把「移动到板块」摆到最显眼处，并在组头说清缺的是什么。
   // 判定由服务端给（同一条规则在后端 segment_placement 写一次），前端不重算。
-  const needsClassification = Boolean(activeGroup?.requires_classification);
+  const isStranded = Boolean(activeGroup?.stranded_in_system);
   // 组成员：对象走 members，关系走 relation_members。下面的选择/判定逻辑只认 id，
   // 两条队列因此共用同一套代码，不各写一遍。
   const members = useMemo(
@@ -344,7 +363,7 @@ export function ReviewWorkbenchPage() {
   }, []);
 
   /**
-   * 全组同旗时「机器存疑」列只剩破折号，宽度还给对象名/三元组——
+   * 全组同旗时「机器存疑」列只剩破折号，宽度还给对象名/外键——
    * 中栏的宽度是零和的，一列 200px 只用来显示「跟组头说的一样」不值。
    */
   const flagColumnWidth = useMemo(
@@ -407,9 +426,10 @@ export function ReviewWorkbenchPage() {
         setUndoStack((prev) => [{ ids: selectedIds, before, kind }, ...prev].slice(0, 10));
         setExcluded((prev) => ({ ...prev, [activeGroup.key]: [] }));
         // 报服务端实际改了几条：已经是目标状态的不计数，别让人以为多判了。
-        // 改判成业务对象却连不成簇的那批仍待归类——不说清楚，看起来就像整组判完了。
-        const stranded = "pending_classification" in result ? (result.pending_classification ?? 0) : 0;
-        const suffix = stranded > 0 ? `，其中 ${stranded} 个仍待归类` : "";
+        // 判成业务对象却归不进任何业务模块的那批还留在系统表里——不说清楚，
+        // 看起来就像整组归好位了。
+        const stranded = "stranded_in_system" in result ? (result.stranded_in_system ?? 0) : 0;
+        const suffix = stranded > 0 ? `，其中 ${stranded} 个还在系统表里待移出` : "";
         message.success(`${verdict.label} ${result.updated} 个${suffix} · ⌘Z 可撤销`);
         await refresh();
       } catch (err) {
@@ -471,31 +491,27 @@ export function ReviewWorkbenchPage() {
   /**
    * 主动作（`A`）：待判视图里是「确认」，已判视图里是「退回复核」。
    *
-   * 一个键位对应「这一屏最该做的那件事」，两个视图各自只有一件。待归类那一组两件都
-   * 不是——它缺的是归属，所以这里挡住并说清楚，而不是让人按了没反应。
+   * 一个键位对应「这一屏最该做的那件事」，两个视图各自只有一件。归错地方的那一组
+   * 也照常能确认——判定不该被板块归属挡住，缺的归属由下面那行「移动到」补，
+   * 没补的会在回执里如实报出来。
    */
   const runPrimary = useCallback(() => {
     if (isReviewedView) {
       void applyVerdict({ label: "退回复核", review: true });
       return;
     }
-    if (needsClassification) {
-      message.warning(`${CLASSIFY_HINT}，或改判为数据表/技术表`);
-      return;
-    }
     void applyVerdict({ label: "确认", review: false });
-  }, [applyVerdict, isReviewedView, needsClassification]);
+  }, [applyVerdict, isReviewedView]);
 
-  /** 归类并确认：挪板块与判复核是同一次请求，后端因此看得到挪过之后的归属。 */
-  const classifyGroup = useCallback(() => {
-    if (!classifyTarget) {
-      message.warning("先选一个业务板块");
+  /** 移动并确认：挪板块与判复核是同一次请求，后端因此看得到挪过之后的归属。 */
+  const moveGroup = useCallback(() => {
+    if (!moveTarget) {
+      message.warning("先选一个板块");
       return;
     }
-    const name =
-      classifyTargets.find((opt) => opt.value === classifyTarget)?.label ?? "所选板块";
-    void applyVerdict({ segmentId: classifyTarget, review: false, label: `归入 ${name}` });
-  }, [applyVerdict, classifyTarget, classifyTargets]);
+    const name = moveTargets.find((opt) => opt.value === moveTarget)?.label ?? "所选板块";
+    void applyVerdict({ segmentId: moveTarget, review: false, label: `移入 ${name}` });
+  }, [applyVerdict, moveTarget, moveTargets]);
 
   // ---- 键盘：审核是重复动作，鼠标点选是最慢的输入方式 ----
   // overlayOpen：抽屉盖着时按 A 会把底下那组直接确认掉——人以为在抽屉里操作，
@@ -583,8 +599,9 @@ export function ReviewWorkbenchPage() {
         ),
       },
       {
-        // 关系的最小可读单元是三元组，不是一个动词——只列动词等于什么都没说。
-        title: "关系三元组",
+        // 外键的最小可读单元是「源对象 —动词→ 目标对象」，不是一个动词——
+        // 只列动词等于什么都没说。
+        title: "外键关系",
         key: "triple",
         render: (_, row) => (
           <span className="review-obj-name">
@@ -762,11 +779,11 @@ export function ReviewWorkbenchPage() {
       }
     : { total: stats.data?.unsegmented_total ?? 0, pending: stats.data?.unsegmented_pending ?? 0 };
 
-  // 「已确认却仍压在待归类里」的存量：门禁上线前判过角色的那批。它们既不在待判队列里，
-  // 也进不了业务地图——不给一个入口，谁也不会再想起它们。
-  const strandedCount = stats.data?.unclassified_reviewed ?? 0;
-  const pendingSegmentId =
-    stats.data?.segment_progress?.find((seg) => seg.kind === PENDING_SEGMENT_KIND)?.segment_id ??
+  // 「已确认、却还是业务对象压在系统表里」的那批：它们不在待判队列里，也进不了
+  // 业务地图——不给一个入口，谁也不会再想起它们。
+  const strandedCount = stats.data?.stranded_reviewed ?? 0;
+  const systemSegmentId =
+    stats.data?.segment_progress?.find((seg) => seg.kind === SYSTEM_SEGMENT_KIND)?.segment_id ??
     null;
   const total = isBridgeScope ? bridgeTotal : isRelation ? relationTotal : objectScopeTotal;
   const reviewed =
@@ -804,7 +821,7 @@ export function ReviewWorkbenchPage() {
               <AuditOutlined /> 审核 · {domain.data.name}
             </span>
             <Segmented
-              // 顶层只有两个 tab；关系页里的「三元组 / 关系表」由下面的次级切换给。
+              // 顶层只有两个 tab；关系页里的「外键 / 关系表」由下面的次级切换给。
               value={relationScope ? "relation" : "object"}
               onChange={(value) => {
                 setKind(value === "relation" ? "relation" : "object");
@@ -812,8 +829,24 @@ export function ReviewWorkbenchPage() {
                 setCursor("");
               }}
               options={[
-                { label: `对象 ${objectScopePending}`, value: "object" },
-                { label: `关系 ${relationPending + bridgePending}`, value: "relation" },
+                {
+                  label: (
+                    <span>
+                      对象
+                      <PendingSup count={objectScopePending} />
+                    </span>
+                  ),
+                  value: "object",
+                },
+                {
+                  label: (
+                    <span>
+                      关系
+                      <PendingSup count={relationPending + bridgePending} />
+                    </span>
+                  ),
+                  value: "relation",
+                },
               ]}
             />
             {relationScope && (
@@ -828,8 +861,24 @@ export function ReviewWorkbenchPage() {
                 // 已经在「关系」tab 里了，标签不必再复述「关系」二字——顶栏是零和的，
                 // 多这两个字就会把整行挤到折行，白白吃掉 50px 的判据表高度。
                 options={[
-                  { label: `三元组 ${relationPending}`, value: "relation" },
-                  { label: `关系表 ${bridgePending}`, value: "bridge" },
+                  {
+                    label: (
+                      <span>
+                        外键
+                        <PendingSup count={relationPending} />
+                      </span>
+                    ),
+                    value: "relation",
+                  },
+                  {
+                    label: (
+                      <span>
+                        关系表
+                        <PendingSup count={bridgePending} />
+                      </span>
+                    ),
+                    value: "bridge",
+                  },
                 ]}
               />
             )}
@@ -848,19 +897,19 @@ export function ReviewWorkbenchPage() {
             </span>
           </div>
           <Space>
-            {strandedCount > 0 && pendingSegmentId && (
-              <Tooltip title="这些对象的角色确认过，却仍留在「待归类业务对象」里：不属于任何业务模块，也就不会出现在业务地图上。点开逐组归位。">
+            {strandedCount > 0 && systemSegmentId && (
+              <Tooltip title="这些对象的角色确认过，却还是业务对象压在「系统表」里：不属于任何业务模块，也就不会出现在业务地图上。点开逐组移出去。">
                 <button
                   type="button"
                   className="review-strand-chip"
                   onClick={() => {
                     setKind("object");
-                    setSegmentFilter(pendingSegmentId);
+                    setSegmentFilter(systemSegmentId);
                     setStatus("reviewed");
                     setCursor("");
                   }}
                 >
-                  待归类未归位 <b>{strandedCount}</b>
+                  系统表里的业务对象 <b>{strandedCount}</b>
                 </button>
               </Tooltip>
             )}
@@ -909,7 +958,15 @@ export function ReviewWorkbenchPage() {
                 setCursor("");
               }}
               options={[
-                { label: `待判 ${queue.data?.pending_total ?? 0}`, value: "pending" },
+                {
+                  label: (
+                    <span>
+                      待判
+                      <PendingSup count={queue.data?.pending_total ?? 0} />
+                    </span>
+                  ),
+                  value: "pending",
+                },
                 { label: `已判 ${queue.data?.reviewed_total ?? 0}`, value: "reviewed" },
               ]}
             />
@@ -921,8 +978,11 @@ export function ReviewWorkbenchPage() {
                 setCursor("");
               }}
             >
-              <span>全部板块</span>
-              <span className="review-seg-num">{total - reviewed}</span>
+              <span className="review-seg-name">全部板块</span>
+              <PendingSup count={total - reviewed} />
+              <span className="review-seg-num">
+                {reviewed}/{total}
+              </span>
             </button>
             {(stats.data?.segment_progress ?? []).map((seg) => {
               const scoped = segmentScope(seg);
@@ -944,7 +1004,8 @@ export function ReviewWorkbenchPage() {
                     {scoped.total > 0 && scoped.pending === 0 ? "✓ " : ""}
                     {seg.segment_name}
                   </span>
-                  {/* 计数跟着当前范围走：对象页排除关系表，关系三元组数边，关系表数
+                  <PendingSup count={scoped.pending} />
+                  {/* 计数跟着当前范围走：对象页排除关系表，外键数边，关系表数
                       bridge 对象。此前关系页只显示板块名不给数字，是因为拿对象进度
                       顶替会读成假数字——现在后端按各自口径给，数字就可以给全。 */}
                   <span className="review-seg-num">
@@ -975,6 +1036,7 @@ export function ReviewWorkbenchPage() {
                 }}
               >
                 <span className="review-seg-name">未接入板块</span>
+                <PendingSup count={unsegmentedScope.pending} />
                 <span className="review-seg-num">
                   {unsegmentedScope.total - unsegmentedScope.pending}/{unsegmentedScope.total}
                 </span>
@@ -1124,15 +1186,16 @@ export function ReviewWorkbenchPage() {
                   )}
                 </div>
 
-                {/* 这一组缺的不是「角色对不对」，是「归到哪个业务模块」——把缺的那一半说出来，
-                    否则界面上只剩一个被禁掉的确认按钮，读起来像是坏了。 */}
-                {needsClassification && (
+                {/* 这一组的角色判对了，位置没放对——把缺的那一半说出来，
+                    人才知道下面那行「移动到」是给谁用的。 */}
+                {isStranded && (
                   <div className="review-classify-note">
                     <PartitionOutlined />
                     <span>
-                      这批表判成了业务对象，却在关系图上连不成簇。<b>确认角色不算判完</b>
-                      ：归入一个业务板块，它们才会出现在业务地图上；确实不属于任何模块的，
-                      改判为数据表/技术表。
+                      这批表判成了业务对象/关系表，却压在<b>系统表</b>里：机器按关系邻居和
+                      命名族都推不出它们属于哪个业务模块。用下面那行移到对应的业务板块，
+                      它们才会出现在业务地图上；确实不是业务数据的，改判为数据表/技术表
+                      即可留在系统表。
                     </span>
                   </div>
                 )}
@@ -1171,9 +1234,7 @@ export function ReviewWorkbenchPage() {
                   <div className="review-actions-row">
                     <Tooltip
                       title={
-                        !isReviewedView && needsClassification
-                          ? `${CLASSIFY_HINT}——用下面那行归类，或改判为数据表/技术表`
-                          : undefined
+                        !isReviewedView && isStranded ? STRAND_HINT : undefined
                       }
                     >
                       {/* 已判视图里主动作换成「退回复核」：回看的目的就是把判错的捞回来。
@@ -1184,9 +1245,7 @@ export function ReviewWorkbenchPage() {
                         danger={isReviewedView}
                         icon={isReviewedView ? <RollbackOutlined /> : undefined}
                         loading={applying}
-                        disabled={
-                          selectedIds.length === 0 || (!isReviewedView && needsClassification)
-                        }
+                        disabled={selectedIds.length === 0}
                         onClick={runPrimary}
                       >
                         <kbd className="review-key">A</kbd>
@@ -1236,29 +1295,39 @@ export function ReviewWorkbenchPage() {
                       <Button type="text" size="small" icon={<QuestionCircleOutlined />} />
                     </Popover>
                   </div>
-                  {needsClassification && (
-                    <div className="review-actions-row review-actions-row--classify">
-                      <span className="review-actions-label">归类到</span>
+                  {/* 移动到板块是常驻动作，不再只在「归错地方」那一组出现：分错板块的
+                      对象哪一组里都可能有，得随时能移走。归错地方的那一组会被高亮。 */}
+                  {!isRelation && (
+                    <div
+                      className={`review-actions-row review-actions-row--classify${
+                        isStranded ? " review-actions-row--urgent" : ""
+                      }`}
+                    >
+                      <span className="review-actions-label">移动到</span>
                       <Select
                         size="small"
                         showSearch
+                        allowClear
                         optionFilterProp="label"
-                        placeholder="选择业务板块"
+                        placeholder={isStranded ? "选择业务板块" : "选择目标板块"}
                         style={{ minWidth: 210 }}
-                        value={classifyTarget}
-                        onChange={setClassifyTarget}
-                        options={classifyTargets}
-                        notFoundContent="本体里还没有业务板块"
+                        value={moveTarget}
+                        onChange={setMoveTarget}
+                        options={moveTargets}
+                        notFoundContent="本体里还没有其他板块"
                       />
                       <Button
-                        type="primary"
+                        type={isStranded ? "primary" : "default"}
                         size="small"
                         icon={<PartitionOutlined />}
-                        disabled={applying || selectedIds.length === 0 || !classifyTarget}
-                        onClick={classifyGroup}
+                        disabled={applying || selectedIds.length === 0 || !moveTarget}
+                        onClick={moveGroup}
                       >
-                        归类并确认 {selectedIds.length} 个
+                        移动并确认 {selectedIds.length} 个
                       </Button>
+                      {isStranded && (
+                        <span className="review-actions-hint">{STRAND_HINT}</span>
+                      )}
                     </div>
                   )}
                   {!isRelation && (

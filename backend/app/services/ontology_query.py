@@ -609,7 +609,7 @@ class OntologyQueryService:
 
         scope / q 过滤与 ``list_relation_types`` 完全一致；聚合在 Python 内完成
         （SQLite 无 array_agg，且 scope 行数有限），并对基数/结构类型套用与
-        ``_to_relation_out`` 相同的归一化，保证列表与详情三元组口径一致。
+        ``_to_relation_out`` 相同的归一化，保证列表与详情口径一致。
         """
         query = db.query(RelationType)
         query = self._apply_ontology_scope(
@@ -1165,7 +1165,7 @@ class OntologyQueryService:
             cluster.cross_relation_count = cross_counts.get(cluster.id, 0)
 
         # 稳定坐标：对"业务模块 + 枢纽"构成的宏观图跑一次确定性力导向布局。
-        # 兜底板块（系统表/技术表/待归类）不参与——它们不画进概览图，让它们占位只会
+        # 兜底板块（系统表/公共主数据）不参与——它们不画进概览图，让它们占位只会
         # 在业务模块之间留下大片空洞。它们的 layout 保持 None，前端也不会去读。
         layout_cluster_ids = {c.id for c in clusters if c.kind == SEGMENT_KIND_BUSINESS}
         layout_nodes = sorted(layout_cluster_ids) + [h.id for h in hub_nodes]
@@ -2079,8 +2079,10 @@ class OntologyQueryService:
             cursor_sort_key,
             sort_key,
         )
-        from app.services.segment_kinds import SEGMENT_KIND_PENDING
-        from app.services.segment_placement import role_stays_pending
+        from app.services.segment_kinds import (
+            SEGMENT_KIND_SYSTEM,
+            is_business_role,
+        )
 
         is_relation = kind == "relation"
         rows = (
@@ -2171,10 +2173,10 @@ class OntologyQueryService:
                 segment_name=group.segment_name,
                 # 未接入板块的那一桶没有 kind（它压根不在任何板块里），给空串。
                 segment_kind=segment_kinds.get(group.segment_id or "", ""),
-                requires_classification=(
+                stranded_in_system=(
                     not is_relation
-                    and segment_kinds.get(group.segment_id or "") == SEGMENT_KIND_PENDING
-                    and role_stays_pending(group.table_role)
+                    and segment_kinds.get(group.segment_id or "") == SEGMENT_KIND_SYSTEM
+                    and is_business_role(group.table_role)
                 ),
                 table_role=group.table_role,
                 name_family=group.name_family,
@@ -2307,18 +2309,20 @@ class OntologyQueryService:
         # 按待审核数量降序排序（未完成的排在前面）
         segment_progress_list.sort(key=lambda x: (-x.needs_review_count, x.segment_name))
 
-        # 「待归类业务对象」板块：判成业务对象却连不成簇的表都压在这里。它们即使角色
-        # 被确认过也没有真正判完——不属于任何业务模块，进不了业务地图。门禁上线前留下
-        # 的那批（已确认却仍在这个板块里）要能被单独捞出来重判，所以单列一个数。
-        from app.services.segment_kinds import SEGMENT_KIND_PENDING
+        # 归错地方的：业务对象/关系表压在系统表里。规矩是业务对象一定在业务板块下，
+        # 所以这批没归好位——机器按邻居与命名族都推不出该去哪，只能等人移出来。
+        # 其中已被确认过的那部分不在待判队列里，只能靠这个数字捞回来。
+        from app.services.segment_kinds import SEGMENT_KIND_SYSTEM, is_business_role
 
-        pending_segment_ids = {
-            seg.id for seg in segments if (seg.kind or "") == SEGMENT_KIND_PENDING
+        system_segment_ids = {
+            seg.id for seg in segments if (seg.kind or "") == SEGMENT_KIND_SYSTEM
         }
-        unclassified = [
-            obj for obj in all_objects if obj.segment_id in pending_segment_ids
+        stranded = [
+            obj
+            for obj in all_objects
+            if obj.segment_id in system_segment_ids and is_business_role(obj.table_role)
         ]
-        unclassified_reviewed = sum(1 for obj in unclassified if not obj.needs_review)
+        stranded_reviewed = sum(1 for obj in stranded if not obj.needs_review)
 
         return ReviewModeStats(
             total_objects=total_objects,
@@ -2334,8 +2338,8 @@ class OntologyQueryService:
             ),
             unsegmented_relation_total=relation_total_by_seg.get(None, 0),
             unsegmented_relation_pending=relation_pending_by_seg.get(None, 0),
-            unclassified_total=len(unclassified),
-            unclassified_reviewed=unclassified_reviewed,
+            stranded_total=len(stranded),
+            stranded_reviewed=stranded_reviewed,
             total_relations=len(all_relations),
             relation_needs_review_count=relation_needs_review_count,
             reviewed_relation_count=len(all_relations) - relation_needs_review_count,
