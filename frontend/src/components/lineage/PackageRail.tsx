@@ -130,7 +130,13 @@ export function PackageRail({
                   cancelText="取消"
                   onConfirm={() => onDelete(pkg.id)}
                 >
-                  <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="删除" />
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    aria-label="删除"
+                  />
                 </Popconfirm>
               </span>
             </li>
