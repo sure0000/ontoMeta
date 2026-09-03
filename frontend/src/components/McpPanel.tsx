@@ -6,7 +6,6 @@ import {
   Space,
   Statistic,
   Table,
-  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -43,7 +42,12 @@ function RoleTag({ role }: { role: string | null }) {
   return <Tag color={ROLE_COLOR[role] ?? "default"}>{role}</Tag>;
 }
 
-/** MCP 服务管理：功能清单、远程连接、服务状态、审计、统计。 */
+/**
+ * MCP 服务管理：连接与状态、功能清单、审计、统计。
+ *
+ * 用**垂直堆叠的独立卡片**而非内嵌 Tabs——设置页容器宽度受限，内嵌 Tabs 会把多余标签
+ * 折叠成「…」，看起来像功能残缺。堆叠卡片与本页其它面板（PrincipalsPanel）风格一致。
+ */
 export function McpPanel() {
   const [info, setInfo] = useState<McpServiceInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -64,7 +68,6 @@ export function McpPanel() {
   }, [loadInfo]);
 
   const httpEnabled = info?.transports.http.enabled ?? false;
-  // 连接地址按当前页面地址推测；前后端不同源（如开发时后端在 :8000）时用户可改。
   const [endpoint, setEndpoint] = useState("");
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -72,91 +75,6 @@ export function McpPanel() {
     }
   }, []);
 
-  return (
-    <SectionCard
-      title="MCP 服务"
-      icon={<ApiOutlined />}
-      extra={
-        <Button
-          size="small"
-          icon={<ReloadOutlined />}
-          onClick={() => void loadInfo()}
-          loading={loading}
-        >
-          刷新
-        </Button>
-      }
-    >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="MCP 把本项目的本体/查询/任务能力暴露给通用 agent（Claude Desktop、Cursor、Claude Code）"
-        description="通用 agent 是 MCP 的『客户端』——配置在它们那边，不在本页。本页用于查看 MCP 提供哪些能力、如何远程连接、以及调用审计与统计。"
-      />
-      <Tabs
-        items={[
-          {
-            key: "connect",
-            label: (
-              <span>
-                <ApiOutlined /> 连接与状态
-              </span>
-            ),
-            children: (
-              <ConnectAndStatus
-                info={info}
-                endpoint={endpoint}
-                setEndpoint={setEndpoint}
-                httpEnabled={httpEnabled}
-              />
-            ),
-          },
-          {
-            key: "tools",
-            label: (
-              <span>
-                <ToolOutlined /> 功能清单
-                {info ? `（${info.tool_count}）` : ""}
-              </span>
-            ),
-            children: <ToolCatalog tools={info?.tools ?? []} loading={loading} />,
-          },
-          {
-            key: "audit",
-            label: (
-              <span>
-                <AuditOutlined /> 审计日志
-              </span>
-            ),
-            children: <AuditTable />,
-          },
-          {
-            key: "stats",
-            label: (
-              <span>
-                <BarChartOutlined /> 使用统计
-              </span>
-            ),
-            children: <StatsView />,
-          },
-        ]}
-      />
-    </SectionCard>
-  );
-}
-
-function ConnectAndStatus({
-  info,
-  endpoint,
-  setEndpoint,
-  httpEnabled,
-}: {
-  info: McpServiceInfo | null;
-  endpoint: string;
-  setEndpoint: (v: string) => void;
-  httpEnabled: boolean;
-}) {
   const desktopConfig = useMemo(
     () =>
       JSON.stringify(
@@ -176,110 +94,144 @@ function ConnectAndStatus({
   );
 
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size="middle">
-      <Descriptions bordered size="small" column={2} title="服务状态">
-        <Descriptions.Item label="本地 stdio">
-          <Tag color="green">始终可用</Tag>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            客户端以子进程拉起（同机）
-          </Text>
-        </Descriptions.Item>
-        <Descriptions.Item label="远程 HTTP">
-          {httpEnabled ? (
-            <Tag color="green">已启用</Tag>
-          ) : (
-            <Tag color="default">未启用</Tag>
-          )}
-        </Descriptions.Item>
-        <Descriptions.Item label="远程匿名访问">
-          {info?.transports.http.allow_anonymous ? (
-            <Tag color="orange">允许</Tag>
-          ) : (
-            <Tag color="green">需令牌</Tag>
-          )}
-        </Descriptions.Item>
-        <Descriptions.Item label="匿名默认角色">
-          <RoleTag role={info?.default_role ?? null} />
-        </Descriptions.Item>
-        <Descriptions.Item label="限流（默认）">
-          {info?.rate_limit.enabled
-            ? `${info.rate_limit.default_per_minute} 次/分`
-            : "关闭"}
-        </Descriptions.Item>
-        <Descriptions.Item label="限流（execute_sql）">
-          {info?.rate_limit.enabled
-            ? `${info.rate_limit.execute_sql_per_minute} 次/分`
-            : "关闭"}
-        </Descriptions.Item>
-        <Descriptions.Item label="审计表">
-          {info?.audit.reachable ? (
-            <Tag color="green">可达</Tag>
-          ) : (
-            <Tooltip title={info?.audit.error ?? ""}>
-              <Tag color="red">不可达</Tag>
-            </Tooltip>
-          )}
-        </Descriptions.Item>
-        <Descriptions.Item label="工具数">{info?.tool_count ?? "—"}</Descriptions.Item>
-      </Descriptions>
-
-      {!httpEnabled && (
-        <Alert
-          type="warning"
-          showIcon
-          message="远程 HTTP 传输未启用，异地 agent 无法连接"
-          description="agent 与本项目不在同一台机器时需要它：在 backend/.env 设 MCP_HTTP_ENABLED=true（可选 MCP_HTTP_ALLOW_ANONYMOUS，默认要令牌）后重启后端。未启用时仅支持本机 stdio。"
-        />
-      )}
-
-      <div>
-        <Text strong>远程连接地址</Text>
-        <Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
-          按当前页面地址推测。若前后端不同源（如开发时后端在 :8000，或经反向代理），请替换为后端实际地址。路径末尾的斜杠不要去掉。
-        </Paragraph>
-        <Input
-          value={endpoint}
-          onChange={(e) => setEndpoint(e.target.value)}
-          addonBefore="URL"
-          style={{ maxWidth: 560 }}
-        />
-      </div>
-
-      <Alert
-        type="info"
-        showIcon
-        message="令牌 = 身份与权限"
-        description={
-          <span>
-            远程连接用 <Text code>Authorization: Bearer &lt;令牌&gt;</Text> 认证。令牌到「安全与鉴权 → 角色与令牌」新建一个<strong>最小权限</strong>主体（建议 reader；要让 agent 出提案用 editor、代跑 SQL 用 publisher），别把 Admin Token 交给 agent。
-          </span>
-        }
-      />
-
-      <div>
-        <Text strong>Claude Desktop / Cursor 配置示例</Text>
-        <Paragraph
-          copyable={{ text: desktopConfig }}
-          style={{ marginTop: 8 }}
-        >
-          <pre
-            style={{
-              background: "var(--om-bg-soft)",
-              border: "1px solid var(--om-border)",
-              padding: 12,
-              borderRadius: 6,
-              fontSize: 12,
-              overflowX: "auto",
-            }}
+    <>
+      <SectionCard
+        title="MCP 服务"
+        icon={<ApiOutlined />}
+        extra={
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={() => void loadInfo()}
+            loading={loading}
           >
-            {desktopConfig}
-          </pre>
-        </Paragraph>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          Claude Code：<Text code>{`claude mcp add ontometa -t http ${endpoint} -H "Authorization: Bearer <你的令牌>"`}</Text>
-        </Text>
-      </div>
-    </Space>
+            刷新
+          </Button>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="MCP 把本项目的本体/查询/任务能力暴露给通用 agent（Claude Desktop、Cursor、Claude Code）"
+          description="通用 agent 是 MCP 的『客户端』——配置在它们那边，不在本页。本页用于查看 MCP 提供哪些能力、如何远程连接、以及调用审计与统计。"
+        />
+
+        <Descriptions
+          bordered
+          size="small"
+          column={{ xs: 1, sm: 2 }}
+          styles={{ label: { width: 120 } }}
+        >
+          <Descriptions.Item label="本地 stdio">
+            <Tag color="green">始终可用</Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="远程 HTTP">
+            {httpEnabled ? <Tag color="green">已启用</Tag> : <Tag>未启用</Tag>}
+          </Descriptions.Item>
+          <Descriptions.Item label="远程匿名访问">
+            {info?.transports.http.allow_anonymous ? (
+              <Tag color="orange">允许</Tag>
+            ) : (
+              <Tag color="green">需令牌</Tag>
+            )}
+          </Descriptions.Item>
+          <Descriptions.Item label="匿名默认角色">
+            <RoleTag role={info?.default_role ?? null} />
+          </Descriptions.Item>
+          <Descriptions.Item label="限流（默认）">
+            {info?.rate_limit.enabled
+              ? `${info.rate_limit.default_per_minute} 次/分`
+              : "关闭"}
+          </Descriptions.Item>
+          <Descriptions.Item label="限流（execute_sql）">
+            {info?.rate_limit.enabled
+              ? `${info.rate_limit.execute_sql_per_minute} 次/分`
+              : "关闭"}
+          </Descriptions.Item>
+          <Descriptions.Item label="审计表">
+            {info?.audit.reachable ? (
+              <Tag color="green">可达</Tag>
+            ) : (
+              <Tooltip title={info?.audit.error ?? ""}>
+                <Tag color="red">不可达</Tag>
+              </Tooltip>
+            )}
+          </Descriptions.Item>
+          <Descriptions.Item label="工具数">{info?.tool_count ?? "—"}</Descriptions.Item>
+        </Descriptions>
+
+        {!httpEnabled && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginTop: 16 }}
+            message="远程 HTTP 传输未启用，异地 agent 无法连接"
+            description="agent 与本项目不在同一台机器时需要它：在 backend/.env 设 MCP_HTTP_ENABLED=true（可选 MCP_HTTP_ALLOW_ANONYMOUS，默认要令牌）后重启后端。未启用时仅支持本机 stdio。"
+          />
+        )}
+
+        <div style={{ marginTop: 16 }}>
+          <Text strong>远程连接地址</Text>
+          <Paragraph type="secondary" style={{ margin: "4px 0 8px", fontSize: 12 }}>
+            按当前页面地址推测。若前后端不同源（如开发时后端在 :8000，或经反向代理），请替换为后端实际地址；路径末尾的斜杠不要去掉。
+          </Paragraph>
+          <Input
+            value={endpoint}
+            onChange={(e) => setEndpoint(e.target.value)}
+            addonBefore="URL"
+            style={{ maxWidth: 560 }}
+          />
+        </div>
+
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginTop: 16 }}
+          message="令牌 = 身份与权限"
+          description={
+            <span>
+              远程连接用 <Text code>Authorization: Bearer &lt;令牌&gt;</Text> 认证。令牌到「安全与鉴权 → 角色与令牌」新建一个<strong>最小权限</strong>主体（建议 reader；要出提案用 editor、代跑 SQL 用 publisher），别把 Admin Token 交给 agent。
+            </span>
+          }
+        />
+
+        <div style={{ marginTop: 16 }}>
+          <Text strong>Claude Desktop / Cursor 配置示例</Text>
+          <Paragraph copyable={{ text: desktopConfig }} style={{ marginTop: 8, marginBottom: 4 }}>
+            <pre
+              style={{
+                background: "var(--om-bg-soft)",
+                border: "1px solid var(--om-border)",
+                padding: 12,
+                borderRadius: 6,
+                fontSize: 12,
+                overflowX: "auto",
+                margin: 0,
+              }}
+            >
+              {desktopConfig}
+            </pre>
+          </Paragraph>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Claude Code：
+            <Text code copyable>{`claude mcp add ontometa -t http ${endpoint} -H "Authorization: Bearer <你的令牌>"`}</Text>
+          </Text>
+        </div>
+      </SectionCard>
+
+      <SectionCard title={`功能清单（${info?.tool_count ?? 0}）`} icon={<ToolOutlined />}>
+        <ToolCatalog tools={info?.tools ?? []} loading={loading} />
+      </SectionCard>
+
+      <SectionCard title="审计日志" icon={<AuditOutlined />}>
+        <AuditTable />
+      </SectionCard>
+
+      <SectionCard title="使用统计" icon={<BarChartOutlined />}>
+        <StatsView />
+      </SectionCard>
+    </>
   );
 }
 
@@ -291,6 +243,7 @@ function ToolCatalog({ tools, loading }: { tools: McpToolInfo[]; loading: boolea
       loading={loading}
       dataSource={tools}
       pagination={false}
+      scroll={{ x: 640 }}
       columns={[
         {
           title: "工具",
@@ -357,7 +310,7 @@ function AuditTable() {
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="small">
-      <Space>
+      <Space wrap>
         <Button
           size="small"
           type={deniedOnly ? "primary" : "default"}
@@ -448,11 +401,7 @@ function StatsView() {
       <Space wrap size="large">
         <Statistic title="总调用" value={t?.calls ?? 0} loading={loading} />
         <Statistic title="成功" value={t?.succeeded ?? 0} loading={loading} />
-        <Statistic
-          title="业务失败"
-          value={t?.business_failed ?? 0}
-          loading={loading}
-        />
+        <Statistic title="业务失败" value={t?.business_failed ?? 0} loading={loading} />
         <Statistic
           title="被拒"
           value={t?.denied ?? 0}
@@ -477,15 +426,15 @@ function StatsView() {
           loading={loading}
           dataSource={stats?.by_tool ?? []}
           pagination={false}
-          style={{ minWidth: 320 }}
+          style={{ minWidth: 300 }}
           columns={[
             {
               title: "工具",
               dataIndex: "tool_name",
               render: (v: string) => <Text code>{v}</Text>,
             },
-            { title: "调用", dataIndex: "calls", width: 80 },
-            { title: "被拒", dataIndex: "denied", width: 80 },
+            { title: "调用", dataIndex: "calls", width: 70 },
+            { title: "被拒", dataIndex: "denied", width: 70 },
           ]}
         />
         <Table
@@ -495,7 +444,7 @@ function StatsView() {
           loading={loading}
           dataSource={stats?.by_role ?? []}
           pagination={false}
-          style={{ minWidth: 220 }}
+          style={{ minWidth: 200 }}
           columns={[
             {
               title: "角色",
@@ -503,7 +452,7 @@ function StatsView() {
               render: (v: string) =>
                 v === "(anonymous)" ? <Tag>匿名</Tag> : <RoleTag role={v} />,
             },
-            { title: "调用", dataIndex: "calls", width: 80 },
+            { title: "调用", dataIndex: "calls", width: 70 },
           ]}
         />
       </Space>
