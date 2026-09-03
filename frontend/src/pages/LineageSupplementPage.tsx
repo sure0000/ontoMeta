@@ -93,7 +93,7 @@ export function LineageSupplementPage() {
   const isIsolated = (table: string) => isolatedSet.has(table);
 
   const pkg = packages.find((p) => p.id === pkgId) ?? null;
-  const selected = pkg ? (selection[pkg.id] ?? pkg.targets) : [];
+  const selected = useMemo(() => (pkg ? (selection[pkg.id] ?? pkg.targets) : []), [pkg, selection]);
   const pkgFrozen = Boolean(pkg && (pkg.applied || appliedScan[pkg.id]));
 
   /* ---------- 本次待写入 ---------- */

@@ -740,6 +740,180 @@
   justify-content: space-between;
 }
 
+/* ---------- 扫描结果的血缘图 ---------- */
+
+.lin-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-3);
+}
+
+.lin-detail-title {
+  font-size: var(--om-text-base);
+  font-weight: 600;
+}
+
+.lin-graph-wrap {
+  position: relative;
+}
+
+.lin-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px var(--om-space-4);
+  padding-bottom: var(--om-space-2);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+}
+
+.lin-graph-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lin-graph-legend-hint {
+  color: var(--om-text-tertiary);
+}
+
+.lin-swatch {
+  width: 14px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid var(--om-border-strong);
+  background: var(--om-surface);
+  display: inline-block;
+}
+
+.lin-swatch--target {
+  border-color: var(--om-primary-border);
+  background: var(--om-primary-soft);
+}
+
+.lin-swatch--source {
+  background: var(--om-surface);
+}
+
+.lin-swatch--blocked {
+  border: 0;
+  height: 0;
+  border-top: 2px dashed var(--om-warning);
+  border-radius: 0;
+}
+
+.lin-graph-toolbar {
+  top: 34px;
+}
+
+.lin-graph-canvas {
+  position: relative;
+  height: clamp(320px, 46vh, 520px);
+  overflow: hidden;
+  background: var(--om-bg-soft);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.lin-graph-canvas:active {
+  cursor: grabbing;
+}
+
+/* 只读图不要网格点：没有拖拽对齐这件事，点阵只是噪声 */
+.lin-world--flat {
+  background-image: none;
+}
+
+.lin-gnode {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius-sm);
+  background: var(--om-surface);
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-secondary);
+  cursor: pointer;
+  box-shadow: var(--om-shadow-sm);
+  transition:
+    opacity 0.15s,
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.lin-gnode--target {
+  border-color: var(--om-primary-border);
+  background: var(--om-primary-soft);
+  color: var(--om-primary);
+  font-weight: 600;
+}
+
+.lin-gnode--faded {
+  opacity: 0.32;
+}
+
+.lin-gnode--focus {
+  border-color: var(--om-primary);
+  box-shadow: 0 0 0 2px var(--om-primary-soft);
+  opacity: 1;
+}
+
+.lin-gnode-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-wire--faded {
+  opacity: 0.2;
+}
+
+/* 聚焦面板：位置与画布补录的检查器一致，只是内容换成"这张表的上下游 + 键" */
+.lin-inspector--graph {
+  top: 46px;
+  max-height: calc(100% - 60px);
+  overflow-y: auto;
+  width: 290px;
+}
+
+.lin-focus-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-focus-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lin-focus-list li {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
 /* ---------- 画布 ---------- */
 
 .lin-canvas-wrap {

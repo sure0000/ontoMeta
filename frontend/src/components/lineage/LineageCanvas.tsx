@@ -10,6 +10,7 @@ import {
 import { Button, Tag, Tooltip } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
+import { assignLayers, curve } from "./graphLayout";
 import { columnsOf } from "./prototypeData";
 
 /**
@@ -88,12 +89,6 @@ function portY(node: CanvasNode, col: string | null) {
   const index = columnsOf(node.table).findIndex((c) => c.name === col);
   if (index < 0) return node.y + HEADER_H / 2;
   return node.y + HEADER_H + BODY_PAD + index * ROW_H + ROW_H / 2;
-}
-
-function curve(x1: number, y1: number, x2: number, y2: number) {
-  // 目标在左侧时给更大的控制点偏移，线才绕得开、不糊在节点上
-  const dx = x2 >= x1 ? Math.min(Math.max((x2 - x1) / 2, 30), 120) : 90;
-  return `M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
 }
 
 export function LineageCanvas({ nodes, edges, setNodes, setEdges, isolated, frozen }: Props) {
@@ -265,20 +260,10 @@ export function LineageCanvas({ nodes, edges, setNodes, setEdges, isolated, froz
   /* ---------- 布局 / 视图 ---------- */
 
   const autoLayout = () => {
-    const layer = new Map<string, number>();
-    nodes.forEach((n) => layer.set(n.table, 0));
-    for (let i = 0; i < nodes.length; i += 1) {
-      let moved = false;
-      edges.forEach((e) => {
-        const from = layer.get(e.from) ?? 0;
-        const to = layer.get(e.to) ?? 0;
-        if (to < from + 1) {
-          layer.set(e.to, from + 1);
-          moved = true;
-        }
-      });
-      if (!moved) break;
-    }
+    const layer = assignLayers(
+      nodes.map((n) => n.table),
+      edges,
+    );
     const byLayer = new Map<number, CanvasNode[]>();
     nodes.forEach((n) => {
       const l = layer.get(n.table) ?? 0;

@@ -6,9 +6,10 @@ import {
   NodeIndexOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
-import { Button, Collapse, Table, Tag, Upload } from "antd";
+import { Button, Collapse, Segmented, Table, Tag, Upload } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { ScanGraph } from "./ScanGraph";
 import { DOMAIN_FACTS, groupsOf, uncoveredIsolated } from "./prototypeData";
 import type { ScanGroup, SqlPackage } from "./prototypeData";
 
@@ -44,6 +45,8 @@ function countEdges(groups: ScanGroup[]) {
   };
 }
 
+type DetailView = "list" | "graph";
+
 export function ScanReport({
   pkg,
   uploading,
@@ -68,6 +71,7 @@ export function ScanReport({
     return { edges, affected: tables.size, resolved, after: DOMAIN_FACTS.isolated - resolved };
   }, [groups]);
 
+  const [view, setView] = useState<DetailView>("list");
   const done = pkg?.applied;
   const uncovered = useMemo(() => uncoveredIsolated(), []);
 
@@ -230,47 +234,64 @@ export function ScanReport({
         </div>
       </div>
 
-      {/* 明细：按落点分组，不逐条列——一个包上百条边，逐条列没人读得完 */}
-      <Table<ScanGroup>
-        className="lin-scan-table"
-        size="small"
-        rowKey="target"
-        columns={columns}
-        dataSource={groups}
-        pagination={false}
-        rowSelection={{
-          selectedRowKeys: selected,
-          onChange: (keys) => onSelectedChange(keys as string[]),
-          getCheckboxProps: () => ({ disabled: frozen }),
-        }}
-        expandable={{
-          expandedRowRender: (row) => (
-            <div className="lin-edge-list">
-              {row.edges.map((edge) => (
-                <div
-                  key={edge.id}
-                  className={`lin-edge-line${edge.state !== "ok" ? " lin-edge-line--off" : ""}`}
-                >
-                  <span className="lin-node">{edge.src}</span>
-                  <ArrowRightOutlined className="lin-flow-arrow" />
-                  <span className="lin-node lin-node--target">{edge.dst}</span>
-                  {edge.key ? (
-                    <span className="lin-key">{edge.key}</span>
-                  ) : (
-                    <Tag variant="filled">无 JOIN 条件 · 仅表级</Tag>
-                  )}
-                  {edge.state === "blocked" && (
-                    <Tag color="warning" variant="filled">
-                      {edge.reason}
-                    </Tag>
-                  )}
-                  {edge.state === "skipped" && <Tag variant="filled">{edge.reason}</Tag>}
-                </div>
-              ))}
-            </div>
-          ),
-        }}
-      />
+      {/* 明细两种看法：列表用来逐条核对与勾选，图用来看形状（谁喂谁、哪张表是枢纽） */}
+      <div className="lin-detail-head">
+        <span className="lin-detail-title">扫出的血缘 · {groups.length} 个落点</span>
+        <Segmented
+          size="small"
+          value={view}
+          onChange={(value) => setView(value as DetailView)}
+          options={[
+            { label: "列表", value: "list" },
+            { label: "血缘图", value: "graph" },
+          ]}
+        />
+      </div>
+
+      {view === "graph" && <ScanGraph groups={groups} selected={selected} />}
+
+      {view === "list" && (
+        <Table<ScanGroup>
+          className="lin-scan-table"
+          size="small"
+          rowKey="target"
+          columns={columns}
+          dataSource={groups}
+          pagination={false}
+          rowSelection={{
+            selectedRowKeys: selected,
+            onChange: (keys) => onSelectedChange(keys as string[]),
+            getCheckboxProps: () => ({ disabled: frozen }),
+          }}
+          expandable={{
+            expandedRowRender: (row) => (
+              <div className="lin-edge-list">
+                {row.edges.map((edge) => (
+                  <div
+                    key={edge.id}
+                    className={`lin-edge-line${edge.state !== "ok" ? " lin-edge-line--off" : ""}`}
+                  >
+                    <span className="lin-node">{edge.src}</span>
+                    <ArrowRightOutlined className="lin-flow-arrow" />
+                    <span className="lin-node lin-node--target">{edge.dst}</span>
+                    {edge.key ? (
+                      <span className="lin-key">{edge.key}</span>
+                    ) : (
+                      <Tag variant="filled">无 JOIN 条件 · 仅表级</Tag>
+                    )}
+                    {edge.state === "blocked" && (
+                      <Tag color="warning" variant="filled">
+                        {edge.reason}
+                      </Tag>
+                    )}
+                    {edge.state === "skipped" && <Tag variant="filled">{edge.reason}</Tag>}
+                  </div>
+                ))}
+              </div>
+            ),
+          }}
+        />
+      )}
 
       <div className="lin-scan-tail">
         {/* 第二个结论：所有包都没提到的孤岛表，只能手工连 */}
