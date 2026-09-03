@@ -172,17 +172,19 @@ def required_role(method: str, path: str) -> str:
     return _METHOD_DEFAULTS.get(method.upper(), "publisher")
 
 
-def resolve_principal(request: Request):
-    """按请求头解析主体。
+def resolve_principal_token(token: str | None) -> tuple[str | None, str | None]:
+    """裸 Token → ``(role, principal_id | None)``。传输无关，供 HTTP 与 MCP stdio 共用。
 
-    返回 ``(role, principal_or_None)``；``ONTOMETA_ADMIN_TOKEN`` 为 superuser，
-    等价 publisher，且不查库——保证未配置 principals 时行为与改造前完全一致。
-    解析失败返回 ``(None, None)``。
+    ``ONTOMETA_ADMIN_TOKEN`` 为 superuser，等价 publisher，且不查库——保证未配置
+    principals 时行为与改造前完全一致。Token 缺失/不匹配任何主体返回 ``(None, None)``。
+
+    这里是**唯一**的 Token→角色判定处：MCP 侧不能另抄一份哈希/比对逻辑，否则两条
+    入口的鉴权语义迟早分叉（宽的那条就是实际边界）。
     """
     from app.database import SessionLocal
     from app.models.principal import Principal
 
-    token = extract_admin_token(request)
+    token = (token or "").strip()
     if not token:
         return None, None
 
@@ -201,8 +203,19 @@ def resolve_principal(request: Request):
             return None, None
         principal.last_used_at = datetime.now(timezone.utc)
         role = principal.role
+        principal_id = principal.id
         db.commit()
-        return role, principal.id
+        return role, principal_id
+
+
+def resolve_principal(request: Request):
+    """按请求头解析主体。
+
+    返回 ``(role, principal_or_None)``；``ONTOMETA_ADMIN_TOKEN`` 为 superuser，
+    等价 publisher，且不查库——保证未配置 principals 时行为与改造前完全一致。
+    解析失败返回 ``(None, None)``。
+    """
+    return resolve_principal_token(extract_admin_token(request))
 
 
 def require_role(minimum: str):

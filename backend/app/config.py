@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     # 外部 API Key 哈希 pepper（可选，变更后须重新生成全部 App Key）
     api_key_hash_pepper: str | None = None
 
+    # ---- MCP 服务（stdio）鉴权 ----
+    # stdio 传输没有逐请求 HTTP 头：整条会话（一个子进程）用一个身份。身份来自启动 MCP
+    # 服务器的客户端（Claude Desktop / Cursor）在其配置的 env 块里传入的 Token——与
+    # ONTOMETA_ADMIN_TOKEN / Principal Token 同价，由 app.auth.resolve_principal_token 解析。
+    ontometa_mcp_token: str | None = None
+    # 未提供 Token 时授予的角色。本地 stdio 是用户自己拉起的子进程，给到 reader 级别
+    # 让只读查询开箱即用，但同步/物化提案与代跑 SQL 仍按各工具的 required_role 拦住。
+    # 置空字符串 = 无匿名身份（所有需要角色的工具一律 403），供锁定部署使用。
+    mcp_default_role: str = "reader"
+
     datahub_gms_url: str = "http://localhost:8080"
     datahub_frontend_url: str = "http://localhost:9002"
     datahub_token: str | None = None

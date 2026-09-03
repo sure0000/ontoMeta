@@ -58,6 +58,7 @@ from app.models.agent import (
     HIGH_RISK_KINDS,
     PipelineStatus,
 )
+from app.models.mcp_audit import McpAuditLog
 from app.models.principal import Principal, Role, role_rank, role_satisfies
 from app.models.governance import GovernanceStandardRecord
 from app.models.semantic_index import SemanticIndexEntry
@@ -164,4 +165,5 @@ __all__ = [
     "DimensionalModel",
     "LineagePackage",
     "LineagePackageEdge",
+    "McpAuditLog",
 ]
