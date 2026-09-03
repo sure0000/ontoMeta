@@ -13,6 +13,9 @@ Jinja2>=3.1.0
 paramiko>=3.4.0
 pytest>=8.0.0
 
+# --- MCP Server ---
+mcp>=0.9.0              # Model Context Protocol SDK
+
 # --- 数仓引擎驱动 ---
 # Data App / Chat BI 直连数仓、数据源连接测试时需要。已在本环境装齐。
 # Hive / Kyuubi：别用 pyhive[hive] extra——它带的 sasl 是 C 扩展，Python≥3.12

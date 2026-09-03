@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ontometa": {
+      "command": "python",
+      "args": [
+        "-m",
+        "app.mcp.server"
+      ],
+      "cwd": "/Users/me/Documents/ontoMeta/backend",
+      "env": {
+        "PYTHONPATH": "/Users/me/Documents/ontoMeta/backend"
+      }
+    }
+  }
+}
