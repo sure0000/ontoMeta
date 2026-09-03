@@ -1,7 +1,6 @@
-import { CloudUploadOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Button, Tag, Tooltip } from "antd";
-import { groupsOf } from "./prototypeData";
-import type { SqlPackage } from "./prototypeData";
+import { CloudUploadOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Button, Popconfirm, Tag, Tooltip } from "antd";
+import type { LineagePackageRow } from "../../types";
 
 /**
  * 代码包历史。
@@ -12,47 +11,50 @@ import type { SqlPackage } from "./prototypeData";
  */
 
 interface Props {
-  packages: SqlPackage[];
+  packages: LineagePackageRow[];
   currentId: string | null;
-  appliedInSession: Record<string, { edges: number; resolved: number }>;
   scanningId: string | null;
+  uploading: boolean;
   onSelect: (id: string) => void;
   onUpload: () => void;
   onRescan: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
-function edgeStats(pkg: SqlPackage) {
-  const edges = groupsOf(pkg).flatMap((g) => g.edges);
-  return {
-    ok: edges.filter((e) => e.state === "ok").length,
-    targets: pkg.targets.length,
-    isolated: groupsOf(pkg).filter((g) => g.isolated).length,
-  };
+function sizeLabel(bytes: number) {
+  if (!bytes) return "—";
+  const mb = bytes / 1024 / 1024;
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 export function PackageRail({
   packages,
   currentId,
-  appliedInSession,
   scanningId,
+  uploading,
   onSelect,
   onUpload,
   onRescan,
+  onDelete,
 }: Props) {
   return (
     <>
       <div className="lin-rail-controls">
-        <Button size="small" type="primary" icon={<CloudUploadOutlined />} block onClick={onUpload}>
+        <Button
+          size="small"
+          type={uploading ? "default" : "primary"}
+          icon={<CloudUploadOutlined />}
+          block
+          onClick={onUpload}
+        >
           上传新代码包
         </Button>
       </div>
 
       <ul className="lin-pkg-list">
         {packages.map((pkg) => {
-          const stats = edgeStats(pkg);
-          const session = appliedInSession[pkg.id];
-          const history = session ? { ...session, at: "刚刚" } : pkg.applied;
-          const partial = history ? history.edges < stats.ok : false;
+          const applied = pkg.applied_edges > 0;
+          const partial = pkg.status === "partial";
           const scanning = scanningId === pkg.id;
 
           return (
@@ -70,9 +72,11 @@ export function PackageRail({
                     <Tag color="processing" variant="filled">
                       扫描中
                     </Tag>
-                  ) : history ? (
+                  ) : applied ? (
                     <Tag color={partial ? "warning" : "success"} variant="filled">
-                      {partial ? `部分上报 ${history.edges}/${stats.ok}` : "已上报"}
+                      {partial
+                        ? `部分上报 ${pkg.applied_edges}/${pkg.applied_edges + pkg.edges_ok}`
+                        : "已上报"}
                     </Tag>
                   ) : (
                     <Tag variant="filled">未上报</Tag>
@@ -80,39 +84,55 @@ export function PackageRail({
                 </span>
 
                 <span className="lin-pkg-meta">
-                  {pkg.uploadedAt} · {pkg.sqlFiles} 个 .sql · {pkg.size}
+                  {(pkg.uploaded_at ?? "").replace("T", " ").slice(0, 16)} · {pkg.sql_files} 个 .sql
+                  · {sizeLabel(pkg.size_bytes)}
                 </span>
 
                 <span className="lin-pkg-nums">
-                  <b>{stats.ok}</b> 条边
+                  <b>{pkg.edges_ok}</b> 条边
                   <i />
-                  {stats.targets} 个落点
-                  {stats.isolated > 0 && (
+                  {pkg.targets} 个落点
+                  {pkg.isolated_targets > 0 && (
                     <>
                       <i />
-                      {stats.isolated} 张孤岛
+                      {pkg.isolated_targets} 张孤岛
                     </>
                   )}
                 </span>
 
-                {history && (
+                {applied && (
                   <span className="lin-pkg-applied">
-                    {history.at} 上报 {history.edges} 条 · 当时 {history.resolved} 张脱离孤岛
+                    {(pkg.applied_at ?? "").replace("T", " ").slice(0, 16)} 上报 {pkg.applied_edges}{" "}
+                    条 · 当时 {pkg.applied_resolved} 张脱离孤岛
                   </span>
                 )}
               </button>
 
-              <Tooltip title="用当前解析器重新扫一遍">
-                <Button
-                  className="lin-pkg-rescan"
-                  size="small"
-                  type="text"
-                  icon={<ReloadOutlined />}
-                  loading={scanning}
-                  onClick={() => onRescan(pkg.id)}
-                  aria-label="重新扫描"
-                />
-              </Tooltip>
+              <span className="lin-pkg-acts">
+                <Tooltip title="用当前解析器重新扫一遍">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<ReloadOutlined />}
+                    loading={scanning}
+                    onClick={() => onRescan(pkg.id)}
+                    aria-label="重新扫描"
+                  />
+                </Tooltip>
+                <Popconfirm
+                  title="删除这条记录？"
+                  description={
+                    applied
+                      ? "已写进 DataHub 的血缘边不会被撤销，只是本地不再留档。"
+                      : "只删本地记录与归档包。"
+                  }
+                  okText="删除"
+                  cancelText="取消"
+                  onConfirm={() => onDelete(pkg.id)}
+                >
+                  <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="删除" />
+                </Popconfirm>
+              </span>
             </li>
           );
         })}

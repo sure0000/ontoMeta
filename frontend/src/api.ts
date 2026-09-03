@@ -33,6 +33,13 @@ import type {
   DatahubSettings,
   DomainContext,
   DomainContextDetail,
+  LineageApplyReceipt,
+  LineageColumn,
+  LineageOverview,
+  LineagePackageDetail,
+  LineagePackageRow,
+  LineageTableRow,
+  ManualLineageEdge,
   DraftGenerationScope,
   DraftGenerationSettings,
   DraftProgress,
@@ -198,7 +205,99 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
 }
 
+/**
+ * multipart 上传。**不能复用 request()**：它会强设 Content-Type: application/json，
+ * 而 multipart 的 boundary 必须由浏览器自己写进头里。
+ */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  const headers = new Headers();
+  const adminToken = getAdminToken();
+  if (adminToken) headers.set("X-Admin-Token", adminToken);
+
+  let response: Response;
+  try {
+    response = await fetch(path, { method: "POST", body: form, headers });
+  } catch (err) {
+    throw new Error(
+      `无法连接服务端 (${path})：${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!response.ok) {
+    const raw = await response.text();
+    let detail = raw || `上传失败：HTTP ${response.status}`;
+    try {
+      const parsed = JSON.parse(raw) as { detail?: string };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) detail = parsed.detail;
+    } catch {
+      detail = `服务端返回了非 JSON 响应（HTTP ${response.status}）：${raw.slice(0, 120)}`;
+    }
+    throw new ApiError(detail, response.status);
+  }
+  return (await response.json()) as T;
+}
+
 export const api = {
+  /* ---------------------------------------------------------- 血缘补录 */
+
+  lineageOverview: (domainId: string, refresh = false) =>
+    request<LineageOverview>(
+      `/api/lineage/domains/${domainId}/overview${refresh ? "?refresh=true" : ""}`,
+    ),
+
+  lineageTables: (
+    domainId: string,
+    params: { onlyIsolated?: boolean; q?: string; limit?: number } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (params.onlyIsolated) query.set("only_isolated", "true");
+    if (params.q) query.set("q", params.q);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query}` : "";
+    return request<LineageTableRow[]>(`/api/lineage/domains/${domainId}/tables${suffix}`);
+  },
+
+  lineageColumns: (domainId: string, urn: string) =>
+    request<LineageColumn[]>(
+      `/api/lineage/domains/${domainId}/columns?urn=${encodeURIComponent(urn)}`,
+    ),
+
+  lineageUncoveredIsolated: (domainId: string) =>
+    request<string[]>(`/api/lineage/domains/${domainId}/uncovered-isolated`),
+
+  listLineagePackages: (domainId: string, kind = "scan") =>
+    request<LineagePackageRow[]>(`/api/lineage/domains/${domainId}/packages?kind=${kind}`),
+
+  uploadLineagePackage: (domainId: string, file: File, dialect: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("dialect", dialect);
+    return upload<LineagePackageDetail>(`/api/lineage/domains/${domainId}/packages`, form);
+  },
+
+  getLineagePackage: (packageId: string) =>
+    request<LineagePackageDetail>(`/api/lineage/packages/${packageId}`),
+
+  rescanLineagePackage: (packageId: string, dialect?: string) =>
+    request<LineagePackageDetail>(
+      `/api/lineage/packages/${packageId}/rescan${dialect ? `?dialect=${dialect}` : ""}`,
+      { method: "POST" },
+    ),
+
+  deleteLineagePackage: (packageId: string) =>
+    request<{ ok: boolean }>(`/api/lineage/packages/${packageId}`, { method: "DELETE" }),
+
+  applyLineagePackage: (packageId: string, targets?: string[]) =>
+    request<LineageApplyReceipt>(`/api/lineage/packages/${packageId}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ targets: targets ?? null }),
+    }),
+
+  applyManualLineage: (domainId: string, edges: ManualLineageEdge[], label?: string) =>
+    request<LineageApplyReceipt>(`/api/lineage/domains/${domainId}/manual-apply`, {
+      method: "POST",
+      body: JSON.stringify({ edges, label: label ?? null }),
+    }),
+
   listDomains: () => request<DomainContext[]>("/api/domains"),
   getDomain: (id: string) => request<DomainContextDetail>(`/api/domains/${id}`),
   createManualObject: (
@@ -611,9 +710,7 @@ export const api = {
     ),
 
   getSegment: (id: string, publishedOnly?: boolean) =>
-    request<SegmentDetail>(
-      `/api/segments/${id}${buildQuery({ published_only: publishedOnly })}`,
-    ),
+    request<SegmentDetail>(`/api/segments/${id}${buildQuery({ published_only: publishedOnly })}`),
   updateSegment: (
     id: string,
     body: { name?: string; display_name?: string; description?: string; operator?: string },
@@ -654,11 +751,7 @@ export const api = {
     ),
 
   /** 批量置关系复核状态（与对象批量对称）。 */
-  batchUpdateRelationTypes: (body: {
-    ids: string[];
-    needs_review?: boolean;
-    operator?: string;
-  }) =>
+  batchUpdateRelationTypes: (body: { ids: string[]; needs_review?: boolean; operator?: string }) =>
     request<{ updated: number; items: RelationType[] }>(`/api/relation-types/batch`, {
       method: "PATCH",
       body: JSON.stringify(body),
@@ -1078,9 +1171,7 @@ export const api = {
     ),
 
   getChatBiAgentRun: (conversationId: string, runId: string) =>
-    request<ChatBiAgentRunDetail>(
-      `/api/chat-bi/conversations/${conversationId}/runs/${runId}`,
-    ),
+    request<ChatBiAgentRunDetail>(`/api/chat-bi/conversations/${conversationId}/runs/${runId}`),
 
   /** P1：记录「本会话催生了某数据任务（治理制品）」，使会话可免 id 追踪任务。 */
   linkChatBiTask: (

@@ -2343,3 +2343,101 @@ export interface AgentKinds {
   registered: string[];
   high_risk: string[];
 }
+
+/* ---------------------------------------------------------------- 血缘补录 */
+
+/** 域的血缘家底：补录页只讲一个数——多少张表是孤岛。 */
+export interface LineageOverview {
+  domain_id: string;
+  domain_name: string;
+  platform?: string | null;
+  databases: string[];
+  total: number;
+  with_lineage: number;
+  isolated: number;
+}
+
+export interface LineageTableRow {
+  urn: string;
+  name: string;
+  platform?: string | null;
+  upstream: number;
+  downstream: number;
+  isolated: boolean;
+}
+
+export interface LineageColumn {
+  name: string;
+  data_type?: string | null;
+  is_primary_key: boolean;
+}
+
+/** ok=可上报 / blocked=表名对不上 DataHub / skipped=不在本域 */
+export type LineageEdgeState = "ok" | "blocked" | "skipped";
+
+export interface LineagePackageEdgeRow {
+  id: string;
+  source_table: string;
+  target_table: string;
+  join_key?: string | null;
+  source_file: string;
+  state: LineageEdgeState;
+  reason?: string | null;
+  applied: boolean;
+}
+
+/** 按落点分组——一个包上百条边，逐条列没人读得完。 */
+export interface LineagePackageGroup {
+  target: string;
+  isolated: boolean;
+  files: string[];
+  edges: LineagePackageEdgeRow[];
+}
+
+export interface LineagePackageFailure {
+  file: string;
+  reason: string;
+  /** parse_error=真解析失败；no_landing=解析成功但没有落点 */
+  kind?: string;
+}
+
+export interface LineagePackageRow {
+  id: string;
+  name: string;
+  kind: string;
+  dialect: string;
+  size_bytes: number;
+  uploaded_at?: string | null;
+  sql_files: number;
+  directories: number;
+  statements: number;
+  parsed_files: number;
+  failures: LineagePackageFailure[];
+  failed_files: number;
+  status: string;
+  applied_edges: number;
+  applied_resolved: number;
+  applied_at?: string | null;
+  edges_ok: number;
+  edges_blocked: number;
+  edges_skipped: number;
+  targets: number;
+  isolated_targets: number;
+}
+
+export interface LineagePackageDetail extends LineagePackageRow {
+  groups: LineagePackageGroup[];
+}
+
+export interface LineageApplyReceipt {
+  applied: number;
+  resolved: number;
+  failed: number;
+  failures: Array<Record<string, unknown>>;
+}
+
+export interface ManualLineageEdge {
+  source_table: string;
+  target_table: string;
+  join_keys: string[];
+}

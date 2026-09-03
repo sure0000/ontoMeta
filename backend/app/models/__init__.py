@@ -25,6 +25,10 @@ from app.models.domain import (
     DraftChunkCheckpoint,
     DraftGenerationTask,
 )
+from app.models.lineage import (
+    LineagePackage,
+    LineagePackageEdge,
+)
 from app.models.logic import (
     BusinessLogic,
     BusinessLogicCategory,
@@ -158,4 +162,6 @@ __all__ = [
     "ModelingCaseSpecKind",
     "ModelingCaseSpecStatus",
     "DimensionalModel",
+    "LineagePackage",
+    "LineagePackageEdge",
 ]

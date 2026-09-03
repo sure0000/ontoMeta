@@ -11,6 +11,7 @@ sqlparse>=0.5.0
 sqlglot>=25.0.0
 Jinja2>=3.1.0
 paramiko>=3.4.0
+python-multipart>=0.0.9   # 血缘补录的代码包上传（multipart，避免 base64 撑爆 nginx 体积限制）
 pytest>=8.0.0
 
 # --- MCP Server ---

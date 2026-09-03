@@ -11,6 +11,7 @@ from app.api import (
     dependencies,
     dimensional_model,
     governance,
+    lineage,
     modeling,
     ontology,
     principals,
@@ -35,6 +36,7 @@ router.include_router(warehouse_migration.router)
 router.include_router(principals.router)
 router.include_router(agents.router)
 router.include_router(governance.router)
+router.include_router(lineage.router)
 router.include_router(modeling.router)
 router.include_router(dimensional_model.router)
 router.include_router(public_routes.router)

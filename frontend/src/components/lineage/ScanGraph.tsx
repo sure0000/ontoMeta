@@ -3,8 +3,7 @@ import { Button, Tooltip } from "antd";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { assignLayers, curve } from "./graphLayout";
-import { TABLES } from "./prototypeData";
-import type { ScanGroup } from "./prototypeData";
+import type { LineagePackageGroup } from "../../types";
 
 /**
  * 代码包扫出来的血缘，画成图。
@@ -28,9 +27,11 @@ const MIN_K = 0.4;
 const MAX_K = 1.4;
 
 interface Props {
-  groups: ScanGroup[];
+  groups: LineagePackageGroup[];
   /** 表格里勾选的落点，未勾选的在图上压暗。 */
   selected: string[];
+  /** 当前是孤岛的表名。图上给它们标红点。 */
+  isolated: Set<string>;
 }
 
 interface PlacedNode {
@@ -47,9 +48,7 @@ function short(table: string) {
   return name.length > 24 ? `${name.slice(0, 23)}…` : name;
 }
 
-const ISOLATED = new Set(TABLES.filter((t) => t.isolated).map((t) => t.name));
-
-export function ScanGraph({ groups, selected }: Props) {
+export function ScanGraph({ groups, selected, isolated }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [pan, setPan] = useState<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
@@ -59,9 +58,9 @@ export function ScanGraph({ groups, selected }: Props) {
     const edges = groups.flatMap((group) =>
       group.edges.map((edge) => ({
         id: edge.id,
-        from: edge.src,
-        to: edge.dst,
-        key: edge.key,
+        from: edge.source_table,
+        to: edge.target_table,
+        key: edge.join_key ?? "",
         state: edge.state,
         dimmed: !selected.includes(group.target),
       })),
@@ -103,7 +102,7 @@ export function ScanGraph({ groups, selected }: Props) {
           x: PAD + columnIndex * (NODE_W + GAP_X),
           y: y0 + i * (NODE_H + GAP_Y),
           kind: targets.has(name) ? "target" : "source",
-          isolated: ISOLATED.has(name),
+          isolated: isolated.has(name),
           dimmed: targets.has(name)
             ? !selected.includes(name)
             : !edges.some((e) => e.from === name && !e.dimmed),
@@ -133,7 +132,7 @@ export function ScanGraph({ groups, selected }: Props) {
       width: PAD * 2 + orderedLayers.length * NODE_W + (orderedLayers.length - 1) * GAP_X,
       height: height + PAD * 2,
     };
-  }, [groups, selected]);
+  }, [groups, selected, isolated]);
 
   /**
    * 聚焦某张表：不相干的压暗，它的上下游与关联键进右侧面板。
@@ -315,7 +314,7 @@ export function ScanGraph({ groups, selected }: Props) {
           <aside className="lin-inspector lin-inspector--graph">
             <div className="lin-inspector-head">
               <span className="lin-focus-name" title={focus}>
-                {ISOLATED.has(focus) && <i className="lin-iso-dot" />}
+                {isolated.has(focus) && <i className="lin-iso-dot" />}
                 {short(focus)}
               </span>
               <button

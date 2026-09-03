@@ -10,8 +10,8 @@ import {
 import { Button, Tag, Tooltip } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
+import type { LineageColumn } from "../../types";
 import { assignLayers, curve } from "./graphLayout";
-import { columnsOf } from "./prototypeData";
 
 /**
  * 路径 B：把表摆到画布上，像连 ER 图一样连血缘。
@@ -75,23 +75,31 @@ interface Props {
   setNodes: Dispatch<SetStateAction<CanvasNode[]>>;
   setEdges: Dispatch<SetStateAction<CanvasEdge[]>>;
   isolated: (table: string) => boolean;
+  /** 表的字段。画布拖字段连线要用，字段来自 DataHub 的 schema。 */
+  columnsOf: (table: string) => LineageColumn[];
   frozen: boolean;
 }
 
-function nodeHeight(node: CanvasNode) {
-  if (node.collapsed) return HEADER_H;
-  return HEADER_H + BODY_PAD * 2 + columnsOf(node.table).length * ROW_H;
-}
+export function LineageCanvas({
+  nodes,
+  edges,
+  setNodes,
+  setEdges,
+  isolated,
+  columnsOf,
+  frozen,
+}: Props) {
+  const nodeHeight = (node: CanvasNode) =>
+    node.collapsed ? HEADER_H : HEADER_H + BODY_PAD * 2 + columnsOf(node.table).length * ROW_H;
 
-/** 字段行的中心 y；折叠或找不到字段时落到表头中心。 */
-function portY(node: CanvasNode, col: string | null) {
-  if (node.collapsed || !col) return node.y + HEADER_H / 2;
-  const index = columnsOf(node.table).findIndex((c) => c.name === col);
-  if (index < 0) return node.y + HEADER_H / 2;
-  return node.y + HEADER_H + BODY_PAD + index * ROW_H + ROW_H / 2;
-}
+  /** 字段行的中心 y；折叠或找不到字段时落到表头中心。 */
+  const portY = (node: CanvasNode, col: string | null) => {
+    if (node.collapsed || !col) return node.y + HEADER_H / 2;
+    const index = columnsOf(node.table).findIndex((c) => c.name === col);
+    if (index < 0) return node.y + HEADER_H / 2;
+    return node.y + HEADER_H + BODY_PAD + index * ROW_H + ROW_H / 2;
+  };
 
-export function LineageCanvas({ nodes, edges, setNodes, setEdges, isolated, frozen }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 24, y: 16, k: 1 });
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -485,10 +493,10 @@ export function LineageCanvas({ nodes, edges, setNodes, setEdges, isolated, froz
                         data-col={col.name}
                       >
                         <span className="lin-col-name">
-                          {col.pk && <em className="lin-pk">PK</em>}
+                          {col.is_primary_key && <em className="lin-pk">PK</em>}
                           {col.name}
                         </span>
-                        <span className="lin-col-type">{col.type}</span>
+                        <span className="lin-col-type">{col.data_type}</span>
                         <span
                           className="lin-port"
                           onPointerDown={(event) => startLink(event, node.table, col.name)}

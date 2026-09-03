@@ -5,34 +5,41 @@ import {
   PlusOutlined,
   RightOutlined,
 } from "@ant-design/icons";
-import { Button, Input, Popconfirm, Segmented, Tag, Tooltip, message } from "antd";
-import { useMemo, useState } from "react";
+import { Alert, Button, Input, Popconfirm, Segmented, Select, Tag, Tooltip, message } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "../api";
 import { LineageCanvas } from "../components/lineage/LineageCanvas";
 import type { CanvasEdge, CanvasNode } from "../components/lineage/LineageCanvas";
 import { PackageRail } from "../components/lineage/PackageRail";
 import { ScanReport } from "../components/lineage/ScanReport";
-import { DOMAIN_FACTS, groupsOf, PACKAGES, TABLES } from "../components/lineage/prototypeData";
-import type { SqlPackage } from "../components/lineage/prototypeData";
 import { PageContainer } from "../components/PageContainer";
+import { PageSkeleton } from "../components/PageSkeleton";
+import { useApi } from "../hooks/useApi";
+import { useUrlState } from "../hooks/useUrlState";
+import type {
+  DomainContext,
+  LineageColumn,
+  LineageOverview,
+  LineagePackageDetail,
+  LineagePackageRow,
+  LineageTableRow,
+} from "../types";
 
 /**
- * 血缘补录工作台（原型）。
+ * 血缘补录工作台。
  *
  * 页面只讲一个数：**这个域里有多少张表是孤岛**（上下游皆空 → 本体生成时被判孤岛、
  * 降级 data_table、所在业务环节断裂）。表为什么没血缘（外购、新导入、临时落地）
  * 是来源场景，不进界面——补录的动作只有两种：
  *
  * - **扫代码包**：丢一个没有格式约定的 SQL 包进来，递归扫 .sql，自动提血缘；
- *   包会留在历史里，什么时候投的、上报没上报都查得到。
+ *   包留在历史里，什么时候投的、上报没上报都查得到。
  * - **画布补录**：把已知的表摆上画布，像连 ER 图一样手工连。
  *
  * 两条路径在「所有包都没覆盖的孤岛表」处交接：这些表一键送进画布。
  *
- * 版式是**工作台**：顶栏一条事实带 + 可收起的左栏 + 吃满剩余高度的工作面 +
- * 常驻写入条。页面自己不滚动，滚动只发生在工作面内部。
- *
- * ⚠ 纯前端原型：数据来自 `components/lineage/prototypeData`，
- * 「上报到 DataHub」不会真的调 `add_lineage_edge`。
+ * 版式是工作台：顶栏一条事实带 + 可收起的左栏 + 吃满剩余高度的工作面 + 常驻写入条。
+ * 页面自己不滚动，滚动只发生在工作面内部。
  */
 
 type Mode = "scan" | "canvas";
@@ -40,216 +47,274 @@ type RailFilter = "all" | "isolated";
 
 const CANVAS_COL_W = 320;
 const CANVAS_ROW_H = 250;
-
-/** 本地时间戳：用 toISOString 会串成 UTC，新投的包看起来比旧包还早。 */
-function localStamp() {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-}
+const DIALECTS = ["mysql", "postgres", "hive", "doris", "starrocks"];
 
 export function LineageSupplementPage() {
+  const [domainId, setDomainId] = useUrlState<string>("domain", "");
   const [mode, setMode] = useState<Mode>("scan");
   const [railOpen, setRailOpen] = useState(true);
   const [railFilter, setRailFilter] = useState<RailFilter>("isolated");
   const [keyword, setKeyword] = useState("");
+  const [dialect, setDialect] = useState("mysql");
 
-  const [packages, setPackages] = useState<SqlPackage[]>(PACKAGES);
-  const [pkgId, setPkgId] = useState<string | null>(PACKAGES[0].id);
+  const [packages, setPackages] = useState<LineagePackageRow[]>([]);
+  const [pkgId, setPkgId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<LineagePackageDetail | null>(null);
   const [uploading, setUploading] = useState(false);
   const [scanningId, setScanningId] = useState<string | null>(null);
-  const [selection, setSelection] = useState<Record<string, string[]>>(() =>
-    Object.fromEntries(PACKAGES.map((p) => [p.id, p.targets])),
+  const [selection, setSelection] = useState<Record<string, string[]>>({});
+  const [uncovered, setUncovered] = useState<string[]>([]);
+  const [applying, setApplying] = useState(false);
+
+  const [nodes, setNodes] = useState<CanvasNode[]>([]);
+  const [edges, setEdges] = useState<CanvasEdge[]>([]);
+  const [columns, setColumns] = useState<Record<string, LineageColumn[]>>({});
+
+  const domains = useApi<DomainContext[]>(() => api.listDomains(), []);
+
+  // 没选域时落到**对象最多的那个**，不是列表第一个：域列表里排在最前的往往是
+  // 调试域（datahub_domain_id 是假的），进来就是一屏 DataHub 报错。
+  useEffect(() => {
+    if (domainId || !domains.data || domains.data.length === 0) return;
+    const best = [...domains.data].sort(
+      (a, b) => (b.object_type_count ?? 0) - (a.object_type_count ?? 0),
+    )[0];
+    setDomainId(best.id);
+  }, [domainId, domains.data, setDomainId]);
+
+  const overview = useApi<LineageOverview | null>(
+    async () => (domainId ? api.lineageOverview(domainId) : null),
+    [domainId],
+  );
+  const tables = useApi<LineageTableRow[]>(
+    async () => (domainId ? api.lineageTables(domainId, { limit: 2000 }) : []),
+    [domainId],
   );
 
-  const [nodes, setNodes] = useState<CanvasNode[]>([
-    { table: "tabSales Order", x: 16, y: 16 },
-    { table: "tabCustomer", x: 16, y: 236 },
-    { table: "imp_channel_order_2026", x: 340, y: 110 },
-  ]);
-  const [edges, setEdges] = useState<CanvasEdge[]>([
-    {
-      id: "tabSales Order->imp_channel_order_2026",
-      from: "tabSales Order",
-      to: "imp_channel_order_2026",
-      keys: [
-        { id: "tabSales Order.name->imp_channel_order_2026.so_no", src: "name", dst: "so_no" },
-      ],
+  const refreshPackages = useCallback(
+    async (select?: string) => {
+      if (!domainId) return;
+      const rows = await api.listLineagePackages(domainId);
+      setPackages(rows);
+      const next = select ?? (rows.length > 0 ? rows[0].id : null);
+      setPkgId(next);
+      setDetail(next ? await api.getLineagePackage(next) : null);
+      setUncovered(await api.lineageUncoveredIsolated(domainId));
     },
-  ]);
-
-  /** 本次会话里上报过的：历史包的 applied 已经算进 DOMAIN_FACTS，不重复计。 */
-  const [appliedScan, setAppliedScan] = useState<
-    Record<string, { edges: number; resolved: number }>
-  >({});
-  const [appliedCanvas, setAppliedCanvas] = useState<{ edges: number; resolved: number } | null>(
-    null,
+    [domainId],
   );
 
-  const isolatedSet = useMemo(
-    () => new Set(TABLES.filter((t) => t.isolated).map((t) => t.name)),
-    [],
+  useEffect(() => {
+    if (!domainId) return;
+    void refreshPackages().catch((err: Error) => message.error(err.message));
+  }, [domainId, refreshPackages]);
+
+  const tableRows = useMemo(() => tables.data ?? [], [tables.data]);
+  const tableByName = useMemo(() => new Map(tableRows.map((row) => [row.name, row])), [tableRows]);
+  const isolatedNames = useMemo(
+    () => new Set(tableRows.filter((row) => row.isolated).map((row) => row.name)),
+    [tableRows],
   );
-  const isIsolated = (table: string) => isolatedSet.has(table);
 
-  const pkg = packages.find((p) => p.id === pkgId) ?? null;
-  const selected = useMemo(() => (pkg ? (selection[pkg.id] ?? pkg.targets) : []), [pkg, selection]);
-  const pkgFrozen = Boolean(pkg && (pkg.applied || appliedScan[pkg.id]));
+  const isolatedTotal = overview.data?.isolated ?? 0;
+  const total = overview.data?.total ?? 0;
+  const withLineage = overview.data?.with_lineage ?? 0;
+  const coveragePct = total > 0 ? (withLineage / total) * 100 : 0;
 
-  /* ---------- 本次待写入 ---------- */
+  /* ---------- 待写入 ---------- */
+
+  const selected = useMemo(
+    () => (detail ? (selection[detail.id] ?? detail.groups.map((group) => group.target)) : []),
+    [detail, selection],
+  );
 
   const scanPending = useMemo(() => {
-    if (!pkg || uploading || pkgFrozen) return { edges: 0, blocked: 0, skipped: 0, resolved: 0 };
-    const groups = groupsOf(pkg).filter((g) => selected.includes(g.target));
-    const all = groups.flatMap((g) => g.edges);
+    if (!detail || uploading) return { edges: 0, blocked: 0, skipped: 0, resolved: 0 };
+    const groups = detail.groups.filter((group) => selected.includes(group.target));
+    const all = groups.flatMap((group) => group.edges).filter((edge) => !edge.applied);
     return {
-      edges: all.filter((e) => e.state === "ok").length,
-      blocked: all.filter((e) => e.state === "blocked").length,
-      skipped: all.filter((e) => e.state === "skipped").length,
-      resolved: groups.filter((g) => g.isolated).length,
+      edges: all.filter((edge) => edge.state === "ok").length,
+      blocked: all.filter((edge) => edge.state === "blocked").length,
+      skipped: all.filter((edge) => edge.state === "skipped").length,
+      resolved: groups.filter((group) => group.isolated).length,
     };
-  }, [pkg, uploading, pkgFrozen, selected]);
+  }, [detail, selected, uploading]);
 
   const canvasPending = useMemo(() => {
-    if (appliedCanvas) return { edges: 0, blocked: 0, skipped: 0, resolved: 0 };
-    const writable = edges.filter((e) => e.keys.length > 0);
-    const resolved = new Set(writable.map((e) => e.to).filter((t) => isolatedSet.has(t)));
+    const writable = edges.filter((edge) => edge.keys.length > 0);
+    const resolved = new Set(
+      writable.map((edge) => edge.to).filter((table) => isolatedNames.has(table)),
+    );
     return {
       edges: writable.length,
       blocked: edges.length - writable.length,
       skipped: 0,
       resolved: resolved.size,
     };
-  }, [edges, isolatedSet, appliedCanvas]);
+  }, [edges, isolatedNames]);
 
   const pending = mode === "scan" ? scanPending : canvasPending;
-  const frozen = mode === "scan" ? pkgFrozen : Boolean(appliedCanvas);
-
-  const sessionApplied = useMemo(() => {
-    const scan = Object.values(appliedScan);
-    return {
-      edges: scan.reduce((sum, a) => sum + a.edges, 0) + (appliedCanvas ? appliedCanvas.edges : 0),
-      resolved:
-        scan.reduce((sum, a) => sum + a.resolved, 0) + (appliedCanvas ? appliedCanvas.resolved : 0),
-    };
-  }, [appliedScan, appliedCanvas]);
-
-  const isolatedNow = DOMAIN_FACTS.isolated - sessionApplied.resolved;
-  const isolatedNext = isolatedNow - pending.resolved;
-  const coveragePct =
-    ((DOMAIN_FACTS.withLineage + sessionApplied.edges) / DOMAIN_FACTS.total) * 100;
-
-  /** 写入条上的数字：上报过就显示实际写入量，否则是本次将写入量。 */
-  const writtenCount = frozen
-    ? mode === "scan"
-      ? pkg
-        ? (appliedScan[pkg.id]?.edges ?? pkg.applied?.edges ?? 0)
-        : 0
-      : (appliedCanvas?.edges ?? 0)
-    : pending.edges;
-
-  const appliedNote = pkg
-    ? appliedScan[pkg.id]
-      ? `本次已上报 ${appliedScan[pkg.id].edges} 条`
-      : pkg.applied
-        ? `${pkg.applied.at} 已上报 ${pkg.applied.edges} 条`
-        : undefined
-    : undefined;
+  const frozen = mode === "scan" ? pending.edges === 0 && (detail?.applied_edges ?? 0) > 0 : false;
+  const isolatedNext = isolatedTotal - pending.resolved;
 
   /* ---------- 动作 ---------- */
 
-  const startUpload = () => {
-    setMode("scan");
-    setUploading(true);
-  };
+  const loadColumns = useCallback(
+    async (table: string) => {
+      const row = tableByName.get(table);
+      if (!domainId || !row || columns[table]) return;
+      try {
+        const cols = await api.lineageColumns(domainId, row.urn);
+        setColumns((prev) => ({ ...prev, [table]: cols }));
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [columns, domainId, tableByName],
+  );
 
-  /** 原型：不真读文件，扫的是内置示例包——但会**新建一条历史记录**，重投看得见。 */
-  const runScan = () => {
-    const source = PACKAGES[0];
-    const id = `pkg-${Date.now()}`;
-    setScanningId(id);
-    window.setTimeout(() => {
-      const fresh: SqlPackage = {
-        ...source,
-        id,
-        uploadedAt: localStamp(),
-        applied: undefined,
-      };
-      setPackages((prev) => [fresh, ...prev]);
-      setSelection((prev) => ({ ...prev, [id]: fresh.targets }));
-      setScanningId(null);
+  const addToCanvas = useCallback(
+    (table: string) => {
+      setMode("canvas");
+      void loadColumns(table);
+      setNodes((prev) => {
+        if (prev.some((node) => node.table === table)) return prev;
+        const index = prev.length;
+        return [
+          ...prev,
+          {
+            table,
+            x: 16 + (index % 3) * CANVAS_COL_W,
+            y: 16 + Math.floor(index / 3) * CANVAS_ROW_H,
+          },
+        ];
+      });
+    },
+    [loadColumns],
+  );
+
+  const runScan = async (file: File) => {
+    if (!domainId) return;
+    setScanningId("uploading");
+    try {
+      const created = await api.uploadLineagePackage(domainId, file, dialect);
       setUploading(false);
-      setPkgId(id);
-      message.success(`扫描完成：${fresh.targets.length} 个落点有血缘可补`);
-    }, 900);
-  };
-
-  const rescan = (id: string) => {
-    setScanningId(id);
-    window.setTimeout(() => {
+      await refreshPackages(created.id);
+      message.success(`扫描完成：${created.targets} 个落点、${created.edges_ok} 条边可上报`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    } finally {
       setScanningId(null);
-      setPkgId(id);
-      setUploading(false);
-      message.success("重新扫描完成，结果无变化");
-    }, 900);
-  };
-
-  const addToCanvas = (table: string) => {
-    setMode("canvas");
-    setNodes((prev) => {
-      if (prev.some((n) => n.table === table)) return prev;
-      const index = prev.length;
-      return [
-        ...prev,
-        {
-          table,
-          x: 16 + (index % 3) * CANVAS_COL_W,
-          y: 16 + Math.floor(index / 3) * CANVAS_ROW_H,
-        },
-      ];
-    });
-  };
-
-  const apply = () => {
-    if (mode === "scan" && pkg) {
-      setAppliedScan((prev) => ({
-        ...prev,
-        [pkg.id]: { edges: pending.edges, resolved: pending.resolved },
-      }));
-    } else {
-      setAppliedCanvas({ edges: pending.edges, resolved: pending.resolved });
     }
-    message.success(`已上报 ${pending.edges} 条血缘边 · ${pending.resolved} 张表脱离孤岛 · 失败 0`);
+  };
+
+  const rescan = async (id: string) => {
+    setScanningId(id);
+    try {
+      const updated = await api.rescanLineagePackage(id, dialect);
+      await refreshPackages(updated.id);
+      message.success(`重新扫描完成：${updated.edges_ok} 条边可上报`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setScanningId(null);
+    }
+  };
+
+  const removePackage = async (id: string) => {
+    try {
+      await api.deleteLineagePackage(id);
+      await refreshPackages();
+      message.success("已删除该记录（DataHub 里的边不受影响）");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const selectPackage = async (id: string) => {
+    setPkgId(id);
+    setUploading(false);
+    try {
+      setDetail(await api.getLineagePackage(id));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const apply = async () => {
+    if (!domainId) return;
+    setApplying(true);
+    try {
+      if (mode === "scan" && detail) {
+        const receipt = await api.applyLineagePackage(detail.id, selected);
+        message.success(
+          `已上报 ${receipt.applied} 条 · 失败 ${receipt.failed} 条 · ${receipt.resolved} 张表脱离孤岛`,
+        );
+        if (receipt.failures.length > 0) {
+          message.warning(`有 ${receipt.failures.length} 条边写入失败，详见回执`);
+        }
+        await refreshPackages(detail.id);
+      } else {
+        const payload = edges
+          .filter((edge) => edge.keys.length > 0)
+          .map((edge) => ({
+            source_table: edge.from,
+            target_table: edge.to,
+            join_keys: edge.keys.map((key) => `${edge.from}.${key.src} = ${edge.to}.${key.dst}`),
+          }));
+        const receipt = await api.applyManualLineage(domainId, payload);
+        message.success(
+          `已上报 ${receipt.applied} 条 · 失败 ${receipt.failed} 条 · ${receipt.resolved} 张表脱离孤岛`,
+        );
+        setEdges([]);
+        await refreshPackages(pkgId ?? undefined);
+      }
+      await Promise.all([overview.reload(), tables.reload()]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApplying(false);
+    }
   };
 
   /* ---------- 左栏 ---------- */
 
-  const railRows = TABLES.filter(
-    (t) =>
-      (railFilter === "all" || t.isolated) &&
-      t.name.toLowerCase().includes(keyword.trim().toLowerCase()),
+  const railRows = tableRows.filter(
+    (row) =>
+      (railFilter === "all" || row.isolated) &&
+      row.name.toLowerCase().includes(keyword.trim().toLowerCase()),
   );
-  const onCanvas = new Set(nodes.map((n) => n.table));
+  const onCanvas = new Set(nodes.map((node) => node.table));
+
+  if (domains.loading && !domains.data) return <PageSkeleton type="detail" full />;
 
   return (
     <PageContainer full>
       <div className="lin-workbench">
-        {/* ── 顶栏：标题 + 事实带 + 模式切换，压成一条 ── */}
         <header className="lin-topbar">
           <span className="lin-topbar-title">
             <NodeIndexOutlined />
             血缘补录
-            <Tag color="processing" variant="filled">
-              原型
-            </Tag>
           </span>
+
+          <Select
+            size="small"
+            style={{ width: 168 }}
+            value={domainId || undefined}
+            placeholder="选择数据域"
+            onChange={(value) => setDomainId(value)}
+            options={(domains.data ?? []).map((domain) => ({
+              value: domain.id,
+              label: domain.name,
+            }))}
+          />
 
           <div className="lin-stats">
             <div className="lin-stat lin-stat--iso">
               <span className="lin-stat-label">孤岛表</span>
               <span className="lin-stat-value">
-                <b>{isolatedNow}</b>
-                {isolatedNext !== isolatedNow && (
+                <b>{isolatedTotal}</b>
+                {pending.resolved > 0 && (
                   <>
                     <ArrowRightOutlined className="lin-stat-arrow" />
                     <b className="lin-stat-next">{isolatedNext}</b>
@@ -265,30 +330,25 @@ export function LineageSupplementPage() {
                 <b>{coveragePct.toFixed(1)}%</b>
               </span>
               <div className="lin-meter">
-                <i
-                  className="lin-meter-have"
-                  style={{ width: `${(DOMAIN_FACTS.withLineage / DOMAIN_FACTS.total) * 100}%` }}
-                />
-                <i
-                  className="lin-meter-gain"
-                  style={{ width: `${(sessionApplied.edges / DOMAIN_FACTS.total) * 100}%` }}
-                />
+                <i className="lin-meter-have" style={{ width: `${coveragePct}%` }} />
               </div>
             </div>
 
             <div className="lin-stat">
-              <span className="lin-stat-label">本轮已上报</span>
+              <span className="lin-stat-label">域内表</span>
               <span className="lin-stat-value">
-                <b>{sessionApplied.edges}</b>
-                <em>条边</em>
+                <b>{total}</b>
               </span>
             </div>
 
             <div className="lin-stat lin-stat--src">
               <span className="lin-stat-label">目标域</span>
               <span className="lin-stat-src">
-                {DOMAIN_FACTS.domain} · {DOMAIN_FACTS.platform} · {DOMAIN_FACTS.database} ·{" "}
-                {DOMAIN_FACTS.fabric}
+                {overview.data
+                  ? `${overview.data.domain_name} · ${overview.data.platform ?? "—"} · ${
+                      overview.data.databases.join(" / ") || "—"
+                    }`
+                  : "—"}
               </span>
             </div>
           </div>
@@ -303,7 +363,10 @@ export function LineageSupplementPage() {
           />
         </header>
 
-        {/* ── 主体：左栏（可收起）+ 工作面 ── */}
+        {overview.error && (
+          <Alert type="error" showIcon title={`读取域血缘失败：${overview.error}`} />
+        )}
+
         <div className={`lin-body${railOpen ? "" : " lin-body--rail-closed"}`}>
           <aside className="lin-rail">
             <div className="lin-rail-head">
@@ -332,14 +395,15 @@ export function LineageSupplementPage() {
                 <PackageRail
                   packages={packages}
                   currentId={uploading ? null : pkgId}
-                  appliedInSession={appliedScan}
                   scanningId={scanningId}
-                  onSelect={(id) => {
-                    setPkgId(id);
-                    setUploading(false);
+                  uploading={uploading}
+                  onSelect={(id) => void selectPackage(id)}
+                  onUpload={() => {
+                    setMode("scan");
+                    setUploading(true);
                   }}
-                  onUpload={startUpload}
-                  onRescan={rescan}
+                  onRescan={(id) => void rescan(id)}
+                  onDelete={(id) => void removePackage(id)}
                 />
               ) : (
                 <>
@@ -350,8 +414,8 @@ export function LineageSupplementPage() {
                       value={railFilter}
                       onChange={(value) => setRailFilter(value as RailFilter)}
                       options={[
-                        { label: `仅孤岛 ${DOMAIN_FACTS.isolated}`, value: "isolated" },
-                        { label: `全部 ${DOMAIN_FACTS.total}`, value: "all" },
+                        { label: `仅孤岛 ${isolatedTotal}`, value: "isolated" },
+                        { label: `全部 ${total}`, value: "all" },
                       ]}
                     />
                     <Input.Search
@@ -359,26 +423,20 @@ export function LineageSupplementPage() {
                       allowClear
                       placeholder="搜表名"
                       value={keyword}
-                      onChange={(e) => setKeyword(e.target.value)}
+                      onChange={(event) => setKeyword(event.target.value)}
                     />
                   </div>
 
                   <ul className="lin-rail-list">
-                    {railRows.map((row) => (
-                      <li key={row.name} className="lin-rail-row">
+                    {railRows.slice(0, 300).map((row) => (
+                      <li key={row.urn} className="lin-rail-row">
                         <span className="lin-rail-main">
-                          <span className="lin-rail-name">
+                          <span className="lin-rail-name" title={row.name}>
                             {row.isolated && <i className="lin-iso-dot" title="孤岛表" />}
                             {row.name}
                           </span>
                           <span className="lin-rail-meta">
-                            {row.isolated ? (
-                              <>上下游 0 / 0</>
-                            ) : (
-                              <>
-                                上游 {row.upstream} · 下游 {row.downstream}
-                              </>
-                            )}
+                            上游 {row.upstream} · 下游 {row.downstream}
                           </span>
                         </span>
                         <Tooltip title={onCanvas.has(row.name) ? "已在画布上" : "放到画布"}>
@@ -393,7 +451,9 @@ export function LineageSupplementPage() {
                       </li>
                     ))}
                     {railRows.length === 0 && (
-                      <li className="lin-muted lin-rail-empty">没有匹配的表</li>
+                      <li className="lin-muted lin-rail-empty">
+                        {tables.loading ? "加载中…" : "没有匹配的表"}
+                      </li>
                     )}
                   </ul>
                 </>
@@ -403,16 +463,18 @@ export function LineageSupplementPage() {
           <main className={`lin-main lin-main--${mode}`}>
             {mode === "scan" ? (
               <ScanReport
-                pkg={pkg}
+                pkg={uploading ? null : detail}
                 uploading={uploading}
                 scanning={scanningId !== null}
-                onScan={runScan}
+                onScan={(file) => void runScan(file)}
                 selected={selected}
                 onSelectedChange={(keys) =>
-                  pkg && setSelection((prev) => ({ ...prev, [pkg.id]: keys }))
+                  detail && setSelection((prev) => ({ ...prev, [detail.id]: keys }))
                 }
-                frozen={pkgFrozen}
-                appliedNote={appliedNote}
+                frozen={frozen}
+                isolated={isolatedNames}
+                isolatedTotal={isolatedTotal}
+                uncovered={uncovered}
                 onSendToCanvas={addToCanvas}
               />
             ) : (
@@ -421,18 +483,18 @@ export function LineageSupplementPage() {
                 edges={edges}
                 setNodes={setNodes}
                 setEdges={setEdges}
-                isolated={isIsolated}
-                frozen={Boolean(appliedCanvas)}
+                isolated={(table) => isolatedNames.has(table)}
+                columnsOf={(table) => columns[table] ?? []}
+                frozen={applying}
               />
             )}
           </main>
         </div>
 
-        {/* ── 写入条：preview / apply 分离，常驻不滚动 ── */}
         <footer className="lin-footer">
           <div className="lin-footer-counts">
             <span>将写入 DataHub</span>
-            <b>{writtenCount}</b>
+            <b>{pending.edges}</b>
             <span>条边</span>
             <Tag color={mode === "canvas" ? "blue" : "default"} variant="filled">
               {mode === "canvas" ? "画布手工连" : "代码包扫描"}
@@ -451,33 +513,37 @@ export function LineageSupplementPage() {
           </div>
 
           <div className="lin-footer-acts">
-            {frozen ? (
-              <>
-                <span className="lin-done">
-                  {mode === "scan" ? appliedNote : "画布已上报"} · 失败 0 ·
-                  幂等，重复上报不会重复建边
-                </span>
-                <Button size="small">去 DataHub 查看血缘图</Button>
-              </>
-            ) : (
-              <Popconfirm
-                placement="topRight"
-                title={`确认向 DataHub 写入 ${pending.edges} 条血缘边？`}
-                description={
-                  pending.resolved > 0
-                    ? `写入后 ${pending.resolved} 张表将脱离孤岛，需重跑本体起草才生效。`
-                    : "写入后可在 DataHub 血缘图中查看；重复上报幂等。"
-                }
-                okText="确认上报"
-                cancelText="再看看"
-                onConfirm={apply}
-                disabled={pending.edges === 0}
-              >
-                <Button type="primary" disabled={pending.edges === 0}>
-                  上报到 DataHub
-                </Button>
-              </Popconfirm>
+            {mode === "scan" && (
+              <Select
+                size="small"
+                value={dialect}
+                style={{ width: 116 }}
+                onChange={setDialect}
+                options={DIALECTS.map((item) => ({ value: item, label: `方言 ${item}` }))}
+              />
             )}
+            {frozen && (
+              <span className="lin-done">
+                已上报 {detail?.applied_edges} 条 · 幂等，重复上报不会重复建边
+              </span>
+            )}
+            <Popconfirm
+              placement="topRight"
+              title={`确认向 DataHub 写入 ${pending.edges} 条血缘边？`}
+              description={
+                pending.resolved > 0
+                  ? `写入后 ${pending.resolved} 张表将脱离孤岛，需重跑本体起草才生效。`
+                  : "写入后可在 DataHub 血缘图中查看；重复上报幂等。"
+              }
+              okText="确认上报"
+              cancelText="再看看"
+              onConfirm={() => void apply()}
+              disabled={pending.edges === 0}
+            >
+              <Button type="primary" loading={applying} disabled={pending.edges === 0}>
+                上报到 DataHub
+              </Button>
+            </Popconfirm>
           </div>
         </footer>
       </div>

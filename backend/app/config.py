@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # 验证栈目录；此后以设置页（DB）为权威，运行期不再读本变量。
     airflow_dags_dir: str = ""
 
+    # 血缘补录的代码包归档目录（部署路径，config-web-only 法则的 bootstrap 例外）：
+    # 重扫要用原包，所以上传的包必须落盘；缺省放在 backend/data/lineage_packages。
+    lineage_package_dir: str = ""
+
     # 单个物化 DAG 的任务上限。M16 据此把大本体拆成多个 DAG；M13 只用于 preflight
     # 预警「本次表数超限、当前仍会塞进一个 DAG」。默认 50。
     ontometa_max_tasks_per_dag: int = 50

@@ -494,6 +494,60 @@ class DataHubConnector:
             include_logic_evidences=include_logic_evidences,
         )
 
+    async def fetch_domain_dataset_index(
+        self, datahub_domain_id: str
+    ) -> list[dict]:
+        """域内每张表的 URN 与**上下游条数**——不取字段、样例、profile。
+
+        与 ``fetch_domain_bundle`` 的区别就是"轻"：后者为每张表拉全量元数据
+        （schema + profile + 样例值），erpnext 域 1000+ 张表要跑几分钟；血缘补录
+        只需要"谁是孤岛"，即上下游是否都为 0，一条 lineage total 就够。实测同一个域
+        列 URN 2.4s + 计数约 4s。
+        """
+        urns = await self._fetch_domain_dataset_urns(datahub_domain_id)
+        if not urns:
+            return []
+
+        query = """
+        query datasetLineageIndex($urns: [String!]!) {
+          entities(urns: $urns) {
+            urn
+            ... on Dataset {
+              name
+              upstream: lineage(input: {direction: UPSTREAM, start: 0, count: 1}) { total }
+              downstream: lineage(input: {direction: DOWNSTREAM, start: 0, count: 1}) { total }
+            }
+          }
+        }
+        """
+        batches = [
+            urns[idx : idx + _ENTITY_BATCH_SIZE]
+            for idx in range(0, len(urns), _ENTITY_BATCH_SIZE)
+        ]
+        semaphore = asyncio.Semaphore(settings.datahub_max_concurrency)
+
+        async def fetch_batch(batch: list[str]) -> list[dict]:
+            async with semaphore:
+                data = await self._graphql(query, {"urns": batch})
+                return data.get("entities") or []
+
+        rows: list[dict] = []
+        for entities in await asyncio.gather(*(fetch_batch(batch) for batch in batches)):
+            for entity in entities:
+                urn = entity.get("urn")
+                if not urn:
+                    continue
+                rows.append(
+                    {
+                        "urn": urn,
+                        "name": _extract_dataset_name(urn),
+                        "platform": _extract_platform(urn),
+                        "upstream": ((entity.get("upstream") or {}).get("total")) or 0,
+                        "downstream": ((entity.get("downstream") or {}).get("total")) or 0,
+                    }
+                )
+        return rows
+
     async def get_dataset_by_urn(self, dataset_urn: str) -> DatasetInput:
         entities = await self._fetch_dataset_entities([dataset_urn])
         if not entities:

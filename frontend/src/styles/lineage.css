@@ -339,16 +339,19 @@
   font-variant-numeric: tabular-nums;
 }
 
-.lin-pkg-rescan {
+/* 行内动作：常驻会把包名挤掉，hover 才出 */
+.lin-pkg-acts {
   position: absolute;
-  top: 7px;
-  right: 5px;
+  top: 5px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
   opacity: 0;
   transition: opacity 0.15s;
 }
 
-.lin-pkg-list li:hover .lin-pkg-rescan,
-.lin-pkg-rescan:focus-visible {
+.lin-pkg-list li:hover .lin-pkg-acts,
+.lin-pkg-acts:focus-within {
   opacity: 1;
 }
 
