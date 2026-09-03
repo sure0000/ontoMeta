@@ -1,7 +1,7 @@
 # MCP 服务实施状态
 
-**当前阶段**：Phase 3 ✅ 已完成（认证 + 授权 + 审计）
-**下一阶段**：Phase 4 监控与运维
+**当前阶段**：Phase 4 ✅ 已完成（限流 + 运维自省/监控）
+**下一阶段**：Phase 5 能力补齐与开放（含资源级权限、远程传输）
 **更新时间**：2026-09-03
 
 ---
@@ -127,27 +127,69 @@ stdio 没有逐请求 HTTP 头：**一条会话（一个子进程）= 一个身�
 - stdio 端到端：匿名（reader）query 放行、propose/execute_sql/audit 被拒；admin token
   （publisher）全放行，审计真写进 dev 库并可回读。
 
-### 仍未做（留给 Phase 4/远程传输）
+### 仍未做（留给后续）
 
+- 资源级权限（某主体只能看某数据域/数据源）——当前是工具级 + 角色级，未到行级。见 Phase 5。
 - 远程传输（streamable HTTP）落地前不要放开——届时身份不再是「一进程一 env Token」，
-  需要逐请求鉴权与来源校验。
-- 资源级权限（某主体只能看某数据域/数据源）——当前是工具级 + 角色级，未到行级。
+  需要逐请求鉴权与来源校验。见 Phase 5。
 - 设计稿里的「本地 MCP 首次 `select_identity` 选身份」未做：stdio 下身份由启动 env 给定，
   更简单也更不易被会话内提权，故不引入运行期改身份的工具。
 
 ---
 
-## 📋 Phase 4: 监控与运维（待实施）
+## ✅ Phase 4: 限流 + 运维自省/监控
 
-- [ ] 异常行为检测 / Rate Limiting / 性能指标
-- [ ] 健康检查、工具使用统计、错误追踪
+只做在 stdio 现实下**真正有依据**的部分。设计稿里的「失败 N 次锁账户 / 通知管理员 /
+多租户隔离」在本环境**无机制可依**——stdio 一会话一身份、用户自己就能重启进程，锁不了
+也没人可通知，故不做；只做**可观测**：把异常暴露出来，处置交给人。
+
+### 限流（`app/mcp/rate_limit.py`）
+
+**进程内滑动窗口**，不查审计表——stdio 一进程一会话，进程内计数即全局，不给下游 DB
+平白加读负载。防的是**最现实的风险**：agent 失控循环（坏 prompt 让它每秒调几十次
+execute_sql，几分钟打爆数仓）。
+
+- 每工具每分钟上限 `mcp_rate_limit_per_minute`（默认 120，0=关闭）；`execute_sql` 直打
+  数仓、单独更严 `mcp_execute_sql_rate_limit_per_minute`（默认 30）。二者是**行为参数**，
+  随部署走 env（与 `agent_run_sql_min_role` / `agent_soundness` 同类，不属于「连接配置进
+  Web 设置页」）。
+- 滑动窗口只对**放行**的调用计数——被限流拒的不计入，否则窗口永满、永久封锁。
+- 闸门放在**授权之前**：失控循环可能全是被拒的调用，只在放行后限流的话，被拒调用照样
+  每次刷审计、打 DB。限流命中回 `rate_limited`（与授权的 `denied` 区分），审计做去重
+  （同一工具每分钟至多一条限流审计，免得「被限流」本身把审计表刷爆）。
+
+### 运维自省 / 监控（`app/mcp/tools/monitoring.py`）
+
+- `server_info`（reader）：版本、工具清单与各自最低角色、**当前会话身份**、限流配置、
+  审计表可达性。自查「我这条会话什么权限、某工具为什么被拒」一眼看清。
+- `get_mcp_stats`（publisher）：基于审计表的使用统计——总量、成功/业务失败/被拒/被限流、
+  按工具与角色分组。把异常信号（某角色被拒激增之类）暴露出来。
+
+### 验证
+
+- `tests/test_mcp_monitoring.py` 13 条：滑动窗口 / execute_sql 独立上限 / 被拒不占窗口 /
+  审计去重 / 限流在授权前 / server_info 身份与配置 / get_mcp_stats 聚合与 publisher 门控。
+- stdio 端到端：`MCP_RATE_LIMIT_PER_MINUTE=3` 连调 5 次 validate_sql，第 4/5 次被限流
+  （retry≈59.8s，去重后只落 1 条限流审计）；server_info 报 16 工具 / publisher 身份 /
+  env 生效的限流配置；get_mcp_stats 聚合正确。
 
 ---
 
 ## 📋 Phase 5: 能力补齐与开放（待实施）
 
-设计稿 `docs/MCP_TOOL_DESIGN.md` 列了 20 个工具，Phase 2 交付了其中的查询/SQL/任务/提案
-共 13 个。剩下的：
+设计稿 `docs/MCP_TOOL_DESIGN.md` 列了 20 个工具，Phase 2/4 交付了查询/SQL/任务/提案/
+运维共 16 个。剩下的：
+
+- [ ] **资源级权限**（某主体只能看某数据域/数据源）：当前是工具级 + 角色级，未到行级。
+      要给 Principal 关联可访问的 domain/datasource，并在所有查询工具注入过滤——工程量
+      不小、在单机可信 stdio 场景收益有限，故留到此处而非硬塞进 Phase 3/4。
+- [ ] 本体建模类（`infer_ontology_from_datahub` / `classify_business_objects` /
+      `infer_relationships` / `validate_ontology`）——都是写侧或长耗时任务，
+      要先想清楚在 MCP 下怎么表达「异步 + 人工确认」
+- [ ] `get_lineage` / `get_landing` / `get_ops_record`
+- [ ] 治理规约类（`validate_against_policy` / `lint_task_spec` /
+      `get_active_governance_standard`）
+- [ ] 远程传输（streamable HTTP）与对外开放
 
 - [ ] 本体建模类（`infer_ontology_from_datahub` / `classify_business_objects` /
       `infer_relationships` / `validate_ontology`）——都是写侧或长耗时任务，

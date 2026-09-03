@@ -110,11 +110,13 @@ MCP 这边不开口子。每个工具的最低角色见「身份与权限」。
 | `propose_materialize` | 本体对象 → 物理表（只出 DDL） |
 | `propose_metric` | 已发布业务口径 → ADS 结果表 |
 
-### 审计
+### 审计与运维
 
 | 工具 | 作用 |
 |------|------|
 | `list_audit_logs` | 回读工具调用审计（谁、什么身份、调了什么、成没成、是否被拒）；仅 publisher |
+| `server_info` | 自省：版本、工具清单与各自最低角色、当前会话身份、限流配置、审计可达性 |
+| `get_mcp_stats` | 使用统计：总量 / 成功 / 被拒 / 被限流、按工具与角色分组；仅 publisher |
 
 提案工具的三条约束：
 
@@ -143,10 +145,17 @@ MCP 这边不开口子。每个工具的最低角色见「身份与权限」。
 | `query_*` / `list_datasources` / `list_tasks` / `get_task_status` / `validate_sql` | `reader` |
 | `propose_*` | `editor` |
 | `execute_sql` | `agent_run_sql_min_role`（默认 `publisher`，与 Data Agent 代跑 SQL 同价） |
-| `list_audit_logs` | `publisher` |
+| `list_audit_logs` / `get_mcp_stats` | `publisher` |
+| `server_info` | `reader` |
 
-**审计**：每次调用（成功 / 失败 / **被拒**）都追加一条 `mcp_audit_logs`（谁、什么身份、
-哪个工具、成没成、耗时、脱敏入参），只追加不改写，publisher 可用 `list_audit_logs` 回读。
+**审计**：每次调用（成功 / 失败 / **被拒** / **被限流**）都追加一条 `mcp_audit_logs`（谁、
+什么身份、哪个工具、成没成、耗时、脱敏入参），只追加不改写，publisher 可用
+`list_audit_logs` 回读、`get_mcp_stats` 聚合。
+
+**限流**：进程内滑动窗口，防 agent 失控循环打爆数仓/DB。每工具每分钟上限
+`MCP_RATE_LIMIT_PER_MINUTE`（默认 120，0=关闭），`execute_sql` 单独更严
+`MCP_EXECUTE_SQL_RATE_LIMIT_PER_MINUTE`（默认 30）。命中回 `rate_limited`（与授权的
+`denied` 区分），并做审计去重。
 
 配置建议：给 MCP 单独建一个**最小权限的 Principal**（`POST /api/principals`），而不是把
 `ONTOMETA_ADMIN_TOKEN` 塞进客户端配置——admin token 是 superuser，泄漏面更大。
@@ -157,9 +166,10 @@ MCP 这边不开口子。每个工具的最低角色见「身份与权限」。
 backend/app/mcp/
 ├── __init__.py
 ├── __main__.py          # 启动入口
-├── server.py            # MCP 服务器实现（stdio）+ 授权闸门 + 审计包裹
+├── server.py            # MCP 服务器实现（stdio）+ 限流/授权闸门 + 审计包裹
 ├── auth.py              # 会话身份解析（env Token → 角色）
 ├── audit.py             # 审计写入点（append-only，脱敏，吞异常）
+├── rate_limit.py        # 进程内滑动窗口限流
 ├── STATUS.md            # 实施状态与阶段计划
 └── tools/
     ├── __init__.py      # 工具注册机制 + ToolResult / AuthContext / required_role
@@ -170,7 +180,8 @@ backend/app/mcp/
     ├── sql.py           # 只读 SQL
     ├── tasks.py         # 任务（治理制品）回读
     ├── proposals.py     # 任务提案
-    └── audit.py         # 审计回读（list_audit_logs，publisher）
+    ├── audit.py         # 审计回读（list_audit_logs，publisher）
+    └── monitoring.py    # 自省与统计（server_info / get_mcp_stats）
 ```
 
 审计表模型在 `app/models/mcp_audit.py`，迁移在
@@ -270,10 +281,10 @@ A: 检查：
 见 [STATUS.md](./STATUS.md)。简述：
 
 - [x] Phase 1 基础设施
-- [x] Phase 2 核心只读工具（14 个）
+- [x] Phase 2 核心只读工具（16 个）
 - [x] Phase 3 认证（env Token → 4 层角色）+ 授权（工具级 required_role，fail-closed）+ 审计
-- [ ] Phase 4 安全监控 / Rate Limiting / 资源级权限
-- [ ] Phase 5 本体建模类工具、血缘/落点工具、远程传输（streamable HTTP）
+- [x] Phase 4 限流（进程内滑动窗口）+ 运维自省（`server_info`）/ 监控（`get_mcp_stats`）
+- [ ] Phase 5 资源级权限、本体建模类工具、血缘/落点工具、远程传输（streamable HTTP）
 
 ## 参考
 

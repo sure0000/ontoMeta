@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # 让只读查询开箱即用，但同步/物化提案与代跑 SQL 仍按各工具的 required_role 拦住。
     # 置空字符串 = 无匿名身份（所有需要角色的工具一律 403），供锁定部署使用。
     mcp_default_role: str = "reader"
+    # MCP 限流（进程内滑动窗口，stdio 单进程即全局）：每个工具每分钟调用上限。
+    # 防 agent 失控循环打爆下游（数仓 / DB）。0 = 关闭限流。与 agent_run_sql_min_role /
+    # agent_soundness 一样是**行为参数**，随部署走 env（不属于「连接配置进 Web 设置页」）。
+    mcp_rate_limit_per_minute: int = 120
+    # execute_sql 直打数仓、代价最重，单独更严。0 = 跟随 mcp_rate_limit_per_minute。
+    mcp_execute_sql_rate_limit_per_minute: int = 30
 
     datahub_gms_url: str = "http://localhost:8080"
     datahub_frontend_url: str = "http://localhost:9002"

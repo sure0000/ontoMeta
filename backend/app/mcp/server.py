@@ -25,6 +25,7 @@ from mcp.server import Server
 
 from .audit import record_call
 from .auth import resolve_auth_context
+from .rate_limit import check_rate_limit
 from .tools import TOOL_REGISTRY, AuthContext, ToolResult, tool_required_role
 
 # stdout 是 MCP 协议通道，日志一律走 stderr——print/日志落到 stdout 会撑破 JSON-RPC 帧。
@@ -106,6 +107,37 @@ async def handle_call_tool(
     auth = session_auth()
     minimum = tool_required_role(tool)
     started = time.monotonic()
+
+    # ---- 限流（在授权之前）----
+    # 放在授权前：失控循环可能全是被拒的调用，若只在放行后限流，被拒调用照样每次刷审计、
+    # 打 DB。限流命中的审计做去重（每工具每分钟至多一条），不逐次刷库。
+    verdict = check_rate_limit(name)
+    if not verdict["allowed"]:
+        elapsed = int((time.monotonic() - started) * 1000)
+        result = ToolResult(
+            success=False,
+            error=(
+                f"调用过于频繁：{name} 已达每分钟 {verdict['limit']} 次上限，"
+                f"请 {verdict['retry_after']} 秒后重试"
+            ),
+            metadata={
+                "rate_limited": True,
+                "limit_per_minute": verdict["limit"],
+                "retry_after_seconds": verdict["retry_after"],
+            },
+        )
+        if verdict["should_audit"]:
+            record_call(
+                auth=auth,
+                tool_name=name,
+                arguments=arguments,
+                success=False,
+                denied=False,
+                error=f"RATE_LIMITED: {result.error}",
+                duration_ms=elapsed,
+            )
+        logger.info("call_tool %s RATE_LIMITED (limit %s/min)", name, verdict["limit"])
+        return _text_result(result)
 
     # ---- 授权闸门（fail-closed）----
     if not auth.has_role(minimum):
