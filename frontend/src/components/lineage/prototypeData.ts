@@ -51,10 +51,10 @@ export const TABLES: TableRow[] = [
   { name: "dw_sales_order_wide", isolated: true, upstream: 0, downstream: 0 },
   { name: "stg_partner_shipment_daily", isolated: true, upstream: 0, downstream: 0 },
   { name: "ext_item_price_index", isolated: true, upstream: 0, downstream: 0 },
-  { name: "ext_supplier_scorecard", isolated: true, upstream: 0, downstream: 0 },
+  { name: "ext_supplier_scorecard", isolated: false, upstream: 3, downstream: 0 },
   { name: "stg_gl_daily_balance", isolated: true, upstream: 0, downstream: 0 },
-  { name: "stg_stock_movement", isolated: true, upstream: 0, downstream: 0 },
-  { name: "ext_project_cost_daily", isolated: true, upstream: 0, downstream: 0 },
+  { name: "stg_stock_movement", isolated: false, upstream: 3, downstream: 1 },
+  { name: "ext_project_cost_daily", isolated: false, upstream: 3, downstream: 0 },
   { name: "dw_customer_360", isolated: true, upstream: 0, downstream: 0 },
   { name: "imp_channel_order_2026", isolated: true, upstream: 0, downstream: 0 },
   { name: "imp_offline_store_traffic", isolated: true, upstream: 0, downstream: 0 },
@@ -294,7 +294,7 @@ const RAW_GROUPS: RawGroup[] = [
   },
   {
     target: "ext_supplier_scorecard",
-    isolated: true,
+    isolated: false,
     file: "scm/supplier_score.sql",
     edges: [
       ["tabSupplier", "tabPurchase Order.supplier = tabSupplier.name"],
@@ -304,7 +304,7 @@ const RAW_GROUPS: RawGroup[] = [
   },
   {
     target: "stg_stock_movement",
-    isolated: true,
+    isolated: false,
     file: "stock/movement.sql",
     edges: [
       ["tabStock Ledger Entry", "tabStock Ledger Entry.item_code = tabItem.name"],
@@ -327,7 +327,7 @@ const RAW_GROUPS: RawGroup[] = [
   },
   {
     target: "ext_project_cost_daily",
-    isolated: true,
+    isolated: false,
     file: "pm/project_cost.sql",
     edges: [
       ["tabProject", "tabTimesheet.project = tabProject.name"],
@@ -391,35 +391,99 @@ export const SCAN_GROUPS: ScanGroup[] = RAW_GROUPS.map((group) => ({
   })),
 }));
 
-/** 解析失败的文件——扫描一个野生代码包，失败是常态，藏起来就是骗人。 */
-export const SCAN_FAILURES = [
-  { file: "legacy/etl_dump.sql", reason: "存储过程语法（DELIMITER $$）超出解析范围" },
-  { file: "adhoc/fix_20250917.sql", reason: "动态 SQL 字符串拼接，静态解析拿不到表名" },
-  { file: "reports/monthly_close.sql", reason: "方言不符：Oracle CONNECT BY" },
-  { file: "migrate/v2_backfill.sql", reason: "只有 UPDATE，没有可推的落点" },
-  { file: "tmp/scratch.sql", reason: "文件为空" },
-  { file: "legacy/proc_rebuild_idx.sql", reason: "存储过程语法（DELIMITER $$）超出解析范围" },
-  { file: "adhoc/hotfix_dup.sql", reason: "动态 SQL 字符串拼接，静态解析拿不到表名" },
-  { file: "reports/ap_aging.sql", reason: "方言不符：Oracle CONNECT BY" },
-  { file: "tmp/.DS_Store.sql", reason: "文件为空" },
+/* ------------------------------------------------------------------ *
+ * 代码包历史
+ * ------------------------------------------------------------------ */
+
+export interface ScanFailure {
+  file: string;
+  reason: string;
+}
+
+export interface SqlPackage {
+  id: string;
+  name: string;
+  size: string;
+  uploadedAt: string;
+  sqlFiles: number;
+  directories: number;
+  statements: number;
+  /** 这个包覆盖到的落点（对应 SCAN_GROUPS.target）。 */
+  targets: string[];
+  /** 解析失败的文件——野生代码包里存储过程和动态 SQL 一定有，藏起来会让人以为扫完就全了。 */
+  failures: ScanFailure[];
+  /** 已上报过的记录。没有＝还没上报。 */
+  applied?: { edges: number; resolved: number; at: string };
+}
+
+/**
+ * 代码包是**有历史的**：谁在什么时候投了哪个包、扫出多少边、上报了没有、
+ * 当时让几张表脱离了孤岛。补录是长期活，同一个包会重投、会补投，
+ * 没有历史就只能靠人记。
+ */
+export const PACKAGES: SqlPackage[] = [
+  {
+    id: "pkg-ext-bundle",
+    name: "erp_ext_sql_bundle.zip",
+    size: "4.7 MB",
+    uploadedAt: "2026-09-03 14:02",
+    sqlFiles: 128,
+    directories: 17,
+    statements: 407,
+    targets: [
+      "ext_customer_credit_daily",
+      "v_customer_credit_flag",
+      "dw_sales_order_wide",
+      "stg_partner_shipment_daily",
+      "ext_item_price_index",
+      "stg_gl_daily_balance",
+      "dw_customer_360",
+    ],
+    failures: [
+      { file: "legacy/etl_dump.sql", reason: "存储过程语法（DELIMITER $$）超出解析范围" },
+      { file: "adhoc/fix_20250917.sql", reason: "动态 SQL 字符串拼接，静态解析拿不到表名" },
+      { file: "reports/monthly_close.sql", reason: "方言不符：Oracle CONNECT BY" },
+      { file: "migrate/v2_backfill.sql", reason: "只有 UPDATE，没有可推的落点" },
+      { file: "tmp/scratch.sql", reason: "文件为空" },
+      { file: "legacy/proc_rebuild_idx.sql", reason: "存储过程语法（DELIMITER $$）超出解析范围" },
+    ],
+  },
+  {
+    id: "pkg-scm",
+    name: "scm_stock_pack_v2.zip",
+    size: "1.2 MB",
+    uploadedAt: "2026-08-27 09:41",
+    sqlFiles: 34,
+    directories: 5,
+    statements: 96,
+    targets: ["ext_supplier_scorecard", "stg_stock_movement"],
+    failures: [{ file: "wms/proc_sync.sql", reason: "存储过程语法（DELIMITER $$）超出解析范围" }],
+    applied: { edges: 6, resolved: 2, at: "2026-08-27 10:05" },
+  },
+  {
+    id: "pkg-fin-hr",
+    name: "finance_hr_etl_2026Q3.tar.gz",
+    size: "2.4 MB",
+    uploadedAt: "2026-08-11 16:20",
+    sqlFiles: 61,
+    directories: 9,
+    statements: 188,
+    targets: ["dw_invoice_payment_link", "ext_project_cost_daily", "stg_employee_attendance"],
+    failures: [
+      { file: "hr/legacy_import.sql", reason: "动态 SQL 字符串拼接，静态解析拿不到表名" },
+      { file: "ap/aging_report.sql", reason: "方言不符：Oracle CONNECT BY" },
+    ],
+    /** 当时只勾了一部分落点上报——历史里要看得出「没上全」。 */
+    applied: { edges: 6, resolved: 1, at: "2026-08-11 17:02" },
+  },
 ];
 
-/** 上传包的元信息。文件数是真扫出来的口径：包里所有 .sql，递归，无固定目录约定。 */
-export const SCAN_PACKAGE = {
-  name: "erp_ext_sql_bundle.zip",
-  size: "4.7 MB",
-  sqlFiles: 128,
-  directories: 17,
-  statements: 407,
-  scannedAt: "2026-09-03 14:02",
-};
+export function groupsOf(pkg: SqlPackage): ScanGroup[] {
+  return SCAN_GROUPS.filter((group) => pkg.targets.includes(group.target));
+}
 
-/** 代码包里没出现过的孤岛表——扫描完的第二个结论：这些只能手工连。 */
-export const UNCOVERED_ISOLATED = [
-  "imp_channel_order_2026",
-  "imp_offline_store_traffic",
-  "imp_wms_pick_log",
-  "ext_partner_settlement",
-  "imp_crm_lead_batch",
-  "stg_manual_adjustment",
-];
+/** 所有代码包都没提到的孤岛表——只能手工连的那批。 */
+export function uncoveredIsolated(): string[] {
+  const covered = new Set(PACKAGES.flatMap((pkg) => pkg.targets));
+  return TABLES.filter((t) => t.isolated && !covered.has(t.name)).map((t) => t.name);
+}

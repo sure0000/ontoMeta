@@ -1,15 +1,21 @@
 /* ============================================================
- * 血缘补录页（原型）
+ * 血缘补录工作台（原型）
+ *
+ * 版式：顶栏事实带 + 可收起左栏 + 吃满剩余高度的工作面 + 常驻写入条。
+ * 页面自己不滚动——滚动只发生在左栏列表和工作面内部，这样写入条和顶栏的数字
+ * 永远在视野里（补录是"边看结论边决定写不写"的活）。
  *
  * 两族颜色：机器扫出来的边走 --om-machine（与审核工作台的「机器判的」同一套印记），
- * 人工连的、选中的走 --om-primary。语义色只表示「能不能写」：待映射/缺键=warning，
- * 孤岛=error。孤岛红点是全页唯一的红，别的地方不许用，否则它就不显眼了。
+ * 人工连的、选中的走 --om-primary。语义色只表示「能不能写」：待映射/缺键=warning。
+ * 孤岛红是全页唯一的红，别处不许用，否则它就不显眼了。
  * ============================================================ */
 
-/* 画布高度：吃掉视口剩余空间，但给上下留出页头与写入条 */
-:root {
-  --lin-canvas-h: clamp(400px, calc(100vh - 430px), 660px);
-  --lin-node-w: 228px;
+.lin-workbench {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--om-space-3);
 }
 
 .lin-muted {
@@ -17,7 +23,6 @@
   font-size: var(--om-text-sm);
 }
 
-/* 孤岛标记：全页唯一的红点 */
 .lin-iso-dot {
   width: 7px;
   height: 7px;
@@ -27,83 +32,112 @@
   flex: none;
 }
 
-/* ---------- 页头事实带 ---------- */
+/* ---------- 顶栏 ---------- */
 
-.lin-facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: var(--om-space-3);
-  width: 100%;
+.lin-topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--om-space-4);
+  padding: 9px var(--om-space-4);
+  background: var(--om-surface);
   border: 1px solid var(--om-border);
-  border-radius: var(--om-radius);
-  overflow: hidden;
-  background: var(--om-border);
+  border-radius: var(--om-radius-lg);
+  box-shadow: var(--om-shadow-sm);
 }
 
-.lin-fact {
-  background: var(--om-surface-muted);
-  padding: 9px 14px;
+.lin-topbar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--om-text-md);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lin-stats {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--om-space-3) var(--om-space-6);
+}
+
+.lin-stat {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
-.lin-fact--key {
-  background: var(--om-surface);
-  box-shadow: inset 3px 0 0 var(--om-error);
+/* 孤岛数是这屏的主角，用左侧红条把它从其余事实里拎出来 */
+.lin-stat--iso {
+  padding-left: 10px;
+  border-left: 3px solid var(--om-error);
 }
 
-.lin-fact-label {
+.lin-stat--src {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.lin-stat-label {
   font-size: var(--om-text-xs);
   color: var(--om-text-tertiary);
+  white-space: nowrap;
 }
 
-.lin-fact-value {
+.lin-stat-value {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
   font-family: var(--om-font-mono);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.lin-fact-value b {
-  font-size: 22px;
+.lin-stat-value b {
+  font-size: var(--om-text-xl);
   font-weight: 600;
   letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 
-.lin-fact--key .lin-fact-value b {
-  font-size: 26px;
+.lin-stat--iso .lin-stat-value b {
+  font-size: 22px;
 }
 
-.lin-fact-value em {
+.lin-stat-value em {
   font-family: var(--om-font-mono);
   font-style: normal;
   font-size: var(--om-text-xs);
   color: var(--om-text-tertiary);
 }
 
-.lin-fact-arrow {
-  font-size: 11px;
+.lin-stat-arrow {
+  font-size: 10px;
   color: var(--om-text-tertiary);
 }
 
-.lin-fact-next {
+.lin-stat-next {
   color: var(--om-success);
 }
 
-.lin-fact-foot {
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
+.lin-stat-src {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .lin-meter {
-  margin-top: 5px;
-  height: 6px;
+  margin-top: 4px;
+  width: 132px;
+  height: 5px;
   display: flex;
   border-radius: var(--om-radius-full);
   background: var(--om-bg-soft);
@@ -124,18 +158,71 @@
   background: var(--om-success);
 }
 
-/* ---------- 两栏 ---------- */
+/* ---------- 主体 ---------- */
 
-.lin-panes {
+.lin-body {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 276px minmax(0, 1fr);
-  gap: var(--om-space-4);
-  align-items: start;
+  grid-template-columns: 288px minmax(0, 1fr);
+  gap: var(--om-space-3);
 }
 
-/* ---------- 左栏：表清单 ---------- */
+/* 收起后只留一条可点的窄边——画布铺满时这 288px 很值钱 */
+.lin-body--rail-closed {
+  grid-template-columns: 38px minmax(0, 1fr);
+}
+
+.lin-rail,
+.lin-main {
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.lin-rail-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: 10px var(--om-space-3) 10px var(--om-space-4);
+  border-bottom: 1px solid var(--om-border);
+}
+
+.lin-body--rail-closed .lin-rail-head {
+  justify-content: center;
+  padding: 10px 0;
+}
+
+.lin-rail-title {
+  flex: 1;
+  font-size: var(--om-text-base);
+  font-weight: 600;
+}
+
+.lin-rail-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--om-text-tertiary);
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: var(--om-radius-sm);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.lin-rail-toggle:hover {
+  background: var(--om-neutral-soft);
+  color: var(--om-text);
+}
 
 .lin-rail-controls {
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: var(--om-space-2);
@@ -143,12 +230,137 @@
   border-bottom: 1px solid var(--om-border);
 }
 
-.lin-rail-list {
+.lin-rail-foot {
+  flex: none;
+  margin: 0;
+  padding: 9px var(--om-space-4);
+  border-top: 1px solid var(--om-border);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  line-height: 1.6;
+}
+
+/* ---------- 左栏：代码包历史 ---------- */
+
+.lin-pkg-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   list-style: none;
   margin: 0;
   padding: var(--om-space-2);
-  max-height: var(--lin-canvas-h);
+}
+
+.lin-pkg-list li {
+  position: relative;
+  margin-bottom: 4px;
+}
+
+.lin-pkg {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 32px 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--om-radius);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.lin-pkg:hover {
+  background: var(--om-surface-muted);
+}
+
+.lin-pkg--on {
+  background: var(--om-primary-soft);
+  border-color: var(--om-primary-border);
+}
+
+.lin-pkg-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lin-pkg-head .ant-tag {
+  margin-inline-end: 0;
+}
+
+.lin-pkg-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  font-weight: 600;
+  color: var(--om-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-pkg-meta {
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-pkg-nums {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-pkg-nums b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-lg);
+  font-weight: 600;
+  color: var(--om-text);
+  margin-right: 2px;
+}
+
+.lin-pkg-nums i {
+  width: 3px;
+  height: 3px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-text-disabled);
+}
+
+.lin-pkg-applied {
+  font-size: var(--om-text-xs);
+  color: var(--om-success);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-pkg-rescan {
+  position: absolute;
+  top: 7px;
+  right: 5px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.lin-pkg-list li:hover .lin-pkg-rescan,
+.lin-pkg-rescan:focus-visible {
+  opacity: 1;
+}
+
+/* ---------- 左栏：表清单 ---------- */
+
+.lin-rail-list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: var(--om-space-2);
 }
 
 .lin-rail-row {
@@ -195,22 +407,17 @@
 .lin-rail-empty {
   padding: var(--om-space-4);
   text-align: center;
-  list-style: none;
 }
 
-/* ---------- 右栏 ---------- */
+/* ---------- 工作面 ---------- */
 
-.lin-work {
-  overflow: hidden;
-}
-
-.lin-tabs .ant-tabs-nav {
-  margin: 0;
-  padding: 0 var(--om-space-4);
-}
-
-.lin-pane-body {
+.lin-main--scan {
+  overflow-y: auto;
   padding: var(--om-space-4);
+}
+
+.lin-main--canvas {
+  overflow: hidden;
 }
 
 /* ---------- 共用：表名 / 关联键 ---------- */
@@ -247,14 +454,16 @@
   font-size: 11px;
 }
 
-/* ---------- 路径 A：上传 ---------- */
+/* ---------- 上传 ---------- */
 
 .lin-dropzone {
   display: flex;
   flex-direction: column;
   gap: var(--om-space-4);
   align-items: center;
-  padding: var(--om-space-6) 0;
+  justify-content: center;
+  height: 100%;
+  min-height: 320px;
 }
 
 .lin-dropzone .ant-upload-wrapper,
@@ -288,7 +497,7 @@
   gap: var(--om-space-3);
 }
 
-/* ---------- 路径 A：扫描结果 ---------- */
+/* ---------- 扫描结果 ---------- */
 
 .lin-scan {
   display: flex;
@@ -321,10 +530,20 @@
   font-size: var(--om-code-base);
 }
 
+.lin-scan-applied {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-size: var(--om-text-sm);
+  color: var(--om-success);
+  font-weight: 500;
+}
+
 /* 三条结论：这一屏真正要回答的问题 */
 .lin-verdicts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: var(--om-space-3);
 }
 
@@ -433,9 +652,32 @@
   opacity: 0.66;
 }
 
-/* 第二个结论：包里根本没提到的孤岛表 */
-.lin-uncovered-body {
-  padding: var(--om-space-3) var(--om-space-4) var(--om-space-4);
+/* 结论的尾巴：没覆盖的孤岛表 与 解析失败清单，并排放，宽屏不浪费 */
+.lin-scan-tail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: var(--om-space-3);
+  align-items: start;
+}
+
+.lin-uncovered {
+  border: 1px solid var(--om-warning-soft);
+  border-radius: var(--om-radius);
+  background: var(--om-surface-muted);
+  padding: 12px 14px;
+}
+
+.lin-uncovered-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--om-warning);
+  font-size: var(--om-text-sm);
+}
+
+.lin-uncovered-head b {
+  color: var(--om-text);
 }
 
 .lin-uncovered-list {
@@ -443,7 +685,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--om-space-2);
-  margin-top: var(--om-space-2);
+  margin-top: var(--om-space-3);
 }
 
 .lin-uncovered-item {
@@ -498,10 +740,14 @@
   justify-content: space-between;
 }
 
-/* ---------- 路径 B：画布 ---------- */
+/* ---------- 画布 ---------- */
 
 .lin-canvas-wrap {
   position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .lin-canvas-toolbar {
@@ -536,10 +782,11 @@
 
 .lin-canvas {
   position: relative;
-  height: var(--lin-canvas-h);
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
   background: var(--om-bg-soft);
-  border-top: 1px solid var(--om-border);
+  border-radius: var(--om-radius-lg);
   cursor: grab;
   touch-action: none;
   user-select: none;
@@ -581,7 +828,6 @@
   cursor: pointer;
 }
 
-/* 表节点 */
 .lin-tnode {
   position: absolute;
   background: var(--om-surface);
@@ -692,7 +938,6 @@
   white-space: nowrap;
 }
 
-/* 出线口：拖它就是连一条血缘 */
 .lin-port {
   position: absolute;
   right: -6px;
@@ -817,23 +1062,21 @@
 
 /* ---------- 写入条 ---------- */
 
-.lin-writebar {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
+.lin-footer {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--om-space-3);
-  padding: 10px var(--om-space-5);
+  padding: 9px var(--om-space-5);
   background: var(--om-surface);
   border: 1px solid var(--om-border-strong);
   border-radius: var(--om-radius-lg);
-  box-shadow: var(--om-shadow-lg);
+  box-shadow: var(--om-shadow-md);
 }
 
-.lin-writebar-counts {
+.lin-footer-counts {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -842,7 +1085,7 @@
   color: var(--om-text-secondary);
 }
 
-.lin-writebar-counts b {
+.lin-footer-counts b {
   font-family: var(--om-font-mono);
   font-size: var(--om-text-xl);
   font-weight: 600;
@@ -850,7 +1093,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-.lin-writebar-acts {
+.lin-footer-acts {
   display: flex;
   align-items: center;
   gap: var(--om-space-2);
@@ -863,11 +1106,9 @@
 }
 
 @media (max-width: 1100px) {
-  .lin-panes {
+  .lin-body,
+  .lin-body--rail-closed {
     grid-template-columns: 1fr;
-  }
-
-  .lin-rail-list {
-    max-height: 260px;
+    grid-template-rows: minmax(160px, 240px) minmax(0, 1fr);
   }
 }

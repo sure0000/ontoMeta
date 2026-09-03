@@ -1,25 +1,19 @@
 import {
   ArrowRightOutlined,
+  CheckCircleOutlined,
   FileSearchOutlined,
   InboxOutlined,
   NodeIndexOutlined,
-  ReloadOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
-import { Button, Collapse, Empty, Table, Tag, Upload } from "antd";
+import { Button, Collapse, Table, Tag, Upload } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useMemo } from "react";
-import {
-  DOMAIN_FACTS,
-  SCAN_FAILURES,
-  SCAN_GROUPS,
-  SCAN_PACKAGE,
-  UNCOVERED_ISOLATED,
-} from "./prototypeData";
-import type { ScanGroup } from "./prototypeData";
+import { DOMAIN_FACTS, groupsOf, uncoveredIsolated } from "./prototypeData";
+import type { ScanGroup, SqlPackage } from "./prototypeData";
 
 /**
- * 路径 A：扔一个 SQL 代码包进来，递归扫所有 .sql，把能推出的血缘全捞出来。
+ * 一个代码包的扫描结果。
  *
  * 代码包**没有固定格式**——目录怎么放、语句怎么写都不做要求，所以这一屏的重点
  * 不是"解析成功了"，而是三个结论：能补哪些边、影响哪些表、哪些孤岛还是孤岛。
@@ -28,13 +22,15 @@ import type { ScanGroup } from "./prototypeData";
  */
 
 interface Props {
-  scanned: boolean;
+  pkg: SqlPackage | null;
+  /** 正在上传新包：主区让位给上传区。 */
+  uploading: boolean;
   scanning: boolean;
   onScan: () => void;
-  onReset: () => void;
   selected: string[];
   onSelectedChange: (keys: string[]) => void;
   frozen: boolean;
+  appliedNote?: string;
   onSendToCanvas: (table: string) => void;
 }
 
@@ -49,32 +45,33 @@ function countEdges(groups: ScanGroup[]) {
 }
 
 export function ScanReport({
-  scanned,
+  pkg,
+  uploading,
   scanning,
   onScan,
-  onReset,
   selected,
   onSelectedChange,
   frozen,
+  appliedNote,
   onSendToCanvas,
 }: Props) {
+  const groups = useMemo(() => (pkg ? groupsOf(pkg) : []), [pkg]);
+
   const stats = useMemo(() => {
-    const edges = countEdges(SCAN_GROUPS);
+    const edges = countEdges(groups);
     const tables = new Set<string>();
-    SCAN_GROUPS.forEach((g) => {
+    groups.forEach((g) => {
       tables.add(g.target);
       g.edges.forEach((e) => tables.add(e.src));
     });
-    const resolved = SCAN_GROUPS.filter((g) => g.isolated).map((g) => g.target);
-    return {
-      edges,
-      affected: tables.size,
-      resolved,
-      stillIsolated: DOMAIN_FACTS.isolated - resolved.length,
-    };
-  }, []);
+    const resolved = groups.filter((g) => g.isolated).length;
+    return { edges, affected: tables.size, resolved, after: DOMAIN_FACTS.isolated - resolved };
+  }, [groups]);
 
-  if (!scanned) {
+  const done = pkg?.applied;
+  const uncovered = useMemo(() => uncoveredIsolated(), []);
+
+  if (uploading || !pkg) {
     return (
       <div className="lin-dropzone">
         <Upload.Dragger
@@ -93,14 +90,14 @@ export function ScanReport({
           <p className="lin-dropzone-hint">
             .zip / .tar.gz / 整个目录都行。<b>不要求目录结构</b>
             ——递归扫描包内所有 .sql 文件，逐条语句提取 FROM / JOIN / INSERT / CREATE
-            的表引用与关联键。
+            的表引用与关联键。扫完的包会留在左边的历史里。
           </p>
         </Upload.Dragger>
         <div className="lin-dropzone-foot">
           <Button type="primary" icon={<FileSearchOutlined />} loading={scanning} onClick={onScan}>
             用示例代码包扫描
           </Button>
-          <span className="lin-muted">原型：示例包 = {SCAN_PACKAGE.name}</span>
+          <span className="lin-muted">原型：不会真的读文件，扫的是内置示例包</span>
         </div>
       </div>
     );
@@ -125,7 +122,7 @@ export function ScanReport({
     {
       title: "可补的边",
       key: "edges",
-      width: 176,
+      width: 172,
       render: (_, row) => {
         const c = countEdges([row]);
         return (
@@ -145,13 +142,13 @@ export function ScanReport({
       title: "来源文件",
       dataIndex: "file",
       key: "file",
-      width: 230,
+      width: 226,
       render: (file: string) => <span className="lin-cell-file">{file}</span>,
     },
     {
       title: "补录后",
       key: "after",
-      width: 120,
+      width: 108,
       render: (_, row) =>
         row.isolated ? (
           <Tag color="success" variant="filled">
@@ -165,35 +162,40 @@ export function ScanReport({
 
   return (
     <div className="lin-scan">
-      {/* 摘要：扫了什么 */}
       <div className="lin-scan-bar">
         <div className="lin-scan-bar-main">
           <FileSearchOutlined />
-          <b>{SCAN_PACKAGE.name}</b>
+          <b>{pkg.name}</b>
           <span className="lin-muted">
-            {SCAN_PACKAGE.size} · {SCAN_PACKAGE.directories} 个目录 · {SCAN_PACKAGE.sqlFiles} 个
-            .sql · {SCAN_PACKAGE.statements} 条语句
+            {pkg.uploadedAt} · {pkg.size} · {pkg.directories} 个目录 · {pkg.sqlFiles} 个 .sql ·{" "}
+            {pkg.statements} 条语句
           </span>
           <Tag color="success" variant="filled">
-            解析成功 {SCAN_PACKAGE.sqlFiles - SCAN_FAILURES.length}
+            解析成功 {pkg.sqlFiles - pkg.failures.length}
           </Tag>
-          <Tag color="warning" variant="filled">
-            失败 {SCAN_FAILURES.length}
-          </Tag>
+          {pkg.failures.length > 0 && (
+            <Tag color="warning" variant="filled">
+              失败 {pkg.failures.length}
+            </Tag>
+          )}
         </div>
-        <Button size="small" icon={<ReloadOutlined />} onClick={onReset} disabled={frozen}>
-          换一个包
-        </Button>
+        {appliedNote && (
+          <span className="lin-scan-applied">
+            <CheckCircleOutlined /> {appliedNote}
+          </span>
+        )}
       </div>
 
-      {/* 三条结论 */}
+      {/* 三条结论。已上报过的包换一套口径：讲"当时补了什么"，不再讲"能补什么" */}
       <div className="lin-verdicts">
         <div className="lin-verdict">
-          <span className="lin-verdict-label">能补多少血缘</span>
-          <b className="lin-verdict-num">{stats.edges.ok}</b>
-          <span className="lin-verdict-unit">条边可上报</span>
+          <span className="lin-verdict-label">{done ? "已补的血缘" : "能补多少血缘"}</span>
+          <b className="lin-verdict-num">{done ? done.edges : stats.edges.ok}</b>
+          <span className="lin-verdict-unit">{done ? "条边已写入 DataHub" : "条边可上报"}</span>
           <div className="lin-verdict-foot">
-            另有 {stats.edges.blocked} 条表名对不上 DataHub、{stats.edges.skipped} 条不在本域
+            {done
+              ? `${done.at} 上报，重投同一个包不会重复建边`
+              : `另有 ${stats.edges.blocked} 条表名对不上 DataHub、${stats.edges.skipped} 条不在本域`}
           </div>
         </div>
         <div className="lin-verdict">
@@ -201,20 +203,30 @@ export function ScanReport({
           <b className="lin-verdict-num">{stats.affected}</b>
           <span className="lin-verdict-unit">张表将获得血缘</span>
           <div className="lin-verdict-foot">
-            覆盖 {SCAN_GROUPS.length} 个落点，上游表 {stats.affected - SCAN_GROUPS.length} 张
+            覆盖 {groups.length} 个落点，上游表 {stats.affected - groups.length} 张
           </div>
         </div>
         <div className="lin-verdict lin-verdict--key">
           <span className="lin-verdict-label">孤岛怎么变</span>
-          <b className="lin-verdict-num">
-            {DOMAIN_FACTS.isolated}
-            <ArrowRightOutlined className="lin-verdict-arrow" />
-            {stats.stillIsolated}
-          </b>
-          <span className="lin-verdict-unit">张孤岛表</span>
-          <div className="lin-verdict-foot">
-            {stats.resolved.length} 张靠这个包脱离孤岛，剩 {stats.stillIsolated} 张要手工连
-          </div>
+          {done ? (
+            <>
+              <b className="lin-verdict-num">{done.resolved}</b>
+              <span className="lin-verdict-unit">张表当时脱离孤岛</span>
+              <div className="lin-verdict-foot">已生效：这些落点现在都有上下游，不再计入孤岛</div>
+            </>
+          ) : (
+            <>
+              <b className="lin-verdict-num">
+                {DOMAIN_FACTS.isolated}
+                <ArrowRightOutlined className="lin-verdict-arrow" />
+                {stats.after}
+              </b>
+              <span className="lin-verdict-unit">张孤岛表</span>
+              <div className="lin-verdict-foot">
+                {stats.resolved} 张靠这个包脱离孤岛，剩 {stats.after} 张要手工连
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -224,7 +236,7 @@ export function ScanReport({
         size="small"
         rowKey="target"
         columns={columns}
-        dataSource={SCAN_GROUPS}
+        dataSource={groups}
         pagination={false}
         rowSelection={{
           selectedRowKeys: selected,
@@ -260,20 +272,18 @@ export function ScanReport({
         }}
       />
 
-      {/* 第二个结论：这些孤岛表包里根本没提到，只能手工连 */}
-      <div className="section-card lin-uncovered">
-        <div className="section-card-head">
-          <span className="section-card-head-title">
-            <WarningOutlined /> 代码包没覆盖的孤岛表
-          </span>
-          <span className="section-card-count">{stats.stillIsolated}</span>
-        </div>
-        <div className="lin-uncovered-body">
-          <p className="lin-muted">
-            这些表在整个包里一次都没出现——没有 SQL 可推，只能在画布上手工连。
-          </p>
+      <div className="lin-scan-tail">
+        {/* 第二个结论：所有包都没提到的孤岛表，只能手工连 */}
+        <section className="lin-uncovered">
+          <div className="lin-uncovered-head">
+            <WarningOutlined />
+            <b>所有代码包都没覆盖的孤岛表</b>
+            <span className="lin-muted">
+              一次都没在 SQL 里出现过，没有代码可推——只能在画布上手工连
+            </span>
+          </div>
           <div className="lin-uncovered-list">
-            {UNCOVERED_ISOLATED.map((table) => (
+            {uncovered.map((table) => (
               <button
                 key={table}
                 type="button"
@@ -285,36 +295,32 @@ export function ScanReport({
                 <em>放到画布</em>
               </button>
             ))}
-            <span className="lin-muted">
-              …另 {stats.stillIsolated - UNCOVERED_ISOLATED.length} 张
-            </span>
           </div>
-        </div>
-      </div>
+        </section>
 
-      <Collapse
-        size="small"
-        className="lin-failures"
-        items={[
-          {
-            key: "failures",
-            label: `解析失败的 ${SCAN_FAILURES.length} 个文件（不影响其余结果）`,
-            children:
-              SCAN_FAILURES.length === 0 ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="全部解析成功" />
-              ) : (
-                <ul className="lin-failure-list">
-                  {SCAN_FAILURES.map((item) => (
-                    <li key={item.file}>
-                      <span className="lin-cell-file">{item.file}</span>
-                      <span className="lin-muted">{item.reason}</span>
-                    </li>
-                  ))}
-                </ul>
-              ),
-          },
-        ]}
-      />
+        {pkg.failures.length > 0 && (
+          <Collapse
+            size="small"
+            className="lin-failures"
+            items={[
+              {
+                key: "failures",
+                label: `解析失败的 ${pkg.failures.length} 个文件（不影响其余结果）`,
+                children: (
+                  <ul className="lin-failure-list">
+                    {pkg.failures.map((item) => (
+                      <li key={item.file}>
+                        <span className="lin-cell-file">{item.file}</span>
+                        <span className="lin-muted">{item.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ),
+              },
+            ]}
+          />
+        )}
+      </div>
     </div>
   );
 }
