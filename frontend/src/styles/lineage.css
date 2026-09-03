@@ -1,0 +1,873 @@
+/* ============================================================
+ * 血缘补录页（原型）
+ *
+ * 两族颜色：机器扫出来的边走 --om-machine（与审核工作台的「机器判的」同一套印记），
+ * 人工连的、选中的走 --om-primary。语义色只表示「能不能写」：待映射/缺键=warning，
+ * 孤岛=error。孤岛红点是全页唯一的红，别的地方不许用，否则它就不显眼了。
+ * ============================================================ */
+
+/* 画布高度：吃掉视口剩余空间，但给上下留出页头与写入条 */
+:root {
+  --lin-canvas-h: clamp(400px, calc(100vh - 430px), 660px);
+  --lin-node-w: 228px;
+}
+
+.lin-muted {
+  color: var(--om-text-tertiary);
+  font-size: var(--om-text-sm);
+}
+
+/* 孤岛标记：全页唯一的红点 */
+.lin-iso-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-error);
+  display: inline-block;
+  flex: none;
+}
+
+/* ---------- 页头事实带 ---------- */
+
+.lin-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--om-space-3);
+  width: 100%;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  overflow: hidden;
+  background: var(--om-border);
+}
+
+.lin-fact {
+  background: var(--om-surface-muted);
+  padding: 9px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lin-fact--key {
+  background: var(--om-surface);
+  box-shadow: inset 3px 0 0 var(--om-error);
+}
+
+.lin-fact-label {
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-fact-value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--om-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-fact-value b {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.lin-fact--key .lin-fact-value b {
+  font-size: 26px;
+}
+
+.lin-fact-value em {
+  font-family: var(--om-font-mono);
+  font-style: normal;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-fact-arrow {
+  font-size: 11px;
+  color: var(--om-text-tertiary);
+}
+
+.lin-fact-next {
+  color: var(--om-success);
+}
+
+.lin-fact-foot {
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-meter {
+  margin-top: 5px;
+  height: 6px;
+  display: flex;
+  border-radius: var(--om-radius-full);
+  background: var(--om-bg-soft);
+  overflow: hidden;
+}
+
+.lin-meter i {
+  display: block;
+  height: 100%;
+  transition: width 0.4s ease;
+}
+
+.lin-meter-have {
+  background: var(--om-machine);
+}
+
+.lin-meter-gain {
+  background: var(--om-success);
+}
+
+/* ---------- 两栏 ---------- */
+
+.lin-panes {
+  display: grid;
+  grid-template-columns: 276px minmax(0, 1fr);
+  gap: var(--om-space-4);
+  align-items: start;
+}
+
+/* ---------- 左栏：表清单 ---------- */
+
+.lin-rail-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--om-space-2);
+  padding: var(--om-space-3);
+  border-bottom: 1px solid var(--om-border);
+}
+
+.lin-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--om-space-2);
+  max-height: var(--lin-canvas-h);
+  overflow-y: auto;
+}
+
+.lin-rail-row {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: 5px 6px 5px 8px;
+  border-radius: var(--om-radius-sm);
+}
+
+.lin-rail-row:hover {
+  background: var(--om-surface-muted);
+}
+
+.lin-rail-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lin-rail-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-rail-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-rail-empty {
+  padding: var(--om-space-4);
+  text-align: center;
+  list-style: none;
+}
+
+/* ---------- 右栏 ---------- */
+
+.lin-work {
+  overflow: hidden;
+}
+
+.lin-tabs .ant-tabs-nav {
+  margin: 0;
+  padding: 0 var(--om-space-4);
+}
+
+.lin-pane-body {
+  padding: var(--om-space-4);
+}
+
+/* ---------- 共用：表名 / 关联键 ---------- */
+
+.lin-node {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  padding: 1px 7px;
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius-sm);
+  background: var(--om-surface-muted);
+  white-space: nowrap;
+}
+
+.lin-node--target {
+  border-color: var(--om-primary-border);
+  background: var(--om-primary-soft);
+  color: var(--om-primary);
+}
+
+.lin-key {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  padding: 1px 7px;
+  border-radius: var(--om-radius-sm);
+  background: var(--om-machine-soft);
+  border: 1px solid var(--om-machine-border);
+  color: var(--om-machine-strong);
+  overflow-wrap: anywhere;
+}
+
+.lin-flow-arrow {
+  color: var(--om-machine);
+  font-size: 11px;
+}
+
+/* ---------- 路径 A：上传 ---------- */
+
+.lin-dropzone {
+  display: flex;
+  flex-direction: column;
+  gap: var(--om-space-4);
+  align-items: center;
+  padding: var(--om-space-6) 0;
+}
+
+.lin-dropzone .ant-upload-wrapper,
+.lin-dropzone .ant-upload {
+  width: 100%;
+}
+
+.lin-dropzone-icon {
+  font-size: 38px;
+  color: var(--om-primary);
+  margin: 0;
+}
+
+.lin-dropzone-title {
+  font-size: var(--om-text-lg);
+  font-weight: 600;
+  margin: var(--om-space-2) 0 4px;
+}
+
+.lin-dropzone-hint {
+  max-width: 54ch;
+  margin: 0 auto;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+  line-height: 1.7;
+}
+
+.lin-dropzone-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-3);
+}
+
+/* ---------- 路径 A：扫描结果 ---------- */
+
+.lin-scan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--om-space-4);
+}
+
+.lin-scan-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-3);
+  padding: 8px 12px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  background: var(--om-surface-muted);
+}
+
+.lin-scan-bar-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--om-space-2);
+  font-size: var(--om-text-sm);
+  min-width: 0;
+}
+
+.lin-scan-bar-main b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-base);
+}
+
+/* 三条结论：这一屏真正要回答的问题 */
+.lin-verdicts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--om-space-3);
+}
+
+.lin-verdict {
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lin-verdict--key {
+  border-color: var(--om-primary-border);
+  background: var(--om-primary-soft);
+}
+
+.lin-verdict-label {
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-verdict-num {
+  font-family: var(--om-font-mono);
+  font-size: 27px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lin-verdict-arrow {
+  font-size: 15px;
+  color: var(--om-text-tertiary);
+}
+
+.lin-verdict-unit {
+  font-size: var(--om-text-sm);
+  color: var(--om-text-secondary);
+}
+
+.lin-verdict-foot {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--om-border-strong);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  line-height: 1.6;
+}
+
+.lin-scan-table .ant-table-cell {
+  padding: 7px 10px;
+}
+
+.lin-cell-table {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+}
+
+.lin-cell-name {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-base);
+}
+
+.lin-cell-edges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-secondary);
+}
+
+.lin-cell-edges b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-lg);
+  color: var(--om-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-cell-file {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-secondary);
+}
+
+.lin-edge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 0 2px 8px;
+}
+
+.lin-edge-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 3px 0;
+}
+
+.lin-edge-line--off {
+  opacity: 0.66;
+}
+
+/* 第二个结论：包里根本没提到的孤岛表 */
+.lin-uncovered-body {
+  padding: var(--om-space-3) var(--om-space-4) var(--om-space-4);
+}
+
+.lin-uncovered-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--om-space-2);
+  margin-top: var(--om-space-2);
+}
+
+.lin-uncovered-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px dashed var(--om-border-strong);
+  border-radius: var(--om-radius-full);
+  background: var(--om-surface);
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-secondary);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.lin-uncovered-item em {
+  font-family: var(--om-font-mono);
+  font-style: normal;
+  font-size: var(--om-text-xs);
+  color: var(--om-primary);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.lin-uncovered-item:hover {
+  border-color: var(--om-primary);
+  border-style: solid;
+  color: var(--om-text);
+}
+
+.lin-uncovered-item:hover em {
+  opacity: 1;
+}
+
+.lin-failure-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.lin-failure-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--om-space-3);
+  justify-content: space-between;
+}
+
+/* ---------- 路径 B：画布 ---------- */
+
+.lin-canvas-wrap {
+  position: relative;
+}
+
+.lin-canvas-toolbar {
+  position: absolute;
+  top: var(--om-space-3);
+  right: var(--om-space-3);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: 4px;
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  box-shadow: var(--om-shadow-md);
+}
+
+.lin-zoom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lin-zoom-num {
+  min-width: 40px;
+  text-align: center;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-canvas {
+  position: relative;
+  height: var(--lin-canvas-h);
+  overflow: hidden;
+  background: var(--om-bg-soft);
+  border-top: 1px solid var(--om-border);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.lin-canvas:active {
+  cursor: grabbing;
+}
+
+.lin-canvas--linking {
+  cursor: crosshair;
+}
+
+.lin-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6000px;
+  height: 4000px;
+  transform-origin: 0 0;
+  /* 网格随画布一起缩放平移，拖动时才有"贴着格子走"的手感（吸附 8px） */
+  background-image: radial-gradient(var(--om-border-strong) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+.lin-wires {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.lin-wire-hit {
+  stroke: transparent;
+  stroke-width: 14;
+  fill: none;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+/* 表节点 */
+.lin-tnode {
+  position: absolute;
+  background: var(--om-surface);
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius);
+  box-shadow: var(--om-shadow-sm);
+}
+
+.lin-tnode--drop {
+  border-color: var(--om-primary);
+  box-shadow: 0 0 0 2px var(--om-primary-soft);
+}
+
+.lin-tnode-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 6px 0 9px;
+  border-bottom: 1px solid var(--om-border);
+  border-radius: var(--om-radius) var(--om-radius) 0 0;
+  background: var(--om-surface-muted);
+  cursor: move;
+}
+
+.lin-tnode-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-tnode-count {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-tnode-x {
+  border: 0;
+  background: transparent;
+  color: var(--om-text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+  line-height: 1;
+  border-radius: var(--om-radius-sm);
+  font-size: 10px;
+}
+
+.lin-tnode-x:hover {
+  background: var(--om-error-soft);
+  color: var(--om-error);
+}
+
+.lin-tnode-body {
+  padding: 5px 0;
+}
+
+.lin-col {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+}
+
+.lin-col--drop {
+  background: var(--om-primary-soft);
+  box-shadow: inset 2px 0 0 var(--om-primary);
+}
+
+.lin-col-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-pk {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: var(--om-machine-soft);
+  border: 1px solid var(--om-machine-border);
+  color: var(--om-machine-strong);
+}
+
+.lin-col-type {
+  font-size: 10px;
+  color: var(--om-text-tertiary);
+  max-width: 78px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 出线口：拖它就是连一条血缘 */
+.lin-port {
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-surface);
+  border: 2px solid var(--om-machine);
+  cursor: crosshair;
+  transition:
+    transform 0.12s,
+    border-color 0.12s;
+}
+
+.lin-port:hover {
+  border-color: var(--om-primary);
+  transform: translateY(-50%) scale(1.35);
+}
+
+.lin-canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+  color: var(--om-text-tertiary);
+}
+
+.lin-canvas-empty p {
+  margin: 0;
+  font-size: var(--om-text-lg);
+  font-weight: 600;
+  color: var(--om-text-secondary);
+}
+
+.lin-canvas-hint {
+  position: absolute;
+  left: var(--om-space-3);
+  bottom: var(--om-space-3);
+  padding: 4px 10px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-surface);
+  border: 1px solid var(--om-border);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  pointer-events: none;
+  box-shadow: var(--om-shadow-sm);
+}
+
+/* 选中边的检查器：只在选中时出现，不常驻占宽度 */
+.lin-inspector {
+  position: absolute;
+  top: 58px;
+  right: var(--om-space-3);
+  width: 262px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--om-space-2);
+  padding: var(--om-space-3);
+  background: var(--om-surface);
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius);
+  box-shadow: var(--om-shadow-lg);
+}
+
+.lin-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--om-text-sm);
+  font-weight: 600;
+}
+
+.lin-inspector-flow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.lin-inspector-arrow {
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  padding-left: 6px;
+}
+
+.lin-inspector-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: var(--om-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--om-text-tertiary);
+}
+
+.lin-inspector-keys {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 148px;
+  overflow-y: auto;
+}
+
+.lin-inspector-keys li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* ---------- 写入条 ---------- */
+
+.lin-writebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-3);
+  padding: 10px var(--om-space-5);
+  background: var(--om-surface);
+  border: 1px solid var(--om-border-strong);
+  border-radius: var(--om-radius-lg);
+  box-shadow: var(--om-shadow-lg);
+}
+
+.lin-writebar-counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px var(--om-space-3);
+  font-size: var(--om-text-base);
+  color: var(--om-text-secondary);
+}
+
+.lin-writebar-counts b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xl);
+  font-weight: 600;
+  color: var(--om-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-writebar-acts {
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+}
+
+.lin-done {
+  font-size: var(--om-text-sm);
+  color: var(--om-success);
+  font-weight: 500;
+}
+
+@media (max-width: 1100px) {
+  .lin-panes {
+    grid-template-columns: 1fr;
+  }
+
+  .lin-rail-list {
+    max-height: 260px;
+  }
+}

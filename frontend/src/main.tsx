@@ -13,6 +13,7 @@ import "./styles/chat-bi.css";
 import "./styles/dashboard.css";
 import "./styles/big-screen.css";
 import "./styles/materialize.css";
+import "./styles/lineage.css";
 
 // 从 CSS 变量动态读取设计令牌，保证单一真源
 const rootStyle = getComputedStyle(document.documentElement);

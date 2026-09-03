@@ -5,6 +5,7 @@ import {
   FolderOutlined,
   HistoryOutlined,
   MenuFoldOutlined,
+  NodeIndexOutlined,
   MenuUnfoldOutlined,
   ProfileOutlined,
   RobotOutlined,
@@ -35,6 +36,7 @@ function getSelectedKey(pathname: string, search: string) {
     const domainId = readDomainFromSearch(search);
     return domainId ? ontologyChildKey(domainId) : "/ontology";
   }
+  if (pathname.startsWith("/lineage-supplement")) return "/lineage-supplement";
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
   if (pathname.startsWith("/decisions")) return "/decisions";
@@ -108,6 +110,9 @@ export function AppLayout() {
             : [{ key: "/ontology-empty", label: "暂无数据域", disabled: true }],
       },
       { key: "/workspace", icon: <FolderOutlined />, label: "本体建模" },
+      // 排在本体建模之后：补血缘是**建模的前置**——补完要重跑起草，放在下游菜单里会
+      // 让人以为它是建完模之后的事。
+      { key: "/lineage-supplement", icon: <NodeIndexOutlined />, label: "血缘补录" },
       {
         key: "/business-logic",
         icon: <FunctionOutlined />,

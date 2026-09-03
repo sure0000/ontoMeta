@@ -13,6 +13,7 @@ import { DataAppPublicPage } from "./pages/DataAppPublicPage";
 import { DecisionsPage } from "./pages/DecisionsPage";
 import { DomainDetailPage } from "./pages/DomainDetailPage";
 import { ExecutionRecordsPage } from "./pages/ExecutionRecordsPage";
+import { LineageSupplementPage } from "./pages/LineageSupplementPage";
 import { ReviewWorkbenchPage } from "./pages/ReviewWorkbenchPage";
 import { ObjectTypeDetailPage } from "./pages/ObjectTypeDetailPage";
 import { OntologyPage } from "./pages/OntologyPage";
@@ -54,6 +55,7 @@ export default function App() {
           element={<RelationGroupDetailPage />}
         />
         <Route path="/ontology/:objectId" element={<ObjectTypeDetailPage />} />
+        <Route path="/lineage-supplement" element={<LineageSupplementPage />} />
         <Route path="/business-logic" element={<BusinessLogicPage />} />
         <Route
           path="/business-logic/category/:categoryId"
