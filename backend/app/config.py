@@ -1,8 +1,16 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# .env 用**绝对路径**定位（基于本文件位置 → backend/.env），让服务在任意 cwd 下拉起都能
+# 读到 DATABASE_URL 等 bootstrap 配置。相对 ".env" 只在 cwd==backend 时才命中；MCP server
+# 被外部（dsh / 远程 uvicorn）以别的 cwd 拉起时会静默退回默认 sqlite 空库、连错库起不来——
+# 这是 dsh 接入时踩到的真实根因。环境变量仍优先于本文件（测试与容器化据此覆盖）。
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), env_file_encoding="utf-8")
 
     app_name: str = "ontoMeta"
     debug: bool = True
