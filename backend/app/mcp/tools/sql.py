@@ -9,6 +9,8 @@ fail-closed 解析；没有显式配置的默认仓就不执行，只把校验�
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.config import settings
 from app.services import data_app_executor
 from app.services.chat_bi_tool_schemas import _RUN_SQL_LIMIT, _SQL_TIMEOUT_SECONDS
@@ -18,6 +20,32 @@ from . import AuthContext, ToolResult, register_tool
 from ._common import as_int, session
 
 _MAX_TIMEOUT_SECONDS = 300
+
+
+def _vega_lite_spec(columns: list[dict[str, str]], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """为常见的分类 + 数值结果生成小型 Vega-Lite 预览 spec。"""
+    if len(columns) < 2 or not rows:
+        return None
+    keys = [str(column.get("key")) for column in columns if column.get("key")]
+    numeric: list[str] = []
+    for key in keys:
+        values = [row.get(key) for row in rows if row.get(key) is not None]
+        if values and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
+            numeric.append(key)
+    y_field = numeric[0] if numeric else keys[-1]
+    x_field = next((key for key in keys if key != y_field), keys[0])
+    y_type = "quantitative" if y_field in numeric else "nominal"
+    mark = "bar" if y_type == "quantitative" else "point"
+    return {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "description": "ontoMeta execute_sql 结果预览（最多内嵌前 100 行）",
+        "data": {"values": rows[:100]},
+        "mark": mark,
+        "encoding": {
+            "x": {"field": x_field, "type": "nominal"},
+            "y": {"field": y_field, "type": y_type},
+        },
+    }
 
 
 @register_tool
@@ -51,6 +79,11 @@ class ExecuteSqlTool:
                 "default": _SQL_TIMEOUT_SECONDS,
                 "minimum": 1,
                 "maximum": _MAX_TIMEOUT_SECONDS,
+            },
+            "include_vega_lite": {
+                "type": "boolean",
+                "description": "附加基于结果样本的 Vega-Lite 图表 spec",
+                "default": False,
             },
         },
         "required": ["sql"],
@@ -98,14 +131,19 @@ class ExecuteSqlTool:
             )
 
         truncated = len(rows) >= limit
+        data: dict[str, Any] = {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+        }
+        if arguments.get("include_vega_lite"):
+            spec = _vega_lite_spec(columns, rows)
+            if spec is not None:
+                data["vega_lite"] = spec
         return ToolResult(
             success=True,
-            data={
-                "columns": columns,
-                "rows": rows,
-                "row_count": len(rows),
-                "truncated": truncated,
-            },
+            data=data,
             metadata={
                 "sql": sql,
                 "datasource": source.name,

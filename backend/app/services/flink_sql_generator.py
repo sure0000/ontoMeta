@@ -403,7 +403,18 @@ def build_identity_select(
         tgt_type = target_flink_type(tgt_col, target_engine)
         expr = quote_identifier(src_name)
         if src_type != tgt_type:
-            expr = f"CAST({expr} AS {tgt_type})"
+            # Flink 1.18 rejects a direct NUMERIC -> TIMESTAMP CAST at validation
+            # time. This shape is common when a legacy source stores epoch seconds
+            # in an integer column but the ontology marks the target as datetime.
+            # Convert through BIGINT/epoch seconds explicitly; ordinary datetime
+            # and string casts retain the generic path.
+            if src_type in {"TINYINT", "SMALLINT", "INT", "BIGINT", "DECIMAL(38, 18)"} and tgt_type.startswith("TIMESTAMP"):
+                expr = (
+                    "TO_TIMESTAMP(FROM_UNIXTIME("
+                    f"CAST({expr} AS BIGINT)))"
+                )
+            else:
+                expr = f"CAST({expr} AS {tgt_type})"
         lines.append(f"  {expr} AS {quote_identifier(tgt_col.name)}")
     return "SELECT\n" + ",\n".join(lines) + f"\nFROM {quote_identifier(source_table.name)}"
 

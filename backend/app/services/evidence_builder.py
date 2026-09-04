@@ -908,6 +908,14 @@ class EvidenceBuilder:
         ):
             if not _samples_support(guess, getattr(field, "sample_values", None)):
                 return "attribute"
+        # A numeric field named *_date/*_time has no evidence that its values are
+        # epoch seconds. Treat the name as a weak hint rather than manufacturing a
+        # NUMERIC -> TIMESTAMP conversion that Flink cannot validate safely.
+        if guess == "datetime" and not _is_text_physical(getattr(field, "data_type", None)):
+            raw = (getattr(field, "data_type", None) or "").lower()
+            base = re.split(r"[(\s]", raw, maxsplit=1)[0]
+            if base in {"tinyint", "smallint", "int", "integer", "bigint", "decimal", "numeric", "float", "double"}:
+                return "attribute"
         return guess
 
     @staticmethod

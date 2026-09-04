@@ -5,10 +5,9 @@
 流）绕开这个坑；stateless（不保存跨请求 session）契合我们纯请求-响应的只读工具，也免去
 mount 子应用 lifespan 不触发导致的 session 清理问题。
 
-**为什么身份逐请求解析**：远程没有 stdio 的「一进程一 env Token」。每个 HTTP 请求各带各的
-``Authorization: Bearer``，由 ``server._auth_for`` 从 ``context.request`` 逐请求解析（见 auth
-的 ``resolve_http_auth``）。本模块只多做一层「匿名拦截」：``mcp_http_allow_anonymous`` 为假时，
-无令牌的请求连 initialize 都不给——公网默认必须带令牌。
+**为什么身份逐请求解析**：每个 HTTP 请求各带各的 ``Authorization: Bearer``，由
+``server._auth_for`` 从 ``context.request`` 逐请求解析（见 auth 的 ``resolve_http_auth``）。
+无令牌的请求连 initialize 都不给，HTTP 服务始终要求 Principal/Admin Bearer Token。
 """
 
 from __future__ import annotations
@@ -20,8 +19,6 @@ from mcp.server.streamable_http_manager import (
     StreamableHTTPASGIApp,
     StreamableHTTPSessionManager,
 )
-
-from app.config import settings
 
 from .auth import _bearer_from_headers
 from .server import build_server
@@ -64,7 +61,7 @@ async def _send_401(send) -> None:
 
 
 class _AnonymousGuardASGI:
-    """匿名拦截层：无令牌的 HTTP 请求在此 401（除非允许匿名）。
+    """强制鉴权层：无令牌的 HTTP 请求在此 401。
 
     有令牌（哪怕无效）就放行到 session manager，由 handler 精细判定角色——无效令牌会在
     授权闸门被 denied 并审计。这一层只快速挡掉「完全不带令牌」的公网匿名访问。
@@ -76,10 +73,9 @@ class _AnonymousGuardASGI:
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") != "http":
             return await self.app(scope, receive, send)
-        if not settings.mcp_http_allow_anonymous:
-            token = _bearer_from_headers(scope.get("headers") or [])
-            if not token:
-                return await _send_401(send)
+        token = _bearer_from_headers(scope.get("headers") or [])
+        if not token:
+            return await _send_401(send)
         return await self.app(scope, receive, send)
 
 

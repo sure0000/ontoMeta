@@ -18,8 +18,6 @@ import threading
 import time
 from collections import defaultdict, deque
 
-from app.config import settings
-
 _WINDOW_SECONDS = 60.0
 
 # 限流命中的审计去重窗口：疯狂调用时，同一工具每分钟最多写一条 rate_limited 审计，
@@ -36,11 +34,15 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def _limit_for(self, tool_name: str) -> int:
+        from app.database import SessionLocal
+        from app.services.settings_service import SettingsService
+        with SessionLocal() as db:
+            runtime = SettingsService().get_mcp_runtime(db)
         if tool_name == "execute_sql":
-            specific = settings.mcp_execute_sql_rate_limit_per_minute
+            specific = runtime.mcp_execute_sql_rate_limit_per_minute
             if specific and specific > 0:
                 return specific
-        return settings.mcp_rate_limit_per_minute
+        return runtime.mcp_rate_limit_per_minute
 
     def check(self, tool_name: str, *, now: float | None = None) -> dict:
         """记录一次调用意图并判定是否放行。

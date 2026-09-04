@@ -69,7 +69,7 @@ import type {
 } from "../../types";
 import { answerToBlocks, splitInlineTokens, splitMarkdownBlocks, type ChatMessage } from "./utils";
 
-function MarkdownLite({ content }: { content: string }) {
+export function MarkdownLite({ content }: { content: string }) {
   const blocks = splitMarkdownBlocks(content);
   let key = 0;
   return (

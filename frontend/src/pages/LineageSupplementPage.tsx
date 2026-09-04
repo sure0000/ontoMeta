@@ -70,7 +70,7 @@ export function LineageSupplementPage() {
   const [edges, setEdges] = useState<CanvasEdge[]>([]);
   const [columns, setColumns] = useState<Record<string, LineageColumn[]>>({});
 
-  const domains = useApi<DomainContext[]>(() => api.listDomains(), []);
+  const domains = useApi<DomainContext[]>((signal) => api.listDomains(signal), []);
 
   // 没选域时落到**对象最多的那个**，不是列表第一个：域列表里排在最前的往往是
   // 调试域（datahub_domain_id 是假的），进来就是一屏 DataHub 报错。
@@ -83,11 +83,11 @@ export function LineageSupplementPage() {
   }, [domainId, domains.data, setDomainId]);
 
   const overview = useApi<LineageOverview | null>(
-    async () => (domainId ? api.lineageOverview(domainId) : null),
+    async (signal) => (domainId ? api.lineageOverview(domainId, false, signal) : null),
     [domainId],
   );
   const tables = useApi<LineageTableRow[]>(
-    async () => (domainId ? api.lineageTables(domainId, { limit: 2000 }) : []),
+    async (signal) => (domainId ? api.lineageTables(domainId, { limit: 2000 }, signal) : []),
     [domainId],
   );
 
@@ -98,8 +98,12 @@ export function LineageSupplementPage() {
       setPackages(rows);
       const next = select ?? (rows.length > 0 ? rows[0].id : null);
       setPkgId(next);
-      setDetail(next ? await api.getLineagePackage(next) : null);
-      setUncovered(await api.lineageUncoveredIsolated(domainId));
+      const [nextDetail, nextUncovered] = await Promise.all([
+        next ? api.getLineagePackage(next) : Promise.resolve(null),
+        api.lineageUncoveredIsolated(domainId),
+      ]);
+      setDetail(nextDetail);
+      setUncovered(nextUncovered);
     },
     [domainId],
   );

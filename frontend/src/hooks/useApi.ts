@@ -35,12 +35,15 @@ export function useApi<T>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const controllerRef = useRef<AbortController | null>(null);
   // 保存最新 fetcher 引用以便 reload 复用，避免依赖 fetcher 函数本身变化
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
   const run = useCallback(async (): Promise<T | null> => {
+    controllerRef.current?.abort();
     const controller = new AbortController();
+    controllerRef.current = controller;
     if (!mountedRef.current) {
       controller.abort();
       return null;
@@ -60,6 +63,7 @@ export function useApi<T>(
       setError(message);
       return null;
     } finally {
+      if (controllerRef.current === controller) controllerRef.current = null;
       if (mountedRef.current && !controller.signal.aborted) {
         setLoading(false);
       }
@@ -71,6 +75,8 @@ export function useApi<T>(
     void run();
     return () => {
       mountedRef.current = false;
+      controllerRef.current?.abort();
+      controllerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);

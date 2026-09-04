@@ -447,3 +447,76 @@ def test_grouped_graph_reports_per_cluster_relation_counts():
     finally:
         db.rollback()
         db.close()
+
+
+def test_ontology_graph_carries_structure_type():
+    """``GraphEdge.structure_type`` 必须原样带出来，两个构造分支都要。
+
+    它曾经在两处都漏填，于是这个字段恒为 None：数据加工血缘（derivation）和业务关系
+    （外键/引用）在图上长得一模一样，血缘视角因此读不出「数据从哪来」，只能把外键
+    当成来源。字段本来就在 schema 上——漏填不报错，只是静默地把区分能力抹掉。
+    """
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        ods = ObjectType(
+            id=_uuid(), ontology_id=ontology.id, name="ods_order",
+            display_name="ODS订单", status=EntityStatus.SUGGESTED.value,
+        )
+        dwd = ObjectType(
+            id=_uuid(), ontology_id=ontology.id, name="dwd_order",
+            display_name="DWD订单", status=EntityStatus.SUGGESTED.value,
+        )
+        customer = ObjectType(
+            id=_uuid(), ontology_id=ontology.id, name="customer",
+            display_name="客户", status=EntityStatus.SUGGESTED.value,
+        )
+        # 只为把 ods 的度数抬到 2：截断分支按度数排名保留邻居，度数打平会让结果随集合
+        # 迭代顺序摆动，测试就成了偶尔失败的那种。
+        raw = ObjectType(
+            id=_uuid(), ontology_id=ontology.id, name="raw_order",
+            display_name="源库订单", status=EntityStatus.SUGGESTED.value,
+        )
+        db.add_all([ods, dwd, customer, raw])
+        db.flush()
+        db.add_all([
+            RelationType(
+                id=_uuid(), ontology_id=ontology.id, name="ods_to_dwd",
+                display_name="加工为", source_object_type_id=ods.id,
+                target_object_type_id=dwd.id, structure_type="derivation",
+                status=EntityStatus.SUGGESTED.value,
+            ),
+            RelationType(
+                id=_uuid(), ontology_id=ontology.id, name="dwd_of_customer",
+                display_name="归属客户", source_object_type_id=dwd.id,
+                target_object_type_id=customer.id, structure_type="foreign_key",
+                status=EntityStatus.SUGGESTED.value,
+            ),
+            RelationType(
+                id=_uuid(), ontology_id=ontology.id, name="raw_to_ods",
+                display_name="装载为", source_object_type_id=raw.id,
+                target_object_type_id=ods.id, structure_type="derivation",
+                status=EntityStatus.SUGGESTED.value,
+            ),
+        ])
+        db.commit()
+
+        service = OntologyQueryService()
+        # 全量分支（对象数未超上限）
+        full = service.get_ontology_graph(db, ontology.id)
+        by_label = {edge.label: edge.structure_type for edge in full.edges}
+        assert by_label == {
+            "加工为": "derivation",
+            "归属客户": "foreign_key",
+            "装载为": "derivation",
+        }
+
+        # BFS 截断分支：压低上限强制走 center + 邻域那条路径。ods 度数更高，
+        # 截断后必然留它，加工血缘那条边因此可预期地出现在结果里。
+        neighborhood = service.get_ontology_graph(
+            db, ontology.id, center_id=dwd.id, depth=1, max_nodes=2
+        )
+        assert neighborhood.truncated is True
+        assert [e.structure_type for e in neighborhood.edges] == ["derivation"]
+    finally:
+        db.close()

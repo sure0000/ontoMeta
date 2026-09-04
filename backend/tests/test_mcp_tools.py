@@ -29,7 +29,7 @@ from app.models.data_app import DataSource
 
 AUTH = AuthContext(user_id=None, client_type="mcp_local")
 
-# Phase 2 交付的工具清单。少一个就是漏注册（注册靠 tools/__init__ 的 import 副作用，
+# MCP 工具清单。少一个就是漏注册（注册靠 tools/__init__ 的 import 副作用，
 # 新增模块忘了加进去时不会有任何报错，只是工具悄悄消失）。
 EXPECTED_TOOLS = {
     "query_ontology",
@@ -45,6 +45,11 @@ EXPECTED_TOOLS = {
     "propose_transform",
     "propose_materialize",
     "propose_metric",
+    "draft_task",
+    "validate_task",
+    "confirm_task",
+    "execute_task",
+    "get_ontology_overview",
 }
 
 

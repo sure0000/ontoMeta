@@ -150,11 +150,16 @@ def list_tools() -> list[McpTool]:
 # 导入所有工具模块（触发 @register_tool 装饰器）
 from . import (  # noqa: E402,F401
     query,
+    overview,
     objects,
+    logics,
+    ops,
+    query_aids,
     datasources,
     sql,
     tasks,
     proposals,
+    lifecycle,
     audit,
     monitoring,
 )

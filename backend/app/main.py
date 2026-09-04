@@ -26,13 +26,11 @@ async def lifespan(_: FastAPI):
         )
     # MCP 远程 HTTP 传输（默认关闭）：session manager 的 run() 是长驻上下文，必须在
     # 主 lifespan 里驱动——mount 的子应用 lifespan 不会被 FastAPI 触发。
-    if settings.mcp_http_enabled:
-        from app.mcp.http_app import get_session_manager
-
-        logger.info("MCP 远程 HTTP 传输已启用：POST %s（Streamable HTTP, JSON 响应）", "/mcp")
-        async with get_session_manager().run():
-            yield
-    else:
+    # Session manager 常驻，是否对外开放由数据库运行期配置在 guard 中决定。
+    # 这样设置页修改 HTTP 开关后无需重启进程即可生效。
+    from app.mcp.http_app import get_session_manager
+    logger.info("MCP 远程 HTTP 传输管理器已启动（数据库配置决定是否开放）")
+    async with get_session_manager().run():
         yield
 
 
@@ -40,10 +38,9 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 # MCP 远程 HTTP 传输：挂到 /mcp（非 /api，AdminAuthMiddleware 自动豁免，由 MCP 自管
 # 逐请求 Bearer 鉴权）。仅在显式开启时挂载——不开则这条网络面根本不存在。
-if settings.mcp_http_enabled:
-    from app.mcp.http_app import MCP_HTTP_PATH, build_mcp_asgi
+from app.mcp.http_app import MCP_HTTP_PATH, build_mcp_asgi
 
-    app.mount(MCP_HTTP_PATH, build_mcp_asgi())
+app.mount(MCP_HTTP_PATH, build_mcp_asgi())
 
 # 先加 CORS，再加鉴权：鉴权中间件在内层，CORS 能正确处理预检与响应头
 app.add_middleware(AdminAuthMiddleware)

@@ -15,7 +15,7 @@ import logging
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
 from app.models import DomainContext, LineagePackage, LineagePackageEdge
@@ -331,6 +331,10 @@ async def list_packages(
     )
     if kind != "all":
         stmt = stmt.where(LineagePackage.kind == kind)
+    # ``_package_row`` needs edge statistics.  Eager-load all packages in one
+    # relationship query to avoid one SELECT per package (the page lists the
+    # whole history on first paint).
+    stmt = stmt.options(selectinload(LineagePackage.edges))
     return [_package_row(package, isolated) for package in db.execute(stmt).scalars().all()]
 
 

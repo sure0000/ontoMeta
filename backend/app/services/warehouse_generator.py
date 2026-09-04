@@ -16,6 +16,7 @@ LogicalSchema，再交给 Dialect Adapter 渲染 DDL；同时产出 ETL SQL、�
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 
 from sqlalchemy.orm import Session, joinedload
@@ -72,6 +73,31 @@ def _physical_field(source_field_ref: str | None) -> str | None:
     if "#" in ref:
         ref = ref.rpartition("#")[2]
     return _field_path(ref) or None
+
+
+_NUMERIC_TYPES = frozenset(
+    {
+        "tinyint",
+        "smallint",
+        "int",
+        "integer",
+        "bigint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+    }
+)
+
+
+def _safe_projection_semantic_type(
+    data_type: str | None, semantic_type: str | None
+) -> str | None:
+    """Prevent stale semantic guesses from changing an incompatible physical type."""
+    if (semantic_type or "").lower() != "datetime":
+        return semantic_type
+    base = re.split(r"[(\s]", (data_type or "").strip().lower(), maxsplit=1)[0]
+    return "attribute" if base in _NUMERIC_TYPES else semantic_type
 
 
 @dataclass(frozen=True)
@@ -287,7 +313,9 @@ class WarehouseGenerator:
             LogicalColumn(
                 name=p.name,
                 data_type=p.data_type,
-                semantic_type=p.semantic_type,
+                semantic_type=_safe_projection_semantic_type(
+                    p.data_type, p.semantic_type
+                ),
                 comment=_comment_of(p.display_name, p.description),
                 nullable=not p.required,
             )

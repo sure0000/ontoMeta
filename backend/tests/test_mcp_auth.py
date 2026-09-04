@@ -26,8 +26,17 @@ from app.mcp.tools import AuthContext, TOOL_REGISTRY, tool_required_role
 from app.models.mcp_audit import McpAuditLog
 from app.models.principal import Principal
 from app.services.principal_service import PrincipalService
+from app.services.settings_service import SettingsService
 
 _principals = PrincipalService()
+
+
+@pytest.fixture(autouse=True)
+def _restore_mcp_settings(db):
+    service = SettingsService()
+    original = service.get_mcp_settings(db)
+    yield
+    service.update_mcp_settings(db, original)
 
 
 @pytest.fixture(autouse=True)
@@ -59,20 +68,20 @@ def _ctx(role: str | None, principal_id: str | None = None) -> AuthContext:
 # --------------------------------------------------------------------------
 
 
-def test_no_token_falls_back_to_default_role(monkeypatch):
+def test_no_token_falls_back_to_default_role(monkeypatch, db):
     monkeypatch.delenv("ONTOMETA_MCP_TOKEN", raising=False)
     monkeypatch.setattr(settings, "ontometa_mcp_token", None)
-    monkeypatch.setattr(settings, "mcp_default_role", "reader")
+    SettingsService().update_mcp_settings(db, {"mcp_default_role": "reader"})
     auth = resolve_auth_context()
     assert auth.role == "reader"
     assert auth.principal_id is None
     assert auth.client_type == "mcp_local"
 
 
-def test_empty_default_role_means_no_identity(monkeypatch):
+def test_empty_default_role_means_no_identity(monkeypatch, db):
     monkeypatch.delenv("ONTOMETA_MCP_TOKEN", raising=False)
     monkeypatch.setattr(settings, "ontometa_mcp_token", None)
-    monkeypatch.setattr(settings, "mcp_default_role", "")
+    SettingsService().update_mcp_settings(db, {"mcp_default_role": ""})
     auth = resolve_auth_context()
     assert auth.role is None
     assert auth.is_authenticated is False
@@ -98,9 +107,9 @@ def test_principal_token_resolves_to_its_role(monkeypatch, db):
     assert auth.principal_name and auth.principal_name.startswith("mcp-editor")
 
 
-def test_unknown_token_is_anonymous(monkeypatch):
+def test_unknown_token_is_anonymous(monkeypatch, db):
     monkeypatch.setattr(settings, "ontometa_admin_token", "the-admin-token")
-    monkeypatch.setattr(settings, "mcp_default_role", "reader")
+    SettingsService().update_mcp_settings(db, {"mcp_default_role": "reader"})
     monkeypatch.setenv("ONTOMETA_MCP_TOKEN", "om_pr_not-a-real-token")
     auth = resolve_auth_context()
     assert auth.role == "reader"

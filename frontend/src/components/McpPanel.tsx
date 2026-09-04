@@ -1,13 +1,17 @@
 import {
-  Alert,
   Button,
+  Col,
   Descriptions,
+  Form,
   Input,
+  InputNumber,
   Space,
   Statistic,
+  Row,
+  Select,
   Table,
   Tag,
-  Tooltip,
+  Tabs,
   Typography,
   message,
 } from "antd";
@@ -15,6 +19,7 @@ import {
   ApiOutlined,
   AuditOutlined,
   BarChartOutlined,
+  CopyOutlined,
   ReloadOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
@@ -25,10 +30,34 @@ import type {
   McpAuditEntry,
   McpServiceInfo,
   McpStats,
+  McpSettings,
   McpToolInfo,
+  Principal,
 } from "../types";
 
 const { Text, Paragraph } = Typography;
+
+function InstallExample({ content }: { content: string }) {
+  return (
+    <Paragraph copyable={{ text: content }} style={{ marginBottom: 0 }}>
+      <pre
+        style={{
+          background: "var(--om-bg-soft)",
+          border: "1px solid var(--om-border)",
+          padding: 12,
+          borderRadius: 6,
+          fontSize: 12,
+          overflowX: "auto",
+          margin: 0,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+        }}
+      >
+        {content}
+      </pre>
+    </Paragraph>
+  );
+}
 
 const ROLE_COLOR: Record<string, string> = {
   reader: "default",
@@ -43,31 +72,31 @@ function RoleTag({ role }: { role: string | null }) {
 }
 
 /**
- * MCP 服务管理：连接与状态、功能清单、审计、统计。
+ * MCP 服务配置：连接与状态、运行期配置和远程安装示例。
  *
- * 用**垂直堆叠的独立卡片**而非内嵌 Tabs——设置页容器宽度受限，内嵌 Tabs 会把多余标签
- * 折叠成「…」，看起来像功能残缺。堆叠卡片与本页其它面板（PrincipalsPanel）风格一致。
+ * 工具目录和审计监控由同文件中的独立面板承载，避免服务页一次加载全部内容。
  */
-export function McpPanel() {
-  const [info, setInfo] = useState<McpServiceInfo | null>(null);
+export function McpServicePanel() {
   const [loading, setLoading] = useState(true);
+  const [settingsForm] = Form.useForm<Pick<McpSettings, "mcp_rate_limit_per_minute" | "mcp_execute_sql_rate_limit_per_minute">>();
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const loadInfo = useCallback(async () => {
     setLoading(true);
     try {
-      setInfo(await api.getMcpInfo());
+      const settings = await api.getMcpSettings();
+      settingsForm.setFieldsValue(settings);
     } catch (e) {
-      message.error(`加载 MCP 服务信息失败：${(e as Error).message}`);
+      message.error(`加载 MCP 服务配置失败：${(e as Error).message}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [settingsForm]);
 
   useEffect(() => {
     void loadInfo();
   }, [loadInfo]);
 
-  const httpEnabled = info?.transports.http.enabled ?? false;
   const [endpoint, setEndpoint] = useState("");
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -75,23 +104,29 @@ export function McpPanel() {
     }
   }, []);
 
-  const desktopConfig = useMemo(
-    () =>
-      JSON.stringify(
-        {
-          mcpServers: {
-            ontometa: {
-              type: "http",
-              url: endpoint,
-              headers: { Authorization: "Bearer <你的令牌>" },
-            },
-          },
-        },
-        null,
-        2,
-      ),
-    [endpoint],
-  );
+  const installExamples = useMemo(() => {
+    const auth = { Authorization: "Bearer <YOUR_PRINCIPAL_TOKEN>" };
+    return {
+      claudeDesktop: JSON.stringify({ mcpServers: { ontometa: { type: "http", url: endpoint, headers: auth } } }, null, 2),
+      cursor: JSON.stringify({ mcpServers: { ontometa: { url: endpoint, headers: auth } } }, null, 2),
+      claudeCode: `claude mcp add ontometa --transport http ${endpoint} --header "Authorization: Bearer <YOUR_PRINCIPAL_TOKEN>"`,
+      windsurf: JSON.stringify({ mcpServers: { ontometa: { serverUrl: endpoint, headers: auth } } }, null, 2),
+      cline: JSON.stringify({ mcpServers: { ontometa: { url: endpoint, headers: auth, disabled: false } } }, null, 2),
+      vscode: JSON.stringify({ servers: { ontometa: { type: "http", url: endpoint, headers: auth } } }, null, 2),
+    };
+  }, [endpoint]);
+
+  const saveServiceSettings = async (values: Pick<McpSettings, "mcp_rate_limit_per_minute" | "mcp_execute_sql_rate_limit_per_minute">) => {
+    setSavingSettings(true);
+    try {
+      const next = await api.updateMcpSettings(values);
+      settingsForm.setFieldsValue(next);
+      await loadInfo();
+      message.success("限流配置已保存，立即生效");
+    } catch (e) {
+      message.error(`保存 MCP 配置失败：${(e as Error).message}`);
+    } finally { setSavingSettings(false); }
+  };
 
   return (
     <>
@@ -109,128 +144,126 @@ export function McpPanel() {
           </Button>
         }
       >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message="MCP 把本项目的本体/查询/任务能力暴露给通用 agent（Claude Desktop、Cursor、Claude Code）"
-          description="通用 agent 是 MCP 的『客户端』——配置在它们那边，不在本页。本页用于查看 MCP 提供哪些能力、如何远程连接、以及调用审计与统计。"
-        />
-
         <Descriptions
           bordered
           size="small"
           column={{ xs: 1, sm: 2 }}
           styles={{ label: { width: 120 } }}
         >
-          <Descriptions.Item label="本地 stdio">
-            <Tag color="green">始终可用</Tag>
+          <Descriptions.Item label="服务类型">
+            <Tag color="green">HTTP</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="远程 HTTP">
-            {httpEnabled ? <Tag color="green">已启用</Tag> : <Tag>未启用</Tag>}
+          <Descriptions.Item label="鉴权">
+            <Tag color="green">必须携带令牌</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="远程匿名访问">
-            {info?.transports.http.allow_anonymous ? (
-              <Tag color="orange">允许</Tag>
-            ) : (
-              <Tag color="green">需令牌</Tag>
-            )}
-          </Descriptions.Item>
-          <Descriptions.Item label="匿名默认角色">
-            <RoleTag role={info?.default_role ?? null} />
-          </Descriptions.Item>
-          <Descriptions.Item label="限流（默认）">
-            {info?.rate_limit.enabled
-              ? `${info.rate_limit.default_per_minute} 次/分`
-              : "关闭"}
-          </Descriptions.Item>
-          <Descriptions.Item label="限流（execute_sql）">
-            {info?.rate_limit.enabled
-              ? `${info.rate_limit.execute_sql_per_minute} 次/分`
-              : "关闭"}
-          </Descriptions.Item>
-          <Descriptions.Item label="审计表">
-            {info?.audit.reachable ? (
-              <Tag color="green">可达</Tag>
-            ) : (
-              <Tooltip title={info?.audit.error ?? ""}>
-                <Tag color="red">不可达</Tag>
-              </Tooltip>
-            )}
-          </Descriptions.Item>
-          <Descriptions.Item label="工具数">{info?.tool_count ?? "—"}</Descriptions.Item>
         </Descriptions>
 
-        {!httpEnabled && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginTop: 16 }}
-            message="远程 HTTP 传输未启用，异地 agent 无法连接"
-            description="agent 与本项目不在同一台机器时需要它：在 backend/.env 设 MCP_HTTP_ENABLED=true（可选 MCP_HTTP_ALLOW_ANONYMOUS，默认要令牌）后重启后端。未启用时仅支持本机 stdio。"
-          />
-        )}
-
         <div style={{ marginTop: 16 }}>
-          <Text strong>远程连接地址</Text>
-          <Paragraph type="secondary" style={{ margin: "4px 0 8px", fontSize: 12 }}>
-            按当前页面地址推测。若前后端不同源（如开发时后端在 :8000，或经反向代理），请替换为后端实际地址；路径末尾的斜杠不要去掉。
+          <Text strong>限流配置</Text>
+          <Paragraph type="secondary" style={{ margin: "4px 0 12px", fontSize: 12 }}>
+            修改后立即生效。
           </Paragraph>
-          <Input
-            value={endpoint}
-            onChange={(e) => setEndpoint(e.target.value)}
-            addonBefore="URL"
-            style={{ maxWidth: 560 }}
-          />
+          <Form form={settingsForm} layout="vertical" onFinish={(values) => void saveServiceSettings(values)}>
+            <Space wrap align="end">
+              <Form.Item name="mcp_rate_limit_per_minute" label="每工具限流/分" style={{ width: 140, marginBottom: 0 }}>
+                <InputNumber min={0} max={100000} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item name="mcp_execute_sql_rate_limit_per_minute" label="execute_sql/分" style={{ width: 140, marginBottom: 0 }}>
+                <InputNumber min={0} max={100000} style={{ width: "100%" }} />
+              </Form.Item>
+              <Button type="primary" htmlType="submit" loading={savingSettings}>保存</Button>
+            </Space>
+          </Form>
         </div>
 
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginTop: 16 }}
-          message="令牌 = 身份与权限"
-          description={
-            <span>
-              远程连接用 <Text code>Authorization: Bearer &lt;令牌&gt;</Text> 认证。令牌到「安全与鉴权 → 角色与令牌」新建一个<strong>最小权限</strong>主体（建议 reader；要出提案用 editor、代跑 SQL 用 publisher），别把 Admin Token 交给 agent。
-            </span>
-          }
-        />
-
         <div style={{ marginTop: 16 }}>
-          <Text strong>Claude Desktop / Cursor 配置示例</Text>
-          <Paragraph copyable={{ text: desktopConfig }} style={{ marginTop: 8, marginBottom: 4 }}>
-            <pre
-              style={{
-                background: "var(--om-bg-soft)",
-                border: "1px solid var(--om-border)",
-                padding: 12,
-                borderRadius: 6,
-                fontSize: 12,
-                overflowX: "auto",
-                margin: 0,
+          <Text strong>远程 MCP 地址</Text>
+          <Space.Compact block style={{ maxWidth: 560 }}>
+            <Input value={endpoint} readOnly addonBefore="URL" />
+            <Button
+              icon={<CopyOutlined />}
+              aria-label="复制 MCP 地址"
+              onClick={() => {
+                if (endpoint) void navigator.clipboard?.writeText(endpoint);
+                message.success("MCP 地址已复制");
               }}
             >
-              {desktopConfig}
-            </pre>
-          </Paragraph>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Claude Code：
-            <Text code copyable>{`claude mcp add ontometa -t http ${endpoint} -H "Authorization: Bearer <你的令牌>"`}</Text>
-          </Text>
+              复制
+            </Button>
+          </Space.Compact>
+        </div>
+
+        <div style={{ marginTop: 16 }}>
+          <Text strong>主流 Agent 安装示例</Text>
+          <Tabs
+            size="small"
+            style={{ marginTop: 8 }}
+            items={[
+              { key: "claude-desktop", label: "Claude Desktop", children: <InstallExample content={installExamples.claudeDesktop} /> },
+              { key: "claude-code", label: "Claude Code", children: <InstallExample content={installExamples.claudeCode} /> },
+              { key: "cursor", label: "Cursor", children: <InstallExample content={installExamples.cursor} /> },
+              { key: "windsurf", label: "Windsurf", children: <InstallExample content={installExamples.windsurf} /> },
+              { key: "cline", label: "Cline", children: <InstallExample content={installExamples.cline} /> },
+              { key: "vscode", label: "VS Code", children: <InstallExample content={installExamples.vscode} /> },
+            ]}
+          />
         </div>
       </SectionCard>
 
-      <SectionCard title={`功能清单（${info?.tool_count ?? 0}）`} icon={<ToolOutlined />}>
-        <ToolCatalog tools={info?.tools ?? []} loading={loading} />
-      </SectionCard>
+    </>
+  );
+}
 
-      <SectionCard title="审计日志" icon={<AuditOutlined />}>
-        <AuditTable />
-      </SectionCard>
+export function McpToolsPanel() {
+  const [info, setInfo] = useState<McpServiceInfo | null>(null);
+  const [loading, setLoading] = useState(true);
 
-      <SectionCard title="使用统计" icon={<BarChartOutlined />}>
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setInfo(await api.getMcpInfo());
+    } catch (e) {
+      message.error(`加载 MCP 工具目录失败：${(e as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <SectionCard
+      title={`MCP 工具（${info?.tool_count ?? 0}）`}
+      icon={<ToolOutlined />}
+      extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>刷新</Button>}
+    >
+      <ToolCatalog tools={info?.tools ?? []} loading={loading} />
+    </SectionCard>
+  );
+}
+
+export function McpMonitoringPanel() {
+  return (
+    <>
+      <SectionCard title="运行概览" icon={<BarChartOutlined />}>
         <StatsView />
       </SectionCard>
+      <SectionCard title="调用明细" icon={<AuditOutlined />}>
+        <AuditTable />
+      </SectionCard>
+    </>
+  );
+}
+
+/** Backward-compatible composition for callers that still need all MCP panels. */
+export function McpPanel() {
+  return (
+    <>
+      <McpServicePanel />
+      <McpToolsPanel />
+      <McpMonitoringPanel />
     </>
   );
 }
@@ -289,20 +322,43 @@ function AuditTable() {
   const [rows, setRows] = useState<McpAuditEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [deniedOnly, setDeniedOnly] = useState(false);
+  const [tools, setTools] = useState<McpToolInfo[]>([]);
+  const [principals, setPrincipals] = useState<Principal[]>([]);
+  const [toolName, setToolName] = useState("");
+  const [result, setResult] = useState<"success" | "failed" | "denied" | "rate_limited" | "">("");
+  const [principalRole, setPrincipalRole] = useState("");
+  const [principalId, setPrincipalId] = useState("");
+  const [windowMinutes, setWindowMinutes] = useState<number | undefined>(1440);
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+
+  useEffect(() => {
+    void Promise.allSettled([api.getMcpInfo(), api.listPrincipals()]).then(([info, principalList]) => {
+      if (info.status === "fulfilled") setTools(info.value.tools);
+      if (principalList.status === "fulfilled") setPrincipals(principalList.value);
+    });
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const page = await api.getMcpAudit({ deniedOnly, limit: 100 });
-      setRows(page.logs);
-      setTotal(page.total);
+      const response = await api.getMcpAudit({
+        toolName: toolName || undefined,
+        result: result || undefined,
+        principalRole: (principalRole || undefined) as "reader" | "editor" | "reviewer" | "publisher" | "anonymous" | undefined,
+        principalId: principalId || undefined,
+        windowMinutes,
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      });
+      setRows(response.logs);
+      setTotal(response.total);
     } catch (e) {
       message.error(`加载审计失败：${(e as Error).message}`);
     } finally {
       setLoading(false);
     }
-  }, [deniedOnly]);
+  }, [page, pageSize, principalId, principalRole, result, toolName, windowMinutes]);
 
   useEffect(() => {
     void load();
@@ -311,18 +367,53 @@ function AuditTable() {
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="small">
       <Space wrap>
-        <Button
-          size="small"
-          type={deniedOnly ? "primary" : "default"}
-          onClick={() => setDeniedOnly((v) => !v)}
-        >
-          {deniedOnly ? "只看被拒 ✓" : "只看被拒"}
-        </Button>
+        <Select
+          value={windowMinutes ?? "all"}
+          onChange={(value) => { setWindowMinutes(value === "all" ? undefined : Number(value)); setPage(1); }}
+          options={[{ value: 60, label: "最近 1 小时" }, { value: 1440, label: "最近 24 小时" }, { value: 10080, label: "最近 7 天" }, { value: "all", label: "全部" }]}
+          style={{ width: 150 }}
+        />
+        <Select
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          placeholder="按工具筛选"
+          value={toolName || undefined}
+          onChange={(value) => { setToolName(value ?? ""); setPage(1); }}
+          options={tools.map((tool) => ({ value: tool.name, label: tool.name }))}
+          style={{ width: 190 }}
+        />
+        <Select
+          allowClear
+          placeholder="按结果筛选"
+          value={result || undefined}
+          onChange={(value) => { setResult(value ?? ""); setPage(1); }}
+          options={[{ value: "success", label: "成功" }, { value: "failed", label: "业务失败" }, { value: "denied", label: "被拒" }, { value: "rate_limited", label: "被限流" }]}
+          style={{ width: 150 }}
+        />
+        <Select
+          allowClear
+          placeholder="按角色筛选"
+          value={principalRole || undefined}
+          onChange={(value) => { setPrincipalRole(value ?? ""); setPage(1); }}
+          options={[{ value: "reader", label: "reader" }, { value: "editor", label: "editor" }, { value: "reviewer", label: "reviewer" }, { value: "publisher", label: "publisher" }, { value: "anonymous", label: "匿名" }]}
+          style={{ width: 150 }}
+        />
+        <Select
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          placeholder="按主体筛选"
+          value={principalId || undefined}
+          onChange={(value) => { setPrincipalId(value ?? ""); setPage(1); }}
+          options={principals.map((principal) => ({ value: principal.id, label: `${principal.name} · ${principal.token_prefix}` }))}
+          style={{ width: 240 }}
+        />
         <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>
           刷新
         </Button>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          共 {total} 条（显示最近 100）
+          共 {total} 条
         </Text>
       </Space>
       <Table<McpAuditEntry>
@@ -330,8 +421,18 @@ function AuditTable() {
         size="small"
         loading={loading}
         dataSource={rows}
-        pagination={{ pageSize: 20, size: "small" }}
-        scroll={{ x: 720 }}
+        pagination={{ current: page, pageSize, total, size: "small", showSizeChanger: false, onChange: (nextPage) => setPage(nextPage) }}
+        scroll={{ x: 980 }}
+        expandable={{
+          expandedRowRender: (row) => (
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="客户端">{row.client_type}</Descriptions.Item>
+              <Descriptions.Item label="主体 ID">{row.principal_id ?? "匿名"}</Descriptions.Item>
+              <Descriptions.Item label="参数（已脱敏）"><pre style={{ whiteSpace: "pre-wrap", margin: 0, maxHeight: 220, overflow: "auto" }}>{JSON.stringify(row.arguments, null, 2)}</pre></Descriptions.Item>
+              {row.error && <Descriptions.Item label="错误"><Text type="danger">{row.error}</Text></Descriptions.Item>}
+            </Descriptions>
+          ),
+        }}
         columns={[
           {
             title: "时间",
@@ -350,6 +451,17 @@ function AuditTable() {
             dataIndex: "principal_role",
             width: 100,
             render: (v: string | null) => <RoleTag role={v} />,
+          },
+          {
+            title: "主体",
+            dataIndex: "principal_id",
+            width: 150,
+            render: (v: string | null) => v ? <Text code copyable={{ text: v }}>{`${v.slice(0, 12)}…`}</Text> : "匿名",
+          },
+          {
+            title: "客户端",
+            dataIndex: "client_type",
+            width: 110,
           },
           { title: "结果", key: "result", width: 80, render: (_: unknown, r) => resultTag(r) },
           {
@@ -379,83 +491,121 @@ function AuditTable() {
 function StatsView() {
   const [stats, setStats] = useState<McpStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [windowMinutes, setWindowMinutes] = useState<number | undefined>(1440);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setStats(await api.getMcpStats());
+      setStats(await api.getMcpStats(windowMinutes));
     } catch (e) {
       message.error(`加载统计失败：${(e as Error).message}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [windowMinutes]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const t = stats?.totals;
+  const successRate = t && t.calls ? `${((t.succeeded / t.calls) * 100).toFixed(1)}%` : "—";
+  const windowLabel = windowMinutes === undefined ? "全部" : windowMinutes === 15 ? "最近 15 分钟" : windowMinutes === 60 ? "最近 1 小时" : windowMinutes === 1440 ? "最近 24 小时" : "最近 7 天";
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="middle">
-      <Space wrap size="large">
-        <Statistic title="总调用" value={t?.calls ?? 0} loading={loading} />
-        <Statistic title="成功" value={t?.succeeded ?? 0} loading={loading} />
-        <Statistic title="业务失败" value={t?.business_failed ?? 0} loading={loading} />
-        <Statistic
-          title="被拒"
-          value={t?.denied ?? 0}
-          loading={loading}
-          valueStyle={{ color: (t?.denied ?? 0) > 0 ? "#cf1322" : undefined }}
+      <Space wrap>
+        <Select
+          value={windowMinutes ?? "all"}
+          onChange={(value) => setWindowMinutes(value === "all" ? undefined : Number(value))}
+          options={[{ value: 15, label: "最近 15 分钟" }, { value: 60, label: "最近 1 小时" }, { value: 1440, label: "最近 24 小时" }, { value: 10080, label: "最近 7 天" }, { value: "all", label: "全部" }]}
+          style={{ width: 150 }}
         />
-        <Statistic
-          title="被限流"
-          value={t?.rate_limited ?? 0}
-          loading={loading}
-          valueStyle={{ color: (t?.rate_limited ?? 0) > 0 ? "#d46b08" : undefined }}
-        />
-        <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>
-          刷新
-        </Button>
+        <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
+        <Text type="secondary">当前窗口：{windowLabel}{stats?.last_call_at ? ` · 最近调用 ${new Date(stats.last_call_at).toLocaleString()}` : ""}</Text>
       </Space>
-      <Space align="start" wrap size="large" style={{ width: "100%" }}>
+      <Row gutter={[16, 16]}>
+        <Col xs={12} sm={8} lg={4}><Statistic title="总调用" value={t?.calls ?? 0} loading={loading} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="成功率" value={successRate} loading={loading} valueStyle={{ color: "#389e0d" }} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="业务失败" value={t?.business_failed ?? 0} loading={loading} valueStyle={{ color: (t?.business_failed ?? 0) > 0 ? "#d46b08" : undefined }} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="业务错误率" value={t?.error_rate == null ? "—" : `${t.error_rate.toFixed(1)}%`} loading={loading} valueStyle={{ color: (t?.error_rate ?? 0) > 0 ? "#d46b08" : undefined }} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="被拒" value={t?.denied ?? 0} loading={loading} valueStyle={{ color: (t?.denied ?? 0) > 0 ? "#cf1322" : undefined }} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="被限流" value={t?.rate_limited ?? 0} loading={loading} valueStyle={{ color: (t?.rate_limited ?? 0) > 0 ? "#d46b08" : undefined }} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="P95 延迟" value={t?.p95_duration_ms == null ? "—" : `${t.p95_duration_ms}ms`} loading={loading} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="平均延迟" value={t?.average_duration_ms == null ? "—" : `${t.average_duration_ms}ms`} loading={loading} /></Col>
+        <Col xs={12} sm={8} lg={4}><Statistic title="活跃主体" value={stats?.unique_principals ?? 0} loading={loading} /></Col>
+      </Row>
+      <Row gutter={[16, 20]}>
+        <Col xs={24} xl={15}>
         <Table
-          title={() => "按工具"}
+          title={() => "工具健康度"}
           rowKey="tool_name"
           size="small"
           loading={loading}
           dataSource={stats?.by_tool ?? []}
           pagination={false}
-          style={{ minWidth: 300 }}
+          scroll={{ x: 620 }}
           columns={[
-            {
-              title: "工具",
-              dataIndex: "tool_name",
-              render: (v: string) => <Text code>{v}</Text>,
-            },
-            { title: "调用", dataIndex: "calls", width: 70 },
-            { title: "被拒", dataIndex: "denied", width: 70 },
+            { title: "工具", dataIndex: "tool_name", render: (v: string) => <Text code>{v}</Text> },
+            { title: "调用", dataIndex: "calls", width: 70, sorter: (a, b) => a.calls - b.calls },
+            { title: "成功率", width: 90, render: (_: unknown, row: McpStats["by_tool"][number]) => row.calls ? `${((row.succeeded / row.calls) * 100).toFixed(0)}%` : "—" },
+            { title: "异常", width: 80, render: (_: unknown, row: McpStats["by_tool"][number]) => row.failed + row.denied + row.rate_limited },
+            { title: "平均延迟", width: 100, render: (_: unknown, row: McpStats["by_tool"][number]) => row.avg_duration_ms == null ? "—" : `${row.avg_duration_ms}ms` },
           ]}
         />
+        </Col>
+        <Col xs={24} xl={9}>
         <Table
-          title={() => "按角色"}
+          title={() => "角色分布"}
           rowKey="role"
           size="small"
           loading={loading}
           dataSource={stats?.by_role ?? []}
           pagination={false}
-          style={{ minWidth: 200 }}
+          scroll={{ x: 340 }}
           columns={[
-            {
-              title: "角色",
-              dataIndex: "role",
-              render: (v: string) =>
-                v === "(anonymous)" ? <Tag>匿名</Tag> : <RoleTag role={v} />,
-            },
+            { title: "角色", dataIndex: "role", render: (v: string) => v === "(anonymous)" ? <Tag>匿名</Tag> : <RoleTag role={v} /> },
             { title: "调用", dataIndex: "calls", width: 70 },
+            { title: "成功", dataIndex: "succeeded", width: 70 },
+            { title: "被拒", dataIndex: "denied", width: 70 },
           ]}
         />
-      </Space>
+        </Col>
+        <Col xs={24} xl={12}>
+          <Table
+            title={() => "调用趋势"}
+            rowKey="bucket"
+            size="small"
+            loading={loading}
+            dataSource={(stats?.timeline ?? []).slice(-12)}
+            pagination={false}
+            scroll={{ x: 500 }}
+            columns={[
+              { title: "时间", dataIndex: "bucket", width: 180, render: (v: string) => new Date(v).toLocaleString() },
+              { title: "调用", dataIndex: "calls", width: 70 },
+              { title: "成功", dataIndex: "succeeded", width: 70 },
+              { title: "业务失败", dataIndex: "failed", width: 90 },
+              { title: "拒绝/限流", render: (_: unknown, row: McpStats["timeline"][number]) => row.denied + row.rate_limited },
+            ]}
+          />
+        </Col>
+        <Col xs={24} xl={12}>
+          <Table
+            title={() => "高频业务错误"}
+            rowKey={(row) => `${row.tool_name}-${row.error}`}
+            size="small"
+            loading={loading}
+            dataSource={stats?.error_groups ?? []}
+            pagination={false}
+            locale={{ emptyText: "当前窗口没有业务错误" }}
+            scroll={{ x: 520 }}
+            columns={[
+              { title: "工具", dataIndex: "tool_name", width: 150, render: (v: string) => <Text code>{v}</Text> },
+              { title: "次数", dataIndex: "count", width: 70 },
+              { title: "错误", dataIndex: "error", ellipsis: true, render: (v: string) => <Text type="danger">{v}</Text> },
+            ]}
+          />
+        </Col>
+      </Row>
     </Space>
   );
 }

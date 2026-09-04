@@ -9,8 +9,9 @@
    执行时会被后端覆盖，提案卡上展示的就是一份假配置。
 2. **缺什么当场说清，并附真实候选**。判据取 Drafter 自己声明的 ``required_context``
    （复用 ``_missing_action_context``），不在这里另抄一份键名。
-3. **写侧动作留给人**。本工具只返回 ``draft_payload``——人在前端确认后由
-   ``POST /api/agents/draft`` 落成草稿，再经校验/确认/执行。MCP 侧不碰写路径。
+3. **提案本身不写库**。本工具只返回 ``draft_payload``，落库要另调 ``draft_task``
+   （见 ``tools/lifecycle.py``）——那一步起按角色收权：editor 到 draft/validate，
+   confirm/execute 要 publisher。提案阶段因此可以放心预览而不产生任何副作用。
 """
 
 from __future__ import annotations

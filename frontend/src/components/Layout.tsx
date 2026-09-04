@@ -1,5 +1,6 @@
 import {
   ApartmentOutlined,
+  ApiOutlined,
   AppstoreOutlined,
   FunctionOutlined,
   FolderOutlined,
@@ -45,6 +46,11 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/tasks")) return "/tasks";
   if (pathname.startsWith("/data-apps")) return "/data-apps";
+  if (pathname.startsWith("/agent-access/tools")) return "/agent-access/tools";
+  if (pathname.startsWith("/agent-access/monitoring")) return "/agent-access/monitoring";
+  if (pathname.startsWith("/agent-access/skills")) return "/agent-access/skills";
+  if (pathname.startsWith("/agent-access/tokens")) return "/agent-access/tokens";
+  if (pathname.startsWith("/agent-access")) return "/agent-access/service";
   if (pathname.startsWith("/settings")) return "/settings";
   return "/ontology";
 }
@@ -52,6 +58,7 @@ function getSelectedKey(pathname: string, search: string) {
 function getOpenKeys(pathname: string) {
   if (pathname.startsWith("/ontology")) return ["/ontology"];
   if (pathname.startsWith("/tasks")) return ["/tasks"];
+  if (pathname.startsWith("/agent-access")) return ["/agent-access"];
   return [];
 }
 
@@ -132,6 +139,18 @@ export function AppLayout() {
         ],
       },
       { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },
+      {
+        key: "/agent-access",
+        icon: <ApiOutlined />,
+        label: "Agent 接入",
+        children: [
+          { key: "/agent-access/service", label: "MCP 配置" },
+          { key: "/agent-access/tools", label: "MCP 工具" },
+          { key: "/agent-access/monitoring", label: "审计监控" },
+          { key: "/agent-access/skills", label: "技能" },
+          { key: "/agent-access/tokens", label: "令牌" },
+        ],
+      },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ];
   }, [domains]);

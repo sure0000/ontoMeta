@@ -2215,6 +2215,17 @@ export interface PrincipalCreated extends Principal {
   token: string;
 }
 
+export interface PrincipalMcpAccess {
+  principal_id: string;
+  role: PrincipalRole;
+  allowed_count: number;
+  tool_count: number;
+  tools: Array<McpToolInfo & { allowed: boolean }>;
+  recent_calls: McpAuditEntry[];
+  total_calls: number;
+  http_config: Record<string, unknown>;
+}
+
 export interface RolePolicy {
   roles: PrincipalRole[];
   method_defaults: Record<string, string>;
@@ -2451,14 +2462,16 @@ export interface McpToolInfo {
 export interface McpServiceInfo {
   server: { name: string; version: string };
   transports: {
-    stdio: boolean;
     http: { enabled: boolean; path: string; allow_anonymous: boolean };
   };
-  default_role: string | null;
   rate_limit: { default_per_minute: number; execute_sql_per_minute: number; enabled: boolean };
   tool_count: number;
   tools: McpToolInfo[];
   audit: { reachable: boolean; error: string | null };
+}
+export interface McpSettings {
+  mcp_rate_limit_per_minute: number;
+  mcp_execute_sql_rate_limit_per_minute: number;
 }
 export interface McpStats {
   window_minutes: number | null;
@@ -2468,9 +2481,31 @@ export interface McpStats {
     business_failed: number;
     denied: number;
     rate_limited: number;
+    error_rate: number;
+    average_duration_ms: number | null;
+    p95_duration_ms: number | null;
   };
-  by_tool: { tool_name: string; calls: number; denied: number }[];
-  by_role: { role: string; calls: number }[];
+  by_tool: {
+    tool_name: string;
+    calls: number;
+    succeeded: number;
+    failed: number;
+    denied: number;
+    rate_limited: number;
+    avg_duration_ms: number | null;
+  }[];
+  by_role: { role: string; calls: number; succeeded: number; failed: number; denied: number }[];
+  error_groups: { tool_name: string; error: string; count: number; last_at: string | null }[];
+  timeline: {
+    bucket: string;
+    calls: number;
+    succeeded: number;
+    failed: number;
+    denied: number;
+    rate_limited: number;
+  }[];
+  unique_principals: number;
+  last_call_at: string | null;
 }
 export interface McpAuditEntry {
   id: string;
@@ -2491,4 +2526,35 @@ export interface McpAuditPage {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface McpSkill {
+  name: string;
+  body: string;
+  builtin_body: string;
+  frontmatter: Record<string, unknown>;
+  builtin_frontmatter: Record<string, unknown>;
+  enabled: boolean;
+  source: "builtin" | "override" | string;
+  builtin_digest: string;
+  upstream_updated: boolean;
+  override: boolean;
+  mentioned_tools: string[];
+  tool_count: number;
+}
+
+export interface McpSkillVersion {
+  id: string;
+  skill_name: string;
+  version: number;
+  body: string;
+  action: "override" | "restore" | string;
+  created_by: string | null;
+  created_at: string | null;
+  builtin_digest: string | null;
+}
+
+export interface McpSkillsResponse {
+  skills: McpSkill[];
+  coverage_gaps: string[];
 }

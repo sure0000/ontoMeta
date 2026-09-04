@@ -145,6 +145,15 @@ class AirflowRuntimeConfig:
         )
 
 
+@dataclass
+class McpRuntimeConfig:
+    mcp_http_enabled: bool = False
+    mcp_http_allow_anonymous: bool = False
+    mcp_default_role: str = "reader"
+    mcp_rate_limit_per_minute: int = 120
+    mcp_execute_sql_rate_limit_per_minute: int = 30
+
+
 def mask_secret(value: str | None) -> str | None:
     if not value:
         return None
@@ -208,6 +217,35 @@ class SettingsService:
             token=c.get("token"),
             fabric=c.get("fabric") or "PROD",
             request_timeout=float(c.get("request_timeout") or 90),
+        )
+
+    def get_mcp_settings(self, db: Session) -> dict:
+        self.ensure_defaults(db)
+        values = self._deps.get_mcp(db)
+        # HTTP is the only supported service surface.  Keep the legacy keys
+        # normalized for old callers, but never let them enable another mode.
+        values["mcp_http_enabled"] = True
+        values["mcp_http_allow_anonymous"] = False
+        return values
+
+    def update_mcp_settings(self, db: Session, data: dict) -> dict:
+        self.ensure_defaults(db)
+        values = dict(data)
+        values["mcp_http_enabled"] = True
+        values["mcp_http_allow_anonymous"] = False
+        return self._deps.save_mcp(db, values)
+
+    def get_mcp_runtime(self, db: Session) -> McpRuntimeConfig:
+        self.ensure_defaults(db)
+        c = self._deps.get_mcp(db)
+        return McpRuntimeConfig(
+            mcp_http_enabled=True,
+            mcp_http_allow_anonymous=False,
+            mcp_default_role="reader" if c.get("mcp_default_role") is None else str(c.get("mcp_default_role")),
+            mcp_rate_limit_per_minute=int(c.get("mcp_rate_limit_per_minute") or 0),
+            mcp_execute_sql_rate_limit_per_minute=int(
+                c.get("mcp_execute_sql_rate_limit_per_minute") or 0
+            ),
         )
 
     def get_draft_generation_settings(self, db: Session) -> DraftGenerationSetting:
@@ -393,6 +431,18 @@ class SettingsService:
                 )
             )
             db.commit()
+
+        if not self._deps.get_mcp(db):
+            self._deps.save_mcp(
+                db,
+                {
+                    "mcp_http_enabled": True,
+                    "mcp_http_allow_anonymous": False,
+                    "mcp_default_role": env_settings.mcp_default_role,
+                    "mcp_rate_limit_per_minute": env_settings.mcp_rate_limit_per_minute,
+                    "mcp_execute_sql_rate_limit_per_minute": env_settings.mcp_execute_sql_rate_limit_per_minute,
+                },
+            )
 
         SettingsService._defaults_initialized = True
 

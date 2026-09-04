@@ -31,6 +31,7 @@ COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
     "llm": ("LLM / 嵌入服务", True),
     "datahub": ("DataHub（GMS + 前端）", False),
     "airflow": ("Airflow 调度", False),
+    "mcp": ("MCP 服务", False),
     # postgres：ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
     # - warehouse: 目标数仓连接由「数据源」标签页统一管理（DataSourcesPanel 完整 CRUD+测试）
 }
@@ -69,6 +70,13 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("username", "str", False, False, None),
         ("password", "str", True, False, None),
         ("ssh_password", "str", True, False, None),
+    ],
+    "mcp": [
+        ("mcp_http_enabled", "bool", False, False, False),
+        ("mcp_http_allow_anonymous", "bool", False, False, False),
+        ("mcp_default_role", "str", False, False, "reader"),
+        ("mcp_rate_limit_per_minute", "int", False, False, 120),
+        ("mcp_execute_sql_rate_limit_per_minute", "int", False, False, 30),
     ],
 }
 
@@ -268,6 +276,13 @@ def _validate_connection(
                 val = int(val)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"连接字段 {name} 须为整数") from exc
+        if val is not None and typ == "bool" and not isinstance(val, bool):
+            if isinstance(val, str) and val.strip().lower() in {"true", "1", "yes", "on"}:
+                val = True
+            elif isinstance(val, str) and val.strip().lower() in {"false", "0", "no", "off"}:
+                val = False
+            else:
+                raise ValueError(f"连接字段 {name} 须为布尔值")
         cleaned[name] = val
     return cleaned
 
@@ -607,6 +622,26 @@ class DependencyComponentService:
                 or 90,
             },
         )
+        c = _loads(row.connection_json)
+        c["updated_at"] = row.updated_at
+        return c
+
+    # -- MCP 运行期配置 --
+    def get_mcp(self, db: Session) -> dict[str, Any]:
+        row = self._get_singleton(db, "mcp")
+        if not row:
+            return {}
+        c = _loads(row.connection_json)
+        c["updated_at"] = row.updated_at
+        return c
+
+    def save_mcp(self, db: Session, data: dict[str, Any]) -> dict[str, Any]:
+        current = self._conn(db, "mcp")
+        merged = dict(current)
+        for field_name, _typ, _secret, _required, _default in CONNECTION_SCHEMAS["mcp"]:
+            if field_name in data:
+                merged[field_name] = data[field_name]
+        row = self._upsert_singleton(db, "mcp", "MCP 服务", merged)
         c = _loads(row.connection_json)
         c["updated_at"] = row.updated_at
         return c

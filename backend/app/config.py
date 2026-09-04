@@ -21,23 +21,23 @@ class Settings(BaseSettings):
     # 外部 API Key 哈希 pepper（可选，变更后须重新生成全部 App Key）
     api_key_hash_pepper: str | None = None
 
-    # ---- MCP 服务（stdio）鉴权 ----
+    # ---- MCP 服务首启播种默认值 ----
     # stdio 传输没有逐请求 HTTP 头：整条会话（一个子进程）用一个身份。身份来自启动 MCP
     # 服务器的客户端（Claude Desktop / Cursor）在其配置的 env 块里传入的 Token——与
     # ONTOMETA_ADMIN_TOKEN / Principal Token 同价，由 app.auth.resolve_principal_token 解析。
     ontometa_mcp_token: str | None = None
+    # 以下五项只在 SettingsService 首次创建 DB 配置时播种；运行期一律从数据库读取。
     # 未提供 Token 时授予的角色。本地 stdio 是用户自己拉起的子进程，给到 reader 级别
     # 让只读查询开箱即用，但同步/物化提案与代跑 SQL 仍按各工具的 required_role 拦住。
     # 置空字符串 = 无匿名身份（所有需要角色的工具一律 403），供锁定部署使用。
     mcp_default_role: str = "reader"
     # MCP 限流（进程内滑动窗口，stdio 单进程即全局）：每个工具每分钟调用上限。
-    # 防 agent 失控循环打爆下游（数仓 / DB）。0 = 关闭限流。与 agent_run_sql_min_role /
-    # agent_soundness 一样是**行为参数**，随部署走 env（不属于「连接配置进 Web 设置页」）。
+    # 防 agent 失控循环打爆下游（数仓 / DB）。0 = 关闭限流。
     mcp_rate_limit_per_minute: int = 120
     # execute_sql 直打数仓、代价最重，单独更严。0 = 跟随 mcp_rate_limit_per_minute。
     mcp_execute_sql_rate_limit_per_minute: int = 30
     # ---- MCP 远程 HTTP 传输（Phase 5）----
-    # 默认关闭：把 MCP 暴露到网络是安全敏感操作，须显式开启。开启后 MCP 挂在后端的
+    # 默认关闭：把 MCP 暴露到网络是安全敏感操作，须在 Web「Agent 接入」中显式开启。开启后 MCP 挂在后端的
     # /mcp 路由（Streamable HTTP，JSON 响应模式），异地 agent 用「服务地址 + 令牌」连接，
     # 不碰任何本地路径。身份逐请求解析（Authorization: Bearer <令牌>），复用与 REST 同一份
     # resolve_principal_token；无本地 stdio 的「一进程一 env Token」。

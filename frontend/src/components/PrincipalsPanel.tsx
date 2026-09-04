@@ -1,7 +1,9 @@
-import { KeyOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { ApiOutlined, CopyOutlined, EyeOutlined, KeyOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
+  Descriptions,
+  Drawer,
   Form,
   Input,
   Modal,
@@ -9,6 +11,7 @@ import {
   Select,
   Space,
   Switch,
+  Tabs,
   Table,
   Tag,
   Typography,
@@ -18,7 +21,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { SectionCard } from "./SectionCard";
-import type { Principal, PrincipalCreated, PrincipalRole } from "../types";
+import type { McpAuditEntry, Principal, PrincipalCreated, PrincipalMcpAccess, PrincipalRole } from "../types";
 
 const { Paragraph, Text } = Typography;
 
@@ -42,12 +45,25 @@ export function PrincipalsPanel() {
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [issued, setIssued] = useState<PrincipalCreated | null>(null);
+  const [accessById, setAccessById] = useState<Record<string, PrincipalMcpAccess>>({});
+  const [detailsId, setDetailsId] = useState<string | null>(null);
   const [form] = Form.useForm<{ name: string; role: PrincipalRole }>();
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setRows(await api.listPrincipals());
+      const principals = await api.listPrincipals();
+      setRows(principals);
+      const access = await Promise.allSettled(
+        principals.map((principal) => api.getPrincipalMcpAccess(principal.id)),
+      );
+      setAccessById(
+        Object.fromEntries(
+          access
+            .filter((item): item is PromiseFulfilledResult<PrincipalMcpAccess> => item.status === "fulfilled")
+            .map((item) => [item.value.principal_id, item.value]),
+        ),
+      );
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -98,8 +114,30 @@ export function PrincipalsPanel() {
     }
   };
 
+  const openDetails = async (id: string) => {
+    if (!accessById[id]) {
+      try {
+        const access = await api.getPrincipalMcpAccess(id);
+        setAccessById((current) => ({ ...current, [id]: access }));
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "加载详情失败");
+        return;
+      }
+    }
+    setDetailsId(id);
+  };
+
   const columns: ColumnsType<Principal> = [
     { title: "名称", dataIndex: "name", key: "name" },
+    {
+      title: "MCP 工具",
+      key: "mcp_tools",
+      width: 120,
+      render: (_, row) => {
+        const access = accessById[row.id];
+        return access ? <Tag color="blue">可调 {access.allowed_count} / {access.tool_count}</Tag> : "—";
+      },
+    },
     {
       title: "角色",
       dataIndex: "role",
@@ -140,6 +178,9 @@ export function PrincipalsPanel() {
       key: "actions",
       render: (_, row) => (
         <Space>
+          <Button size="small" icon={<EyeOutlined />} onClick={() => void openDetails(row.id)}>
+            详情
+          </Button>
           <Popconfirm title="轮换后旧 Token 立即失效" onConfirm={() => rotate(row.id)}>
             <Button size="small" icon={<ReloadOutlined />}>
               轮换
@@ -155,6 +196,15 @@ export function PrincipalsPanel() {
     },
   ];
 
+  const issuedAccess = issued ? accessById[issued.id] : undefined;
+  const issuedHttpConfig = issuedAccess && issued
+    ? JSON.stringify({
+        ...issuedAccess.http_config,
+        url: typeof window === "undefined" ? issuedAccess.http_config.url : `${window.location.origin}/mcp/`,
+        headers: { Authorization: `Bearer ${issued.token}` },
+      }, null, 2)
+    : "";
+
   return (
     <SectionCard
       title="角色与令牌"
@@ -168,10 +218,10 @@ export function PrincipalsPanel() {
     >
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
         <Alert
-          type="info"
+          type="warning"
           showIcon
           title="四层角色：reader < editor < reviewer < publisher"
-          description="ONTOMETA_ADMIN_TOKEN 仍为 superuser（等价 publisher）；未创建任何主体时行为与启用 RBAC 前一致。"
+          description="外部 Agent 默认使用 editor：可起草和校验，但不能确认或执行。确需自动执行时再授予 publisher；不要把 Admin Token 交给 Agent。"
         />
         <Table
           rowKey="id"
@@ -180,8 +230,87 @@ export function PrincipalsPanel() {
           columns={columns}
           dataSource={rows}
           pagination={false}
+          scroll={{ x: 960 }}
         />
       </Space>
+
+      <Drawer
+        title={detailsId ? `主体详情：${rows.find((row) => row.id === detailsId)?.name ?? ""}` : "主体详情"}
+        open={Boolean(detailsId)}
+        onClose={() => setDetailsId(null)}
+        width={760}
+        destroyOnHidden
+      >
+        {(() => {
+          const principal = rows.find((row) => row.id === detailsId);
+          const access = detailsId ? accessById[detailsId] : undefined;
+          if (!principal || !access) return <Text type="secondary">MCP 权限信息暂不可用</Text>;
+          return (
+            <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+              <Descriptions size="small" column={2} bordered>
+                <Descriptions.Item label="名称">{principal.name}</Descriptions.Item>
+                <Descriptions.Item label="角色"><Tag color={ROLE_COLOR[principal.role]}>{principal.role}</Tag></Descriptions.Item>
+                <Descriptions.Item label="Token 前缀"><Text code>{principal.token_prefix}…</Text></Descriptions.Item>
+                <Descriptions.Item label="状态">{principal.active ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>}</Descriptions.Item>
+                <Descriptions.Item label="最近使用" span={2}>{principal.last_used_at ? new Date(principal.last_used_at).toLocaleString() : "未使用"}</Descriptions.Item>
+              </Descriptions>
+              <Tabs
+                items={[
+                  {
+                    key: "tools",
+                    label: `工具权限 ${access.allowed_count}/${access.tool_count}`,
+                    children: (
+                      <Table
+                        rowKey="name"
+                        size="small"
+                        pagination={{ pageSize: 12, size: "small" }}
+                        dataSource={access.tools}
+                        scroll={{ x: 520 }}
+                        columns={[
+                          { title: "工具", dataIndex: "name", render: (value: string) => <Text code>{value}</Text> },
+                          { title: "最低角色", dataIndex: "required_role", width: 110 },
+                          { title: "状态", dataIndex: "allowed", width: 90, render: (value: boolean) => value ? <Tag color="green">可调用</Tag> : <Tag>不可调用</Tag> },
+                        ]}
+                      />
+                    ),
+                  },
+                  {
+                    key: "calls",
+                    label: `最近调用 ${access.total_calls}`,
+                    children: (
+                      <Table<McpAuditEntry>
+                        rowKey="id"
+                        size="small"
+                        pagination={false}
+                        dataSource={access.recent_calls}
+                        scroll={{ x: 540 }}
+                        columns={[
+                          { title: "时间", dataIndex: "created_at", width: 180, render: (value: string | null) => value ? new Date(value).toLocaleString() : "—" },
+                          { title: "工具", dataIndex: "tool_name", render: (value: string) => <Text code>{value}</Text> },
+                          { title: "结果", width: 90, render: (_value: unknown, item: McpAuditEntry) => item.rate_limited ? <Tag color="orange">限流</Tag> : item.denied ? <Tag color="red">被拒</Tag> : item.success ? <Tag color="green">成功</Tag> : <Tag color="volcano">失败</Tag> },
+                        ]}
+                      />
+                    ),
+                  },
+                  {
+                    key: "config",
+                    label: "接入配置",
+                    children: (
+                      <Space direction="vertical" style={{ width: "100%" }}>
+                        <Text strong>远程 HTTP</Text>
+                        <Paragraph copyable={{ text: JSON.stringify(access.http_config, null, 2) }}>
+                          <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{JSON.stringify(access.http_config, null, 2)}</pre>
+                        </Paragraph>
+                        <Text type="secondary">详情中只显示 Token 前缀占位符；完整令牌仅在创建或轮换后显示一次。</Text>
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+            </Space>
+          );
+        })()}
+      </Drawer>
 
       <Modal
         open={createOpen}
@@ -190,7 +319,7 @@ export function PrincipalsPanel() {
         onCancel={() => setCreateOpen(false)}
         okText="创建"
       >
-        <Form form={form} layout="vertical" initialValues={{ role: "reader" }}>
+        <Form form={form} layout="vertical" initialValues={{ role: "editor" }}>
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="如：数据组-张三 / CI 流水线" />
           </Form.Item>
@@ -219,13 +348,35 @@ export function PrincipalsPanel() {
           title="明文仅此一次显示，关闭后无法再次获取"
           style={{ marginBottom: 12 }}
         />
-        <Paragraph copyable={{ text: issued?.token }}>
-          <Text code>{issued?.token}</Text>
-        </Paragraph>
+        <Space.Compact block>
+          <Input.TextArea
+            value={issued?.token}
+            readOnly
+            autoSize={{ minRows: 2, maxRows: 4 }}
+            style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-all" }}
+          />
+          <Button
+            icon={<CopyOutlined />}
+            onClick={() => {
+              if (issued?.token) void navigator.clipboard?.writeText(issued.token);
+              message.success("Token 已复制");
+            }}
+          >
+            复制
+          </Button>
+        </Space.Compact>
         {issued && (
-          <Text type="secondary">
-            主体「{issued.name}」· <Tag color={ROLE_COLOR[issued.role]}>{issued.role}</Tag>
-          </Text>
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Text type="secondary">
+              主体「{issued.name}」· <Tag color={ROLE_COLOR[issued.role]}>{issued.role}</Tag>
+            </Text>
+            {issuedHttpConfig && <>
+              <Text strong><ApiOutlined /> HTTP 客户端配置</Text>
+              <Paragraph copyable={{ text: issuedHttpConfig }}>
+                <pre style={{ whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto", fontSize: 12 }}>{issuedHttpConfig}</pre>
+              </Paragraph>
+            </>}
+          </Space>
         )}
       </Modal>
     </SectionCard>

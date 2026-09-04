@@ -192,14 +192,19 @@ MCP 是文本协议，能补的一半是「让工具结果里带**可被 agent �
 
 ## 交付检查清单
 
-- [ ] `app/mcp/tools/lifecycle.py`：draft/validate/confirm/execute_task（薄壳复用 agent_pipeline）
-- [ ] `execute_task` 异步、立即返回
-- [ ] 注册进 `tools/__init__.py` import 清单
-- [ ] `query_objects` 加 `group_by` 聚合模式（P1）
-- [ ] （可选）`get_ontology_overview`（P1）
-- [ ] 前端「MCP 服务」页 / README 更新：给外部 agent 用最小权限令牌、写侧工具的角色门槛说明
-- [ ] `tests/test_mcp_lifecycle.py` + 全量绿
-- [ ] `backend/app/mcp/STATUS.md` 追加本阶段记录
+- [x] `app/mcp/tools/lifecycle.py`：draft/validate/confirm/execute_task（薄壳复用 agent_pipeline）
+- [x] `execute_task` 异步、立即返回（原子抢占 + 分离 worker）
+- [x] 注册进 `tools/__init__.py` import 清单
+- [x] `query_objects` 加 `group_by` 聚合模式（P1）
+- [x] `get_ontology_overview`（P1 可选项）
+- [x] P2 可渲染增强：`query_relations(include_mermaid=true)`、`execute_sql(include_vega_lite=true)`
+- [x] 前端「MCP 服务」页 / README 更新：给外部 agent 用最小权限令牌、写侧工具的角色门槛说明
+- [x] dsh `ontometa-mcp` skill：友好输出、真实 ID 路由、六环执行和失败分层
+- [x] `tests/test_mcp_lifecycle.py` + 全量绿
+- [x] `backend/app/mcp/STATUS.md` 追加本阶段记录
+- [x] 口径三件套 `search_logics` / `get_logic` / `compile_metric`（补 `propose_metric`
+      必填 `business_logic_id` 却无从查起的断路）+ dsh skill 口径优先路由
+      + `tests/test_mcp_logics.py`
 
 ## 端到端验收（真机）
 
@@ -207,6 +212,18 @@ MCP 是文本协议，能补的一半是「让工具结果里带**可被 agent �
 `mcp__ontometa__*`**（propose→draft→validate→（publisher 令牌下）confirm→execute→get_task_status），
 **不再出现 Bash/Read/curl 绕道、不再读 .env 抓 token、不再被 execute 阻塞**。用
 `list_audit_logs` 复核：写侧操作都以正确身份留痕。
+
+本阶段已在 dsh（editor Principal）实测 `server_info`、
+`query_objects(group_by=role)`（分布统计不返回明细）以及
+`propose_sync → draft_task → validate_task`（task_id 可回读，状态 `validated`，
+`blocking_count=0`）。
+
+**publisher 侧也已真机跑过**（2026-09-04，`confirmed_by=dsh-publisher-acceptance-20260904`）：
+`confirm_task → execute_task` 全程走 MCP，DAG/spec/jobs 投递到远端 Airflow、DagRun 建出、
+`get_task_status` 对账回读到终态——**MCP 链路本身是通的**。但三条「同步 · 公司 → 数仓 ODS」
+的终态都是 `failed`，失败在 Flink/Airflow 侧（同期「客户分组」「代码表目录」是 succeeded，
+所以不是通用故障）。回执里没有失败原因，agent 只能拿到 `run_url`——这正是 `get_ops_record`
+仍缺位的代价，见 STATUS.md 待办。
 
 ---
 

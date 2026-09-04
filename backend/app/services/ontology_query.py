@@ -371,34 +371,16 @@ class OntologyQueryService:
         limit: int | None = None,
         offset: int = 0,
     ) -> PageResult[ObjectTypeSummary]:
-        query = db.query(ObjectType)
-        query = self._apply_ontology_scope(
+        query = self._object_type_query(
             db,
-            query,
             ontology_id=ontology_id,
             domain_context_id=domain_context_id,
             published_only=published_only,
+            q=q,
+            role_in=role_in,
+            needs_review=needs_review,
+            segment_id=segment_id,
         )
-        # 组合筛选（AND）：role_in=对象角色多选；needs_review=仅看待复核。
-        # 复核状态是独立列（此前寄生在 role_reason 的 [待复核] 前缀里，靠全表 LIKE 扫）。
-        if role_in:
-            query = query.filter(ObjectType.table_role.in_(role_in))
-        if needs_review is not None:
-            query = query.filter(ObjectType.needs_review.is_(bool(needs_review)))
-        if segment_id:
-            query = query.filter(ObjectType.segment_id == segment_id)
-        normalized_q = (q or "").strip()
-        # Agent/搜索框约定 ``*`` 表示不限定关键词，不能把它当成字面星号去做 ILIKE。
-        if normalized_q and normalized_q != "*":
-            like = f"%{normalized_q}%"
-            query = query.filter(
-                (ObjectType.name.ilike(like))
-                | (ObjectType.display_name.ilike(like))
-                | (ObjectType.description.ilike(like))
-                # 用户经常拿物理表名（如 ``tabCode List``）找业务对象；该信息只在
-                # DataHub URN/source_ref 中，遗漏它会让已绑定对象看起来像不存在。
-                | (ObjectType.source_ref.ilike(like))
-            )
         total = query.count()
         query = query.order_by(ObjectType.updated_at.desc())
         if offset:
@@ -429,6 +411,108 @@ class OntologyQueryService:
             for obj in objects
         ]
         return PageResult(items=items, total=total, limit=limit, offset=offset)
+
+    def _object_type_query(
+        self,
+        db: Session,
+        *,
+        ontology_id: str | None = None,
+        domain_context_id: str | None = None,
+        published_only: bool = False,
+        q: str | None = None,
+        role_in: list[str] | None = None,
+        needs_review: bool | None = None,
+        segment_id: str | None = None,
+    ):
+        """构造对象列表与聚合共用的完整过滤查询。"""
+        query = db.query(ObjectType)
+        query = self._apply_ontology_scope(
+            db,
+            query,
+            ontology_id=ontology_id,
+            domain_context_id=domain_context_id,
+            published_only=published_only,
+        )
+        # 组合筛选（AND）：role_in=对象角色多选；needs_review=仅看待复核。
+        # 复核状态是独立列（此前寄生在 role_reason 的 [待复核] 前缀里，靠全表 LIKE 扫）。
+        if role_in:
+            query = query.filter(ObjectType.table_role.in_(role_in))
+        if needs_review is not None:
+            query = query.filter(ObjectType.needs_review.is_(bool(needs_review)))
+        if segment_id:
+            query = query.filter(ObjectType.segment_id == segment_id)
+        normalized_q = (q or "").strip()
+        # Agent/搜索框约定 ``*`` 表示不限定关键词，不能把它当成字面星号去做 ILIKE。
+        if normalized_q and normalized_q != "*":
+            like = f"%{normalized_q}%"
+            query = query.filter(
+                (ObjectType.name.ilike(like))
+                | (ObjectType.display_name.ilike(like))
+                | (ObjectType.description.ilike(like))
+                # 用户经常拿物理表名（如 ``tabCode List``）找业务对象；该信息只在
+                # DataHub URN/source_ref 中，遗漏它会让已绑定对象看起来像不存在。
+                | (ObjectType.source_ref.ilike(like))
+            )
+        return query
+
+    def group_object_types(
+        self,
+        db: Session,
+        *,
+        group_by: str,
+        ontology_id: str | None = None,
+        domain_context_id: str | None = None,
+        published_only: bool = False,
+        q: str | None = None,
+        role_in: list[str] | None = None,
+        needs_review: bool | None = None,
+        segment_id: str | None = None,
+    ) -> dict[str, Any]:
+        """按角色或板块统计对象，不加载对象摘要和派生明细。"""
+        if group_by not in {"role", "segment"}:
+            raise ValueError("group_by 须为 role 或 segment")
+        query = self._object_type_query(
+            db,
+            ontology_id=ontology_id,
+            domain_context_id=domain_context_id,
+            published_only=published_only,
+            q=q,
+            role_in=role_in,
+            needs_review=needs_review,
+            segment_id=segment_id,
+        )
+        if group_by == "role":
+            rows = (
+                query.with_entities(ObjectType.table_role, func.count(ObjectType.id))
+                .group_by(ObjectType.table_role)
+                .all()
+            )
+            return {
+                "by_role": {
+                    (role or "unclassified"): count for role, count in rows
+                }
+            }
+
+        rows = (
+            query.outerjoin(OntologySegment, OntologySegment.id == ObjectType.segment_id)
+            .with_entities(
+                ObjectType.segment_id,
+                OntologySegment.display_name,
+                func.count(ObjectType.id),
+            )
+            .group_by(ObjectType.segment_id, OntologySegment.display_name)
+            .all()
+        )
+        return {
+            "by_segment": [
+                {
+                    "segment_id": segment_id,
+                    "segment_name": segment_name or "未归类",
+                    "count": count,
+                }
+                for segment_id, segment_name, count in rows
+            ]
+        }
 
     def _bulk_segment_names(
         self, db: Session, segment_ids: list[str | None]
@@ -794,6 +878,9 @@ class OntologyQueryService:
                     label=rel.display_name,
                     cardinality=_normalize_cardinality(rel.cardinality),
                     relation_id=rel.id,
+                    # 血缘视角靠它区分「数据加工（derivation）」和「业务关系（外键/引用）」。
+                    # 漏填的话 GraphEdge.structure_type 恒为 None，下游只能把两者混作一谈。
+                    structure_type=rel.structure_type,
                 )
                 for rel in relations
             ]
@@ -860,6 +947,7 @@ class OntologyQueryService:
                 label=rel.display_name,
                 cardinality=_normalize_cardinality(rel.cardinality),
                 relation_id=rel.id,
+                structure_type=rel.structure_type,
             )
             for rel in relations
             if rel.source_object_type_id in selected and rel.target_object_type_id in selected

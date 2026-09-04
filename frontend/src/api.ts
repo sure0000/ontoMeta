@@ -74,6 +74,7 @@ import type {
   LineageEmitResult,
   Principal,
   PrincipalCreated,
+  PrincipalMcpAccess,
   PrincipalRole,
   RolePolicy,
   AgentKinds,
@@ -113,6 +114,10 @@ import type {
   McpServiceInfo,
   McpStats,
   McpAuditPage,
+  McpSkill,
+  McpSkillVersion,
+  McpSkillsResponse,
+  McpSettings,
 } from "./types";
 import { buildQuery } from "./utils/format";
 
@@ -242,30 +247,39 @@ async function upload<T>(path: string, form: FormData): Promise<T> {
 export const api = {
   /* ---------------------------------------------------------- 血缘补录 */
 
-  lineageOverview: (domainId: string, refresh = false) =>
+  lineageOverview: (domainId: string, refresh = false, signal?: AbortSignal) =>
     request<LineageOverview>(
       `/api/lineage/domains/${domainId}/overview${refresh ? "?refresh=true" : ""}`,
+      signal ? { signal } : undefined,
     ),
 
   lineageTables: (
     domainId: string,
     params: { onlyIsolated?: boolean; q?: string; limit?: number } = {},
+    signal?: AbortSignal,
   ) => {
     const query = new URLSearchParams();
     if (params.onlyIsolated) query.set("only_isolated", "true");
     if (params.q) query.set("q", params.q);
     if (params.limit) query.set("limit", String(params.limit));
     const suffix = query.toString() ? `?${query}` : "";
-    return request<LineageTableRow[]>(`/api/lineage/domains/${domainId}/tables${suffix}`);
+    return request<LineageTableRow[]>(
+      `/api/lineage/domains/${domainId}/tables${suffix}`,
+      signal ? { signal } : undefined,
+    );
   },
 
-  lineageColumns: (domainId: string, urn: string) =>
+  lineageColumns: (domainId: string, urn: string, signal?: AbortSignal) =>
     request<LineageColumn[]>(
       `/api/lineage/domains/${domainId}/columns?urn=${encodeURIComponent(urn)}`,
+      signal ? { signal } : undefined,
     ),
 
-  lineageUncoveredIsolated: (domainId: string) =>
-    request<string[]>(`/api/lineage/domains/${domainId}/uncovered-isolated`),
+  lineageUncoveredIsolated: (domainId: string, signal?: AbortSignal) =>
+    request<string[]>(
+      `/api/lineage/domains/${domainId}/uncovered-isolated`,
+      signal ? { signal } : undefined,
+    ),
 
   listLineagePackages: (domainId: string, kind = "scan") =>
     request<LineagePackageRow[]>(`/api/lineage/domains/${domainId}/packages?kind=${kind}`),
@@ -301,7 +315,8 @@ export const api = {
       body: JSON.stringify({ edges, label: label ?? null }),
     }),
 
-  listDomains: () => request<DomainContext[]>("/api/domains"),
+  listDomains: (signal?: AbortSignal) =>
+    request<DomainContext[]>("/api/domains", signal ? { signal } : undefined),
   getDomain: (id: string) => request<DomainContextDetail>(`/api/domains/${id}`),
   createManualObject: (
     domainId: string,
@@ -1610,21 +1625,94 @@ export const api = {
     request<PrincipalCreated>(`/api/principals/${id}/rotate-token`, { method: "POST" }),
   deletePrincipal: (id: string) =>
     request<{ deleted: string }>(`/api/principals/${id}`, { method: "DELETE" }),
+  getPrincipalMcpAccess: (id: string) =>
+    request<PrincipalMcpAccess>(`/api/principals/${id}/mcp-access`),
 
   // ---- MCP 服务（Phase 5：远程传输 + 管理页）----
   getMcpInfo: () => request<McpServiceInfo>("/api/mcp/info"),
+  getMcpSettings: () => request<McpSettings>("/api/mcp/settings"),
+  updateMcpSettings: (body: Partial<McpSettings>) =>
+    request<McpSettings>("/api/mcp/settings", { method: "PUT", body: JSON.stringify(body) }),
   getMcpStats: (windowMinutes?: number) =>
     request<McpStats>(
       `/api/mcp/stats${windowMinutes ? `?window_minutes=${windowMinutes}` : ""}`,
     ),
-  getMcpAudit: (params?: { toolName?: string; deniedOnly?: boolean; limit?: number }) => {
+  getMcpAudit: (params?: {
+    toolName?: string;
+    result?: "success" | "failed" | "denied" | "rate_limited";
+    principalId?: string;
+    principalRole?: "reader" | "editor" | "reviewer" | "publisher" | "anonymous";
+    deniedOnly?: boolean;
+    limit?: number;
+    offset?: number;
+    windowMinutes?: number;
+  }) => {
     const q = new URLSearchParams();
     if (params?.toolName) q.set("tool_name", params.toolName);
     if (params?.deniedOnly) q.set("denied_only", "true");
+    if (params?.result) q.set("result", params.result);
+    if (params?.principalId) q.set("principal_id", params.principalId);
+    if (params?.principalRole) q.set("principal_role", params.principalRole);
     if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.windowMinutes) q.set("window_minutes", String(params.windowMinutes));
     const qs = q.toString();
     return request<McpAuditPage>(`/api/mcp/audit${qs ? `?${qs}` : ""}`);
   },
+  getMcpSkills: () => request<McpSkillsResponse>("/api/mcp/skills"),
+  downloadMcpSkills: async (name?: string) => {
+    const path = name
+      ? `/api/mcp/skills/${encodeURIComponent(name)}/export`
+      : "/api/mcp/skills/export";
+    const headers = new Headers();
+    const adminToken = getAdminToken();
+    if (adminToken) headers.set("X-Admin-Token", adminToken);
+    const response = await fetch(path, { headers });
+    if (!response.ok) {
+      const raw = await response.text();
+      let detail = raw || `导出失败：HTTP ${response.status}`;
+      try {
+        const parsed = JSON.parse(raw) as { detail?: string };
+        if (parsed.detail) detail = parsed.detail;
+      } catch {
+        // Keep the raw response when the server did not return JSON.
+      }
+      throw new ApiError(detail, response.status);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ||
+      (name ? `${name}-skill.zip` : "ontometa-skills.zip");
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+  getMcpSkill: (name: string) => request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}`),
+  listMcpSkillVersions: (name: string) =>
+    request<{ versions: McpSkillVersion[] }>(`/api/mcp/skills/${encodeURIComponent(name)}/versions`),
+  restoreMcpSkillVersion: (name: string, version: number) =>
+    request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}/versions/${version}/restore`, {
+      method: "POST",
+    }),
+  updateMcpSkill: (name: string, body: string) =>
+    request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({ body }),
+    }),
+  resetMcpSkill: (name: string) =>
+    request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}/override`, {
+      method: "DELETE",
+    }),
+  setMcpSkillEnabled: (name: string, enabled: boolean) =>
+    request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
 
   // ---- 治理智能体流水线（M5/M6，写侧；整个命名空间需 publisher 角色）----
   listAgentKinds: () => request<AgentKinds>("/api/agents/kinds"),

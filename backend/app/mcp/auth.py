@@ -19,7 +19,6 @@ import os
 
 from app.auth import resolve_principal_token
 from app.config import settings
-
 from .tools import AuthContext
 
 logger = logging.getLogger(__name__)
@@ -39,7 +38,10 @@ def resolve_auth_context() -> AuthContext:
 
     if role is None:
         # 无有效 Token：回落到匿名默认角色。空字符串表示不授予任何角色。
-        default_role = (settings.mcp_default_role or "").strip() or None
+        from app.database import SessionLocal
+        from app.services.settings_service import SettingsService
+        with SessionLocal() as db:
+            default_role = (SettingsService().get_mcp_runtime(db).mcp_default_role or "").strip() or None
         return AuthContext(
             client_type="mcp_local",
             role=default_role,
@@ -90,15 +92,11 @@ def resolve_http_auth(request) -> AuthContext:
     与 stdio 的「一进程一 env Token」不同：每个 HTTP 请求各带各的 Authorization 头，
     绝不能复用进程级会话身份。令牌解析与 REST/stdio 共用 ``resolve_principal_token``。
 
-    无有效令牌时：``mcp_http_allow_anonymous`` 为真才回落 ``mcp_default_role``，否则无身份
-    （role=None）——由服务器的授权闸门 fail-closed 拦下（公网默认不匿名）。
+    无有效令牌时始终无身份（role=None），由服务器的授权闸门 fail-closed 拦下。
     """
     headers = getattr(request, "headers", None)
     token = _bearer_from_headers(headers) if headers is not None else None
     role, principal_id = resolve_principal_token(token)
-
-    if role is None and settings.mcp_http_allow_anonymous:
-        role = (settings.mcp_default_role or "").strip() or None
 
     name = None
     if principal_id:

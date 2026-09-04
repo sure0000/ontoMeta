@@ -59,6 +59,7 @@ from app.models.agent import (
     PipelineStatus,
 )
 from app.models.mcp_audit import McpAuditLog
+from app.models.mcp_skill import McpSkill, McpSkillVersion
 from app.models.principal import Principal, Role, role_rank, role_satisfies
 from app.models.governance import GovernanceStandardRecord
 from app.models.semantic_index import SemanticIndexEntry
@@ -166,4 +167,6 @@ __all__ = [
     "LineagePackage",
     "LineagePackageEdge",
     "McpAuditLog",
+    "McpSkill",
+    "McpSkillVersion",
 ]

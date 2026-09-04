@@ -22,8 +22,6 @@ import { api, clearAdminToken, getAdminToken, setAdminToken } from "../api";
 import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { PrincipalsPanel } from "../components/PrincipalsPanel";
-import { McpPanel } from "../components/McpPanel";
 import { DependencyPanel } from "../components/DependencyPanel";
 import { DataSourcesPanel } from "../components/DataSourcesModal";
 import { SectionCard } from "../components/SectionCard";
@@ -308,21 +306,13 @@ export function SettingsPage() {
                     </Form.Item>
                   </Form>
                 </SectionCard>
-                <PrincipalsPanel />
-              </div>
-            ),
-          },
-          {
-            key: "mcp",
-            label: (
-              <span>
-                <ApiOutlined style={{ marginRight: 6 }} />
-                MCP 服务
-              </span>
-            ),
-            children: (
-              <div className="om-tab-stack">
-                <McpPanel />
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Agent 接入已移至独立菜单"
+                  description="MCP 服务、Skill 和外部 Agent 令牌请前往左侧「Agent 接入」管理。"
+                  style={{ marginTop: 16 }}
+                />
               </div>
             ),
           },

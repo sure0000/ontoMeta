@@ -3,8 +3,8 @@
 把 ontoMeta 的本体/任务/查询能力暴露为 MCP 工具，供通用 agent（Claude Desktop、
 Claude Code、Cursor…）直接调用。
 
-**只暴露只读能力**：查询本体/对象/关系、跑只读 SQL、回读任务状态、生成任务提案。
-写侧（草稿落库、确认、执行）仍走 REST + 人工确认，MCP 这边不开口子。
+查询、提案和任务生命周期能力均通过 MCP 暴露：生命周期工具只写治理制品，仍受
+校验、确认和角色闸门约束；数仓执行由已确认任务的异步 worker 完成。
 
 传输为 stdio——客户端以子进程方式拉起本模块，凭据不过网络。
 
@@ -23,9 +23,12 @@ import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 
+from app.database import SessionLocal
+
 from .audit import record_call
 from .auth import resolve_auth_context, resolve_http_auth
 from .rate_limit import check_rate_limit
+from .skills import get_skill, list_skills
 from .tools import TOOL_REGISTRY, AuthContext, ToolResult, tool_required_role
 
 # stdout 是 MCP 协议通道，日志一律走 stderr——print/日志落到 stdout 会撑破 JSON-RPC 帧。
@@ -34,6 +37,22 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "ontometa"
 SERVER_VERSION = "1.0.0"
+
+# Keep initialization guidance deliberately small.  Full operating guidance is
+# available through MCP prompts, while these lines cover the failure modes that
+# otherwise produce plausible but incorrect answers.
+SERVER_INSTRUCTIONS = """ontoMeta MCP 使用底线：
+1. 业务口径以本体和已登记业务逻辑为准，先用 search_logics/compile_metric，不要凭文字重写 SQL。
+2. 连接键和字段字面量必须先用 find_join_path/profile_values 核实，不要猜表名、JOIN 或枚举值。
+3. 运行事实只从 get_task_status/get_landing/get_ops_record 读取，不要根据命名规则推断已落地或已成功。
+
+Skill 路由：
+- ontometa-discovery：用 query_ontology 探索本体、对象、关系、口径、血缘和落点
+- ontometa-query：核实口径、关联和字段取值，编译并执行查询
+- ontometa-task-plan：起草并校验任务方案
+- ontometa-task-execute：确认、执行和追踪任务运行
+- ontometa-admin：查看服务身份、审计和统计
+"""
 
 # 会话身份：stdio 一进程一身份，启动时解析一次并缓存。``None`` 表示尚未解析
 # （惰性解析，让测试可先设好 env / monkeypatch 再触发）。
@@ -101,6 +120,79 @@ async def handle_list_tools(context, params) -> types.ListToolsResult:
     return types.ListToolsResult(tools=tools)
 
 
+async def handle_list_prompts(context, params) -> types.ListPromptsResult:
+    """列出已启用的 Skill prompts。"""
+    started = time.monotonic()
+    try:
+        with SessionLocal() as db:
+            skills = list_skills(db)
+        prompts = [
+            types.Prompt(
+                name=skill.name,
+                description=str(skill.frontmatter.get("description") or ""),
+                title=str(skill.frontmatter.get("whenToUse") or "")[:160] or None,
+            )
+            for skill in skills
+            if skill.enabled
+        ]
+        record_call(
+            auth=_auth_for(context),
+            tool_name="prompt:list",
+            arguments={},
+            success=True,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return types.ListPromptsResult(prompts=prompts)
+    except Exception as exc:  # noqa: BLE001 - prompt discovery must not crash session
+        record_call(
+            auth=_auth_for(context),
+            tool_name="prompt:list",
+            arguments={},
+            success=False,
+            error=str(exc),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise
+
+
+async def handle_get_prompt(context, params: types.GetPromptRequestParams) -> types.GetPromptResult:
+    """Return one Skill body as a user prompt; unknown names are protocol errors."""
+    started = time.monotonic()
+    name = params.name
+    auth = _auth_for(context)
+    try:
+        with SessionLocal() as db:
+            skill = get_skill(db, name)
+        if skill is None or not skill.enabled:
+            raise ValueError(f"未知或已停用的 Skill prompt：{name}")
+        record_call(
+            auth=auth,
+            tool_name=f"prompt:{name}",
+            arguments={"name": name},
+            success=True,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return types.GetPromptResult(
+            description=str(skill.frontmatter.get("description") or ""),
+            messages=[
+                types.PromptMessage(
+                    role="user",
+                    content=types.TextContent(type="text", text=skill.body),
+                )
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - let SDK turn it into JSON-RPC error
+        record_call(
+            auth=auth,
+            tool_name=f"prompt:{name}"[:100],
+            arguments={"name": name},
+            success=False,
+            error=str(exc),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        raise
+
+
 async def handle_call_tool(
     context, params: types.CallToolRequestParams
 ) -> types.CallToolResult:
@@ -164,7 +256,7 @@ async def handle_call_tool(
                 "current_role": auth.role,
                 "hint": (
                     f"在客户端配置的 env 里传入 ONTOMETA_MCP_TOKEN（{minimum} 及以上的"
-                    "主体 Token 或 ONTOMETA_ADMIN_TOKEN）后重启 MCP 服务器。"
+                    "主体 Token）后重启 MCP 服务器。不要把 Admin Token 交给外部 agent。"
                 ),
             },
         )
@@ -209,8 +301,11 @@ def build_server() -> Server:
         SERVER_NAME,
         version=SERVER_VERSION,
         description="ontoMeta 本体工程与数据治理能力",
+        instructions=SERVER_INSTRUCTIONS,
         on_list_tools=handle_list_tools,
         on_call_tool=handle_call_tool,
+        on_list_prompts=handle_list_prompts,
+        on_get_prompt=handle_get_prompt,
     )
 
 

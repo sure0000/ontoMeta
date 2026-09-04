@@ -307,3 +307,70 @@ def target_receipt(
         "physical_tables": [p["physical_table"] for p in projection_evidence],
         "projections": projection_evidence,
     }
+
+
+@dataclass(frozen=True)
+class ObjectReadPreparation:
+    """在默认 Doris 上读某几个对象的**真实数据**之前，就绪判定 + 落点映射的结果。
+
+    ``blocked`` 非 None 就是「现在读不了」，那句话本身即原因（可直接回给调用方）；
+    为 None 时 ``mapping`` 是本次读取唯一权威的逻辑→物理映射。
+    """
+
+    mapping: dict[str, Any] | None
+    blocked: str | None
+
+    @property
+    def readable(self) -> bool:
+        return self.blocked is None
+
+
+def prepare_object_read(
+    db: Session,
+    *,
+    datasource: DataSource,
+    ontology_id: str,
+    object_names: list[str],
+) -> ObjectReadPreparation:
+    """割接闸门 → 就绪闸门 → **对账重判** → 落点映射。
+
+    抽出来是因为「取真实数据前该过哪几道闸门」必须只有一份：Data Agent 的
+    ``profile_values`` 与 MCP 的同名工具走的是同一类数据暴露，两边各写一遍的话，
+    松的那一边就成了实际的安全边界。
+
+    **对账那一步不能省**：就绪结论会因为「没人推进过对账」而陈旧——任务其实已经跑完，
+    读出来却还说未就绪（见 memory「Readiness blocks on stale state」）。所以先重判一次
+    再下结论，而不是把陈旧状态当事实报出去。
+    """
+    from app.services.query_readiness import readiness_detail, reconcile_blocking_runs
+    from app.services.warehouse_migration import cutover_error
+
+    ontology_ids = [ontology_id]
+    blocked = cutover_error(db, ontology_ids) or readiness_error(
+        db, datasource=datasource, ontology_ids=ontology_ids, object_names=object_names
+    )
+    if blocked:
+        if reconcile_blocking_runs(db, ontology_ids=ontology_ids, object_names=object_names):
+            blocked = cutover_error(db, ontology_ids) or readiness_error(
+                db,
+                datasource=datasource,
+                ontology_ids=ontology_ids,
+                object_names=object_names,
+            )
+        if blocked:
+            detail = readiness_detail(
+                db, ontology_ids=ontology_ids, object_names=object_names
+            )
+            return ObjectReadPreparation(
+                mapping=None,
+                blocked=f"{blocked}（{detail}）" if detail else blocked,
+            )
+    return ObjectReadPreparation(
+        mapping=projection_mapping(
+            db,
+            datasource=datasource,
+            ontology_ids=ontology_ids,
+            object_names=object_names,
+        ),
+        blocked=None,
+    )

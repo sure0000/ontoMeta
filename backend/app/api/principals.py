@@ -4,13 +4,14 @@
 否则低权角色可自我提权。
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import principal_service
 from app.auth import _METHOD_DEFAULTS, _ROLE_OVERRIDES
 from app.database import get_db
 from app.models.principal import Role
+from app.models.principal import Principal, role_satisfies
 from app.schemas import (
     PrincipalCreate,
     PrincipalCreated,
@@ -82,3 +83,40 @@ def get_role_policy():
             for m, p, r in _ROLE_OVERRIDES
         ],
     )
+
+
+@router.get("/principals/{principal_id}/mcp-access")
+def principal_mcp_access(
+    principal_id: str,
+    audit_limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """MCP tool permissions, recent calls and client templates for one Principal."""
+    from app.mcp import introspection
+
+    principal = db.get(Principal, principal_id)
+    if principal is None:
+        raise HTTPException(status_code=404, detail="主体不存在")
+    tools = introspection.tool_catalog()
+    allowed = [tool for tool in tools if role_satisfies(principal.role, tool["required_role"])]
+    recent, total_calls = introspection.query_audit(
+        db, principal_id=principal.id, limit=audit_limit
+    )
+    placeholder = f"<{principal.token_prefix}…完整令牌>"
+    return {
+        "principal_id": principal.id,
+        "role": principal.role,
+        "allowed_count": len(allowed),
+        "tool_count": len(tools),
+        "tools": [
+            {**tool, "allowed": role_satisfies(principal.role, tool["required_role"])}
+            for tool in tools
+        ],
+        "recent_calls": recent,
+        "total_calls": total_calls,
+        "http_config": {
+            "type": "http",
+            "url": "/mcp/",
+            "headers": {"Authorization": f"Bearer {placeholder}"},
+        },
+    }

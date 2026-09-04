@@ -21,14 +21,22 @@ from app.mcp import server as mcp_server
 from app.mcp.rate_limit import check_rate_limit, reset_rate_limit
 from app.mcp.tools import AuthContext
 from app.models.mcp_audit import McpAuditLog
+from app.services.settings_service import SettingsService
 
 
 @pytest.fixture(autouse=True)
-def _clean_rate_and_identity():
+def _clean_rate_and_identity(db):
+    service = SettingsService()
+    original = service.get_mcp_settings(db)
     reset_rate_limit()
     yield
+    service.update_mcp_settings(db, original)
     reset_rate_limit()
     mcp_server._reset_session_auth()
+
+
+def _configure_mcp(db, **values):
+    SettingsService().update_mcp_settings(db, values)
 
 
 def _ctx(role: str | None) -> AuthContext:
@@ -51,8 +59,8 @@ def call_via_server(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_sliding_window_admits_up_to_limit(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 3)
+def test_sliding_window_admits_up_to_limit(db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=3)
     reset_rate_limit()
     assert check_rate_limit("t", now=0.0)["allowed"] is True
     assert check_rate_limit("t", now=0.1)["allowed"] is True
@@ -64,8 +72,8 @@ def test_sliding_window_admits_up_to_limit(monkeypatch):
     assert v["retry_after"] > 0
 
 
-def test_window_slides_after_60s(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 1)
+def test_window_slides_after_60s(db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=1)
     reset_rate_limit()
     assert check_rate_limit("t", now=0.0)["allowed"] is True
     assert check_rate_limit("t", now=10.0)["allowed"] is False
@@ -73,9 +81,9 @@ def test_window_slides_after_60s(monkeypatch):
     assert check_rate_limit("t", now=61.0)["allowed"] is True
 
 
-def test_denied_calls_do_not_consume_window(monkeypatch):
+def test_denied_calls_do_not_consume_window(db):
     """被限流拒绝的调用不计入窗口，否则窗口永远满、永久封锁。"""
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 1)
+    _configure_mcp(db, mcp_rate_limit_per_minute=1)
     reset_rate_limit()
     assert check_rate_limit("t", now=0.0)["allowed"] is True
     # 连撞若干次拒绝
@@ -85,9 +93,8 @@ def test_denied_calls_do_not_consume_window(monkeypatch):
     assert check_rate_limit("t", now=61.0)["allowed"] is True
 
 
-def test_execute_sql_has_its_own_stricter_limit(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 100)
-    monkeypatch.setattr(settings, "mcp_execute_sql_rate_limit_per_minute", 1)
+def test_execute_sql_has_its_own_stricter_limit(db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=100, mcp_execute_sql_rate_limit_per_minute=1)
     reset_rate_limit()
     assert check_rate_limit("execute_sql", now=0.0)["allowed"] is True
     assert check_rate_limit("execute_sql", now=0.1)["allowed"] is False
@@ -95,9 +102,9 @@ def test_execute_sql_has_its_own_stricter_limit(monkeypatch):
     assert check_rate_limit("query_ontology", now=0.2)["allowed"] is True
 
 
-def test_rate_limit_audit_dedup(monkeypatch):
+def test_rate_limit_audit_dedup(db):
     """疯狂撞限流时，同一工具每分钟至多写一条审计。"""
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 1)
+    _configure_mcp(db, mcp_rate_limit_per_minute=1)
     reset_rate_limit()
     check_rate_limit("t", now=0.0)  # 放行
     first = check_rate_limit("t", now=1.0)
@@ -106,9 +113,8 @@ def test_rate_limit_audit_dedup(monkeypatch):
     assert second["allowed"] is False and second["should_audit"] is False
 
 
-def test_zero_disables_rate_limit(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 0)
-    monkeypatch.setattr(settings, "mcp_execute_sql_rate_limit_per_minute", 0)
+def test_zero_disables_rate_limit(db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=0, mcp_execute_sql_rate_limit_per_minute=0)
     reset_rate_limit()
     for i in range(50):
         assert check_rate_limit("t", now=float(i) * 0.001)["allowed"] is True
@@ -119,8 +125,8 @@ def test_zero_disables_rate_limit(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_server_rate_limits_and_marks_it(call_via_server, monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 2)
+def test_server_rate_limits_and_marks_it(call_via_server, db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=2)
     reset_rate_limit()
     ok1 = call_via_server("validate_sql", {"sql": "SELECT 1"}, auth=_ctx("reader"))
     ok2 = call_via_server("validate_sql", {"sql": "SELECT 2"}, auth=_ctx("reader"))
@@ -135,10 +141,9 @@ def test_server_rate_limits_and_marks_it(call_via_server, monkeypatch):
     assert "retry_after_seconds" in body["metadata"]
 
 
-def test_rate_limit_precedes_authorization(call_via_server, monkeypatch):
+def test_rate_limit_precedes_authorization(call_via_server, db):
     """限流在授权之前：一个连 reader 都没有的身份猛刷，也先被限流挡住（不逐次刷审计/DB）。"""
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 1)
-    monkeypatch.setattr(settings, "mcp_execute_sql_rate_limit_per_minute", 1)
+    _configure_mcp(db, mcp_rate_limit_per_minute=1, mcp_execute_sql_rate_limit_per_minute=1)
     reset_rate_limit()
     first = call_via_server("execute_sql", {"sql": "SELECT 1"}, auth=_ctx(None))
     second = call_via_server("execute_sql", {"sql": "SELECT 1"}, auth=_ctx(None))
@@ -147,8 +152,8 @@ def test_rate_limit_precedes_authorization(call_via_server, monkeypatch):
     assert json.loads(second.content[0].text)["metadata"].get("rate_limited") is True
 
 
-def test_rate_limited_call_is_audited_once(call_via_server, monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 1)
+def test_rate_limited_call_is_audited_once(call_via_server, db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=1)
     reset_rate_limit()
     marker = f"SELECT '{uuid4().hex}'"
     call_via_server("validate_sql", {"sql": marker}, auth=_ctx("reader"))  # 放行
@@ -172,8 +177,8 @@ def test_rate_limited_call_is_audited_once(call_via_server, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_server_info_reports_identity_and_limits(call_via_server, monkeypatch):
-    monkeypatch.setattr(settings, "mcp_rate_limit_per_minute", 77)
+def test_server_info_reports_identity_and_limits(call_via_server, db):
+    _configure_mcp(db, mcp_rate_limit_per_minute=77)
     result = call_via_server("server_info", {}, auth=_ctx("editor"))
     assert result.is_error is False
     data = json.loads(result.content[0].text)["data"]
@@ -217,3 +222,9 @@ def test_get_mcp_stats_aggregates_audit(call_via_server):
     assert "validate_sql" in tool_names
     roles = {row["role"] for row in data["by_role"]}
     assert "reader" in roles
+
+
+def test_get_mcp_stats_includes_diagnostics(client, admin_headers):
+    body = client.get("/api/mcp/stats?window_minutes=1440", headers=admin_headers).json()
+    assert {"error_rate", "average_duration_ms", "p95_duration_ms"} <= set(body["totals"])
+    assert {"timeline", "error_groups", "unique_principals", "last_call_at"} <= set(body)

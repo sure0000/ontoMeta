@@ -107,7 +107,11 @@ class DorisAdapter(DialectAdapter):
             return "DOUBLE"
         if st == "flag" or dt in {"bool", "boolean"}:
             return "BOOLEAN"
-        # 无长度元数据时的保守默认；宽文本需在本体显式标注类型。
+        # LONGTEXT/TEXT/JSON 等源字段可能超过默认 VARCHAR(1024)；Doris 的
+        # VARCHAR 上限约 64 KiB，使用最大可用长度避免全量搬运时的 filtered rows。
+        if dt in {"tinytext", "text", "mediumtext", "longtext", "json", "blob", "clob"}:
+            return "VARCHAR(65533)"
+        # 无长度元数据时的保守默认。
         return "VARCHAR(1024)"
 
     def _qualified(self, table: LogicalTable) -> str:

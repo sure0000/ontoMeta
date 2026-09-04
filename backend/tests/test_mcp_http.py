@@ -19,8 +19,21 @@ from app.database import SessionLocal
 from app.mcp.auth import resolve_http_auth
 from app.mcp.http_app import _AnonymousGuardASGI
 from app.services.principal_service import PrincipalService
+from app.services.settings_service import SettingsService
 
 _principals = PrincipalService()
+
+
+@pytest.fixture(autouse=True)
+def _restore_mcp_settings(db):
+    service = SettingsService()
+    original = service.get_mcp_settings(db)
+    yield
+    service.update_mcp_settings(db, original)
+
+
+def _configure_mcp(db, **values):
+    SettingsService().update_mcp_settings(db, values)
 
 
 class _FakeHeaders:
@@ -60,17 +73,16 @@ def test_http_auth_principal_token(monkeypatch, db):
     assert auth.client_type == "mcp_remote"
 
 
-def test_http_auth_no_token_denied_by_default(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_http_allow_anonymous", False)
+def test_http_auth_no_token_denied_by_default(db):
+    _configure_mcp(db, mcp_http_allow_anonymous=False)
     auth = resolve_http_auth(_FakeRequest({}))
     assert auth.role is None  # 无身份 → 授权闸门 fail-closed
 
 
-def test_http_auth_no_token_anonymous_when_allowed(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_http_allow_anonymous", True)
-    monkeypatch.setattr(settings, "mcp_default_role", "reader")
+def test_http_auth_no_token_remains_denied_even_if_legacy_flag_is_set(db):
+    _configure_mcp(db, mcp_http_allow_anonymous=True, mcp_default_role="reader")
     auth = resolve_http_auth(_FakeRequest({}))
-    assert auth.role == "reader"
+    assert auth.role is None
 
 
 def test_http_auth_bare_token_without_bearer_prefix(monkeypatch):
@@ -107,25 +119,26 @@ def _run_guard(headers: list[tuple[bytes, bytes]]):
     return inner_called["v"], sent
 
 
-def test_guard_401s_anonymous_when_disallowed(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_http_allow_anonymous", False)
+def test_guard_401s_anonymous_when_disallowed(db):
+    _configure_mcp(db, mcp_http_enabled=True, mcp_http_allow_anonymous=False)
     called, sent = _run_guard(headers=[])
     assert called is False  # 没进到内层
     assert sent[0]["status"] == 401
     assert any(k == b"www-authenticate" for k, _ in sent[0]["headers"])
 
 
-def test_guard_passes_with_token(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_http_allow_anonymous", False)
+def test_guard_passes_with_token(db):
+    _configure_mcp(db, mcp_http_enabled=True, mcp_http_allow_anonymous=False)
     called, sent = _run_guard(headers=[(b"authorization", b"Bearer whatever")])
     assert called is True  # 有令牌就放行到内层（角色由 handler 精细判定）
     assert sent[0]["status"] == 200
 
 
-def test_guard_passes_anonymous_when_allowed(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_http_allow_anonymous", True)
-    called, _sent = _run_guard(headers=[])
-    assert called is True
+def test_guard_rejects_anonymous_even_if_legacy_flag_is_set(db):
+    _configure_mcp(db, mcp_http_enabled=True, mcp_http_allow_anonymous=True)
+    called, sent = _run_guard(headers=[])
+    assert called is False
+    assert sent[0]["status"] == 401
 
 
 # --------------------------------------------------------------------------

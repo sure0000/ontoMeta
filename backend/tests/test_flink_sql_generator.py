@@ -282,6 +282,20 @@ def test_identity_select_casts_on_type_mismatch():
     assert "CAST(`docstatus` AS STRING) AS `docstatus`" in body
 
 
+def test_identity_select_converts_numeric_epoch_to_timestamp():
+    source = LogicalTable(
+        name="legacy_events",
+        columns=(LogicalColumn("event_time", "BIGINT", "attribute"),),
+    )
+    target = LogicalTable(
+        name="events",
+        columns=(LogicalColumn("event_time", "BIGINT", "datetime"),),
+    )
+    body = build_identity_select(source, target, "doris")
+    assert "TO_TIMESTAMP(FROM_UNIXTIME(CAST(`event_time` AS BIGINT)))" in body
+    assert "CAST(`event_time` AS DATETIME" not in body
+
+
 def test_identity_select_honors_column_map():
     """目标列名 ≠ 源物理列名时，按 column_map 取源列名。"""
     source = LogicalTable(

@@ -27,6 +27,13 @@ import { SegmentDetailPage } from "./pages/SegmentDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import { GraphTestPage } from "./pages/GraphTestPage";
+import {
+  MonitoringPage,
+  ServicePage,
+  SkillsPage,
+  TokensPage,
+  ToolsPage,
+} from "./pages/agent-access";
 
 export default function App() {
   return (
@@ -71,6 +78,12 @@ export default function App() {
         <Route path="/tasks/orchestration" element={<PipelinesPage />} />
         <Route path="/data-apps" element={<DataAppsPage />} />
         <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />
+        <Route path="/agent-access" element={<Navigate to="/agent-access/service" replace />} />
+        <Route path="/agent-access/service" element={<ServicePage />} />
+        <Route path="/agent-access/tools" element={<ToolsPage />} />
+        <Route path="/agent-access/monitoring" element={<MonitoringPage />} />
+        <Route path="/agent-access/skills" element={<SkillsPage />} />
+        <Route path="/agent-access/tokens" element={<TokensPage />} />
         <Route path="/graph-test" element={<GraphTestPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>

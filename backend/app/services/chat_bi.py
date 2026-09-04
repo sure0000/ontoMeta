@@ -2366,51 +2366,25 @@ class ChatBiService:
         mapping = None
         dsn = source.dsn_secret_ref if source is not None else None
         if source is not None:
-            from app.services.query_routing import projection_mapping, readiness_error
-            from app.services.warehouse_migration import cutover_error
+            # 闸门顺序（割接 → 就绪 → 对账重判 → 映射）只有一份，与 MCP 的 profile_values
+            # 共用；两边各写一遍的话，松的那边就成了实际的安全边界。
+            from app.services.query_routing import prepare_object_read
 
-            blocked = cutover_error(db, [ontology_id]) or readiness_error(
-                db,
-                datasource=source,
-                ontology_ids=[ontology_id],
-                object_names=[obj.name],
+            prepared = prepare_object_read(
+                db, datasource=source, ontology_id=ontology_id, object_names=[obj.name]
             )
-            if blocked:
-                # 与 run_sql 同治：未就绪的结论可能只是没人推进过，先对账再重判。
-                from app.services.query_readiness import (
-                    readiness_detail,
-                    reconcile_blocking_runs,
+            if not prepared.readable:
+                return (
+                    {
+                        "object": obj.name,
+                        "property": prop.name,
+                        "available": False,
+                        "note": prepared.blocked,
+                    },
+                    "Doris Projection 未就绪",
+                    False,
                 )
-
-                if reconcile_blocking_runs(
-                    db, ontology_ids=[ontology_id], object_names=[obj.name]
-                ):
-                    blocked = cutover_error(db, [ontology_id]) or readiness_error(
-                        db,
-                        datasource=source,
-                        ontology_ids=[ontology_id],
-                        object_names=[obj.name],
-                    )
-                if blocked:
-                    detail = readiness_detail(
-                        db, ontology_ids=[ontology_id], object_names=[obj.name]
-                    )
-                    return (
-                        {
-                            "object": obj.name,
-                            "property": prop.name,
-                            "available": False,
-                            "note": f"{blocked}（{detail}）" if detail else blocked,
-                        },
-                        "Doris Projection 未就绪",
-                        False,
-                    )
-            mapping = projection_mapping(
-                db,
-                datasource=source,
-                ontology_ids=[ontology_id],
-                object_names=[obj.name],
-            )
+            mapping = prepared.mapping
         profile = profile_property(
             proj, obj, prop,
             dsn=dsn,

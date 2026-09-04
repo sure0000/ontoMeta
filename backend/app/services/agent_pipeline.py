@@ -328,31 +328,87 @@ class AgentPipelineService:
 
     # ---------- 执行 ----------
 
-    def execute(
-        self, db: Session, artifact_id: str, *, context: dict[str, Any] | None = None
-    ) -> GovernanceArtifact:
-        artifact = self._require(db, artifact_id)
+    def claim_execution(
+        self, db: Session, artifact_id: str
+    ) -> tuple[GovernanceArtifact, bool]:
+        """原子抢占一次执行；返回 ``(artifact, claimed)``。
 
-        # 幂等：已成功的制品重复执行不产生第二次副作用。
-        if artifact.status == ArtifactStatus.SUCCEEDED.value:
-            return artifact
+        MCP 的异步入口会先抢占、再派发进程外 worker。状态条件更新是这里真正的
+        幂等边界：两个并发请求即使都读到 confirmed，也只有一个能把它改成
+        executing，另一个只会拿到当前态，不会重复投递下游作业。
+        """
+        artifact = self._require(db, artifact_id)
+        if artifact.status in {
+            ArtifactStatus.EXECUTING.value,
+            ArtifactStatus.SUCCEEDED.value,
+        }:
+            return artifact, False
         if artifact.status != ArtifactStatus.CONFIRMED.value:
             raise PipelineError(
                 f"只有 confirmed 状态可执行，当前为 {artifact.status}"
                 "（未经人工确认的制品不得执行）"
             )
 
-        executor = registry.get_executor(artifact.kind)
-        spec = _loads(artifact.spec_json, {})
-        artifact.status = ArtifactStatus.EXECUTING.value
+        # 在占位前确认执行器存在；否则不能把任务留在无人处理的 executing。
+        registry.get_executor(artifact.kind)
+        updated = (
+            db.query(GovernanceArtifact)
+            .filter(
+                GovernanceArtifact.id == artifact_id,
+                GovernanceArtifact.status == ArtifactStatus.CONFIRMED.value,
+            )
+            .update(
+                {GovernanceArtifact.status: ArtifactStatus.EXECUTING.value},
+                synchronize_session=False,
+            )
+        )
+        if updated:
+            db.commit()
+        else:
+            db.rollback()
+        db.expire_all()
+        current = self._require(db, artifact_id)
+        if updated:
+            return current, True
+        if current.status in {
+            ArtifactStatus.EXECUTING.value,
+            ArtifactStatus.SUCCEEDED.value,
+        }:
+            return current, False
+        raise PipelineError(f"任务状态已变化，当前为 {current.status}，请重新查询后再执行")
+
+    def release_execution_claim(self, db: Session, artifact_id: str) -> None:
+        """派发 worker 失败时释放尚未产生回执的执行占位，允许调用方重试。"""
+        (
+            db.query(GovernanceArtifact)
+            .filter(
+                GovernanceArtifact.id == artifact_id,
+                GovernanceArtifact.status == ArtifactStatus.EXECUTING.value,
+                GovernanceArtifact.execution_receipt_json.is_(None),
+            )
+            .update(
+                {GovernanceArtifact.status: ArtifactStatus.CONFIRMED.value},
+                synchronize_session=False,
+            )
+        )
         db.commit()
 
-        # 制品 id 由流水线注入，不指望调用方回传：执行器拿它作 dag_run_id（
-        # ``ontometa__<制品id>__<批次>``）。前端调 execute 时不传 context，于是 id 一路
-        # 为空、run_id 退化成 ``ontometa__manual__manual``——同一本体的第二个任务撞上
-        # 同一个 run_id，而读时对账又会拿别人的 DagRun 状态回写自己的制品。
+    def execute_claimed(
+        self, db: Session, artifact_id: str, *, context: dict[str, Any] | None = None
+    ) -> GovernanceArtifact:
+        """执行一个已由 ``claim_execution`` 抢占的制品并写入回执。"""
+        artifact = self._require(db, artifact_id)
+        if artifact.status == ArtifactStatus.SUCCEEDED.value:
+            return artifact
+        if artifact.status != ArtifactStatus.EXECUTING.value:
+            raise PipelineError(
+                f"只有 executing 状态可由执行 worker 处理，当前为 {artifact.status}"
+            )
+
+        spec = _loads(artifact.spec_json, {})
         run_context = {**(context or {}), "artifact_id": artifact.id}
         try:
+            executor = registry.get_executor(artifact.kind)
             receipt = executor.execute(spec, run_context)
         except Exception as exc:  # noqa: BLE001
             artifact.status = ArtifactStatus.FAILED.value
@@ -362,10 +418,6 @@ class AgentPipelineService:
             db.refresh(artifact)
             return artifact
 
-        # 执行器不抛异常 ≠ 执行成功。materialize/sync 的执行器约定是「投递失败如实记进
-        # 回执的 error/state，不抛」，
-        # 此前这里一律置 SUCCEEDED，于是「Airflow 根本没解析到 DAG」的任务在列表里显示成功。
-        # 而 _reconcile_orchestrated_status 只在有真实 DagRun 时才对账，救不回这种投递期失败。
         failure = _receipt_failure(receipt)
         if artifact.kind == "sync" and (
             receipt.get("execute_mode") == "handoff" or receipt.get("handoff")
@@ -376,8 +428,6 @@ class AgentPipelineService:
         if failure:
             artifact.status = ArtifactStatus.FAILED.value
         elif receipt.get("execute_mode") == "orchestrated":
-            # DAG 已提交不等于业务执行成功。终态由 Airflow 对账；sync 还必须通过
-            # Doris 目标表验证后才能进入 succeeded。
             artifact.status = ArtifactStatus.EXECUTING.value
         else:
             artifact.status = ArtifactStatus.SUCCEEDED.value
@@ -386,6 +436,15 @@ class AgentPipelineService:
         db.commit()
         db.refresh(artifact)
         return artifact
+
+    def execute(
+        self, db: Session, artifact_id: str, *, context: dict[str, Any] | None = None
+    ) -> GovernanceArtifact:
+        artifact, claimed = self.claim_execution(db, artifact_id)
+        # executing/succeeded 都按幂等重放处理；只有本次抢占者能触发执行器。
+        if not claimed:
+            return artifact
+        return self.execute_claimed(db, artifact_id, context=context)
 
     # ---------- 查询 ----------
 

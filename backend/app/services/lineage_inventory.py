@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ logger = logging.getLogger("ontometa.lineage_inventory")
 CACHE_TTL_SECONDS = 90.0
 
 _cache: dict[str, tuple[float, "DomainInventory"]] = {}
+# A cache only helps after the first request completes.  The page fans out to
+# several endpoints at once, so coalesce concurrent misses as well; otherwise
+# every endpoint starts its own expensive DataHub index scan.
+_inflight: dict[str, asyncio.Task["DomainInventory"]] = {}
 
 
 @dataclass(frozen=True)
@@ -125,12 +130,7 @@ def _build(domain: DomainContext, rows: list[dict]) -> DomainInventory:
     )
 
 
-async def get_inventory(db: Session, domain_id: str, *, refresh: bool = False) -> DomainInventory:
-    """取该域的家底。默认走短缓存，``refresh=True`` 强制重抓。"""
-    cached = _cache.get(domain_id)
-    if not refresh and cached and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
-        return cached[1]
-
+async def _load_inventory(db: Session, domain_id: str) -> DomainInventory:
     domain = db.get(DomainContext, domain_id)
     if domain is None:
         raise ValueError("数据域不存在")
@@ -151,6 +151,34 @@ async def get_inventory(db: Session, domain_id: str, *, refresh: bool = False) -
         len(inventory.isolated_tables),
     )
     return inventory
+
+
+async def get_inventory(db: Session, domain_id: str, *, refresh: bool = False) -> DomainInventory:
+    """取该域的家底。默认走短缓存，``refresh=True`` 强制重抓。
+
+    同一事件循环内的并发调用共享一个 DataHub 请求任务。``shield`` 防止某个
+    HTTP 请求被取消时把其它等待者的共享任务一并取消。
+    """
+    cached = _cache.get(domain_id)
+    if not refresh and cached and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
+        return cached[1]
+
+    task = _inflight.get(domain_id)
+    # ASGI normally uses one loop per worker, but test clients and embedded
+    # deployments can create more than one.  A Task cannot be awaited from a
+    # different loop, so only reuse a task owned by the current loop.
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        _inflight.pop(domain_id, None)
+        task = None
+    if task is None:
+        task = asyncio.create_task(_load_inventory(db, domain_id))
+        _inflight[domain_id] = task
+
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _inflight.get(domain_id) is task:
+            _inflight.pop(domain_id, None)
 
 
 def invalidate(domain_id: str) -> None:

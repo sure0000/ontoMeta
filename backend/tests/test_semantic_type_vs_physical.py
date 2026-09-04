@@ -15,6 +15,7 @@ import pytest
 
 from app.schemas import FieldInput
 from app.services.evidence_builder import EvidenceBuilder
+from app.services.warehouse_generator import _safe_projection_semantic_type
 
 
 def _infer(**kwargs) -> str:
@@ -28,6 +29,8 @@ def _infer(**kwargs) -> str:
         ("created_at", "DATETIME(6)", "datetime"),
         ("total_amount", "DECIMAL(21, 9)", "amount"),
         ("is_group", "TINYINT(1)", "flag"),
+        # 数值字段的时间命名不足以证明 epoch 秒，避免生成 Flink 非法转换
+        ("event_time", "BIGINT", "attribute"),
         # 物理是文本、又没有样例 → 不认，退回 attribute
         ("date_format", "VARCHAR(140)", "attribute"),
         ("time_format", "VARCHAR(140)", "attribute"),
@@ -69,3 +72,9 @@ def test_samples_rescue_boolean_like_text():
 def test_samples_rescue_amount_stored_as_text():
     assert _infer(name="grand_amount", data_type="VARCHAR(32)",
                   sample_values=["1200.50", "88"]) == "amount"
+
+
+@pytest.mark.parametrize("data_type", ["TINYINT(4)", "BIGINT", "DECIMAL(21, 9)"])
+def test_numeric_datetime_guess_is_safe_in_physical_projection(data_type):
+    assert _safe_projection_semantic_type(data_type, "datetime") == "attribute"
+    assert _safe_projection_semantic_type("DATETIME(6)", "datetime") == "datetime"

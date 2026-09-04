@@ -406,6 +406,8 @@ def test_hive_translate_sql():
         ("bigint", None, "BIGINT"),
         ("boolean", "flag", "BOOLEAN"),
         ("varchar", "attribute", "VARCHAR(1024)"),  # 泛字符串落 VARCHAR（可作 Key）
+        ("LONGTEXT", "attribute", "VARCHAR(65533)"),
+        ("JSON", "attribute", "VARCHAR(65533)"),
     ],
 )
 def test_doris_type_mapping(data_type, semantic_type, expected):

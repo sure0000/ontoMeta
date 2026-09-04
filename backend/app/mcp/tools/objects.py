@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from app.services.logic_query import OntologyQueryService
@@ -25,6 +26,45 @@ _NOISE_KEYS = ("role_signals",)
 _TABLE_ROLES = ["business_object", "data_table", "bridge", "technical"]
 
 
+def _mermaid_label(value: Any) -> str:
+    """Mermaid label escaping; relation/object names are data, not syntax."""
+    text = str(value or "未命名").replace("\n", " ").replace("\r", " ")
+    return text.replace('"', "'")[:120]
+
+
+def _relations_mermaid(relations: list[dict[str, Any]], *, truncated: bool) -> str:
+    def node_id(object_id: str) -> str:
+        digest = hashlib.sha1(object_id.encode("utf-8")).hexdigest()[:10]
+        return f"n{digest}"
+
+    nodes: dict[str, str] = {}
+    lines = ["```mermaid", "flowchart LR"]
+    for index, relation in enumerate(relations):
+        source_id = str(relation.get("source_object_type_id") or f"source_{index}")
+        target_id = str(relation.get("target_object_type_id") or f"target_{index}")
+        source_node = node_id(source_id)
+        target_node = node_id(target_id)
+        nodes.setdefault(
+            source_node, _mermaid_label(relation.get("source_object_name") or source_id)
+        )
+        nodes.setdefault(
+            target_node, _mermaid_label(relation.get("target_object_name") or target_id)
+        )
+        edge_label = _mermaid_label(
+            relation.get("display_name")
+            or relation.get("structure_type")
+            or relation.get("name")
+            or "关系"
+        )
+        lines.append(f'  {source_node}["{nodes[source_node]}"] -->|"{edge_label}"| {target_node}["{nodes[target_node]}"]')
+    if not relations:
+        lines.append("  %% 当前筛选没有关系")
+    if truncated:
+        lines.append("  %% 关系结果已截断；请分页查询完整关系")
+    lines.extend(["```"])
+    return "\n".join(lines)
+
+
 def _lean(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in _NOISE_KEYS}
 
@@ -35,7 +75,7 @@ class QueryObjectsTool:
 
     name = "query_objects"
     description = (
-        "查询本体中的业务对象（表/实体）。可按角色、关键词过滤。"
+        "查询本体中的业务对象（表/实体）。可按角色、关键词过滤，或用 group_by=role/segment 只取分布统计。"
         "关键词同时匹配对象标识名、显示名、描述和物理源表名（source_ref）。"
     )
     input_schema = {
@@ -54,6 +94,11 @@ class QueryObjectsTool:
                 "description": "对象角色过滤（对应 table_role）",
                 "enum": _TABLE_ROLES,
             },
+            "group_by": {
+                "type": "string",
+                "description": "只返回分布统计，不返回对象明细",
+                "enum": ["role", "segment"],
+            },
             "search": {
                 "type": "string",
                 "description": "关键词；匹配对象名/显示名/描述/物理源表名",
@@ -65,6 +110,11 @@ class QueryObjectsTool:
             "published_only": {
                 "type": "boolean",
                 "description": "只看已发布的本体与对象",
+                "default": False,
+            },
+            "include_mermaid": {
+                "type": "boolean",
+                "description": "附加当前结果页的 Mermaid 关系图文本",
                 "default": False,
             },
             "limit": {
@@ -82,12 +132,49 @@ class QueryObjectsTool:
         ontology_id = (arguments.get("ontology_id") or "").strip() or None
         domain_context_id = (arguments.get("domain_context_id") or "").strip() or None
         role = (arguments.get("role") or "").strip() or None
+        group_by = (arguments.get("group_by") or "").strip() or None
         limit = as_int(arguments.get("limit"), 50, low=1, high=500)
         offset = as_int(arguments.get("offset"), 0, low=0, high=1_000_000)
         needs_review = arguments.get("needs_review")
 
         try:
             with session() as db:
+                if group_by:
+                    distribution = _query.group_object_types(
+                        db,
+                        group_by=group_by,
+                        ontology_id=ontology_id,
+                        domain_context_id=domain_context_id,
+                        published_only=bool(arguments.get("published_only", False)),
+                        q=(arguments.get("search") or "").strip() or None,
+                        role_in=[role] if role else None,
+                        needs_review=(
+                            None if needs_review is None else bool(needs_review)
+                        ),
+                    )
+                    total = sum(
+                        distribution.get("by_role", {}).values()
+                    ) or sum(
+                        item.get("count", 0)
+                        for item in distribution.get("by_segment", [])
+                    )
+                    return ToolResult(
+                        success=True,
+                        data=distribution,
+                        metadata={
+                            "group_by": group_by,
+                            "total": total,
+                            "ontology_id": ontology_id,
+                            "filters": {
+                                "role": role,
+                                "search": arguments.get("search"),
+                                "needs_review": needs_review,
+                                "published_only": bool(
+                                    arguments.get("published_only", False)
+                                ),
+                            },
+                        },
+                    )
                 page = _query.list_object_types(
                     db,
                     ontology_id=ontology_id,
@@ -112,6 +199,7 @@ class QueryObjectsTool:
                         "ontology_id": ontology_id,
                         "filters": {
                             "role": role,
+                            "group_by": group_by,
                             "search": arguments.get("search"),
                             "needs_review": needs_review,
                             "published_only": bool(
@@ -245,9 +333,15 @@ class QueryRelationsTool:
                     offset=offset,
                 )
                 relations = [dump(item) for item in page.items]
+                data: dict[str, Any] = {"relations": relations}
+                if arguments.get("include_mermaid"):
+                    data["mermaid"] = _relations_mermaid(
+                        relations,
+                        truncated=page.total > offset + len(relations),
+                    )
                 return ToolResult(
                     success=True,
-                    data={"relations": relations},
+                    data=data,
                     metadata={
                         "count": len(relations),
                         "total": page.total,

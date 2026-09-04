@@ -1,15 +1,10 @@
 {
   "mcpServers": {
     "ontometa": {
-      "command": "/Users/me/Documents/ontoMeta/backend/.venv/bin/python",
-      "args": [
-        "-m",
-        "app.mcp.server"
-      ],
-      "cwd": "/Users/me/Documents/ontoMeta/backend",
-      "env": {
-        "PYTHONPATH": "/Users/me/Documents/ontoMeta/backend",
-        "ONTOMETA_MCP_TOKEN": "<你的 Principal Token 或 ONTOMETA_ADMIN_TOKEN；不填=匿名只读 reader>"
+      "type": "http",
+      "url": "https://<你的后端地址>/mcp/",
+      "headers": {
+        "Authorization": "Bearer <你的 Principal Token>"
       }
     }
   }
