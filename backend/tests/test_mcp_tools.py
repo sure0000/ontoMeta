@@ -41,6 +41,7 @@ EXPECTED_TOOLS = {
     "validate_sql",
     "list_tasks",
     "get_task_status",
+    "wait_task_status",
     "propose_sync",
     "propose_transform",
     "propose_materialize",
@@ -50,6 +51,8 @@ EXPECTED_TOOLS = {
     "confirm_task",
     "execute_task",
     "get_ontology_overview",
+    "start_task_flow",
+    "advance_task_flow",
 }
 
 

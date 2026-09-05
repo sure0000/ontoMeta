@@ -31,6 +31,7 @@ import {
   MonitoringPage,
   ServicePage,
   SkillsPage,
+  TaskFormPage,
   TokensPage,
   ToolsPage,
 } from "./pages/agent-access";
@@ -83,6 +84,7 @@ export default function App() {
         <Route path="/agent-access/tools" element={<ToolsPage />} />
         <Route path="/agent-access/monitoring" element={<MonitoringPage />} />
         <Route path="/agent-access/skills" element={<SkillsPage />} />
+        <Route path="/agent-access/task-form/:formId" element={<TaskFormPage />} />
         <Route path="/agent-access/tokens" element={<TokensPage />} />
         <Route path="/graph-test" element={<GraphTestPage />} />
         <Route path="/settings" element={<SettingsPage />} />

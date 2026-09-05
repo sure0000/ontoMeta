@@ -11,6 +11,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useMemo, useState } from "react";
 import { ScanGraph } from "./ScanGraph";
 import type { LineagePackageDetail, LineagePackageGroup } from "../../types";
+import { LineageJoinKey, LineageTableName } from "./LineageTableName";
 
 /**
  * 一个代码包的扫描结果。
@@ -37,6 +38,8 @@ interface Props {
   isolatedTotal: number;
   /** 所有代码包都没提到的孤岛表——只能手工连的那批。 */
   uncovered: string[];
+  /** DataHub 家底仍在读取时，避免把空结果误显示成“没有孤岛”。 */
+  inventoryLoading: boolean;
   /** 把一张表送进画布：两条路径在这里交接。 */
   onSendToCanvas: (table: string) => void;
 }
@@ -71,6 +74,7 @@ export function ScanReport({
   isolated,
   isolatedTotal,
   uncovered,
+  inventoryLoading,
   onSendToCanvas,
 }: Props) {
   const [view, setView] = useState<DetailView>("list");
@@ -132,7 +136,7 @@ export function ScanReport({
       key: "target",
       render: (target: string, row) => (
         <div className="lin-cell-table">
-          <span className="lin-cell-name">{target}</span>
+          <LineageTableName className="lin-cell-name" name={target} />
           {row.isolated && (
             <Tag color="error" variant="filled">
               孤岛
@@ -293,11 +297,14 @@ export function ScanReport({
                     key={edge.id}
                     className={`lin-edge-line${edge.state !== "ok" ? " lin-edge-line--off" : ""}`}
                   >
-                    <span className="lin-node">{edge.source_table}</span>
+                    <LineageTableName className="lin-node" name={edge.source_table} />
                     <ArrowRightOutlined className="lin-flow-arrow" />
-                    <span className="lin-node lin-node--target">{edge.target_table}</span>
+                    <LineageTableName
+                      className="lin-node lin-node--target"
+                      name={edge.target_table}
+                    />
                     {edge.join_key ? (
-                      <span className="lin-key">{edge.join_key}</span>
+                      <LineageJoinKey value={edge.join_key} />
                     ) : (
                       <Tag variant="filled">无 JOIN 条件 · 仅表级</Tag>
                     )}
@@ -332,7 +339,11 @@ export function ScanReport({
             </span>
           </div>
           <div className="lin-uncovered-list">
-            {uncovered.length === 0 && <span className="lin-muted">没有了</span>}
+            {uncovered.length === 0 && (
+              <span className="lin-muted">
+                {inventoryLoading ? "正在同步 DataHub 孤岛清单…" : "没有了"}
+              </span>
+            )}
             {uncovered.slice(0, 12).map((table) => (
               <button
                 key={table}
@@ -340,7 +351,7 @@ export function ScanReport({
                 className="lin-uncovered-item"
                 onClick={() => onSendToCanvas(table)}
               >
-                <span>{table}</span>
+                <LineageTableName name={table} />
                 <NodeIndexOutlined />
                 <em>放到画布</em>
               </button>

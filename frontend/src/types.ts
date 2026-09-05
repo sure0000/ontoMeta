@@ -2274,6 +2274,10 @@ export interface GovernanceArtifact {
   confirmed_by?: string | null;
   confirmed_at?: string | null;
   executed_at?: string | null;
+  /** 允许外部 Agent（MCP）代为确认并执行这一条。与角色正交，须逐条由人给。 */
+  agent_execution_approved?: boolean;
+  agent_execution_approved_by?: string | null;
+  agent_execution_approved_at?: string | null;
   origin: string;
   created_at: string;
   updated_at: string;
@@ -2472,6 +2476,14 @@ export interface McpServiceInfo {
 export interface McpSettings {
   mcp_rate_limit_per_minute: number;
   mcp_execute_sql_rate_limit_per_minute: number;
+  /** 与角色正交的第二道闸：开启后 MCP 的 confirm/execute 只认逐条人工放行的任务。 */
+  mcp_require_execution_approval: boolean;
+  /** 允许本机 stdio MCP 宿主用交互式人类确认 + 任务 digest 放行单次执行。 */
+  mcp_allow_stdio_interactive_approval: boolean;
+  /** 上次把 Skill 装到哪个目录（后端主机上的绝对路径），只作为下次的默认值。 */
+  mcp_skill_install_dir: string;
+  /** 控制台对外地址：Agent 发交互表单链接时拼在前面。 */
+  mcp_console_base_url: string;
 }
 export interface McpStats {
   window_minutes: number | null;
@@ -2530,7 +2542,10 @@ export interface McpAuditPage {
 
 export interface McpSkill {
   name: string;
+  /** 合成后**下发给 Agent** 的正文（出口契约已注入）。只读展示用。 */
   body: string;
+  /** 编辑对象：覆写原文或内置原文，仍带 `{{OUTPUT_CONTRACT}}` 占位符。 */
+  source_body: string;
   builtin_body: string;
   frontmatter: Record<string, unknown>;
   builtin_frontmatter: Record<string, unknown>;
@@ -2541,6 +2556,98 @@ export interface McpSkill {
   override: boolean;
   mentioned_tools: string[];
   tool_count: number;
+  /**
+   * 出口契约从哪来：`master` 这份就是总控 / `inherited` 用占位符引用总控（跟随更新）/
+   * `inline` 正文里固化了一份（不再跟随）/ `appended` 正文没有契约、下发时补在末尾。
+   */
+  contract_source: "master" | "inherited" | "inline" | "appended" | string;
+  is_output_contract: boolean;
+}
+
+export interface McpFlowFormOption {
+  label: string;
+  value: string;
+  detail?: string;
+  disabled?: boolean;
+  recommended?: boolean;
+}
+
+export interface McpFlowFormField {
+  key: string;
+  label: string;
+  type: string;
+  multi: boolean;
+  free_text: boolean;
+  required: boolean;
+  /** 当前取值（含系统预填）。页面直接采用它，不另设默认值。 */
+  value: unknown;
+  value_label: string;
+  /** 系统按默认值或唯一候选替用户填的，界面要标出来重点核对。 */
+  auto: boolean;
+  options: McpFlowFormOption[];
+  options_total: number;
+  options_truncated: boolean;
+  help?: string;
+  placeholder?: string;
+  note?: string;
+  /** 这一格的值对不上候选；错值留在表单里，不被系统推荐值顶替。 */
+  error?: string;
+}
+
+export interface McpFlowFormReview {
+  name: string;
+  /** 这次真会执行的方案（Drafter 派生的 Spec 摘要），不是把填的值再念一遍。 */
+  plan: { key: string; label: string; value: string }[];
+  notes: string[];
+  blocking_count: number;
+  blocking_issues: { code?: string; message?: string }[];
+  plan_digest: string;
+  /** 上一次确认对应的是改动前的方案，已作废。 */
+  stale_confirmation?: boolean;
+}
+
+export interface McpFlowFormState {
+  id: string;
+  kind: string;
+  /** decide=还定不下来的参数；review=执行审查（唯一一次人工确认）。 */
+  stage?: "decide" | "review" | string;
+  goal: string;
+  status: "pending" | "submitted" | "expired" | "stale" | "blocked" | string;
+  created_at: string | null;
+  submitted_at: string | null;
+  expires_at: string | null;
+  reason?: string;
+  review?: McpFlowFormReview;
+  form: {
+    title: string;
+    submit_key: string | null;
+    /** 执行审查里要原样回传的方案指纹。 */
+    submit_value?: string;
+    fields: McpFlowFormField[];
+    missing?: string[];
+    note?: string;
+  } | null;
+  /** 提交结果：false = 还没填齐 / 还没确认，表单原地继续。 */
+  accepted?: boolean;
+}
+
+export interface McpSkillInstallItem {
+  name: string;
+  path: string;
+  action: "created" | "updated" | "unchanged" | string;
+  bytes: number;
+  enabled: boolean;
+}
+
+export interface McpSkillInstallResult {
+  target_dir: string;
+  exists: boolean;
+  items: McpSkillInstallItem[];
+  created: number;
+  updated: number;
+  unchanged: number;
+  dry_run: boolean;
+  written?: string[];
 }
 
 export interface McpSkillVersion {

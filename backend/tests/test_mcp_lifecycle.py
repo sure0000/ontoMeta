@@ -15,7 +15,9 @@ from app.agents.drafters.base import Drafter
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
 from app.mcp import server as mcp_server
-from app.mcp.tools import AuthContext
+from app.mcp.tools import AuthContext, TOOL_REGISTRY
+from app.mcp.tools import tasks as task_tools
+from app.mcp.tools._common import artifact_approval_digest
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
 from app.models.agent import ArtifactStatus, GovernanceArtifact
 from app.services.agent_pipeline import AgentPipelineService
@@ -101,17 +103,29 @@ def reset_mcp_auth():
     mcp_server._reset_session_auth()
 
 
-def _ctx(role: str | None) -> AuthContext:
+def _ctx(role: str | None, principal_id: str | None = None) -> AuthContext:
     return AuthContext(
-        client_type="mcp_local", role=role, principal_name=f"mcp-{role}"
+        client_type="mcp_local",
+        role=role,
+        principal_id=principal_id,
+        principal_name=f"mcp-{role}",
     )
 
 
 @pytest.fixture
 def call_via_server(monkeypatch):
-    def _call(name: str, arguments: dict, role: str | None):
+    def _call(
+        name: str,
+        arguments: dict,
+        role: str | None,
+        principal_id: str | None = None,
+    ):
         mcp_server._reset_session_auth()
-        monkeypatch.setattr(mcp_server, "resolve_auth_context", lambda: _ctx(role))
+        monkeypatch.setattr(
+            mcp_server,
+            "resolve_auth_context",
+            lambda: _ctx(role, principal_id=principal_id),
+        )
         params = types.CallToolRequestParams(name=name, arguments=arguments)
         return asyncio.run(mcp_server.handle_call_tool(None, params))
 
@@ -195,6 +209,7 @@ def test_confirm_and_execute_are_publisher_only(call_via_server, monkeypatch):
             status=ArtifactStatus.VALIDATED.value,
             validation_report_json='{"blocking_count": 0}',
             spec_json="{}",
+            agent_execution_approved=True,
         )
         db.add(artifact)
         db.commit()
@@ -229,12 +244,14 @@ def test_lifecycle_state_gates_are_enforced(call_via_server, monkeypatch):
             name=f"mcp-gate-draft-{uuid4().hex[:8]}",
             status=ArtifactStatus.DRAFTED.value,
             spec_json="{}",
+            agent_execution_approved=True,
         )
         confirmed = GovernanceArtifact(
             kind="metric",
             name=f"mcp-gate-confirmed-{uuid4().hex[:8]}",
             status=ArtifactStatus.CONFIRMED.value,
             spec_json="{}",
+            agent_execution_approved=True,
         )
         db.add_all([drafted, confirmed])
         db.commit()
@@ -266,6 +283,7 @@ def test_execute_task_returns_immediately_after_dispatch(call_via_server, monkey
             name=f"mcp-async-{uuid4().hex[:8]}",
             status=ArtifactStatus.CONFIRMED.value,
             spec_json="{}",
+            agent_execution_approved=True,
         )
         db.add(artifact)
         db.commit()
@@ -283,6 +301,87 @@ def test_execute_task_returns_immediately_after_dispatch(call_via_server, monkey
     assert result.is_error is False
     assert seen == [task_id]
     assert _body(result)["data"]["status"] == ArtifactStatus.EXECUTING.value
+
+
+def test_wait_task_status_returns_terminal_without_sleep(call_via_server):
+    with SessionLocal() as db:
+        artifact = GovernanceArtifact(
+            kind="metric",
+            name=f"mcp-wait-done-{uuid4().hex[:8]}",
+            status=ArtifactStatus.SUCCEEDED.value,
+            spec_json="{}",
+        )
+        db.add(artifact)
+        db.commit()
+        task_id = artifact.id
+
+    result = call_via_server("wait_task_status", {"task_id": task_id}, "reader")
+    body = _body(result)
+    assert result.is_error is False
+    assert body["data"]["status"] == ArtifactStatus.SUCCEEDED.value
+    assert body["metadata"]["timed_out"] is False
+    assert body["metadata"]["waited_seconds"] == 0
+    assert body["data"]["interactive_approval"]["digest"]
+
+
+def test_wait_task_status_long_polls_until_state_changes(monkeypatch):
+    states = iter(["executing", "executing", "succeeded"])
+    clock = [0.0]
+
+    def fake_read(_task_id, *, include_spec=False):
+        state = next(states)
+        return task_tools.ToolResult(
+            success=True,
+            data={"status": state, "terminal": state == "succeeded"},
+            metadata={"state": state},
+        )
+
+    async def fake_sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(task_tools, "_read_task_status", fake_read)
+    monkeypatch.setattr(task_tools.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(task_tools.time, "monotonic", lambda: clock[0])
+
+    result = asyncio.run(
+        TOOL_REGISTRY["wait_task_status"].execute(
+            {"task_id": "task", "timeout_seconds": 5, "poll_interval_seconds": 1},
+            AuthContext(client_type="mcp_local", role="reader"),
+        )
+    )
+    assert result.success is True
+    assert result.metadata["state"] == "succeeded"
+    assert result.metadata["timed_out"] is False
+    assert clock[0] == 2
+
+
+def test_wait_task_status_reports_timeout_without_claiming_success(monkeypatch):
+    clock = [0.0]
+
+    def fake_read(_task_id, *, include_spec=False):
+        return task_tools.ToolResult(
+            success=True,
+            data={"status": "executing", "terminal": False},
+            metadata={"state": "executing"},
+        )
+
+    async def fake_sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(task_tools, "_read_task_status", fake_read)
+    monkeypatch.setattr(task_tools.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(task_tools.time, "monotonic", lambda: clock[0])
+
+    result = asyncio.run(
+        TOOL_REGISTRY["wait_task_status"].execute(
+            {"task_id": "task", "timeout_seconds": 2, "poll_interval_seconds": 1},
+            AuthContext(client_type="mcp_local", role="reader"),
+        )
+    )
+    assert result.success is True
+    assert result.metadata["timed_out"] is True
+    assert result.metadata["state"] == "executing"
+    assert "不能判定执行成功" in result.metadata["status_note"]
 
 
 def test_claim_execution_is_atomic_and_idempotent():
@@ -312,6 +411,7 @@ def test_succeeded_execute_is_idempotent(call_via_server, monkeypatch):
             name=f"mcp-done-{uuid4().hex[:8]}",
             status=ArtifactStatus.SUCCEEDED.value,
             spec_json="{}",
+            agent_execution_approved=True,
         )
         db.add(artifact)
         db.commit()

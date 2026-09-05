@@ -68,6 +68,24 @@ class GovernanceArtifact(Base, ProvenanceMixin):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # 代执行授权：**与角色正交的第二道闸**，只挡 MCP（外部 agent）那条路。
+    #
+    # 角色是「这个身份能不能做这类事」，一发就长期有效；而「这一条任务现在可以让
+    # agent 自己确认并推到远端」是另一个决定，得逐条给。此前只有角色一道闸：一个
+    # publisher 令牌加一句话就能把任务推到远端 Airflow 真跑起来。
+    #
+    # 只能从 REST（人在界面上点）写，任何 MCP 工具都不得设置它——否则 agent 就能
+    # 自己给自己发许可，闸门等于不存在。
+    agent_execution_approved: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    agent_execution_approved_by: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    agent_execution_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
     # 溯源（比照 ObjectType / MaterializationContract）
     origin: Mapped[str] = mapped_column(
         String(30), default="machine", server_default="machine"

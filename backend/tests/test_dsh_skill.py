@@ -19,22 +19,33 @@ import pytest
 import yaml
 
 from app.mcp.tools import TOOL_REGISTRY
+from app.mcp.skills import OUTPUT_CONTRACT_HEADING, builtin_composed
 
 SKILL_ROOT = Path(__file__).parents[1] / "app/mcp/skills"
 
 ROUTER = "ontometa-mcp"
+#: 出口契约总控：它不是"某一类问题的指引"，而是所有回答共同的格式与提问规矩。
+CONTRACT = "ontometa-output"
 SPECIALIZED = (
+    "ontometa-flow",
     "ontometa-discovery",
     "ontometa-query",
     "ontometa-task-plan",
     "ontometa-task-execute",
     "ontometa-admin",
 )
-ALL_SKILLS = (ROUTER, *SPECIALIZED)
+ALL_SKILLS = (ROUTER, CONTRACT, *SPECIALIZED)
 
 # 每份 skill 自己必须带的指引。放这里而不是「在所有 skill 的并集里找一遍」——
 # 并集能过，说明标记只是存在于某处，不代表用得上它的那份 skill 里有。
 REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
+    "ontometa-flow": (
+        "start_task_flow", "advance_task_flow",
+        "answers",           # 无服务端状态：答案必须累计带回
+        "__confirm_",        # 六环逐环确认
+        "blocked",           # 缺前置条件是事实，不是可以绕过的提示
+        "search",            # 候选几百条时怎么收窄
+    ),
     "ontometa-discovery": (
         "query_ontology", "get_ontology_overview", "query_objects", "query_object_detail",
         "query_relations", "search_logics", "get_logic", "get_lineage", "get_landing",
@@ -58,10 +69,13 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "blocking_count",
     ),
     "ontometa-task-execute": (
-        "get_task_status", "confirm_task", "execute_task", "list_tasks", "get_ops_record",
+        "get_task_status", "wait_task_status", "confirm_task", "execute_task", "list_tasks", "get_ops_record",
         "run_url",
         "observed_at",       # 读取时刻 ≠ 记录自身的权威时点
         "failed_without_reason",
+        "ask_user_question",
+        "host_confirmation",
+        "interactive_approval.digest",
     ),
     "ontometa-admin": (
         "server_info", "list_audit_logs", "get_mcp_stats",
@@ -71,10 +85,17 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
 
 
 def _read(name: str) -> tuple[dict, str]:
+    """frontmatter + **下发正文**。
+
+    正文取合成后的那一份（``{{OUTPUT_CONTRACT}}`` 已替换成总控的契约）——dsh 装到
+    skills 目录里、``get_playbook`` 回传的都是它；拿仓库原文去断言，等于在检查一份
+    没有任何 Agent 会读到的文本。
+    """
     raw = (SKILL_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
     assert raw.startswith("---\n"), f"{name}: 缺少 frontmatter"
-    _, frontmatter, body = raw.split("---", 2)
-    return yaml.safe_load(frontmatter), body
+    _, frontmatter, _body = raw.split("---", 2)
+    composed = builtin_composed(name)
+    return yaml.safe_load(frontmatter), composed.split("---", 2)[2]
 
 
 def test_all_skills_present_and_well_formed():
@@ -90,6 +111,9 @@ def test_all_skills_present_and_well_formed():
         assert "ontoMeta" in metadata["description"]
         assert metadata.get("whenToUse"), f"{name}: 缺 whenToUse，模型无从判断该不该选它"
         assert "结论" in body, f"{name}: 没有声明输出契约"
+        contract = body.split(OUTPUT_CONTRACT_HEADING, 1)[1]
+        for marker in ("## 结论", "## 结果", "## 依据", "## 限制", "## 下一步", "状态", "最多 10 行"):
+            assert marker in contract, f"{name}: 输出契约缺少 {marker}"
 
 
 @pytest.mark.parametrize("name", SPECIALIZED)
@@ -114,8 +138,22 @@ def test_skill_carries_its_own_guidance(name, markers):
 
 def test_router_points_at_every_specialized_skill():
     _metadata, body = _read(ROUTER)
-    missing = [name for name in SPECIALIZED if name not in body]
+    missing = [name for name in (*SPECIALIZED, CONTRACT) if name not in body]
     assert not missing, f"总入口没有路由到：{missing}"
+
+
+def test_every_skill_inherits_the_single_output_contract():
+    """契约只有一份：仓库原文里除了总控都不许自带契约，下发正文里又必须人人都有。"""
+    for name in ALL_SKILLS:
+        raw = (SKILL_ROOT / name / "SKILL.md").read_text(encoding="utf-8")
+        if name == CONTRACT:
+            assert OUTPUT_CONTRACT_HEADING in raw
+            continue
+        assert "{{OUTPUT_CONTRACT}}" in raw, f"{name}: 没有引用出口契约总控"
+        assert OUTPUT_CONTRACT_HEADING not in raw, f"{name}: 自己抄了一份契约，不会跟随总控"
+        composed = builtin_composed(name)
+        assert composed.count(OUTPUT_CONTRACT_HEADING) == 1
+        assert "{{OUTPUT_CONTRACT}}" not in composed
 
 
 def test_every_registered_tool_has_skill_guidance():
@@ -125,6 +163,7 @@ def test_every_registered_tool_has_skill_guidance():
     这条失败时的修法是去补 skill，不是把工具从这里豁免掉。
     """
     bodies = {name: _read(name)[1] for name in ALL_SKILLS}
+    # 总控只讲出口，不承担工具指引——工具覆盖由其它 skill 负责。
     uncovered = {
         tool: sorted(bodies)
         for tool in sorted(TOOL_REGISTRY)

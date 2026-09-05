@@ -1,15 +1,17 @@
 import {
   ArrowRightOutlined,
+  CloudUploadOutlined,
   LeftOutlined,
   NodeIndexOutlined,
   PlusOutlined,
   RightOutlined,
 } from "@ant-design/icons";
 import { Alert, Button, Input, Popconfirm, Segmented, Select, Tag, Tooltip, message } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { LineageCanvas } from "../components/lineage/LineageCanvas";
 import type { CanvasEdge, CanvasNode } from "../components/lineage/LineageCanvas";
+import { LineageTableName, readableDatabaseList } from "../components/lineage/LineageTableName";
 import { PackageRail } from "../components/lineage/PackageRail";
 import { ScanReport } from "../components/lineage/ScanReport";
 import { PageContainer } from "../components/PageContainer";
@@ -47,7 +49,16 @@ type RailFilter = "all" | "isolated";
 
 const CANVAS_COL_W = 320;
 const CANVAS_ROW_H = 250;
+const RAIL_ROW_H = 64;
+const RAIL_OVERSCAN = 6;
 const DIALECTS = ["mysql", "postgres", "hive", "doris", "starrocks"];
+
+function canvasEdgeSignature(edge: CanvasEdge) {
+  return `${edge.id}|${edge.keys
+    .map((key) => key.id)
+    .sort()
+    .join("|")}`;
+}
 
 export function LineageSupplementPage() {
   const [domainId, setDomainId] = useUrlState<string>("domain", "");
@@ -55,6 +66,8 @@ export function LineageSupplementPage() {
   const [railOpen, setRailOpen] = useState(true);
   const [railFilter, setRailFilter] = useState<RailFilter>("isolated");
   const [keyword, setKeyword] = useState("");
+  const [railScrollTop, setRailScrollTop] = useState(0);
+  const [railViewportHeight, setRailViewportHeight] = useState(0);
   const [dialect, setDialect] = useState("mysql");
 
   const [packages, setPackages] = useState<LineagePackageRow[]>([]);
@@ -69,6 +82,13 @@ export function LineageSupplementPage() {
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
   const [edges, setEdges] = useState<CanvasEdge[]>([]);
   const [columns, setColumns] = useState<Record<string, LineageColumn[]>>({});
+  const [appliedCanvasEdges, setAppliedCanvasEdges] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
+  const [optimisticResolvedTables, setOptimisticResolvedTables] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
+  const railListRef = useRef<HTMLUListElement>(null);
 
   const domains = useApi<DomainContext[]>((signal) => api.listDomains(signal), []);
 
@@ -82,6 +102,14 @@ export function LineageSupplementPage() {
     setDomainId(best.id);
   }, [domainId, domains.data, setDomainId]);
 
+  useEffect(() => {
+    setNodes([]);
+    setEdges([]);
+    setColumns({});
+    setAppliedCanvasEdges(new Set());
+    setOptimisticResolvedTables(new Set());
+  }, [domainId]);
+
   const overview = useApi<LineageOverview | null>(
     async (signal) => (domainId ? api.lineageOverview(domainId, false, signal) : null),
     [domainId],
@@ -91,16 +119,24 @@ export function LineageSupplementPage() {
     [domainId],
   );
 
+  const inventoryLoading = Boolean(
+    domainId && (overview.loading || tables.loading || overview.data?.domain_id !== domainId),
+  );
+  const inventoryReady = Boolean(domainId && !inventoryLoading && overview.data && tables.data);
+  const selectedDomainKnown = Boolean(
+    domainId && domains.data?.some((domain) => domain.id === domainId),
+  );
+
   const refreshPackages = useCallback(
-    async (select?: string) => {
+    async (select?: string, withInventory = true) => {
       if (!domainId) return;
-      const rows = await api.listLineagePackages(domainId);
+      const rows = await api.listLineagePackages(domainId, "scan", withInventory);
       setPackages(rows);
       const next = select ?? (rows.length > 0 ? rows[0].id : null);
       setPkgId(next);
       const [nextDetail, nextUncovered] = await Promise.all([
-        next ? api.getLineagePackage(next) : Promise.resolve(null),
-        api.lineageUncoveredIsolated(domainId),
+        next ? api.getLineagePackage(next, withInventory) : Promise.resolve(null),
+        withInventory ? api.lineageUncoveredIsolated(domainId) : Promise.resolve([]),
       ]);
       setDetail(nextDetail);
       setUncovered(nextUncovered);
@@ -110,19 +146,46 @@ export function LineageSupplementPage() {
 
   useEffect(() => {
     if (!domainId) return;
-    void refreshPackages().catch((err: Error) => message.error(err.message));
+    // Local package history is available immediately; inventory-dependent
+    // badges are refreshed by the effect below once DataHub finishes.
+    void refreshPackages(undefined, false).catch((err: Error) => message.error(err.message));
   }, [domainId, refreshPackages]);
 
-  const tableRows = useMemo(() => tables.data ?? [], [tables.data]);
+  useEffect(() => {
+    if (!inventoryReady) return;
+    void refreshPackages(pkgId ?? undefined, true).catch((err: Error) =>
+      message.error(err.message),
+    );
+  }, [inventoryReady, pkgId, refreshPackages]);
+
+  const sourceTableRows = useMemo(() => tables.data ?? [], [tables.data]);
+  const optimisticResolvedCount = useMemo(() => {
+    if (optimisticResolvedTables.size === 0) return 0;
+    const isolatedFromApi = new Set(
+      sourceTableRows.filter((row) => row.isolated).map((row) => row.name),
+    );
+    return [...optimisticResolvedTables].filter((name) => isolatedFromApi.has(name)).length;
+  }, [optimisticResolvedTables, sourceTableRows]);
+  const tableRows = useMemo(
+    () =>
+      sourceTableRows.map((row) =>
+        optimisticResolvedTables.has(row.name)
+          ? { ...row, isolated: false, upstream: Math.max(1, row.upstream) }
+          : row,
+      ),
+    [optimisticResolvedTables, sourceTableRows],
+  );
   const tableByName = useMemo(() => new Map(tableRows.map((row) => [row.name, row])), [tableRows]);
   const isolatedNames = useMemo(
     () => new Set(tableRows.filter((row) => row.isolated).map((row) => row.name)),
     [tableRows],
   );
+  const isIsolated = useCallback((table: string) => isolatedNames.has(table), [isolatedNames]);
+  const columnsOf = useCallback((table: string) => columns[table] ?? [], [columns]);
 
-  const isolatedTotal = overview.data?.isolated ?? 0;
+  const isolatedTotal = Math.max(0, (overview.data?.isolated ?? 0) - optimisticResolvedCount);
   const total = overview.data?.total ?? 0;
-  const withLineage = overview.data?.with_lineage ?? 0;
+  const withLineage = Math.min(total, (overview.data?.with_lineage ?? 0) + optimisticResolvedCount);
   const coveragePct = total > 0 ? (withLineage / total) * 100 : 0;
 
   /* ---------- 待写入 ---------- */
@@ -145,17 +208,18 @@ export function LineageSupplementPage() {
   }, [detail, selected, uploading]);
 
   const canvasPending = useMemo(() => {
-    const writable = edges.filter((edge) => edge.keys.length > 0);
+    const pendingEdges = edges.filter((edge) => !appliedCanvasEdges.has(canvasEdgeSignature(edge)));
+    const writable = pendingEdges.filter((edge) => edge.keys.length > 0);
     const resolved = new Set(
       writable.map((edge) => edge.to).filter((table) => isolatedNames.has(table)),
     );
     return {
       edges: writable.length,
-      blocked: edges.length - writable.length,
+      blocked: pendingEdges.length - writable.length,
       skipped: 0,
       resolved: resolved.size,
     };
-  }, [edges, isolatedNames]);
+  }, [appliedCanvasEdges, edges, isolatedNames]);
 
   const pending = mode === "scan" ? scanPending : canvasPending;
   const frozen = mode === "scan" ? pending.edges === 0 && (detail?.applied_edges ?? 0) > 0 : false;
@@ -239,7 +303,7 @@ export function LineageSupplementPage() {
     setPkgId(id);
     setUploading(false);
     try {
-      setDetail(await api.getLineagePackage(id));
+      setDetail(await api.getLineagePackage(id, inventoryReady));
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err));
     }
@@ -258,22 +322,43 @@ export function LineageSupplementPage() {
           message.warning(`有 ${receipt.failures.length} 条边写入失败，详见回执`);
         }
         await refreshPackages(detail.id);
+        await Promise.all([overview.reload(), tables.reload()]);
       } else {
-        const payload = edges
-          .filter((edge) => edge.keys.length > 0)
-          .map((edge) => ({
-            source_table: edge.from,
-            target_table: edge.to,
-            join_keys: edge.keys.map((key) => `${edge.from}.${key.src} = ${edge.to}.${key.dst}`),
-          }));
+        const pendingCanvasEdges = edges.filter(
+          (edge) => edge.keys.length > 0 && !appliedCanvasEdges.has(canvasEdgeSignature(edge)),
+        );
+        const payload = pendingCanvasEdges.map((edge) => ({
+          source_table: edge.from,
+          target_table: edge.to,
+          join_keys: edge.keys.map((key) => `${edge.from}.${key.src} = ${edge.to}.${key.dst}`),
+        }));
+        const attemptedKeyCount = pendingCanvasEdges.reduce(
+          (count, edge) => count + edge.keys.length,
+          0,
+        );
         const receipt = await api.applyManualLineage(domainId, payload);
         message.success(
           `已上报 ${receipt.applied} 条 · 失败 ${receipt.failed} 条 · ${receipt.resolved} 张表脱离孤岛`,
         );
-        setEdges([]);
+        if (
+          receipt.failed === 0 &&
+          receipt.applied === attemptedKeyCount &&
+          attemptedKeyCount > 0
+        ) {
+          setAppliedCanvasEdges(
+            (prev) => new Set([...prev, ...pendingCanvasEdges.map(canvasEdgeSignature)]),
+          );
+          const resolvedTables = new Set(
+            pendingCanvasEdges
+              .flatMap((edge) => [edge.from, edge.to])
+              .filter((table) => isolatedNames.has(table)),
+          );
+          if (resolvedTables.size > 0) {
+            setOptimisticResolvedTables((prev) => new Set([...prev, ...resolvedTables]));
+          }
+        }
         await refreshPackages(pkgId ?? undefined);
       }
-      await Promise.all([overview.reload(), tables.reload()]);
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -288,9 +373,46 @@ export function LineageSupplementPage() {
       (railFilter === "all" || row.isolated) &&
       row.name.toLowerCase().includes(keyword.trim().toLowerCase()),
   );
+  const railWindow = useMemo(() => {
+    const viewportHeight = railViewportHeight || 480;
+    const start = Math.min(
+      railRows.length,
+      Math.max(0, Math.floor(railScrollTop / RAIL_ROW_H) - RAIL_OVERSCAN),
+    );
+    const end = Math.min(
+      railRows.length,
+      Math.ceil((railScrollTop + viewportHeight) / RAIL_ROW_H) + RAIL_OVERSCAN,
+    );
+    return { start, end, rows: railRows.slice(start, end) };
+  }, [railRows, railScrollTop, railViewportHeight]);
+  const railRowCount = railRows.length;
   const onCanvas = new Set(nodes.map((node) => node.table));
 
-  if (domains.loading && !domains.data) return <PageSkeleton type="detail" full />;
+  useEffect(() => {
+    if (mode !== "canvas" || !railOpen) return;
+    const element = railListRef.current;
+    if (!element) return;
+    const updateHeight = () => setRailViewportHeight(element.clientHeight);
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [mode, railOpen]);
+
+  useEffect(() => {
+    if (mode !== "canvas") return;
+    setRailScrollTop(0);
+    railListRef.current?.scrollTo({ top: 0 });
+  }, [domainId, keyword, mode, railFilter, railRowCount]);
+
+  // A shared domain list can take a round trip to DataHub.  When a domain is
+  // already present in the URL, render the workbench immediately and let the
+  // selector/statistics fill in asynchronously; this also exposes local
+  // package history without waiting for the remote inventory.
+  if (!domainId && domains.loading && !domains.data) {
+    return <PageSkeleton type="detail" full />;
+  }
 
   return (
     <PageContainer full>
@@ -304,8 +426,8 @@ export function LineageSupplementPage() {
           <Select
             size="small"
             style={{ width: 168 }}
-            value={domainId || undefined}
-            placeholder="选择数据域"
+            value={selectedDomainKnown ? domainId : undefined}
+            placeholder={domains.loading ? "正在加载数据域…" : "选择数据域"}
             onChange={(value) => setDomainId(value)}
             options={(domains.data ?? []).map((domain) => ({
               value: domain.id,
@@ -317,8 +439,8 @@ export function LineageSupplementPage() {
             <div className="lin-stat lin-stat--iso">
               <span className="lin-stat-label">孤岛表</span>
               <span className="lin-stat-value">
-                <b>{isolatedTotal}</b>
-                {pending.resolved > 0 && (
+                <b>{inventoryLoading ? "…" : isolatedTotal}</b>
+                {!inventoryLoading && pending.resolved > 0 && (
                   <>
                     <ArrowRightOutlined className="lin-stat-arrow" />
                     <b className="lin-stat-next">{isolatedNext}</b>
@@ -331,9 +453,9 @@ export function LineageSupplementPage() {
             <div className="lin-stat">
               <span className="lin-stat-label">血缘覆盖率</span>
               <span className="lin-stat-value">
-                <b>{coveragePct.toFixed(1)}%</b>
+                <b>{inventoryLoading ? "—" : `${coveragePct.toFixed(1)}%`}</b>
               </span>
-              <div className="lin-meter">
+              <div className={`lin-meter${inventoryLoading ? " lin-meter--loading" : ""}`}>
                 <i className="lin-meter-have" style={{ width: `${coveragePct}%` }} />
               </div>
             </div>
@@ -341,30 +463,99 @@ export function LineageSupplementPage() {
             <div className="lin-stat">
               <span className="lin-stat-label">域内表</span>
               <span className="lin-stat-value">
-                <b>{total}</b>
+                <b>{inventoryLoading ? "…" : total}</b>
               </span>
             </div>
 
             <div className="lin-stat lin-stat--src">
               <span className="lin-stat-label">目标域</span>
-              <span className="lin-stat-src">
+              <span
+                className="lin-stat-src"
+                title={overview.data?.databases.join(" / ") || undefined}
+              >
                 {overview.data
-                  ? `${overview.data.domain_name} · ${overview.data.platform ?? "—"} · ${
-                      overview.data.databases.join(" / ") || "—"
-                    }`
+                  ? inventoryLoading
+                    ? `${overview.data.domain_name} · 正在同步 DataHub 血缘…`
+                    : `${overview.data.domain_name} · ${overview.data.platform ?? "—"} · ${readableDatabaseList(
+                        overview.data.databases,
+                      )}`
                   : "—"}
               </span>
             </div>
           </div>
 
-          <Segmented
-            value={mode}
-            onChange={(value) => setMode(value as Mode)}
-            options={[
-              { label: "代码包扫描", value: "scan" },
-              { label: "画布补录", value: "canvas" },
-            ]}
-          />
+          <div className="lin-topbar-tools">
+            <Segmented
+              size="small"
+              value={mode}
+              onChange={(value) => setMode(value as Mode)}
+              options={[
+                { label: "代码包扫描", value: "scan" },
+                { label: "画布补录", value: "canvas" },
+              ]}
+            />
+
+            <div className="lin-submit-tools">
+              <div className="lin-submit-summary" title={`将写入 DataHub ${pending.edges} 条边`}>
+                <span className="lin-submit-count">
+                  <b>{pending.edges}</b>
+                  <span>条待上报</span>
+                </span>
+                {pending.resolved > 0 && (
+                  <Tag color="success" variant="filled">
+                    {pending.resolved} 张脱离孤岛
+                  </Tag>
+                )}
+                {pending.blocked > 0 && (
+                  <Tag color="warning" variant="filled">
+                    {mode === "canvas" ? `待补键 ${pending.blocked}` : `待映射 ${pending.blocked}`}
+                  </Tag>
+                )}
+                {pending.skipped > 0 && <Tag variant="filled">跳过 {pending.skipped}</Tag>}
+              </div>
+
+              <div className="lin-submit-acts">
+                {mode === "scan" && (
+                  <Select
+                    size="small"
+                    value={dialect}
+                    className="lin-submit-dialect"
+                    onChange={setDialect}
+                    options={DIALECTS.map((item) => ({ value: item, label: `方言 ${item}` }))}
+                  />
+                )}
+                {frozen && (
+                  <Tooltip title={`已上报 ${detail?.applied_edges ?? 0} 条，重复上报不会重复建边`}>
+                    <span className="lin-done">已上报</span>
+                  </Tooltip>
+                )}
+                <Popconfirm
+                  placement="bottomRight"
+                  title={`确认向 DataHub 写入 ${pending.edges} 条血缘边？`}
+                  description={
+                    pending.resolved > 0
+                      ? `写入后 ${pending.resolved} 张表将脱离孤岛，需重跑本体起草才生效。`
+                      : "写入后可在 DataHub 血缘图中查看；重复上报幂等。"
+                  }
+                  okText="确认上报"
+                  cancelText="再看看"
+                  onConfirm={() => void apply()}
+                  disabled={pending.edges === 0}
+                >
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<CloudUploadOutlined />}
+                    loading={applying}
+                    disabled={pending.edges === 0}
+                    aria-label="上报到 DataHub"
+                  >
+                    上报
+                  </Button>
+                </Popconfirm>
+              </div>
+            </div>
+          </div>
         </header>
 
         {overview.error && (
@@ -418,8 +609,11 @@ export function LineageSupplementPage() {
                       value={railFilter}
                       onChange={(value) => setRailFilter(value as RailFilter)}
                       options={[
-                        { label: `仅孤岛 ${isolatedTotal}`, value: "isolated" },
-                        { label: `全部 ${total}`, value: "all" },
+                        {
+                          label: `仅孤岛 ${inventoryLoading ? "…" : isolatedTotal}`,
+                          value: "isolated",
+                        },
+                        { label: `全部 ${inventoryLoading ? "…" : total}`, value: "all" },
                       ]}
                     />
                     <Input.Search
@@ -431,13 +625,24 @@ export function LineageSupplementPage() {
                     />
                   </div>
 
-                  <ul className="lin-rail-list">
-                    {railRows.slice(0, 300).map((row) => (
-                      <li key={row.urn} className="lin-rail-row">
+                  <ul
+                    ref={railListRef}
+                    className="lin-rail-list"
+                    onScroll={(event) => setRailScrollTop(event.currentTarget.scrollTop)}
+                  >
+                    {railWindow.start > 0 && (
+                      <li
+                        className="lin-rail-virtual-spacer"
+                        aria-hidden="true"
+                        style={{ height: railWindow.start * RAIL_ROW_H }}
+                      />
+                    )}
+                    {railWindow.rows.map((row) => (
+                      <li key={row.urn} className="lin-rail-row" style={{ height: RAIL_ROW_H }}>
                         <span className="lin-rail-main">
                           <span className="lin-rail-name" title={row.name}>
                             {row.isolated && <i className="lin-iso-dot" title="孤岛表" />}
-                            {row.name}
+                            <LineageTableName name={row.name} />
                           </span>
                           <span className="lin-rail-meta">
                             上游 {row.upstream} · 下游 {row.downstream}
@@ -454,6 +659,13 @@ export function LineageSupplementPage() {
                         </Tooltip>
                       </li>
                     ))}
+                    {railWindow.end < railRows.length && (
+                      <li
+                        className="lin-rail-virtual-spacer"
+                        aria-hidden="true"
+                        style={{ height: (railRows.length - railWindow.end) * RAIL_ROW_H }}
+                      />
+                    )}
                     {railRows.length === 0 && (
                       <li className="lin-muted lin-rail-empty">
                         {tables.loading ? "加载中…" : "没有匹配的表"}
@@ -479,6 +691,7 @@ export function LineageSupplementPage() {
                 isolated={isolatedNames}
                 isolatedTotal={isolatedTotal}
                 uncovered={uncovered}
+                inventoryLoading={inventoryLoading}
                 onSendToCanvas={addToCanvas}
               />
             ) : (
@@ -487,69 +700,13 @@ export function LineageSupplementPage() {
                 edges={edges}
                 setNodes={setNodes}
                 setEdges={setEdges}
-                isolated={(table) => isolatedNames.has(table)}
-                columnsOf={(table) => columns[table] ?? []}
+                isolated={isIsolated}
+                columnsOf={columnsOf}
                 frozen={applying}
               />
             )}
           </main>
         </div>
-
-        <footer className="lin-footer">
-          <div className="lin-footer-counts">
-            <span>将写入 DataHub</span>
-            <b>{pending.edges}</b>
-            <span>条边</span>
-            <Tag color={mode === "canvas" ? "blue" : "default"} variant="filled">
-              {mode === "canvas" ? "画布手工连" : "代码包扫描"}
-            </Tag>
-            {pending.resolved > 0 && (
-              <Tag color="success" variant="filled">
-                {pending.resolved} 张表脱离孤岛
-              </Tag>
-            )}
-            {pending.blocked > 0 && (
-              <Tag color="warning" variant="filled">
-                {mode === "canvas" ? `待补关联键 ${pending.blocked}` : `待映射 ${pending.blocked}`}
-              </Tag>
-            )}
-            {pending.skipped > 0 && <Tag variant="filled">跳过 {pending.skipped}</Tag>}
-          </div>
-
-          <div className="lin-footer-acts">
-            {mode === "scan" && (
-              <Select
-                size="small"
-                value={dialect}
-                style={{ width: 116 }}
-                onChange={setDialect}
-                options={DIALECTS.map((item) => ({ value: item, label: `方言 ${item}` }))}
-              />
-            )}
-            {frozen && (
-              <span className="lin-done">
-                已上报 {detail?.applied_edges} 条 · 幂等，重复上报不会重复建边
-              </span>
-            )}
-            <Popconfirm
-              placement="topRight"
-              title={`确认向 DataHub 写入 ${pending.edges} 条血缘边？`}
-              description={
-                pending.resolved > 0
-                  ? `写入后 ${pending.resolved} 张表将脱离孤岛，需重跑本体起草才生效。`
-                  : "写入后可在 DataHub 血缘图中查看；重复上报幂等。"
-              }
-              okText="确认上报"
-              cancelText="再看看"
-              onConfirm={() => void apply()}
-              disabled={pending.edges === 0}
-            >
-              <Button type="primary" loading={applying} disabled={pending.edges === 0}>
-                上报到 DataHub
-              </Button>
-            </Popconfirm>
-          </div>
-        </footer>
       </div>
     </PageContainer>
   );

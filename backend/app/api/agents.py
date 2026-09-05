@@ -8,6 +8,7 @@
 """
 
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from app.models.agent import HIGH_RISK_KINDS, ArtifactStatus, GovernanceArtifact
 from app.schemas.chat_bi import ChatBiFormRequest
 from app.schemas import (
     AgentKindsOut,
+    ArtifactAgentApprovalRequest,
     ArtifactConfirmRequest,
     ArtifactDraftRequest,
     ConfirmedArtifactDraftRequest,
@@ -116,6 +118,9 @@ def _to_out(a: GovernanceArtifact, *, live_state: dict | None = None) -> Governa
         confirmed_by=a.confirmed_by,
         confirmed_at=a.confirmed_at,
         executed_at=a.executed_at,
+        agent_execution_approved=bool(a.agent_execution_approved),
+        agent_execution_approved_by=a.agent_execution_approved_by,
+        agent_execution_approved_at=a.agent_execution_approved_at,
         origin=a.origin,
         created_at=a.created_at,
         updated_at=a.updated_at,
@@ -444,6 +449,54 @@ def confirm_artifact(
         stage="artifact_confirm",
         trigger="artifact_confirm",
         summary=f"确认「{artifact.name or artifact.kind}」可执行",
+    )
+    return _to_out(artifact)
+
+
+@router.post(
+    "/agents/artifacts/{artifact_id}/agent-approval",
+    response_model=GovernanceArtifactOut,
+)
+def set_artifact_agent_approval(
+    artifact_id: str,
+    request: Request,
+    data: ArtifactAgentApprovalRequest,
+    db: Session = Depends(get_db),
+):
+    """逐条给出/收回「允许外部 agent 代执行这条任务」。
+
+    **这是这道闸的唯一写入口，且刻意只开在 REST 上**：MCP 工具只读它。放到 MCP 上
+    等于让 agent 自己给自己发许可，闸门就不存在了。
+
+    角色回答的是「这个身份能不能做这类事」，一发长期有效；这里回答的是「这一条现在
+    可以让 agent 自己确认并推到远端」。两个问题，两道闸。
+    """
+    artifact = db.get(GovernanceArtifact, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    operator = (data.operator or "").strip() or None
+    artifact.agent_execution_approved = bool(data.approved)
+    if data.approved:
+        artifact.agent_execution_approved_by = operator
+        artifact.agent_execution_approved_at = datetime.now()
+    else:
+        # 收回时清掉署名与时间：留着会让人以为授权还在。
+        artifact.agent_execution_approved_by = None
+        artifact.agent_execution_approved_at = None
+    db.commit()
+    db.refresh(artifact)
+    _record_artifact_decision(
+        db,
+        request,
+        artifact,
+        node="plan",
+        stage="artifact_agent_approval",
+        trigger="artifact_agent_approval",
+        summary=(
+            f"{'授权' if data.approved else '收回'} Agent 代执行"
+            f"「{artifact.name or artifact.kind}」"
+        ),
+        chosen={"approved": bool(data.approved)},
     )
     return _to_out(artifact)
 

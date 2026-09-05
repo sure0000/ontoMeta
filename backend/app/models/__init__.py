@@ -59,6 +59,7 @@ from app.models.agent import (
     PipelineStatus,
 )
 from app.models.mcp_audit import McpAuditLog
+from app.models.mcp_flow_form import McpFlowForm
 from app.models.mcp_skill import McpSkill, McpSkillVersion
 from app.models.principal import Principal, Role, role_rank, role_satisfies
 from app.models.governance import GovernanceStandardRecord
@@ -167,6 +168,7 @@ __all__ = [
     "LineagePackage",
     "LineagePackageEdge",
     "McpAuditLog",
+    "McpFlowForm",
     "McpSkill",
     "McpSkillVersion",
 ]

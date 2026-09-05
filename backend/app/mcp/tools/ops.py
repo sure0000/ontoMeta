@@ -38,6 +38,45 @@ from app.services.ops_records import (
 from . import AuthContext, ToolResult, register_tool
 from ._common import as_int, session
 
+# keyword 定位一次最多看这么多候选。比"够用"稍大一点是刻意的：唯一性判定要拿
+# page.total 兜底，截断过的结果集绝不允许声称唯一。
+_KEYWORD_CANDIDATE_LIMIT = 20
+
+
+def _is_exact(item: dict[str, Any], keyword: str) -> bool:
+    """标识名或显示名与 keyword 完全相同（忽略大小写/首尾空白）。"""
+    needle = keyword.strip().casefold()
+    if not needle:
+        return False
+    return needle in {
+        str(item.get("name") or "").strip().casefold(),
+        str(item.get("display_name") or "").strip().casefold(),
+    }
+
+
+def _rank_candidates(items: list[dict[str, Any]], keyword: str) -> list[dict[str, Any]]:
+    """精确匹配置顶，已发布优先，其余保持服务层顺序。
+
+    没有这一步时，``keyword="公司"`` 的候选里真正叫「公司」的那个排第 5——
+    调用方要么多问几轮，要么直接取第一个然后答错。
+    """
+    needle = keyword.strip().casefold()
+
+    def rank(item: dict[str, Any]) -> tuple[int, int]:
+        name = str(item.get("name") or "").casefold()
+        display = str(item.get("display_name") or "").casefold()
+        if _is_exact(item, keyword):
+            exactness = 0
+        elif needle and (name.startswith(needle) or display.startswith(needle)):
+            exactness = 1
+        else:
+            exactness = 2
+        published = 0 if item.get("status") == EntityStatus.PUBLISHED.value else 1
+        return (exactness, published)
+
+    return sorted(items, key=rank)
+
+
 _query = OntologyQueryService()
 
 # 这两族在 MCP 下无法成立：REGISTRY 里有它们，但 reader 要会话上下文。
@@ -47,6 +86,16 @@ _OPS_FAMILIES = tuple(
     key
     for key in REGISTRY
     if key not in _CONVERSATION_BOUND_FAMILIES and key != "landing"
+)
+
+# 「哪些族必须给 ontology_id」以前只在描述里写成「task_run/pipeline/draft_run **等**」——
+# 那个「等」让调用方只能撞一次才知道（真机审计里 get_ops_record 成功率 64%，
+# 失败大半是这一条）。改成从 REGISTRY 现算，两组各自摆明，加族时自动跟上。
+_ONTOLOGY_SCOPED_FAMILIES = tuple(
+    key for key in _OPS_FAMILIES if default_ops_record_scope(key) == "ontology"
+)
+_GLOBAL_FAMILIES = tuple(
+    key for key in _OPS_FAMILIES if key not in _ONTOLOGY_SCOPED_FAMILIES
 )
 
 
@@ -270,12 +319,15 @@ class GetLandingTool:
     name = "get_landing"
     required_role = "reader"
     description = (
-        "读已发布业务对象或业务口径的**真实物理落点**：落到哪张表、表建了吗、数搬了吗、"
+        "读业务对象或业务口径的**真实物理落点**：落到哪张表、表建了吗、数搬了吗、"
         "现在能不能查。\n"
         "只返回既有的同步契约 / 数仓投影登记；**没有登记就是没落地**，"
         "此时禁止按命名规则推测表名——推出来的表通常并不存在。\n"
         "target_id 来自 query_objects / search_logics；不知道 id 时给 keyword，"
-        "命中不唯一会返回 candidates 让你选。"
+        "命中不唯一会返回 candidates。\n"
+        "**candidates 不是「随便挑一个」**：同名对象常分属不同数据域（odoo 与 erpnext "
+        "各有一个「公司」，落点完全不同），按 domain_name 挑，或者带上 ontology_id 再问一次。\n"
+        "未发布主体也会返回落点，但带 subject_status 标注——引用时要连状态一起说。"
     )
     input_schema = {
         "type": "object",
@@ -316,14 +368,21 @@ class GetLandingTool:
         try:
             with session() as db:
                 subject: str | None = None
+                subject_status: str | None = None
                 if target_id:
                     entity = db.get(model, target_id)
-                    if entity is None or entity.status != EntityStatus.PUBLISHED.value:
+                    if entity is None:
                         return ToolResult(
                             success=False,
-                            error="主体不存在或未发布",
+                            error="主体不存在",
                             data={"target_kind": target_kind, "target_id": target_id},
                         )
+                    # 未发布的主体**照样读落点**。落点登记（IngestionContract /
+                    # WarehouseObjectProjection）与发布状态无关，`query_object_detail`
+                    # 的 landing 块一直就是这么给的；这里曾因为多加一道发布闸而对
+                    # 「erpnext 公司」直接报「主体不存在或未发布」，逼得调用方绕道另一个
+                    # 工具去读同一份事实。状态改成显式标注，不再当成不存在。
+                    subject_status = entity.status
                     if ontology_id and entity.ontology_id != ontology_id:
                         return ToolResult(
                             success=False,
@@ -336,28 +395,63 @@ class GetLandingTool:
                         )
                     subject = entity.display_name or entity.name
                 else:
+                    # 唯一性必须在**不过滤发布状态**的全集上判。曾经这里先按
+                    # published_only=True 过滤再数个数：odoo 与 erpnext 各有一个
+                    # 「公司」，erpnext 那个是 edited 被滤掉，只剩 odoo 一个 →
+                    # 判定"唯一" → 直接认了别的域的对象，还回一句权威口吻的
+                    # 「未落地，不要按命名规则推测表名」。发布状态成了跨域消歧器，
+                    # 这是比报错危险得多的错答案。
                     if target_kind == "object":
                         page = _query.list_object_types(
-                            db, ontology_id=ontology_id, published_only=True, q=keyword, limit=5
+                            db,
+                            ontology_id=ontology_id,
+                            published_only=False,
+                            q=keyword,
+                            limit=_KEYWORD_CANDIDATE_LIMIT,
                         )
                     else:
                         page = _query.list_business_logics(
-                            db, ontology_id=ontology_id, published_only=True, q=keyword, limit=5
+                            db,
+                            ontology_id=ontology_id,
+                            published_only=False,
+                            q=keyword,
+                            limit=_KEYWORD_CANDIDATE_LIMIT,
                         )
-                    # 带上数据域：keyword 默认跨本体，odoo 与 erpnext 各有一个「公司」，
-                    # 只给 id 和显示名的话调用方分不出该选哪个。
-                    candidates = [
-                        {
-                            "id": item.id,
-                            "name": item.name,
-                            "display_name": item.display_name,
-                            "domain_name": getattr(item, "domain_name", None),
-                            "domain_context_id": getattr(item, "domain_context_id", None),
-                        }
-                        for item in page.items
+                    # 带上数据域和发布状态：keyword 默认跨本体，只给 id 和显示名的话
+                    # 调用方分不出该选哪个，也看不出为什么某个候选查不到落点。
+                    candidates = _rank_candidates(
+                        [
+                            {
+                                "id": item.id,
+                                "name": item.name,
+                                "display_name": item.display_name,
+                                "status": getattr(item, "status", None),
+                                "domain_name": getattr(item, "domain_name", None),
+                                "domain_context_id": getattr(item, "domain_context_id", None),
+                                "ontology_id": getattr(item, "ontology_id", None),
+                            }
+                            for item in page.items
+                        ],
+                        keyword,
+                    )
+                    # 唯一性以**精确命中**为准，而不是"过滤完只剩一个"：
+                    # - `company` 在 odoo 和 erpnext 各精确命中一个 → 2 个，不许猜；
+                    # - `订单-a1b2` 精确命中 1 个、另外两个只是子串（ODS订单-a1b2 /
+                    #   DWD订单-a1b2）→ 认那个精确的，这才是调用方要的。
+                    # 结果集被截断时一律不认：页外可能还压着一个精确同名的。
+                    truncated = page.total > len(candidates)
+                    exact = [
+                        item for item in candidates if _is_exact(item, keyword)
                     ]
-                    if len(candidates) != 1:
-                        # 主体不唯一时**不猜**：返回候选让调用方拿 id 再问一次。
+                    if truncated:
+                        unique = False
+                    elif exact:
+                        unique = len(exact) == 1
+                        if unique:
+                            candidates = exact + [c for c in candidates if c not in exact]
+                    else:
+                        unique = len(candidates) == 1
+                    if not unique:
                         return ToolResult(
                             success=True,
                             data={
@@ -367,19 +461,23 @@ class GetLandingTool:
                                 "facts": [],
                                 "candidates": candidates,
                                 "note": (
-                                    "没有唯一主体，请从 candidates 里选 id 后重新调用 get_landing。"
+                                    "没有唯一主体，请从 candidates 里选 id 后重新调用 get_landing"
+                                    "（候选已按精确匹配排序，但同名对象常分属不同数据域，"
+                                    "按 domain_name 挑，别默认取第一个）。"
                                     if candidates
-                                    else "没有匹配的已发布主体。"
+                                    else "没有匹配的主体。"
                                 ),
                             },
                             metadata={
                                 "resolved": False,
                                 "candidate_count": len(candidates),
                                 "total": page.total,
+                                "truncated": page.total > len(candidates),
                             },
                         )
                     target_id = candidates[0]["id"]
                     subject = candidates[0]["display_name"] or candidates[0]["name"]
+                    subject_status = candidates[0].get("status")
 
                 answer = read_landing(
                     db,
@@ -394,6 +492,15 @@ class GetLandingTool:
 
         answer["target_kind"] = target_kind
         answer["target_id"] = target_id
+        answer["subject_status"] = subject_status
+        if subject_status and subject_status != EntityStatus.PUBLISHED.value:
+            # 未发布主体的落点是真实登记，但它不在已发布视图里——说破，免得
+            # 调用方把「草稿对象的落点」讲成「已发布对象的落点」。
+            answer["note"] = (
+                f"{answer.get('note') or ''}"
+                f"（注意：主体当前状态是 {subject_status}，不在已发布视图里；"
+                "以上落点登记本身是真实的，但引用时要连状态一起说。）"
+            ).strip()
         facts = {fact.get("key"): fact.get("value") for fact in answer.get("facts") or []}
         return ToolResult(
             success=True,
@@ -402,6 +509,7 @@ class GetLandingTool:
                 "resolved": True,
                 "target_kind": target_kind,
                 "target_id": target_id,
+                "subject_status": subject_status,
                 "state": facts.get("state"),
                 "queryable": facts.get("queryable"),
             },
@@ -417,7 +525,12 @@ class GetOpsRecordTool:
     description = (
         "读**已经发生过**的权威运行记录，只读，不创建也不执行任何任务。按 family 选族：\n"
         + "\n".join(f"- `{key}`（{REGISTRY[key].display}）：{REGISTRY[key].answers}" for key in _OPS_FAMILIES)
-        + "\n物理落点问 get_landing。没有匹配记录时返回明确的空结果与 note，不要自己补。\n"
+        + "\n**这些族必须给 ontology_id**（默认按本体组织）："
+        + "、".join(f"`{k}`" for k in _ONTOLOGY_SCOPED_FAMILIES)
+        + "；这些族不需要（全局）："
+        + "、".join(f"`{k}`" for k in _GLOBAL_FAMILIES)
+        + "。ontology_id 用 query_ontology 或 resolve_subject 取真实值，别拿域名当 id。\n"
+        + "物理落点问 get_landing。没有匹配记录时返回明确的空结果与 note，不要自己补。\n"
         "`as_of` 是记录自身的权威时点（上次成功搬数 / 执行完成），"
         "`observed_at` 是本次读取时刻——报告时别把后者当成前者。\n"
         "task_run 的失败原因只来自**投递回执自陈**：远端 Airflow/Flink 跑挂的任务，"
@@ -434,7 +547,12 @@ class GetOpsRecordTool:
             },
             "ontology_id": {
                 "type": "string",
-                "description": "本体作用域；按本体组织的族（task_run/pipeline/draft_run 等）必填",
+                "description": (
+                    "本体作用域。以下族必填："
+                    + "、".join(_ONTOLOGY_SCOPED_FAMILIES)
+                    + "；以下族不需要："
+                    + "、".join(_GLOBAL_FAMILIES)
+                ),
             },
             "scope": {
                 "type": "string",
@@ -512,7 +630,11 @@ class GetOpsRecordTool:
             return ToolResult(
                 success=False,
                 error=f"family={family} 需要 ontology_id",
-                data={"hint": "先用 query_ontology 取真实本体 id"},
+                data={
+                    "hint": "先用 query_ontology 取真实本体 id（域名不是 id）",
+                    "ontology_scoped_families": list(_ONTOLOGY_SCOPED_FAMILIES),
+                    "global_families": list(_GLOBAL_FAMILIES),
+                },
             )
 
         params = {

@@ -19,6 +19,7 @@ import {
   Popconfirm,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -982,15 +983,8 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
     {},
   );
   const properties = propertyScope ? scopedProperties : allProperties;
-  const { options: businessLogics } = useSpecOptions(
-    { kind: "businessLogics" },
-    ontologyId,
-    {},
-  );
-  const resolveOptions = (
-    options: { value: string; label: string }[],
-    value: unknown,
-  ): string => {
+  const { options: businessLogics } = useSpecOptions({ kind: "businessLogics" }, ontologyId, {});
+  const resolveOptions = (options: { value: string; label: string }[], value: unknown): string => {
     const one = (item: unknown) => {
       const raw = String(item ?? "");
       return options.find((o) => o.value === raw)?.label ?? raw;
@@ -1002,11 +996,28 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
       return dataSources.find((o) => o.value === value)?.label ?? value;
     }
     if (
-      ["object_type", "target_table", "selected_targets", "object_types", "subject_objects", "dimension_objects"].includes(key)
+      [
+        "object_type",
+        "target_table",
+        "selected_targets",
+        "object_types",
+        "subject_objects",
+        "dimension_objects",
+      ].includes(key)
     ) {
       return resolveOptions(objectTypes, value);
     }
-    if (["primary_keys", "incremental_column", "sequence_column", "properties", "group_by", "filters", "inputs"].includes(key)) {
+    if (
+      [
+        "primary_keys",
+        "incremental_column",
+        "sequence_column",
+        "properties",
+        "group_by",
+        "filters",
+        "inputs",
+      ].includes(key)
+    ) {
       return resolveOptions(properties, value);
     }
     if (key === "business_logic_id") return resolveOptions(businessLogics, value);
@@ -1082,16 +1093,25 @@ function ExecutionReceiptDetail({
   const topDagId = receipt.dag_id as string | undefined;
   const receiptState = (receipt.state as string | undefined) ?? liveState?.live_state;
   const tables = (receipt.tables as string[]) ?? [];
-  const targetTables = ((receipt.target_tables as string[]) ?? (receipt.ods_tables as string[]) ?? []);
+  const targetTables =
+    (receipt.target_tables as string[]) ?? (receipt.ods_tables as string[]) ?? [];
   const jobs = (receipt.jobs as string[]) ?? [];
   const unsupported = (receipt.unsupported as Record<string, string>[]) ?? [];
   const receiptError = receipt.error as string | undefined;
   const isRunning = liveState && !liveState.terminal;
   const object = receipt.object as { name?: string; display_name?: string } | undefined;
-  const sourceDatasource = receipt.source_datasource as { name?: string; kind?: string } | undefined;
-  const targetDatasource = receipt.target_datasource as { name?: string; kind?: string } | undefined;
+  const sourceDatasource = receipt.source_datasource as
+    { name?: string; kind?: string } | undefined;
+  const targetDatasource = receipt.target_datasource as
+    { name?: string; kind?: string } | undefined;
   const verification = receipt.doris_verification as
-    | { status?: string; verified?: boolean; target_table?: string; row_count?: number; error?: string }
+    | {
+        status?: string;
+        verified?: boolean;
+        target_table?: string;
+        row_count?: number;
+        error?: string;
+      }
     | undefined;
 
   // 合并 live_state 与回执的状态：live_state 更权威（实时回读 Airflow）
@@ -1120,9 +1140,7 @@ function ExecutionReceiptDetail({
             </Descriptions.Item>
           )}
           {targetTables.length > 0 && (
-            <Descriptions.Item label="Doris 目标表">
-              {targetTables.join("、")}
-            </Descriptions.Item>
+            <Descriptions.Item label="Doris 目标表">{targetTables.join("、")}</Descriptions.Item>
           )}
           {verification?.row_count != null && (
             <Descriptions.Item label="验证行数">{verification.row_count}</Descriptions.Item>
@@ -1138,7 +1156,7 @@ function ExecutionReceiptDetail({
           description={
             verification.verified
               ? `${verification.target_table ?? "目标表"} 共 ${verification.row_count ?? 0} 行`
-              : verification.error ?? "目标表未产生可验证的数据"
+              : (verification.error ?? "目标表未产生可验证的数据")
           }
         />
       )}
@@ -1364,6 +1382,7 @@ export function ArtifactDetail({
   ontologyName,
   onConfirmResult,
   resultOutcome,
+  onAgentApprovalChange,
 }: {
   artifact: GovernanceArtifact | null;
   busy: boolean;
@@ -1376,8 +1395,34 @@ export function ArtifactDetail({
   /** 对话入口可提供结果验收；治理列表无会话上下文时不显示。 */
   onConfirmResult?: (artifact: GovernanceArtifact, outcome: "accepted" | "rejected") => void;
   resultOutcome?: "accepted" | "rejected";
+  /** 代执行授权改动后通知父组件重新拉取制品。不传则只更新抽屉内的本地态。 */
+  onAgentApprovalChange?: (artifact: GovernanceArtifact) => void;
 }) {
   const [resolvedOntologyName, setResolvedOntologyName] = useState<string | null>(null);
+  // 代执行授权：与角色正交的第二道闸，只影响外部 Agent（MCP）那条路，
+  // 不影响这个抽屉里的按钮——在这里点的人本身就是那个"人工确认"。
+  const [agentApproved, setAgentApproved] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  useEffect(() => {
+    setAgentApproved(Boolean(artifact?.agent_execution_approved));
+  }, [artifact?.id, artifact?.agent_execution_approved]);
+
+  const toggleAgentApproval = async (next: boolean) => {
+    if (!artifact) return;
+    setApprovalBusy(true);
+    try {
+      const updated = await api.setArtifactAgentApproval(artifact.id, next);
+      setAgentApproved(Boolean(updated.agent_execution_approved));
+      onAgentApprovalChange?.(updated);
+      message.success(next ? "已允许 Agent 代执行这条任务" : "已收回代执行授权");
+    } catch (e) {
+      setAgentApproved(!next);
+      message.error(`修改代执行授权失败：${(e as Error).message}`);
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
   useEffect(() => {
     const ontologyId = artifact?.ontology_id;
     if (!ontologyId || ontologyName) {
@@ -1520,6 +1565,33 @@ export function ArtifactDetail({
           </Descriptions.Item>
         </Descriptions>
 
+        {/* ---- 代执行授权 ----
+            角色是长期许可（"这个身份能不能做这类事"），这里是逐条的另一个决定
+            （"这一条现在可以让 Agent 自己确认并推到远端"）。不给的话，外部 Agent
+            即使拿着 publisher 令牌也推不动这条任务。 */}
+        {!terminal && (
+          <div>
+            <SectionTitle>代执行授权</SectionTitle>
+            <Space align="start" size="middle" style={{ width: "100%" }}>
+              <Switch
+                checked={agentApproved}
+                loading={approvalBusy}
+                onChange={(next) => void toggleAgentApproval(next)}
+              />
+              <div style={{ flex: 1 }}>
+                <Text>允许 Agent 代执行这条任务</Text>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {agentApproved
+                      ? `已授权${artifact.agent_execution_approved_by ? `（${artifact.agent_execution_approved_by}）` : ""}：外部 Agent 可通过 MCP 确认并执行它。`
+                      : "未授权：外部 Agent 通过 MCP 确认或执行会被拦下。你在本页面上的操作不受影响。"}
+                  </Text>
+                </div>
+              </div>
+            </Space>
+          </div>
+        )}
+
         {/* ---- 任务配置 ---- */}
         <div>
           <SectionTitle>任务配置</SectionTitle>
@@ -1613,7 +1685,11 @@ export function ArtifactDetail({
               <Alert
                 type={status === "failed" ? "error" : "info"}
                 showIcon
-                message={status === "failed" ? "任务执行失败，未返回结构化回执" : "任务已结束，未返回结构化回执"}
+                message={
+                  status === "failed"
+                    ? "任务执行失败，未返回结构化回执"
+                    : "任务已结束，未返回结构化回执"
+                }
               />
             )}
             {onConfirmResult && terminal && !resultOutcome && (

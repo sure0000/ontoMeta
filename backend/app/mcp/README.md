@@ -2,8 +2,14 @@
 
 本体工程和数据治理能力的 MCP (Model Context Protocol) 封装。
 
-除工具外，服务器还通过 MCP prompts 交付 `backend/app/mcp/skills/` 下的 Skill 指引；Skill 的启用
-状态和部署级覆写由 Web 端「Agent 接入 → 技能」管理。
+除工具外，服务器还通过 MCP prompts 交付 `backend/app/mcp/skills/` 下的 Skill 指引（不消费
+prompts 的客户端用 `get_playbook` 工具取同一份正文）；Skill 的启用状态和部署级覆写由 Web 端
+「Agent 接入 → 技能」管理，那里也可以把生效正文**直接安装到 Agent 读取 Skill 的目录**
+（后端主机上的绝对路径），不必下载 ZIP 再解压。
+
+**出口契约只有一份**：`ontometa-output` 是所有回答的格式、状态口径、截断/ID 规则和"需要
+用户选择时怎么问"的总控；其余 skill 正文写 `{{OUTPUT_CONTRACT}}` 占位符，下发时替换成它的
+正文。改回答格式只改这一份，导出与安装出去的每份仍自带完整契约。
 
 ## 快速开始
 
@@ -60,7 +66,7 @@ MCP 服务固定挂载在 `/mcp/`，所有请求都必须携带 Principal/Admin 
 ### dsh 工作流 skill
 
 DeepSeek Harness（dsh）可加载项目提供的 `ontometa-mcp` skill。skill 会把本体查询、
-大结果聚合、任务六环、publisher 门控、异步轮询和结果呈现固化为一套提示，减少猜 ID、
+大结果聚合、任务六环、publisher 门控、宿主交互确认、异步长轮询和结果呈现固化为一套提示，减少猜 ID、
 把受理误报成成功、以及执行失败后重复提交等问题。
 
 在 dsh 中推荐显式调用：
@@ -169,6 +175,23 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 | `get_task_status` | 单个任务的状态、Spec、校验报告、回执，并尽力回读 Airflow 实时态 |
 | `get_ontology_overview` | 一次返回本体元信息、角色/板块分布和业务对象精简清单 |
 
+### 交互式建数流程
+
+| 工具 | 作用 |
+|------|------|
+| `start_task_flow` | 用户想建任务但参数没给全时先调它：只问系统定不下来的那几项 |
+| `advance_task_flow` | 提交答案并推进；参数齐了给 `status="review"`（执行审查），确认后给可照抄的 `draft_task` 参数 |
+| `open_task_form` / `wait_task_form` | 客户端没有原生问答工具时，改用控制台上的一次性网页表单 |
+
+问题与候选取自 `ChatBiService.build_task_form`，**与 Web 表单同源**。流程**不存服务端状态**：
+由 `(kind, answers)` 完全决定，`answers` 每次原样带回即可续问。
+
+**只问定不下来的**：有默认值、唯一候选、可选项一律自动填，摆进最后那张执行审查里一次核对。
+审查摆的是 Drafter 派生的 Spec（来源 → 落点、装载方式、调度、引擎）+ 校验阻断项，
+并给一个 `plan_digest`：确认必须把它原样写回 `__confirm_plan`，改过参数旧 digest 自动失效——
+"确认过的方案"与"执行的方案"因此必须是同一份。闭集字段取不到候选时返回 `blocked`，
+不放一个没校验过的值进 Spec。
+
 ### 任务提案
 
 | 工具 | 作用 |
@@ -190,10 +213,16 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 | `validate_task` | editor | 重跑校验闸门与 dry-run |
 | `confirm_task` | publisher | 确认已通过校验的任务 |
 | `execute_task` | publisher | 异步派发已确认任务，立即返回；用 `get_task_status` 轮询 |
+| `wait_task_status` | reader | 服务端等待状态变化/终态，避免客户端用 sleep 高频轮询 |
 
 推荐工作流：先 `propose_*` 预览，再 `draft_task`；确认校验报告无阻断项后由有执行授权的
 publisher 调用 `confirm_task` 和 `execute_task`。`execute_task` 返回成功只代表已受理，
-不代表 Airflow 或数据搬运已经成功。
+不代表 Airflow 或数据搬运已经成功；受理后用 `wait_task_status` 等终态。
+
+默认仍需在任务详情逐条开启「允许 Agent 代执行」。可信的 dsh Web 本机 stdio 部署可由管理员
+显式开启「本机宿主交互确认」：dsh 用原生 `ask_user_question` 展示任务方案并得到人类批准，
+再把 `get_task_status` 返回的任务 digest 同时传给 confirm/execute。digest 绑定任务 Spec 与校验
+报告，内容变化后旧确认失效；远程 HTTP、匿名默认角色与 Admin bootstrap token 不接受此模式。
 
 ### 审计与运维
 
@@ -227,7 +256,7 @@ publisher 调用 `confirm_task` 和 `execute_task`。`execute_task` 返回成功
 
 | 工具 | 最低角色 |
 |------|----------|
-| `query_*` / `search_logics` / `get_logic` / `compile_metric` / `get_lineage` / `get_landing` / `get_ops_record` / `find_join_path` / `list_datasources` / `list_tasks` / `get_task_status` / `validate_sql` | `reader` |
+| `query_*` / `search_logics` / `get_logic` / `compile_metric` / `get_lineage` / `get_landing` / `get_ops_record` / `find_join_path` / `list_datasources` / `list_tasks` / `get_task_status` / `wait_task_status` / `validate_sql` | `reader` |
 | `propose_*` / `draft_task` / `validate_task` | `editor` |
 | `confirm_task` / `execute_task` | `publisher` |
 | `execute_sql` / `profile_values` | `agent_run_sql_min_role`（默认 `publisher`，与 Data Agent 代跑 SQL 同价） |

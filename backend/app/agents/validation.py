@@ -37,8 +37,100 @@ _WARNING_CODES = frozenset(
         # 提交前自检的**提醒项**（blocking=False）与「自检本身没跑成」——呈现但不拦。
         "preflight_warning",
         "preflight_unavailable",
+        # 同目标近期反复失败——提醒，不拦。拦下会挡住"修好了重跑"这个正当动作。
+        "duplicate_recent_failure",
     }
 )
+
+# 「近期」的窗口。再往前的失败多半已经是另一回事了，报出来只是噪音。
+_DUPLICATE_LOOKBACK_DAYS = 30
+# 从 Spec 里取「这个任务往哪写」——同 kind + 同落点即视为同一件事重做。
+_TARGET_KEYS = (
+    "target_datasource_id",
+    "target_database",
+    "target_table",
+    "target_ods_database",
+    "target_ods_table",
+)
+
+
+def _target_signature(kind: str, spec: dict[str, Any]) -> tuple | None:
+    """这份 Spec 的落点指纹。取不到落点就返回 None（无从判重）。"""
+    values = tuple(str(spec.get(k) or "") for k in _TARGET_KEYS)
+    if not any(values):
+        return None
+    return (kind, *values)
+
+
+def _check_duplicate_recent_failures(
+    db: Session,
+    *,
+    kind: str,
+    spec: dict[str, Any],
+    ontology_id: str | None,
+    artifact_id: str | None,
+) -> list[ValidationIssue]:
+    """同一落点近期已经失败过的同构任务，作为**非阻断**提醒报出来。
+
+    真机上出现过：同一目标 `ods.ods_erpnext_tab_company` 连着建了 4 条 spec 完全相同的
+    同步任务，前 3 条全部失败，校验报告却一句没提（`blocking_count=0`）——是模型在正文里
+    自己想起来提醒的。这种护栏得在闸门里，不能指望每次都有人想起来。
+
+    只提醒不阻断：修好远端问题之后重跑本来就是正当动作。
+    """
+    signature = _target_signature(kind, spec)
+    if signature is None:
+        return []
+
+    from datetime import datetime, timedelta
+
+    from app.models.agent import ArtifactStatus, GovernanceArtifact
+
+    query = db.query(GovernanceArtifact).filter(
+        GovernanceArtifact.kind == kind,
+        GovernanceArtifact.status == ArtifactStatus.FAILED.value,
+        GovernanceArtifact.created_at >= datetime.now() - timedelta(days=_DUPLICATE_LOOKBACK_DAYS),
+    )
+    if ontology_id:
+        query = query.filter(GovernanceArtifact.ontology_id == ontology_id)
+    if artifact_id:
+        query = query.filter(GovernanceArtifact.id != artifact_id)
+
+    hits = [
+        row
+        for row in query.order_by(GovernanceArtifact.created_at.desc()).limit(50).all()
+        if _target_signature(row.kind, _spec_of(row)) == signature
+    ]
+    if not hits:
+        return []
+
+    target = spec.get("target_table") or spec.get("target_ods_table") or "该落点"
+    names = "、".join(f"{a.name or a.id[:8]}" for a in hits[:3])
+    more = f"（共 {len(hits)} 条）" if len(hits) > 3 else ""
+    return [
+        ValidationIssue(
+            code="duplicate_recent_failure",
+            message=(
+                f"同一落点「{target}」近 {_DUPLICATE_LOOKBACK_DAYS} 天内已有 {len(hits)} 条"
+                f"同构任务执行失败：{names}{more}。"
+                "确认前先查清上一次的失败原因（get_task_status 的 run_url → 远端日志），"
+                "否则很可能只是再失败一次。"
+            ),
+            entity_type="artifact",
+            entity_id=hits[0].id,
+            entity_name=hits[0].name,
+        )
+    ]
+
+
+def _spec_of(artifact) -> dict[str, Any]:
+    import json
+
+    try:
+        data = json.loads(artifact.spec_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _standard_warning_codes() -> frozenset[str]:
@@ -54,7 +146,12 @@ def is_blocking(issue: ValidationIssue) -> bool:
 
 
 def validate_spec(
-    db: Session, *, kind: str, spec: dict[str, Any], ontology_id: str | None
+    db: Session,
+    *,
+    kind: str,
+    spec: dict[str, Any],
+    ontology_id: str | None,
+    artifact_id: str | None = None,
 ) -> list[ValidationIssue]:
     """校验一个治理制品的 Spec。返回问题清单（可能为空）。"""
     issues: list[ValidationIssue] = []
@@ -84,6 +181,11 @@ def validate_spec(
         issues.extend(_check_doris_transform(db, spec))
     if kind == "metric":
         issues.extend(_check_doris_metric(db, spec))
+    issues.extend(
+        _check_duplicate_recent_failures(
+            db, kind=kind, spec=spec, ontology_id=ontology_id, artifact_id=artifact_id
+        )
+    )
 
     # 本体范围的制品：连带跑既有的发布前一致性校验（warning 级，不阻断制品本身）。
     if ontology_id and db.query(Ontology).filter(Ontology.id == ontology_id).first():

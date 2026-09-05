@@ -103,6 +103,46 @@ def _issue_payload(db: Session, kind: str, spec: dict, ontology_id: str | None) 
     }
 
 
+def build_proposal(
+    db: Session, *, kind: str, intent: str, context: dict[str, Any]
+) -> dict[str, Any]:
+    """跑一遍真 Drafter + 规约校验，返回提案（不写库、不执行）。
+
+    抽出来是为了让**交互流程的执行审查**用同一条路：审查里给用户看的落点、装载方式、调度
+    必须是执行时真会用的那份 Spec，而不是把他刚填的值再念一遍——那种"审查"审不出
+    Drafter 会怎么改写它。失败时抛 ``ValueError``，由调用方决定怎么呈现。
+    """
+    from app.agents import registry as _registry
+
+    try:
+        drafter = _registry.get_drafter(kind)
+    except _registry.UnregisteredKindError as exc:
+        raise ValueError(str(exc)) from exc
+    ontology_id = str(context.get("ontology_id") or "").strip() or None
+    missing = _missing_action_context(kind, context)
+    if missing:
+        raise ValueError(f"提案缺少必要上下文：{'、'.join(missing)}")
+    if kind == "sync":
+        errors = _sync_context_errors(db, context, ontology_id=ontology_id)
+        if errors:
+            raise ValueError("；".join(errors))
+    spec = drafter.draft(intent, context)
+    return {
+        "kind": kind,
+        "name": drafter.suggested_name(intent, spec),
+        "intent": intent,
+        "ontology_id": ontology_id,
+        "spec": spec,
+        "validation": _issue_payload(db, kind, spec, ontology_id),
+        "draft_payload": {
+            "kind": kind,
+            "intent": intent,
+            "context": context,
+            "ontology_id": ontology_id,
+        },
+    }
+
+
 async def _propose(kind: str, arguments: dict) -> ToolResult:
     intent = str(arguments.get("intent") or "").strip()
     if not intent:

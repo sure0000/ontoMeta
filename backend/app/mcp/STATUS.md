@@ -1,5 +1,218 @@
 # MCP 服务实施状态
 
+**当前阶段**：Phase 5 部分完成（✅ 远程 HTTP 传输 + 前端管理页；✅ Data Agent parity P0/P1/P2 可实现项；✅ 口径三件套；✅ 血缘/落点/运行记录；✅ 取数辅助；✅ dsh 验收 P0/P1/P2 全部；治理规约、建模类工具、资产目录与资源级权限待做）
+**更新时间**：2026-09-05
+
+## ✅ 出口契约总控 + Skill 安装到目录 + 交互式建数流程（2026-09-05）
+
+三件事，各自堵一个"界面上看不出来"的口子。
+
+### 1. 出口契约从抄六份变成一份（`ontometa-output`）
+
+此前每份 skill 正文末尾各自抄了一遍输出契约：改一句要改六处，漏掉一处就只有那一类回答不
+守规矩，而技能页上完全看不出哪份没跟上。现在契约只有 `ontometa-output` 一份，其余 skill
+写 `{{OUTPUT_CONTRACT}}` 占位符，**下发时替换**——MCP prompt、`get_playbook`、导出 ZIP、
+安装到目录读的都是同一条 `SkillView.body`，所以每份单独加载仍带完整契约。
+
+- 编辑与下发分层：`source_body`（带占位符，技能页编辑它）vs `body`（合成后，Agent 拿到的）。
+  界面若拿合成正文去编辑，一保存就把契约固化进那份 skill，从此改总控不再影响它——
+  现在这种情况会被标成「契约本地固化」，不是静默发生。
+- 总控不可停用；总控的覆写必须保留完整契约与「需要用户做选择时」那一段（校验拦下）。
+- 契约里新增**交互出口**：工具返回候选时，这一轮的出口是一道编号选择题，不是结论。
+- `TOOL_OUTPUT_FALLBACK`（挂在每个工具描述后的极简兜底）的状态枚举与行数上限改从
+  `OUTPUT_CONTRACT` 取，不再各写一份。
+
+### 2. 部署 Skill：直接写进目录，不必下载解压
+
+`POST /api/mcp/skills/install`（publisher，写 `<目录>/<skill-name>/SKILL.md`）：
+
+- 路径是**后端主机**上的绝对路径（服务端写盘）；相对路径、系统目录、家目录根、仓库内置
+  skill 目录一律拒绝——写进去不会报错，只会让文件躺在没人读的地方。
+- `dry_run` 先出计划（新建/覆盖/未变逐份列出），界面确认后再写；两次都记审计。
+- 只碰自己的 `SKILL.md`，目标目录里别的 Agent 技能不动；装进去的正文与导出 ZIP 逐字节相同。
+- 目录记进 `mcp_skill_install_dir`（走 `CONNECTION_SCHEMAS`，无需迁移），下次默认填上。
+
+### 3. 交互式建数流程（`start_task_flow` / `advance_task_flow` + `ontometa-flow`）
+
+通用 Agent 没有 `request_form` 那样的表单出口，于是要么一次问八个参数，要么自己挑一个 id
+往下走。现在把**同一张六环表单**（`ChatBiService.build_task_form`，与 Web 同源）拆成一问一答：
+
+- 每一步返回"现在该问什么 + 真实候选 + 属于六环的哪一环"，前三环逐环确认，系统预填的项
+  标成 `auto` 要求重点核对；`field:<字段名>` 可以真正重问某一项（不是拿同一个默认值糊回去）。
+- **无服务端状态**：由 `(kind, answers)` 完全决定，断线/换会话/重连都能接着问。
+- 用户回序号、中文名或 id 都行，服务端对回真实候选；对不上就再问，闭集字段没有候选时
+  宁可 `blocked` 也不放一个没人校验过的值进 Spec。
+- `ready` 时给出可以照抄的 `propose_*` 参数，测试钉住"照抄就能调通"。
+
+全量 **2337 passed**（新增 `tests/test_mcp_flow.py` 8 条、技能安装与契约 8 条）。
+
+## ✅ dsh Web 交互确认与服务端长轮询（2026-09-05）
+
+真机复现了两条此前 headless 验收看不到的问题：逐条代执行授权只有 REST 写入口，dsh 会话内
+无法完成用户确认；执行受理后 dsh 又没有 sleep 工具，只能高频重复 `get_task_status`，会触发
+宿主的重复工具保护并快速膨胀上下文。
+
+- `get_task_status` 现在返回绑定 task id、Spec 与校验报告的 `interactive_approval.digest`。
+- 新增默认关闭的 `mcp_allow_stdio_interactive_approval`：仅本机 stdio、真实 Principal、publisher
+  三项同时满足时，允许 dsh 原生 `ask_user_question` 得到人类批准后，把同一 digest 作为
+  `host_confirmation` 传给 `confirm_task` 与 `execute_task`。任务内容变化会使旧 digest 失效；
+  远程 HTTP、匿名默认角色与 Admin bootstrap token 仍被拒绝。REST 逐条授权字段没有被 MCP 写入。
+- 新增 reader 工具 `wait_task_status`：等待发生在服务端，最长 50 秒，状态变化/终态立即返回；
+  超时返回 `timed_out=true` 和当前状态，不把等待超时误报成执行失败。
+- dsh Web 真机已验证：展示任务/落点/阻断数/digest → 用户点批准 → `confirm_task`
+  返回 `approval_source=stdio_host_interactive` → `execute_task accepted=true` →
+  `wait_task_status` 长轮询。同步任务仍由远端 Airflow/Doris 决定终态。
+
+## ✅ dsh 真机验收后的 P0 加固（2026-09-04）
+
+在本机 dsh 上按真实用法跑了一轮验收（11 个会话、72 次工具调用、真库 + 真远端 Airflow），
+工具与 skill 的**判断质量**站得住——不存在的口径没被编、`found=0` 如实报成「本体中确实
+无从关联」、远端失败没被猜出原因、明确要求不执行时严格停在 `validated`。挂住的是另外
+五件事，都已修：
+
+### 1. skill 根本没随 MCP 出厂 → `get_playbook` 工具
+
+dsh 的 MCP 客户端文档写得很直白：*Only tools are bridged: MCP resources and prompts are
+not supported*。实测问模型「你有哪些 skill、从哪加载的」，回答是 5 份全部来自本地文件，
+**MCP 的 prompt 一个都没进去**——服务端的 `list_prompts` / `get_prompt` 在 dsh 上是死代码，
+skill 生效纯粹因为 `cordis.patch.yml` 手工把 `customSkillDirs` 指到了仓库路径。
+任何按「远程地址 + Bearer」接进来的客户端，拿到 30 个工具、**0 份指引**。
+
+修法是把 skill 正文也做成**工具**（`get_playbook`，reader）：tools 是唯一保证被桥接的
+MCP 能力。不带 topic 回主题清单，带 topic 回正文；与 `list_prompts` 读同一份
+`app.mcp.skills` 生效正文（含 DB 覆写），不会分叉。`SERVER_INSTRUCTIONS` 第一句改成
+「动手前先调 get_playbook」。**`list_prompts` 保留不动**，支持它的客户端照旧走那条路。
+
+真机复验：dsh 一句「我的客户端加载不了 skill，请只用 MCP 工具取回取数指引」，
+一次 `get_playbook` 调用就拿到正文并正确复述了调用顺序。
+
+### 2. `get_landing` 跨域撞名会用权威口吻答错
+
+odoo 与 erpnext 各有一个 `company`／「公司」，erpnext 那个是 `edited`。候选集此前
+**先按 `published_only=True` 过滤、再判唯一性**：草稿那个被滤掉，只剩 odoo 一个 →
+判定「唯一」→ 直接认了别的域的对象，回一句「未落地（没有任何落点登记）…不要按命名
+规则推测表名」。而 erpnext 的公司实际登记了 `ods.ods_erpnext_tab_company`（state=failed）。
+**发布状态成了跨域消歧器**，产出的是比报错危险得多的错答案。
+
+改成：唯一性在**不过滤发布状态**的全集上判，且以**精确命中**为准——
+`company` 两个候选都精确同名 → 给候选不许猜；`订单-a1b2` 精确命中一个、
+`ODS订单-a1b2` 只是子串 → 认那个精确的。截断过的结果集一律不认唯一（真实命中数走
+`page.total`），候选带上 `status` 与 `domain_name`。
+
+顺带修掉同源的一处：**未发布主体照样读落点**。落点登记与发布状态无关
+（`query_object_detail` 的 landing 块一直这么给），此前多加的那道发布闸把
+「erpnext 公司」报成「主体不存在或未发布」，逼得调用方绕到另一个工具读同一份事实。
+现在返回真实落点 + `subject_status` 显式标注。
+
+### 3. `get_ontology_overview` 一份载荷混两个口径
+
+`ontology.object_type_count=1035` 是草稿域计数器，同一份里的 `object_distribution`
+却是 published 口径（合计 154），两组数听起来是一回事却差一个数量级，没有任何字段说明
+谁是谁。真机那次模型自己识破了，但那是模型救场——换一个就会说「有 1035 个对象，
+其中 44 个业务对象」。
+
+改成：含混的三个计数从 `ontology` 块里摘掉，改到 `counts` 块按口径分别命名
+（`in_scope_*` / `draft_*`），并在 metadata 的 `counts_scope` 里写明每组属于哪个口径。
+
+### 4. 代执行授权闸：与角色正交的第二道闸
+
+角色回答「这个身份能不能做这类事」，发一次长期有效；「这一条任务现在可以让 agent
+自己确认并推到远端 Airflow」是**另一个决定**，此前没有人来做——一个 publisher 令牌
+加一句话就够了，审计里那三条真实的远端执行就是这么来的（令牌页自己写着「外部 Agent
+默认使用 editor」，而实际配的是 publisher）。
+
+`governance_artifacts` 加 `agent_execution_approved`（+ 署名/时间），MCP 的
+`confirm_task` / `execute_task` 各查一次（授权可能在两步之间被收回）。
+**唯一写入口是 REST**（`POST /api/agents/artifacts/{id}/agent-approval`，前端任务详情
+抽屉里的开关）——放到 MCP 上等于让 agent 自己给自己发许可，闸门就不存在了；
+有一条测试遍历全部工具源码钉住这一点。开关本身是运行期配置
+（`mcp_require_execution_approval`，缺省 **开**，MCP 配置页可关）。
+
+真机复验：dsh 让模型确认那条未授权任务，它被拦下后正确报成「不是权限不足、换令牌没用、
+需要人在任务详情里放行」，没有重试、没有换令牌、没有调 `execute_task`。
+
+### 5. 审计时间序列化不一致，趋势表整体偏一个时区
+
+`created_at` 落库是裸时间（`server_default=now()`，本机时钟），`last_call_at` 与
+`/api/mcp/audit` 也都裸着回；唯独趋势桶被 `datetime.fromtimestamp(..., tz=utc)` 打上
+`+00:00`——同一个钟点一个裸一个带偏移，前端 `toLocaleString()` 一转就差 8 小时，
+趋势里出现比「最近调用」还晚的桶。桶改回库里那套钟。
+
+顺带修掉同源的窗口起点：`datetime.now(timezone.utc)` 传给 `timestamp without time zone`
+列会被丢掉偏移当成 UTC 墙钟，「最近 24 小时」在 UTC+8 上实际取了 32 小时。
+
+**回归**：`tests/test_mcp_p0_hardening.py` 19 条，全量 **2298 passed, 1 skipped**。
+
+
+## ✅ dsh 验收 P1/P2：把「答得对但很贵」修掉（2026-09-04）
+
+P0 修的是会给出错答案的地方；这一批每条都对着一个实测数字。
+
+**P1-6 `resolve_subject`（新工具，reader）**——找 id 是真机上被调用最多的动作：
+一次会话 6 次 `query_objects` + 3 次 `query_object_detail`，13 步里 9 步只是在把
+「客户」「销售订单」两个中文词变成 id。新工具一次给全下一步真正要的四件事：
+**id、所属本体与数据域、角色与发布状态、有没有落点**。真库上 `resolve_subject("公司")`
+一次 0.16 秒返回 `exact_count=2`（odoo/erpnext 各一个），erpnext 那个带出
+`ods.ods_erpnext_tab_company / state=failed`。
+两个实现细节是踩过的坑：**排序必须在截断之前**（只取回一页再排，第二个精确同名根本进不了
+页面，`exact_count` 会错报成 1——正是 get_landing 栽过的那个）；**`ontology_id` 不在
+读模型 `ObjectTypeSummary` 上**，`getattr` 会静默给 None，只能对展示行单独回填。
+
+**P1-7 `list_tasks` 的 reconcile 开关**——默认 `false`，`limit` 下推进查询。
+此前 `list_artifacts` 对**全表**逐条回读 Airflow DagRun（`limit=20` 也可能对账上百条），
+均耗时 11.8 秒。真库实测 **16.66s → 0.06s**；`reconcile=true` 时 5 条 2.11 秒，那是诚实的代价。
+返回里带 `status_note` 说破"这是制品自陈状态、未回读远端"。
+
+**P1-8 字段投影**——`query_objects` / `get_ontology_overview` 加 `fields`。
+读模型是给**前端复核工作台**用的，带着 `origin`/`pinned_fields`/`conflicts`/`role_reason`/
+`top_neighbors`，随列表成倍放大（`limit=5` 曾回 9.2 KB，模型只好落盘再 grep）。
+默认精简面，`fields` 点名，`fields=["*"]` 全量；点错的字段进 `unknown_fields`
+而不是静默忽略。同 ontology 下实测 lean 3.6 KB / full 7.4 KB。
+
+**P1-9 `server_info` 瘦身**——默认只回「工具名 → 最低角色」表 + 身份/限流/审计可达性，
+**8.1 KB → 1.9 KB**；工具全文描述改 `verbose=true` 才给。原来的问题是：调用方的工具清单里
+已经有一份完整描述（15.7 KB），而 skill 又要求开局先调 server_info，同一段文本付两次。
+
+**P1-10 条件必填写进 schema**——`get_ops_record` 的描述原本写「task_run/pipeline/draft_run
+**等**必填」，那个「等」让调用方只能撞一次才知道（审计里该工具成功率 64%，失败多为此）。
+现在两组（要 ontology_id 的 8 个族 / 全局的 3 个族）都摆明，且**从 REGISTRY 现算**——
+加族时自动跟上，不会再有第二份会漂的清单。运行期报错也带上这两组。
+
+**P1-11 SQL 错误噪音**——服务层已包过一层「查询执行失败：」，MCP 再包一层就成了双前缀，
+SQLAlchemy 还附上整段 SQL 和 sqlalche.me 链接。这段文本既进模型上下文、也原样落进审计页
+给人看。现在只留驱动那一句。
+
+**P2-12 安装示例加 dsh Tab + Skill 安装入口**——dsh 那份配置有个不写出来一定会踩的坑：
+新增插件必须用 `- insert:` 包起来（裸 `{id,name,config}` 会被当成"覆盖已有 id"而报
+not found）。同时在服务页写明「多数客户端只桥接工具、不消费 prompts」，给出
+`get_playbook` 与「下载 Skill 安装包」两条出路。
+
+**P2-13 工具页渲染**——「说明」列此前把写给模型的 Markdown 原样当纯文本倒进单元格
+（`**加粗**` 星号裸奔、换行压平，`get_ops_record` 那条 850 字挤成一坨）。改成首行常驻 +
+「展开完整说明」，展开后走与对话区同一个 `MarkdownLite`，不另写第二套渲染。
+
+**P2-14 技能页**——覆盖度只列**没覆盖的**（全覆盖收成一行绿字；铺 31 个绿 chip 要人逐个
+扫才能确认"确实没有红的"）；详情以中文 `description` 为主、英文 `whenToUse` 降为
+「模型触发语」次要行；首屏加载改骨架屏，不再显示会被读成"真的是 0"的「（0）」。
+
+**P2-15 同落点重复失败护栏**——真机上同一目标 `ods.ods_erpnext_tab_company` 连建了 4 条
+spec 完全相同的同步任务、前 3 条全部失败，校验报告 `blocking_count=0` 一句没提，是模型在
+正文里自己想起来提醒的。现在闸门里出 `duplicate_recent_failure`（**非阻断**——修好远端问题
+后重跑是正当动作），点名近 30 天内同落点失败过的任务。真库上那条第 4 任务复验即命中。
+
+**收尾三处**（报告 C5 里我第一轮只修了一半的，加上这批改动新造成的文档陈旧）：
+MCP 工具页首屏不再写「（0）」（技能页已改骨架屏，这页漏了）；远程 MCP 地址标明
+「按当前页面地址推导，假定前后端同源」，跨域部署要自己换；`docs/MCP_README.md`
+的工具清单**按 registry 重新生成**（停在 29 个、缺 `get_playbook`/`resolve_subject`、
+`locate_entities` 还挂在「尚未实现」里而它要的能力已由 `resolve_subject` 覆盖），
+并加 `tests/test_docs_tool_catalog.py` 钉住：工具名、最低角色、总数、
+「尚未实现」清单四项与 registry 不一致即失败——手写清单漂过一次，不该再漂第二次。
+
+**回归**：`tests/test_mcp_p1_ergonomics.py` 15 条 + `tests/test_docs_tool_catalog.py` 5 条，
+31 工具，全量 **2319 passed, 1 skipped**。
+
+---
+
 **当前阶段**：Phase 5 部分完成（✅ 远程 HTTP 传输 + 前端管理页；✅ Data Agent parity P0/P1/P2 可实现项；✅ 口径三件套；✅ 血缘/落点/运行记录；✅ 取数辅助；治理规约、建模类工具、资产目录与资源级权限待做）
 **更新时间**：2026-09-04
 

@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { assignLayers, curve } from "./graphLayout";
 import type { LineagePackageGroup } from "../../types";
+import { LineageJoinKey, LineageTableName } from "./LineageTableName";
 
 /**
  * 代码包扫出来的血缘，画成图。
@@ -41,11 +42,6 @@ interface PlacedNode {
   kind: "target" | "source";
   isolated: boolean;
   dimmed: boolean;
-}
-
-function short(table: string) {
-  const name = table.includes(".") ? table.slice(table.indexOf(".") + 1) : table;
-  return name.length > 24 ? `${name.slice(0, 23)}…` : name;
 }
 
 export function ScanGraph({ groups, selected, isolated }: Props) {
@@ -304,7 +300,7 @@ export function ScanGraph({ groups, selected, isolated }: Props) {
                 onClick={() => setFocus((prev) => (prev === node.table ? null : node.table))}
               >
                 {node.isolated && <i className="lin-iso-dot" />}
-                <span className="lin-gnode-name">{short(node.table)}</span>
+                <LineageTableName className="lin-gnode-name" name={node.table} />
               </button>
             );
           })}
@@ -315,7 +311,7 @@ export function ScanGraph({ groups, selected, isolated }: Props) {
             <div className="lin-inspector-head">
               <span className="lin-focus-name" title={focus}>
                 {isolated.has(focus) && <i className="lin-iso-dot" />}
-                {short(focus)}
+                <LineageTableName name={focus} />
               </span>
               <button
                 type="button"
@@ -331,9 +327,9 @@ export function ScanGraph({ groups, selected, isolated }: Props) {
             <ul className="lin-focus-list">
               {related.upstream.map((item) => (
                 <li key={`u-${item.table}-${item.key}`}>
-                  <span className="lin-node">{short(item.table)}</span>
+                  <LineageTableName className="lin-node" name={item.table} />
                   {item.key ? (
-                    <span className="lin-key">{item.key}</span>
+                    <LineageJoinKey value={item.key} />
                   ) : (
                     <span className="lin-muted">无 JOIN 条件 · 仅表级</span>
                   )}
@@ -346,9 +342,9 @@ export function ScanGraph({ groups, selected, isolated }: Props) {
             <ul className="lin-focus-list">
               {related.downstream.map((item) => (
                 <li key={`d-${item.table}-${item.key}`}>
-                  <span className="lin-node lin-node--target">{short(item.table)}</span>
+                  <LineageTableName className="lin-node lin-node--target" name={item.table} />
                   {item.key ? (
-                    <span className="lin-key">{item.key}</span>
+                    <LineageJoinKey value={item.key} />
                   ) : (
                     <span className="lin-muted">无 JOIN 条件 · 仅表级</span>
                   )}

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -58,3 +59,18 @@ def loads(raw: str | None, fallback: Any = None) -> Any:
         return json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def artifact_approval_digest(artifact: Any) -> str:
+    """Bind an interactive approval to the exact reviewed task payload."""
+    payload = {
+        "id": artifact.id,
+        "kind": artifact.kind,
+        "ontology_id": artifact.ontology_id,
+        "spec": loads(artifact.spec_json, {}),
+        "validation": loads(artifact.validation_report_json, {}),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

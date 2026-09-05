@@ -14,11 +14,16 @@ user-invocable: true
 
 ## 工具顺序
 
-1. 先调用 `server_info`，记录当前身份和工具权限。
+1. 先调用 `server_info`，记录当前身份和工具权限（默认已省略各工具全文描述，要看传 `verbose=true`）。
 2. 用 `query_ontology` 查本体列表；不要把域名当作 `ontology_id`，必须使用返回的真实 ID。
+2.5 **用户点名了某个对象/口径（「客户」「公司」）时，先 `resolve_subject`**——它一次给全 id、
+   本体、角色、发布状态和有没有落点，精确匹配置顶。不要用 `query_objects(search=...)` 反复试探。
+   `exact_count>1` 表示同名跨域（odoo 与 erpnext 各有一个「公司」），按 `domain_name` 挑或带
+   `ontology_id` 再问一次，**不许取第一个**。
 3. 对指定本体优先调用 `get_ontology_overview`，获取元信息、角色/板块分布和业务对象精简清单。
 4. 问角色或板块分布时使用 `query_objects(group_by=role|segment)`，不要拉全量明细。
 5. 需要前 N 条明细时使用 `query_objects` 的 `role`、`search`、`limit`、`offset`；结果带 `total`/`truncated` 时如实说明。
+   默认只回精简字段面；要看判定依据（`role_reason`、`conflicts` 等）用 `fields` 点名，别一上来就 `fields=["*"]`。
 6. 需要字段、关系或落点时调用 `query_object_detail` 或 `query_relations`；需要关系图时传 `include_mermaid=true`。
 7. 问“有哪些指标/口径/标签/规则”时调用 `search_logics`；要某条口径的完整定义（表达式、绑定对象与字段、ADS 落点）时调用 `get_logic`。
 8. 问“数据从哪来 / 被谁引用 / 改了影响谁”时调用 `get_lineage`（可传 `include_mermaid=true`）。
@@ -38,10 +43,15 @@ user-invocable: true
 - `get_landing` 报 `not_landed` 就是数仓里没有这张表：如实说“还没落地”，绝不按命名规则编一个表名。
 - `get_landing` 的 keyword 定位默认跨本体，同名对象会串域（odoo 和 erpnext 各有一个「公司」）；候选带 `domain_name`，选错域比没找到更糟。
 
-## 输出
+{{OUTPUT_CONTRACT}}
 
-默认中文，使用“结论 / 证据 / 下一步”。证据只列真实 ID、数量、状态和截断信息，不倾倒完整 JSON、属性列表或凭据。
+## 输出补充（本体探索）
+
+- `结论` 一句话直接回答问题；查得到本体但没有匹配项用 `无结果`。
+- `结果` 推荐列：名称 / 类型或角色 / 状态 / 关键关系；字段多时只保留回答问题所需的列。
+- 草稿视角、推断字段、缺失落点写进 `限制`，不要让读者以为是已确认事实。
 
 ## 通用底线
 
 MCP 是 ontoMeta 能力的唯一入口：不读 `.env`、不猜 ID、不绕道 REST 或直连数据库；凭据、token、DSN 不进入回答、工具参数或报告。服务端 RBAC、校验闸门、审计和状态机是最终权威。把 `success` / `denied`（角色不够）/ `rate_limited`（限流）/ 校验阻断 / 远端执行失败分开报告，不要把“工具调用成功”写成“事情办成了”。
+换个阶段就换一份指引：其它主题用 `get_playbook(topic="ontometa-…")` 取回，不要凭印象套用本份的顺序。

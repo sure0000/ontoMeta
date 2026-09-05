@@ -186,11 +186,24 @@ def test_server_info_reports_identity_and_limits(call_via_server, db):
     assert data["tool_count"] >= 16
     assert data["rate_limit"]["default_per_minute"] == 77
     assert data["audit"]["reachable"] is True
-    names = {t["name"] for t in data["tools"]}
-    assert {"execute_sql", "server_info", "get_mcp_stats"} <= names
-    # 工具清单带最低角色，便于自查「为什么被拒」
-    roles = {t["name"]: t["required_role"] for t in data["tools"]}
+    # 默认只回「工具名 → 最低角色」：完整描述在调用方自己的工具清单里已经有一份，
+    # 这里再抄一遍等于同一段文本付两次上下文（实测 8.1KB）。自查「为什么被拒」
+    # 要看的就是角色这一列。
+    roles = data["tool_roles"]
+    assert {"execute_sql", "server_info", "get_mcp_stats"} <= set(roles)
     assert roles["execute_sql"] == settings.agent_run_sql_min_role
+    assert "tools" not in data
+    assert "verbose=true" in data["tools_note"]
+
+
+def test_server_info_verbose_returns_full_descriptions(call_via_server):
+    """全文没被删掉，只是改成显式索取。"""
+    result = call_via_server("server_info", {"verbose": True}, auth=_ctx("reader"))
+    data = json.loads(result.content[0].text)["data"]
+    tools = {t["name"]: t for t in data["tools"]}
+    assert "execute_sql" in tools
+    assert tools["execute_sql"]["description"]
+    assert "tool_roles" not in data
 
 
 def test_server_info_is_reader_accessible(call_via_server):

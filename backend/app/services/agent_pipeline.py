@@ -259,7 +259,12 @@ class AgentPipelineService:
 
         spec = _loads(artifact.spec_json, {})
         issues = validate_spec(
-            db, kind=artifact.kind, spec=spec, ontology_id=artifact.ontology_id
+            db,
+            kind=artifact.kind,
+            spec=spec,
+            ontology_id=artifact.ontology_id,
+            # 传自己的 id，判重时才排得掉本条（否则每条都跟自己"重复"）。
+            artifact_id=artifact.id,
         )
         blocking = [i for i in issues if is_blocking(i)]
 
@@ -455,7 +460,19 @@ class AgentPipelineService:
         kind: str | None = None,
         status: str | None = None,
         ontology_id: str | None = None,
+        limit: int | None = None,
+        reconcile: bool = True,
     ) -> list[GovernanceArtifact]:
+        """列出治理制品。
+
+        ``reconcile=True``（默认，保持既有调用方的语义）会**逐条**回读 Airflow DagRun
+        并在终态时回写——那是「状态不读不推进」的必要代价，但也是一次远程往返/条。
+        只想要名字和 id 的场景（列目录、给模型选任务）传 ``reconcile=False``，
+        真要终态时再对单条用 ``get``。
+
+        ``limit`` 在**查询里**截断。此前只在调用方切片，对账仍然跑满全表——
+        `limit=20` 也可能对账上百条，MCP 侧实测均耗时 11.8 秒。
+        """
         q = db.query(GovernanceArtifact)
         if kind:
             q = q.filter(GovernanceArtifact.kind == kind)
@@ -463,10 +480,14 @@ class AgentPipelineService:
             q = q.filter(GovernanceArtifact.status == status)
         if ontology_id:
             q = q.filter(GovernanceArtifact.ontology_id == ontology_id)
-        rows = q.order_by(desc(GovernanceArtifact.created_at)).all()
+        q = q.order_by(desc(GovernanceArtifact.created_at))
+        if limit is not None:
+            q = q.limit(int(limit))
+        rows = q.all()
         # P0b：读时对账 orchestrated 制品的 Airflow DagRun 状态，终态时回写 artifact.status
-        for a in rows:
-            self._reconcile_orchestrated_status(db, a)
+        if reconcile:
+            for a in rows:
+                self._reconcile_orchestrated_status(db, a)
         return rows
 
     def get(self, db: Session, artifact_id: str) -> GovernanceArtifact | None:

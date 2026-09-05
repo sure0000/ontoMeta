@@ -217,6 +217,7 @@ from app.schemas.dependencies import (
 )
 from app.schemas.agent import (
     AgentKindsOut,
+    ArtifactAgentApprovalRequest,
     ArtifactConfirmRequest,
     ArtifactDraftRequest,
     ConfirmedArtifactDraftRequest,
@@ -483,6 +484,7 @@ __all__ = [
     "RolePolicyOut",
     "ArtifactDraftRequest",
     "ConfirmedArtifactDraftRequest",
+    "ArtifactAgentApprovalRequest",
     "ArtifactConfirmRequest",
     "ArtifactEditRequest",
     "ArtifactExecuteRequest",

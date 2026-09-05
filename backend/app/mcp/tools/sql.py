@@ -48,6 +48,29 @@ def _vega_lite_spec(columns: list[dict[str, str]], rows: list[dict[str, Any]]) -
     }
 
 
+
+# 服务层已经把错误包成「查询执行失败：…」，这里再包一层就成了双前缀；SQLAlchemy 还会附上
+# 完整 SQL 和一条 sqlalche.me 文档链接。这段文本既进模型上下文、也原样落进审计页给人看，
+# 于是审计里出现过：
+#   查询执行失败：查询执行失败：(pymysql.err.OperationalError) (1051, "Unknown table 'x'")
+#   [SQL: SELECT ...] (Background on this error at: https://sqlalche.me/e/20/e3q8)
+# 只留驱动自己那句话。
+_NOISE_MARKERS = ("\n[SQL:", "[SQL:", "(Background on this error at:")
+_DOUBLED_PREFIX = "查询执行失败："
+
+
+def _clean_db_error(exc: Exception) -> str:
+    text = str(exc)
+    for marker in _NOISE_MARKERS:
+        head = text.split(marker, 1)[0]
+        if head != text:
+            text = head
+    text = text.strip()
+    while text.startswith(_DOUBLED_PREFIX):
+        text = text[len(_DOUBLED_PREFIX) :].lstrip()
+    return text[:300] or str(exc)[:300]
+
+
 @register_tool
 class ExecuteSqlTool:
     """在默认 Doris 数仓执行只读 SQL"""
@@ -126,7 +149,7 @@ class ExecuteSqlTool:
         except Exception as exc:  # noqa: BLE001
             return ToolResult(
                 success=False,
-                error=f"查询执行失败：{str(exc)[:300]}",
+                error=f"查询执行失败：{_clean_db_error(exc)}",
                 metadata={"sql": sql, "executed": False},
             )
 

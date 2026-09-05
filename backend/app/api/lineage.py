@@ -320,10 +320,14 @@ async def list_uncovered_isolated(domain_id: str, db: Session = Depends(get_db))
 async def list_packages(
     domain_id: str,
     kind: str = "scan",
+    include_inventory: bool = True,
     db: Session = Depends(get_db),
 ):
     """代码包历史。``kind=all`` 连画布补录的留档一起列。"""
-    isolated = await _isolated_names(db, domain_id)
+    # The history is local data and should be usable while the DataHub
+    # inventory is still loading.  Existing callers keep the accurate default;
+    # the workbench opts into the fast local-only phase explicitly.
+    isolated = await _isolated_names(db, domain_id) if include_inventory else set()
     stmt = (
         select(LineagePackage)
         .where(LineagePackage.domain_context_id == domain_id)
@@ -365,11 +369,20 @@ async def upload_package(
 
 
 @router.get("/packages/{package_id}", response_model=PackageDetail)
-async def get_package(package_id: str, db: Session = Depends(get_db)):
+async def get_package(
+    package_id: str,
+    include_inventory: bool = True,
+    db: Session = Depends(get_db),
+):
     package = db.get(LineagePackage, package_id)
     if package is None:
         raise HTTPException(status_code=404, detail="代码包不存在")
-    return _package_detail(package, await _isolated_names(db, package.domain_context_id))
+    isolated = (
+        await _isolated_names(db, package.domain_context_id)
+        if include_inventory
+        else set()
+    )
+    return _package_detail(package, isolated)
 
 
 @router.post("/packages/{package_id}/rescan", response_model=PackageDetail)

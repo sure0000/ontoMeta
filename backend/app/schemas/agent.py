@@ -52,6 +52,17 @@ class ArtifactExecuteRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class ArtifactAgentApprovalRequest(BaseModel):
+    """逐条给出/收回「允许外部 agent 代执行这条任务」。
+
+    与角色正交：角色说的是"这个身份能不能做这类事"，这里说的是"这一条现在可以自动跑"。
+    只有这条 REST（人在界面上点）能写，MCP 工具一律只读。
+    """
+
+    approved: bool
+    operator: str | None = None
+
+
 class GovernanceArtifactOut(BaseModel):
     id: str
     kind: str
@@ -69,6 +80,10 @@ class GovernanceArtifactOut(BaseModel):
     confirmed_by: str | None = None
     confirmed_at: datetime | None = None
     executed_at: datetime | None = None
+    # 代执行授权（与角色正交的第二道闸，只作用于 MCP 的 confirm/execute）。
+    agent_execution_approved: bool = False
+    agent_execution_approved_by: str | None = None
+    agent_execution_approved_at: datetime | None = None
     origin: str
     created_at: datetime
     updated_at: datetime

@@ -87,27 +87,53 @@
 MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` 预览后，用 editor
 调用 `draft_task`（落治理草稿并自动校验）和 `validate_task`；只有 publisher 才能调用
 `confirm_task` 与异步 `execute_task`。执行工具立即返回，最终 Airflow/数据状态通过
-`get_task_status` 轮询。外部 agent 默认使用最小权限 Principal Token，不要暴露
+`wait_task_status` 在服务端长轮询。dsh Web 可在管理员显式开启后用宿主 `ask_user_question`
+收集人类确认，并用任务 digest 绑定本次批准；远程 HTTP 仍只能走任务详情逐条授权。
+外部 agent 默认使用最小权限 Principal Token，不要暴露
 `ONTOMETA_ADMIN_TOKEN` 或让 agent 读取 `backend/.env`。
 
 `query_objects` 支持 `group_by=role|segment` 聚合模式，先返回分布再按需分页取明细，
 避免把大型本体的全部对象塞进 agent 上下文。
 
-**29 个已注册工具**（以 `app/mcp/tools/` 的 `TOOL_REGISTRY` 为准；括号内是服务器强制的最低角色）：
+**36 个已注册工具**（以 `app/mcp/tools/` 的 `TOOL_REGISTRY` 为准；括号内是服务器强制的最低角色。本节由 `tests/test_docs_tool_catalog.py` 钉住，加工具不同步会失败）：
+
+### 入口与指引（1 个）
+- `get_playbook`（reader）- 取回 ontoMeta 的操作指引（playbook）正文：某类问题该按什么顺序调哪些工具、每个结果字段怎么解读、哪些结论不许说
+
+### 交互式建数流程（4 个）
+- `start_task_flow`（editor）- 用户想建数据任务但参数没给全时先调它：只把**系统定不下来**的参数做成一张表单（字段、控件类型、真实候选），其余由本体、契约和默认值推导
+- `advance_task_flow`（editor）- 提交答案并推进；参数齐了返回 `status="review"`（执行审查），确认后返回可以照抄的 `draft_task` 参数
+- `open_task_form`（editor）- 客户端没有原生问答工具时，把当前这一步换成 ontoMeta 控制台上的一次性网页表单链接
+- `wait_task_form`（editor）- 服务端等那张网页表单被提交（最长 50 秒），回填后连同下一步一起返回
+
+字段与候选取自 `ChatBiService.build_task_form`——**与 Web 表单同源**。流程本身**无服务端状态**：
+由 `(kind, answers)` 完全决定，断线、换会话、重连都能接着填。
+
+**只问定不下来的，最后给一次执行审查**：有默认值、唯一候选、可选项一律自动填；
+`status="review"` 摆的是 Drafter 派生的那份 Spec（来源 → 落点、装载方式、调度、引擎）、
+`review.notes`（全量会重写目标表之类）和阻断项，全部参数可就地改。确认要把
+`__confirm_plan` 设成该次审查的 `plan_digest`——写 `"yes"` 不算数，改过参数旧 digest 自动失效，
+以此保证"确认过的方案"与"执行的方案"是同一份。
+
+渲染优先级：宿主原生问答工具（dsh 的 `ask_user_question`、Claude Code 的 `AskUserQuestion`，
+一次带上全部格子）→ 网页表单链接 → 编号清单。
+
+### 主体解析（1 个）
+- `resolve_subject`（reader）- 把用户说的词（「客户」「销售订单」「公司」）解析成真实主体，一次给全下一步要的信息：**id、所属本体与数据域、角色、发布状态、有没有物理落点/能不能取数**
 
 ### 本体与口径查询（8 个）
-- `query_ontology`（reader）- 查询本体结构和业务对象列表。可以查询所有本体，或按 ID 查询特定本体
+- `compile_metric`（reader）- 把一条**已发布且已形式化**的口径按给定维度/过滤/时间粒度编译成 Doris SQL，并返回口径展开轨迹（caliber_trace）、JOIN 路径与语义证书
+- `get_logic`（reader）- 查询单个业务口径的完整定义：表达式（文字口径 + 形式化 AST）、绑定的业务对象与字段、ADS 落点。要拿可执行 SQL 用 compile_metric，不要照着表达式自己重写
 - `get_ontology_overview`（reader）- 一次返回本体元信息、对象角色/板块分布和业务对象精简清单。用于快速建立本体地图；需要完整字段时再调用 query_objects 或 query_object_detail
-- `query_objects`（reader）- 查询本体中的业务对象（表/实体）。可按角色、关键词过滤，或用 group_by=role/segment 只取分布统计。关键词同时匹配对象标识名、显示名、描述和物理源表名（source_ref）
 - `query_object_detail`（reader）- 查询单个业务对象的详情：属性（字段）、进出关系、绑定的业务口径、物理落点
+- `query_objects`（reader）- 查询本体中的业务对象（表/实体）。可按角色、关键词过滤，或用 group_by=role/segment 只取分布统计。关键词同时匹配对象标识名、显示名、描述和物理源表名（source_ref）
+- `query_ontology`（reader）- 查询本体结构和业务对象列表。可以查询所有本体，或按 ID 查询特定本体
 - `query_relations`（reader）- 查询本体中的业务对象关系（外键/引用/包含/转化）。关系两端给的是对象名，写 JOIN 时的连接键在 source_evidence 里
 - `search_logics`（reader）- 按关键词检索业务口径：指标（GMV/客单价）、标签（客户分层）、规则（金额必须为正）。关键词匹配标识名、显示名与描述；默认只看已发布口径
-- `get_logic`（reader）- 查询单个业务口径的完整定义：表达式（文字口径 + 形式化 AST）、绑定的业务对象与字段、ADS 落点。要拿可执行 SQL 用 compile_metric，不要照着表达式自己重写
-- `compile_metric`（reader）- 把一条**已发布且已形式化**的口径按给定维度/过滤/时间粒度编译成 Doris SQL，并返回口径展开轨迹（caliber_trace）、JOIN 路径与语义证书
 
 ### 血缘 / 落点 / 运行记录（3 个）
+- `get_landing`（reader）- 读业务对象或业务口径的**真实物理落点**：落到哪张表、表建了吗、数搬了吗、现在能不能查
 - `get_lineage`（reader）- 查某个业务对象的血缘与上下游邻域（中心对象 + depth 跳关系）
-- `get_landing`（reader）- 读已发布业务对象或业务口径的**真实物理落点**：落到哪张表、表建了吗、数搬了吗、现在能不能查
 - `get_ops_record`（reader）- 读**已经发生过**的权威运行记录，只读，不创建也不执行任何任务。按 family 选族：
 
 ### 取数辅助（2 个）
@@ -115,35 +141,37 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 - `profile_values`（publisher）- 查某个字段**实际存着什么值**：类别/标识字段给 TopN 取值与频次、去重数；度量字段给最小/最大/均值；时间字段给时间区间；另有空值率
 
 ### 数据源与 SQL（3 个）
+- `execute_sql`（publisher）- 在默认 Doris 数仓执行只读 SQL 并返回结果行
 - `list_datasources`（reader）- 列出已配置的数据源：业务源库（business_source）与数仓（warehouse）。建同步任务时源端取 business_source、目标端取默认 Doris 仓。不返回任何凭据
 - `validate_sql`（reader）- 校验 SQL 是否为合法的单条只读查询。不连数据库、不执行
-- `execute_sql`（publisher）- 在默认 Doris 数仓执行只读 SQL 并返回结果行
 
 ### 任务提案（4 个）
-- `propose_sync`（editor）- 生成数据同步任务提案：把源库表搬进数仓 ODS。落点恒为 ODS 库、表名 ods_{数据域}_{原表名}，不可指定。只出提案，不写库、不执行
-- `propose_transform`（editor）- 生成数据加工（清洗/转换）任务提案：读已同步就绪的 ODS，产出加工结果表。只出提案，不写库、不执行
 - `propose_materialize`（editor）- 生成本体物化任务提案：把本体对象建成物理表（只出建表 DDL，不搬数据）。人工建模、没有物理源表的对象要先物化。只出提案，不写库、不执行
 - `propose_metric`（editor）- 生成指标（聚合）任务提案：按已发布的业务口径产出 ADS 结果表。只出提案，不写库、不执行
+- `propose_sync`（editor）- 生成数据同步任务提案：把源库表搬进数仓 ODS。落点恒为 ODS 库、表名 ods_{数据域}_{原表名}，不可指定。只出提案，不写库、不执行
+- `propose_transform`（editor）- 生成数据加工（清洗/转换）任务提案：读已同步就绪的 ODS，产出加工结果表。只出提案，不写库、不执行
 
-### 任务生命周期与追踪（6 个）
+### 任务生命周期与追踪（7 个）
+- `confirm_task`（publisher）- 确认一个已通过校验的治理任务。本工具只确认，不触发执行
 - `draft_task`（editor）- 把 propose_* 返回的 draft_payload 落成治理任务并立即校验。只写治理草稿并做 dry-run，不确认、不执行数仓变更
-- `validate_task`（editor）- 重跑治理任务的校验闸门与 dry-run；不确认、不执行
-- `confirm_task`（publisher）- 确认一个已通过校验的治理任务。publisher 令牌代表调用方已获执行授权；本工具只确认，不触发执行
 - `execute_task`（publisher）- 异步执行一个已确认的治理任务并立即返回。返回成功只表示已受理；最终结果必须用 get_task_status 轮询
-- `list_tasks`（reader）- 列出数据治理任务（同步 sync / 加工 transform / 聚合 metric / 物化 materialize）。可按类型、状态、本体过滤。只读；读的同时会对账 Airflow 状态，不触发执行
 - `get_task_status`（reader）- 回读单个数据任务的状态、Spec、校验报告与执行回执，并尽力回读 Airflow DagRun 的实时状态（读不到就退回制品态）。只读，不触发执行
+- `wait_task_status`（reader）- 在服务端长轮询任务状态变化或终态，避免 dsh 用 Bash/sleep 高频重复查询；默认最多等待 50 秒，超时如实返回当前状态
+- `list_tasks`（reader）- 列出数据治理任务（同步 sync / 加工 transform / 聚合 metric / 物化 materialize）。可按类型、状态、本体过滤。只读，不触发执行
+- `validate_task`（editor）- 重跑治理任务的校验闸门与 dry-run；不确认、不执行
 
 ### 自省 / 审计 / 监控（3 个）
-- `server_info`（reader）- 回读本 MCP 服务器状态：版本、传输方式、工具清单与各自最低角色、当前会话身份、限流配置、审计表可达性。用于自查「我这条会话是什么权限、某工具为什么被拒」
-- `list_audit_logs`（publisher）- 回读 MCP 工具调用审计日志（谁、什么身份、调了哪个工具、成没成、是否被授权拦下）。按时间倒序，可按工具名、是否成功、是否被拒过滤。仅 publisher
 - `get_mcp_stats`（publisher）- 基于审计表的 MCP 使用统计：总调用量、成功/失败/被拒/被限流数、按工具与角色分组。仅 publisher
+- `list_audit_logs`（publisher）- 回读 MCP 工具调用审计日志（谁、什么身份、调了哪个工具、成没成、是否被授权拦下）。按时间倒序，可按工具名、是否成功、是否被拒过滤。仅 publisher
+- `server_info`（reader）- 回读本 MCP 服务器状态：版本、传输方式、当前会话身份、限流配置、审计表可达性，以及**工具名 → 最低角色**的对照表。用于自查「我这条会话是什么权限、某工具为什么被拒」
+
 ### 尚未实现（设计稿里的名字，别当成可调用工具）
 
 下列工具只存在于 `MCP_TOOL_DESIGN.md` 等设计稿中，**registry 里没有**，调用会直接失败。
 它们对应 Data Agent 仍未追平的能力面，按优先级排：
 
 - 资产目录：`list_datasets`（`get_lineage`/`get_landing`/`get_ops_record` 已实现，见上）
-- 取数辅助：`locate_entities`、`scout_query`（`find_join_path`/`profile_values` 已实现，见上）
+- 取数辅助：`scout_query`（`find_join_path`/`profile_values`/`resolve_subject` 已实现，见上）
 - 治理规约：`lint_against_standard`、`validate_against_policy`、`get_active_governance_standard`
 - 本体建模：`propose_ontology_draft`、`propose_dimensional_model`、`propose_logic_batch`、
   `create_modeling_case`（写侧或长耗时，要先想清 MCP 下「异步 + 人工确认」怎么表达）

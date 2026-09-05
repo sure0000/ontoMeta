@@ -22,6 +22,31 @@ _query = OntologyQueryService()
 # 与 services/tool_result_compaction 的第 1 级丢弃同口径。
 _NOISE_KEYS = ("role_signals",)
 
+# 默认投影。读模型 ObjectTypeSummary 是给**前端复核工作台**用的，带着 origin /
+# pinned_fields / conflicts / role_reason / top_neighbors 这些只有人在界面上拍板时
+# 才用得上的字段——随列表成倍放大：真机上 `limit=5` 回了 9.2 KB，模型只好把结果
+# 落盘再 grep。这里定一个"回答结构问题够用"的最小面，其余按需用 fields 取回。
+_LEAN_FIELDS = (
+    "id",
+    "name",
+    "display_name",
+    "description",
+    "table_role",
+    "status",
+    "needs_review",
+    "segment_id",
+    "segment_name",
+    "property_count",
+    "relation_count",
+    "business_logic_count",
+    "row_count",
+    "source_ref",
+    "source_provenance",
+)
+# 无论 fields 怎么给都必须在场：少了这几个，返回的行就没法拿去调别的工具。
+_ALWAYS_FIELDS = ("id", "name", "display_name")
+_ALL = "*"
+
 # 对象角色取值来自 ObjectType.table_role（services/object_classifier 判定）。
 _TABLE_ROLES = ["business_object", "data_table", "bridge", "technical"]
 
@@ -69,6 +94,22 @@ def _lean(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in _NOISE_KEYS}
 
 
+def _project_fields(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
+    """按 fields 裁剪一行。``None`` = 默认精简面；``["*"]`` = 全量（仍去掉噪音键）。"""
+    row = _lean(row)
+    if fields and _ALL in fields:
+        return row
+    wanted = set(fields or _LEAN_FIELDS) | set(_ALWAYS_FIELDS)
+    return {k: v for k, v in row.items() if k in wanted}
+
+
+def _unknown_fields(fields: list[str] | None, sample: dict[str, Any]) -> list[str]:
+    """调用方点名了但读模型里没有的字段。静默忽略会让人以为"那个字段是空的"。"""
+    if not fields or _ALL in fields:
+        return []
+    return sorted(f for f in fields if f not in sample and f not in _ALWAYS_FIELDS)
+
+
 @register_tool
 class QueryObjectsTool:
     """查询业务对象列表"""
@@ -76,7 +117,12 @@ class QueryObjectsTool:
     name = "query_objects"
     description = (
         "查询本体中的业务对象（表/实体）。可按角色、关键词过滤，或用 group_by=role/segment 只取分布统计。"
-        "关键词同时匹配对象标识名、显示名、描述和物理源表名（source_ref）。"
+        "关键词同时匹配对象标识名、显示名、描述和物理源表名（source_ref）。\n"
+        "**默认只回精简字段面**（标识/角色/状态/板块/数量/源表）。复核工作台那些字段"
+        "（role_reason、conflicts、pinned_fields、top_neighbors 等）默认不回——"
+        "确实需要时用 `fields` 点名，或 `fields=[\"*\"]` 取全量。\n"
+        "**知道要找哪个对象时用 resolve_subject**，它精确匹配置顶并会指出同名跨域；"
+        "本工具适合列举、过滤和分布统计。"
     )
     input_schema = {
         "type": "object",
@@ -125,6 +171,15 @@ class QueryObjectsTool:
                 "maximum": 500,
             },
             "offset": {"type": "integer", "description": "翻页偏移", "default": 0},
+            "fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "点名要哪些字段（id/name/display_name 恒在）。"
+                    "留空 = 精简面；[\"*\"] = 全量（含 role_reason、conflicts、"
+                    "top_neighbors 等复核字段，很占上下文，只在确实要看判定依据时用）"
+                ),
+            },
         },
     }
 
@@ -136,6 +191,12 @@ class QueryObjectsTool:
         limit = as_int(arguments.get("limit"), 50, low=1, high=500)
         offset = as_int(arguments.get("offset"), 0, low=0, high=1_000_000)
         needs_review = arguments.get("needs_review")
+        raw_fields = arguments.get("fields")
+        fields = (
+            [str(f).strip() for f in raw_fields if str(f).strip()]
+            if isinstance(raw_fields, list)
+            else None
+        ) or None
 
         try:
             with session() as db:
@@ -188,7 +249,9 @@ class QueryObjectsTool:
                     limit=limit,
                     offset=offset,
                 )
-                objects = [_lean(dump(item)) for item in page.items]
+                dumped = [dump(item) for item in page.items]
+                objects = [_project_fields(row, fields) for row in dumped]
+                unknown = _unknown_fields(fields, dumped[0] if dumped else {})
                 return ToolResult(
                     success=True,
                     data={"objects": objects},
@@ -196,6 +259,9 @@ class QueryObjectsTool:
                         "count": len(objects),
                         "total": page.total,
                         "truncated": page.total > offset + len(objects),
+                        # 说破投影，免得调用方把"默认没回"读成"这个字段是空的"。
+                        "fields": "all" if (fields and "*" in fields) else (fields or "lean"),
+                        **({"unknown_fields": unknown} if unknown else {}),
                         "ontology_id": ontology_id,
                         "filters": {
                             "role": role,

@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # 服务器的客户端（Claude Desktop / Cursor）在其配置的 env 块里传入的 Token——与
     # ONTOMETA_ADMIN_TOKEN / Principal Token 同价，由 app.auth.resolve_principal_token 解析。
     ontometa_mcp_token: str | None = None
-    # 以下五项只在 SettingsService 首次创建 DB 配置时播种；运行期一律从数据库读取。
+    # 以下七项只在 SettingsService 首次创建 DB 配置时播种；运行期一律从数据库读取。
     # 未提供 Token 时授予的角色。本地 stdio 是用户自己拉起的子进程，给到 reader 级别
     # 让只读查询开箱即用，但同步/物化提案与代跑 SQL 仍按各工具的 required_role 拦住。
     # 置空字符串 = 无匿名身份（所有需要角色的工具一律 403），供锁定部署使用。
@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     mcp_rate_limit_per_minute: int = 120
     # execute_sql 直打数仓、代价最重，单独更严。0 = 跟随 mcp_rate_limit_per_minute。
     mcp_execute_sql_rate_limit_per_minute: int = 30
+    # 代执行授权闸：与角色**正交**的第二道闸，只作用于 MCP 的 confirm_task / execute_task。
+    # 角色回答「这个身份能不能做这类事」，发一次长期有效；「这一条任务现在可以让 agent
+    # 自己确认并推到远端 Airflow」是另一个决定，必须逐条由人在界面上给。
+    # 关掉它就退回「一个 publisher 令牌 + 一句话即可推到远端真跑」，所以默认开。
+    mcp_require_execution_approval: bool = True
+    # 仅给可信的本机 stdio MCP 宿主使用：宿主先用自己的交互 UI 向人确认，再把绑定
+    # 当前任务内容的 digest 传回 confirm/execute。运行期仍从 Web 设置读取，本值只播种新库。
+    mcp_allow_stdio_interactive_approval: bool = False
     # ---- MCP 远程 HTTP 传输（Phase 5）----
     # 默认关闭：把 MCP 暴露到网络是安全敏感操作，须在 Web「Agent 接入」中显式开启。开启后 MCP 挂在后端的
     # /mcp 路由（Streamable HTTP，JSON 响应模式），异地 agent 用「服务地址 + 令牌」连接，

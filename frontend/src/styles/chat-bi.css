@@ -687,6 +687,15 @@
 
 /* ---------- Markdown ---------- */
 
+/* 表格单元格里的 Markdown（MCP 工具页的「说明」列）：同一套渲染，只是压紧。
+   工具描述是写给模型看的 Markdown，原样当纯文本倒进单元格的话星号会裸奔、换行被压平。 */
+.chatbi-md-compact .chatbi-md {
+  gap: 2px;
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  color: var(--om-text-secondary);
+}
+
 .chatbi-md {
   display: flex;
   flex-direction: column;

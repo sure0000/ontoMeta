@@ -8,10 +8,11 @@ import {
   SwapOutlined,
 } from "@ant-design/icons";
 import { Button, Tag, Tooltip } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import type { LineageColumn } from "../../types";
 import { assignLayers, curve } from "./graphLayout";
+import { LineageJoinKey, LineageTableName } from "./LineageTableName";
 
 /**
  * 路径 B：把表摆到画布上，像连 ER 图一样连血缘。
@@ -60,6 +61,12 @@ type Drag =
   | { kind: "pan"; startX: number; startY: number; origX: number; origY: number }
   | { kind: "link"; from: { table: string; col: string | null }; x: number; y: number };
 
+interface PendingNodePosition {
+  table: string;
+  x: number;
+  y: number;
+}
+
 /** 指针捕获失败（指针已抬起、合成事件）不该把整个拖拽手势带崩。 */
 function capture(el: HTMLElement | null, pointerId: number) {
   try {
@@ -68,6 +75,91 @@ function capture(el: HTMLElement | null, pointerId: number) {
     /* 没有活动指针时忽略 */
   }
 }
+
+interface CanvasTableNodeProps {
+  node: CanvasNode;
+  columns: LineageColumn[];
+  dropTarget: boolean;
+  dropColumn: string | null;
+  isolated: boolean;
+  frozen: boolean;
+  onStartDrag: (event: ReactPointerEvent, node: CanvasNode) => void;
+  onToggleCollapse: (table: string) => void;
+  onStartLink: (event: ReactPointerEvent, table: string, col: string | null) => void;
+  onRemoveNode: (table: string) => void;
+}
+
+const CanvasTableNode = memo(function CanvasTableNode({
+  node,
+  columns,
+  dropTarget,
+  dropColumn,
+  isolated,
+  frozen,
+  onStartDrag,
+  onToggleCollapse,
+  onStartLink,
+  onRemoveNode,
+}: CanvasTableNodeProps) {
+  return (
+    <div
+      className={`lin-tnode${dropTarget ? " lin-tnode--drop" : ""}`}
+      style={{
+        left: 0,
+        top: 0,
+        width: NODE_W,
+        transform: `translate3d(${node.x}px, ${node.y}px, 0)`,
+      }}
+      data-table={node.table}
+    >
+      <div
+        className="lin-tnode-head"
+        onPointerDown={(event) => onStartDrag(event, node)}
+        onDoubleClick={() => onToggleCollapse(node.table)}
+        data-table={node.table}
+      >
+        {isolated && <i className="lin-iso-dot" title="孤岛表" />}
+        <LineageTableName className="lin-tnode-name" name={node.table} />
+        <span className="lin-tnode-count">{columns.length}</span>
+        {!frozen && (
+          <button
+            type="button"
+            className="lin-tnode-x"
+            aria-label="从画布移除"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => onRemoveNode(node.table)}
+          >
+            <CloseOutlined />
+          </button>
+        )}
+      </div>
+
+      {!node.collapsed && (
+        <div className="lin-tnode-body">
+          {columns.map((col) => (
+            <div
+              key={col.name}
+              className={`lin-col${dropColumn === col.name ? " lin-col--drop" : ""}`}
+              data-table={node.table}
+              data-col={col.name}
+            >
+              <span className="lin-col-name">
+                {col.is_primary_key && <em className="lin-pk">PK</em>}
+                {col.name}
+              </span>
+              <span className="lin-col-type">{col.data_type}</span>
+              <span
+                className="lin-port"
+                onPointerDown={(event) => onStartLink(event, node.table, col.name)}
+                title="从这里拖到下游表的字段"
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 interface Props {
   nodes: CanvasNode[];
@@ -105,8 +197,14 @@ export function LineageCanvas({
   const [drag, setDrag] = useState<Drag | null>(null);
   const [hover, setHover] = useState<{ table: string; col: string | null } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const pendingNodePosition = useRef<PendingNodePosition | null>(null);
+  const nodePositionFrame = useRef<number | null>(null);
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.table, n])), [nodes]);
+  const columnsByTable = useMemo(
+    () => new Map(nodes.map((node) => [node.table, columnsOf(node.table)])),
+    [columnsOf, nodes],
+  );
   const selectedEdge = edges.find((e) => e.id === selected) ?? null;
 
   const toWorld = useCallback(
@@ -123,21 +221,27 @@ export function LineageCanvas({
 
   /* ---------- 指针 ---------- */
 
-  const startNodeDrag = (event: ReactPointerEvent, node: CanvasNode) => {
-    if (frozen) return;
-    event.stopPropagation();
-    const p = toWorld(event.clientX, event.clientY);
-    setDrag({ kind: "node", table: node.table, offX: p.x - node.x, offY: p.y - node.y });
-    capture(ref.current, event.pointerId);
-  };
+  const startNodeDrag = useCallback(
+    (event: ReactPointerEvent, node: CanvasNode) => {
+      if (frozen) return;
+      event.stopPropagation();
+      const p = toWorld(event.clientX, event.clientY);
+      setDrag({ kind: "node", table: node.table, offX: p.x - node.x, offY: p.y - node.y });
+      capture(ref.current, event.pointerId);
+    },
+    [frozen, toWorld],
+  );
 
-  const startLink = (event: ReactPointerEvent, table: string, col: string | null) => {
-    if (frozen) return;
-    event.stopPropagation();
-    const p = toWorld(event.clientX, event.clientY);
-    setDrag({ kind: "link", from: { table, col }, x: p.x, y: p.y });
-    capture(ref.current, event.pointerId);
-  };
+  const startLink = useCallback(
+    (event: ReactPointerEvent, table: string, col: string | null) => {
+      if (frozen) return;
+      event.stopPropagation();
+      const p = toWorld(event.clientX, event.clientY);
+      setDrag({ kind: "link", from: { table, col }, x: p.x, y: p.y });
+      capture(ref.current, event.pointerId);
+    },
+    [frozen, toWorld],
+  );
 
   const startPan = (event: ReactPointerEvent) => {
     setSelected(null);
@@ -150,6 +254,41 @@ export function LineageCanvas({
     });
     capture(ref.current, event.pointerId);
   };
+
+  const flushNodePosition = useCallback(() => {
+    if (nodePositionFrame.current !== null) {
+      cancelAnimationFrame(nodePositionFrame.current);
+      nodePositionFrame.current = null;
+    }
+    const next = pendingNodePosition.current;
+    pendingNodePosition.current = null;
+    if (!next) return;
+    setNodes((prev) => {
+      const current = prev.find((node) => node.table === next.table);
+      if (!current || (current.x === next.x && current.y === next.y)) return prev;
+      return prev.map((node) =>
+        node.table === next.table ? { ...node, x: next.x, y: next.y } : node,
+      );
+    });
+  }, [setNodes]);
+
+  const scheduleNodePosition = useCallback(
+    (next: PendingNodePosition) => {
+      pendingNodePosition.current = next;
+      if (nodePositionFrame.current !== null) return;
+      nodePositionFrame.current = requestAnimationFrame(flushNodePosition);
+    },
+    [flushNodePosition],
+  );
+
+  useEffect(
+    () => () => {
+      if (nodePositionFrame.current !== null) cancelAnimationFrame(nodePositionFrame.current);
+      nodePositionFrame.current = null;
+      pendingNodePosition.current = null;
+    },
+    [],
+  );
 
   const onPointerMove = (event: ReactPointerEvent) => {
     if (!drag) return;
@@ -165,7 +304,7 @@ export function LineageCanvas({
     if (drag.kind === "node") {
       const x = Math.round((p.x - drag.offX) / GRID) * GRID;
       const y = Math.round((p.y - drag.offY) / GRID) * GRID;
-      setNodes((prev) => prev.map((n) => (n.table === drag.table ? { ...n, x, y } : n)));
+      scheduleNodePosition({ table: drag.table, x, y });
       return;
     }
     setDrag({ ...drag, x: p.x, y: p.y });
@@ -179,6 +318,7 @@ export function LineageCanvas({
   };
 
   const onPointerUp = (event: ReactPointerEvent) => {
+    if (drag?.kind === "node") flushNodePosition();
     if (drag?.kind === "link") {
       const el = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
       const target = el?.closest("[data-table]") as HTMLElement | null;
@@ -193,34 +333,40 @@ export function LineageCanvas({
 
   /** 同一对表之间已有边就并入键，不新建——复合键是一条边的多对字段。 */
   const connect = (from: string, fromCol: string | null, to: string, toCol: string | null) => {
+    const edgeId = `${from}->${to}`;
+    if (fromCol && toCol) setSelected(edgeId);
     setEdges((prev) => {
       const existing = prev.find((e) => e.from === from && e.to === to);
       if (!fromCol || !toCol) {
-        return existing ? prev : [...prev, { id: `${from}->${to}`, from, to, keys: [] }];
+        return existing ? prev : [...prev, { id: edgeId, from, to, keys: [] }];
       }
       const key: CanvasKey = { id: `${from}.${fromCol}->${to}.${toCol}`, src: fromCol, dst: toCol };
       if (!existing) {
-        const edge = { id: `${from}->${to}`, from, to, keys: [key] };
-        setSelected(edge.id);
+        const edge = { id: edgeId, from, to, keys: [key] };
         return [...prev, edge];
       }
       if (existing.keys.some((k) => k.id === key.id)) return prev;
-      setSelected(existing.id);
       return prev.map((e) => (e === existing ? { ...e, keys: [...e.keys, key] } : e));
     });
   };
 
   /* ---------- 编辑 ---------- */
 
-  const removeNode = (table: string) => {
-    setNodes((prev) => prev.filter((n) => n.table !== table));
-    setEdges((prev) => prev.filter((e) => e.from !== table && e.to !== table));
-  };
+  const removeNode = useCallback(
+    (table: string) => {
+      setNodes((prev) => prev.filter((n) => n.table !== table));
+      setEdges((prev) => prev.filter((e) => e.from !== table && e.to !== table));
+    },
+    [setEdges, setNodes],
+  );
 
-  const toggleCollapse = (table: string) =>
-    setNodes((prev) =>
-      prev.map((n) => (n.table === table ? { ...n, collapsed: !n.collapsed } : n)),
-    );
+  const toggleCollapse = useCallback(
+    (table: string) =>
+      setNodes((prev) =>
+        prev.map((n) => (n.table === table ? { ...n, collapsed: !n.collapsed } : n)),
+      ),
+    [setNodes],
+  );
 
   const reverseEdge = (id: string) =>
     setEdges((prev) =>
@@ -445,70 +591,21 @@ export function LineageCanvas({
             )}
           </svg>
 
-          {nodes.map((node) => {
-            const cols = columnsOf(node.table);
-            const linkTarget = hover?.table === node.table;
-            return (
-              <div
-                key={node.table}
-                className={`lin-tnode${linkTarget ? " lin-tnode--drop" : ""}`}
-                style={{ left: node.x, top: node.y, width: NODE_W }}
-                data-table={node.table}
-              >
-                <div
-                  className="lin-tnode-head"
-                  onPointerDown={(event) => startNodeDrag(event, node)}
-                  onDoubleClick={() => toggleCollapse(node.table)}
-                  data-table={node.table}
-                >
-                  {isolated(node.table) && <i className="lin-iso-dot" title="孤岛表" />}
-                  <span className="lin-tnode-name" title={node.table}>
-                    {node.table}
-                  </span>
-                  <span className="lin-tnode-count">{cols.length}</span>
-                  {!frozen && (
-                    <button
-                      type="button"
-                      className="lin-tnode-x"
-                      aria-label="从画布移除"
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={() => removeNode(node.table)}
-                    >
-                      <CloseOutlined />
-                    </button>
-                  )}
-                </div>
-
-                {!node.collapsed && (
-                  <div className="lin-tnode-body">
-                    {cols.map((col) => (
-                      <div
-                        key={col.name}
-                        className={`lin-col${
-                          hover?.table === node.table && hover.col === col.name
-                            ? " lin-col--drop"
-                            : ""
-                        }`}
-                        data-table={node.table}
-                        data-col={col.name}
-                      >
-                        <span className="lin-col-name">
-                          {col.is_primary_key && <em className="lin-pk">PK</em>}
-                          {col.name}
-                        </span>
-                        <span className="lin-col-type">{col.data_type}</span>
-                        <span
-                          className="lin-port"
-                          onPointerDown={(event) => startLink(event, node.table, col.name)}
-                          title="从这里拖到下游表的字段"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {nodes.map((node) => (
+            <CanvasTableNode
+              key={node.table}
+              node={node}
+              columns={columnsByTable.get(node.table) ?? []}
+              dropTarget={hover?.table === node.table}
+              dropColumn={hover?.table === node.table ? hover.col : null}
+              isolated={isolated(node.table)}
+              frozen={frozen}
+              onStartDrag={startNodeDrag}
+              onToggleCollapse={toggleCollapse}
+              onStartLink={startLink}
+              onRemoveNode={removeNode}
+            />
+          ))}
         </div>
 
         {nodes.length === 0 && (
@@ -538,9 +635,9 @@ export function LineageCanvas({
             </div>
 
             <div className="lin-inspector-flow">
-              <span className="lin-node">{selectedEdge.from}</span>
+              <LineageTableName className="lin-node" name={selectedEdge.from} />
               <span className="lin-inspector-arrow">上游 → 下游</span>
-              <span className="lin-node lin-node--target">{selectedEdge.to}</span>
+              <LineageTableName className="lin-node lin-node--target" name={selectedEdge.to} />
             </div>
 
             {/* 表名可以很长，按钮里塞不下方向说明——方向在上面那两行已经写清楚了 */}
@@ -567,9 +664,9 @@ export function LineageCanvas({
             <ul className="lin-inspector-keys">
               {selectedEdge.keys.map((key) => (
                 <li key={key.id}>
-                  <span className="lin-key">
-                    {key.src} = {key.dst}
-                  </span>
+                  <LineageJoinKey
+                    value={`${selectedEdge.from}.${key.src} = ${selectedEdge.to}.${key.dst}`}
+                  />
                   {!frozen && (
                     <button
                       type="button"

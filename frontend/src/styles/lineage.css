@@ -15,7 +15,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--om-space-3);
+  gap: var(--om-space-2);
 }
 
 .lin-muted {
@@ -36,11 +36,11 @@
 
 .lin-topbar {
   flex: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 168px minmax(0, 1fr) auto;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--om-space-4);
-  padding: 9px var(--om-space-4);
+  gap: 10px 16px;
+  padding: 7px var(--om-space-3);
   background: var(--om-surface);
   border: 1px solid var(--om-border);
   border-radius: var(--om-radius-lg);
@@ -56,13 +56,84 @@
   white-space: nowrap;
 }
 
-.lin-stats {
-  flex: 1;
+.lin-topbar-tools {
   min-width: 0;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--om-space-3) var(--om-space-6);
+  justify-content: flex-end;
+  gap: var(--om-space-2);
+}
+
+.lin-submit-tools {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding-left: var(--om-space-2);
+  border-left: 1px solid var(--om-border);
+}
+
+.lin-submit-summary {
+  min-width: 0;
+  max-width: 250px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.lin-submit-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  flex: none;
+  color: var(--om-text-secondary);
+  font-size: var(--om-text-xs);
+  white-space: nowrap;
+}
+
+.lin-submit-count b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-lg);
+  font-weight: 600;
+  color: var(--om-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-submit-summary .ant-tag {
+  flex: none;
+  margin-inline-end: 0;
+  white-space: nowrap;
+}
+
+.lin-submit-acts {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lin-submit-dialect {
+  width: 96px;
+}
+
+.lin-done {
+  max-width: 56px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--om-text-xs);
+  color: var(--om-success);
+  font-weight: 500;
+}
+
+.lin-stats {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--om-space-3) var(--om-space-5);
 }
 
 .lin-stat {
@@ -154,6 +225,17 @@
   background: var(--om-machine);
 }
 
+.lin-meter--loading {
+  background: linear-gradient(
+    90deg,
+    var(--om-bg-soft) 25%,
+    var(--om-border) 50%,
+    var(--om-bg-soft) 75%
+  );
+  background-size: 200% 100%;
+  animation: lin-loading 1.2s ease-in-out infinite;
+}
+
 .lin-meter-gain {
   background: var(--om-success);
 }
@@ -164,8 +246,8 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 288px minmax(0, 1fr);
-  gap: var(--om-space-3);
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: var(--om-space-2);
 }
 
 /* 收起后只留一条可点的窄边——画布铺满时这 288px 很值钱 */
@@ -190,7 +272,7 @@
   display: flex;
   align-items: center;
   gap: var(--om-space-2);
-  padding: 10px var(--om-space-3) 10px var(--om-space-4);
+  padding: 8px var(--om-space-3);
   border-bottom: 1px solid var(--om-border);
 }
 
@@ -358,20 +440,28 @@
 /* ---------- 左栏：表清单 ---------- */
 
 .lin-rail-list {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   list-style: none;
   margin: 0;
   padding: var(--om-space-2);
 }
 
 .lin-rail-row {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: var(--om-space-2);
   padding: 5px 6px 5px 8px;
   border-radius: var(--om-radius-sm);
+}
+
+.lin-rail-virtual-spacer {
+  display: block;
+  pointer-events: none;
 }
 
 .lin-rail-row:hover {
@@ -390,12 +480,35 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--om-font-mono);
   font-size: var(--om-code-sm);
   color: var(--om-text);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.lin-rail-name > .lin-table-name {
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+}
+
+.lin-rail-name .lin-table-name-main {
+  flex: 1 1 100%;
+  min-width: 0;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.lin-rail-name .lin-table-name-db {
+  flex: 0 0 100%;
+  max-width: 100%;
+  line-height: 1.15;
 }
 
 .lin-rail-meta {
@@ -416,7 +529,7 @@
 
 .lin-main--scan {
   overflow-y: auto;
-  padding: var(--om-space-4);
+  padding: var(--om-space-3);
 }
 
 .lin-main--canvas {
@@ -426,6 +539,9 @@
 /* ---------- 共用：表名 / 关联键 ---------- */
 
 .lin-node {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
   font-family: var(--om-font-mono);
   font-size: var(--om-code-sm);
   padding: 1px 7px;
@@ -433,6 +549,44 @@
   border-radius: var(--om-radius-sm);
   background: var(--om-surface-muted);
   white-space: nowrap;
+}
+
+.lin-table-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.lin-table-name-main {
+  min-width: 0;
+  font-family: var(--om-font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-table-name-db,
+.lin-table-name-kind {
+  flex: none;
+  font-family: var(--om-font-sans);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--om-text-tertiary);
+  white-space: nowrap;
+}
+
+.lin-table-name-db {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lin-table-name-kind {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--om-neutral-soft);
 }
 
 .lin-node--target {
@@ -611,7 +765,8 @@
 }
 
 .lin-cell-name {
-  font-family: var(--om-font-mono);
+  flex: 1;
+  min-width: 0;
   font-size: var(--om-code-base);
 }
 
@@ -872,9 +1027,6 @@
   flex: 1;
   min-width: 0;
   text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .lin-wire--faded {
@@ -984,6 +1136,7 @@
   width: 6000px;
   height: 4000px;
   transform-origin: 0 0;
+  will-change: transform;
   /* 网格随画布一起缩放平移，拖动时才有"贴着格子走"的手感（吸附 8px） */
   background-image: radial-gradient(var(--om-border-strong) 1px, transparent 1px);
   background-size: 16px 16px;
@@ -1011,6 +1164,8 @@
   border: 1px solid var(--om-border-strong);
   border-radius: var(--om-radius);
   box-shadow: var(--om-shadow-sm);
+  contain: layout style;
+  will-change: transform;
 }
 
 .lin-tnode--drop {
@@ -1033,12 +1188,8 @@
 .lin-tnode-name {
   flex: 1;
   min-width: 0;
-  font-family: var(--om-font-mono);
   font-size: var(--om-code-sm);
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .lin-tnode-count {
@@ -1144,8 +1295,15 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
+  padding: 24px;
+  text-align: center;
   pointer-events: none;
   color: var(--om-text-tertiary);
+}
+
+.lin-canvas-empty span {
+  max-width: min(560px, 100%);
+  line-height: 1.6;
 }
 
 .lin-canvas-empty p {
@@ -1159,6 +1317,10 @@
   position: absolute;
   left: var(--om-space-3);
   bottom: var(--om-space-3);
+  max-width: calc(100% - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 4px 10px;
   border-radius: var(--om-radius-full);
   background: var(--om-surface);
@@ -1237,55 +1399,62 @@
   gap: 6px;
 }
 
-/* ---------- 写入条 ---------- */
-
-.lin-footer {
-  flex: none;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--om-space-3);
-  padding: 9px var(--om-space-5);
-  background: var(--om-surface);
-  border: 1px solid var(--om-border-strong);
-  border-radius: var(--om-radius-lg);
-  box-shadow: var(--om-shadow-md);
-}
-
-.lin-footer-counts {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px var(--om-space-3);
-  font-size: var(--om-text-base);
-  color: var(--om-text-secondary);
-}
-
-.lin-footer-counts b {
-  font-family: var(--om-font-mono);
-  font-size: var(--om-text-xl);
-  font-weight: 600;
-  color: var(--om-text);
-  font-variant-numeric: tabular-nums;
-}
-
-.lin-footer-acts {
-  display: flex;
-  align-items: center;
-  gap: var(--om-space-2);
-}
-
-.lin-done {
-  font-size: var(--om-text-sm);
-  color: var(--om-success);
-  font-weight: 500;
-}
-
 @media (max-width: 1100px) {
+  .lin-topbar {
+    grid-template-columns: auto minmax(150px, 1fr) auto;
+  }
+
+  .lin-stats {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(3, max-content) minmax(0, 1fr);
+    grid-row: 2;
+  }
+
+  .lin-topbar-tools {
+    gap: 6px;
+  }
+
   .lin-body,
   .lin-body--rail-closed {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(160px, 240px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .lin-topbar {
+    grid-template-columns: auto minmax(120px, 1fr);
+  }
+
+  .lin-topbar-tools {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    justify-content: flex-end;
+    padding-top: 2px;
+  }
+
+  .lin-submit-summary {
+    max-width: 180px;
+  }
+
+  .lin-submit-dialect {
+    width: 88px;
+  }
+
+  .lin-submit-acts {
+    gap: 4px;
+  }
+
+  .lin-done {
+    display: none;
+  }
+}
+
+@keyframes lin-loading {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
   }
 }

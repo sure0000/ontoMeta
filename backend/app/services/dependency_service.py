@@ -77,6 +77,18 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("mcp_default_role", "str", False, False, "reader"),
         ("mcp_rate_limit_per_minute", "int", False, False, 120),
         ("mcp_execute_sql_rate_limit_per_minute", "int", False, False, 30),
+        # 代执行授权闸：开着时，MCP 的 confirm_task/execute_task 只认已被人工
+        # 逐条标记为可代执行的任务。默认开——角色是长期许可，"这条现在可以自动跑"
+        # 是另一个决定。
+        ("mcp_require_execution_approval", "bool", False, False, True),
+        # 只允许本机 stdio + 真实 Principal 使用宿主交互确认断言；远程 HTTP 永不接受。
+        ("mcp_allow_stdio_interactive_approval", "bool", False, False, False),
+        # Skill 安装目录（后端主机上的绝对路径）。记住上次装到哪，免得每次重填一遍
+        # Agent 的 skills 目录；只是默认值，每次安装仍以请求里的目录为准。
+        ("mcp_skill_install_dir", "str", False, False, ""),
+        # 控制台对外地址：交互表单链接要拼成用户点得开的地址。后端听什么地址与用户从哪
+        # 访问它是两回事，故只取配置、不推导（见 use-saved-connection-info 那条法则）。
+        ("mcp_console_base_url", "str", False, False, ""),
     ],
 }
 

@@ -16,6 +16,8 @@ user-invocable: true
 
 本 skill 负责：需求 → 本体 → 数据 → 执行方案 → 草稿 → 校验。
 
+0. **参数没给全就别猜**：用户没说清本体、对象、数据源、装载方式或调度时，先走 `ontometa-flow`
+   （`start_task_flow` → `advance_task_flow`）把这些逐环问出来，拿到 `ready` 再回到这里。
 1. 明确 `kind`：`sync`、`transform`、`materialize` 或 `metric`。
 2. 用 `query_ontology`、`get_ontology_overview`、`query_objects`、`query_object_detail` 和 `list_datasources` 获取真实上下文。
    `metric` 任务另需真实的 `business_logic_id`：用 `search_logics` 找、`get_logic` 核实，确认 `status=published` 且 `formalized=true`——只有文字口径的那条建不出指标任务。
@@ -33,10 +35,18 @@ user-invocable: true
 - `draft_task` 已写入但校验异常：保留并报告 `task_id`，不要假装未创建。
 - 不调用 `confirm_task`、`execute_task`，除非用户明确切换到执行阶段并改用 `ontometa-task-execute`。
 
-## 输出
+{{OUTPUT_CONTRACT}}
 
-使用“结论 / 任务方案 / 校验证据 / 下一步”。展示 `task_id`、状态、目标、模式、`blocking_count` 和 dry-run 摘要；不输出完整 Spec 或凭据。
+## 输出补充（任务规划）
+
+- `结论` 说明规划到哪一步、能否进入确认：`validated` 且零阻断用 `待确认`；
+  存在阻断项用 `受阻`；只生成提案尚未落草稿用 `进行中`。
+- `结果` 只给业务可读的任务类型、来源、目标、模式和 dry-run 摘要；
+  禁止倾倒 `draft_payload` 或完整 Spec。
+- 阻断项每行写「问题 / 影响 / 修复动作」，最多 10 行，不要粘内部堆栈。
+- 失败或受阻时必须明确说清**有没有已经创建任务**，不要含糊写成"未完成"。
 
 ## 通用底线
 
 MCP 是 ontoMeta 能力的唯一入口：不读 `.env`、不猜 ID、不绕道 REST 或直连数据库；凭据、token、DSN 不进入回答、工具参数或报告。服务端 RBAC、校验闸门、审计和状态机是最终权威。把 `success` / `denied`（角色不够）/ `rate_limited`（限流）/ 校验阻断 / 远端执行失败分开报告，不要把“工具调用成功”写成“事情办成了”。
+换个阶段就换一份指引：其它主题用 `get_playbook(topic="ontometa-…")` 取回，不要凭印象套用本份的顺序。

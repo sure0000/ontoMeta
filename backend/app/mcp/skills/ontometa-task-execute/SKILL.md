@@ -22,8 +22,13 @@ user-invocable: true
 
 1. `confirm_task(task_id)`：记录真实确认人，确认结果必须是 `confirmed`。
 2. `execute_task(task_id)`：只接受 `accepted=true` / `status=executing` 作为“已受理”，不称为成功。
-3. 每约 5 秒调用 `get_task_status`，直到 `succeeded` 或 `failed`；长时间无变化时最多用一次 `list_tasks` 交叉核对，不重复触发执行。
+3. 用 `wait_task_status(task_id)` 服务端长轮询到 `succeeded` 或 `failed`；返回 `timed_out=true` 时稍后再次等待，
+   不用 Bash/sleep，不用高频重复 `get_task_status`。长时间无变化时最多用一次 `list_tasks` 交叉核对，不重复触发执行。
 4. 终态以 Airflow/Doris 对账结果为准。只有终态 `succeeded` 才能说执行成功；`failed` 必须说明失败阶段和 `run_url`。
+
+启用本机宿主交互确认时，步骤 1 前必须先用 dsh 原生 `ask_user_question` 展示方案并得到批准；
+把 `get_task_status` 返回的 `interactive_approval.digest` 组成 `host_confirmation`，同时传给步骤 1 和步骤 2。
+没有宿主交互能力时不要自行填 `approved=true`，改走任务详情逐条授权或停止在 `待确认`。
 
 ## 运行追溯（问“已经发生了什么”时走这条）
 
@@ -47,10 +52,30 @@ user-invocable: true
 - 失败后先报告回执和日志入口，不自动新建或重跑任务。
 - 不读取 Admin Token、`.env`、Airflow 凭据或内部日志中的密码。
 
-## 输出
+{{OUTPUT_CONTRACT}}
 
-使用“结论 / 执行链 / 终态证据 / 下一步”。列出每阶段工具结果、task_id、DagRun、实时状态、是否超时和最终回执摘要；绝不把受理快照当作终态。运行追溯类回答要标明记录族、`as_of` 与 `observed_at`，失败无原因时明确指向 `run_url`。
+## 输出补充（任务执行与追溯）
+
+- 状态映射是硬的：`accepted=true` 只能写 `进行中`；终态 `succeeded` 才是 `完成`；
+  终态 `failed` 是 `失败`；代执行授权未放行是 `待确认`；权限或限流是 `受阻`。
+- `结果` 按业务阶段展示（校验 / 确认 / 执行），不逐条复述工具调用。
+- 运行追溯必须在 `依据` 给出记录族、`as_of` 与 `observed_at`；时间统一用同一时区的
+  `YYYY-MM-DD HH:mm:ss`。
+- 未到终态时必须保留 `限制`，写明"尚不能判定成功"；`failed_without_reason` 时只给
+  `run_url`，禁止猜测失败原因。
+
+## 两条容易踩的默认值
+
+- `list_tasks` **默认不对账 Airflow**（快得多），返回的 `status` 是制品自身记录、可能落后于远端；
+  要终态就对**单条**用 `get_task_status`，别为了拿终态给整批传 `reconcile=true`。
+- `confirm_task` / `execute_task` 除角色外还有一道**代执行授权闸**（逐条由人在任务详情里放行）。
+  被它拦下时 `metadata.gate=agent_execution_approval`——这不是权限不足，换令牌没用，
+  如实告诉用户去哪里放行，不要重试。
+- dsh Web 若管理员显式开启“本机宿主交互确认”，先用宿主的 `ask_user_question` 展示任务方案并取得用户批准，
+  再把 `get_task_status` 返回的 `interactive_approval.digest` 作为 `host_confirmation` 同时传给
+  `confirm_task` 与 `execute_task`。digest 不一致表示方案已变，必须重新展示确认；远程 HTTP、匿名和 Admin bootstrap token 不可使用。
 
 ## 通用底线
 
 MCP 是 ontoMeta 能力的唯一入口：不读 `.env`、不猜 ID、不绕道 REST 或直连数据库；凭据、token、DSN 不进入回答、工具参数或报告。服务端 RBAC、校验闸门、审计和状态机是最终权威。把 `success` / `denied`（角色不够）/ `rate_limited`（限流）/ 校验阻断 / 远端执行失败分开报告，不要把“工具调用成功”写成“事情办成了”。
+换个阶段就换一份指引：其它主题用 `get_playbook(topic="ontometa-…")` 取回，不要凭印象套用本份的顺序。

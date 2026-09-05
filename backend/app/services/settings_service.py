@@ -152,6 +152,10 @@ class McpRuntimeConfig:
     mcp_default_role: str = "reader"
     mcp_rate_limit_per_minute: int = 120
     mcp_execute_sql_rate_limit_per_minute: int = 30
+    mcp_require_execution_approval: bool = True
+    mcp_allow_stdio_interactive_approval: bool = False
+    mcp_skill_install_dir: str = ""
+    mcp_console_base_url: str = ""
 
 
 def mask_secret(value: str | None) -> str | None:
@@ -226,6 +230,18 @@ class SettingsService:
         # normalized for old callers, but never let them enable another mode.
         values["mcp_http_enabled"] = True
         values["mcp_http_allow_anonymous"] = False
+        # 读侧要和 get_mcp_runtime 用同一个缺省，否则字段是在这个设置项之前建的行
+        # 会读回 None，开关在界面上显示"关"，而运行期其实是开着的——界面会撒谎。
+        values["mcp_require_execution_approval"] = (
+            True
+            if values.get("mcp_require_execution_approval") is None
+            else bool(values.get("mcp_require_execution_approval"))
+        )
+        values["mcp_skill_install_dir"] = str(values.get("mcp_skill_install_dir") or "")
+        values["mcp_console_base_url"] = str(values.get("mcp_console_base_url") or "")
+        values["mcp_allow_stdio_interactive_approval"] = bool(
+            values.get("mcp_allow_stdio_interactive_approval")
+        )
         return values
 
     def update_mcp_settings(self, db: Session, data: dict) -> dict:
@@ -245,6 +261,17 @@ class SettingsService:
             mcp_rate_limit_per_minute=int(c.get("mcp_rate_limit_per_minute") or 0),
             mcp_execute_sql_rate_limit_per_minute=int(
                 c.get("mcp_execute_sql_rate_limit_per_minute") or 0
+            ),
+            # 缺省 True：没配过的老部署也带闸，而不是默默敞着。
+            mcp_require_execution_approval=(
+                True
+                if c.get("mcp_require_execution_approval") is None
+                else bool(c.get("mcp_require_execution_approval"))
+            ),
+            mcp_skill_install_dir=str(c.get("mcp_skill_install_dir") or ""),
+            mcp_console_base_url=str(c.get("mcp_console_base_url") or ""),
+            mcp_allow_stdio_interactive_approval=bool(
+                c.get("mcp_allow_stdio_interactive_approval")
             ),
         )
 
@@ -441,6 +468,8 @@ class SettingsService:
                     "mcp_default_role": env_settings.mcp_default_role,
                     "mcp_rate_limit_per_minute": env_settings.mcp_rate_limit_per_minute,
                     "mcp_execute_sql_rate_limit_per_minute": env_settings.mcp_execute_sql_rate_limit_per_minute,
+                    "mcp_require_execution_approval": env_settings.mcp_require_execution_approval,
+                    "mcp_allow_stdio_interactive_approval": env_settings.mcp_allow_stdio_interactive_approval,
                 },
             )
 

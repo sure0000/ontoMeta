@@ -6,7 +6,7 @@ MCP 工具（`server_info` / `get_mcp_stats` / `list_audit_logs`）和前端用�
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Integer, case, cast, func, or_
@@ -89,13 +89,24 @@ def audit_health(db: Session) -> dict[str, Any]:
     return {"reachable": reachable, "error": error}
 
 
+def _window_start(window_minutes: int) -> datetime:
+    """时间窗起点，用**库里那套钟**算。
+
+    ``McpAuditLog.created_at`` 是裸时间（``server_default=now()``，本机时钟）。
+    这里曾经用 ``datetime.now(timezone.utc)`` 做起点：aware 值传给
+    ``timestamp without time zone`` 列会被丢掉偏移当成 UTC 墙钟，于是
+    「最近 24 小时」在 UTC+8 上实际取了 32 小时。窗口和桶必须同钟。
+    """
+    return datetime.now() - timedelta(minutes=int(window_minutes))
+
+
 def compute_stats(
     db: Session, *, window_minutes: int | None = None, top_tools: int = 20
 ) -> dict[str, Any]:
     """审计聚合：总量、延迟、趋势、错误聚合和工具/角色分组。"""
     since = None
     if window_minutes:
-        since = datetime.now(timezone.utc) - timedelta(minutes=int(window_minutes))
+        since = _window_start(window_minutes)
 
     def _scope(q):
         return q.filter(McpAuditLog.created_at >= since) if since is not None else q
@@ -208,13 +219,18 @@ def compute_stats(
     for created_at, success, denied_flag, error in trend_rows:
         if created_at is None:
             continue
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
+        # created_at 落库是**裸时间**（server_default=now()，本机时钟），
+        # last_call_at 和 /api/mcp/audit 的 created_at 也都原样裸着回。
+        # 这里曾经把裸时间当 UTC 读进来、再按 UTC 打上 +00:00 写回去——同一个钟点，
+        # 一个裸一个带偏移，前端 new Date().toLocaleString() 一转就差整整一个时区，
+        # 趋势里于是出现比「最近调用」还晚的桶。桶一律留在库里那套钟上。
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone().replace(tzinfo=None)
         timestamp = created_at.timestamp()
         bucket = int(timestamp // bucket_seconds) * bucket_seconds
         item = buckets.setdefault(
             bucket,
-            {"bucket": datetime.fromtimestamp(bucket, tz=timezone.utc).isoformat(), "calls": 0, "succeeded": 0, "failed": 0, "denied": 0, "rate_limited": 0},
+            {"bucket": datetime.fromtimestamp(bucket).isoformat(), "calls": 0, "succeeded": 0, "failed": 0, "denied": 0, "rate_limited": 0},
         )
         item["calls"] += 1
         if success:
@@ -292,7 +308,7 @@ def query_audit(
     """审计日志分页查询。返回 (rows, total)。arguments 已在写入时脱敏。"""
     q = db.query(McpAuditLog)
     if window_minutes:
-        since = datetime.now(timezone.utc) - timedelta(minutes=int(window_minutes))
+        since = _window_start(window_minutes)
         q = q.filter(McpAuditLog.created_at >= since)
     if tool_name:
         q = q.filter(McpAuditLog.tool_name == tool_name)

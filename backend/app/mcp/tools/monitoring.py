@@ -22,15 +22,41 @@ class ServerInfoTool:
     required_role = "reader"
     name = "server_info"
     description = (
-        "回读本 MCP 服务器状态：版本、传输方式、工具清单与各自最低角色、当前会话身份、"
-        "限流配置、审计表可达性。用于自查「我这条会话是什么权限、某工具为什么被拒」。"
+        "回读本 MCP 服务器状态：版本、传输方式、当前会话身份、限流配置、审计表可达性，"
+        "以及**工具名 → 最低角色**的对照表。用于自查「我这条会话是什么权限、某工具为什么被拒」。\n"
+        "默认不重复各工具的完整描述——那份你的工具清单里已经有了一份；"
+        "确实要读全文时传 verbose=true。"
     )
-    input_schema = {"type": "object", "properties": {}}
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "verbose": {
+                "type": "boolean",
+                "description": "连各工具的完整描述一起回（约 8KB，通常不需要）",
+                "default": False,
+            },
+        },
+    }
 
     async def execute(self, arguments: dict, auth: AuthContext) -> ToolResult:
+        verbose = bool(arguments.get("verbose", False))
         status = introspection.service_status()
         with session() as db:
             audit = introspection.audit_health(db)
+        tools = status.pop("tools", [])
+        if verbose:
+            status["tools"] = tools
+        else:
+            # 调用方的工具清单里已经有一份完整描述了；skill 又要求开局先调 server_info，
+            # 于是同一份文本被付两次费（清单 15.7KB + 这里 8.1KB）。默认只回
+            # 「哪个工具要什么角色」——这才是自查权限时真正要看的那一列。
+            status["tool_roles"] = {
+                item["name"]: item["required_role"] for item in tools
+            }
+            status["tools_note"] = (
+                "工具描述已省略（你的工具清单里有完整版）；"
+                "确需全文传 verbose=true。跨工具的调用顺序看 get_playbook。"
+            )
         return ToolResult(
             success=True,
             data={
@@ -44,7 +70,7 @@ class ServerInfoTool:
                 },
                 "audit": audit,
             },
-            metadata={"role": auth.role},
+            metadata={"role": auth.role, "verbose": verbose},
         )
 
 

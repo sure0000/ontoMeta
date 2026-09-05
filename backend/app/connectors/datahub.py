@@ -89,7 +89,14 @@ fragment DatasetDetails on Dataset {
 """
 
 _ENTITY_BATCH_SIZE = 20
-_DOMAIN_ENTITY_PAGE_SIZE = 100
+# The lineage inventory asks for only urn/name/platform and two totals.  It is
+# much smaller than the full dataset fragment above, so use larger batches to
+# reduce round trips for domains with thousands of tables.
+_LINEAGE_INDEX_BATCH_SIZE = 250
+# DataHub accepts a larger page for domain membership than the generic search
+# defaults.  Fewer pagination round trips materially reduce the inventory
+# latency for 1k+ table domains.
+_DOMAIN_ENTITY_PAGE_SIZE = 1000
 
 
 def _field_path(field_path: str) -> str:
@@ -521,8 +528,8 @@ class DataHubConnector:
         }
         """
         batches = [
-            urns[idx : idx + _ENTITY_BATCH_SIZE]
-            for idx in range(0, len(urns), _ENTITY_BATCH_SIZE)
+            urns[idx : idx + _LINEAGE_INDEX_BATCH_SIZE]
+            for idx in range(0, len(urns), _LINEAGE_INDEX_BATCH_SIZE)
         ]
         semaphore = asyncio.Semaphore(settings.datahub_max_concurrency)
 

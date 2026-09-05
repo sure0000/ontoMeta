@@ -24,6 +24,7 @@ from app.mcp import introspection
 from app.mcp.audit import record_call
 from app.mcp.skills import (
     get_skill,
+    install_to_dir,
     list_skills,
     reset_override,
     save_override,
@@ -47,9 +48,41 @@ class SkillEnabledPayload(BaseModel):
     enabled: bool
 
 
+class SkillInstallPayload(BaseModel):
+    """把生效 Skill 直接写进 Agent 读取的目录（后端主机上的绝对路径）。"""
+
+    target_dir: str = Field(min_length=1)
+    #: 留空 = 全部已启用；给了就只装这几份（仍是生效正文）。
+    names: list[str] | None = None
+    #: 只回计划、不写盘。界面先拿它给人看"会新建/覆盖哪几份"。
+    dry_run: bool = False
+    #: 记住这个目录作为下次的默认值（真正写盘时才记）。
+    remember: bool = True
+
+
 class McpSettingsPayload(BaseModel):
     mcp_rate_limit_per_minute: int | None = Field(default=None, ge=0, le=100000)
     mcp_execute_sql_rate_limit_per_minute: int | None = Field(default=None, ge=0, le=100000)
+    # 代执行授权闸的开关（与角色正交，只作用于 MCP 的 confirm/execute）。
+    mcp_require_execution_approval: bool | None = None
+    # 本机 stdio 宿主可用 ask_user_question 等 UI 取得人类确认，并回传任务 digest。
+    mcp_allow_stdio_interactive_approval: bool | None = None
+    # Skill 安装目录（后端主机上的绝对路径），只作为技能页的默认值。
+    mcp_skill_install_dir: str | None = None
+    # 控制台对外地址，用于把交互表单拼成可点的链接。
+    mcp_console_base_url: str | None = None
+
+
+# 读写两侧共用一份字段清单：少写一个，界面上那一格就静默变成"关"，
+# 而运行期其实还开着——开关会撒谎。
+_MCP_SETTING_FIELDS = (
+    "mcp_rate_limit_per_minute",
+    "mcp_execute_sql_rate_limit_per_minute",
+    "mcp_require_execution_approval",
+    "mcp_allow_stdio_interactive_approval",
+    "mcp_skill_install_dir",
+    "mcp_console_base_url",
+)
 
 
 def _audit_management(
@@ -122,11 +155,7 @@ def mcp_settings(db: Session = Depends(get_db)):
     from app.api.deps import settings_service
 
     values = settings_service.get_mcp_settings(db)
-    values = {
-        key: values[key]
-        for key in ("mcp_rate_limit_per_minute", "mcp_execute_sql_rate_limit_per_minute")
-        if key in values
-    }
+    values = {key: values[key] for key in _MCP_SETTING_FIELDS if key in values}
     values.pop("updated_at", None)
     return values
 
@@ -139,7 +168,13 @@ def update_mcp_settings(
 ):
     from app.api.deps import settings_service
 
-    data = {key: value for key, value in payload.model_dump(exclude_unset=True).items() if value is not None}
+    # 用 `is not None` 而不是真值判断：False 是合法取值（把闸关掉），
+    # truthy 过滤会让"关"这个动作静默失效。
+    data = {
+        key: value
+        for key, value in payload.model_dump(exclude_unset=True).items()
+        if value is not None
+    }
     try:
         values = settings_service.update_mcp_settings(db, data)
     except ValueError as exc:
@@ -148,6 +183,65 @@ def update_mcp_settings(
     _audit_management(request, "settings:mcp", data, success=True)
     values.pop("updated_at", None)
     return values
+
+
+class FlowFormSubmitPayload(BaseModel):
+    """页面填完后提交的取值（键是字段 key）。
+
+    ``confirm`` 只在执行审查那一步为真（人点了「确认执行方案」）；``plan_digest`` 是页面上
+    显示的那份方案的指纹，对不上说明提交前方案变了，服务端会退回让人重看。
+    """
+
+    values: dict = {}
+    confirm: bool = False
+    plan_digest: str = ""
+
+
+@router.get("/mcp/flow-forms/{form_id}")
+def mcp_flow_form(form_id: str, db: Session = Depends(get_db)):
+    """交互式建数流程的一次性表单：字段与候选每次实时算，不读快照。"""
+    from app.mcp.flow_forms import form_state, get_form
+
+    form = get_form(db, form_id)
+    if form is None:
+        raise HTTPException(status_code=404, detail="表单不存在或已被清理")
+    return form_state(db, form)
+
+
+@router.post(
+    "/mcp/flow-forms/{form_id}/submit", dependencies=[Depends(require_role("editor"))]
+)
+def submit_mcp_flow_form(
+    form_id: str,
+    payload: FlowFormSubmitPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """提交表单。参数没填齐、或执行审查还没被确认，就原地退回继续；填齐并确认才落 submitted。"""
+    from app.mcp.flow_forms import get_form, submit_form
+
+    form = get_form(db, form_id)
+    if form is None:
+        raise HTTPException(status_code=404, detail="表单不存在或已被清理")
+    result = submit_form(
+        db,
+        form,
+        payload.values or {},
+        confirm=payload.confirm,
+        plan_digest=payload.plan_digest,
+    )
+    _audit_management(
+        request,
+        "flow-form:submit",
+        {
+            "form_id": form_id,
+            "stage": form.stage,
+            "confirm": payload.confirm,
+            "accepted": result.get("accepted"),
+        },
+        success=True,
+    )
+    return result
 
 
 @router.get("/mcp/skills")
@@ -170,6 +264,44 @@ def export_mcp_skills(db: Session = Depends(get_db)):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/mcp/skills/install", dependencies=[Depends(require_role("publisher"))])
+def install_mcp_skills(
+    payload: SkillInstallPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """把生效 Skill 写进目标目录，省掉"下载 ZIP → 找到目录 → 解压"这三步。
+
+    路径是**后端主机**上的绝对路径（安装是服务端写盘）。``dry_run`` 先给计划，
+    界面确认后再真写；两次都记审计——这是一个往主机上写文件的动作。
+    """
+    from app.api.deps import settings_service
+
+    action = "skill:install-preview" if payload.dry_run else "skill:install"
+    arguments = {
+        "target_dir": payload.target_dir,
+        "names": payload.names,
+        "dry_run": payload.dry_run,
+    }
+    try:
+        result = install_to_dir(
+            db,
+            target_dir=payload.target_dir,
+            names=payload.names,
+            dry_run=payload.dry_run,
+        )
+    except ValueError as exc:
+        _audit_management(request, action, arguments, success=False, error=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not payload.dry_run and payload.remember:
+        # 记的是**规范化后**的目录：下次默认值与这次真正写进去的地方是同一个。
+        settings_service.update_mcp_settings(
+            db, {"mcp_skill_install_dir": result["target_dir"]}
+        )
+    _audit_management(request, action, arguments, success=True)
+    return result
 
 
 @router.get("/mcp/skills/{name}/versions")

@@ -28,7 +28,7 @@ from app.database import SessionLocal
 from .audit import record_call
 from .auth import resolve_auth_context, resolve_http_auth
 from .rate_limit import check_rate_limit
-from .skills import get_skill, list_skills
+from .skills import OUTPUT_CONTRACT, get_skill, list_skills
 from .tools import TOOL_REGISTRY, AuthContext, ToolResult, tool_required_role
 
 # stdout 是 MCP 协议通道，日志一律走 stderr——print/日志落到 stdout 会撑破 JSON-RPC 帧。
@@ -38,15 +38,41 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "ontometa"
 SERVER_VERSION = "1.0.0"
 
-# Keep initialization guidance deliberately small.  Full operating guidance is
-# available through MCP prompts, while these lines cover the failure modes that
-# otherwise produce plausible but incorrect answers.
-SERVER_INSTRUCTIONS = """ontoMeta MCP 使用底线：
+# Skills carry the detailed, domain-specific format.  Keep this short fallback
+# on every tool because some dsh sessions can temporarily lose their local
+# skill catalog; tool descriptions remain available in that case.
+# 状态枚举与行数上限取自 OUTPUT_CONTRACT（与 ontometa-output 总控同源）：这两项是可枚举的
+# 事实，写死在这里就会在总控改了之后继续宣传旧口径。散文部分保持极简——它挂在每个工具的
+# 描述后面，34 个工具就是 34 份，塞一份完整契约会把工具清单撑爆。
+TOOL_OUTPUT_FALLBACK = (
+    "\n\n最终答复格式（即使未加载 Skill 也必须遵守）：使用 Markdown 的 `## 结论`、"
+    "`## 结果`、`## 依据`；仅有内容时加 `## 限制`、`## 下一步`。状态只能是"
+    + "/".join(OUTPUT_CONTRACT["statuses"])
+    + f"；明细最多 {OUTPUT_CONTRACT['max_detail_rows']} 行，超出写总数和 truncated；"
+    "不要输出原始 JSON、完整 Spec、凭据或调用过程。"
+    "\n需要用户在候选之间做选择时，只摆编号候选并停下等回答，不要替用户选。"
+)
+
+# Keep initialization guidance deliberately small.  The full operating guidance
+# lives in the playbooks; these lines only have to get the client there, plus the
+# failure modes that otherwise produce plausible but incorrect answers.
+#
+# 第一句指向 get_playbook 而不是 prompts：prompts 不是每个客户端都消费（dsh 的 MCP
+# 客户端明确只桥接 tools），只靠 list_prompts 的话，远程接入方拿到的是一堆工具和零份
+# 指引。get_playbook 走 tools 通道，是唯一对所有客户端都成立的那条路。
+SERVER_INSTRUCTIONS = """ontoMeta MCP：动手前先调 get_playbook（不带参数看主题清单，
+带 topic 取正文）——跨工具的调用顺序、闸门和输出契约只在 playbook 里，工具描述里没有。
+最终答复必须按 playbook 的固定 Markdown 骨架输出：结论、结果、依据；只在有内容时加限制和下一步。
+状态只能是完成、进行中、待确认、受阻、失败或无结果；不要输出原始 JSON、完整 Spec、凭据或调用过程。
+
+三条使用底线（错了不报错，只会给出看起来合理的错答案）：
 1. 业务口径以本体和已登记业务逻辑为准，先用 search_logics/compile_metric，不要凭文字重写 SQL。
 2. 连接键和字段字面量必须先用 find_join_path/profile_values 核实，不要猜表名、JOIN 或枚举值。
 3. 运行事实只从 get_task_status/get_landing/get_ops_record 读取，不要根据命名规则推断已落地或已成功。
 
-Skill 路由：
+playbook 主题：
+- ontometa-output：所有回答共同遵守的出口契约（格式、状态口径、怎么向用户提问）
+- ontometa-flow：用户想建任务但参数没给全时，用 start_task_flow 一问一答带他走完
 - ontometa-discovery：用 query_ontology 探索本体、对象、关系、口径、血缘和落点
 - ontometa-query：核实口径、关联和字段取值，编译并执行查询
 - ontometa-task-plan：起草并校验任务方案
@@ -111,7 +137,7 @@ async def handle_list_tools(context, params) -> types.ListToolsResult:
     tools = [
         types.Tool(
             name=tool.name,
-            description=tool.description,
+            description=f"{tool.description.rstrip()}{TOOL_OUTPUT_FALLBACK}",
             inputSchema=tool.input_schema,
         )
         for tool in TOOL_REGISTRY.values()

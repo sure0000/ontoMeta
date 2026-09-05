@@ -117,7 +117,9 @@ import type {
   McpSkill,
   McpSkillVersion,
   McpSkillsResponse,
+  McpFlowFormState,
   McpSettings,
+  McpSkillInstallResult,
 } from "./types";
 import { buildQuery } from "./utils/format";
 
@@ -281,8 +283,10 @@ export const api = {
       signal ? { signal } : undefined,
     ),
 
-  listLineagePackages: (domainId: string, kind = "scan") =>
-    request<LineagePackageRow[]>(`/api/lineage/domains/${domainId}/packages?kind=${kind}`),
+  listLineagePackages: (domainId: string, kind = "scan", includeInventory = true) =>
+    request<LineagePackageRow[]>(
+      `/api/lineage/domains/${domainId}/packages?kind=${kind}&include_inventory=${includeInventory}`,
+    ),
 
   uploadLineagePackage: (domainId: string, file: File, dialect: string) => {
     const form = new FormData();
@@ -291,8 +295,10 @@ export const api = {
     return upload<LineagePackageDetail>(`/api/lineage/domains/${domainId}/packages`, form);
   },
 
-  getLineagePackage: (packageId: string) =>
-    request<LineagePackageDetail>(`/api/lineage/packages/${packageId}`),
+  getLineagePackage: (packageId: string, includeInventory = true) =>
+    request<LineagePackageDetail>(
+      `/api/lineage/packages/${packageId}?include_inventory=${includeInventory}`,
+    ),
 
   rescanLineagePackage: (packageId: string, dialect?: string) =>
     request<LineagePackageDetail>(
@@ -1634,9 +1640,7 @@ export const api = {
   updateMcpSettings: (body: Partial<McpSettings>) =>
     request<McpSettings>("/api/mcp/settings", { method: "PUT", body: JSON.stringify(body) }),
   getMcpStats: (windowMinutes?: number) =>
-    request<McpStats>(
-      `/api/mcp/stats${windowMinutes ? `?window_minutes=${windowMinutes}` : ""}`,
-    ),
+    request<McpStats>(`/api/mcp/stats${windowMinutes ? `?window_minutes=${windowMinutes}` : ""}`),
   getMcpAudit: (params?: {
     toolName?: string;
     result?: "success" | "failed" | "denied" | "rate_limited";
@@ -1659,6 +1663,22 @@ export const api = {
     const qs = q.toString();
     return request<McpAuditPage>(`/api/mcp/audit${qs ? `?${qs}` : ""}`);
   },
+  /** 交互式建数流程的一次性网页表单（Agent 用 open_task_form 发链接）。 */
+  getMcpFlowForm: (formId: string) =>
+    request<McpFlowFormState>(`/api/mcp/flow-forms/${encodeURIComponent(formId)}`),
+  submitMcpFlowForm: (
+    formId: string,
+    values: Record<string, unknown>,
+    options?: { confirm?: boolean; planDigest?: string },
+  ) =>
+    request<McpFlowFormState>(`/api/mcp/flow-forms/${encodeURIComponent(formId)}/submit`, {
+      method: "POST",
+      body: JSON.stringify({
+        values,
+        confirm: options?.confirm ?? false,
+        plan_digest: options?.planDigest ?? "",
+      }),
+    }),
   getMcpSkills: () => request<McpSkillsResponse>("/api/mcp/skills"),
   downloadMcpSkills: async (name?: string) => {
     const path = name
@@ -1681,7 +1701,8 @@ export const api = {
     }
     const blob = await response.blob();
     const disposition = response.headers.get("content-disposition") || "";
-    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ||
+    const filename =
+      disposition.match(/filename="?([^";]+)"?/i)?.[1] ||
       (name ? `${name}-skill.zip` : "ontometa-skills.zip");
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -1692,9 +1713,25 @@ export const api = {
     anchor.remove();
     URL.revokeObjectURL(url);
   },
+  /**
+   * 把生效 Skill 直接写进目标目录（**后端主机**上的绝对路径），省掉下载解压那两步。
+   * `dry_run` 先拿计划给人看会新建/覆盖哪几份，确认后再真写。
+   */
+  installMcpSkills: (body: {
+    target_dir: string;
+    names?: string[];
+    dry_run?: boolean;
+    remember?: boolean;
+  }) =>
+    request<McpSkillInstallResult>("/api/mcp/skills/install", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getMcpSkill: (name: string) => request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}`),
   listMcpSkillVersions: (name: string) =>
-    request<{ versions: McpSkillVersion[] }>(`/api/mcp/skills/${encodeURIComponent(name)}/versions`),
+    request<{ versions: McpSkillVersion[] }>(
+      `/api/mcp/skills/${encodeURIComponent(name)}/versions`,
+    ),
   restoreMcpSkillVersion: (name: string, version: number) =>
     request<McpSkill>(`/api/mcp/skills/${encodeURIComponent(name)}/versions/${version}/restore`, {
       method: "POST",
@@ -1811,6 +1848,16 @@ export const api = {
     request<GovernanceArtifact>(`/api/agents/artifacts/${id}/confirm`, {
       method: "POST",
       body: JSON.stringify({ operator }),
+    }),
+  /**
+   * 逐条给出/收回「允许 Agent 代执行」。
+   *
+   * 这是这道闸的唯一写入口——MCP 工具只读它，否则 agent 就能自己给自己发许可。
+   */
+  setArtifactAgentApproval: (id: string, approved: boolean, operator?: string) =>
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}/agent-approval`, {
+      method: "POST",
+      body: JSON.stringify({ approved, operator }),
     }),
   executeArtifact: (id: string, context?: Record<string, unknown>) =>
     request<GovernanceArtifact>(`/api/agents/artifacts/${id}/execute`, {
