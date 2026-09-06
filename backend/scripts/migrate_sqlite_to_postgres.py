@@ -36,10 +36,9 @@ from collections.abc import Iterator
 from sqlalchemy import String, Table, create_engine, func, insert, select
 from sqlalchemy.engine import Engine
 
+import app.models  # noqa: F401  触发全部模型注册，metadata 才是完整的
 from app.config import settings
 from app.database import Base
-
-import app.models  # noqa: F401  触发全部模型注册，metadata 才是完整的
 
 #: 运行期配置表：权威源是目标库自己，默认不覆盖。
 SETTINGS_TABLES = frozenset(
@@ -263,7 +262,7 @@ def main() -> int:
         for table, _n_src, n_dst, action in reversed(rows):
             if action == "overwrite" and n_dst:
                 conn.execute(table.delete())
-        for table, n_src, _n_dst, action in rows:
+        for table, n_src, _n_dst, _action in rows:
             if action not in ("copy", "overwrite"):
                 continue
             # 父表此刻已经写完（sorted_tables 顺序），直接从**目标库**读父键集合：
@@ -321,7 +320,7 @@ def main() -> int:
     # 校验：逐表比对行数，别只信写入计数。差额必须正好等于本表丢弃的悬空行数，
     # 对不上说明还有别的东西在丢数据。
     bad = []
-    for table, n_src, _n_dst, action in rows:
+    for table, n_src, _n_dst, _action in rows:
         if table.name not in copied:
             continue
         n_now = count_rows(target, table)

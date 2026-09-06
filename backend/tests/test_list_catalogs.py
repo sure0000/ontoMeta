@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
+from app.database import SessionLocal
 from app.models import DataSource
-from app.services.chat_bi import ChatBiService
 from app.services.chat_bi_tool_schemas import _TOOL_BY_NAME
 from app.services.data_app import resolve_domain_data_source
-from app.database import SessionLocal
-import pytest
 
 
 @pytest.fixture(autouse=True)

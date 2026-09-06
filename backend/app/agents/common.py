@@ -11,7 +11,8 @@ LLM 接入点：``select_by_intent`` 是唯一需要「理解自然语言」的�
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, TypeVar
+from collections.abc import Iterable
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -44,8 +45,8 @@ def score_match(intent: str, *candidates: str | None) -> int:
     return score
 
 
-def select_by_intent(
-    intent: str, items: Iterable[T], key: "callable[[T], tuple[str | None, ...]]"
+def select_by_intent[T](
+    intent: str, items: Iterable[T], key: callable[[T], tuple[str | None, ...]]
 ) -> T | None:
     """从候选中挑与意图最贴合的一个；无任何重合时返回 None（宁缺毋滥）。"""
     best: T | None = None

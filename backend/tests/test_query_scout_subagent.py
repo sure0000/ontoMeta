@@ -18,12 +18,9 @@ from app.services.chat_bi import _AGENT_TOOL_SCHEMAS, ChatBiService
 from app.services.query_scout_agent import (
     MAX_STEPS,
     SCOUT_TOOLS,
-    ScoutResult,
     scout_query,
 )
-
 from tests.fixtures.large_ontology import seed_large_ontology
-
 
 # ------------------------------------------------------------------ stub
 

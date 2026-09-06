@@ -9,14 +9,14 @@ from app.schemas import (
     PropertyEvidencePack,
     RelationEvidencePack,
 )
+from app.services.bridge_collapse import select_bridge_endpoints
+from app.services.community_detection import label_propagation_clusters
+from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.object_classifier import (
     ROLE_BUSINESS_OBJECT,
     FieldSignal,
     classify_object_role,
 )
-from app.services.bridge_collapse import select_bridge_endpoints
-from app.services.community_detection import label_propagation_clusters
-from app.services.fact_naming import detect_fact_name, detect_weak_fact_name
 from app.services.relation_terms import infer_relation_term, reference_term
 from app.services.source_profile import InferredFk, SourceProfile, detect_source_profile
 
@@ -216,18 +216,18 @@ class EvidenceBuilder:
             # 重判时必须尊重它——见 _reclassify_bridge_to_object。
             field_signals_by_name[object_name] = field_signals
             child_table_by_name[object_name] = is_child
-            reeval_args_by_name[object_name] = dict(
-                fk_in_degree=fk_in_degree.get(dataset.name, 0),
-                distinct_fk_targets=fk_out_degree.get(dataset.name, 0),
-                lineage_upstream=lineage_up.get(dataset.urn, 0),
-                lineage_downstream=lineage_down.get(dataset.urn, 0),
-                glossary_terms=dataset.glossary_terms,
-                row_count=dataset.row_count,
-                has_business_naming=has_business_naming,
-                subtypes=dataset.subtypes,
-                tags=dataset.tags,
-                segment_size=segment_size.get(dataset.name),
-            )
+            reeval_args_by_name[object_name] = {
+                "fk_in_degree": fk_in_degree.get(dataset.name, 0),
+                "distinct_fk_targets": fk_out_degree.get(dataset.name, 0),
+                "lineage_upstream": lineage_up.get(dataset.urn, 0),
+                "lineage_downstream": lineage_down.get(dataset.urn, 0),
+                "glossary_terms": dataset.glossary_terms,
+                "row_count": dataset.row_count,
+                "has_business_naming": has_business_naming,
+                "subtypes": dataset.subtypes,
+                "tags": dataset.tags,
+                "segment_size": segment_size.get(dataset.name),
+            }
             # 保留原启发式（维表）作为命名置信度；对象是否为业务对象另走 role。
             is_dimension = dataset.name.startswith("dim_") or "维" in (dataset.display_name or "")
             confidence = 0.85 if is_dimension else 0.65

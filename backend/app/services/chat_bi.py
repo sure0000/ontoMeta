@@ -13,12 +13,11 @@ import asyncio
 import json
 import logging
 import re
-import statistics
 import types
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -26,14 +25,12 @@ from sqlalchemy import desc, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings as env_settings
-
 from app.governance import lint_against_standard
 from app.models import (
     BusinessLogic,
     BusinessLogicCategory,
     ChatBiConversation,
     ChatBiConversationTask,
-    ChatBiDecisionRecord,
     ChatBiDomainMemory,
     ChatBiMessage,
     DomainContext,
@@ -41,31 +38,23 @@ from app.models import (
     ObjectType,
     Ontology,
     OntologyStatus,
-    Property,
     RelationType,
 )
 from app.models.chat_bi import DEFAULT_CONVERSATION_TITLE
-from app.services.common import log_change, make_async_http_client
-from app.services.logic_query import OntologyQueryService
-from app.services.settings_service import SettingsService
-from app.services.ontology_projection import build_projection
-from app.services.sql_soundness import SqlRejection, prove_sql_sound
-from app.services import agent_telemetry
-from app.services import agent_trace
+from app.services import agent_sql, agent_telemetry, agent_trace, task_form
 from app.services.agent_compaction import compact_conversation
-from app.services.agent_result_store import RunResultStore, project_run_sql_for_model
 from app.services.agent_grounding import FactLedger
+from app.services.agent_result_store import RunResultStore, project_run_sql_for_model
 from app.services.agent_telemetry import RunTelemetry
 from app.services.answer_verifier import verify_answer
-from app.services.domain_semantic_card import build_card
-from app.services.ontology_ladder import OntologyLadderLoader
-from app.services.chat_bi_ledger import (
-    missing_task_confirmations,
-    node_label,
-    task_confirmations,
-    task_journey_steps,
-)
 from app.services.chat_bi_skills import SKILLS, Skill
+from app.services.common import log_change, make_async_http_client
+from app.services.domain_semantic_card import build_card
+from app.services.logic_query import OntologyQueryService
+from app.services.ontology_ladder import OntologyLadderLoader
+from app.services.ontology_projection import build_projection
+from app.services.result_analysis import analyze_rows
+from app.services.settings_service import SettingsService
 from app.services.tool_result_compaction import compact_tool_result
 
 logger = logging.getLogger("ontometa.chat_bi")
@@ -84,85 +73,80 @@ _FILTER_KEYWORDS = ("按", "where", "筛选", "条件", "等于", "大于", "小
 
 # V4 O5：工具 schema/常量/工具集构建已拆到 chat_bi_tool_schemas.py（纯声明，无运行态）。
 # 这里全量 re-export，保持 `chat_bi._AGENT_TOOL_SCHEMAS` 等对外符号逐字节不变（测试/其它模块 import 契约不动）。
-from app.services.chat_bi_tool_schemas import (  # noqa: F401
-    _AGENT_MAX_STEPS,
-    _AGENT_REPAIR_ATTEMPTS,
-    _RUN_SQL_LIMIT,
-    _TOOL_RESULT_MAX_CHARS,
-    _SQL_TIMEOUT_SECONDS,
-    _SEARCH_LIMIT,
-    _OVERVIEW_LIST_LIMIT,
-    _OVERVIEW_TOP_CONNECTED,
-    _AGENT_SYSTEM_PROMPT,
-    _MINIMAL_AGENT_SYSTEM_PROMPT,
-    _AGENT_TOOL_SCHEMAS,
-    _SELECT_SKILL_TOOL,
-    _RENDER_CHART_TOOL,
-    _ANALYZE_RESULT_TOOL,
-    _READ_RESULT_TOOL,
-    _SCOUT_QUERY_TOOL,
-    _GET_LINEAGE_TOOL,
-    _PROPOSE_DRAFT_TOOL,
-    _LINT_TOOL,
-    _ACTION_KINDS,
-    _ACTION_KIND_LABEL,
-    _PIPELINE_KINDS,
-    _PIPELINE_MAX_STEPS,
-    _PROPOSE_ACTION_TOOL,
-    _PROPOSE_PIPELINE_TOOL,
-    _CRON_PRESETS,
-    _LOAD_STRATEGIES,
-    _TASK_OPTIONS_LIMIT,
-    _GET_TASK_OPTIONS_TOOL,
-    _AUTO_ACTION_CONTEXT_KEYS,
-    _ACTION_CONTEXT_HINT,
-    _missing_action_context,
-    _sync_context_errors,
-    _action_context_candidates,
-    _GET_TASK_STATUS_TOOL,
-    _GET_LANDING_TOOL,
-    _GET_OPS_RECORD_TOOL,
-    _PLAN_STATUSES,
-    _PLAN_MAX_STEPS,
-    _UPDATE_PLAN_TOOL,
-    _PROPOSE_PREFERENCE_TOOL,
-    _FORM_FIELD_TYPES,
-    _FORM_MAX_FIELDS,
-    _FORM_DATASOURCE_PROBE_LIMIT,
-    _FORM_LOCATION_LIMIT,
-    _normalize_form_options,
-    _match_option,
-    _apply_prefill,
-    _REQUEST_FORM_TOOL,
-    _PANEL_VIZ_TYPES,
-    _PROPOSE_PANEL_TOOL,
-    _PROPOSE_DASHBOARD_TOOL,
-    _DATASOURCE_KINDS,
-    _DRAFT_SCOPES,
-    _LIST_ONBOARDING_TARGETS_TOOL,
-    _PROPOSE_DATASOURCE_TOOL,
-    _PROPOSE_ONTOLOGY_DRAFT_TOOL,
-    _BASE_TOOL_SCHEMAS,
-    _TOOL_BY_NAME,
-    _ALL_AGENT_TOOL_NAMES,
-    _SQL_TOOL_NAMES,
-    _ANALYTICAL_MARKERS,
-    _STRUCTURAL_MARKERS,
-    _OPERATIONAL_MARKERS,
-    _tools_for_skill,
-    _search_items,
-    _format_sql,
-)
-
 # V5 T4：本体快照与引用归一已拆到 chat_bi_references.py（只依赖 ORM 模型，无运行态）。
 # 同样全量 re-export，`chat_bi._ObjectSnapshot` / `_ReferenceResolver` / `_loads_payload`
 # 的对外符号与对象 identity 不变。
 from app.services.chat_bi_references import (  # noqa: F401,E402
+    _loads_payload,
     _ObjectSnapshot,
     _ReferenceResolver,
-    _loads_payload,
 )
-
+from app.services.chat_bi_tool_schemas import (  # noqa: F401
+    _ACTION_CONTEXT_HINT,
+    _ACTION_KIND_LABEL,
+    _ACTION_KINDS,
+    _AGENT_MAX_STEPS,
+    _AGENT_REPAIR_ATTEMPTS,
+    _AGENT_SYSTEM_PROMPT,
+    _AGENT_TOOL_SCHEMAS,
+    _ALL_AGENT_TOOL_NAMES,
+    _ANALYTICAL_MARKERS,
+    _ANALYZE_RESULT_TOOL,
+    _AUTO_ACTION_CONTEXT_KEYS,
+    _BASE_TOOL_SCHEMAS,
+    _CRON_PRESETS,
+    _DATASOURCE_KINDS,
+    _DRAFT_SCOPES,
+    _FORM_DATASOURCE_PROBE_LIMIT,
+    _FORM_FIELD_TYPES,
+    _FORM_LOCATION_LIMIT,
+    _FORM_MAX_FIELDS,
+    _GET_LANDING_TOOL,
+    _GET_LINEAGE_TOOL,
+    _GET_OPS_RECORD_TOOL,
+    _GET_TASK_OPTIONS_TOOL,
+    _GET_TASK_STATUS_TOOL,
+    _LINT_TOOL,
+    _LIST_ONBOARDING_TARGETS_TOOL,
+    _LOAD_STRATEGIES,
+    _MINIMAL_AGENT_SYSTEM_PROMPT,
+    _OPERATIONAL_MARKERS,
+    _OVERVIEW_LIST_LIMIT,
+    _OVERVIEW_TOP_CONNECTED,
+    _PANEL_VIZ_TYPES,
+    _PLAN_MAX_STEPS,
+    _PLAN_STATUSES,
+    _PROPOSE_ACTION_TOOL,
+    _PROPOSE_DASHBOARD_TOOL,
+    _PROPOSE_DATASOURCE_TOOL,
+    _PROPOSE_DRAFT_TOOL,
+    _PROPOSE_ONTOLOGY_DRAFT_TOOL,
+    _PROPOSE_PANEL_TOOL,
+    _PROPOSE_PREFERENCE_TOOL,
+    _READ_RESULT_TOOL,
+    _RENDER_CHART_TOOL,
+    _REQUEST_FORM_TOOL,
+    _RUN_SQL_LIMIT,
+    _SCOUT_QUERY_TOOL,
+    _SEARCH_LIMIT,
+    _SELECT_SKILL_TOOL,
+    _SQL_TIMEOUT_SECONDS,
+    _SQL_TOOL_NAMES,
+    _STRUCTURAL_MARKERS,
+    _TASK_OPTIONS_LIMIT,
+    _TOOL_BY_NAME,
+    _TOOL_RESULT_MAX_CHARS,
+    _UPDATE_PLAN_TOOL,
+    _action_context_candidates,
+    _apply_prefill,
+    _format_sql,
+    _match_option,
+    _missing_action_context,
+    _normalize_form_options,
+    _search_items,
+    _sync_context_errors,
+    _tools_for_skill,
+)
 
 # 「同步前面不需要物化」这条规矩的**唯一措辞**：给模型的报错、给人的链卡片注释共用一份。
 _MATERIALIZE_BEFORE_SYNC_REASON = (
@@ -249,6 +233,70 @@ def _relink_steps(
     return out
 
 
+def _done_event(
+    *,
+    answer: str,
+    referenced_objects: list,
+    referenced_logics: list,
+    steps: list,
+    suggested_sql: str | None = None,
+    caliber_decomposition: list | None = None,
+    data_result: dict | None = None,
+    charts: list | None = None,
+    analyses: list | None = None,
+    lineage: dict | None = None,
+    draft_proposals: list | None = None,
+    preference_proposals: list | None = None,
+    action_proposals: list | None = None,
+    app_proposals: list | None = None,
+    onboard_proposals: list | None = None,
+    task_statuses: list | None = None,
+    ops_records: list | None = None,
+    plan: dict | None = None,
+    skill: str | None = None,
+    clarification: dict | None = None,
+    form_request: dict | None = None,
+    grounded: bool = True,
+    unverified: list | None = None,
+) -> dict:
+    """构造 ``done`` 事件。**这是 done 载荷形状的唯一定义。**
+
+    ``_stream_agent_events`` 有三个出口会发 done：正常收尾、澄清反问、表单请求。
+    此前三处各自手写字典，两个早退出口只填了其中六七个键——``charts`` / ``analyses`` /
+    ``lineage`` / 各类 proposals / ``plan`` / ``skill`` 全都缺。于是下游必须对每个键
+    做「可能不存在」的防御，而新增一个字段要记得改三个地方，漏一处就是某条出口悄悄
+    少一块数据。收敛到一处之后，缺省值写在签名里，三个出口只说自己不同的那几项。
+    """
+    return {
+        "type": "done",
+        "payload": {
+            "answer": answer,
+            "suggested_sql": suggested_sql,
+            "caliber_decomposition": caliber_decomposition or [],
+            "referenced_objects": referenced_objects,
+            "referenced_logics": referenced_logics,
+            "steps": steps,
+            "data_result": data_result,
+            "charts": charts or [],
+            "analyses": analyses or [],
+            "lineage": lineage,
+            "draft_proposals": draft_proposals or [],
+            "preference_proposals": preference_proposals or [],
+            "action_proposals": action_proposals or [],
+            "app_proposals": app_proposals or [],
+            "onboard_proposals": onboard_proposals or [],
+            "task_statuses": task_statuses or [],
+            "ops_records": ops_records or [],
+            "plan": plan,
+            "skill": skill,
+            "clarification": clarification,
+            "form_request": form_request,
+            "_grounded": grounded,
+            "_unverified": unverified or [],
+        },
+    }
+
+
 class ChatBiService:
     """以本体知识为上下文，调用 LLM 回答业务提问。"""
 
@@ -268,43 +316,111 @@ class ChatBiService:
         - 每个域取其已发布本体；无已发布本体的域跳过（不阻断，由调用方按 ontologies 判空）。
         - 去重、保持稳定顺序（按 domain.name）。
         """
-        if domain_ids:
+        # Resolve all requested domains in one query.  The old implementation
+        # called ``Session.get`` once per id and then queried the published
+        # ontology once per domain, which made a multi-domain question scale
+        # linearly in round trips.
+        requested_ids = list(dict.fromkeys(domain_ids or []))
+        domain_query = db.query(DomainContext)
+        if requested_ids:
+            rows = domain_query.filter(DomainContext.id.in_(requested_ids)).all()
+            by_id = {domain.id: domain for domain in rows}
             domains = [
-                d for d in (
-                    db.get(DomainContext, did) for did in dict.fromkeys(domain_ids)
-                ) if d is not None
+                by_id[domain_id]
+                for domain_id in requested_ids
+                if domain_id in by_id
             ]
         else:
-            domains = (
-                db.query(DomainContext).order_by(DomainContext.name.asc()).all()
+            domains = domain_query.order_by(DomainContext.name.asc()).all()
+
+        if not domains:
+            return [], []
+
+        # Ontology is unique per domain, so a single set query is sufficient.
+        # Keep the domain order above rather than relying on database UUID order.
+        domain_scope = [domain.id for domain in domains]
+        published_by_domain = {
+            ontology.domain_context_id: ontology
+            for ontology in db.query(Ontology)
+            .filter(
+                Ontology.domain_context_id.in_(domain_scope),
+                Ontology.status == OntologyStatus.PUBLISHED.value,
             )
-        # 去重（按 id）
-        seen: set[str] = set()
-        uniq: list[DomainContext] = []
-        for d in domains:
-            if d.id in seen:
-                continue
-            seen.add(d.id)
-            uniq.append(d)
-        domains = uniq
-        ontologies: list[Ontology] = []
-        for d in domains:
-            ont = self.query_service.get_published_ontology(db, d.id)
-            if ont is not None:
-                ontologies.append(ont)
+            .all()
+        }
+        ontologies = [
+            published_by_domain[domain_id]
+            for domain_id in domain_scope
+            if domain_id in published_by_domain
+        ]
         return domains, ontologies
 
     def _load_merged_knowledge(
         self, db: Session, ontology_ids: list[str]
     ) -> tuple[list[_ObjectSnapshot], list[RelationType], list[BusinessLogic]]:
         """合并多个本体的对象/关系/口径为一个虚拟知识包（决策 2-X）。"""
-        snapshots: list[_ObjectSnapshot] = []
-        relations: list[RelationType] = []
-        logics: list[BusinessLogic] = []
-        for oid in ontology_ids:
-            snapshots.extend(self._load_ontology_snapshot(db, oid))
-            relations.extend(self._load_relations(db, oid))
-            logics.extend(self._load_logics(db, oid))
+        ordered_ids = list(dict.fromkeys(ontology_ids))
+        if not ordered_ids:
+            return [], [], []
+
+        # Load the three collections in batches.  This keeps the merged
+        # knowledge contract identical while reducing 3*N queries to 3 for a
+        # multi-domain request.
+        ontology_order = {
+            ontology_id: position
+            for position, ontology_id in enumerate(ordered_ids)
+        }
+        object_rows = (
+            db.query(ObjectType)
+            .options(joinedload(ObjectType.properties))
+            .filter(ObjectType.ontology_id.in_(ordered_ids))
+            .all()
+        )
+        object_rows.sort(
+            key=lambda obj: (
+                ontology_order.get(obj.ontology_id, len(ordered_ids)),
+                obj.display_name or "",
+            )
+        )
+        snapshots = [
+            _ObjectSnapshot(
+                id=obj.id,
+                name=obj.name,
+                display_name=obj.display_name,
+                description=obj.description,
+                properties=sorted(
+                    obj.properties,
+                    key=lambda prop: (not prop.required, prop.name),
+                ),
+            )
+            for obj in object_rows
+        ]
+
+        relations = (
+            db.query(RelationType)
+            .filter(RelationType.ontology_id.in_(ordered_ids))
+            .all()
+        )
+        relations.sort(
+            key=lambda relation: (
+                ontology_order.get(relation.ontology_id, len(ordered_ids)),
+                relation.display_name or "",
+            )
+        )
+
+        logics = (
+            db.query(BusinessLogic)
+            .filter(BusinessLogic.ontology_id.in_(ordered_ids))
+            .all()
+        )
+        logics.sort(
+            key=lambda logic: (
+                ontology_order.get(logic.ontology_id, len(ordered_ids)),
+                # Preserve the previous per-ontology ``updated_at DESC`` order.
+                logic.updated_at is None,
+                -(logic.updated_at.timestamp() if logic.updated_at else 0),
+            )
+        )
         return snapshots, relations, logics
 
     # ------------------------------------------------------------------ public
@@ -651,22 +767,34 @@ class ChatBiService:
             )
             counts = {row[0]: row[1] for row in count_rows}
 
-            # Last message preview per conversation
-            preview_rows = (
+            # Last message preview per conversation.  Rank in SQL so a large
+            # conversation history does not get materialized and sorted in
+            # Python just to discard every row except the newest one.
+            latest_messages = (
                 db.query(
-                    ChatBiMessage.conversation_id,
-                    ChatBiMessage.content,
+                    ChatBiMessage.conversation_id.label("conversation_id"),
+                    ChatBiMessage.content.label("content"),
+                    func.row_number()
+                    .over(
+                        partition_by=ChatBiMessage.conversation_id,
+                        order_by=(
+                            desc(ChatBiMessage.created_at),
+                            desc(ChatBiMessage.id),
+                        ),
+                    )
+                    .label("message_rank"),
                 )
                 .filter(ChatBiMessage.conversation_id.in_(conv_ids))
-                .order_by(ChatBiMessage.conversation_id, desc(ChatBiMessage.created_at))
-                .all()
+                .subquery()
             )
-            seen: set[str] = set()
-            for row in preview_rows:
-                if row[0] not in seen:
-                    seen.add(row[0])
-                    preview = row[1][:100] if row[1] else None
-                    previews[row[0]] = preview
+            preview_rows = db.query(
+                latest_messages.c.conversation_id,
+                latest_messages.c.content,
+            ).filter(latest_messages.c.message_rank == 1).all()
+            previews = {
+                conversation_id: content[:100] if content else None
+                for conversation_id, content in preview_rows
+            }
 
         return [
             {
@@ -803,14 +931,9 @@ class ChatBiService:
         if not conv:
             raise ValueError("对话不存在")
         log_change(db, "chat_bi_conversation", conversation_id, "delete")
-        # 决策留痕随会话一起删。**不能靠 FK 兜底**：SQLite 默认不启外键，记录会留成
-        # 孤儿——在决策追踪页上表现为一行没有会话名、点「看闭环」还打不开的脏数据；
-        # 而在真启外键的库上，这条 delete 会直接被外键挡下、删会话变成 500。
-        # 显式删一次，两种库行为一致。
-        # （消息由 relationship 的 delete-orphan 级联带走，故此处只需处理本表。）
-        db.query(ChatBiDecisionRecord).filter(
-            ChatBiDecisionRecord.conversation_id == conversation_id
-        ).delete(synchronize_session=False)
+        # 消息由 relationship 的 delete-orphan 级联带走。
+        # 删会话不动它建过的任务：任务是「这件事被做了」的记录，与哪次对话促成它无关，
+        # 生命周期本就不该绑在会话上。
         db.delete(conv)
         db.commit()
 
@@ -872,12 +995,12 @@ class ChatBiService:
             role=role,
             content=content,
             payload=json.dumps(payload) if payload else None,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         db.add(msg)
         conv = db.get(ChatBiConversation, conversation_id)
         if conv:
-            conv.updated_at = datetime.now(timezone.utc)
+            conv.updated_at = datetime.now(UTC)
         db.commit()
         db.refresh(msg)
         return msg
@@ -1056,7 +1179,7 @@ class ChatBiService:
         if not refs:
             return
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for domain_id in domain_ids:
                 for ref_kind, ref_id, label in refs:
                     row = (
@@ -1448,9 +1571,7 @@ class ChatBiService:
         run_sql 直打真实 DSN，而手动执行端点要 publisher——不在这里卡一道，工具化就把
         权限模型绕过去了。fail-closed：拿不到角色一律视为不够格。
         """
-        from app.models.principal import role_satisfies
-
-        return role_satisfies(principal_role, env_settings.agent_run_sql_min_role)
+        return agent_sql.may_run_sql(principal_role)
 
     def _dispatch_run_sql(
         self,
@@ -1460,23 +1581,11 @@ class ChatBiService:
         ontology_ids: list[str] | None = None,
         principal_role: str | None = None,
     ) -> tuple[Any, str, bool]:
-        from app.services import data_app_executor
-
+        """代跑只读 SQL。闸门链整条在 ``agent_sql.run_agent_sql``——与 MCP 的
+        ``execute_sql`` 是同一份，两处不再各留一套（松的那套就是实际的安全边界）。"""
         sql = str(args.get("sql") or "").strip()
-        if not sql:
-            return {"error": "缺少 sql"}, "run_sql 缺少 sql", True
-        try:
-            limit = int(args.get("limit") or _RUN_SQL_LIMIT)
-        except (TypeError, ValueError):
-            limit = _RUN_SQL_LIMIT
-        limit = max(1, min(limit, _RUN_SQL_LIMIT))
 
-        ok, reason = data_app_executor.is_read_only(sql)
-        if not ok:
-            return {"executed": False, "error": f"仅允许只读 SELECT：{reason}", "sql": sql}, "被只读校验拒绝", True
-
-        # Query routing is Doris-only.  A legacy target is an explicit attempt
-        # to select a source system and must fail closed.
+        # 查询路由只认 Doris。显式指定源库是一次「想绕开数仓」的尝试，必须 fail-closed。
         if args.get("target"):
             return (
                 {"executed": False, "reason": "run_sql 不支持 target；Data Agent 只查询默认 Doris", "sql": sql},
@@ -1484,251 +1593,14 @@ class ChatBiService:
                 True,
             )
 
-        # 权限不足时不解析数据源——降级为「仅建议 SQL」，而不是硬报错：
-        # 检索类工具对低权角色仍合法，问答体验不掉，只是不代跑数。
-        may_run = self._may_run_sql(principal_role)
-        source = (
-            self._resolve_domain_data_source(db)
-            if may_run
-            else None
+        return agent_sql.run_agent_sql(
+            db,
+            sql=sql,
+            ontology_ids=ontology_ids,
+            limit=args.get("limit"),
+            principal_role=principal_role,
+            resolve_source=self._resolve_domain_data_source,
         )
-        # DataSource.mapping_json is historical metadata and must not authorize
-        # a query.  Object-level mapping is resolved from current Deployment /
-        # Projection only after semantic proof identifies every referenced object.
-        mapping = None
-
-        # ★ SQL 语义证明（F3）：执行/建议前静态证明语义合法，不过则不放行。
-        #   即便无可执行数据源（仅建议 SQL），也要证明——臆造字段/JOIN 与是否落库无关。
-        rejection, proved = self._prove_sql_or_reject(db, sql, ontology_ids, source, mapping)
-        if rejection is not None:
-            return rejection
-
-        try:
-            from app.services.query_routing import (
-                projection_mapping,
-                readiness_error,
-                referenced_table_names,
-            )
-
-            object_names = list(proved.get("tables") or referenced_table_names(sql))
-            if source is not None:
-                from app.services.warehouse_migration import cutover_error
-
-                migration_error = cutover_error(db, ontology_ids or [])
-                if migration_error:
-                    return (
-                        {"executed": False, "reason": migration_error, "sql": sql, "proved": proved},
-                        "Phase 6 尚未审批切流",
-                        False,
-                    )
-                ready_error = readiness_error(
-                    db,
-                    datasource=source,
-                    ontology_ids=ontology_ids,
-                    object_names=object_names,
-                )
-                if ready_error:
-                    # 未就绪的结论可能只是陈旧：制品状态靠「有人读」才推进，一次早已
-                    # success 的同步能把表锁在不可查上好几个小时。先对一次账再重判。
-                    from app.services.query_readiness import (
-                        readiness_detail,
-                        reconcile_blocking_runs,
-                    )
-
-                    if reconcile_blocking_runs(
-                        db, ontology_ids=ontology_ids, object_names=object_names
-                    ):
-                        ready_error = readiness_error(
-                            db,
-                            datasource=source,
-                            ontology_ids=ontology_ids,
-                            object_names=object_names,
-                        )
-                    if ready_error:
-                        detail = readiness_detail(
-                            db, ontology_ids=ontology_ids, object_names=object_names
-                        )
-                        return (
-                            {
-                                "executed": False,
-                                "reason": (
-                                    f"{ready_error}（{detail}）" if detail else ready_error
-                                ),
-                                "sql": sql,
-                                "proved": proved,
-                            },
-                            "Doris Projection 未就绪",
-                            False,
-                        )
-                mapping = projection_mapping(
-                    db,
-                    datasource=source,
-                    ontology_ids=ontology_ids or [],
-                    object_names=object_names,
-                )
-        except ValueError as exc:
-            return (
-                {"executed": False, "reason": str(exc), "sql": sql, "proved": proved},
-                "Doris Projection 覆盖校验失败",
-                False,
-            )
-
-        if not may_run:
-            return (
-                {
-                    "executed": False,
-                    "reason": (
-                        f"当前角色无权让 Agent 执行 SQL（需 "
-                        f"{env_settings.agent_run_sql_min_role} 及以上），仅能给出建议 SQL"
-                    ),
-                    "sql": sql,
-                    "proved": proved,
-                },
-                "权限不足，仅建议 SQL",
-                False,
-            )
-        if source is None:
-            reason = "当前未配置可执行的默认 Doris 数仓，仅能给出建议 SQL"
-            return (
-                {"executed": False, "reason": reason,
-                 "sql": sql, "proved": proved},
-                "无可执行数据源",
-                False,
-            )
-        try:
-            columns, rows = data_app_executor.execute_sql(
-                dsn=source.dsn_secret_ref,
-                sql=sql,
-                limit=limit,
-                mapping=mapping or None,
-                timeout_seconds=_SQL_TIMEOUT_SECONDS,
-                dialect="doris",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {"executed": False, "error": str(exc)[:300], "sql": sql}, "SQL 执行失败", True
-        truncated = len(rows) >= limit
-        result: dict[str, Any] = {
-            "executed": True,
-            "sql": sql,
-            "columns": columns,
-            "rows": rows,
-            "row_count": len(rows),
-            "truncated": truncated,
-            "proved": proved,
-        }
-        if source is not None and source.purpose == "warehouse":
-            from app.services.query_routing import target_receipt
-
-            result["query_target"] = target_receipt(
-                db,
-                datasource=source,
-                ontology_ids=ontology_ids,
-                object_names=object_names,
-            )
-        # 截断 + 无 ORDER BY → 这是一份「无序样本」（执行层虽已自动补 ORDER BY 1
-        # 保证可复现，但首列排序无业务含义），明确告知不是全集、非按业务键取样，
-        # 避免用户把两次样例当作数据矛盾。
-        if truncated and not re.search(r"\border\s+by\b", sql, flags=re.IGNORECASE):
-            result["sample_note"] = (
-                f"已截断到前 {limit} 行且原 SQL 未指定排序：这是一份无业务序的样本、非全集。"
-                "若需稳定/可复现的明细，请按主键或时间键显式 ORDER BY 后重取。"
-            )
-        return (
-            result,
-            f"返回 {len(rows)} 行" + ("（无序样本）" if result.get("sample_note") else ""),
-            False,
-        )
-
-    def _build_merged_projection(
-        self, db: Session, ontology_ids: list[str], mapping: dict | None
-    ) -> OntologyProjection:
-        """合并多个本体的投影为一个虚拟投影（决策 2-X），供跨域 SQL 语义证明。
-
-        表/列名跨域冲突时后者覆盖前者（同名校罕见；以检索为准，证明仅放行已知表列）。"""
-        from app.services.ontology_projection import OntologyProjection
-
-        objects: dict[str, Any] = {}
-        relations_by_pair: dict[frozenset[str], list[Any]] = {}
-        mapping_tables: dict[str, str] = {}
-        mapping_columns: dict[str, str] = {}
-        for oid in ontology_ids:
-            proj = build_projection(db, oid, mapping)
-            objects.update(proj.objects)
-            for k, v in proj.relations_by_pair.items():
-                relations_by_pair.setdefault(k, []).extend(v)
-            mapping_tables.update(proj.mapping_tables)
-            mapping_columns.update(proj.mapping_columns)
-        return OntologyProjection(
-            objects=objects,
-            relations_by_pair=relations_by_pair,
-            mapping_tables=mapping_tables,
-            mapping_columns=mapping_columns,
-        )
-
-    def _prove_sql_or_reject(
-        self, db: Session, sql: str, ontology_ids: list[str] | None, source, mapping
-    ) -> tuple[tuple[Any, str, bool] | None, dict]:
-        """SQL 语义证明门（F3）。返回 (拒绝三元组或 None, 证书摘要)。
-
-        多域：合并所有涉及本体的投影后统一证明，跨域 SQL（JOIN 不同域的表）一次过。
-        受 ``settings.agent_soundness`` 开关：off=跳过；warn=只记日志不拦；on=拒绝执行。
-        证明本身出错时，若存在可执行 Doris 则 fail-closed；没有执行目标时仍可给建议 SQL。
-
-        **证书要带回去**：``SqlCertificate.tables/columns`` 是「这些表/列确实是已发布
-        本体成员」的**证明结论**，不是模型的主张。不回传的话，模型写了一条被证明合法的
-        SQL、再在正文里解释它引用的字段，会因账本里没有该字段而被 F4 判成幻觉——
-        自己证过的东西反过来拒自己。
-        """
-        from app.config import settings as env_settings
-        from app.services import data_app_executor
-
-        mode = (getattr(env_settings, "agent_soundness", "on") or "on").lower()
-        if mode == "off" or not ontology_ids:
-            return None, {}
-        try:
-            proj = self._build_merged_projection(db, ontology_ids, mapping)
-            dialect = (
-                "doris"
-                if source is not None and getattr(source, "kind", None) == "doris"
-                else (
-                    data_app_executor.backend_of(source.dsn_secret_ref)
-                    if source is not None else None
-                )
-            )
-            verdict = prove_sql_sound(sql, proj, dialect=dialect)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("sql soundness prover error: %s", exc)
-            if source is not None:
-                return (
-                    {
-                        "executed": False,
-                        "rejected": True,
-                        "sql": sql,
-                        "reason": "SQL 语义证明器不可用，Doris 查询已 fail-closed",
-                        "code": "soundness_unavailable",
-                    },
-                    "SQL 语义证明不可用",
-                    True,
-                ), {}
-            return None, {}
-        if not isinstance(verdict, SqlRejection):
-            return None, {
-                "tables": list(verdict.tables),
-                "columns": list(verdict.columns),
-            }
-        if mode == "warn":
-            logger.info("[soundness=warn] 本应拒答 SQL：%s | %s", verdict.code, verdict.message)
-            return None, {}
-        # mode == "on"：拒绝执行。is_error=True → 不计入接地，避免用拒绝当命中。
-        # hint（P1.4）必须随结果回灌：这条 dict 会 json 化进 role:tool，
-        # 模型据此在下一步自修（补对候选字段、换合法对端、改安全聚合）。
-        return (
-            {"executed": False, "rejected": True, "sql": sql,
-             "reason": verdict.message, "code": verdict.code,
-             "hint": verdict.hint or {}},
-            f"SQL 语义证明未通过：{verdict.code}",
-            True,
-        ), {}
 
     # -------------------------------------------------------------- F4 断言级可靠性
 
@@ -2279,14 +2151,13 @@ class ChatBiService:
         编译失败一律带 code + hint 回灌（同 P1.4 取向）：口径没形式化、维度不可关联、
         会扇出——每种都有明确下一步，比一句「编译失败」有用得多。
         """
-        from app.services import data_app_executor
         from app.services.metric_compiler import MetricCompileError, compile_metric
 
         logic_id = str(args.get("logic_id") or "").strip()
         if not logic_id:
             return {"error": "需要 logic_id"}, "缺少 logic_id", True
 
-        source = self._resolve_domain_data_source(db)
+        self._resolve_domain_data_source(db)
         dims = [str(d) for d in (args.get("dimensions") or []) if str(d).strip()]
         filters = [f for f in (args.get("filters") or []) if isinstance(f, dict)]
         try:
@@ -2320,7 +2191,6 @@ class ChatBiService:
         画像要读真实数据，与 run_sql 是同一类数据暴露，故用**同一道权限闸门**；
         权限不足或无数据源时优雅降级（available=False + 说明），不报错。
         """
-        from app.services import data_app_executor
         from app.services.column_profiler import profile_property
 
         obj_token = str(args.get("object_id") or "").strip()
@@ -2580,7 +2450,7 @@ class ChatBiService:
         governance_card: str = "",
         *,
         apply_overlay: bool = True,
-    ) -> tuple["Skill | None", dict, str, bool]:
+    ) -> tuple[Skill | None, dict, str, bool]:
         """V3 S1：切换技能。就地把 messages[0] 重建为 base_system + 技能 overlay。
 
         返回 (激活的技能, 工具结果, 摘要, 是否错误)。未知技能名→不切换、回错误提示。
@@ -2705,149 +2575,39 @@ class ChatBiService:
     def _dispatch_analyze_result(
         args: dict, data_result: dict | None, analyses: list[dict]
     ) -> tuple[dict, str, bool]:
-        """P5：对最近一次 run_sql 结果做统计画像 + IQR 离群检测（纯 stdlib，不外呼）。
-
-        让「有没有异常/分布如何」这类分析有**真实计算**支撑，而非模型对结果的口头臆测。
-        接地约束：必须已有执行结果；只分析数值列。结果随后投影成 insight 块，且其统计数值
-        登记进事实账本（见 _ledger_register），答案复述均值/离群时不被 F4 判成幻觉。
-        """
+        """Analyze the latest query result with the shared deterministic service."""
         rows = (data_result or {}).get("rows") or []
-        if not rows:
-            return (
-                {"error": "尚无查询结果，请先用 run_sql 取到数据再分析。"},
-                "分析失败：无数据",
-                True,
-            )
-        columns = [str(c.get("key") or c.get("title") or "") for c in (data_result.get("columns") or [])]
-        if not columns:
-            columns = list({k for r in rows if isinstance(r, dict) for k in r})
+        columns = (data_result or {}).get("columns") or []
         want = [str(c).strip() for c in (args.get("columns") or []) if str(c).strip()]
         order_by = str(args.get("order_by") or "").strip()
-        if order_by and order_by not in columns:
-            order_by = ""  # 不在结果里就忽略（仍出统计，只是不算趋势）
         try:
             max_out = int(args.get("max_outliers") or 5)
         except (TypeError, ValueError):
             max_out = 5
-        max_out = max(1, min(max_out, 20))
-
-        def _num(v: Any) -> float | None:
-            if isinstance(v, bool) or v is None:
-                return None
-            if isinstance(v, (int, float)):
-                return float(v)
-            if isinstance(v, str):
-                try:
-                    return float(v.replace(",", "").strip())
-                except ValueError:
-                    return None
-            return None
-
-        dict_rows = [r for r in rows if isinstance(r, dict)]
-        # 趋势/突变需要**有序序列**：仅当给了 order_by 才排序并计算，避免对无序数据误判趋势。
-        ordered_rows = dict_rows
-        if order_by:
-            def _okey(r: dict) -> tuple:
-                v = r.get(order_by)
-                nv = _num(v)
-                return (0, nv) if nv is not None else (1, str(v))
-            ordered_rows = sorted(dict_rows, key=_okey)
-
-        def _trend_and_jumps(pairs: list[tuple[Any, float]]) -> tuple[dict | None, list[dict]]:
-            ys = [v for _, v in pairs]
-            n = len(ys)
-            if n < 4:
-                return None, []
-            xs = list(range(n))
-            mx = statistics.fmean(xs)
-            my = statistics.fmean(ys)
-            denom = sum((x - mx) ** 2 for x in xs)
-            slope = (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom) if denom else 0.0
-            first, last = ys[0], ys[-1]
-            change = last - first
-            span = max(ys) - min(ys)
-            eps = (span or abs(my) or 1.0) * 0.01
-            direction = "up" if slope > eps else ("down" if slope < -eps else "flat")
-            trend = {
-                "direction": direction, "slope": round(slope, 4),
-                "first": first, "last": last, "change": round(change, 4),
-                "change_pct": round(change / abs(first) * 100, 2) if first else None,
-            }
-            deltas = [ys[i] - ys[i - 1] for i in range(1, n)]
-            ad = [abs(d) for d in deltas]
-            jumps: list[dict] = []
-            if len(ad) >= 3:
-                # 突变阈值用「3×典型步长（中位）」——中位对单个大突变稳健，不像 mean+kσ 会被
-                # 突变自身抬高阈值而漏检（masking）。
-                thr = max(eps, 3 * statistics.median(ad))
-                for i, d in enumerate(deltas, start=1):
-                    if abs(d) > thr:
-                        jumps.append({"at": pairs[i][0], "from": pairs[i - 1][1],
-                                      "to": pairs[i][1], "delta": round(d, 4)})
-            jumps.sort(key=lambda j: -abs(j["delta"]))
-            return trend, jumps[:max_out]
-
-        col_reports: list[dict] = []
-        total_outliers = 0
-        total_jumps = 0
-        for col in columns:
-            if want and col not in want:
-                continue
-            if order_by and col == order_by:
-                continue  # 排序维度本身不作为度量分析
-            raw = [r.get(col) for r in dict_rows]
-            vals = [x for x in (_num(v) for v in raw) if x is not None]
-            nulls = len(raw) - len(vals)
-            # 数值列判定：至少一半非空值可解析为数
-            if not vals or len(vals) < max(1, len([v for v in raw if v is not None]) / 2):
-                continue
-            n = len(vals)
-            rep: dict[str, Any] = {
-                "column": col, "count": n, "nulls": nulls,
-                "min": min(vals), "max": max(vals),
-                "mean": round(statistics.fmean(vals), 4),
-            }
-            if n >= 2:
-                q = statistics.quantiles(vals, n=4)  # [p25, p50, p75]
-                p25, p50, p75 = q[0], q[1], q[2]
-                iqr = p75 - p25
-                rep.update({
-                    "p25": round(p25, 4), "median": round(p50, 4), "p75": round(p75, 4),
-                    "std": round(statistics.stdev(vals), 4),
-                })
-                lo, hi = p25 - 1.5 * iqr, p75 + 1.5 * iqr
-                outliers = [v for v in vals if v < lo or v > hi]
-                rep["outlier_count"] = len(outliers)
-                rep["outliers"] = sorted(outliers, key=lambda v: -abs(v - rep["mean"]))[:max_out]
-                total_outliers += len(outliers)
-            if order_by:
-                pairs = [(r.get(order_by), _num(r.get(col))) for r in ordered_rows]
-                pairs = [(lbl, v) for lbl, v in pairs if v is not None]
-                trend, jumps = _trend_and_jumps(pairs)
-                if trend:
-                    rep["trend"] = trend
-                if jumps:
-                    rep["jumps"] = jumps
-                    total_jumps += len(jumps)
-            col_reports.append(rep)
-
-        if not col_reports:
-            return (
-                {"error": "结果里没有可分析的数值列。", "columns": columns},
-                "分析失败：无数值列",
-                True,
-            )
-        analysis = {
-            "row_count": len(rows), "columns": col_reports,
-            "total_outliers": total_outliers, "total_jumps": total_jumps,
-        }
-        if order_by:
-            analysis["ordered_by"] = order_by
-        _extra = f"、{total_jumps} 处突变" if order_by else ""
+        analysis, error = analyze_rows(
+            rows,
+            columns,
+            selected_columns=want,
+            order_by=order_by,
+            max_outliers=max_out,
+        )
+        if error:
+            payload = {"error": error}
+            if error == "结果里没有可分析的数值列。":
+                payload["columns"] = [
+                    str(c.get("key") or c.get("title") or "")
+                    for c in columns
+                    if isinstance(c, dict)
+                ]
+            summary = "分析失败：无数据" if not rows else "分析失败：无数值列"
+            return payload, summary, True
+        assert analysis is not None
         analyses.append(analysis)
+        extra = f"、{analysis['total_jumps']} 处突变" if order_by else ""
         return (
             {"analysis": analysis},
-            f"已分析 {len(col_reports)} 个数值列，发现 {total_outliers} 个离群值{_extra}",
+            f"已分析 {len(analysis['columns'])} 个数值列，发现 "
+            f"{analysis['total_outliers']} 个离群值{extra}",
             False,
         )
 
@@ -3420,8 +3180,9 @@ class ChatBiService:
         self, db: Session, *, args: dict
     ) -> tuple[dict, str, bool]:
         """创建建模工单。"""
-        from app.models import ModelingCase, ModelingCaseStage
         import json
+
+        from app.models import ModelingCase, ModelingCaseStage
 
         title = str(args.get("title") or "").strip()
         business_goal = str(args.get("business_goal") or "").strip()
@@ -3446,8 +3207,9 @@ class ChatBiService:
         db.flush()
 
         # 创建初始需求规格
-        from app.models import ModelingCaseSpec, ModelingCaseSpecKind, ModelingCaseSpecStatus
         import hashlib
+
+        from app.models import ModelingCaseSpec, ModelingCaseSpecKind, ModelingCaseSpecStatus
 
         requirement_spec = {
             "business_goal": business_goal,
@@ -3479,9 +3241,10 @@ class ChatBiService:
         self, db: Session, *, args: dict
     ) -> tuple[dict, str, bool]:
         """更新需求规格。"""
-        from app.models import ModelingCase, ModelingCaseSpec, ModelingCaseSpecKind
-        import json
         import hashlib
+        import json
+
+        from app.models import ModelingCase, ModelingCaseSpec, ModelingCaseSpecKind
 
         case_id = str(args.get("case_id") or "").strip()
         if not case_id:
@@ -3564,6 +3327,9 @@ class ChatBiService:
         self, db: Session, *, args: dict
     ) -> tuple[dict, str, bool]:
         """确认需求规格，推进到本体确认阶段。"""
+        import json
+        from datetime import datetime
+
         from app.models import (
             ModelingCase,
             ModelingCaseSpec,
@@ -3571,8 +3337,6 @@ class ChatBiService:
             ModelingCaseSpecStatus,
             ModelingCaseStage,
         )
-        from datetime import datetime
-        import json
 
         case_id = str(args.get("case_id") or "").strip()
         if not case_id:
@@ -3612,7 +3376,7 @@ class ChatBiService:
 
         # 确认规格
         spec.status = ModelingCaseSpecStatus.CONFIRMED.value
-        spec.confirmed_at = datetime.utcnow()
+        spec.confirmed_at = datetime.now(UTC).replace(tzinfo=None)
         case.stage = ModelingCaseStage.REQUIREMENT_CONFIRMED.value
         case.current_revision = spec.revision
         db.commit()
@@ -3623,14 +3387,15 @@ class ChatBiService:
             "requirement_spec": requirement_spec,
             "revision": spec.revision,
         }
-        return result, f"需求规格已确认，进入本体确认阶段", False
+        return result, "需求规格已确认，进入本体确认阶段", False
 
     def _dispatch_get_modeling_case(
         self, db: Session
     ) -> tuple[dict, str, bool]:
         """查询当前会话关联的建模工单。"""
-        from app.models import ModelingCase, ModelingCaseSpec, ModelingCaseSpecKind
         import json
+
+        from app.models import ModelingCase, ModelingCaseSpec, ModelingCaseSpecKind
 
         conversation_id = getattr(self, "_current_conversation_id", None)
         if not conversation_id:
@@ -3734,7 +3499,7 @@ class ChatBiService:
         shared_context = args.get("shared_context", {})
         deduplication = args.get("deduplication", True)
         
-        expr_service = ExpressionCandidateService()
+        ExpressionCandidateService()
         compiler = MetricCompilerService()
         
         results = []
@@ -3762,7 +3527,7 @@ class ChatBiService:
                 try:
                     # 验证字段引用
                     fields = logic.get("fields", [])
-                    for field in fields:
+                    for _field in fields:
                         # 这里应该验证字段是否存在于本体中
                         # 简化处理：假设字段已经过验证
                         pass
@@ -3854,553 +3619,17 @@ class ChatBiService:
             )
         keyword = str(args.get("keyword") or "").strip()
         if kind == "materialize":
-            return self._materialize_options(
+            return task_form.materialize_options(
                 db,
                 ontology_id=ontology_id,
                 datasource_id=str(args.get("target_datasource_id") or "").strip(),
                 keyword=keyword,
             )
         if kind == "metric":
-            return self._metric_task_options(
+            return task_form.metric_task_options(
                 db, ontology_id=ontology_id, keyword=keyword
             )
-        return self._entity_task_options(db, kind=kind, ontology_id=ontology_id, keyword=keyword)
-
-    @staticmethod
-    def _doris_target_catalog(db: Session) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        """任务可选的 Doris warehouse；唯一可执行默认项单独返回。
-
-        所有数仓任务共用这一处，避免 sync/transform/metric/materialize 对“目标能不能选”
-        各持一套条件。非默认/停用/缺连接项仍返回供 UI 置灰说明，但绝不能成为 default。
-        """
-        from app.models import DataSource
-
-        rows = (
-            db.query(DataSource)
-            .filter(
-                DataSource.purpose == "warehouse",
-                DataSource.kind == "doris",
-            )
-            .order_by(DataSource.name, DataSource.id)
-            .all()
-        )
-        items = [
-            {
-                "id": source.id,
-                "name": source.name,
-                "kind": source.kind,
-                "status": source.status,
-                "enabled": source.enabled,
-                "is_default": source.is_default_warehouse,
-                "has_connection": bool((source.dsn_secret_ref or "").strip()),
-                "executable": bool(
-                    source.enabled
-                    and source.is_default_warehouse
-                    and (source.dsn_secret_ref or "").strip()
-                ),
-            }
-            for source in rows
-        ]
-        return items, next((item for item in items if item["executable"]), None)
-
-    @staticmethod
-    def _doris_target_options(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Doris 目录 → 表单下拉候选；非法项可见但置灰。"""
-        options: list[dict[str, Any]] = []
-        for target in items:
-            if target.get("executable"):
-                label = f"{target['name']}（默认 Doris）"
-            else:
-                reason = (
-                    "未启用"
-                    if not target.get("enabled")
-                    else "未设为默认数仓"
-                    if not target.get("is_default")
-                    else "未配置连接"
-                )
-                label = f"{target['name']}（不可选：{reason}）"
-            options.append({
-                "label": label,
-                "value": target["id"],
-                "disabled": not target.get("executable"),
-            })
-        return options
-
-    @staticmethod
-    def _engine_of_datasource(ds: Any) -> str | None:
-        """由数据源类型推导物化引擎（DDL/ETL 方言）。仅仓库类型可作物化目标。
-
-        与前端 MaterializeModal.engineOfKind 同口径：数据源 kind 命中已注册引擎即用它。
-        """
-        from app.warehouse import list_engines
-
-        key = (getattr(ds, "kind", None) or "").lower()
-        return key if key in set(list_engines()) else None
-
-    @staticmethod
-    def _partition_key_candidates(
-        db: Session, ontology_id: str, contracts: list[Any]
-    ) -> list[dict[str, Any]]:
-        """整批可用的分区键候选 = **业务属性**，按覆盖的实体数排序。
-
-        分区键是逐表的列名，凭空给一个「全域最常见」的默认值会填进一个这张表根本没有的
-        字段（实测就发生过）。故这里不给默认值，只把**真实属性**摆成候选，并如实标注它
-        覆盖了几个待物化实体——覆盖不全的键整批用会让没这列的表退化成无谓词追加。
-
-        排序把已被现有契约用作分区键的排在最前：那是人已经认过的选择。
-        """
-        from app.models import ObjectType, Property
-
-        object_ids = [
-            c.target_id for c in contracts if c.target_kind == "object_type"
-        ]
-        if not object_ids:
-            return []
-        # 只认本体内的对象，防止契约里残留的陈旧 target_id 把别的域的属性带进来。
-        alive = {
-            row.id
-            for row in db.query(ObjectType.id)
-            .filter(ObjectType.ontology_id == ontology_id, ObjectType.id.in_(object_ids))
-            .all()
-        }
-        if not alive:
-            return []
-        coverage: dict[str, set[str]] = {}
-        display: dict[str, str] = {}
-        semantic: dict[str, str | None] = {}
-        for p in db.query(Property).filter(Property.object_type_id.in_(alive)).all():
-            name = (p.name or "").strip()
-            if not name:
-                continue
-            coverage.setdefault(name, set()).add(p.object_type_id)
-            display.setdefault(name, p.display_name or name)
-            semantic.setdefault(name, p.semantic_type or p.data_type)
-        in_use = {
-            (c.partition_key or "").strip() for c in contracts if (c.partition_key or "").strip()
-        }
-        total = len(alive)
-        items = [
-            {
-                "name": name,
-                "display_name": display.get(name) or name,
-                "semantic_type": semantic.get(name),
-                "covers": len(ids),
-                "total": total,
-                # 已在用的键放在最前：那是人已经认过的选择，不该被一个覆盖面更广的挤下去。
-                "in_use": name in in_use,
-            }
-            for name, ids in coverage.items()
-        ]
-        items.sort(key=lambda it: (not it["in_use"], -it["covers"], it["name"]))
-        return items[:_TASK_OPTIONS_LIMIT]
-
-    def _materialize_locations(
-        self, db: Session, sources: list[Any]
-    ) -> list[dict[str, Any]]:
-        """逐个可写数据源列出它上面的库，供「某某数据源下的某某库」合并成一次选择。
-
-        物化弹窗里目标库是**选完数据源才去连它列库**的联动下拉；表单是一次性提交、没有
-        联动，故把两级摊平成一级：候选本身就是「数据源 → 库」这一对。
-
-        列不出库的源不静默丢掉——记下原因，让它以「手填库名」的形式仍能被选到，否则一个
-        连接暂时不通的仓就凭空从候选里消失了。
-        """
-        from app.services.data_app import DataAppService
-
-        svc = DataAppService()
-        out: list[dict[str, Any]] = []
-        for s in sources:
-            try:
-                databases = svc.list_databases(db, s.id)
-                error = None
-            except Exception as exc:  # noqa: BLE001 — 列不出库只降级为手填，不该中断建数
-                databases, error = [], f"列不出该数据源的库（{exc}）"
-            out.append({
-                "id": s.id,
-                "name": s.name,
-                "kind": s.kind,
-                "engine": self._engine_of_datasource(s),
-                "databases": list(databases or []),
-                "error": error,
-            })
-        return out
-
-    def _materialize_options(
-        self,
-        db: Session,
-        *,
-        ontology_id: str,
-        datasource_id: str,
-        keyword: str,
-        limit: int | None = _TASK_OPTIONS_LIMIT,
-    ) -> tuple[dict, str, bool]:
-        from app.models import DataSource, ObjectType
-        from app.services.materialization_contract import MaterializationContractService
-        from app.warehouse import DEFAULT_ENGINE
-
-        contracts_svc = MaterializationContractService()
-
-        sources = (
-            db.query(DataSource)
-            .filter(DataSource.purpose == "warehouse", DataSource.kind == "doris")
-            .order_by(DataSource.name, DataSource.id)
-            .all()
-        )
-        target_catalog, default_doris = self._doris_target_catalog(db)
-        datasources = [
-            {
-                **target,
-                "engine": "doris",
-                "writable": target["executable"],
-            }
-            for target in target_catalog
-        ]
-
-        # 物化固定写唯一可执行默认 Doris；其它 datasource_id 不参与。
-        chosen_id = default_doris["id"] if default_doris else ""
-        chosen = next((s for s in sources if s.id == chosen_id), None)
-        engine = DEFAULT_ENGINE
-
-        # 目标库：只有指定了数据源才去连它列库。连不上不是错误——弹窗那边也是降级成手填。
-        databases: list[str] | None = None
-        databases_error: str | None = None
-        if chosen is not None:
-            from app.services.data_app import DataAppService
-
-            try:
-                databases = DataAppService().list_databases(db, chosen.id)
-            except Exception as exc:  # noqa: BLE001 — 列不出库只降级为手填，不该中断建数
-                databases_error = f"列不出该数据源的库（{exc}）；请让用户手填库名"
-
-        # 候选读取保持**纯读**：尚未持久化契约时，用 derive() 的确定性结果补齐；已有契约
-        # （含人工钉住字段）优先。执行入口会按既有流程 sync() 后再生成 DDL。
-        rows = contracts_svc.list_contracts(db, ontology_id, materialized_only=True)
-        persisted = {(row.target_kind, row.target_id): row for row in rows}
-        derived = [item for item in contracts_svc.derive(db, ontology_id) if item["materialized"]]
-
-        from app.models import BusinessLogic, RelationType
-
-        object_names = {
-            row.id: (row.name, row.display_name)
-            for row in db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
-        }
-        relation_names = {
-            row.id: (row.name, row.display_name)
-            for row in db.query(RelationType).filter(RelationType.ontology_id == ontology_id)
-        }
-        logic_names = {
-            row.id: (row.name, row.display_name)
-            for row in db.query(BusinessLogic).filter(BusinessLogic.ontology_id == ontology_id)
-        }
-        names_by_kind = {
-            "object_type": object_names,
-            "relation_type": relation_names,
-            "business_logic": logic_names,
-        }
-        entities: list[dict[str, Any]] = []
-        for item in derived:
-            key = (item["target_kind"], item["target_id"])
-            contract = persisted.get(key)
-            name, display = names_by_kind.get(item["target_kind"], {}).get(
-                item["target_id"], (None, None)
-            )
-            if keyword and keyword.lower() not in f"{name or ''}{display or ''}".lower():
-                continue
-            entities.append({
-                "contract_id": contract.id if contract else None,
-                "entity": name or item["target_id"],
-                "display_name": display,
-                "layer": contract.target_layer if contract else item["target_layer"],
-                "derived_only": contract is None,
-            })
-            if limit is not None and len(entities) >= limit:
-                break
-
-        configured_database = None
-        if default_doris:
-            from app.models import DorisWarehouseConfig
-
-            config = (
-                db.query(DorisWarehouseConfig)
-                .filter(DorisWarehouseConfig.warehouse_datasource_id == default_doris["id"])
-                .first()
-            )
-            configured_database = (
-                str(config.default_database).strip()
-                if config and config.default_database else None
-            )
-
-        result = {
-            "kind": "materialize",
-            "engine": engine,
-            "datasources": datasources,
-            "default_doris": default_doris,
-            "databases": databases,
-            "configured_database": configured_database,
-            "databases_error": databases_error,
-            "layers": sorted({e["layer"] for e in entities}),
-            "entities": entities,
-            "total_entities": len(derived),
-            "returned": len(entities),
-            "truncated": len(entities) < len(derived),
-            "usage": (
-                "物化只建结构：target_datasource_id 固定为唯一可执行默认 Doris，"
-                "target_database 必须来自真实数据库目录；selected_targets 控制范围，空=全部。"
-                "装载方式、分区键和调度属于后续同步任务，不在物化任务中配置。"
-            ),
-        }
-        summary = (
-            f"可选项：{len(datasources)} 个数据源 / "
-            f"{len(databases) if databases is not None else '—'} 个库 / "
-            f"{len(derived)} 个待物化实体"
-        )
-        return result, summary, False
-
-    def _metric_task_options(
-        self,
-        db: Session,
-        *,
-        ontology_id: str,
-        keyword: str,
-        limit: int | None = _TASK_OPTIONS_LIMIT,
-    ) -> tuple[dict, str, bool]:
-        from app.models import BusinessLogic, DataSource, EntityStatus
-
-        q = db.query(BusinessLogic).filter(
-            BusinessLogic.ontology_id == ontology_id,
-            BusinessLogic.status == EntityStatus.PUBLISHED.value,
-            BusinessLogic.expression_json.is_not(None),
-        )
-        logics = q.order_by(BusinessLogic.name).all()
-        if keyword:
-            logics = [
-                logic for logic in logics
-                if keyword.lower() in f"{logic.name}{logic.display_name}".lower()
-            ]
-        target_datasources, default_doris = self._doris_target_catalog(db)
-        items = [
-            {
-                "business_logic_id": logic.id,
-                "name": logic.name,
-                "display_name": logic.display_name,
-                "logic_type": logic.logic_type,
-                "suggested_context": (
-                    {
-                        "business_logic_id": logic.id,
-                        "target_datasource_id": default_doris["id"],
-                    }
-                    if default_doris else None
-                ),
-            }
-            for logic in (logics if limit is None else logics[:limit])
-        ]
-        return (
-            {
-                "kind": "metric",
-                "target_datasources": target_datasources,
-                "default_doris": default_doris,
-                "business_logics": items,
-                "required_context": ["business_logic_id", "target_datasource_id"],
-                "note": "只列已发布且 expression_json 完整的 metric/tag/rule；执行固定写 Doris ADS。",
-            },
-            f"可选项：{len(items)} 个已形式化业务逻辑",
-            False,
-        )
-
-    def _entity_task_options(
-        self,
-        db: Session,
-        *,
-        kind: str,
-        ontology_id: str,
-        keyword: str,
-        limit: int | None = _TASK_OPTIONS_LIMIT,
-    ) -> tuple[dict, str, bool]:
-        """同步/加工的候选对象。
-
-        两者的 Drafter 在没给 object_type / target_table 时会用 ``select_by_intent`` **猜**
-        一个对象——把候选摆出来让用户选，猜就不必发生了。
-        """
-        from app.models import ObjectType
-        from app.services.ods_naming import target_ods_table_name
-        from app.services.source_ref import (
-            has_physical_source,
-            is_derived_source_ref,
-            source_table_of,
-        )
-
-        q = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
-        rows = q.order_by(ObjectType.name).all()
-        transform_ready: set[str] | None = None
-        if kind == "transform":
-            from app.models import (
-                Ontology,
-                OntologyWarehouseDeployment,
-                WarehouseObjectProjection,
-            )
-
-            _targets, transform_doris = self._doris_target_catalog(db)
-            transform_ready = set()
-            # 派生对象没有自己的 ODS projection：它的输入是 DerivedDefinition 里声明的
-            # 多张数仓数据集，TransformDrafter/validation 会在起草和校验时检查这些上游。
-            # 手动向导也按这个语义允许派生对象，因此候选阶段不能把它们误删掉。
-            transform_ready.update(
-                o.name for o in rows if is_derived_source_ref(o.source_ref)
-            )
-            ontology = db.get(Ontology, ontology_id)
-            if transform_doris and ontology is not None:
-                deployment = (
-                    db.query(OntologyWarehouseDeployment)
-                    .filter(
-                        OntologyWarehouseDeployment.ontology_id == ontology_id,
-                        OntologyWarehouseDeployment.ontology_version == ontology.version,
-                        OntologyWarehouseDeployment.doris_datasource_id == transform_doris["id"],
-                    )
-                    .first()
-                )
-                if deployment is not None:
-                    transform_ready.update({
-                        name
-                        for (name,) in (
-                            db.query(ObjectType.name)
-                            .join(
-                                WarehouseObjectProjection,
-                                WarehouseObjectProjection.object_type_id == ObjectType.id,
-                            )
-                            .filter(
-                                ObjectType.ontology_id == ontology_id,
-                                WarehouseObjectProjection.deployment_id == deployment.id,
-                                WarehouseObjectProjection.sync_status == "ready",
-                                WarehouseObjectProjection.ods_table.is_not(None),
-                            )
-                            .all()
-                        )
-                    })
-
-        objects: list[dict[str, Any]] = []
-        for o in rows:
-            if keyword and keyword.lower() not in f"{o.name or ''}{o.display_name or ''}".lower():
-                continue
-            if transform_ready is not None and o.name not in transform_ready:
-                continue
-            # 同步要从源表搬。没有物理源表的对象（无 source_ref，或人工建模的 manual: 引用）
-            # 定位不到源，不该进候选——它们的去处是物化。
-            if kind == "sync" and not has_physical_source(o.source_ref):
-                continue
-            objects.append({
-                "name": o.name,
-                "display_name": o.display_name,
-                "description": o.description,
-                "source_table": source_table_of(o.source_ref),
-                "target_ods_table": (
-                    target_ods_table_name(db, ontology_id, o) if kind == "sync" else None
-                ),
-            })
-            if limit is not None and len(objects) >= limit:
-                break
-
-        eligible = (
-            len([o for o in rows if has_physical_source(o.source_ref)])
-            if kind == "sync"
-            else len(transform_ready or set())
-            if kind == "transform"
-            else len(rows)
-        )
-        result: dict[str, Any] = {
-            "kind": kind,
-            # 键名对齐各自 Drafter 认的 context 键，模型照抄即可，不必自己映射。
-            "context_key": "object_type" if kind == "sync" else "target_table",
-            "objects": objects,
-            "total_objects": eligible,
-            "returned": len(objects),
-            "truncated": len(objects) < eligible,
-        }
-        if kind == "sync":
-            from app.models import DataSource
-            from app.services.source_datasource import source_datasource_candidates
-
-            sources = (
-                db.query(DataSource)
-                .filter(
-                    DataSource.purpose == "business_source",
-                    DataSource.enabled.is_(True),
-                )
-                .order_by(DataSource.name, DataSource.id)
-                .all()
-            )
-            rows_by_name = {o.name: o for o in rows}
-            matched_by_object: dict[str, list[DataSource]] = {}
-            for item in objects:
-                obj = rows_by_name.get(item["name"])
-                matched = (
-                    source_datasource_candidates(db, obj, sources=sources) if obj else []
-                )
-                matched_by_object[item["name"]] = matched
-                item["source_datasources"] = [
-                    {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
-                    for s in matched
-                ]
-            target_datasources, default_doris = self._doris_target_catalog(db)
-            # 顶层保留并集供旧调用方读取；每个对象自己的精确候选在
-            # objects[].source_datasources，表单据此随本体选择联动。
-            matched_ids = {
-                source.id for matched in matched_by_object.values() for source in matched
-            }
-            result["source_datasources"] = [
-                {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
-                for s in sources if s.id in matched_ids
-            ]
-            result["target_datasources"] = target_datasources
-            result["default_doris"] = default_doris
-            result["required_context"] = [
-                "object_type", "source_datasource_id", "target_datasource_id", "mode",
-            ]
-            # 每个本体对象单独推导来源；只有该对象唯一命中时才给可直接复制的推荐 context。
-            if default_doris:
-                for item in objects:
-                    matched = matched_by_object.get(item["name"]) or []
-                    if len(matched) != 1:
-                        continue
-                    item["suggested_context"] = {
-                        "object_type": item["name"],
-                        "source_datasource_id": matched[0].id,
-                        "target_datasource_id": default_doris["id"],
-                        # 落点不进 context：Drafter 按 ODS_DATABASE + ods_{数据域}_{原始表名} 固定生成。
-                        "mode": "full",
-                    }
-            result["load_strategies"] = [dict(s) for s in _LOAD_STRATEGIES]
-            result["cron_presets"] = [dict(c) for c in _CRON_PRESETS]
-            result["note"] = (
-                "同步只允许 business_source → Flink → 默认 Doris ODS。落点固定为 "
-                "ods.ods_{数据域}_{原始表名}，不接受自定义库/表；无 source_ref 的对象已排除；"
-                "incremental/CDC 还必须按 load_strategies 的 hint 补齐主键、水位或 sequence/checkpoint。"
-                "另外要问清 refresh_cron（调度频率）：入仓作业跑一次不叫管道，"
-                "留空只会产出一条手动触发的 DAG。"
-            )
-        else:
-            from app.agents.drafters.transform import SUPPORTED_CLEANSING_RULES
-
-            target_datasources, default_doris = self._doris_target_catalog(db)
-            result["target_datasources"] = target_datasources
-            result["default_doris"] = default_doris
-            if default_doris:
-                for item in objects:
-                    item["suggested_context"] = {
-                        "target_table": item["name"],
-                        "target_datasource_id": default_doris["id"],
-                    }
-
-            # 清洗规则是**闭集**：Drafter 只认这几条，说不出的需求会被静默丢掉，
-            # 故把词表交给模型，让它当场告诉用户哪些做得了。
-            result["cleansing_rules"] = [
-                {"rule": code, "description": desc} for code, desc in SUPPORTED_CLEANSING_RULES
-            ]
-            result["note"] = (
-                "只列当前默认 Doris 中 ODS Projection 已同步就绪的对象；没有候选时须先建同步任务"
-                "（同步自己会幂等建出 ODS 表，不必先单独物化）。"
-                "清洗需求只有落到上述规则才会进 Spec，词表外需求不能假装执行。"
-            )
-        return result, f"可选项：{len(objects)}/{eligible} 个候选对象", False
+        return task_form.entity_task_options(db, kind=kind, ontology_id=ontology_id, keyword=keyword)
 
     def _dispatch_propose_action(
         self,
@@ -4435,48 +3664,17 @@ class ChatBiService:
         raw_context = args.get("context")
         if not isinstance(raw_context, dict):
             raw_context = {}
-        confirmation_id = str(raw_context.get("task_confirmation_id") or "").strip()
-        confirmed_requirement: str | None = None
-        confirmed_context: dict[str, Any] = {}
-        if conversation_id:
-            # 识别出任务意图不等于需求已确认。四类写侧任务都要先逐环确认需求、本体/口径和
-            # 数据落点；后三环（执行方案/执行/结果）在制品抽屉里各自确认。同一会话可能连续
-            # 建多条任务，故必须按本张表单 confirmation_id 隔离，不能复用旧确认。
-            latest = task_confirmations(db, conversation_id, confirmation_id)
-            requirement_chosen = (latest.get("requirement") or {}).get("chosen") or {}
-            if isinstance(requirement_chosen, dict):
-                confirmed_requirement = str(
-                    requirement_chosen.get("task_requirement")
-                    or requirement_chosen.get("intent")
-                    or ""
-                ).strip() or None
-            for node in ("ontology", "data"):
-                chosen = (latest.get(node) or {}).get("chosen") or {}
-                if isinstance(chosen, dict):
-                    confirmed_context.update({
-                        str(key): value
-                        for key, value in chosen.items()
-                        if key != "task_confirmation_id"
-                    })
-            missing_confirmations = missing_task_confirmations(
-                db, conversation_id, confirmation_id
-            )
-            if missing_confirmations:
-                return (
-                    {
-                        "error": "数据任务必须先逐环确认需求、本体/口径和数据落点",
-                        "missing_confirmations": missing_confirmations,
-                        "confirmation_id": confirmation_id or None,
-                        "hint": f"请先调用 request_form(task_kind={kind})，并把回填中的 task_confirmation_id 原样放进 context。",
-                    },
-                    "尚未确认：" + "、".join(node_label(n) for n in missing_confirmations),
-                    True,
-                )
-        # 人在向导中确认的本体/口径和数据参数是权威值，覆盖模型从回填文本再次解析出的值。
-        # 这样即使模型抄错一个 id，也不会让“确认 A、执行 B”。
-        context = {**dict(raw_context), **confirmed_context}
-        intent = confirmed_requirement or str(context.pop("task_requirement", "") or "").strip() or intent
-        context.pop("task_confirmation_id", None)
+        # 提案就是提案：这里不设确认闸。**人的放行只有一处**——制品被确认之前不得执行
+        # （agent_pipeline 把守）。此前还有一道按会话六环逐环核对的前置闸，随决策账本
+        # 一起退场：账本没了，"人在第几环选了什么"也就不再是这条路径的数据来源。
+        #
+        # 表单答案由调用方原样带进 context（前端提交表单、MCP 累计 answers），不再走
+        # 账本回读。模型抄错 id 的防线改由制品确认前的执行方案审查兜——人在那里看到的
+        # 是 Drafter 派生出的、这次真会执行的那份 Spec。
+        context = dict(raw_context)
+        intent = str(context.pop("task_requirement", "") or "").strip() or intent
+        # 表单单号原样带回给前端（它据此把这条任务关联到本次会话），但不再进 Spec。
+        confirmation_id = str(context.pop("task_confirmation_id", "") or "").strip()
         if kind == "sync":
             # ODS 表名由 Drafter 按 ods_{数据域}_{原始表名} 固定生成。清掉外部传入的值
             # 传入的值，避免提案卡展示一个执行时必然会被后端覆盖的假配置。
@@ -4498,7 +3696,7 @@ class ChatBiService:
 
         if db.get(Ontology, ontology_id) is not None:
             if kind in {"sync", "transform"}:
-                catalog, _summary, _error = self._entity_task_options(
+                catalog, _summary, _error = task_form.entity_task_options(
                     db, kind=kind, ontology_id=ontology_id, keyword="", limit=None
                 )
                 allowed_objects = {item["name"] for item in catalog.get("objects") or []}
@@ -4511,7 +3709,7 @@ class ChatBiService:
                     )
                     return ({"error": reason, "available": sorted(allowed_objects)}, reason, True)
             elif kind == "metric":
-                catalog, _summary, _error = self._metric_task_options(
+                catalog, _summary, _error = task_form.metric_task_options(
                     db, ontology_id=ontology_id, keyword="", limit=None
                 )
                 allowed_logics = {
@@ -4524,7 +3722,7 @@ class ChatBiService:
                         True,
                     )
             elif kind == "materialize":
-                catalog, _summary, _error = self._materialize_options(
+                catalog, _summary, _error = task_form.materialize_options(
                     db, ontology_id=ontology_id, datasource_id="", keyword="", limit=None
                 )
                 allowed_targets = {item["entity"] for item in catalog.get("entities") or []}
@@ -4556,7 +3754,7 @@ class ChatBiService:
         target_id = str(context.get("target_datasource_id") or "")
         if target_id:
             executable_ids = {
-                target["id"] for target in self._doris_target_catalog(db)[0]
+                target["id"] for target in task_form._doris_target_catalog(db)[0]
                 if target["executable"]
             }
             if target_id not in executable_ids:
@@ -4585,8 +3783,7 @@ class ChatBiService:
             "intent": intent,
             "context": context,
             "ontology_id": ontology_id,
-            # action_proposal 是旧前端仍会渲染的提案块；把表单确认单号显式带过去，
-            # 前端才能改走 draft-confirmed，而不是拿着已确认的上下文再绕过账本直 draft。
+            # 表单单号：前端据此走 draft-confirmed，把建出来的任务关联回本次会话。
             "confirmation_id": confirmation_id or None,
             # 前端「去校验并执行」按钮原样 POST /api/agents/draft 的载荷（ArtifactDraftRequest）。
             "draft_payload": {
@@ -4598,149 +3795,6 @@ class ChatBiService:
         }
         label = _ACTION_KIND_LABEL[kind]
         return proposal, f"提案：新建{label}任务「{intent[:24]}」", False
-
-    def _dispatch_propose_pipeline(
-        self, db: Session, *, ontology_id: str, args: dict
-    ) -> tuple[dict, str, bool]:
-        """产出一条**任务链**提案（纯 spec，不写库、不执行）。
-
-        与 propose_action 同构：ask() 保持只读，真正建链由用户在前端点击后 POST
-        /api/agents/pipelines。链只管顺序与上下文传递，逐步的「校验→确认→执行」原样不动。
-
-        **必填 context 的校验要把继承算进去**：第 2 步的清洗不必自己给目标数据源——那是第 1
-        步物化已经定下的，链会接过去。若在这里照单步的口径判缺，模型就会被迫在每一步都重报
-        一遍同样的 id，那正是任务链要消灭的事。
-        """
-        name = str(args.get("name") or "").strip()
-        raw_steps = args.get("steps")
-        if not isinstance(raw_steps, list) or not raw_steps:
-            return {"error": "需要 steps（非空步骤数组）"}, "任务链无步骤", True
-        if len(raw_steps) < 2:
-            return (
-                {"error": "任务链至少两步；只有一个任务请用 propose_action"},
-                "任务链只有一步",
-                True,
-            )
-        if len(raw_steps) > _PIPELINE_MAX_STEPS:
-            return (
-                {"error": f"任务链最多 {_PIPELINE_MAX_STEPS} 步，收到 {len(raw_steps)} 步"},
-                "任务链过长",
-                True,
-            )
-
-        steps: list[dict[str, Any]] = []
-        # 沿链累积「上游已经定下的键」，据此判下游还缺什么。
-        available: set[str] = set(_AUTO_ACTION_CONTEXT_KEYS)
-        for i, raw in enumerate(raw_steps):
-            if not isinstance(raw, dict):
-                return {"error": f"第 {i + 1} 步不是对象"}, "任务链步骤非法", True
-            kind = str(raw.get("kind") or "").strip()
-            if kind not in _PIPELINE_KINDS:
-                return (
-                    {"error": f"第 {i + 1} 步的 kind 须为 {'/'.join(_PIPELINE_KINDS)}，收到「{kind}」",
-                     "available": list(_PIPELINE_KINDS)},
-                    "任务链步骤类型非法",
-                    True,
-                )
-            step_intent = str(raw.get("intent") or "").strip()
-            if not step_intent:
-                return {"error": f"第 {i + 1} 步（{kind}）缺少 intent"}, "任务链步骤缺意图", True
-            context = raw.get("context")
-            if not isinstance(context, dict):
-                context = {}
-            else:
-                context = dict(context)
-            if kind == "sync":
-                context.pop("target_ods_table", None)
-            missing = [
-                key
-                for key in _missing_action_context(kind, context)
-                if key not in available
-            ]
-            if missing:
-                label = _ACTION_KIND_LABEL.get(kind, kind)
-                return (
-                    {
-                        "error": f"第 {i + 1} 步（{label}）缺少必要上下文：{'、'.join(missing)}",
-                        "step_index": i,
-                        "missing": missing,
-                        "hint": _ACTION_CONTEXT_HINT,
-                        **_action_context_candidates(db, missing),
-                    },
-                    f"任务链第 {i + 1} 步缺上下文",
-                    True,
-                )
-            if kind == "sync":
-                sync_errors = _sync_context_errors(db, context, ontology_id=ontology_id)
-                if sync_errors:
-                    return (
-                        {
-                            "error": f"第 {i + 1} 步同步上下文不符合 Doris ODS 架构",
-                            "step_index": i,
-                            "issues": sync_errors,
-                        },
-                        "任务链同步步骤违反 Doris ODS 架构",
-                        True,
-                    )
-            available |= {k for k, v in context.items() if v}
-            # C2：血缘依赖（depends_on 步序列表）。agent 可从 DataHub 血缘/意图推导；
-            # 未给则沿用线性默认（依赖上一步），编译期再按血缘边收敛。
-            raw_depends = raw.get("depends_on")
-            depends: list[int] = []
-            if isinstance(raw_depends, list):
-                for d in raw_depends:
-                    try:
-                        depends.append(int(d))
-                    except (TypeError, ValueError):
-                        return (
-                            {"error": f"第 {i + 1} 步的 depends_on 必须是步序数字列表"},
-                            "任务链步骤依赖非法",
-                            True,
-                        )
-                if i in depends:
-                    return (
-                        {"error": f"第 {i + 1} 步不能依赖自己"},
-                        "任务链步骤自依赖",
-                        True,
-                    )
-            steps.append({"kind": kind, "intent": step_intent, "context": context,
-                          "depends_on": depends})
-
-        steps, dropped = _drop_redundant_materialize(steps)
-        if len(steps) < 2:
-            # 砍掉多余物化后只剩一步：这本来就不是链，让模型改走单任务。
-            return (
-                {
-                    "error": "去掉多余的物化步骤后只剩一个任务，请改用 propose_action",
-                    "reason": _MATERIALIZE_BEFORE_SYNC_REASON,
-                },
-                "任务链只剩一步（物化步骤多余）",
-                True,
-            )
-
-        intent = str(args.get("intent") or "").strip()
-        chain = " → ".join(_ACTION_KIND_LABEL.get(s["kind"], s["kind"]) for s in steps)
-        proposal = {
-            "kind": "pipeline",
-            "name": name or f"任务链 · {chain}",
-            "intent": intent or chain,
-            "ontology_id": ontology_id,
-            "steps": steps,
-            # 砍掉的步骤如实说出来（前端在链卡片上展示，模型也据此措辞）——省一步是
-            # 对的，但不能让人以为自己要的那一步凭空消失了。
-            "dropped_steps": dropped,
-            # 前端「创建任务链」按钮原样 POST /api/agents/pipelines 的载荷。
-            "create_payload": {
-                "name": name or f"任务链 · {chain}",
-                "intent": intent or chain,
-                "ontology_id": ontology_id,
-                "steps": steps,
-            },
-        }
-        summary = f"提案：任务链 {chain}（{len(steps)} 步）"
-        if dropped:
-            summary += f"，已省略 {len(dropped)} 个多余的物化步骤"
-        return proposal, summary, False
 
     @staticmethod
     def _dispatch_update_plan(args: dict) -> tuple[dict, str, bool]:
@@ -4773,595 +3827,6 @@ class ChatBiService:
         done = sum(1 for s in steps if s["status"] == "done")
         return {"plan": plan}, f"计划 {len(steps)} 步（完成 {done}）", False
 
-    def _task_form_template(
-        self,
-        db: Session,
-        *,
-        kind: str,
-        ontology_id: str,
-        datasource_id: str,
-        intent: str = "",
-    ) -> list[dict]:
-        """建数任务的必问字段骨架，候选取自 get_task_options 的同一份目录。
-
-        取值要能原样回到 context，而表单回填是**纯文本**（无后端会话态，见 P6）——故 id 类
-        候选把 id 放进 ``value``，界面只显示 ``label``。此前二者是同一个字符串（``名称｜id``），
-        那串 id 就糊在下拉里给人看。
-
-        **与专属界面同构**：物化的这几个控件必须和 MaterializeModal 是同一套事实与同一套
-        呈现——目标库跟着数据源走、执行侧不支持的装载方式摆出来但置灰、分区键从业务属性里
-        选、调度频率用 cron 选择器。对话里配出来的任务与弹窗里配出来的应当没有差别。
-        """
-        if kind == "metric":
-            return self._metric_form_template(db, ontology_id=ontology_id, intent=intent)
-        if kind != "materialize":
-            return self._entity_form_template(
-                db, kind=kind, ontology_id=ontology_id, intent=intent
-            )
-        return self._materialize_form_template(
-            db, ontology_id=ontology_id, datasource_id=datasource_id, intent=intent
-        )
-
-    def _entity_form_template(
-        self, db: Session, *, kind: str, ontology_id: str, intent: str = ""
-    ) -> list[dict]:
-        """同步 / 加工的字段骨架。
-
-        ``get_task_options`` 给模型的目录仍限制条数以节省上下文；真正给人操作的表单则必须
-        带上全部候选，否则 Select 虽然有搜索框，也只能搜到按名称排序后的前几十项。
-        """
-        opts, _s, err = self._entity_task_options(
-            db, kind=kind, ontology_id=ontology_id, keyword="", limit=None
-        )
-        if err:
-            return []
-        raw_objects = opts.get("objects") or []
-        # 选项文案只给**业务名**。此前一条选项长这样：
-        #   「团队成员介绍（about_us_team_member） · _d71df877e93eac81.tabAbout Us Team
-        #    Member → ods_erpnext_tab_about_us_team_member」
-        # ——四个技术标识（技术名、源库的哈希名、物理源表、ODS 表名）挤在一行，人要在几百
-        # 条这样的字符串里挑一个。要确认的是「同步哪个业务对象」，源表与 ODS 落点是后端
-        # 按固定规则派生的结果（ods_naming），不该在选之前就摊一遍；它们在任务详情的
-        # 「源表 / 目标表」两行里仍看得到，核对不丢。
-        objects = [
-            {"label": o.get("display_name") or o["name"], "value": o["name"]}
-            for o in raw_objects
-        ]
-        recommended = None
-        if intent and raw_objects:
-            from app.agents.common import select_by_intent
-
-            recommended = select_by_intent(
-                intent,
-                raw_objects,
-                key=lambda o: (o.get("name"), o.get("display_name"), o.get("description")),
-            )
-        is_sync = kind == "sync"
-        fields: list[dict] = [{
-            "name": "task_requirement",
-            "label": "同步任务需求" if is_sync else "加工任务需求",
-            "type": "textarea",
-            "required": True,
-            "default": intent,
-            "confirmation_node": "requirement",
-        }]
-        fields.append({
-            "name": opts["context_key"],
-            "label": "确认同步本体" if is_sync else "目标表（业务对象）",
-            "type": "select",
-            "required": True,
-            # 搜索匹配的是 label（业务名），placeholder 就照实说，别再承诺搜技术名。
-            "placeholder": "搜索对象名称" if is_sync and objects else None,
-            **({} if is_sync else {"help": "这里选定的就是最终目标，Drafter 不再按意图猜"}),
-            "confirmation_node": "ontology",
-            **({"options": objects} if objects else {}),
-            **({"default": recommended["name"]} if recommended else {}),
-        })
-        if is_sync:
-            source_options_by_object = {
-                o["name"]: [
-                    {"label": f"{s['name']}（{s['kind']}）", "value": s["id"]}
-                    for s in o.get("source_datasources") or []
-                ]
-                for o in raw_objects
-            }
-            recommended_name = recommended["name"] if recommended else None
-            source_options = source_options_by_object.get(recommended_name or "", [])
-            default_doris = opts.get("default_doris")
-            target_options = self._doris_target_options(
-                opts.get("target_datasources") or []
-            )
-            # 落点不是选项：同步就是「源头数据 → 数仓 ODS」，库名恒为
-            # ods_naming.ODS_DATABASE、表名恒为 ods_{数据域}_{原始表名}，两者都摆在
-            # 上面那个对象下拉的选项文案里（源表 → ODS 表），不必再要人填一个库。
-            fields.extend([
-                {
-                    "name": "source_datasource_id", "label": "源数据源",
-                    "type": "select", "required": True,
-                    "placeholder": "按所选对象的来源筛出",
-                    "confirmation_node": "data",
-                    "depends_on": "object_type",
-                    "options_by_value": source_options_by_object,
-                    **({"options": source_options} if source_options else {}),
-                    **({"default": source_options[0]["value"]} if len(source_options) == 1 else {}),
-                },
-                {
-                    "name": "target_datasource_id", "label": "目标数仓",
-                    "type": "select", "required": True,
-                    "placeholder": "默认 Doris",
-                    "confirmation_node": "data",
-                    # 正常情况不写说明；只有「没有可写的目标」这种挡路的事实才值得占一行。
-                    **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
-                    **({"options": target_options} if target_options else {}),
-                    **({"default": default_doris["id"]} if default_doris else {}),
-                },
-                {
-                    "name": "mode", "label": "装载方式", "type": "radio",
-                    "required": True, "default": "full", "confirmation_node": "data",
-                    "options": [
-                        {"label": s["label"], "value": s["value"]} for s in _LOAD_STRATEGIES
-                    ],
-                    # 不写说明：三个选项的名字已经说清是哪种同步，而 hint 那几句是给模型
-                    # 读的实现口径（Flink batch / Doris atomic replace / JDBC 有界批），
-                    # 摆在人眼前只是一段看不懂的实现细节。选了增量/CDC 之后要填什么，由
-                    # 随之出现的那几个格子自己说。
-                },
-                *self._sync_strategy_fields(db),
-                {
-                    "name": "refresh_cron", "label": "调度频率", "type": "cron",
-                    "default": "", "confirmation_node": "data",
-                    "help": "入仓作业跑一次不算管道；留空 = 仅手动触发",
-                },
-            ])
-        else:
-            target_catalog, default_doris = self._doris_target_catalog(db)
-            target_options = self._doris_target_options(target_catalog)
-            rules = opts.get("cleansing_rules") or []
-            fields.extend([
-                {
-                    "name": "target_datasource_id", "label": "目标数仓",
-                    "type": "select", "required": True,
-                    "placeholder": "请选择已登记的默认 Doris 数仓",
-                    "confirmation_node": "data",
-                    "options": target_options,
-                    **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
-                    **({"default": default_doris["id"]} if default_doris else {}),
-                },
-                {
-                    "name": "target_layer", "label": "目标层", "type": "select",
-                    "required": True, "default": "dim", "confirmation_node": "data",
-                    "options": [
-                        {"label": "维度层 DIM", "value": "dim"},
-                        {"label": "明细层 DWD", "value": "dwd"},
-                        {"label": "汇总层 DWS", "value": "dws"},
-                    ],
-                },
-                {
-                    "name": "cleansing_rules", "label": "清洗规则", "type": "multiselect",
-                    "confirmation_node": "data",
-                    "options": [
-                        {"label": r["description"], "value": r["rule"]} for r in rules
-                    ],
-                    "help": "只有这些确定性算子可执行",
-                },
-                {
-                    "name": "database_prefix", "label": "库名前缀", "type": "text",
-                    "confirmation_node": "data",
-                    "help": "可选；留空使用默认分层库",
-                },
-                {
-                    "name": "refresh_cron", "label": "调度频率", "type": "cron",
-                    "default": "", "confirmation_node": "data",
-                    "help": "留空 = 仅手动触发",
-                },
-                {
-                    "name": "notes", "label": "备注", "type": "textarea",
-                    "confirmation_node": "data",
-                    "help": "可选；记录未被清洗规则覆盖的补充要求",
-                },
-            ])
-        return fields
-
-    def _sync_strategy_fields(self, db: Session) -> list[dict]:
-        """装载方式选了增量/CDC 之后才要填的那几项。
-
-        **为什么必须有**：装载方式那个单选给了三个选项，但表单此前只到那里为止。选「增量
-        同步」的人填完整张表单，提交时被 ``_sync_context_errors`` 打回「incremental 必须配置
-        primary_keys / incremental_column / initial_watermark」——而表单里根本没有这三个格子。
-        三选一里两个是死路，等于只有全量能用。
-
-        候选（主键/增量字段/sequence 列）随所选对象实时取（``options_from``），不静态摊进
-        表单：一个几百对象的本体，把每个对象的字段全摊开是几 MB 的消息负载。
-
-        ``visible_when`` 决定可见性：全量同步的人不该看到六个填不着的格子——这是**同一张
-        表单在三种装载语义下的三副面孔**，不是六个可选项。
-        """
-        incremental_only = {"field": "mode", "in": ["incremental"]}
-        cdc_only = {"field": "mode", "in": ["cdc"]}
-        fields: list[dict] = [
-            {
-                "name": "primary_keys", "label": "业务主键", "type": "multiselect",
-                "required": True, "confirmation_node": "data",
-                "depends_on": "object_type", "options_from": "object_properties",
-                "visible_when": {"field": "mode", "in": ["incremental", "cdc"]},
-                "help": "增量/CDC 靠它做 UPSERT 去重；命中 <对象>_id / id 约定的字段已预选，"
-                        "没命中就必须自己指定——猜错会让重跑变成插重复行",
-            },
-            {
-                "name": "incremental_column", "label": "增量字段", "type": "select",
-                "required": True, "confirmation_node": "data",
-                "depends_on": "object_type", "options_from": "object_properties",
-                "visible_when": incremental_only,
-                "help": "每轮只搬该字段 ≥ 上次成功水位的行；通常是更新时间列",
-            },
-            {
-                "name": "initial_watermark", "label": "初始水位", "type": "text",
-                "required": True, "confirmation_node": "data",
-                "visible_when": incremental_only,
-                "placeholder": "如 2026-01-01 00:00:00",
-                "help": "第一次跑从这里开始；之后由每轮成功的水位自动推进",
-            },
-            {
-                "name": "sequence_column", "label": "Sequence 列", "type": "select",
-                "required": True, "confirmation_node": "data",
-                "depends_on": "object_type", "options_from": "object_properties",
-                "visible_when": cdc_only,
-                "help": "同一主键的多条变更按它定新旧，避免乱序回放把旧值覆盖成最新",
-            },
-            {
-                "name": "delete_policy", "label": "DELETE 策略", "type": "select",
-                "required": True, "default": "ignore", "confirmation_node": "data",
-                "visible_when": cdc_only,
-                "options": [
-                    {"label": "忽略删除（源删了 ODS 保留）", "value": "ignore"},
-                    {"label": "软删除（打标记）", "value": "soft_delete"},
-                    {"label": "传播删除（ODS 同步删除）", "value": "hard_delete"},
-                ],
-            },
-            # 与手动 Spec 的任务级覆盖保持同一协议；留空表示跟随设置页默认。
-            {
-                "name": "flink_parallelism", "label": "并行度", "type": "number",
-                "confirmation_node": "data", "placeholder": "留空跟随设置页",
-                "help": "范围 1~512",
-            },
-            {
-                "name": "flink_yarn_queue", "label": "YARN 队列", "type": "text",
-                "confirmation_node": "data", "placeholder": "留空跟随设置页",
-            },
-            {
-                "name": "flink_deploy_target", "label": "提交目标", "type": "select",
-                "confirmation_node": "data", "placeholder": "留空跟随设置页",
-                "options": [
-                    {"label": target, "value": target}
-                    for target in ("yarn-per-job", "yarn-session", "remote", "local")
-                ],
-            },
-            {
-                "name": "flink_extra_args", "label": "额外 Flink 参数", "type": "text",
-                "confirmation_node": "data",
-                "placeholder": "如 -Dtaskmanager.memory.process.size=2g",
-                "help": "多个参数用空格分隔；留空跟随设置页",
-            },
-        ]
-        # checkpoint 目录是「这套部署长什么样」：设置页配了就跟随，不逼每条 CDC 任务重填
-        # 一遍（见 DEVELOPMENT_PRINCIPLES P1「全局配置 ≠ 唯一取值」）。只有设置页也没有时
-        # 才非填不可——没有读位点持久化，CDC 作业一重启就从头重搬。
-        if not self._settings_checkpoint_dir(db):
-            fields.append({
-                "name": "flink_checkpoint_dir", "label": "Checkpoint 目录", "type": "text",
-                "required": True, "confirmation_node": "data",
-                "visible_when": cdc_only,
-                "placeholder": "如 hdfs:///flink/checkpoints 或 file:///var/flink/ck",
-                "help": "CDC 是常驻流作业，读位点存这里；设置页配了全局默认就不必逐条填",
-            })
-        return fields
-
-    @staticmethod
-    def _settings_checkpoint_dir(db: Session) -> str:
-        """设置页配的 Flink checkpoint 目录（没有则空串）。
-
-        判据只有 ``chat_bi_tool_schemas`` 那一处：表单「问不问这一格」与闸门「拦不拦」
-        必须同源，否则会出现「表单不问、闸门要」这种填不出来的死路。
-        """
-        from app.services.chat_bi_tool_schemas import _settings_checkpoint_dir
-
-        return _settings_checkpoint_dir(db)
-
-    def _metric_form_template(
-        self, db: Session, *, ontology_id: str, intent: str = ""
-    ) -> list[dict]:
-        """聚合任务：确认需求、形式化口径、默认 Doris 和调度。"""
-        catalog, _summary, err = self._metric_task_options(
-            db, ontology_id=ontology_id, keyword="", limit=None
-        )
-        if err:
-            return []
-        logics = catalog.get("business_logics") or []
-        options = [
-            {
-                "label": (
-                    f"{logic['display_name']}（{logic['name']}） · {logic['logic_type']}"
-                    if logic.get("display_name") and logic["display_name"] != logic["name"]
-                    else f"{logic['name']} · {logic['logic_type']}"
-                ),
-                "value": logic["business_logic_id"],
-            }
-            for logic in logics
-        ]
-        recommended = None
-        if intent and logics:
-            from app.agents.common import select_by_intent
-
-            recommended = select_by_intent(
-                intent,
-                logics,
-                key=lambda logic: (logic.get("name"), logic.get("display_name")),
-            )
-        default_doris = catalog.get("default_doris")
-        return [
-            {
-                "name": "task_requirement", "label": "聚合任务需求", "type": "textarea",
-                "required": True, "default": intent, "confirmation_node": "requirement",
-            },
-            {
-                "name": "business_logic_id", "label": "确认业务口径", "type": "select",
-                "required": True, "placeholder": "搜索已发布且形式化的指标/标签/规则",
-                "confirmation_node": "ontology", "options": options,
-                "help": "只能选已形式化的口径",
-                **({"default": recommended["business_logic_id"]} if recommended else {}),
-            },
-            {
-                "name": "target_datasource_id", "label": "目标数仓", "type": "select",
-                "required": True, "placeholder": "请选择已登记的默认 Doris 数仓",
-                "confirmation_node": "data",
-                "options": self._doris_target_options(catalog.get("target_datasources") or []),
-                **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
-                **({"default": default_doris["id"]} if default_doris else {}),
-            },
-            {
-                "name": "target_layer", "label": "目标层", "type": "select",
-                "required": True, "default": "ads", "confirmation_node": "data",
-                "options": [{"label": "应用层 ADS", "value": "ads"}],
-            },
-            {
-                "name": "database_prefix", "label": "库名前缀", "type": "text",
-                "confirmation_node": "data",
-                "help": "可选；留空使用默认 ADS 库",
-            },
-            {
-                "name": "refresh_cron", "label": "调度频率", "type": "cron",
-                "default": "", "confirmation_node": "data",
-                "help": "留空 = 仅手动触发",
-            },
-        ]
-
-    def _materialize_form_template(
-        self,
-        db: Session,
-        *,
-        ontology_id: str,
-        datasource_id: str,
-        intent: str = "",
-    ) -> list[dict]:
-        """物化字段：需求 / 契约范围 / 唯一默认 Doris / 真实目标数据库。"""
-        catalog, _summary, err = self._materialize_options(
-            db, ontology_id=ontology_id, datasource_id=datasource_id, keyword="", limit=None
-        )
-        if err:
-            return []
-        default_doris = catalog.get("default_doris")
-        target_options = self._doris_target_options(catalog.get("datasources") or [])
-        entities = catalog.get("entities") or []
-        entity_options = [
-            {"label": f"全部契约实体（{len(entities)} 项）", "value": "__all__"},
-            *[
-            {
-                "label": (
-                    f"{entity.get('display_name')}（{entity['entity']}） · {entity['layer'].upper()}"
-                    if entity.get("display_name") and entity["display_name"] != entity["entity"]
-                    else f"{entity['entity']} · {entity['layer'].upper()}"
-                ),
-                "value": entity["entity"],
-            }
-            for entity in entities
-            ],
-        ] if entities else []
-
-        # 需求点名了某个实体，范围就默认成它——而不是「全部契约实体（几百项）」。
-        # 「把客户分组物化到数仓」配上一个默认全选的范围，人一路确认下来，最后建的是
-        # 整本体几百张表：确认的是 A、执行的是 B。点不准就退回全部（原行为）。
-        recommended_entity = None
-        if intent and entities:
-            from app.agents.common import select_by_intent
-
-            recommended_entity = select_by_intent(
-                intent,
-                entities,
-                key=lambda e: (e.get("entity"), e.get("display_name")),
-            )
-
-        databases = list(catalog.get("databases") or [])
-        configured_database = catalog.get("configured_database")
-        if configured_database and configured_database not in databases:
-            databases.insert(0, configured_database)
-        database_options = [{"label": name, "value": name} for name in databases]
-        fields: list[dict] = [
-            {
-                "name": "task_requirement", "label": "物化任务需求", "type": "textarea",
-                "required": True, "default": intent or "将本体结构物化到默认 Doris",
-                "confirmation_node": "requirement",
-                "help": "物化只建结构，不搬数据",
-            },
-            {
-                "name": "selected_targets", "label": "确认物化范围",
-                "type": "multiselect", "required": True,
-                "confirmation_node": "ontology", "options": entity_options,
-                "help": (
-                    "已按需求定位，可继续增删"
-                    if recommended_entity
-                    else "默认全部；只物化部分请先删除「全部契约实体」"
-                    if entity_options
-                    else "当前本体没有可物化契约实体，请先生成并确认物化契约"
-                ),
-                **(
-                    {"default": [recommended_entity["entity"]]}
-                    if recommended_entity
-                    else {"default": ["__all__"]}
-                    if entity_options
-                    else {}
-                ),
-            },
-            {
-                "name": "target_datasource_id", "label": "目标数仓", "type": "select",
-                "required": True, "placeholder": "请选择已登记的默认 Doris 数仓",
-                "confirmation_node": "data", "options": target_options,
-                **({} if default_doris else {"help": "请先到设置页配置默认 Doris"}),
-                **({"default": default_doris["id"]} if default_doris else {}),
-            },
-            {
-                "name": "target_database", "label": "目标数据库", "type": "select",
-                "required": True, "confirmation_node": "data",
-                "placeholder": "请选择默认 Doris 中已存在的数据库",
-                "help": (
-                    "候选来自默认 Doris 实时目录，物化不会自动建库"
-                    if database_options
-                    else "读不到默认 Doris 的库目录，请先修复连接；不接受手填"
-                ),
-                "options": database_options,
-                **(
-                    {"default": configured_database}
-                    if configured_database and configured_database in databases
-                    else {"default": database_options[0]["value"]}
-                    if len(database_options) == 1
-                    else {}
-                ),
-            },
-        ]
-
-        # 物化只建 DDL，不负责装载。load_strategy / partition_key / refresh_cron 属于同步契约，
-        # 不应在物化表单中制造“填了就会生效”的错觉。
-        return fields
-
-    def _target_location_fields(
-        self, db: Session, *, writable: list[dict], datasource_id: str
-    ) -> list[dict]:
-        """「目标数据源 + 目标库」的字段。
-
-        能列出库时合并成**一次**选择（「某某数据源 → 某某库」），因为这两者在物化弹窗里
-        本来就是联动的：先选源、再从这个源上列出的库里挑。表单一次性提交、没有联动，两个
-        独立下拉就会让人选出「A 源 + B 源上的库」这种根本不存在的组合。
-
-        候选的 ``value`` 直接写成 ``键=值`` 对，故回填文本自解释，模型不必再猜哪段是 id。
-        一个库都列不出来时退回两个字段（数据源下拉 + 库名手填）。
-        """
-        if not writable:
-            return [
-                {"name": "target_datasource_id", "label": "目标数据源", "type": "text",
-                 "required": True,
-                 "help": "尚无可写数据源（未配连接串的源不能作物化目标），请先到 系统设置 → 数据源 配置"},
-                {"name": "target_database", "label": "目标库", "type": "text", "required": True,
-                 "help": "各分层的表都建在这个库里；物化不会自动建库"},
-            ]
-
-        # 已定下数据源就只探它，否则探全部可写源（每个源一次连接，故限个数）。
-        probe = (
-            [d for d in writable if d["id"] == datasource_id] or writable
-            if datasource_id
-            else writable
-        )[:_FORM_DATASOURCE_PROBE_LIMIT]
-        from app.models import DataSource
-
-        rows = db.query(DataSource).filter(DataSource.id.in_([d["id"] for d in probe])).all()
-        by_id = {r.id: r for r in rows}
-        locations = self._materialize_locations(
-            db, [by_id[d["id"]] for d in probe if d["id"] in by_id]
-        )
-
-        options: list[dict] = []
-        unreachable: list[str] = []
-        for loc in locations:
-            if not loc["databases"]:
-                unreachable.append(loc["name"])
-                continue
-            for database in loc["databases"]:
-                options.append({
-                    "label": f"{loc['name']}（{loc['kind']}） → {database}",
-                    "value": f"target_datasource_id={loc['id']},target_database={database}",
-                })
-        if not options:
-            ds_options = [
-                {"label": f"{d['name']}（{d['kind']}）", "value": d["id"]} for d in writable
-            ]
-            return [
-                {
-                    "name": "target_datasource_id", "label": "目标数据源",
-                    "type": "select", "required": True,
-                    "options": ds_options[:50],
-                    "help": "物化落库的目标仓；引擎由数据源类型决定。未配连接串的源不在候选里",
-                    **({"default": ds_options[0]["value"]} if len(ds_options) == 1 else {}),
-                },
-                {
-                    "name": "target_database", "label": "目标库", "type": "text",
-                    "required": True,
-                    "help": "列不出这些源上的库（连接不通或缺驱动），请手填库名；"
-                            "各分层的表都建在这个库里，物化不会自动建库",
-                },
-            ]
-        help_text = "选「哪个数据源下的哪个库」；各分层的表都建在这个库里，物化不会自动建库"
-        if unreachable:
-            help_text += f"。列不出库的源未展开：{'、'.join(unreachable[:3])}"
-        return [{
-            "name": "target_location", "label": "目标数据源与库", "type": "select",
-            "required": True,
-            "options": options[:_FORM_LOCATION_LIMIT],
-            "help": help_text,
-            **({"default": options[0]["value"]} if len(options) == 1 else {}),
-        }]
-
-    # 四类任务在前三环各自确认的到底是什么，用一份表说清（表单标题与向导文案都取自此）。
-    _TASK_CONFIRMATION_LABELS: dict[str, tuple[str, str]] = {
-        "sync": ("同步本体", "业务源、目标 Doris、ODS 数据库和装载偏好"),
-        "materialize": ("物化范围", "目标 Doris 和目标数据库"),
-        "transform": ("加工对象", "目标 Doris、分层、清洗规则和调度"),
-        "metric": ("业务口径", "目标 Doris、ADS 层和调度"),
-    }
-
-    def build_task_form(
-        self,
-        db: Session,
-        *,
-        kind: str,
-        ontology_id: str,
-        title: str,
-        intent: str = "",
-        datasource_id: str = "",
-        prefill: dict | None = None,
-    ) -> dict:
-        """一个数据任务的**六环确认表单**（骨架字段 + 六环之旅 + 本次确认 id）。
-
-        对话里的 ``request_form`` 与任务链的逐步确认走的是同一张表单——两处各建一份的话，
-        同一个同步任务在单发时问四个参数、在链里只问两个，那不是两种体验，是两套事实。
-        """
-        fields = self._task_form_template(
-            db, kind=kind, ontology_id=ontology_id, datasource_id=datasource_id, intent=intent
-        )
-        prefilled = _apply_prefill(fields, prefill) if prefill else []
-        ontology_label, data_label = self._TASK_CONFIRMATION_LABELS.get(
-            kind, ("本体/口径", "数据落点")
-        )
-        return {
-            "title": title[:120],
-            "intent": intent[:200],
-            "fields": fields,
-            "task_kind": kind,
-            "ontology_id": ontology_id,
-            "confirmation_id": str(uuid.uuid4()),
-            "confirmation_steps": task_journey_steps(
-                ontology_label=ontology_label, data_label=data_label
-            ),
-            "prefilled": prefilled,
-        }
-
     def _sync_supersedes_materialize(
         self, db: Session, *, ontology_id: str, intent: str
     ) -> bool:
@@ -5373,7 +3838,7 @@ class ChatBiService:
 
         对象没有源表（人工建模）时返回 False —— 那种表只能靠物化建出来，不能改判。
         """
-        catalog, _summary, error = self._entity_task_options(
+        catalog, _summary, error = task_form.entity_task_options(
             db, kind="sync", ontology_id=ontology_id, keyword="", limit=None
         )
         if error:
@@ -5465,7 +3930,7 @@ class ChatBiService:
             task_kind = "materialize"
         template: list[dict] = []
         if task_kind in _ACTION_KINDS:
-            template = self._task_form_template(
+            template = task_form.task_form_template(
                 db,
                 kind=task_kind,
                 ontology_id=ontology_id,
@@ -5542,15 +4007,7 @@ class ChatBiService:
         if task_kind in _ACTION_KINDS:
             form["task_kind"] = task_kind
             form["ontology_id"] = ontology_id
-            ontology_label, data_label = self._TASK_CONFIRMATION_LABELS.get(
-                task_kind, ("本体/口径", "数据落点")
-            )
             form["confirmation_id"] = str(uuid.uuid4())
-            # 六环一次给全（含制品阶段的后三环）：人从第一步就看得见「一共要确认几件事、
-            # 现在在第几件」。前端只收集 phase=form 的前三环，后三环在制品抽屉里走。
-            form["confirmation_steps"] = task_journey_steps(
-                ontology_label=ontology_label, data_label=data_label
-            )
         if notice:
             form["notice"] = notice
         intent = str(args.get("intent") or "").strip()
@@ -5571,7 +4028,11 @@ class ChatBiService:
         """
         try:
             from app.api.warehouse import _aggregate_state, _receipt_batches  # noqa: PLC0415
-            from app.connectors.airflow import AirflowClient, AirflowError, is_terminal  # noqa: PLC0415
+            from app.connectors.airflow import (  # noqa: PLC0415
+                AirflowClient,
+                AirflowError,
+                is_terminal,
+            )
 
             batches = _receipt_batches(db, artifact.id)
             if not batches:
@@ -5778,7 +4239,7 @@ class ChatBiService:
                 for item in page.items
             ]
             if len(candidates) != 1:
-                observed_at = datetime.now(timezone.utc).isoformat()
+                observed_at = datetime.now(UTC).isoformat()
                 return (
                     {
                         "family": "landing",
@@ -6143,10 +4604,6 @@ class ChatBiService:
                     "提案缺会话上下文",
                     True,
                 )
-            if name == "propose_pipeline":
-                return self._dispatch_propose_pipeline(
-                    db, ontology_id=anchor_ontology, args=args
-                )
             if name == "propose_preference":
                 return self._dispatch_propose_preference(domain_id=anchor_domain, args=args)
             if name == "list_onboarding_targets":
@@ -6432,7 +4889,7 @@ class ChatBiService:
     @staticmethod
     def _question_names_published_entity(
         question: str,
-        seed_objects: list["_ObjectSnapshot"],
+        seed_objects: list[_ObjectSnapshot],
         seed_logics: list[BusinessLogic],
     ) -> bool:
         """问题是否**点名**了某个已发布业务对象/口径（完整显示名或标识作连续子串）。
@@ -6609,7 +5066,7 @@ class ChatBiService:
             loader = OntologyLadderLoader(self.query_service)
             with_profiles = self._classify_intent(question) == "analytical"
             merged_pkgs: list[dict] = []
-            for d, o in zip(domains, ontologies):
+            for d, o in zip(domains, ontologies, strict=False):
                 ladder = loader.load(
                     db,
                     domain_id=d.id,
@@ -6652,7 +5109,7 @@ class ChatBiService:
         card_text = ""
         try:
             parts: list[str] = []
-            for d, o in zip(domains, ontologies):
+            for d, o in zip(domains, ontologies, strict=False):
                 c = build_card(db, o, d.name)
                 cards.append(c)
                 parts.append(c.render())
@@ -6809,7 +5266,7 @@ class ChatBiService:
         # 首轮不暴露（省首轮 prefill）；首次 run_sql 取到数后再解锁。
         read_result_unlocked = False
 
-        def _compose_tools(skill: "Skill | None") -> list[dict]:
+        def _compose_tools(skill: Skill | None) -> list[dict]:
             tools = [*_tools_for_skill(skill, sql_allowed=sql_allowed)]
             if read_result_unlocked:
                 tools.append(_READ_RESULT_TOOL)
@@ -6829,7 +5286,6 @@ class ChatBiService:
         draft_proposals: list[dict] = []  # propose_draft 产出的建数提案（供 draft_proposal 块）
         preference_proposals: list[dict] = []  # propose_preference 产出的记忆提案（供 preference_proposal 块）
         action_proposals: list[dict] = []  # propose_action 产出的数据任务提案（供 action_proposal 块）
-        pipeline_proposals: list[dict] = []  # propose_pipeline 产出的任务链提案（供 pipeline_proposal 块）
         app_proposals: list[dict] = []  # propose_panel/dashboard 产出的数据应用提案（供 app_proposal 块）
         onboard_proposals: list[dict] = []  # propose_datasource/ontology_draft 产出的接数据提案
         task_statuses: list[dict] = []  # get_task_status 产出的任务状态（供 task_status 块）
@@ -6843,7 +5299,7 @@ class ChatBiService:
         prompt_safe_mode = False
         ops_reader_completed = False
 
-        for loop_index in range(_AGENT_MAX_STEPS):
+        for _loop_index in range(_AGENT_MAX_STEPS):
             # 有些 OpenAI 兼容网关会接受 tool_choice 参数，却仍返回另一个工具。
             # 因此这个布尔值同时驱动请求层提示和响应后的服务端归一，不能只依赖模型遵守。
             force_ops_reader = bool(ops_route is not None and not steps and not ops_records)
@@ -7231,7 +5687,7 @@ class ChatBiService:
                         "find_join_path", "profile_values", "compile_metric", "get_lineage",
                         "get_landing", "get_ops_record",
                         "propose_draft", "propose_expression",
-                        "propose_action", "propose_pipeline",
+                        "propose_action",
                         "get_task_status",
                         "propose_preference", "get_task_options",
                         # 数据应用/接数据两条车道：与上面的提案类同理——成功的提案是基于
@@ -7301,8 +5757,6 @@ class ChatBiService:
                         preference_proposals.append(result)
                     elif tool_name == "propose_action" and result.get("draft_payload"):
                         action_proposals.append(result)
-                    elif tool_name == "propose_pipeline" and result.get("create_payload"):
-                        pipeline_proposals.append(result)
                     elif tool_name in ("propose_panel", "propose_dashboard") and result.get(
                         "create_payload"
                     ):
@@ -7392,21 +5846,14 @@ class ChatBiService:
             body = form_request["title"]
             if form_request.get("intent"):
                 body += "\n\n" + form_request["intent"]
-            yield {
-                "type": "done",
-                "payload": {
-                    "answer": body,
-                    "form_request": form_request,
-                    "suggested_sql": None,
-                    "caliber_decomposition": [],
-                    "referenced_objects": referenced_objects,
-                    "referenced_logics": referenced_logics,
-                    "steps": steps,
-                    "data_result": None,
-                    "_grounded": True,   # 表单不是拒答，不该被接地判定拦下
-                    "_unverified": [],
-                },
-            }
+            yield _done_event(
+                answer=body,
+                form_request=form_request,
+                referenced_objects=referenced_objects,
+                referenced_logics=referenced_logics,
+                steps=steps,
+                grounded=True,  # 表单不是拒答，不该被接地判定拦下
+            )
             return
 
         if clarification is not None:
@@ -7415,21 +5862,14 @@ class ChatBiService:
             body = clarification["question"]
             if clarification["options"]:
                 body += "\n\n" + "\n".join(f"- {o}" for o in clarification["options"])
-            yield {
-                "type": "done",
-                "payload": {
-                    "answer": body,
-                    "clarification": clarification,
-                    "suggested_sql": None,
-                    "caliber_decomposition": [],
-                    "referenced_objects": referenced_objects,
-                    "referenced_logics": referenced_logics,
-                    "steps": steps,
-                    "data_result": None,
-                    "_grounded": True,   # 反问不是拒答，不该被接地判定拦下
-                    "_unverified": [],
-                },
-            }
+            yield _done_event(
+                answer=body,
+                clarification=clarification,
+                referenced_objects=referenced_objects,
+                referenced_logics=referenced_logics,
+                steps=steps,
+                grounded=True,  # 反问不是拒答，不该被接地判定拦下
+            )
             return
 
         # SQL 收割优先级：run_sql 实际提交的 > 口径编译产物 > 正文围栏块兜底。
@@ -7537,35 +5977,31 @@ class ChatBiService:
             "subagent_isolated_chars": tel.subagent_isolated_chars,
         })
 
-        yield {
-            "type": "done",
-            "payload": {
-                "answer": answer or "（模型未返回回答）",
-                "suggested_sql": last_sql,
-                "caliber_decomposition": self._steps_to_caliber(
-                    steps, referenced_objects, referenced_logics, compiled=compiled_metrics
-                ),
-                "referenced_objects": referenced_objects,
-                "referenced_logics": referenced_logics,
-                "steps": steps,
-                "data_result": data_result,
-                "charts": charts,
-                "analyses": analyses,
-                "lineage": lineage,
-                "draft_proposals": draft_proposals,
-                "preference_proposals": preference_proposals,
-                "action_proposals": action_proposals,
-                "pipeline_proposals": pipeline_proposals,
-                "app_proposals": app_proposals,
-                "onboard_proposals": onboard_proposals,
-                "task_statuses": task_statuses,
-                "ops_records": ops_records,
-                "plan": plan,
-                "skill": active_skill.name if active_skill else None,
-                "_grounded": grounded,
-                "_unverified": unverified,
-            },
-        }
+        yield _done_event(
+            answer=answer or "（模型未返回回答）",
+            suggested_sql=last_sql,
+            caliber_decomposition=self._steps_to_caliber(
+                steps, referenced_objects, referenced_logics, compiled=compiled_metrics
+            ),
+            referenced_objects=referenced_objects,
+            referenced_logics=referenced_logics,
+            steps=steps,
+            data_result=data_result,
+            charts=charts,
+            analyses=analyses,
+            lineage=lineage,
+            draft_proposals=draft_proposals,
+            preference_proposals=preference_proposals,
+            action_proposals=action_proposals,
+            app_proposals=app_proposals,
+            onboard_proposals=onboard_proposals,
+            task_statuses=task_statuses,
+            ops_records=ops_records,
+            plan=plan,
+            skill=active_skill.name if active_skill else None,
+            grounded=grounded,
+            unverified=unverified,
+        )
 
     async def _run_agent_loop(
         self,
@@ -7576,7 +6012,7 @@ class ChatBiService:
         ontologies: list[Ontology],
         question: str,
         history: list[dict],
-        resolver: "_ReferenceResolver",
+        resolver: _ReferenceResolver,
         seed_objects: list[_ObjectSnapshot],
         seed_logics: list[BusinessLogic],
         principal_role: str | None = None,

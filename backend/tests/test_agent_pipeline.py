@@ -228,122 +228,6 @@ def test_cannot_confirm_without_validate(client, admin_headers, metric_agent):
     assert "请先执行校验" in resp.json()["detail"]
 
 
-def test_confirm_and_execute_record_into_conversation_ledger(
-    client, admin_headers, metric_agent
-):
-    """接线验证：制品的确认/执行自动记进催生它的会话——前端零改动。
-
-    走完整生命周期（draft → validate → confirm → execute），核对账本里
-    「执行方案确认」与「执行任务」两环都到达，且指向同一制品。
-    """
-    from app.database import SessionLocal
-    from app.models.chat_bi import ChatBiConversation, ChatBiConversationTask
-
-    a = _draft(client, admin_headers)
-
-    db = SessionLocal()
-    try:
-        conv = ChatBiConversation(title="生命周期留痕")
-        db.add(conv)
-        db.commit()
-        conversation_id = conv.id
-        # 模拟前端在「去校验并执行」时建立的 (会话, 制品) 关联
-        db.add(
-            ChatBiConversationTask(
-                conversation_id=conversation_id, artifact_id=a["id"]
-            )
-        )
-        db.commit()
-    finally:
-        db.close()
-
-    client.post(
-        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
-    )
-    assert (
-        client.post(
-            f"/api/agents/artifacts/{a['id']}/confirm", headers=admin_headers, json={}
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            f"/api/agents/artifacts/{a['id']}/execute", headers=admin_headers, json={}
-        ).status_code
-        == 200
-    )
-
-    items = client.get(
-        f"/api/chat-bi/conversations/{conversation_id}/decisions", headers=admin_headers
-    ).json()
-    by_node = {i["node"]: i for i in items}
-    assert by_node["plan"]["stage"] == "artifact_confirm"
-    assert by_node["execute"]["outcome"] == "accepted"
-    assert by_node["execute"]["ref_id"] == a["id"]
-
-    closure = client.get(
-        f"/api/chat-bi/conversations/{conversation_id}/closure", headers=admin_headers
-    ).json()
-    # 执行完但没人确认结果 → 悬挂项如实报出来
-    assert any("结果尚未确认" in d for d in closure["dangling"])
-
-
-def test_artifact_without_conversation_records_nothing(
-    client, admin_headers, metric_agent
-):
-    """工单直接起草的制品无会话——静默跳过留痕，确认/执行照常成功。"""
-    a = _draft(client, admin_headers)
-    client.post(
-        f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={}
-    )
-    resp = client.post(
-        f"/api/agents/artifacts/{a['id']}/confirm", headers=admin_headers, json={}
-    )
-    assert resp.status_code == 200
-
-
-def test_decision_ledger_never_authorizes_execution(
-    client, admin_headers, metric_agent
-):
-    """**账本只记录、不授权**：账本里有 execute 记录也不能让未确认的制品被执行。
-
-    决策留痕是观察层，执行门槛的唯一权威是 ``GovernanceArtifact.status``。
-    这条把「账本永不成为第二授权源」钉死——将来谁想让 executor 顺手读账本判状态，
-    这条会先红。
-    """
-    from app.database import SessionLocal
-    from app.models.chat_bi import ChatBiConversation
-    from app.services import chat_bi_ledger
-
-    _, executor = metric_agent
-    a = _draft(client, admin_headers)
-
-    db = SessionLocal()
-    try:
-        conv = ChatBiConversation(title="伪造授权尝试")
-        db.add(conv)
-        db.commit()
-        # 往账本里塞一条"已确认、已执行"的记录——制品本身仍是 drafted
-        for node in ("plan", "execute"):
-            chat_bi_ledger.record_decision(
-                db,
-                conversation_id=conv.id,
-                node=node,
-                outcome="accepted",
-                ref_kind="artifact",
-                ref_id=a["id"],
-            )
-    finally:
-        db.close()
-
-    resp = client.post(
-        f"/api/agents/artifacts/{a['id']}/execute", headers=admin_headers, json={}
-    )
-    assert resp.status_code == 409
-    assert "未经人工确认" in resp.json()["detail"]
-    assert executor.executions == 0
-
-
 def test_execution_failure_marks_failed(client, admin_headers):
     registry.register("metric", _FakeDrafter({"metric_name": "x", "subject_objects": ["order"]}), _CountingExecutor(fail=True))
     try:
@@ -1166,3 +1050,181 @@ def test_execute_injects_artifact_id_into_context():
             registry.register("sync", registry.get_drafter("sync"), original)
 
     assert seen.get("artifact_id") == artifact_id
+
+
+# ---------- 制品即唯一记录：机器提了什么、人改了什么、谁建的 ----------
+#
+# 按会话组织的决策账本退场后，这三件事只剩制品这一处落点。以下用例是它的护栏——
+# 任何一条挂掉，就意味着"用户的选择"在库里又变回不可回答。
+
+
+def test_edit_records_overridden_fields(client, admin_headers, metric_agent):
+    """人改过的顶层键必须落进 overridden_fields，而不是靠读路径现算。
+
+    这是账本立论的那一条：edit() 会清掉 confirmed_by（旧确认对新 spec 无效），
+    终态里唯一还答得出"人改了什么"的就是这份清单。
+    """
+    a = _draft(client, admin_headers)  # 基线 = {metric_name: gmv, engine: hive, ...}
+    resp = client.patch(
+        f"/api/agents/artifacts/{a['id']}",
+        headers=admin_headers,
+        json={
+            "spec": {
+                "metric_name": "gmv",  # 未改
+                "engine": "doris",  # 改了
+                "subject_objects": ["order"],  # 未改
+            }
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["pinned_fields"] == ["engine"]
+
+
+def test_edit_without_change_records_nothing(client, admin_headers, metric_agent):
+    """原样重填不算"人改过"——判据是 spec 差异，不是"调用过 edit 没有"。"""
+    a = _draft(client, admin_headers)
+    resp = client.patch(
+        f"/api/agents/artifacts/{a['id']}",
+        headers=admin_headers,
+        json={"spec": a["spec"]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["pinned_fields"] == []
+
+
+def test_confirm_origin_distinguishes_accept_from_modify(
+    client, admin_headers, metric_agent
+):
+    """原样接受机器提案 → machine；接受但改过参数 → machine_edited。
+
+    此前 confirm() 一律盖 machine_edited，两者在库里不可分。
+    """
+    accepted = _draft(client, admin_headers)
+    client.post(
+        f"/api/agents/artifacts/{accepted['id']}/validate", headers=admin_headers, json={}
+    )
+    body = client.post(
+        f"/api/agents/artifacts/{accepted['id']}/confirm", headers=admin_headers, json={}
+    ).json()
+    assert body["origin"] == "machine"
+
+    modified = _draft(client, admin_headers)
+    client.patch(
+        f"/api/agents/artifacts/{modified['id']}",
+        headers=admin_headers,
+        json={"spec": {"metric_name": "gmv", "engine": "doris", "subject_objects": ["order"]}},
+    )
+    client.post(
+        f"/api/agents/artifacts/{modified['id']}/validate", headers=admin_headers, json={}
+    )
+    body = client.post(
+        f"/api/agents/artifacts/{modified['id']}/confirm", headers=admin_headers, json={}
+    ).json()
+    assert body["origin"] == "machine_edited"
+
+
+def test_confirm_keeps_user_created_origin(client, admin_headers, metric_agent):
+    """人自己开的任务，确认后仍是人工创建——不该被盖成 machine_edited。"""
+    a = _draft(
+        client,
+        admin_headers,
+        intent=None,
+        spec={"metric_name": "dau", "engine": "hive", "subject_objects": ["order"]},
+    )
+    assert a["origin"] == "user"
+    client.post(f"/api/agents/artifacts/{a['id']}/validate", headers=admin_headers, json={})
+    body = client.post(
+        f"/api/agents/artifacts/{a['id']}/confirm", headers=admin_headers, json={}
+    ).json()
+    assert body["origin"] == "user"
+
+
+def test_draft_records_creation_entrance(client, admin_headers, metric_agent):
+    """从哪个入口建的必须落库：Web 与外部 agent 经 MCP 建的任务要分得出来。"""
+    a = _draft(client, admin_headers)
+    assert a["created_via"] == "frontend"
+
+
+# ---------- 结果表态：跑完了 ≠ 跑对了 ----------
+#
+# status/回执说的是系统这侧发生了什么，result_outcome 说的是人看过之后认不认。
+# 两者必须分列——回执自陈成功而数据其实没搬对，本仓真出过。
+
+
+def _run_to_terminal(client, headers, **draft_kwargs) -> str:
+    a = _draft(client, headers, **draft_kwargs)
+    aid = a["id"]
+    client.post(f"/api/agents/artifacts/{aid}/validate", headers=headers, json={})
+    client.post(f"/api/agents/artifacts/{aid}/confirm", headers=headers, json={})
+    client.post(f"/api/agents/artifacts/{aid}/execute", headers=headers, json={})
+    return aid
+
+
+def test_result_verdict_is_recorded_on_the_task(client, admin_headers, metric_agent):
+    """人的判断落在制品上——账本退场后这是它唯一的落点。"""
+    aid = _run_to_terminal(client, admin_headers)
+    resp = client.post(
+        f"/api/agents/artifacts/{aid}/result",
+        headers=admin_headers,
+        json={"outcome": "rejected", "note": "行数对不上，少了上个月"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["result_outcome"] == "rejected"
+    assert body["result_note"] == "行数对不上，少了上个月"
+    assert body["result_confirmed_at"]
+    assert body["result_via"] == "frontend"
+    # 表态不改任务状态：任务确实跑成功了，只是结果不对——两件事分列。
+    assert body["status"] == "succeeded"
+
+
+def test_succeeded_task_starts_with_no_verdict(client, admin_headers, metric_agent):
+    """执行成功**不会**自动变成"结果符合预期"。
+
+    没人表态就如实空着。拿 status 顶上去，等于替一个没看过数据的人签了字。
+    """
+    aid = _run_to_terminal(client, admin_headers)
+    body = client.get(f"/api/agents/artifacts/{aid}", headers=admin_headers).json()
+    assert body["status"] == "succeeded"
+    assert body["result_outcome"] is None
+    assert body["result_confirmed_by"] is None
+
+
+def test_result_verdict_rejected_before_terminal(client, admin_headers, metric_agent):
+    """还没跑完就谈"结果符不符合预期"，记下来的也不是结果 → 409。"""
+    a = _draft(client, admin_headers)
+    resp = client.post(
+        f"/api/agents/artifacts/{a['id']}/result",
+        headers=admin_headers,
+        json={"outcome": "accepted"},
+    )
+    assert resp.status_code == 409
+    assert "还没有结果" in resp.json()["detail"]
+
+
+def test_result_verdict_can_be_revised(client, admin_headers, metric_agent):
+    """先说符合、看细了再说不符合——覆盖写，与 confirmed_by 同一口径只答最近一次。"""
+    aid = _run_to_terminal(client, admin_headers)
+    client.post(
+        f"/api/agents/artifacts/{aid}/result",
+        headers=admin_headers,
+        json={"outcome": "accepted"},
+    )
+    body = client.post(
+        f"/api/agents/artifacts/{aid}/result",
+        headers=admin_headers,
+        json={"outcome": "rejected", "note": "复核发现口径错了"},
+    ).json()
+    assert body["result_outcome"] == "rejected"
+    assert body["result_note"] == "复核发现口径错了"
+
+
+def test_result_verdict_rejects_unknown_outcome(client, admin_headers, metric_agent):
+    """只有 accepted/rejected 两个值——"大概吧"不是一个判断。"""
+    aid = _run_to_terminal(client, admin_headers)
+    resp = client.post(
+        f"/api/agents/artifacts/{aid}/result",
+        headers=admin_headers,
+        json={"outcome": "maybe"},
+    )
+    assert resp.status_code == 422

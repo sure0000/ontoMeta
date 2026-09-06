@@ -10,8 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import principal_service
 from app.auth import _METHOD_DEFAULTS, _ROLE_OVERRIDES
 from app.database import get_db
-from app.models.principal import Role
-from app.models.principal import Principal, role_satisfies
+from app.models.principal import Principal, Role, role_satisfies
 from app.schemas import (
     PrincipalCreate,
     PrincipalCreated,

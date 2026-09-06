@@ -21,7 +21,7 @@ import logging
 import tarfile
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -54,6 +54,17 @@ class ApplyReceipt:
     resolved: int = 0
     failed: int = 0
     failures: list[dict] = field(default_factory=list)
+
+
+def _utc_naive() -> datetime:
+    """写进 naive DateTime 列的时间戳：UTC，去掉 tzinfo。
+
+    这些列是 ``DateTime``（无时区），而本模块原先写的是 ``datetime.now()`` ——**本地时间**。
+    库里其它地方（data_app / ingestion_contract / metric_reconciliation …）一律写 naive UTC，
+    于是同一批列里混着两种时区语义，在 UTC+8 的机器上差 8 小时，而且不会有任何报错。
+    由 ruff 的 DTZ005 扫出来。
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _archive_dir() -> Path:
@@ -281,7 +292,7 @@ async def _rescan_into(
     package.statements = outcome.statements
     package.parsed_files = outcome.parsed_files
     package.failures_json = json.dumps(outcome.failures, ensure_ascii=False)
-    package.scanned_at = datetime.now()
+    package.scanned_at = _utc_naive()
     db.flush()
 
 
@@ -332,7 +343,7 @@ async def apply(
 
     package.applied_edges += receipt.applied
     package.applied_resolved += receipt.resolved
-    package.applied_at = datetime.now()
+    package.applied_at = _utc_naive()
     remaining = [
         edge for edge in package.edges if edge.state == "ok" and edge.applied_at is None
     ]
@@ -360,11 +371,11 @@ async def apply_manual(
 
     package = LineagePackage(
         domain_context_id=domain_id,
-        name=label or f"画布补录 {datetime.now():%Y-%m-%d %H:%M}",
+        name=label or f"画布补录 {datetime.now(UTC).astimezone():%Y-%m-%d %H:%M}",  # 给人看的标签，用本机时区
         kind="manual",
         dialect="manual",
         status="scanned",
-        scanned_at=datetime.now(),
+        scanned_at=_utc_naive(),
     )
     db.add(package)
     db.flush()
@@ -398,7 +409,7 @@ async def apply_manual(
 
     package.applied_edges = receipt.applied
     package.applied_resolved = receipt.resolved
-    package.applied_at = datetime.now()
+    package.applied_at = _utc_naive()
     package.status = "applied" if receipt.failed == 0 else "partial"
     db.commit()
     lineage_inventory.invalidate(domain_id)
@@ -438,7 +449,7 @@ async def _write_edges(
                 receipt.failed += len(group)
                 continue
 
-            stamped = datetime.now()
+            stamped = _utc_naive()
             for edge in group:
                 edge.applied_at = stamped
             receipt.applied += len(group)

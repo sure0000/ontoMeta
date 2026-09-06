@@ -31,10 +31,10 @@ from app.services.object_landing import (
 )
 from app.services.ontology_query import (
     OntologyQueryService as _OntologyQueryBase,
+)
+from app.services.ontology_query import (
     _loads_json,
     _logic_referenced_ids,
-    _logic_relates_to_object,
-    _logic_text_blob,
 )
 
 
@@ -203,7 +203,7 @@ class OntologyQueryService(_OntologyQueryBase):
             .filter(ObjectType.id.in_(object_ids))
             .all()
         )
-        obj_to_ontology = {oid: oid_ for oid, oid_ in rows}
+        obj_to_ontology = dict(rows)
         if not obj_to_ontology:
             return {oid: set() for oid in object_ids}
         ontology_ids = set(obj_to_ontology.values())
@@ -486,7 +486,7 @@ class OntologyQueryService(_OntologyQueryBase):
                 .filter(BusinessLogicCategory.id.in_(list(category_ids)))
                 .all()
             )
-            category_names = {cid: name for cid, name in cats}
+            category_names = dict(cats)
         return PageResult(
             items=[
                 self._to_business_logic_out(
@@ -519,7 +519,7 @@ class OntologyQueryService(_OntologyQueryBase):
             .group_by(BusinessLogic.category_id)
             .all()
         )
-        count_map = {cid: n for cid, n in count_rows}
+        count_map = dict(count_rows)
         return [
             {
                 "id": cat.id,

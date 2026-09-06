@@ -21,7 +21,7 @@ from app.models import (
     OntologyStatus,
     Property,
 )
-from app.schemas import DraftObjectType, DraftProperty, OntologyDraftOutput
+from app.schemas import DraftObjectType, DraftProperty
 from app.services import ontology_workspace
 from app.services.ontology_merge import MergeReport, OntologyMergeService
 from app.services.publish import PublishService
@@ -41,16 +41,16 @@ def _domain(db, name: str = "闭环域") -> str:
 
 
 def _draft_object(**kw) -> DraftObjectType:
-    base = dict(
-        name="sale_order",
-        display_name="销售订单",
-        description="机器描述",
-        source_ref="urn:li:dataset:sale_order",
-        confidence=0.9,
-        table_role="data_table",
-        role_confidence=0.8,
-        role_reason="无主键",
-    )
+    base = {
+        "name": "sale_order",
+        "display_name": "销售订单",
+        "description": "机器描述",
+        "source_ref": "urn:li:dataset:sale_order",
+        "confidence": 0.9,
+        "table_role": "data_table",
+        "role_confidence": 0.8,
+        "role_reason": "无主键",
+    }
     base.update(kw)
     return DraftObjectType(**base)
 
@@ -279,7 +279,6 @@ def test_manual_creation_lands_in_the_published_working_row():
 
 def test_review_state_survives_role_reason_conflict_resolution():
     """复核状态与 role_reason 正交：解决「角色依据」冲突不会把对象重新打成待复核。"""
-    from app.services.provenance_service import ProvenanceService
 
     db = SessionLocal()
     try:

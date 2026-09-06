@@ -21,21 +21,18 @@
 
 from __future__ import annotations
 
+import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.services.install_platforms import (
     Platform,
-    ServiceSpec,
     detect_platform,
     ensure_python,
     home_dir,
-    service_check_hint,
     shell_quote,
-    start_service,
-    stop_service,
 )
 from app.services.ssh_installer import CommandResult, SSHError, SSHSession
 

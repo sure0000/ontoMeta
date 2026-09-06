@@ -1,7 +1,10 @@
 """Advance Doris ADS logic projection from Airflow final states."""
 from __future__ import annotations
-from datetime import datetime, timezone
+
+from datetime import UTC, datetime
+
 from sqlalchemy.orm import Session
+
 from app.models import WarehouseLogicProjection
 
 
@@ -15,7 +18,7 @@ def reconcile_metric_receipt(db: Session, *, receipt: dict, airflow_state: str |
     if state == "success":
         projection.status = "ready"
         projection.queryable = True
-        projection.last_success_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        projection.last_success_at = datetime.now(UTC).replace(tzinfo=None)
     elif state in {"failed", "upstream_failed"}:
         projection.status = "failed"
         projection.queryable = False

@@ -24,7 +24,6 @@ from sqlalchemy.orm import Session
 from app.models import DomainContext, ObjectType, Ontology
 from app.services.source_ref import is_derived_source_ref, source_table_of
 
-
 # 同步唯一落点库。改这里等于改全仓的 ODS 库名——不要在别处再拼 ``ods_{prefix}``。
 ODS_DATABASE = "ods"
 

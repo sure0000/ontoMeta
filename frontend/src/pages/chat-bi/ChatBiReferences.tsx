@@ -5,7 +5,6 @@ import {
   Form,
   Input,
   InputNumber,
-  Modal,
   Radio,
   Select,
   Space,
@@ -27,7 +26,7 @@ import {
   SyncOutlined,
 } from "@ant-design/icons";
 import cronstrue from "cronstrue/i18n";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, api } from "../../api";
 import { ArtifactDetail } from "../../components/AgentsPanel";
@@ -38,16 +37,7 @@ import { DataSourcesModal } from "../../components/DataSourcesModal";
 import { SpecForm } from "../../components/artifact-spec/SpecForm";
 import { useSpecOptions } from "../../components/artifact-spec/useSpecOptions";
 import { SPEC_FIELDS } from "../../components/artifact-spec/specFields";
-import { TaskRingSteps, type TaskRing } from "../../components/TaskRingSteps";
-import { useDecisionLedger } from "./DecisionLedger";
-import {
-  AckTarget,
-  ackKey,
-  formDefaults,
-  recordAck,
-  recordDecisionQuietly,
-  toJsonSafe,
-} from "./ledger";
+import { toJsonSafe } from "../../utils/jsonSafe";
 import type {
   ChatBiAgentStep,
   ChatBiBlock,
@@ -65,158 +55,9 @@ import type {
   GovernanceArtifact,
   GraphEdge,
   GraphNode,
-  TaskPipeline,
 } from "../../types";
-import { answerToBlocks, splitInlineTokens, splitMarkdownBlocks, type ChatMessage } from "./utils";
-
-export function MarkdownLite({ content }: { content: string }) {
-  const blocks = splitMarkdownBlocks(content);
-  let key = 0;
-  return (
-    <div className="chatbi-md">
-      {blocks.map((block) => {
-        if (block.type === "code") {
-          return (
-            <pre key={key++} className="chatbi-codeblock">
-              <code>{block.code}</code>
-            </pre>
-          );
-        }
-        if (block.type === "table") {
-          return <MarkdownTable key={key++} header={block.header} rows={block.rows} />;
-        }
-        if (block.type === "hr") {
-          return <hr key={key++} className="chatbi-md-hr" />;
-        }
-        return <Line key={key++} raw={block.raw} />;
-      })}
-    </div>
-  );
-}
-
-function MarkdownTable({ header, rows }: { header: string[]; rows: string[][] }) {
-  return (
-    <div className="chatbi-md-tablewrap">
-      <table className="chatbi-md-table">
-        <thead>
-          <tr>
-            {header.map((cell, i) => (
-              <th key={i}>
-                <InlineRender text={cell} />
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, ri) => (
-            <tr key={ri}>
-              {row.map((cell, ci) => (
-                <td key={ci}>
-                  <InlineRender text={cell} />
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function Line({ raw }: { raw: string }) {
-  if (!raw.trim()) return <div className="chatbi-md-line" />;
-
-  // 兜底:未被解析器识别的裸 `---`/`***`/`___`(例如流式中途尚未成行)当作分隔线。
-  if (/^(?:-{3,}|\*{3,}|_{3,})[\s-*_]*$/.test(raw.trim()) && !raw.includes("|")) {
-    return <hr className="chatbi-md-hr" />;
-  }
-  if (raw.trim().startsWith(">")) {
-    return (
-      <blockquote className="chatbi-md-quote">
-        <InlineRender text={raw.replace(/^\s*>\s?/, "")} />
-      </blockquote>
-    );
-  }
-  // 缩进量→左移:支持嵌套列表/引用块在视觉上分层。
-  const indent = /^\s+/.exec(raw)?.[0].replace(/\t/g, "  ").length ?? 0;
-  const indentPx = Math.min(indent, 24) * 7;
-  const orderedMatch = raw.match(/^\s*(\d+)\.\s+(.*)$/);
-  if (orderedMatch) {
-    return (
-      <div
-        className="chatbi-md-listitem chatbi-md-listitem--ordered"
-        style={{ marginLeft: indentPx }}
-      >
-        <span className="chatbi-md-num">{orderedMatch[1]}</span>
-        <span>
-          <InlineRender text={orderedMatch[2]} />
-        </span>
-      </div>
-    );
-  }
-  const listMatch = raw.match(/^\s*[-*]\s+(.*)$/);
-  if (listMatch) {
-    return (
-      <div className="chatbi-md-listitem" style={{ marginLeft: indentPx }}>
-        <span className="chatbi-md-bullet">•</span>
-        <span>
-          <InlineRender text={listMatch[1]} />
-        </span>
-      </div>
-    );
-  }
-  const headerMatch = raw.match(/^(#{1,4})\s+(.*)$/);
-  if (headerMatch) {
-    const level = headerMatch[1].length;
-    const text = headerMatch[2];
-    const className = `chatbi-md-h${Math.min(level, 4)}`;
-    return (
-      <div className={className}>
-        <InlineRender text={text} />
-      </div>
-    );
-  }
-  return (
-    <div className="chatbi-md-line">
-      <InlineRender text={raw} />
-    </div>
-  );
-}
-
-function InlineRender({ text }: { text: string }) {
-  const parts = splitInlineTokens(text);
-  let key = 0;
-  return (
-    <>
-      {parts.map((part) => {
-        if (part.type === "bold") {
-          return <strong key={key++}>{part.value}</strong>;
-        }
-        if (part.type === "code") {
-          return (
-            <code key={key++} className="chatbi-md-inline-code">
-              {part.value}
-            </code>
-          );
-        }
-        if (part.type === "link") {
-          return (
-            <a
-              key={key++}
-              className="chatbi-md-link"
-              href={part.href}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {part.value}
-            </a>
-          );
-        }
-        return <span key={key++}>{part.value}</span>;
-      })}
-    </>
-  );
-}
+import { MarkdownLite } from "../../components/MarkdownLite";
+import { answerToBlocks, type ChatMessage } from "./utils";
 
 const CALIBER_KIND_LABEL: Record<ChatBiCaliberKind, string> = {
   object_type: "对象",
@@ -442,18 +283,12 @@ function BlockRenderer({
           variant={block.variant}
           items={block.items}
           references={block.references}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "sql":
       return (
         <SqlBlock
           sql={block.sql}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "table":
@@ -464,9 +299,6 @@ function BlockRenderer({
             rows: block.rows,
             truncated: block.truncated,
           }}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "chart":
@@ -490,9 +322,6 @@ function BlockRenderer({
       return (
         <DraftProposalBlock
           proposal={block.proposal}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "action_proposal":
@@ -504,15 +333,10 @@ function BlockRenderer({
           blockId={block.id}
         />
       );
-    case "pipeline_proposal":
-      return <PipelineProposalBlock proposal={block.proposal} conversationId={conversationId} />;
     case "preference_proposal":
       return (
         <PreferenceProposalBlock
           proposal={block.proposal}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "app_proposal":
@@ -521,18 +345,12 @@ function BlockRenderer({
       return (
         <OnboardProposalBlock
           proposal={block.proposal}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "task_status":
       return (
         <TaskStatusBlock
           status={block.status}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "record":
@@ -545,9 +363,6 @@ function BlockRenderer({
           clarification={block.clarification}
           question={question}
           onClarify={onClarify}
-          conversationId={conversationId}
-          messageId={messageId}
-          blockId={block.id}
         />
       );
     case "form":
@@ -602,85 +417,19 @@ function MockNotice() {
   );
 }
 
-/**
- * 「认可 / 存疑」轻量表态条(P1)。
- *
- * 挂在本体映射 / 数据结果 / 任务回执三类**纯展示**块上,把「人看过并认了」这件事
- * 从推断变成记录。刻意**不做闸门**:不点不拦,答案照看照用。
- *
- * 无 `conversationId` 时(历史消息渲染,导出预览)整条不渲染——留痕无处可去,
- * 摆一对点不动的按钮只会让人以为坏了。
- *
- * 表态可改判:已认可的再点存疑会追加一条新记录,闭环取最新(账本追加式,不改写)。
- * 重复点同一个结论则整条挡掉——那不是决策,只是手抖。
- */
-function AckControl({ target, label }: { target: AckTarget; label: string }) {
-  const { ackOf, notifyWritten } = useDecisionLedger();
-  const [local, setLocal] = useState<"accepted" | "rejected" | null>(null);
-  const key = ackKey(target.messageId, target.node, target.stage, target.blockId, target.refId);
-  // 本地态优先:刚点完的这一下要立刻见效,不能等 closure 重取回来才亮。
-  const picked = local ?? ackOf(key) ?? null;
-  if (!target.conversationId) return null;
-  const choose = (accepted: boolean) => {
-    const next = accepted ? "accepted" : "rejected";
-    if (picked === next) return;
-    setLocal(next);
-    recordAck(target, accepted);
-    notifyWritten();
-  };
-  return (
-    <div className="chatbi-ack">
-      <span className="chatbi-ack-label">{picked ? "已留痕" : label}</span>
-      <button
-        type="button"
-        className={`chatbi-ack-btn${picked === "accepted" ? " chatbi-ack-btn--on" : ""}`}
-        onClick={() => choose(true)}
-      >
-        认可
-      </button>
-      <button
-        type="button"
-        className={`chatbi-ack-btn${picked === "rejected" ? " chatbi-ack-btn--off" : ""}`}
-        onClick={() => choose(false)}
-      >
-        存疑
-      </button>
-    </div>
-  );
-}
-
 function ClarifyBlock({
   clarification,
   question,
   onClarify,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   clarification: ChatBiClarification;
   question?: string;
   onClarify?: (text: string) => void;
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   // 澄清反问:正文即问题与候选项,这里把候选项做成可点击的追问,
   // 让用户一步接上,而不是自己再打一遍。
   const onPick = (opt: string) => {
     onClarify?.(`${question ?? ""}(${opt})`.trim());
-    // 留痕:用户选了哪个候选项,是"需求确认"最直接的证据。
-    // 同一块换选项算两次决策(那是真实的改主意,应各记一条),故 dedup_key 带选项。
-    recordDecisionQuietly(conversationId, {
-      node: "requirement",
-      stage: "clarify",
-      trigger: "clarify_option",
-      message_id: messageId,
-      block_id: blockId,
-      summary: `澄清「${clarification.question}」→ 选择「${opt}」`,
-      proposed: { options: clarification.options },
-      chosen: { option: opt },
-      dedup_key: blockId ? `${conversationId}:requirement:clarify:${blockId}:${opt}` : undefined,
-    });
   };
   return (
     <BlockCard variant="primary">
@@ -902,13 +651,9 @@ export function FormBlock({
   const [antForm] = Form.useForm();
   const [submitted, setSubmitted] = useState(false);
   const [submittingTask, setSubmittingTask] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0);
-  const { notifyWritten } = useDecisionLedger();
-  const confirmationSteps: TaskRing[] = form.confirmation_steps ?? [];
-  // 表单只收集前三环(需求/本体/数据);后三环(执行方案/执行/结果)在任务详情抽屉里
-  // 逐环确认。六环一次画全,人从第一步就看得见还剩几环,下一环在哪确认。
-  const formSteps = confirmationSteps.filter((step) => (step.phase ?? "form") === "form");
-  const staged = formSteps.length > 0;
+  // 建数表单是**单页**的:一次把参数摆全,人核对后一次确认。
+  // 此前这里是按六环逐环点确认的向导,用户实测后的原话是"6 环确实太繁琐";
+  // MCP 那条路早已收敛成一次执行方案确认,这里跟它对齐,两个入口不再有两套节奏。
   const inferredTaskKind = form.fields.some((field) => field.name === "object_type")
     ? "sync"
     : form.fields.some((field) => field.name === "business_logic_id")
@@ -921,15 +666,9 @@ export function FormBlock({
   const taskKind = form.task_kind ?? inferredTaskKind;
   const effectiveOntologyId = form.ontology_id ?? ontologyId ?? undefined;
   const deterministicTaskSubmit = Boolean(
-    staged && form.confirmation_id && taskKind && effectiveOntologyId && conversationId,
+    form.confirmation_id && taskKind && effectiveOntologyId && conversationId,
   );
-  const { open: openArtifact, node: artifactDrawer } = useArtifactDrawer(
-    undefined,
-    conversationId,
-    messageId,
-    blockId,
-  );
-  const activeStep = formSteps[currentStep];
+  const { open: openArtifact, node: artifactDrawer } = useArtifactDrawer();
   const disabled = submitted || submittingTask || (!onSubmit && !deterministicTaskSubmit);
   const initialValues = useMemo(() => {
     const iv: Record<string, unknown> = {};
@@ -952,14 +691,7 @@ export function FormBlock({
     if (!cond?.field) return true;
     return cond.in.includes(String((values ?? liveValues)[cond.field] ?? ""));
   };
-  const fieldsOfStep = (node: string) =>
-    form.fields.filter(
-      (f) =>
-        (f.confirmation_node === node || (node === "plan" && !f.confirmation_node)) && isVisible(f),
-    );
-  const visibleFields = staged
-    ? fieldsOfStep(activeStep?.node ?? "")
-    : form.fields.filter((f) => isVisible(f));
+  const visibleFields = form.fields.filter((f) => isVisible(f));
   // DataSource 是可变设置,不能永久使用消息生成时的静态 options 快照。尤其是用户先收到
   // 空表单,再去设置页配置默认 Doris 后,返回历史消息时应立即看到新目标,无需重开对话。
   const [runtimeOptions, setRuntimeOptions] = useState<Record<string, ChatBiFormField["options"]>>(
@@ -1160,9 +892,8 @@ export function FormBlock({
             });
         setSubmitted(true);
         openArtifact(artifact);
-        notifyWritten();
         if (artifact.status === "validated") {
-          message.success("前三环已确认,执行方案已生成;还剩「确认执行方案 → 执行 → 确认结果」三环");
+          message.success("执行方案已生成;确认无误后在任务详情里执行");
         } else {
           message.warning("任务草稿已创建,执行方案存在阻断项,请查看详情");
         }
@@ -1178,74 +909,6 @@ export function FormBlock({
     // 用界面上真正呈现过的候选去翻译取值:人在下拉里选的是「ERP 主库(mysql)」,
     // 回填文本就不该是一串 uuid。
     onSubmit?.(composeFormReply(form, values, resolvedField));
-    if (staged) return;
-    // 通用单页表单仍按原逻辑记为需求确认。
-    recordDecisionQuietly(conversationId, {
-      node: "requirement",
-      stage: "form",
-      trigger: "form_submit",
-      message_id: messageId,
-      block_id: blockId,
-      summary: `填写了表单「${form.title}」`,
-      proposed: formDefaults(form.fields),
-      chosen: toJsonSafe(values),
-      dedup_key: blockId
-        ? `${conversationId}:requirement:form:${messageId ?? ""}:${blockId}`
-        : undefined,
-    });
-    notifyWritten();
-  };
-  const confirmCurrentStep = async () => {
-    if (!activeStep) return;
-    // fieldsOfStep 已按 visible_when 过滤:隐藏字段不校验(否则「全量同步」会被一个
-    // 看不见的必填 sequence 列卡住),也不记进本环的确认内容。
-    const stepFields = fieldsOfStep(activeStep.node);
-    const names = stepFields.map((f) => f.name);
-    try {
-      if (names.length) await antForm.validateFields(names);
-    } catch {
-      return;
-    }
-    const allValues = antForm.getFieldsValue(true) as Record<string, unknown>;
-    const chosen = {
-      ...(names.length
-        ? Object.fromEntries(names.map((name) => [name, allValues[name]]))
-        : { intent: form.intent ?? form.title }),
-      ...(form.confirmation_id ? { task_confirmation_id: form.confirmation_id } : {}),
-    };
-    const proposed = names.length
-      ? Object.fromEntries(
-          stepFields
-            .filter((f) => f.default !== undefined && f.default !== null)
-            .map((f) => [f.name, f.default]),
-        )
-      : { intent: form.intent ?? form.title };
-    const decision = {
-      node: activeStep.node,
-      stage: `task_${activeStep.node}_confirm`,
-      trigger: "step_confirm",
-      message_id: messageId,
-      block_id: blockId,
-      summary: `${activeStep.title}:${form.intent ?? form.title}`,
-      proposed: toJsonSafe(proposed),
-      chosen: toJsonSafe(chosen),
-    };
-    // 最后一步确认后会立刻把表单作为下一轮消息提交。这里必须等账本提交完成,
-    // 否则 propose_action 的服务端闭环门禁可能先到,看不到刚确认的数据环。
-    if (conversationId) {
-      const saved = await api.recordChatBiDecision(conversationId, decision).catch(() => null);
-      if (!saved?.recorded) {
-        message.error("确认记录未保存,请重试;为避免跳过人审,本步不会继续");
-        return;
-      }
-    }
-    notifyWritten();
-    if (currentStep < formSteps.length - 1) {
-      setCurrentStep((i) => i + 1);
-    } else {
-      // 前三环走完即提交起草;后三环在任务详情抽屉里继续,进度条在那边接着画。
-      antForm.submit();
-    }
   };
   const title = form.title;
 
@@ -1253,19 +916,14 @@ export function FormBlock({
     <Button
       type="primary"
       size="small"
-      htmlType={staged ? "button" : "submit"}
+      htmlType="submit"
       disabled={disabled}
       loading={submittingTask}
-      onClick={staged ? () => void confirmCurrentStep() : undefined}
     >
       {submitted
         ? "已提交"
-        : staged
-          ? currentStep === formSteps.length - 1
-            ? deterministicTaskSubmit
-              ? "确认数据并生成执行方案"
-              : "确认并提交"
-            : `确认${activeStep?.title.replace(/^确认/, "") ?? "本步"}`
+        : deterministicTaskSubmit
+          ? "确认并生成执行方案"
           : form.submit_label || "提交"}
     </Button>
   );
@@ -1274,12 +932,6 @@ export function FormBlock({
     <BlockCard variant="primary" title={title} actions={actions}>
       {form.notice && <div className="chatbi-draft-note">{form.notice}</div>}
       {form.intent && <div className="chatbi-form-intent">{form.intent}</div>}
-      {staged && (
-        <TaskRingSteps rings={confirmationSteps} current={currentStep} labelPlacement="vertical" />
-      )}
-      {staged && activeStep?.description && (
-        <div className="chatbi-form-step-desc">{activeStep.description}</div>
-      )}
       <Form
         form={antForm}
         layout="vertical"
@@ -1306,15 +958,6 @@ export function FormBlock({
             </Form.Item>
           );
         })}
-        {staged &&
-          activeStep?.node === "requirement" &&
-          visibleFields.length === 0 &&
-          form.intent && <div className="chatbi-proposal-param-ro">{form.intent}</div>}
-        {staged && currentStep > 0 && (
-          <Button size="small" disabled={disabled} onClick={() => setCurrentStep((i) => i - 1)}>
-            上一步
-          </Button>
-        )}
       </Form>
       {artifactDrawer}
     </BlockCard>
@@ -1347,14 +990,8 @@ const DRAFT_TYPE_LABEL: Record<string, string> = { metric: "指标", tag: "标�
  */
 function DraftProposalBlock({
   proposal,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "draft_proposal" }>["proposal"];
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   const navigate = useNavigate();
   const [state, setState] = useState<"idle" | "creating" | "done" | "error">("idle");
@@ -1392,27 +1029,12 @@ function DraftProposalBlock({
   const categoryOptions =
     proposal.category_options ??
     categories.map((category) => ({ id: category.id, name: category.name }));
-  // 留痕:此前这个确认完全绕开会话——点完就 navigate 走人,会话里看不出用户点没点。
-  const recordOntologyDecision = (logicId: string, proposed?: unknown) =>
-    recordDecisionQuietly(conversationId, {
-      node: "ontology",
-      stage: "draft_proposal",
-      trigger: patching ? "logic_updated" : "logic_created",
-      message_id: messageId,
-      block_id: blockId,
-      summary: `${patching ? "补全" : "新建"}${typeLabel}「${proposal.name ?? ""}」`,
-      proposed: proposed ?? ((proposal.update_payload ?? proposal.create_payload) as unknown),
-      ref_kind: "business_logic",
-      ref_id: logicId,
-      dedup_key: `${conversationId}:ontology:draft:${logicId}`,
-    });
   const onConfirm = async () => {
     setState("creating");
     try {
       if (patching) {
         await api.updateBusinessLogic(proposal.logic_id!, proposal.update_payload!);
         setState("done");
-        recordOntologyDecision(proposal.logic_id!);
         navigate(`/business-logic/${proposal.logic_id}`);
         return;
       }
@@ -1422,7 +1044,6 @@ function DraftProposalBlock({
       };
       const created = await api.createBusinessLogic(createPayload);
       setState("done");
-      recordOntologyDecision(created.id, createPayload);
       navigate(`/business-logic/${created.id}`);
     } catch {
       setState("error");
@@ -1489,9 +1110,6 @@ function DraftProposalBlock({
           ) : null}
           <SqlBlock
             sql={proposal.compiled_sql!}
-            conversationId={conversationId}
-            messageId={messageId}
-            blockId={blockId}
           />
         </>
       )}
@@ -1584,14 +1202,8 @@ const DRAFT_SCOPE_LABEL: Record<string, string> = {
  */
 function OnboardProposalBlock({
   proposal,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "onboard_proposal" }>["proposal"];
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   const navigate = useNavigate();
   const [dsOpen, setDsOpen] = useState(false);
@@ -1608,20 +1220,6 @@ function OnboardProposalBlock({
       else if (scope === "relations") await api.generateRelations(domainId);
       else await api.generateDraft(domainId);
       message.success("已启动草稿生成,可在工作区查看进度");
-      // 留痕:启动本体草稿生成是「本体确认」环。此前这个确认走 REST 旁路且立刻导航去
-      // 工作区,会话里看不出用户点没点,按哪个范围生成的。
-      recordDecisionQuietly(conversationId, {
-        node: "ontology",
-        stage: "onboard_draft",
-        trigger: "draft_generation_started",
-        message_id: messageId,
-        block_id: blockId,
-        summary: `为域「${proposal.domain_name ?? domainId}」启动生成:${DRAFT_SCOPE_LABEL[scope] ?? scope}`,
-        proposed: { domain_id: domainId, scope: proposal.scope ?? "draft" },
-        chosen: { domain_id: domainId, scope },
-        ref_kind: "domain",
-        ref_id: domainId,
-      });
       navigate(`/workspace/${domainId}`);
     } catch (err) {
       message.error(
@@ -1704,22 +1302,6 @@ function OnboardProposalBlock({
             kind: proposal.datasource_kind,
             catalog_name: proposal.catalog_name ?? undefined,
           }}
-          // 只在数据源**真的建成**后才留痕(表单打开又取消不算决策)。
-          // 回调只带 id/name/kind——凭据不经 agent,也不进账本。
-          onCreated={(ds) =>
-            recordDecisionQuietly(conversationId, {
-              node: "data",
-              stage: "onboard_datasource",
-              trigger: "datasource_created",
-              message_id: messageId,
-              block_id: blockId,
-              summary: `登记数据源「${ds.name}」(${ds.kind})`,
-              proposed: { name: proposal.name, kind: proposal.datasource_kind },
-              chosen: { name: ds.name, kind: ds.kind },
-              ref_kind: "datasource",
-              ref_id: ds.id,
-            })
-          }
         />
       )}
     </BlockCard>
@@ -1745,14 +1327,8 @@ const TREND_ICON: Record<string, string> = { up: "↑", down: "↓", flat: "→"
  */
 function PreferenceProposalBlock({
   proposal,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   proposal: Extract<ChatBiBlock, { type: "preference_proposal" }>["proposal"];
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
   const onRemember = async () => {
@@ -1764,18 +1340,6 @@ function PreferenceProposalBlock({
     try {
       await api.rememberPreference(proposal.domain_id, proposal.text);
       setState("done");
-      // 留痕:约定本身进的是域记忆(无会话溯源),这里补记"是这次对话定的"。
-      recordDecisionQuietly(conversationId, {
-        node: "data",
-        stage: "preference",
-        trigger: "preference_remembered",
-        message_id: messageId,
-        block_id: blockId,
-        summary: `记住本域约定:${proposal.text}`,
-        chosen: { text: proposal.text, domain_id: proposal.domain_id },
-        ref_kind: "preference",
-        dedup_key: blockId ? `${conversationId}:data:preference:${blockId}` : undefined,
-      });
     } catch {
       setState("error");
     }
@@ -1923,19 +1487,12 @@ function PlanBlock({
  * 任务制品抽屉(P0):复用治理面板的 ArtifactDetail(已含 dry-run 差异 + 校验/确认/执行 + 回执)。
  * agent 只出提案,人在此抽屉里过既有人审门;写全部落在 publisher 门控之后。
  *
- * 导出给闭环卡用:后三环都在这个抽屉里确认,关掉后要能重新进来(见 `ClosureCard`)。
  */
-export function useArtifactDrawer(
-  onClose?: () => void,
-  conversationId?: string,
-  messageId?: string,
-  blockId?: string,
-) {
+export function useArtifactDrawer(onClose?: () => void) {
   const navigate = useNavigate();
   const location = useLocation();
   const [detail, setDetail] = useState<GovernanceArtifact | null>(null);
   const [busy, setBusy] = useState(false);
-  const { closure, notifyWritten } = useDecisionLedger();
   const pollingDetailId = detail?.id;
   const pollingDetailStatus = detail?.status;
   useEffect(() => {
@@ -1956,17 +1513,6 @@ export function useArtifactDrawer(
       window.clearInterval(timer);
     };
   }, [pollingDetailId, pollingDetailStatus]);
-  const resultOutcome = detail
-    ? (closure?.records
-        .filter(
-          (record) =>
-            record.node === "result" &&
-            record.ref_kind === "artifact" &&
-            record.ref_id === detail.id &&
-            ["accepted", "rejected"].includes(record.outcome),
-        )
-        .at(-1)?.outcome as "accepted" | "rejected" | undefined)
-    : undefined;
   const STEP_LABEL: Record<string, string> = { validate: "校验", confirm: "确认", execute: "执行" };
   const onStep = async (step: "validate" | "confirm" | "execute", artifact: GovernanceArtifact) => {
     setBusy(true);
@@ -1995,26 +1541,6 @@ export function useArtifactDrawer(
       setBusy(false);
     }
   };
-  const confirmResult = (artifact: GovernanceArtifact, outcome: "accepted" | "rejected") => {
-    const succeeded = outcome === "accepted";
-    recordDecisionQuietly(conversationId, {
-      node: "result",
-      stage: "artifact_result_confirm",
-      trigger: succeeded ? "result_success" : "result_failure",
-      outcome,
-      message_id: messageId,
-      block_id: blockId,
-      summary: `反馈「${artifact.name}」执行结果${succeeded ? "成功" : "失败"}`,
-      chosen: {
-        reported_outcome: succeeded ? "success" : "failure",
-        system_status: artifact.status,
-        receipt: artifact.execution_receipt ?? null,
-      },
-      ref_kind: "artifact",
-      ref_id: artifact.id,
-    });
-    notifyWritten();
-  };
   const node = (
     <ArtifactDetail
       artifact={detail}
@@ -2030,8 +1556,8 @@ export function useArtifactDrawer(
         const returnTo = `${location.pathname}${location.search}`;
         navigate(`/tasks/${artifact.id}/edit?returnTo=${encodeURIComponent(returnTo)}`);
       }}
-      onConfirmResult={conversationId ? confirmResult : undefined}
-      resultOutcome={resultOutcome}
+      // 抽屉里改了制品（代执行授权、结果表态）就把新值灌回来，不必关掉重开。
+      onArtifactChange={setDetail}
     />
   );
   return { open: setDetail, node };
@@ -2253,7 +1779,7 @@ function ActionProposalBlock({
   const [context, setContext] = useState<Record<string, unknown>>(() => ({
     ...(proposal.context ?? {}),
   }));
-  const { open, node } = useArtifactDrawer(undefined, conversationId, messageId, blockId);
+  const { open, node } = useArtifactDrawer();
   const kindLabel = ACTION_KIND_LABEL[proposal.kind] ?? proposal.kind;
   const onConfirm = async () => {
     setDrafting(true);
@@ -2362,366 +1888,6 @@ function ActionProposalBlock({
   );
 }
 
-/** 链上一步的制品状态 → 中文标签与色。未起草的如实显示「待起草」,不冒充 drafted。 */
-const STEP_STATUS_LABEL: Record<string, { label: string; color: string }> = {
-  drafted: { label: "待校验", color: "default" },
-  validated: { label: "待确认", color: "blue" },
-  confirmed: { label: "待执行", color: "gold" },
-  executing: { label: "执行中", color: "processing" },
-  succeeded: { label: "已完成", color: "green" },
-  failed: { label: "失败", color: "red" },
-};
-
-const PIPELINE_STATUS_LABEL: Record<string, { label: string; color: string }> = {
-  drafted: { label: "未开始", color: "default" },
-  running: { label: "进行中", color: "processing" },
-  succeeded: { label: "已完成", color: "green" },
-  failed: { label: "有失败", color: "red" },
-};
-
-/**
- * 任务链提案块:Data Agent 出的**一条链**(如 物化 → 清洗 → 聚合)。
- *
- * 链只管两件此前只能靠人肉完成的事:记住下一步是什么,以及把上游定下的落点(目标数据源/
- * 库/引擎)接给下游。**它不替谁确认**——每一步仍是一条独立制品,点「起草第 N 步」后照旧
- * 在复用的 ArtifactDetail 抽屉里过「校验 → dry-run → 人工确认 → 执行」。
- *
- * 故这里没有「一键跑完整条链」的按钮:那必然绕过逐制品的人工确认,而「未确认不得执行」是
- * 这条流水线的硬不变量。
- */
-function PipelineProposalBlock({
-  proposal,
-  conversationId,
-}: {
-  proposal: Extract<ChatBiBlock, { type: "pipeline_proposal" }>["proposal"];
-  conversationId?: string;
-}) {
-  // 建链前:可就地改各步参数。建链后:以服务端的链态为准(本地草稿不再有意义)。
-  const [drafts, setDrafts] = useState<Record<string, unknown>[]>(() =>
-    proposal.steps.map((s) => ({ ...(s.context ?? {}) })),
-  );
-  const [pipeline, setPipeline] = useState<TaskPipeline | null>(null);
-  const [busy, setBusy] = useState(false);
-  // 正在确认的那一步(服务端现取的六环表单)。null = 没有弹窗。
-  const [stepForm, setStepForm] = useState<{ index: number; form: ChatBiFormRequest } | null>(null);
-
-  const refresh = useCallback(async (id: string) => {
-    try {
-      setPipeline(await api.getPipeline(id));
-    } catch {
-      /* 回读失败不打断主流程:下次操作还会再拉一次 */
-    }
-  }, []);
-  // 抽屉里刚走完的那一步可能已经成功,下一步随之解锁——关掉抽屉就回读一次链态。
-  const { open, node } = useArtifactDrawer(() => {
-    if (pipeline) void refresh(pipeline.id);
-  }, conversationId);
-
-  const create = async () => {
-    setBusy(true);
-    try {
-      setPipeline(
-        await api.createPipeline({
-          ...proposal.create_payload,
-          // 用户改过的参数为准
-          steps: proposal.create_payload.steps.map((s, i) => ({ ...s, context: drafts[i] })),
-        }),
-      );
-      message.success("任务链已创建,可逐步起草");
-    } catch (err) {
-      message.error(
-        err instanceof ApiError && err.status === 403
-          ? "需要 publisher 角色:写侧任务仅 publisher 可创建"
-          : err instanceof Error
-            ? err.message
-            : "创建任务链失败",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /**
-   * 起草链上的下一步之前,先把这一步的**前三环**确认掉。
-   *
-   * 链不替谁确认:第 N 步同样是一条要落库的数据任务,与单发任务问的是同一张表单
-   * (服务端 /agents/task-form 现取,候选与默认值都按真实目录算),确认完才起草。
-   * 此前这里是一个「起草第 N 步」按钮直接建制品——链上的任务因此比单发任务少确认三环。
-   */
-  const startStepConfirmation = async (stepIndex: number) => {
-    if (!pipeline) return;
-    const step = proposal.steps[stepIndex];
-    if (!step || !proposal.ontology_id) {
-      message.error("这一步缺少本体,无法生成确认表单");
-      return;
-    }
-    setBusy(true);
-    try {
-      const form = await api.taskConfirmationForm({
-        kind: step.kind,
-        ontology_id: proposal.ontology_id,
-        title: `确认第 ${stepIndex + 1} 步:${ACTION_KIND_LABEL[step.kind] ?? step.kind}`,
-        intent: step.intent,
-        // 上游已经定下的落点原样带进来当默认值——链的价值就在这里,但仍要人过目确认。
-        prefill: { ...(pipeline.steps?.[stepIndex]?.context ?? step.context ?? {}) },
-      });
-      setStepForm({ index: stepIndex, form });
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "生成确认表单失败,请重试");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** 六环向导走完前三环后落到这里:起草该步并直接产出执行方案预览。 */
-  const submitStep = async (args: {
-    values: Record<string, unknown>;
-    intent: string;
-    confirmationId: string;
-  }) => {
-    if (!pipeline || !conversationId) throw new Error("缺少会话上下文,无法起草这一步");
-    const result = await api.advancePipelineConfirmed(pipeline.id, {
-      conversation_id: conversationId,
-      confirmation_id: args.confirmationId,
-      context: args.values,
-      intent: args.intent,
-    });
-    setPipeline(result.pipeline);
-    setStepForm(null);
-    return result.artifact;
-  };
-
-  const openStep = async (artifactId: string) => {
-    try {
-      open(await api.getArtifact(artifactId));
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "读取任务失败");
-    }
-  };
-
-  const steps = pipeline?.steps ?? null;
-  const overall = pipeline ? PIPELINE_STATUS_LABEL[pipeline.status] : null;
-
-  const title = (
-    <Space size={8}>
-      <Tag color="geekblue" bordered={false}>
-        任务链提案
-      </Tag>
-      <span>{proposal.name}</span>
-      {overall && (
-        <Tag color={overall.color} bordered={false}>
-          {overall.label}
-        </Tag>
-      )}
-    </Space>
-  );
-
-  const actions = !pipeline ? (
-    <Button type="primary" size="small" loading={busy} onClick={() => void create()}>
-      创建任务链
-    </Button>
-  ) : null;
-
-  return (
-    <BlockCard variant="primary" title={title} actions={actions}>
-      {proposal.intent && <div className="chatbi-draft-name">{proposal.intent}</div>}
-
-      {/* 「一键起草全部步骤」已下线:它让链上每一步都跳过需求/本体/数据三环确认,
-          与「所有任务逐环确认」直接冲突。要快,仍可逐步确认——候选与默认值都已按
-          上游落点预填好,多数步骤只是过目点确认。 */}
-
-      {/* 服务端砍掉的步骤如实说出来:省一步是对的,但不能让人以为自己要的那一步凭空没了。 */}
-      {(proposal.dropped_steps ?? []).length > 0 && (
-        <div className="chatbi-draft-note">
-          已省略{" "}
-          {(proposal.dropped_steps ?? [])
-            .map((s) => `${ACTION_KIND_LABEL[s.kind] ?? s.kind}「${s.intent}」`)
-            .join(",")}
-          :{proposal.dropped_steps![0].reason}
-        </div>
-      )}
-
-      <div className="chatbi-pipeline-steps">
-        {proposal.steps.map((step, i) => {
-          const live = steps?.[i];
-          const status = live?.artifact_status
-            ? (STEP_STATUS_LABEL[live.artifact_status] ?? {
-                label: live.artifact_status,
-                color: "default",
-              })
-            : null;
-          const isNext = pipeline?.next_step_index === i;
-          return (
-            <div className="chatbi-pipeline-step" key={step.kind + i}>
-              <div className="chatbi-pipeline-step-head">
-                <span className="chatbi-pipeline-step-no">{i + 1}</span>
-                <Tag bordered={false}>{ACTION_KIND_LABEL[step.kind] ?? step.kind}</Tag>
-                <span className="chatbi-pipeline-step-intent">{step.intent}</span>
-                {/* 还没起草到这一步就如实说「待起草」——不拿 drafted 冒充「已经建了制品」。 */}
-                <Tag color={status?.color ?? "default"} bordered={false}>
-                  {status?.label ?? "待起草"}
-                </Tag>
-              </div>
-              {!pipeline && (
-                <ProposalContextForm
-                  kind={step.kind}
-                  context={drafts[i] ?? {}}
-                  ontologyId={proposal.ontology_id}
-                  onChange={(key, value) =>
-                    setDrafts((prev) => prev.map((c, j) => (j === i ? { ...c, [key]: value } : c)))
-                  }
-                />
-              )}
-              {pipeline && (
-                <div className="chatbi-pipeline-step-actions">
-                  {live?.artifact_id ? (
-                    <Button size="small" onClick={() => void openStep(live.artifact_id!)}>
-                      {live.artifact_status === "succeeded" ? "查看" : "继续校验/确认/执行"}
-                    </Button>
-                  ) : isNext ? (
-                    <Button
-                      size="small"
-                      type="primary"
-                      loading={busy}
-                      disabled={Boolean(pipeline.next_blocked_reason) || !conversationId}
-                      onClick={() => void startStepConfirmation(i)}
-                    >
-                      确认第 {i + 1} 步(需求 → 本体 → 数据)
-                    </Button>
-                  ) : (
-                    <span className="chatbi-pipeline-step-wait">等前一步完成</span>
-                  )}
-                  {isNext && pipeline.next_blocked_reason && (
-                    <span className="chatbi-pipeline-step-wait">
-                      {pipeline.next_blocked_reason}
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* 逐步确认弹窗:链上的第 N 步与单发任务走同一张六环向导 */}
-      <Modal
-        open={Boolean(stepForm)}
-        onCancel={() => setStepForm(null)}
-        footer={null}
-        width={640}
-        destroyOnHidden
-        title={`任务链 · 第 ${(stepForm?.index ?? 0) + 1} 步`}
-      >
-        {stepForm && (
-          <FormBlock
-            form={stepForm.form}
-            conversationId={conversationId}
-            ontologyId={proposal.ontology_id}
-            submitTask={submitStep}
-          />
-        )}
-      </Modal>
-
-      {/* P2-4:周期任务控件——链走通(status=succeeded)后显示 */}
-      {pipeline && pipeline.status === "succeeded" && (
-        <div
-          className="chatbi-pipeline-schedule"
-          style={{ marginTop: 16, padding: "12px 16px", background: "#f5f5f5", borderRadius: 4 }}
-        >
-          {!pipeline.compiled_dag_id ? (
-            <>
-              <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 500 }}>挂成周期任务</div>
-              <div style={{ color: "#666", marginBottom: 12, fontSize: 12 }}>
-                整条链已走通,可编译成一条 Airflow DAG,挂上调度周期后自动反复执行。
-              </div>
-              <Space>
-                <span style={{ fontSize: 12 }}>调度周期</span>
-                <CronPicker
-                  value={pipeline.schedule_cron ?? "0 2 * * *"}
-                  onChange={async (cron) => {
-                    try {
-                      setPipeline(await api.setPipelineSchedule(pipeline.id, cron));
-                    } catch (err) {
-                      message.error(err instanceof Error ? err.message : "设置失败");
-                    }
-                  }}
-                  size="small"
-                />
-                <Button
-                  type="primary"
-                  size="small"
-                  loading={busy}
-                  disabled={!pipeline.schedule_cron}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      await api.compilePipeline(pipeline.id);
-                      await refresh(pipeline.id);
-                      message.success("已编译成周期 DAG");
-                    } catch (err) {
-                      message.error(
-                        err instanceof Error
-                          ? err.message
-                          : "编译失败(检查所有步骤是否已确认且执行过)",
-                      );
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  编译并挂起
-                </Button>
-              </Space>
-            </>
-          ) : (
-            <>
-              <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 500 }}>周期任务已挂起</div>
-              <div style={{ color: "#666", marginBottom: 8, fontSize: 12 }}>
-                DAG ID: <code>{pipeline.compiled_dag_id}</code>
-              </div>
-              <div style={{ color: "#666", marginBottom: 12, fontSize: 12 }}>
-                调度周期:{" "}
-                {pipeline.schedule_cron
-                  ? cronstrue.toString(pipeline.schedule_cron, { locale: "zh_CN" })
-                  : "无"}
-              </div>
-              <Space>
-                <Button
-                  size="small"
-                  danger
-                  loading={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      setPipeline(await api.unschedulePipeline(pipeline.id));
-                      message.success("已下线周期任务");
-                    } catch (err) {
-                      message.error(err instanceof Error ? err.message : "下线失败");
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  下线
-                </Button>
-                <span style={{ fontSize: 12, color: "#999" }}>
-                  (下线只清 ontoMeta 记录,DAG 文件需另行从 Airflow dags_dir 删除)
-                </span>
-              </Space>
-            </>
-          )}
-        </div>
-      )}
-
-      <div className="chatbi-draft-note">
-        {pipeline
-          ? "每一步都要各自过「校验 → dry-run 差异 → 人工确认 → 执行」;上一步执行成功后,下一步才可起草,届时目标数据源/库会自动接过去。"
-          : "点击后只创建这条链,不会起草或执行任何任务;随后逐步起草,每步仍需人工确认才执行。"}
-      </div>
-      {node}
-    </BlockCard>
-  );
-}
 
 /**
  * 任务状态块(P0):get_task_status 回读的数据任务态与回执摘要,列表展示;
@@ -2729,17 +1895,11 @@ function PipelineProposalBlock({
  */
 function TaskStatusBlock({
   status,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   status: Extract<ChatBiBlock, { type: "task_status" }>["status"];
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const { open, node } = useArtifactDrawer(undefined, conversationId, messageId, blockId);
+  const { open, node } = useArtifactDrawer();
   const tasks = status.tasks ?? [];
   // L4 血缘:status.lineage = { tasks, dependencies }(谁产出谁消费)。
   // dependencies: [{ upstream: task_id, downstream: task_id }]
@@ -2774,25 +1934,6 @@ function TaskStatusBlock({
           >
             查看
           </Button>
-          {/*
-            验收**一行一条**：任务回执的认可就是这条任务六环里的结果确认，闭环按任务
-            分开之后，一条表态盖住整块就落不到任何一条任务头上——三条任务里认可了哪条，
-            账本上读不出来，三张卡的结果环也全都点不亮。故必须带 refId 逐条记。
-          */}
-          <AckControl
-            target={{
-              conversationId,
-              messageId,
-              blockId,
-              node: "result",
-              stage: "task_status",
-              summary: `${ACTION_KIND_LABEL[t.kind] ?? t.kind}「${t.name}」执行结果`,
-              refKind: "artifact",
-              refId: t.id,
-              chosen: { task_id: t.id, status: t.status },
-            }}
-            label="结果符合预期？"
-          />
         </div>
       ))}
       {/* L4 血缘:任务间依赖(上游产出 → 下游消费)。有边才画。 */}
@@ -2898,16 +2039,10 @@ function MappingBlock({
   variant,
   items,
   references,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   variant: "inline" | "caliber";
   items: ChatBiCaliberItem[];
   references: ChatBiCaliberReference[];
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   if (variant === "inline") {
     // 无口径展开——只有「命中本体」,收成一行内联 chip。
@@ -2918,36 +2053,12 @@ function MappingBlock({
         {references.map((reference, ri) => (
           <CaliberRefChip key={ri} reference={reference} />
         ))}
-        <AckControl
-          target={{
-            conversationId,
-            messageId,
-            blockId,
-            node: "ontology",
-            stage: "mapping",
-            summary: `映射本体(${references.length} 项)`,
-            chosen: references.map((r) => r.id),
-          }}
-          label="映射是否准确？"
-        />
       </div>
     );
   }
   return (
     <BlockCard variant="neutral" title="口径展开">
       <CaliberDecomposition items={items} references={references} />
-      <AckControl
-        target={{
-          conversationId,
-          messageId,
-          blockId,
-          node: "ontology",
-          stage: "mapping",
-          summary: `映射本体(${references.length} 项)`,
-          chosen: references.map((r) => r.id),
-        }}
-        label="映射是否准确？"
-      />
     </BlockCard>
   );
 }
@@ -3373,14 +2484,8 @@ function fmtCell(value: unknown): string {
 
 function ResultTable({
   result,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   result: ChatBiDataResult;
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   const rows = result.rows ?? [];
   const cols =
@@ -3418,20 +2523,6 @@ function ResultTable({
       {rows.length > shown.length && (
         <div className="chatbi-result-more">仅展示前 {shown.length} 行</div>
       )}
-      <AckControl
-        target={{
-          conversationId,
-          messageId,
-          blockId,
-          node: "data",
-          // stage 叫 data_result 而不是 result——"result" 是**环名**(任务回执验收),
-          // 拿它当数据环的场景名,日后按 stage 下钻分析时两者会混作一谈。
-          stage: "data_result",
-          summary: `查询结果(${rows.length} 行)`,
-          chosen: { row_count: rows.length, truncated: result.truncated },
-        }}
-        label="数据结果是否符合预期？"
-      />
     </div>
   );
 }
@@ -3516,30 +2607,12 @@ function refToPath(ref: ChatBiCaliberReference): string | null {
 
 function SqlBlock({
   sql,
-  conversationId,
-  messageId,
-  blockId,
 }: {
   sql: string;
-  conversationId?: string;
-  messageId?: string;
-  blockId?: string;
 }) {
   return (
     <div>
       <CodeBlock code={sql} language="sql" />
-      <AckControl
-        target={{
-          conversationId,
-          messageId,
-          blockId,
-          node: "data",
-          stage: "sql",
-          summary: "生成的 SQL",
-          chosen: { sql_preview: sql.slice(0, 200) },
-        }}
-        label="SQL 是否符合预期？"
-      />
     </div>
   );
 }

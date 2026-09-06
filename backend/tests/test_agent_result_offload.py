@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.services.agent_result_store import RunResultStore, project_run_sql_for_model
 from app.services import agent_telemetry
+from app.services.agent_result_store import RunResultStore, project_run_sql_for_model
 from app.services.agent_telemetry import RunTelemetry
 
 

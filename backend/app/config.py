@@ -13,8 +13,31 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(_ENV_FILE), env_file_encoding="utf-8")
 
     app_name: str = "ontoMeta"
-    debug: bool = True
+    # **默认关**：debug 为真时全局异常处理器会把 `类名: 异常文本` 原样回给调用方
+    # （见 app/main.py 的 _unhandled_exc_handler）。默认真意味着任何绕过 compose 的
+    # 启动方式——service.sh、裸 uvicorn、MCP 子进程——都在对外泄露内部细节。
+    # 本地开发在 backend/.env 里写 DEBUG=true 显式打开。
+    debug: bool = False
     database_url: str = "sqlite:///./ontometa.db"
+
+    # ---- 应用库连接池（部署形态，config-web-only 法则的 bootstrap 例外：
+    #      建引擎发生在能读设置表之前，鸡生蛋）----
+    # 272 个端点是同步 def，FastAPI 把它们放进线程池执行，**一个在飞的请求占一条连接**。
+    # 所以池容量与线程数必须同数量级：线程多于连接，多出来的线程只会在 checkout 上等到
+    # pool_timeout 然后抛错——那是把排队变成了 500。app.main 据此把线程池对齐到
+    # pool_size + max_overflow，让背压发生在队列里而不是异常里。
+    #
+    # ⚠ 这是**每 worker** 的数量。多 worker 部署时数据库侧要满足
+    #   workers × (pool_size + max_overflow) ≤ max_connections（Postgres 默认 100）。
+    #   默认取 5 + 10 = 15：镜像默认 4 worker，4 × 15 = 60，给草稿子进程、运维会话
+    #   和监控留出余量。调 worker 数时这两个值要跟着一起调。
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    # 池里没有空闲连接时等多久（秒）。到点抛 TimeoutError，好过无限期挂住线程。
+    db_pool_timeout: int = 30
+    # 主动回收超过此秒数的连接：数据库侧的 idle_session_timeout、中间的负载均衡/NAT
+    # 都会在服务端悄悄断掉长期空闲的连接，客户端要到下次用才发现。1800s 短于常见配置。
+    db_pool_recycle: int = 1800
 
     # 管理端共享 Token；未配置时受保护的 /api 返回 503
     ontometa_admin_token: str | None = None

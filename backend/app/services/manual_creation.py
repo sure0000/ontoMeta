@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.models import DomainContext, ObjectType, Ontology, Property
-from app.models.ontology import EntityStatus, OntologyStatus
+from app.models.ontology import EntityStatus
 from app.services import ontology_workspace
 from app.services.edit import _assert_object_name_free
 from app.services.segment_placement import place_unsegmented

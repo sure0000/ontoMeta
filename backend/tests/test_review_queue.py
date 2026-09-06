@@ -25,7 +25,6 @@ from app.services.review_queue import (
     score_band,
 )
 
-
 # ---------------------------------------------------------------- 纯函数
 
 

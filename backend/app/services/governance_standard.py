@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -80,7 +80,7 @@ class GovernanceStandardService:
             status="published",
             payload_json=json.dumps(standard.to_dict(), ensure_ascii=False),
             note=note,
-            activated_at=datetime.now(timezone.utc),
+            activated_at=datetime.now(UTC),
         )
         db.add(record)
         db.commit()

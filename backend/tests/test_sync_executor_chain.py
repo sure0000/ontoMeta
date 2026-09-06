@@ -81,11 +81,17 @@ def test_sync_with_target_datasource_calls_run_sync(monkeypatch):
 
 
 def test_new_doris_sync_persists_contract_and_targets_only_ods(monkeypatch):
+    import uuid
+
     from app.database import SessionLocal
     from app.models import (
-        DataSource, DomainContext, IngestionContract, ObjectType, Ontology, Property
+        DataSource,
+        DomainContext,
+        IngestionContract,
+        ObjectType,
+        Ontology,
+        Property,
     )
-    import uuid
 
     with SessionLocal() as db:
         db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
@@ -116,8 +122,7 @@ def test_new_doris_sync_persists_contract_and_targets_only_ods(monkeypatch):
         db.add_all([source, doris]); db.commit()
         oid, source_id, doris_id = ontology.id, source.id, doris.id
 
-    from app.services import materialization_runner
-    from app.services import materialize_preflight
+    from app.services import materialization_runner, materialize_preflight
     from app.services.materialize_preflight import PreflightReport
 
     mock_run = MagicMock(return_value={"ok": True, "dag_id": "d1", "dag_run_id": "r1"})

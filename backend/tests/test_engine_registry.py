@@ -52,7 +52,7 @@ def test_kyuubi_adapter_is_hive():
 def test_unknown_engine_raises():
     try:
         get_adapter("not-an-engine")
-        assert False, "应抛 UnknownEngineError"
+        raise AssertionError("应抛 UnknownEngineError")
     except UnknownEngineError:
         pass
 

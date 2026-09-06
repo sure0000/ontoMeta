@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -36,6 +36,7 @@ from app.services.version_diff import (
     load_previous_snapshot,
     summarize_diff,
 )
+
 
 def _log_change(
     db: Session,
@@ -225,7 +226,7 @@ class DraftPersistenceService:
                 )
             )
 
-        ontology.generated_at = datetime.now(timezone.utc)
+        ontology.generated_at = datetime.now(UTC)
         ontology.status = OntologyStatus.DRAFT.value
         db.commit()
         db.refresh(ontology)
@@ -326,7 +327,7 @@ class DraftPersistenceService:
                     )
                 )
 
-        ontology.generated_at = datetime.now(timezone.utc)
+        ontology.generated_at = datetime.now(UTC)
         db.commit()
         db.refresh(ontology)
         return object_ref_to_id
@@ -394,7 +395,7 @@ class DraftPersistenceService:
                 )
             written += 1
 
-        ontology.generated_at = datetime.now(timezone.utc)
+        ontology.generated_at = datetime.now(UTC)
         db.commit()
         db.refresh(ontology)
         return written
@@ -614,7 +615,7 @@ class PublishService:
 
         ontology.version = new_version
         ontology.status = OntologyStatus.PUBLISHED.value
-        ontology.published_at = datetime.now(timezone.utc)
+        ontology.published_at = datetime.now(UTC)
         ontology.approved_by = operator
 
         selection = self.select_publishable(db, ontology_id)
@@ -718,7 +719,7 @@ class ConfirmationService:
             raise ValueError("Confirmation is not pending")
 
         confirmation.confirmation_status = ConfirmationStatus.CONFIRMED.value
-        confirmation.confirmed_at = datetime.now(timezone.utc)
+        confirmation.confirmed_at = datetime.now(UTC)
         if operator:
             confirmation.operator = operator
 

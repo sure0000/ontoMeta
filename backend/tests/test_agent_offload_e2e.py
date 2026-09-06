@@ -10,13 +10,12 @@ from types import SimpleNamespace
 
 from app.database import SessionLocal
 from app.services.chat_bi import ChatBiService
-
+from tests.fixtures.golden_questions import FinalTurn, ToolTurn
 from tests.test_chat_bi_golden import (
+    _seed_golden_domain,
     _StubClient,
     _StubCompletions,
-    _seed_golden_domain,
 )
-from tests.fixtures.golden_questions import FinalTurn, ToolTurn
 
 
 def _big_executed_result(n: int = 100) -> dict:

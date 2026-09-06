@@ -18,7 +18,6 @@ from app.services.ontology_ladder import (
 )
 from tests.test_chat_bi_golden import _seed_golden_domain
 
-
 _entity_grams_probe = OntologyLadderLoader._entity_grams
 
 

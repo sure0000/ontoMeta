@@ -154,7 +154,7 @@ SKILLS: dict[str, Skill] = {
             "→ ask_clarification('复购率的计算口径是？如：复购客户数/总客户数，还是复购订单数/总订单数？')\n"
             "→ [用户回答后] propose_expression(name='repurchase_rate', formula='...', based_on=[客户对象])\n\n"
 
-            "注意：提案只是草稿，需要后续六环确认才能发布。\n"
+            "注意：提案只是草稿，要人确认后才能发布。\n"
         ),
         extra_tool_names=("propose_draft", "propose_expression", "lint_against_standard"),
         block_types=("markdown", "draft_proposal"),
@@ -167,15 +167,15 @@ SKILLS: dict[str, Skill] = {
             "【数据任务模式】\n"
             "当前任务：创建或管理数据任务（物化/同步/加工/指标）。\n\n"
 
-            "核心原则：**所有数据任务都按六环分别确认**\n"
-            "需求 → 本体 → 数据 → 执行方案 → 执行 → 结果\n"
-            "前三环在表单向导里确认，后三环在任务详情里确认。任何一环都不能替用户跳过。\n\n"
+            "核心原则：**参数摆全给人核对，人确认前不执行**\n"
+            "表单一次把参数问全，人核对后确认；执行方案与执行在任务详情里由人放行。\n"
+            "不要替用户猜 id——猜错不会当场报错，要到执行时才炸。\n\n"
 
             "单任务标准流程：\n"
             "1. get_task_options(kind) 查看该类任务的配置选项和候选值\n"
-            "2. request_form(title='任务名', task_kind=kind, intent='用户需求描述') 生成六环确认表单\n"
-            "   - fields 参数留空，由服务端生成六环向导\n"
-            "3. [等待用户填表] 用户在界面上逐环确认\n"
+            "2. request_form(title='任务名', task_kind=kind, intent='用户需求描述') 生成建数表单\n"
+            "   - fields 参数留空，由服务端按任务类型生成\n"
+            "3. [等待用户填表]\n"
             "4. propose_action(kind, context={...}) 根据回填内容生成任务提案\n"
             "   - context 必须包含 task_confirmation_id（从表单回填中获取）\n\n"
 
@@ -192,23 +192,23 @@ SKILLS: dict[str, Skill] = {
             "- **metric（指标）**：基于形式化业务口径生成定时计算任务\n"
             "  候选：已发布的业务逻辑（口径）\n\n"
 
-            "任务链流程：\n"
-            "- 多步需求（如「把 ERP 订单同步过来并加工到 DWD」）→ propose_pipeline(steps=[...])\n"
-            "- 链上每一步同样逐环确认，只是上游落点自动接成下游默认值\n\n"
+            "多步需求（如「把 ERP 订单同步过来并加工到 DWD」）：\n"
+            "- 拆成前后相继的多条任务，一次提一条，上一条落到哪张表要等它真的建好再读\n"
+            "- 下游的上游表用 list_datasets(layer='ods') 查，不要自己拼表名\n\n"
 
             "查询任务状态：\n"
             "- get_task_status(artifact_id) 或 get_task_status() 查询本会话相关任务\n\n"
 
             "重要约束：\n"
             "- 提案只创建草稿，不会立即执行\n"
-            "- 不要说「任务已创建」或「已执行」，应说「已生成任务提案，请在界面逐环确认」\n"
+            "- 不要说「任务已创建」或「已执行」，应说「已生成任务提案，请在界面确认」\n"
             "- 同步任务不需要先物化，一个 sync 任务就够\n"
         ),
         extra_tool_names=(
             "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
             "lint_against_standard", "list_datasets",
         ),
-        block_types=("markdown", "action_proposal", "pipeline_proposal", "task_status"),
+        block_types=("markdown", "action_proposal", "task_status"),
     ),
     "onboard": Skill(
         name="onboard",

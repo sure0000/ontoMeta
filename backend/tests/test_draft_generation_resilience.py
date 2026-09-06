@@ -7,6 +7,7 @@ technical candidate_name 悄悄顶替真实业务命名（成功块落 checkpoin
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -22,7 +23,6 @@ from app.services.draft_generator import (
     LlmResponseFormatError,
     OntologyDraftGenerator,
 )
-from types import SimpleNamespace
 
 
 def _bundle(num_objects: int) -> EvidenceBundle:

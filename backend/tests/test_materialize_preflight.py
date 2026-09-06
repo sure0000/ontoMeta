@@ -10,42 +10,39 @@ test_airflow_connector.py），并把 preflight 依赖的 settings / 契约服�
 
 from __future__ import annotations
 
-import os
-import time
 from types import SimpleNamespace
 
 import httpx
-import pytest
 
 import app.services.materialize_preflight as pf
 from app.connectors.airflow import AirflowClient
 
 
 def _runtime(dags_dir, **over) -> SimpleNamespace:
-    base = dict(
-        endpoint="http://airflow:8080",
-        username="admin",
-        password="admin",
-        dags_dir=str(dags_dir),
+    base = {
+        "endpoint": "http://airflow:8080",
+        "username": "admin",
+        "password": "admin",
+        "dags_dir": str(dags_dir),
         # SSH 投递参数：dag_dir_visible 检查改验 SSH 管道，基线给个主机名。
-        ssh_host="test-airflow-host",
-        ssh_user="deploy",
-        ssh_port=22,
-        ssh_password=None,
+        "ssh_host": "test-airflow-host",
+        "ssh_user": "deploy",
+        "ssh_port": 22,
+        "ssh_password": None,
         # 编排旋钮现在全在设置行上（不再有环境变量），基线取与库默认一致的值。
-        max_tasks_per_dag=50,
-        max_active_tasks_per_dag=16,
-        dag_parse_timeout=60.0,
-        staging_swap=True,
+        "max_tasks_per_dag": 50,
+        "max_active_tasks_per_dag": 16,
+        "dag_parse_timeout": 60.0,
+        "staging_swap": True,
         # Flink 执行参数现在也在设置行上（不再有环境变量）。
-        flink_sql_runner_jar="/opt/flink/runner.jar",
-        flink_sql_runner_class="com.ontometa.flink.SqlRunner",
-        flink_bin="flink",
-        flink_deploy_target="yarn-per-job",
-        flink_parallelism=1,
-        flink_yarn_queue="",
-        flink_checkpoint_dir="",
-    )
+        "flink_sql_runner_jar": "/opt/flink/runner.jar",
+        "flink_sql_runner_class": "com.ontometa.flink.SqlRunner",
+        "flink_bin": "flink",
+        "flink_deploy_target": "yarn-per-job",
+        "flink_parallelism": 1,
+        "flink_yarn_queue": "",
+        "flink_checkpoint_dir": "",
+    }
     available = over.pop("available", None)
     base.update(over)
     if available is None:

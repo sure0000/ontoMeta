@@ -3,9 +3,16 @@ __pycache__/
 *.py[cod]
 .venv/
 *.db
-*.db.bak.*
 *.db-wal
 *.db-shm
+# 数据库备份：原来只写了 `*.db.bak.*`，匹配不到 `ontometa.db.bak-1787284769`
+# 与 `ontometa.db.pre-derived.20260828_110706.bak` 这两种命名——于是 242 MB 备份
+# 被一路提交进了历史。改成按 .bak 兜底 + 覆盖 .db.bak 前缀两种写法。
+*.bak
+*.db.bak*
+*.db.pre-*
+# 还有 `ontometa.db.bak-before-lifecycle-1787299838` 这种「.bak-<任意后缀>」的写法
+*.db.bak-*
 
 # Node
 node_modules/
@@ -22,6 +29,11 @@ dist/
 *.swp
 *.swo
 *~
+
+# 运行期产物：血缘代码包归档、草稿证据缓存。都是跑起来才生成的东西，
+# 体量随使用增长（当前工作区已有 160 个包、12 MB 证据缓存），不该进版本库。
+backend/data/
+backend/.cache/
 
 # Local / scratch artifacts
 .dagcheck/

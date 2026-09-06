@@ -15,8 +15,6 @@ import type {
   ChatBiAgentRunSummary,
   ChatBiCategoryList,
   ChatBiConversation,
-  ChatBiDecision,
-  ChatBiDecisionClosure,
   ChatBiFormRequest,
   ChatBiHistoryItem,
   ChatBiMessageItem,
@@ -79,10 +77,6 @@ import type {
   RolePolicy,
   AgentKinds,
   GovernanceArtifact,
-  TaskPipeline,
-  TaskPipelineAdvanceResult,
-  TaskPipelineDraftAllResult,
-  PipelineCompileResult,
   LlmConnectionTestResult,
   ObjectTypeDetail,
   ObjectTypeSummary,
@@ -1220,58 +1214,6 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) },
     ),
 
-  /**
-   * 决策留痕：记一条人工确认。
-   *
-   * **责任人不用传**——服务端从已认证主体取，前端给了也会被忽略。
-   * 端点恒返回 200（recorded 表是否记成），故调用方只需 fire-and-forget。
-   */
-  recordChatBiDecision: (
-    conversationId: string,
-    body: {
-      node: string;
-      outcome?: string;
-      stage?: string;
-      trigger?: string;
-      message_id?: string;
-      block_id?: string;
-      summary?: string;
-      proposed?: unknown;
-      chosen?: unknown;
-      ref_kind?: string;
-      ref_id?: string;
-      dedup_key?: string;
-    },
-  ) =>
-    request<{ id: string | null; recorded: boolean }>(
-      `/api/chat-bi/conversations/${conversationId}/decisions`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  listChatBiDecisions: (conversationId: string) =>
-    request<ChatBiDecision[]>(`/api/chat-bi/conversations/${conversationId}/decisions`),
-
-  getChatBiClosure: (conversationId: string) =>
-    request<ChatBiDecisionClosure>(`/api/chat-bi/conversations/${conversationId}/closure`),
-
-  /** 跨会话决策查询，供决策追踪页。结果附带 conversation_title。 */
-  searchChatBiDecisions: (params: {
-    node?: string;
-    outcome?: string;
-    ref_kind?: string;
-    subject_id?: string;
-    since?: string;
-    until?: string;
-    limit?: number;
-  }) => {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
-    }
-    const suffix = qs.toString();
-    return request<ChatBiDecision[]>(`/api/chat-bi/decisions${suffix ? `?${suffix}` : ""}`);
-  },
-
   /** P3.1：把用户确认的约定落库为本域记忆（点「记住」后调用）。 */
   rememberPreference: (domainId: string, text: string) =>
     request<{ id: string; text: string; remembered: boolean }>(
@@ -1753,9 +1695,20 @@ export const api = {
 
   // ---- 治理智能体流水线（M5/M6，写侧；整个命名空间需 publisher 角色）----
   listAgentKinds: () => request<AgentKinds>("/api/agents/kinds"),
-  listArtifacts: (params?: { kind?: string; status?: string; ontology_id?: string }) =>
+  listArtifacts: (params?: {
+    kind?: string;
+    status?: string;
+    ontology_id?: string;
+    reconcile?: boolean;
+    include_details?: boolean;
+  }) =>
     request<GovernanceArtifact[]>(`/api/agents/artifacts${buildQuery(params ?? {})}`),
-  getArtifact: (id: string) => request<GovernanceArtifact>(`/api/agents/artifacts/${id}`),
+  getArtifact: (id: string, options?: { reconcile?: boolean }) =>
+    request<GovernanceArtifact>(
+      `/api/agents/artifacts/${id}${
+        options?.reconcile === undefined ? "" : `?reconcile=${options.reconcile}`
+      }`,
+    ),
 
   // 结构化 Spec 表单的字段下拉数据源
   listWarehouseEngines: () =>
@@ -1865,63 +1818,18 @@ export const api = {
       body: JSON.stringify({ context: context ?? {} }),
     }),
 
-  // ---- 任务链（多任务编排）----
-  // 链只管顺序与上下文传递，逐步的校验/确认/执行仍走上面那几个制品端点。
-  // 故这里**没有** executePipeline：一键跑完必然绕过逐制品的人工确认。
-  createPipeline: (body: {
-    name: string;
-    intent?: string | null;
-    ontology_id?: string | null;
-    steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
-  }) =>
-    request<TaskPipeline>("/api/agents/pipelines", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  getPipeline: (id: string) => request<TaskPipeline>(`/api/agents/pipelines/${id}`),
-  listPipelines: (ontologyId?: string) =>
-    request<TaskPipeline[]>(`/api/agents/pipelines${buildQuery({ ontology_id: ontologyId })}`),
-  /** 起草链上的下一步。上游还没跑成功时后端 409，错误里说清卡在哪一步。 */
-  advancePipeline: (id: string) =>
-    request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance`, {
-      method: "POST",
-    }),
   /**
-   * 确认过前三环（需求/本体/数据）后起草链上的下一步，并直接产出执行方案预览。
-   * 缺任何一环后端 409 并说清缺哪环——链不替谁确认。
+   * 记下人对执行结果的判断：符不符合预期。
+   *
+   * **不传 operator**——署名由服务端从已认证主体取。这条记录的价值全在"是谁看过之后认的"。
+   * 只有终态可写（否则 409）；通用 agent 经 MCP 的 confirm_task_result 写的是同一列。
    */
-  advancePipelineConfirmed: (
+  confirmArtifactResult: (
     id: string,
-    body: {
-      conversation_id: string;
-      confirmation_id: string;
-      context: Record<string, unknown>;
-      intent?: string;
-    },
+    body: { outcome: "accepted" | "rejected"; note?: string },
   ) =>
-    request<TaskPipelineAdvanceResult>(`/api/agents/pipelines/${id}/advance-confirmed`, {
+    request<GovernanceArtifact>(`/api/agents/artifacts/${id}/result`, {
       method: "POST",
       body: JSON.stringify(body),
-    }),
-  /** C2：一键起草全部步骤（血缘驱动，起草阶段不阻塞）。只起草不执行。 */
-  draftAllPipeline: (id: string) =>
-    request<TaskPipelineDraftAllResult>(`/api/agents/pipelines/${id}/draft-all`, {
-      method: "POST",
-    }),
-  /** 给链设置周期 cron（不触发编译；编译是显式的第二步）。 */
-  setPipelineSchedule: (id: string, scheduleCron: string | null) =>
-    request<TaskPipeline>(`/api/agents/pipelines/${id}/schedule`, {
-      method: "PUT",
-      body: JSON.stringify({ schedule_cron: scheduleCron }),
-    }),
-  /** 把链编译成周期 DAG。前提不满足时后端 409，错误里说清卡在哪一步。 */
-  compilePipeline: (id: string) =>
-    request<PipelineCompileResult>(`/api/agents/pipelines/${id}/compile`, {
-      method: "POST",
-    }),
-  /** 下线周期调度：清 schedule_cron 与 compiled_dag_id。 */
-  unschedulePipeline: (id: string) =>
-    request<TaskPipeline>(`/api/agents/pipelines/${id}/schedule`, {
-      method: "DELETE",
     }),
 };

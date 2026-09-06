@@ -103,7 +103,7 @@ def test_service_rejects_bad_cardinality_when_error(client, monkeypatch):
                 source_object_type_id=a_id, target_object_type_id=b_id,
                 cardinality="乱码",
             )
-            assert False, "应因非法基数被拒"
+            raise AssertionError("应因非法基数被拒")
         except ValueError as e:
             assert "基数" in str(e)
 
@@ -136,6 +136,6 @@ def test_service_rejects_bad_semantic_type_when_error(client, monkeypatch):
         svc = EditService()
         try:
             svc.update_property(db, prop.id, semantic_type="瞎写")
-            assert False, "应因非法语义类型被拒"
+            raise AssertionError("应因非法语义类型被拒")
         except ValueError as e:
             assert "语义类型" in str(e)

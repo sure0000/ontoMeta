@@ -1,7 +1,7 @@
 """维度模型 API。"""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.dimensional_model import DimensionalModelService

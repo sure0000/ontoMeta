@@ -13,16 +13,16 @@
 **产出**：一组 (FlinkSqlTask, 依赖边) → ``build_flink_sql_dag(task_dependencies=...)``
 编成一条 DAG，一次触发。Airflow 默认 all_success：上游失败时下游不执行。
 
-**环检测**：Kahn 拓扑排序（与 pipeline_compiler 同算法）。有环抛错，不静默。
+**环检测**：Kahn 拓扑排序。有环抛错，不静默。
 
-**与人工链（GovernanceTaskPipeline）的关系**：本模块是 C2 的替代路径——依赖
-从血缘自动推导，不需要用户逐步建链。人工链保留（向后兼容），新路径走这里。
+**依赖从血缘自动推导**，不需要谁逐步建链——手工任务链（GovernanceTaskPipeline）已经
+随任务编排模块一起退场，本模块是多任务间依赖关系的唯一来源。
 """
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from app.services.airflow_dag_builder import FlinkSqlTask, build_flink_sql_dag
@@ -118,7 +118,7 @@ def _check_acyclic(
     """Kahn 拓扑排序检测环。有环抛 LineageSchedulerError。"""
     all_ids = {t.id for t in tasks}
     graph: dict[str, list[str]] = defaultdict(list)
-    in_degree: dict[str, int] = {tid: 0 for tid in all_ids}
+    in_degree: dict[str, int] = dict.fromkeys(all_ids, 0)
     for up, down in edges:
         if up.id not in all_ids or down.id not in all_ids:
             continue  # 防御：build_flink_sql_dag 会拦，这里不重复报

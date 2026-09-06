@@ -29,7 +29,7 @@ def test_identity_calibrator_clamps():
 def test_platt_calibrator_monotonic():
     cal = PlattCalibrator(w=4.0, b=-2.0)
     vals = [cal.calibrate(x / 10) for x in range(11)]
-    assert all(b >= a for a, b in zip(vals, vals[1:]))  # 单调不减
+    assert all(b >= a for a, b in zip(vals, vals[1:], strict=False))  # 单调不减
     assert 0.0 <= vals[0] <= vals[-1] <= 1.0
 
 

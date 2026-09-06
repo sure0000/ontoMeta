@@ -12,9 +12,9 @@ import asyncio
 import json
 from uuid import uuid4
 
+import mcp.types as types
 import pytest
 
-import mcp.types as types
 from app.config import settings
 from app.database import SessionLocal
 from app.mcp import server as mcp_server

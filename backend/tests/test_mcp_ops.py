@@ -344,13 +344,20 @@ def test_ops_record_reads_global_families_without_ontology(call_via_server):
     assert body["metadata"]["scope"] == "global"
 
 
-def test_ops_record_rejects_conversation_bound_family(call_via_server):
-    """decision 族按会话组织；MCP 无会话，塞个假 id 就会读到别人的决策记录。"""
-    result = call_via_server("get_ops_record", {"family": "decision"})
-    body = _body(result)
-    assert result.is_error is True
-    assert "会话" in body["data"]["hint"]
-    assert {f["key"] for f in body["data"]["available_families"]} >= {"task_run", "component"}
+def test_ops_record_points_removed_families_at_their_successor(call_via_server):
+    """`decision`/`pipeline` 已随决策账本与任务编排退场——报错要说去哪儿读。
+
+    调用方（或它缓存的旧 skill）还会用老名字。只说"不支持的族"会让它反复重试；
+    说清「谁建的、谁拍的板」现在由 task_run 直接答，它一次就能改对。
+    """
+    for family in ("decision", "pipeline"):
+        result = call_via_server("get_ops_record", {"family": family})
+        body = _body(result)
+        assert result.is_error is True, family
+        assert "task_run" in body["data"]["hint"], family
+        keys = {f["key"] for f in body["data"]["available_families"]}
+        assert keys >= {"task_run", "component"}
+        assert not keys & {"decision", "pipeline"}
 
 
 def test_ops_record_rejects_conversation_scope(call_via_server, ops_env):

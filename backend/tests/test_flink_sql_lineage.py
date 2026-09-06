@@ -22,7 +22,7 @@ def _cfg(tmp_path, **over) -> FlinkSubmitConfig:
     # /opt/... 的占位路径现在会直接被 jar 读取报错。
     from tests.support.delivery import make_runner_jar
 
-    base = dict(runner_jar=make_runner_jar(tmp_path))
+    base = {"runner_jar": make_runner_jar(tmp_path)}
     base.update(over)
     return FlinkSubmitConfig(**base)
 

@@ -13,12 +13,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.models import ModelingCase, ModelingCaseSpec
 from app.schemas.modeling import (
     ModelingCaseCreate,
     ModelingCaseSpecConfirm,
     ModelingCaseSpecSave,
-    RequirementSpec,
 )
 from app.services.modeling_case import ModelingCaseService
 

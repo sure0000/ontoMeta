@@ -35,14 +35,14 @@ import time
 from dataclasses import replace
 from typing import Any, Literal
 
-from sqlalchemy.orm import Session
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError, build_run_id
-from app.connectors.datahub import build_dataset_urn
 from app.models import IngestionContract, MaterializationContract, ObjectType, Ontology
-from app.models.warehouse import TargetKind
 from app.models.data_app import DataSource, DorisWarehouseConfig
+from app.models.warehouse import TargetKind
+from app.services import flink_params
 from app.services.airflow_dag_builder import (
     _plan_staging,
     build_flink_sql_dag,
@@ -51,9 +51,8 @@ from app.services.job_planner import JobPlanner
 from app.services.materialization_contract import MaterializationContractService
 from app.services.move_job_compiler import compile_move_task
 from app.services.ods_naming import ODS_DATABASE, target_ods_table_name
-from app.services.source_ref import has_physical_source
-from app.services import flink_params
 from app.services.settings_service import SettingsService
+from app.services.source_ref import has_physical_source
 from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse import DEFAULT_ENGINE, get_adapter
 from app.warehouse.jobs import JobPlan

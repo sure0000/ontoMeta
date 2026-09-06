@@ -12,8 +12,9 @@ from __future__ import annotations
 from app.services.chat_bi import ChatBiService
 from app.services.chat_bi_blocks import answer_to_blocks
 from tests.fixtures.golden_questions import ToolTurn
-from tests.test_chat_bi_golden import _StubCompletions, _seed_golden_domain
+from tests.test_chat_bi_golden import _seed_golden_domain, _StubCompletions
 from tests.test_chat_bi_intent_gate import _ask, _make_service
+
 
 def _dispatch(args: dict):
     """无 task_kind 的通用表单不碰库，给个占位 session 即可（模板分支不会走到）。"""
@@ -210,12 +211,6 @@ def test_materialize_template_only_asks_effective_fields():
     assert by_name["selected_targets"]["type"] == "multiselect"
     # 物化不搬数据，这些属于同步或旧版无效字段，不能再出现。
     assert not {"target_table", "load_strategy", "partition_key", "refresh_cron"} & set(names)
-    assert [s["node"] for s in form["confirmation_steps"]] == [
-        "requirement", "ontology", "data", "plan", "execute", "result"
-    ]
-    assert [s["phase"] for s in form["confirmation_steps"]] == [
-        "form", "form", "form", "artifact", "artifact", "artifact"
-    ]
 
 
 def test_materialize_ignores_obsolete_model_fields():
@@ -510,16 +505,9 @@ def test_sync_template_recommends_ontology_and_keeps_all_objects_searchable():
     assert "erp.public" not in sale["label"]
     assert "ods_golden_" not in sale["label"]
     assert any(o["value"] == "sync_object_34" for o in field["options"])
-    # 闭环向导：六环一次给全，人从第一步就看得见还剩几环。前三环在表单里收集
-    # （phase=form），后三环等制品 dry-run 出来后在任务详情里确认（phase=artifact）——
-    # 故这里不能提前记 plan。
     assert result["form"]["confirmation_id"]
-    assert [s["node"] for s in result["form"]["confirmation_steps"]] == [
-        "requirement", "ontology", "data", "plan", "execute", "result"
-    ]
-    assert [
-        s["node"] for s in result["form"]["confirmation_steps"] if s["phase"] == "form"
-    ] == ["requirement", "ontology", "data"]
+    # 字段仍带 confirmation_node：它是"这一格属于哪一类"的分组标签（MCP 的执行审查按它
+    # 归组），与已退场的六环进度条无关。
     by_name = {f["name"]: f for f in result["form"]["fields"]}
     assert by_name["object_type"]["confirmation_node"] == "ontology"
     source_field = by_name["source_datasource_id"]
@@ -608,9 +596,9 @@ def test_materialize_before_sync_collapses_into_the_sync_form():
     form = result["form"]
     assert form["task_kind"] == "sync"
     assert "selected_targets" not in {field["name"] for field in form["fields"]}
-    assert [s["title"] for s in form["confirmation_steps"] if s["node"] == "ontology"] == [
-        "确认同步本体"
-    ]
+    assert [
+        f["label"] for f in form["fields"] if f.get("confirmation_node") == "ontology"
+    ] == ["确认同步本体"]
 
 
 def test_materialize_step_collapses_when_only_the_user_said_sync():

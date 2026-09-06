@@ -1,10 +1,8 @@
 """测试动词细化 API 端点（S2）。"""
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
-from app.main import app
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus, RelationType
 
 

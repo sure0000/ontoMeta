@@ -18,13 +18,14 @@ import json
 import logging
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import desc
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, joinedload
 
+from app.auth import hash_api_key
 from app.models import (
     BusinessLogic,
     DataApp,
@@ -32,22 +33,24 @@ from app.models import (
     DataAppVersion,
     DataAppWidget,
     DataSource,
-    DorisWarehouseConfig,
     DomainContext,
+    DorisWarehouseConfig,
     ObjectType,
     Property,
 )
-from app.warehouse.policy import WAREHOUSE_ENGINE, require_doris_datasource
 from app.services.common import log_change
-from app.auth import hash_api_key
 from app.services.data_app_executor import (
     ExecutionError,
     execute_sql,
-    is_read_only,
+)
+from app.services.data_app_executor import (
     list_databases as execute_list_databases,
+)
+from app.services.data_app_executor import (
     list_tables as execute_list_tables,
 )
 from app.services.ontology_query import OntologyQueryService
+from app.warehouse.policy import WAREHOUSE_ENGINE, require_doris_datasource
 
 logger = logging.getLogger("ontometa.data_app")
 
@@ -66,7 +69,7 @@ _TIME_WINDOW_DAYS = {
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _merge_dsn_password(new_dsn: str, old_dsn: str | None) -> str:
@@ -737,8 +740,8 @@ class DataAppService:
             from app.services.query_routing import (
                 projection_mapping,
                 readiness_error,
-                resolve_default_doris,
                 referenced_table_names,
+                resolve_default_doris,
                 target_receipt,
             )
             from app.services.warehouse_migration import cutover_error
@@ -1252,30 +1255,25 @@ class DataAppService:
         caliber_decomposition: list[dict] | None = None,
         referenced_objects: list[dict] | None = None,
     ) -> DataApp:
-        """基于 Chat BI 口径拆解生成数据应用草稿。
+        """基于一份**已经给人看过**的口径拆解生成数据应用草稿。
 
-        一致性保证：若前端传入用户已看到的回答载荷（caliber_decomposition /
-        referenced_objects），则直接复用，**不重新调用 LLM**，确保生成的应用
-        与对话中展示的口径完全一致；仅当未传时才回退到重新 ask()。
+        载荷（caliber_decomposition / referenced_objects）必须由调用方带来：那正是用户
+        在回答里看到的那一份，直接复用才能保证生成的应用与他确认的口径逐字一致。
+
+        此前缺载荷时会回退到重新问一次 LLM。那条回退有两个问题：生成的应用可能与用户看到
+        的口径不是同一份（LLM 两次未必给出同样的拆解），且让「建数据应用」这件事反过来依赖
+        对话模块。现在缺载荷就明确报错——由调用方先取到口径再来。
         """
-        from app.services.chat_bi import ChatBiService
-
         if app_type not in APP_TYPES:
             raise ValueError(f"不支持的应用类型：{app_type}")
 
         caliber = caliber_decomposition or []
         refs = referenced_objects or []
         if not caliber and not refs:
-            # 未携带载荷（如直接调 API）：回退到重新问数
-            answer = await ChatBiService().ask(db, domain_ids=[domain_id] if domain_id else [], question=question)
-            if answer.get("grounding_refused") or (
-                not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
-            ):
-                raise ValueError(
-                    "无法基于已发布本体将该问题落地为数据应用：未命中对象或口径。"
-                )
-            caliber = answer.get("caliber_decomposition") or []
-            refs = answer.get("referenced_objects") or []
+            raise ValueError(
+                "生成数据应用需要口径载荷（caliber_decomposition / referenced_objects）："
+                "请先取得该问题的口径拆解，再带着它调用本接口。"
+            )
 
         binding = self._binding_from_caliber(
             db,
@@ -1519,19 +1517,18 @@ class DataAppService:
         name: str | None = None, caliber_decomposition: list[dict] | None = None,
         referenced_objects: list[dict] | None = None, dashboard_id: str | None = None,
     ) -> DataAppWidget:
-        """由 Data Agent 口径生成一个可复用图表（可直接加入看板）。"""
-        from app.services.chat_bi import ChatBiService
+        """由一份**已经给人看过**的口径生成一个可复用图表（可直接加入看板）。
 
+        与 ``generate_from_chat`` 同一条约定：载荷由调用方带来，缺了就报错，不在这里
+        重新问一次 LLM——那会生成一个与用户确认过的口径未必相同的图表。
+        """
         caliber = caliber_decomposition or []
         refs = referenced_objects or []
         if not caliber and not refs:
-            answer = await ChatBiService().ask(db, domain_ids=[domain_id] if domain_id else [], question=question)
-            if answer.get("grounding_refused") or (
-                not answer.get("referenced_objects") and not answer.get("caliber_decomposition")
-            ):
-                raise ValueError("无法基于已发布本体生成图表：未命中对象或口径。")
-            caliber = answer.get("caliber_decomposition") or []
-            refs = answer.get("referenced_objects") or []
+            raise ValueError(
+                "生成图表需要口径载荷（caliber_decomposition / referenced_objects）："
+                "请先取得该问题的口径拆解，再带着它调用本接口。"
+            )
 
         binding = self._binding_from_caliber(db, caliber=caliber, referenced_objects=refs)
         if not binding.get("primary_object_type_id"):

@@ -20,8 +20,8 @@ _BACKEND = Path(__file__).resolve().parent.parent
 
 
 def test_alembic_head_creates_every_model_table(tmp_path):
-    from app.database import Base
     import app.models  # noqa: F401 — 触发全部模型注册到 metadata
+    from app.database import Base
 
     db_path = tmp_path / "migrated.db"
     url = f"sqlite:///{db_path}"

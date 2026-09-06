@@ -7,7 +7,6 @@ import subprocess
 
 from app.database import SessionLocal
 from app.models import DomainContext, DraftGenerationTask
-from app.schemas import DraftProgressOut
 from app.services.draft_generation_queue import (
     _try_claim_running_slot,
     await_running_slot,
@@ -164,7 +163,9 @@ def test_await_running_slot_returns_false_when_cancelled(client):
 # 派发切换：subprocess 模式下 _launch_draft_task 应 Popen 分离子进程
 # --------------------------------------------------------------------------
 def test_launch_dispatches_subprocess(monkeypatch, client):
-    import app.api.workspace as ws
+    """派发路径住在 `services.draft_launch`（Web 与 MCP 共用同一条），这里钉的是它。"""
+    import app.jobs.draft_worker as worker
+    import app.services.draft_launch as launch
 
     calls = {}
 
@@ -173,21 +174,30 @@ def test_launch_dispatches_subprocess(monkeypatch, client):
             calls["argv"] = argv
             calls["kwargs"] = kwargs
 
-    monkeypatch.setattr(ws.settings, "draft_worker_subprocess", True)
-    monkeypatch.setattr(ws.subprocess, "Popen", _FakePopen)
-
-    progress = DraftProgressOut(
-        task_id="task-xyz", status="queued", progress=0, message="", scope="full"
-    )
+    monkeypatch.setattr(launch.settings, "draft_worker_subprocess", True)
+    monkeypatch.setattr(worker.subprocess, "Popen", _FakePopen)
 
     async def _runner(_task_id):  # subprocess 模式下不会被调用
         raise AssertionError("runner should not run in subprocess mode")
 
-    ws._launch_draft_task(progress, _runner)
+    launch.launch_draft_task("task-xyz", _runner)
 
     argv = calls["argv"]
-    assert argv[0] == ws.sys.executable
+    assert argv[0] == worker.sys.executable
     assert argv[1:] == ["-m", "app.jobs.draft_worker", "task-xyz"]
     assert calls["kwargs"].get("start_new_session") is True
-    assert calls["kwargs"].get("cwd") == str(ws._BACKEND_DIR)
+    assert calls["kwargs"].get("cwd") == str(worker._BACKEND_DIR)
     assert calls["kwargs"].get("stderr") == subprocess.STDOUT
+
+
+def test_web_and_mcp_share_one_dispatch_path():
+    """Web 的 `_launch_draft_task` 只是薄壳，真正的派发在 `services.draft_launch`。
+
+    两处各写一份的话，只有一边会跟上 `draft_worker_subprocess` 的语义，而差异要等到
+    某个入口的生成任务莫名其妙不跑了才被发现。
+    """
+    import inspect
+
+    import app.api.workspace as ws
+
+    assert "launch_draft_task" in inspect.getsource(ws._launch_draft_task)

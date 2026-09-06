@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   Checkbox,
@@ -200,7 +200,7 @@ export function DataSourcesPanel({
   const profile = KIND_PROFILES[kind] ?? KIND_PROFILES.postgres;
   const required = !editingId && !rawMode; // 新增且非高级模式时，连接字段必填
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     api
       .listDataSources()
@@ -209,11 +209,11 @@ export function DataSourcesPanel({
       )
       .catch(() => setSources([]))
       .finally(() => setLoading(false));
-  };
+  }, [includeDoris]);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   // 带预填打开（Data Agent 的接数据提案点进来）：直接弹「新增」表单并填好非机密字段。
   // 只认第一次——之后用户关掉表单不该被再次弹开。

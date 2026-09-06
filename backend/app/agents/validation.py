@@ -26,7 +26,7 @@ from app.services import flink_params
 from app.services.draft_consistency import ValidationIssue, validate_ontology
 from app.services.ods_naming import ODS_DATABASE
 from app.warehouse import UnknownEngineError, get_adapter
-from app.warehouse.policy import ALLOWED_EXECUTION_ENGINES, WAREHOUSE_ENGINE, require_doris
+from app.warehouse.policy import ALLOWED_EXECUTION_ENGINES, WAREHOUSE_ENGINE
 
 # 与规约无关的结构性 warning（引擎未核实、本体一致性）。规约条款的 error/warning
 # 由其自身 severity 决定，不在这里维护——见 is_blocking。
@@ -82,14 +82,16 @@ def _check_duplicate_recent_failures(
     if signature is None:
         return []
 
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
     from app.models.agent import ArtifactStatus, GovernanceArtifact
 
     query = db.query(GovernanceArtifact).filter(
         GovernanceArtifact.kind == kind,
         GovernanceArtifact.status == ArtifactStatus.FAILED.value,
-        GovernanceArtifact.created_at >= datetime.now() - timedelta(days=_DUPLICATE_LOOKBACK_DAYS),
+        GovernanceArtifact.created_at
+        # created_at 是 naive UTC；拿本地 now 去比会把窗口整体平移一个时区偏移量
+        >= datetime.now(UTC).replace(tzinfo=None) - timedelta(days=_DUPLICATE_LOOKBACK_DAYS),
     )
     if ontology_id:
         query = query.filter(GovernanceArtifact.ontology_id == ontology_id)
@@ -675,8 +677,8 @@ def _check_execution_preflight(
         # 缺这两样另有 missing_required_field 报，不在这里重复喊一遍。
         return []
     from app.services import flink_params
-    from app.services.materialize_preflight import run_preflight
     from app.services.materialization_runner import resolve_engine
+    from app.services.materialize_preflight import run_preflight
 
     is_sync = kind == "sync"
     try:

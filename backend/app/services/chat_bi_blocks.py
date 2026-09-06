@@ -150,8 +150,6 @@ def answer_to_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
     # 多任务编排：任务链提案块（propose_pipeline 产出）。纯提案 + 「创建任务链」载荷；
     # 建链本身也不起草任何制品，逐步的校验/确认/执行照旧由用户在制品抽屉里走。
-    for proposal in payload.get("pipeline_proposals") or []:
-        _add({"type": "pipeline_proposal", "proposal": proposal})
 
     # 数据应用提案块（propose_panel / propose_dashboard 产出）。纯提案 + 「生成」载荷；
     # 点击时前端再并上本条消息的口径（caliber_decomposition/referenced_objects），

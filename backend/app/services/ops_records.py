@@ -11,16 +11,18 @@
 信封里有两样东西是运维答案的命门，缺一不可：
 
 - ``source``：这份事实取自哪个权威层。执行门槛权威是 ``GovernanceArtifact.status``，
-  流程权威是 ``ModelingCase.stage``，观察/审计层是决策账本 + 变更日志。不标明出处就会
-  答出两个互相矛盾的「真相」——典型是制品的 ``confirmed_by``：``agent_pipeline.edit()``
-  改 spec 时会把它清空，所以「当初谁拍的板」**只能**查决策账本，不能查制品。
+  流程权威是 ``ModelingCase.stage``，观察层是变更日志。不标明出处就会答出两个互相
+  矛盾的「真相」。典型是制品的 ``confirmed_by``：``agent_pipeline.edit()`` 改 spec 时
+  会清空它（旧确认对新 spec 无效），所以它只答「最近一次确认」；「人改过哪几格」要看
+  ``overridden_fields``——那一份不随确认被清掉。
 - ``as_of`` / ``observed_at``：前者是这条记录自己的时点（上次搬数成功、任务执行完成），
   后者是本次读取的时点。两者必须分开——「三天前落的数」和「我刚读到的状态」是两回事，
   合成一个字段就会把陈旧事实说成新鲜的。
 
 注册表按「问题族」组织（见 ``docs/DATA_AGENT_V6_OPERATIONAL_RECALL_PLAN.md`` §3）。
-``landing`` / ``task_run`` 回答物理落点与单任务执行，``pipeline`` / ``decision`` /
-``ontology_version`` / ``standard`` 分别回读任务链、六环决策、本体发布版本与治理规约。
+``landing`` / ``task_run`` 回答物理落点与单任务执行（含「谁建的、谁拍的板、人改过什么」——
+制品是这几件事的唯一记录），``ontology_version`` / ``standard`` 分别回读本体发布版本与
+治理规约。
 """
 
 from __future__ import annotations
@@ -28,12 +30,13 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.models.agent import TERMINAL_STATUSES
 from app.services.object_landing import (
     FAILED,
     LANDED,
@@ -66,6 +69,20 @@ ARTIFACT_STATUS_LABELS: dict[str, str] = {
     "executing": "执行中",
     "succeeded": "执行成功",
     "failed": "执行失败",
+}
+
+#: 人对结果取态的中文说法。
+RESULT_OUTCOME_LABELS: dict[str, str] = {
+    "accepted": "符合预期",
+    "rejected": "不符合预期",
+}
+
+# 制品来源的中文说法。三个取值与 agent_pipeline.confirm() 定的那套一一对应：
+# 机器起草原样接受 / 机器起草人改过参数 / 人自己开的。
+ARTIFACT_ORIGIN_LABELS: dict[str, str] = {
+    "machine": "机器创建",
+    "machine_edited": "机器创建·人工修改",
+    "user": "人工创建",
 }
 
 
@@ -141,7 +158,6 @@ class OpsQuestionRoute:
 
 
 OPS_RECORD_DEFAULT_SCOPES: dict[str, str] = {
-    "decision": "conversation",
     "standard": "global",
     "datasource": "global",
     "component": "global",
@@ -149,8 +165,6 @@ OPS_RECORD_DEFAULT_SCOPES: dict[str, str] = {
 
 OPS_RECORD_ALLOWED_SCOPES: dict[str, frozenset[str]] = {
     "task_run": frozenset({"conversation", "ontology", "all"}),
-    "pipeline": frozenset({"ontology", "all"}),
-    "decision": frozenset({"conversation"}),
     "ontology_version": frozenset({"ontology"}),
     "standard": frozenset({"global", "all"}),
     "draft_run": frozenset({"ontology"}),
@@ -222,24 +236,10 @@ _OPS_ROUTE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "decision",
-        (
-            "六环进度", "哪一环", "谁批的", "谁确认", "谁审批", "谁拍板",
-            "确认记录", "决策记录", "悬挂确认", "六环闭环",
-        ),
-    ),
-    (
         "standard",
         (
             "当前规约", "规约版本", "生效规约", "治理规约", "治理标准",
             "强制条款", "合规规则", "规约历史", "标准版本",
-        ),
-    ),
-    (
-        "pipeline",
-        (
-            "任务链状态", "任务链进度", "任务链做到哪", "整条链", "流水线状态", "流水线进度",
-            "pipeline 状态", "dag 编译", "调度编译", "逐步状态", "链路阻塞",
         ),
     ),
     (
@@ -263,6 +263,9 @@ _OPS_ROUTE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "跑完了吗", "跑到哪", "卡在哪", "失败原因", "为什么失败", "执行状态",
             "任务状态", "任务进度", "执行记录", "运行记录", "最近一次执行",
             "上次执行", "执行结果", "调度状态",
+            # 「谁拍的板」原属决策审计族；账本退场后由任务本身回答（created_by /
+            # confirmed_by / agent_execution_approved_by / overridden_fields）。
+            "谁批的", "谁确认", "谁审批", "谁拍板", "谁建的", "确认记录", "改过什么",
         ),
     ),
 )
@@ -300,7 +303,7 @@ def route_ops_question(question: str) -> OpsQuestionRoute | None:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _fact(key: str, label: str, value: Any) -> dict[str, Any]:
@@ -484,13 +487,50 @@ def _artifact_facts(artifact: Any) -> list[dict[str, Any]]:
     failure = _receipt_failure(receipt)
     if failure:
         facts.append(_fact("failure", "失败原因", failure))
-    # confirmed_by/at 只能答「最近一次确认」，不能答「当初谁拍的板」：edit() 改 spec
-    # 时会把这两个字段清空。审计口径在决策账本（F 族，P2 接入）。
+    # 「谁建的、谁拍的板、人改过什么」——制品是这几件事的唯一记录（按会话组织的决策
+    # 账本已退场），故一并作为事实答出来。
+    #
+    # confirmed_by 仍只答「最近一次确认」：``edit()`` 改 spec 时会清空它（旧确认对新
+    # spec 无效）。人改过哪几格由 pinned_fields 答——它不随确认被清掉。
+    if artifact.created_by:
+        facts.append(_fact("created_by", "创建人", artifact.created_by))
+    if artifact.created_via:
+        facts.append(_fact("created_via", "创建入口", artifact.created_via))
     if artifact.confirmed_by:
         facts.append(
-            _fact("confirmed_by", "最近一次确认人（改过 spec 会被清空，审计请查决策账本）",
-                  artifact.confirmed_by)
+            _fact("confirmed_by", "最近一次确认人（改过 spec 会被清空）", artifact.confirmed_by)
         )
+    if artifact.agent_execution_approved_by:
+        facts.append(
+            _fact(
+                "agent_execution_approved_by",
+                "代执行授权人",
+                artifact.agent_execution_approved_by,
+            )
+        )
+    if artifact.pinned_fields:
+        facts.append(
+            _fact("overridden_fields", "人工改过的参数", "、".join(artifact.pinned_fields))
+        )
+    # 「跑完了」和「跑对了」是两件事，分列两条事实。**空着就是没人看过**，
+    # 绝不因为 status=succeeded 就替人答一句"结果正常"。
+    if artifact.result_outcome:
+        facts.append(
+            _fact(
+                "result_outcome",
+                "人对结果的判断",
+                RESULT_OUTCOME_LABELS.get(artifact.result_outcome, artifact.result_outcome),
+            )
+        )
+        if artifact.result_note:
+            facts.append(_fact("result_note", "判断说明", artifact.result_note))
+        if artifact.result_confirmed_by:
+            facts.append(_fact("result_confirmed_by", "结果确认人", artifact.result_confirmed_by))
+    elif status in TERMINAL_STATUSES:
+        facts.append(
+            _fact("result_outcome", "人对结果的判断", "尚无人确认（不等于结果没问题）")
+        )
+    facts.append(_fact("origin", "来源", ARTIFACT_ORIGIN_LABELS.get(artifact.origin, artifact.origin)))
     return facts
 
 
@@ -547,10 +587,15 @@ def read_task_run(db: Session, params: dict) -> RecordAnswer:
             and (not requested_kind or artifact.kind == requested_kind)
         ]
     else:
+        # limit 必须传进查询，不能只在下面切片：``list_artifacts`` 默认逐条回读 Airflow
+        # DagRun 做对账，不截断就是「为了回 5 条，先对全表几十条各发一次远程 HTTP」。
+        # 这正是 list_artifacts docstring 里记着的那个坑（MCP 侧实测 11.8 秒），
+        # 当时只改了 MCP 调用点，这条漏了。
         rows = pipeline.list_artifacts(
             db,
             ontology_id=(None if scope == "all" else ontology_id),
             kind=requested_kind,
+            limit=limit,
         )
     shown = rows[:limit]
     items = [
@@ -566,203 +611,6 @@ def read_task_run(db: Session, params: dict) -> RecordAnswer:
         source=source,
         truncated=len(rows) > len(shown),
         note=None if items else "这个范围里没有任何数据任务。",
-    )
-
-
-# --------------------------------------------------------------------------- pipeline
-
-
-def _pipeline_item(detail: dict[str, Any], *, include_steps: bool = False) -> dict[str, Any]:
-    steps = detail.get("steps") or []
-    item: dict[str, Any] = {
-        "pipeline_id": detail.get("id"),
-        "name": detail.get("name"),
-        "status": detail.get("status"),
-        "step_count": len(steps),
-        "succeeded_step_count": sum(
-            1 for step in steps if step.get("artifact_status") == "succeeded"
-        ),
-        "next_step_index": detail.get("next_step_index"),
-        "next_blocked_reason": detail.get("next_blocked_reason"),
-        "schedule_cron": detail.get("schedule_cron"),
-        "compiled_dag_id": detail.get("compiled_dag_id"),
-        "compiled_at": detail.get("compiled_at"),
-        "created_at": detail.get("created_at"),
-        "updated_at": detail.get("updated_at"),
-    }
-    if include_steps:
-        item["steps"] = steps
-    return _json_value(item)
-
-
-def read_pipeline(db: Session, params: dict) -> RecordAnswer:
-    """C 族：整条任务链做到哪一步、卡在哪里、各步是什么状态。"""
-    from app.services.task_pipeline import TaskPipelineService  # noqa: PLC0415
-
-    service = TaskPipelineService()
-    source = "TaskPipelineService.detail（链状态由逐步治理制品状态实时聚合）"
-    pipeline_id = str(params.get("pipeline_id") or "").strip()
-    ontology_id = str(params.get("ontology_id") or "").strip() or None
-    scope = str(params.get("scope") or "ontology").strip()
-
-    if pipeline_id:
-        try:
-            detail = service.detail(db, pipeline_id)
-        except LookupError:
-            return RecordAnswer(
-                family="pipeline",
-                observed_at=_now(),
-                source=source,
-                note=f"没有 id 为 {pipeline_id} 的任务链。",
-            )
-        if (
-            scope != "all"
-            and ontology_id
-            and detail.get("ontology_id")
-            and detail["ontology_id"] != ontology_id
-        ):
-            return RecordAnswer(
-                family="pipeline",
-                observed_at=_now(),
-                source=source,
-                note=f"任务链 {pipeline_id} 不属于当前数据域。",
-            )
-        item = _pipeline_item(detail, include_steps=True)
-        facts = [
-            _fact("pipeline_id", "任务链 id", item["pipeline_id"]),
-            _fact("name", "任务链名称", item["name"]),
-            _fact("status", "整体状态", item["status"]),
-            _fact("step_count", "步骤数", item["step_count"]),
-            _fact("succeeded_step_count", "已成功步骤数", item["succeeded_step_count"]),
-            _fact("next_step_index", "下一步序号（从 0 开始）", item["next_step_index"]),
-            _fact("next_blocked_reason", "下一步阻塞原因", item["next_blocked_reason"]),
-            _fact("schedule_cron", "调度周期", item["schedule_cron"]),
-            _fact("compiled_dag_id", "已编译 DAG id", item["compiled_dag_id"]),
-            _fact("compiled_at", "DAG 编译时间", item["compiled_at"]),
-        ]
-        return RecordAnswer(
-            family="pipeline",
-            subject=str(item.get("name") or pipeline_id),
-            facts=facts,
-            items=item.get("steps") or [],
-            as_of=detail.get("updated_at"),
-            observed_at=_now(),
-            source=source,
-        )
-
-    limit = _limit(params)
-    rows = service.list_pipelines(
-        db,
-        ontology_id=None if scope == "all" else ontology_id,
-        limit=limit + 1,
-    )
-    details = [service.detail(db, row.id) for row in rows]
-    shown = details[:limit]
-    updated = [item.get("updated_at") for item in shown if item.get("updated_at")]
-    return RecordAnswer(
-        family="pipeline",
-        items=[_pipeline_item(item) for item in shown],
-        as_of=max(updated) if updated else None,
-        observed_at=_now(),
-        source=source,
-        truncated=len(details) > len(shown),
-        note=None if shown else "这个范围里没有任何任务链。",
-    )
-
-
-# --------------------------------------------------------------------------- decision
-
-
-def read_decision(db: Session, params: dict) -> RecordAnswer:
-    """F 族：当前会话各条任务的六环走到哪、谁确认过、是否存在悬挂确认。
-
-    **六环是按任务算的**：一条会话可能建了好几条任务，也可能通篇只是查数一条没建。
-    只报会话级的并集，就会出现「这次会话六环走了 4 环」这种谁都对不上号的说法——
-    问的人想知道的是**某条任务**还差哪一环。故任务级的进度单独出一条事实。
-    """
-    from app.services.chat_bi_ledger import build_closure  # noqa: PLC0415
-
-    source = "ChatBiDecisionRecord（当前会话追加式决策账本）"
-    conversation_id = str(params.get("conversation_id") or "").strip()
-    if not conversation_id:
-        return RecordAnswer(
-            family="decision",
-            observed_at=_now(),
-            source=source,
-            note="决策审计只能读取当前会话，需要 conversation_id。",
-        )
-
-    closure = build_closure(db, conversation_id)
-    limit = _limit(params)
-    records = closure.get("records") or []
-    shown = records[-limit:]
-    items = [
-        {
-            "id": record.get("id"),
-            "seq": record.get("seq"),
-            "node": record.get("node"),
-            "stage": record.get("stage"),
-            "outcome": record.get("outcome"),
-            "subject_id": record.get("subject_id"),
-            "subject_role": record.get("subject_role"),
-            "summary": record.get("summary"),
-            "overridden_fields": record.get("overridden_fields") or [],
-            "ref_kind": record.get("ref_kind"),
-            "ref_id": record.get("ref_id"),
-            "created_at": record.get("created_at"),
-        }
-        for record in shown
-    ]
-    created = [record.get("created_at") for record in records if record.get("created_at")]
-    return RecordAnswer(
-        family="decision",
-        subject=conversation_id,
-        facts=[
-            _fact("conversation_id", "会话 id", conversation_id),
-            _fact("reached_count", "已到达环数", closure.get("reached_count", 0)),
-            _fact("total_count", "六环总数", closure.get("total_count", 0)),
-            _fact("nodes", "六环进度", closure.get("nodes") or []),
-            _fact("dangling_count", "悬挂项数", len(closure.get("dangling") or [])),
-            _fact("dangling", "悬挂项", closure.get("dangling") or []),
-            _fact("task_count", "关联任务数", len(closure.get("tasks") or [])),
-            # 任务级进度：闭环的真实粒度。会话级的 nodes 只是审计并集。
-            _fact(
-                "task_closures",
-                "各任务六环进度",
-                [
-                    {
-                        "artifact_id": task.get("artifact_id"),
-                        "name": task.get("name"),
-                        "kind": task.get("kind"),
-                        "status": task.get("status"),
-                        "reached_count": task.get("reached_count", 0),
-                        "total_count": task.get("total_count", 6),
-                        "unreached": [
-                            ring.get("label")
-                            for ring in task.get("nodes") or []
-                            if not ring.get("reached")
-                        ],
-                        "dangling": task.get("dangling") or [],
-                    }
-                    for task in closure.get("tasks") or []
-                ],
-            ),
-            _fact("decision_count", "决策记录数", len(records)),
-        ],
-        items=items,
-        as_of=max(created) if created else None,
-        observed_at=_now(),
-        source=source,
-        truncated=len(records) > len(shown),
-        note=(
-            "当前会话还没有任何人工决策记录，六环均未到达。"
-            if not records
-            else (
-                "当前会话没有数据任务，只有决策留痕——没有要闭的六环。"
-                if not (closure.get("tasks") or [])
-                else None
-            )
-        ),
     )
 
 
@@ -1451,27 +1299,15 @@ REGISTRY: dict[str, RecordFamily] = {
     "task_run": RecordFamily(
         key="task_run",
         display="任务执行",
-        answers="那个数据任务跑完了吗、卡在哪一步、失败原因是什么",
-        reader=read_task_run,
-        ledger_fields=("subject", "name", "artifact_id", "failure", "confirmed_by"),
-    ),
-    "pipeline": RecordFamily(
-        key="pipeline",
-        display="任务链",
-        answers="整条任务链做到哪一步、每一步什么状态、为什么阻塞、调度或 DAG 是否已编译",
-        reader=read_pipeline,
-        ledger_fields=(
-            "subject", "name", "pipeline_id", "next_blocked_reason", "compiled_dag_id",
-            "artifact_id", "artifact_name",
+        answers=(
+            "那个数据任务跑完了吗、卡在哪一步、失败原因是什么；"
+            "谁建的、谁确认的、人改过哪些参数；以及人看过之后认为结果对不对"
         ),
-    ),
-    "decision": RecordFamily(
-        key="decision",
-        display="决策审计",
-        answers="当前会话六环走到哪、谁确认过、是否有确认后未执行等悬挂项",
-        reader=read_decision,
+        reader=read_task_run,
         ledger_fields=(
-            "subject", "conversation_id", "subject_id", "subject_role", "summary", "ref_id",
+            "subject", "name", "artifact_id", "failure",
+            "created_by", "confirmed_by", "agent_execution_approved_by",
+            "overridden_fields", "result_outcome", "result_confirmed_by",
         ),
     ),
     "ontology_version": RecordFamily(

@@ -1,7 +1,7 @@
 ---
 name: ontometa-task-execute
-description: ontoMeta 任务执行与运行追溯：在校验通过且用户明确授权后确认治理任务、异步触发执行、轮询到 Airflow/Doris 终态，并用运行记录回读任务、任务链、组件和数据源的既有事实。
-whenToUse: Use when the user explicitly authorizes confirmation or execution of an already validated ontoMeta task, asks to track an executing task to its terminal state, or asks what already happened - task run history, why a task failed, pipeline progress, component deployment, datasource probe results.
+description: ontoMeta 任务执行与运行追溯：在校验通过且用户明确授权后确认治理任务、异步触发执行、轮询到 Airflow/Doris 终态、回来问用户结果对不对，并用运行记录回读任务、组件和数据源的既有事实。
+whenToUse: Use when the user explicitly authorizes confirmation or execution of an already validated ontoMeta task, asks to track an executing task to its terminal state, tells you whether a finished task's result was right or wrong, or asks what already happened - task run history, why a task failed, who created or approved a task, component deployment, datasource probe results.
 disable-model-invocation: false
 user-invocable: true
 ---
@@ -25,19 +25,40 @@ user-invocable: true
 3. 用 `wait_task_status(task_id)` 服务端长轮询到 `succeeded` 或 `failed`；返回 `timed_out=true` 时稍后再次等待，
    不用 Bash/sleep，不用高频重复 `get_task_status`。长时间无变化时最多用一次 `list_tasks` 交叉核对，不重复触发执行。
 4. 终态以 Airflow/Doris 对账结果为准。只有终态 `succeeded` 才能说执行成功；`failed` 必须说明失败阶段和 `run_url`。
+5. **到了终态还有一步**：问用户结果对不对，见下节。别在 `succeeded` 上收尾。
 
 启用本机宿主交互确认时，步骤 1 前必须先用 dsh 原生 `ask_user_question` 展示方案并得到批准；
 把 `get_task_status` 返回的 `interactive_approval.digest` 组成 `host_confirmation`，同时传给步骤 1 和步骤 2。
 没有宿主交互能力时不要自行填 `approved=true`，改走任务详情逐条授权或停止在 `待确认`。
 
+## 结果表态（终态之后必走）
+
+**执行成功不等于结果正确。** `status` 和回执说的是系统这一侧发生了什么（DAG 提交成功、
+Airflow 终态、写了多少行）；「搬过来的数对不对」只有人答得了——本仓真出过回执自陈成功而
+数据没搬对的事。
+
+`get_task_status` 在任务到了终态、又没人表过态时会带 `result_pending`。看到它就：
+
+1. 把 `result_pending.evidence` 里的事实**原样**摆给用户——终态、执行时间、回执摘要、落到哪张表。
+   这些是让他判断的依据，不是你的结论。宿主有 `ask_user_question` 就用它，没有就摆成清单。
+2. 等用户回答。**不要替他判断**，也不要因为 `status=succeeded` 就自己填 `accepted`；
+   他不回答就如实说「结果尚未有人确认」，那也是一个准确的状态。
+3. `confirm_task_result(task_id, outcome, note)` 回写他的答复。`outcome` 只有
+   `accepted`（符合预期）/ `rejected`（不符合）；判 `rejected` 必须带 `note` 写清他说哪里不对，
+   否则这条记录对后来看的人没有用。用他的原话，不要润色成「数据质量存在偏差」这类空话。
+
+这条记录不改任务状态、不触发重跑。用户说结果不对时，先记下来，再问要不要改配置重建一条任务——
+不要自作主张 `execute_task` 重跑一遍。
+
 ## 运行追溯（问“已经发生了什么”时走这条）
 
 用 `get_ops_record` 按族读权威记录，不要凭印象复述：
 
-- `task_run` 任务跑完没有、失败没有；`pipeline` 整条任务链卡在哪一步；
+- `task_run` 任务跑完没有、失败没有，谁建的、谁拍的板、人改过哪几个参数，以及**人认为结果对不对**
+  （`result_outcome` 为空 = 没人看过，不等于没问题）；
 - `component` 依赖组件（airflow/datahub/llm）部署与连通状态；`datasource` 数据源上次拨测结果；
 - `ontology_version` / `draft_run` / `merge_report` / `conflict` / `standard` / `data_app` / `migration` 各自的历史。
-- 按本体组织的族要传 `ontology_id`；`decision` 族按会话组织，MCP 无会话，读不到也不该读。
+- 按本体组织的族要传 `ontology_id`。
 
 三条准确性底线：
 

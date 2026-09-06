@@ -8,7 +8,6 @@ GraphQL JSON，故 SPA HTML / 404 / 鉴权失败都应判为失败。
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from app.services import dependency_service as ds
 

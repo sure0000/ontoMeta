@@ -14,15 +14,13 @@ import asyncio
 import re
 from types import SimpleNamespace
 
-from app.database import SessionLocal
-from app.services.chat_bi import ChatBiService
 import app.services.chat_bi as chat_bi_mod
+from app.database import SessionLocal
 from app.services.agent_compaction import compact_conversation
 from app.services.agent_grounding import FactLedger
-
-from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golden_domain
-from tests.fixtures.golden_questions import FinalTurn, ToolTurn
-
+from app.services.chat_bi import ChatBiService
+from tests.fixtures.golden_questions import FinalTurn
+from tests.test_chat_bi_golden import _seed_golden_domain, _StubClient, _StubCompletions
 
 # 早前轮定下的口径 SQL（跨 order/customer 的 GMV），要能穿过 compaction 活到延续轮。
 _GMV_SQL = (

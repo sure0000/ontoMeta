@@ -17,8 +17,7 @@ from app.services import chat_bi as c
 from app.services.chat_bi import ChatBiService
 from app.services.chat_bi_blocks import answer_to_blocks
 from tests.fixtures.golden_questions import FinalTurn, ToolTurn
-from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golden_domain
-
+from tests.test_chat_bi_golden import _seed_golden_domain, _StubClient, _StubCompletions
 
 # --------------------------------------------------------------------------- 单元
 

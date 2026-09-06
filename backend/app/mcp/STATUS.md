@@ -1,7 +1,83 @@
 # MCP 服务实施状态
 
-**当前阶段**：Phase 5 部分完成（✅ 远程 HTTP 传输 + 前端管理页；✅ Data Agent parity P0/P1/P2 可实现项；✅ 口径三件套；✅ 血缘/落点/运行记录；✅ 取数辅助；✅ dsh 验收 P0/P1/P2 全部；治理规约、建模类工具、资产目录与资源级权限待做）
-**更新时间**：2026-09-05
+**当前阶段**：为「删掉 Data Agent」做的解耦与补齐已完成（67 工具 / 12 份 skill）。
+MCP 不再依赖对话模块，取数闸门与对话侧合一，口径创作 / 接数据 / 建模工单三族补齐。
+结果分析已通过中性服务和 `analyze_query` 暴露；血缘补录与业务逻辑管理已通过 MCP/Skill 暴露；资源级权限、数据应用面板/看板仍待做。
+**更新时间**：2026-09-06
+
+---
+
+## ✅ 为删除 Data Agent 做的解耦与补齐（2026-09-06）
+
+目标是让 `app/services/chat_bi.py` 那一族可以整块删掉，而 MCP + skill 照常工作。分两半：
+
+### A. 解耦：MCP 反过来依赖对话模块的那几条全部剪断
+
+此前 MCP 有五处 `from app.services.chat_bi...`——**对话模块成了建数流程的依赖底座**，删它
+会让 MCP 静默哑掉。搬到中性位置：
+
+| 搬走的东西 | 新家 | 谁在用 |
+|---|---|---|
+| 建数表单骨架 / 候选目录 / context 校验（约 1100 行） | `services/task_form.py` | Web 任务面板、Data Agent、MCP 建数流程 |
+| 代跑 SQL 的整条闸门链 | `services/agent_sql.py` | Data Agent 的 run_sql、MCP 的 execute_sql |
+| 表单传输结构 | `schemas/task_form.py` | 同上 |
+| 草稿生成派发 | `services/draft_launch.py` | Web 工作区、MCP 的 start_ontology_draft |
+| `agent_pipeline` 单例 | `services/agent_pipeline.py`（`api.deps` 改为再导出） | 到处 |
+
+顺带剪掉两条间接依赖：`app/mcp/tools/lifecycle.py` 与 `services/query_readiness.py` 原本经
+`app.api.deps` 拿流水线单例，而那一包在导入期就 `ChatBiService()`。
+
+`services/data_app.py` 的两处 `ChatBiService().ask()` 回退删掉了：生成数据应用/图表现在
+**要求调用方带口径载荷**，缺了就报错。那条回退本来也有问题——它可能生成一份与用户看过的
+口径不是同一个的应用（LLM 两次未必给出同样的拆解）。
+
+**钉成被检查的属性**（`tests/test_mcp_independence.py`）：静态扫 `app/mcp/**` 的每个 import；
+再在**新解释器**里把 `app.services.chat_bi` 从 meta_path 上挡掉，断言工具注册表照样装配得出来
+——那等于一次删除演练。
+
+### B. 补齐：MCP 缺的能力面（37 → 50 工具）
+
+**最要紧的一条不是新工具，是 `execute_sql` 之前只做了只读校验就直连 Doris。**
+它没有语义证明、没有割接闸、没有就绪闸，也**没有落点映射**——调用方只能自己按命名规则
+拼 `ods_xxx`，而那正是本仓反复禁止的动作。现在两侧共用 `agent_sql.run_agent_sql`：
+
+    只读校验 → SQL 语义证明(F3) → 割接闸 → 就绪闸(必要时对账重判) → 落点映射 → 执行
+
+真机已验：`SELECT x FROM 天顶星科技的表` 当场被拒（`unknown_table` + 可照做的 fix）；
+`SELECT * FROM code_list` 被翻译成 `ods.ods_erpnext_tab_code_list` 并跑出真实结果 + 证书。
+
+拒绝信号顺手补了一处：表名对不上时区分**不存在**与**存在但没发布**——真机上 dsh 为了自己
+拼出「对象是 edited 不是不存在」多花了四次工具调用，补上之后同一个问题 3 次调用答完。
+
+新增四族工具：
+
+- **落点目录**（1）：`list_datasets`——`get_landing` 回答「这个对象落在哪」，它回答「这个域**都**落了什么」。
+- **口径创作**（4）：`compile_logic_expression`（reader，只编不写，可以试到过为止）、
+  `create_logic` / `update_logic_expression`（editor，落库）、`lint_spec`。
+  写与不写分成两个工具而不是一个 `dry_run` 开关：编译不过的表达式到不了落库那一步。
+- **接数据**（3）：`list_onboarding_targets` / `create_datasource`（只建骨架，凭据入参一律丢弃并回报）/
+  `start_ontology_draft`（已有发布本体时必须先 `acknowledge_republish`）。
+- **建模工单**（5）：`create_modeling_case` / `save_modeling_spec` / `confirm_modeling_spec`（带
+  content_hash 乐观锁）/ `get_modeling_case` / `create_dimensional_model`。
+  这一族此前**只有 Data Agent 一个人类入口**（REST 有，前端零页面）。迁过来时接回了
+  `ModelingCaseService`——对话侧那份是直接写表的平行实现，字段名与 `RequirementSpec`
+  （`extra: forbid`）对不上，写进去的规格按 schema 校验过不去。
+
+skill 从 8 份加到 11 份：`ontometa-onboarding` / `ontometa-authoring` / `ontometa-modeling`，
+总入口路由同步更新。「每个注册工具都要有 skill 指引」那条测试原样把关。
+
+**结果分析补齐**：`analyze_query` 复用 `execute_sql` 的完整 SQL 闸门，在服务端计算分布、
+IQR 离群值、趋势和突变。统计范围显式标注为本次返回行；`truncated=true` 时不能把它说成全表事实。
+
+**验证**：全量 2448 passed；真机 dsh（stdio，publisher 令牌）跑通落点目录问答、受阻取数
+（未发布对象如实报受阻而不是编数）、口径创作全链（查重 → 编译 → 落草稿）、接数分工说明。
+
+### 还没做（与删除相关）
+
+- 数据应用面板/看板（`propose_panel` / `propose_dashboard`）仍只有 Web 入口。
+- 跨会话口径记忆（`propose_preference` + 域记忆卡）随对话模块一起没。
+- Web 端删掉对话页后，`/agents/draft-confirmed`（只被对话页调用）也应一并删。
+
 
 ## ✅ 出口契约总控 + Skill 安装到目录 + 交互式建数流程（2026-09-05）
 
@@ -602,11 +678,12 @@ execute_sql，几分钟打爆数仓）。
 - [ ] 本体建模类（`infer_ontology_from_datahub` / `classify_business_objects` /
       `infer_relationships` / `validate_ontology`）——写侧或长耗时，要先想清 MCP 下
       「异步 + 人工确认」怎么表达。
-- [x] ~~`get_lineage` / `get_landing` / `get_ops_record`~~——已做（见上）。仍未解决的是
+- [x] ~~`get_lineage` / `get_landing` / `get_ops_record`~~——已做（见上）。血缘补录的家底、
+      字段、SQL/人工预览、代码包回读与确认上报也已由 `ontometa-lineage` 补齐。仍未解决的是
       **远端失败原因本身读不到**：ontoMeta 的回执只记录投递，Flink 作业为什么挂要去
       Airflow 日志。要真答上这个问题，得让执行器把远端 task 日志摘要回写进回执。
 - [x] ~~取数辅助：`find_join_path` / `profile_values`~~——已做（见上）。
-- [ ] 资产目录 `list_datasets`（数仓落点目录，与 get_landing 互补：一个查单主体，一个列全域）。
+- [x] ~~资产目录 `list_datasets`~~（数仓落点目录，与 get_landing 互补）。
 - [ ] 治理规约类（`validate_against_policy` / `lint_task_spec` /
       `get_active_governance_standard`）。
 - [ ] 远程传输的生产加固：来源校验 / TLS 终止 / 速率与并发（当前限流是进程内滑动窗口）。

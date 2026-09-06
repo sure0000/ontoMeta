@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import io
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -195,7 +194,7 @@ def test_run_install_unknown_key_raises():
 
 def test_best_effort_component_raises_clear_error():
     """重组件（datahub）配方在缺前置条件时应明确报错，而不是假装装好。"""
-    from app.services.install_recipes import INSTALL_RECIPES, BEST_EFFORT
+    from app.services.install_recipes import BEST_EFFORT, INSTALL_RECIPES
 
     recipe = INSTALL_RECIPES["datahub"]
     assert recipe.tier == BEST_EFFORT

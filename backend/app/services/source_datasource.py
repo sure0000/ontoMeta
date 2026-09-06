@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session
 from app.models import DataSource, ObjectType
 from app.services.source_ref import source_platform_of, source_table_of
 
-
 _PLATFORM_FAMILY: dict[str, str] = {
     "postgres": "postgres",
     "postgresql": "postgres",

@@ -1,6 +1,6 @@
 ---
 name: ontometa-discovery
-description: ontoMeta 本体探索：查询本体、业务对象、关系、业务口径、血缘上下游、物理落点、数据源和角色/板块分布，建立真实 ID 上下文并用简洁证据回答结构问题。
+description: ontoMeta 本体探索：查询本体、业务对象、关系、业务口径、血缘上下游、物理落点目录、数据源和角色/板块分布，建立真实 ID 上下文并用简洁证据回答结构问题。
 whenToUse: Use for ontology overview, business object lists, object roles, segments, relations, business logic/metric definitions, lineage and upstream/downstream impact, physical landing of an object or metric, datasource discovery, and structural questions.
 disable-model-invocation: false
 user-invocable: true
@@ -28,6 +28,8 @@ user-invocable: true
 7. 问“有哪些指标/口径/标签/规则”时调用 `search_logics`；要某条口径的完整定义（表达式、绑定对象与字段、ADS 落点）时调用 `get_logic`。
 8. 问“数据从哪来 / 被谁引用 / 改了影响谁”时调用 `get_lineage`（可传 `include_mermaid=true`）。
 9. 问“这个对象/口径落到哪张表了、能不能查”时调用 `get_landing`，不要自己拼 `ods_xxx` 表名。
+9.5 问“这个域**都**落了些什么、哪些表可以拿来加工、同步到哪一步了”时用 `list_datasets`
+   （列目录，可按 `layer` 过滤 ods/dwd/dws/ads）；问单个对象落在哪仍用 `get_landing`。
 10. 需要数据源真实 ID 时调用 `list_datasources`，不编造连接 ID、表名或凭据。
 
 ## 准确性规则
@@ -41,6 +43,7 @@ user-invocable: true
 - 血缘只认 `is_derivation=true` 的边。外键/引用是业务关系，不是「数据从这里来」，两者不能混说。
 - `get_lineage` 默认只看已发布：`metadata.unpublished_derivation_edges > 0` 说明草稿里还压着血缘边，此时不能说“这个对象没有上游”，要么照 `lineage_note` 传 `published_only=false`，要么说明当前是已发布视角。
 - `get_landing` 报 `not_landed` 就是数仓里没有这张表：如实说“还没落地”，绝不按命名规则编一个表名。
+- `list_datasets` 只列**已登记**的落点：数仓里的无主表不在其中，目录里没有就是没登记，同样不许拼表名。`queryable=false` 表示表在但还不能查（同步没跑完/未就绪），别把它说成「已同步」。
 - `get_landing` 的 keyword 定位默认跨本体，同名对象会串域（odoo 和 erpnext 各有一个「公司」）；候选带 `domain_name`，选错域比没找到更糟。
 
 {{OUTPUT_CONTRACT}}

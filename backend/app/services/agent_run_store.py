@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
-from typing import Any, Iterable
-
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 _MAX_HISTORY_ARTIFACT_CHARS = 4_000
 _MAX_ERROR_CHARS = 500
@@ -31,7 +31,7 @@ _SENSITIVE_KEY = re.compile(
 def _iso(value: datetime | str | None) -> str:
     if isinstance(value, str):
         return value
-    return (value or datetime.now(timezone.utc)).isoformat()
+    return (value or datetime.now(UTC)).isoformat()
 
 
 def sanitize_run_error(error: Exception | str) -> str:
@@ -171,7 +171,6 @@ def build_artifact_manifest(payload: dict[str, Any], run_id: str) -> list[dict[s
         ("task_status", "task_statuses"),
         ("draft_proposal", "draft_proposals"),
         ("action_proposal", "action_proposals"),
-        ("pipeline_proposal", "pipeline_proposals"),
         ("app_proposal", "app_proposals"),
         ("onboard_proposal", "onboard_proposals"),
     )

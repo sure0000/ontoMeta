@@ -5,9 +5,9 @@
 """
 
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -18,6 +18,7 @@ from app.api.deps import (
     settings_service,
     warehouse_generator,
 )
+from app.auth import principal_label
 from app.database import get_db
 from app.models import MaterializationContract, Ontology
 from app.models.agent import ArtifactStatus
@@ -42,7 +43,7 @@ from app.warehouse import (
     list_engines,
 )
 from app.warehouse.adapters.base import UnimplementedAdapter
-from app.warehouse.policy import WAREHOUSE_ENGINE, require_doris
+from app.warehouse.policy import require_doris
 
 router = APIRouter()
 
@@ -108,7 +109,6 @@ def list_materialize_targets(db: Session = Depends(get_db)):
       派生等**不落表**的关系天然被排除——外键无承接表，无法同步，不应可选。
     - 同本体内按实体名去重：可物化实体名应唯一，重名是命名问题，不在选择面重复呈现。
     """
-    from sqlalchemy import func as _func
 
     from app.models import DomainContext, ObjectType, RelationType
 
@@ -255,7 +255,7 @@ def update_materialization_contract(
             db, contract_id, payload.model_dump(exclude_unset=True)
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if contract is None:
         raise HTTPException(status_code=404, detail="物化契约不存在")
     names = materialization_contract_service.resolve_target_names(db, [contract])
@@ -522,6 +522,7 @@ def materialize_preflight(
 def materialize_ontology(
     ontology_id: str,
     payload: MaterializeRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """把本体物化到默认 Doris：生成 DDL 并提交 Airflow 建表任务。
@@ -553,13 +554,15 @@ def materialize_ontology(
             intent=payload.intent or f"物化 → {payload.engine}",
             context=context,
             ontology_id=ontology_id,
+            created_by=principal_label(db, request),
+            created_via="frontend",
         )
     except ValueError as exc:  # 缺 target_datasource_id 等输入问题
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     artifact.status = ArtifactStatus.CONFIRMED.value
     artifact.confirmed_by = payload.operator
-    artifact.confirmed_at = datetime.now(timezone.utc)
+    artifact.confirmed_at = datetime.now(UTC)
     artifact.origin = "user"
     artifact.user_created = True
     db.commit()
@@ -605,6 +608,7 @@ def get_materialize_task_result(
 
     batches = _receipt_batches(db, artifact_id)
     import json
+
     from app.models.agent import GovernanceArtifact
 
     artifact = db.get(GovernanceArtifact, artifact_id)

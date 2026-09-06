@@ -4,7 +4,6 @@ import {
   AppstoreOutlined,
   FunctionOutlined,
   FolderOutlined,
-  HistoryOutlined,
   MenuFoldOutlined,
   NodeIndexOutlined,
   MenuUnfoldOutlined,
@@ -40,10 +39,6 @@ function getSelectedKey(pathname: string, search: string) {
   if (pathname.startsWith("/lineage-supplement")) return "/lineage-supplement";
   if (pathname.startsWith("/business-logic")) return "/business-logic";
   if (pathname.startsWith("/chat-bi")) return "/chat-bi";
-  if (pathname.startsWith("/decisions")) return "/decisions";
-  if (pathname.startsWith("/tasks/orchestration")) {
-    return "/tasks/orchestration";
-  }
   if (pathname.startsWith("/tasks")) return "/tasks";
   if (pathname.startsWith("/data-apps")) return "/data-apps";
   if (pathname.startsWith("/agent-access/tools")) return "/agent-access/tools";
@@ -57,7 +52,6 @@ function getSelectedKey(pathname: string, search: string) {
 
 function getOpenKeys(pathname: string) {
   if (pathname.startsWith("/ontology")) return ["/ontology"];
-  if (pathname.startsWith("/tasks")) return ["/tasks"];
   if (pathname.startsWith("/agent-access")) return ["/agent-access"];
   return [];
 }
@@ -88,7 +82,7 @@ export function AppLayout() {
     [location.pathname, location.search],
   );
 
-  const defaultOpenKeys = useMemo(() => getOpenKeys(location.pathname), []);
+  const defaultOpenKeys = useMemo(() => getOpenKeys(location.pathname), [location.pathname]);
 
   // Data Agent 等全高度三栏应用：内容区满幅铺满，去掉内边距
   const isFlushPage = location.pathname.startsWith("/chat-bi");
@@ -126,18 +120,9 @@ export function AppLayout() {
         label: "业务逻辑",
       },
       { key: "/chat-bi", icon: <RobotOutlined />, label: "Data Agent" },
-      // 与 Data Agent 平级而不是做成它的子项：决策留痕是**跨会话**看的，
-      // 塞进对话页的子菜单会把主入口从一次点击变成两次，换来的分组并不成立。
-      { key: "/decisions", icon: <HistoryOutlined />, label: "决策追踪" },
-      {
-        key: "/tasks",
-        icon: <ProfileOutlined />,
-        label: "任务中心",
-        children: [
-          { key: "/tasks/list", label: "📋 我的任务" },
-          { key: "/tasks/orchestration", label: "🔧 任务编排" },
-        ],
-      },
+      // 任务中心曾有「任务编排」这个同级子项（手工任务链）。链退场后只剩一项，
+      // 父子两层就没有意义了——拍平成一个入口。
+      { key: "/tasks", icon: <ProfileOutlined />, label: "我的任务" },
       { key: "/data-apps", icon: <AppstoreOutlined />, label: "数据应用" },
       {
         key: "/agent-access",
@@ -157,10 +142,6 @@ export function AppLayout() {
 
   const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
     if (key === "/ontology-empty") return;
-    if (key === "/tasks/list") {
-      navigate("/tasks");
-      return;
-    }
     if (key.startsWith("/ontology?")) {
       const [, query] = key.split("?");
       const params = new URLSearchParams(query);

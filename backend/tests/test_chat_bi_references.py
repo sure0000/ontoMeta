@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 from app.services import chat_bi
 from app.services.chat_bi_references import (
+    _loads_payload,
     _ObjectSnapshot,
     _ReferenceResolver,
-    _loads_payload,
 )
 
 

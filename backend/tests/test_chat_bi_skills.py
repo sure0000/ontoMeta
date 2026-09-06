@@ -11,17 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from uuid import uuid4
 from types import SimpleNamespace
+from uuid import uuid4
 
 from app.api.deps import chat_bi_service as svc
+from app.database import SessionLocal
 from app.services import chat_bi as c
 from app.services.chat_bi import ChatBiService
 from app.services.chat_bi_blocks import answer_to_blocks
 from app.services.chat_bi_skills import SKILLS, skill_choices_text
-from app.database import SessionLocal
 from tests.fixtures.golden_questions import FinalTurn, ToolTurn
-from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golden_domain
+from tests.test_chat_bi_golden import _seed_golden_domain, _StubClient, _StubCompletions
 
 
 def test_registry_has_overview_and_query():
@@ -529,16 +529,20 @@ def test_propose_action_requires_explicit_sync_endpoints_and_transform_doris():
         assert transform["missing"] == ["target_datasource_id"]
 
 
-def test_sync_proposal_requires_conversation_confirmations(
+def test_sync_proposal_validates_source_and_default_warehouse(
     client, admin_headers, monkeypatch
 ):
-    """识别出 sync 任务不等于需求已确认；通过后仍校验真实业务源与默认 Doris。"""
+    """sync 提案校验真实业务源与默认 Doris；draft-confirmed 派生 ODS 表名并关联会话。
+
+    此前这里还有一道「先逐环确认需求/本体/数据」的前置闸（按会话读决策账本）。账本随
+    六环退场后闸也没了——**人的放行只剩制品确认前那一次**，这条用例因此只钉提案本身的
+    校验与起草结果，不再钉环数。
+    """
     from uuid import uuid4
 
     from app.models import DataSource, ObjectType
     from app.models.chat_bi import ChatBiConversation
     from app.services.materialize_preflight import PreflightReport
-    from app.services.chat_bi_ledger import record_decision
 
     monkeypatch.setattr(
         "app.services.materialize_preflight.run_preflight",
@@ -572,26 +576,7 @@ def test_sync_proposal_requires_conversation_confirmations(
         conv = ChatBiConversation(title="同步闭环门禁")
         db.add(conv)
         db.commit()
-        result, _summary, is_error = svc._dispatch_propose_action(
-            db, ontology_id=ontology_id, domain_id=domain_id, conversation_id=conv.id,
-            args={"kind": "sync", "intent": "同步订单到数仓", "context": {
-                "object_type": "order", "source_datasource_id": source_id,
-                "target_datasource_id": target_id, "target_ods_database": "ods", "mode": "full",
-            }},
-        )
-        assert is_error is True
-        assert result["missing_confirmations"] == ["requirement", "ontology", "data"]
-
         confirmation_id = "sync-confirm-1"
-        for node in ("requirement", "ontology", "data"):
-            record_decision(
-                db, conversation_id=conv.id, node=node,
-                stage=f"task_{node}_confirm", outcome="accepted",
-                chosen={
-                    "task_confirmation_id": confirmation_id,
-                    **({"task_requirement": "同步已确认的订单到数仓"} if node == "requirement" else {}),
-                },
-            )
         proposal, _summary, is_error = svc._dispatch_propose_action(
             db, ontology_id=ontology_id, domain_id=domain_id, conversation_id=conv.id,
             args={"kind": "sync", "intent": "同步订单到数仓", "context": {
@@ -626,26 +611,21 @@ def test_sync_proposal_requires_conversation_confirmations(
     assert response.status_code == 200, response.text
     artifact = response.json()
     assert artifact["status"] == "validated"
-    assert artifact["intent"] == "同步已确认的订单到数仓"
+    assert artifact["intent"] == "同步订单到数仓"
     assert artifact["validation_report"]["dry_run"]["target_ods_table"].endswith("_order")
     assert artifact["spec"]["target_ods_table"].endswith("_order")
     assert artifact["spec"]["target_ods_table"] != "caller_defined"
 
-    # 闭环按任务分开：前三环在制品还不存在时就确认了，只带表单的 confirmation_id。
-    # draft-confirmed 必须把它落到 (会话, 制品) 关联上，否则这条任务的卡片只剩后三环，
-    # 明明逐环确认过的需求/本体/数据在界面上恒灰。
-    closure = client.get(
-        f"/api/chat-bi/conversations/{conversation_id}/closure", headers=admin_headers
-    ).json()
-    assert [t["artifact_id"] for t in closure["tasks"]] == [artifact["id"]]
-    task = closure["tasks"][0]
-    assert task["confirmation_id"] == confirmation_id
-    assert task["reached_count"] == 3
-    assert [n["node"] for n in task["nodes"] if n["reached"]] == [
-        "requirement",
-        "ontology",
-        "data",
-    ]
+    # draft-confirmed 必须把建出来的任务落到 (会话, 制品) 关联上——那是"这次对话促成了
+    # 哪些任务"的唯一接缝，会话侧的界面全靠它。
+    from app.models.chat_bi import ChatBiConversationTask
+
+    with SessionLocal() as db:
+        linked = db.query(ChatBiConversationTask).filter(
+            ChatBiConversationTask.conversation_id == conversation_id
+        ).all()
+    assert [row.artifact_id for row in linked] == [artifact["id"]]
+    assert linked[0].confirmation_id == confirmation_id
 
     with SessionLocal() as db:
         db.query(DataSource).filter(DataSource.id.in_([source_id, target_id])).delete(
@@ -689,12 +669,16 @@ def test_confirmed_task_rejects_ontology_outside_conversation_scope(
     assert "不属于当前会话的数据域作用域" in response.json()["detail"]
 
 
-def test_all_write_task_proposals_require_three_step_confirmation():
-    """物化/同步/加工/聚合都不能把“识别出任务”当作“用户已确认”。"""
+def test_all_write_task_proposals_refuse_to_guess_missing_context():
+    """物化/同步/加工/聚合都不能把"识别出任务"当作"参数已齐"——缺什么就说缺什么。
+
+    此前这里钉的是六环前置闸（"未逐环确认不得提案"）。闸随决策账本退场后，剩下的护栏
+    是这一条：**提案绝不替用户猜 id**。猜错不会当场报错，要到执行时才炸。
+    """
     from app.models.chat_bi import ChatBiConversation
 
     with SessionLocal() as db:
-        conv = ChatBiConversation(title="四类任务闭环门禁")
+        conv = ChatBiConversation(title="四类任务缺参")
         db.add(conv)
         db.commit()
         for kind in ("materialize", "sync", "transform", "metric"):
@@ -705,8 +689,10 @@ def test_all_write_task_proposals_require_three_step_confirmation():
                 conversation_id=conv.id,
                 args={"kind": kind, "intent": f"新建 {kind} 任务", "context": {}},
             )
-            assert is_error is True
-            assert result["missing_confirmations"] == ["requirement", "ontology", "data"]
+            assert is_error is True, kind
+            assert result["missing"], kind
+            # 报错里必须带真实候选，否则模型只能再猜一轮。
+            assert "hint" in result, kind
 
 
 def test_materialize_required_context_matches_standard():
@@ -926,9 +912,6 @@ def test_task_skill_flow_stays_read_only(client):
     assert payload.get("grounding_refused") is not True, payload.get("answer")
     assert payload["form_request"]
     assert payload["form_request"]["confirmation_id"]
-    assert [s["node"] for s in payload["form_request"]["confirmation_steps"]] == [
-        "requirement", "ontology", "data", "plan", "execute", "result"
-    ]
     assert "form" in [b["type"] for b in answer_to_blocks(payload)]
     assert not payload.get("action_proposals")
     assert _count() == before

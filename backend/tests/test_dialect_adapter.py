@@ -23,26 +23,26 @@ from app.warehouse.registry import UnknownEngineError
 
 
 def _customer_table(**overrides) -> LogicalTable:
-    base = dict(
-        name="customer",
-        database="dim_erp",
-        layer="dim",
-        comment="客户",
-        columns=(
+    base = {
+        "name": "customer",
+        "database": "dim_erp",
+        "layer": "dim",
+        "comment": "客户",
+        "columns": (
             LogicalColumn("customer_id", "string", "identifier", "客户ID", nullable=False),
             LogicalColumn("customer_name", "string", "attribute", "客户名称"),
             LogicalColumn("total_amount", "decimal", "amount", "累计成交额"),
             LogicalColumn("is_vip", "boolean", "flag", "是否VIP"),
             LogicalColumn("created_at", "timestamp", "datetime", "创建时间"),
         ),
-        constraints=(
+        "constraints": (
             LogicalConstraint("primary_key", ("customer_id",)),
             LogicalConstraint(
                 "foreign_key", ("region_id",), "dim_erp.region", ("region_id",)
             ),
         ),
-        partition_key="created_at",
-    )
+        "partition_key": "created_at",
+    }
     base.update(overrides)
     return LogicalTable(**base)
 

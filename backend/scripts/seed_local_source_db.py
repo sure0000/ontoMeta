@@ -181,7 +181,8 @@ def main() -> None:
         return
 
     engine = create_engine(make_url(args.url))
-    base_time = datetime(2024, 1, 1)
+    # 造种子数据用的固定基准时刻，naive 与目标列一致；不是「当前时间」，无时区语义
+    base_time = datetime(2024, 1, 1)  # noqa: DTZ001
     created = rows_inserted = 0
     with engine.begin() as conn:
         for db_name in databases:

@@ -43,8 +43,8 @@ from app.models.warehouse import MaterializationLayer, TargetKind
 from app.services import dataset_catalog
 from app.services.dataset_catalog import DatasetEntry
 from app.services.edit import _assert_object_name_free, _mark_overridden
-from app.services.source_ref import DERIVED_PREFIX
 from app.services.segment_placement import place_unsegmented
+from app.services.source_ref import DERIVED_PREFIX
 
 # 派生对象可落的层。ODS 是贴源层，派生结果按定义不贴源；ADS 是口径的物化，那归
 # BusinessLogic（口径不建对象，见 object_landing）。剩下的才是派生实体的去处。

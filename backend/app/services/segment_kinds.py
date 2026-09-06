@@ -83,7 +83,6 @@ SYSTEM_SCHEMAS = frozenset(
         "pg_toast",
         "pg_temp_1",
         # SQL Server
-        "sys",
         "guest",
         # Oracle
         "sysaux",

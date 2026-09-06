@@ -22,11 +22,17 @@ from sqlalchemy.orm import Session
 
 from app.agents import registry  # 导入即注册四类 Drafter/Executor
 from app.agents.validation import is_blocking, validate_spec
-from app.services.chat_bi_tool_schemas import (
-    _ACTION_CONTEXT_HINT,
-    _action_context_candidates,
-    _missing_action_context,
-    _sync_context_errors,
+from app.services.task_form import (
+    ACTION_CONTEXT_HINT as _ACTION_CONTEXT_HINT,
+)
+from app.services.task_form import (
+    action_context_candidates as _action_context_candidates,
+)
+from app.services.task_form import (
+    missing_action_context as _missing_action_context,
+)
+from app.services.task_form import (
+    sync_context_errors as _sync_context_errors,
 )
 
 from . import AuthContext, ToolResult, register_tool

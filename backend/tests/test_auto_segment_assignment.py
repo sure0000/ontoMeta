@@ -124,7 +124,7 @@ def test_auto_assign_segment_on_role_promotion():
 
         # 提升为 business_object
         edit_service = EditService()
-        result = edit_service.update_object_type(
+        edit_service.update_object_type(
             db, order_item.id, table_role="business_object", operator="test"
         )
 

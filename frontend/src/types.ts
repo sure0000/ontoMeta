@@ -1118,80 +1118,6 @@ export interface ChatBiMessageItem {
   created_at: string;
 }
 
-/** 决策留痕：一次对话里人在某个关键节点拍的板。 */
-export interface ChatBiDecision {
-  id: string;
-  conversation_id: string;
-  /** 仅跨会话查询填充——会话内时间线本就在会话上下文里，不必重复。 */
-  conversation_title?: string | null;
-  message_id?: string | null;
-  block_id?: string | null;
-  seq: number;
-  /** requirement | ontology | data | plan | execute | result | other */
-  node: string;
-  stage?: string | null;
-  trigger?: string | null;
-  /** accepted | modified | rejected | skipped */
-  outcome: string;
-  subject_id?: string | null;
-  subject_role?: string | null;
-  summary?: string | null;
-  /** agent 原样提的 */
-  proposed?: unknown;
-  /** 人最终定的 */
-  chosen?: unknown;
-  /** 人相对机器基线改过的顶层键 */
-  overridden_fields: string[];
-  ref_kind?: string | null;
-  ref_id?: string | null;
-  created_at?: string | null;
-}
-
-export interface ChatBiClosureNode {
-  node: string;
-  label: string;
-  reached: boolean;
-  latest_outcome?: string | null;
-  latest_at?: string | null;
-  summary?: string | null;
-  count: number;
-}
-
-/**
- * 本会话催生的一条数据任务**及它自己的六环闭环**。
- *
- * 闭环的粒度是任务、不是会话：`nodes` 恒为六项（未到达的标灰而非隐藏），只统计归属
- * 这条任务的决策记录。卡片一条任务一张，并据此给出「重新进入某一环」的入口。
- */
-export interface ChatBiClosureTask {
-  artifact_id: string;
-  name: string;
-  kind?: string | null;
-  status?: string | null;
-  confirmation_id?: string | null;
-  nodes: ChatBiClosureNode[];
-  reached_count: number;
-  total_count: number;
-  dangling: string[];
-}
-
-/**
- * 一次对话的决策总结。
- *
- * `tasks` 是给人看的闭环——一条任务一组六环。会话级的 `nodes`/`reached_count`/
- * `dangling` 是审计聚合（决策追踪页的时间线表头、跨会话统计），**不是闭环**：
- * 拿它画图的话，一次纯查询点个「认可」也会顶出一张六环卡。
- */
-export interface ChatBiDecisionClosure {
-  conversation_id: string;
-  nodes: ChatBiClosureNode[];
-  reached_count: number;
-  total_count: number;
-  dangling: string[];
-  tasks: ChatBiClosureTask[];
-  records: ChatBiDecision[];
-}
-
 export interface ChatBiReference {
   id?: string | null;
   name?: string | null;
@@ -1319,18 +1245,6 @@ export interface ChatBiFormRequest {
   ontology_id?: string;
   /** 一张任务确认单的隔离 id；防止复用同会话旧确认。 */
   confirmation_id?: string;
-  /**
-   * 一个数据任务的六环确认之旅：需求 → 本体 → 数据 → 执行方案 → 执行 → 结果。
-   * `phase="form"` 的前三环在本表单里逐环确认，`phase="artifact"` 的后三环在任务
-   * 详情抽屉里逐环确认——一次给全，人从第一步就看得见一共几环、现在第几环。
-   * 没有这个字段则按普通单页表单渲染（非任务表单）。
-   */
-  confirmation_steps?: Array<{
-    node: "requirement" | "ontology" | "data" | "plan" | "execute" | "result" | string;
-    title: string;
-    description?: string;
-    phase?: "form" | "artifact" | string;
-  }>;
 }
 
 export interface ChatBiDataResult {
@@ -1469,34 +1383,6 @@ export type ChatBiBlock =
           intent: string;
           context?: Record<string, unknown>;
           ontology_id?: string | null;
-        };
-      };
-    }
-  | {
-      id: string;
-      /**
-       * 任务链提案（propose_pipeline 产出）：前后相继的多个任务。
-       * 点「创建任务链」只建链、不起草任何制品；每一步仍各自走校验/确认/执行。
-       */
-      type: "pipeline_proposal";
-      proposal: {
-        kind: "pipeline";
-        name: string;
-        intent?: string;
-        ontology_id?: string | null;
-        steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
-        /**
-         * 服务端砍掉的步骤（当前只有一种：排在同步前、纯为同步建表的物化）。
-         * 同步自己会幂等建出 ODS 表，那一步是多余的；但砍了要说出来，不能让人
-         * 以为自己要的步骤凭空消失。
-         */
-        dropped_steps?: { kind: string; intent: string; reason: string }[];
-        /** 「创建任务链」按钮原样传给 api.createPipeline 的载荷。 */
-        create_payload: {
-          name: string;
-          intent?: string;
-          ontology_id?: string | null;
-          steps: { kind: string; intent: string; context?: Record<string, unknown> }[];
         };
       };
     }
@@ -2279,79 +2165,22 @@ export interface GovernanceArtifact {
   agent_execution_approved_by?: string | null;
   agent_execution_approved_at?: string | null;
   origin: string;
+  /** 人看过之后认为结果对不对。与 status 分列：跑完了不等于跑对了，空 = 没人看过。 */
+  result_outcome?: "accepted" | "rejected" | null;
+  result_note?: string | null;
+  result_confirmed_by?: string | null;
+  result_confirmed_at?: string | null;
+  /** 这条判断怎么来的：frontend=人在界面上点，mcp_*=通用 agent 问出后转述。 */
+  result_via?: string | null;
+  /** 最终 spec 相对起草基线差在哪几个顶层键——即"人改过哪几格"。 */
+  pinned_fields?: string[];
+  /** 谁建的、从哪个入口建的（frontend / mcp_local / mcp_remote / api）。 */
+  created_by?: string | null;
+  created_via?: string | null;
   created_at: string;
   updated_at: string;
 }
 
-/**
- * 任务链的一步：**先是一份待起草的意图，起草后才有制品**。
- *
- * `artifact_id` 为空 = 还没起草到这一步；此时 `artifact_status` 也是 null，
- * 不是 "drafted"——那会让人以为已经建了一条制品。
- */
-export interface TaskPipelineStep {
-  id: string;
-  step_index: number;
-  kind: string;
-  intent: string;
-  context: Record<string, unknown>;
-  artifact_id?: string | null;
-  artifact_status?: string | null;
-  artifact_name?: string | null;
-  /** C2：血缘依赖（上游步序列表）。空 = 线性默认（依赖上一步）。 */
-  depends_on?: number[];
-}
-
-/**
- * 任务链：把「物化 → 清洗 → 聚合」这种前后相继的任务串起来。
- *
- * 链只管顺序与上下文传递——每一步仍是一条独立制品，照旧各自走「校验 → dry-run →
- * 人工确认 → 执行」。故这里没有、也不该有「一键跑完整条链」。
- */
-export interface TaskPipeline {
-  id: string;
-  name: string;
-  intent?: string | null;
-  ontology_id?: string | null;
-  /** 由各步制品聚合推导：drafted / running / succeeded / failed。 */
-  status: string;
-  steps: TaskPipelineStep[];
-  /** 下一个待起草的步序；全起草完为 null。 */
-  next_step_index?: number | null;
-  /** 下一步为什么还不能起草（上游没跑成功）；能起草为 null。 */
-  next_blocked_reason?: string | null;
-  // P2：编译成周期 DAG 的状态
-  schedule_cron?: string | null;
-  compiled_dag_id?: string | null;
-  compiled_at?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TaskPipelineAdvanceResult {
-  pipeline: TaskPipeline;
-  artifact: GovernanceArtifact;
-}
-
-export interface TaskPipelineDraftAllResult {
-  pipeline: TaskPipeline;
-  artifacts: GovernanceArtifact[];
-}
-
-/** 编译成周期 DAG 的结果（P2）。 */
-export interface PipelineCompileResult {
-  pipeline_id: string;
-  compiled_dag_id: string;
-  schedule_cron: string;
-  steps: {
-    step_index: number;
-    kind: string;
-    artifact_id: string;
-    dag_ids: string[];
-  }[];
-  dag_path: string;
-  spec_path: string;
-}
 
 export interface AgentKinds {
   all_kinds: string[];
@@ -2663,5 +2492,6 @@ export interface McpSkillVersion {
 
 export interface McpSkillsResponse {
   skills: McpSkill[];
+  tools: McpToolInfo[];
   coverage_gaps: string[];
 }

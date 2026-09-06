@@ -75,7 +75,11 @@ export function TasksOverviewPage() {
     setLoading(true);
     try {
       const filterKind = activeKind === "all" ? undefined : activeKind;
-      const artifacts = await api.listArtifacts(filterKind ? { kind: filterKind } : undefined);
+      const artifacts = await api.listArtifacts({
+        kind: filterKind,
+        reconcile: false,
+        include_details: false,
+      });
       setRows(artifacts);
       setForbidden(false);
     } catch (err) {
@@ -139,9 +143,9 @@ export function TasksOverviewPage() {
     });
   }, [rows, statusFilter, ontologyFilter, searchText]);
 
-  const refreshDetail = useCallback(async (id: string) => {
+  const refreshDetail = useCallback(async (id: string, reconcile = true) => {
     try {
-      setDetail(await api.getArtifact(id));
+      setDetail(await api.getArtifact(id, { reconcile }));
     } catch {
       /* 详情刷新失败不打断主流程 */
     }
@@ -230,7 +234,7 @@ export function TasksOverviewPage() {
       width: 88,
       fixed: "right",
       render: (_, row) => (
-        <Button size="small" onClick={() => setDetail(row)}>
+        <Button size="small" onClick={() => void refreshDetail(row.id, false)}>
           查看
         </Button>
       ),

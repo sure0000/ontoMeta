@@ -5,10 +5,16 @@
 - **Adapter 注册**（``get_adapter`` / ``list_engines``）：方言/DDL 生成；
 - **DSN scheme 识别**（``engine_for_dsn``）：数据源连接串前缀 → 引擎名，顺序敏感
   （长前缀优先：kyuubi 在 hive 前，doris/starrocks 在 mysql 前）；
-- **驱动安装提示**（``engine_driver_hint``）：缺 DBAPI 驱动时提示装哪个包。
+- **驱动安装提示**（``engine_driver_hint``）：缺 DBAPI 驱动时提示装哪个包；
+- **会话级语句超时**（``session_timeout_statements``）：执行前给连接设的超时语句。
+
+后两项的引擎集合比 Adapter 大：业务源（mysql / duckdb…）没有 Adapter，却一样要装驱动、
+一样要设超时。所以它们是注册表里的**引擎事实表**，不是 Adapter 的渲染职责。
 """
 
 from __future__ import annotations
+
+import math
 
 from app.warehouse.adapters.base import DialectAdapter
 from app.warehouse.adapters.clickhouse import ClickHouseAdapter
@@ -101,3 +107,65 @@ def engine_for_dsn(dsn: str) -> str | None:
 
 def engine_driver_hint(engine: str) -> str | None:
     return _DRIVER_HINTS.get((engine or "").lower())
+
+
+# 引擎 → 会话级语句超时的设置语句模板。占位符 ``{ms}`` / ``{s}`` 由调用方填。
+#
+# **为什么必须有**：只读校验拦得住写操作，拦不住代价。一条 `SELECT pg_sleep(60)`
+# 或漏了连接条件的大表 JOIN 完全合法，却能把数仓连接挂死——而 Data Agent / MCP 的
+# execute_sql 正是由模型生成 SQL，跑飞是常态而非异常。上限只能由服务端设。
+#
+# **为什么按引擎分**：各家的旋钮名和单位都不一样，写错的后果是「设了个不存在的变量」
+# 或「把 15 秒设成 15 毫秒」，两种都不会报错，只会静默失效或全量误杀：
+#   - Postgres  statement_timeout   毫秒
+#   - MySQL     max_execution_time  毫秒（5.7.8+，只作用于 SELECT）
+#   - Doris / StarRocks  query_timeout  **秒**（MySQL 线协议但旋钮是自己的）
+#   - ClickHouse  max_execution_time  **秒**（与 MySQL 同名不同单位，最容易写错的一个）
+# Hive / Kyuubi 没有等价的会话级旋钮（超时在 HiveServer2 服务端配），故不在表中——
+# 缺项返回空列表，调用方照常执行，不因此拒绝查询。
+_SESSION_TIMEOUT_SQL: dict[str, tuple[str, ...]] = {
+    "postgres": ("SET statement_timeout = {ms}",),
+    "mysql": ("SET max_execution_time = {ms}",),
+    "doris": ("SET query_timeout = {s}",),
+    "starrocks": ("SET query_timeout = {s}",),
+    "clickhouse": ("SET max_execution_time = {s}",),
+}
+
+
+# 没有 Adapter、但仍需引用其表名的引擎，按引号风格归到某个 Adapter 上。
+# 只用于**引用标识符**这一件事，不代表方言等价——所以是这里一张窄表，而不是把它们
+# 塞进 _ENGINE_ALIASES（那会让 get_adapter 把整套 DDL 渲染也一并借出去）。
+#   mysql  反引号，与 Doris/Hive 同风格
+#   duckdb ANSI 双引号，与 Postgres 同风格
+_QUOTE_STYLE_OF: dict[str, str] = {"mysql": "doris", "duckdb": "postgres"}
+
+
+def quote_table_ref(engine: str | None, ref: str) -> str:
+    """按引擎的引号规则给「库.表」逐段加引号。
+
+    源表名来自真实源，ERPNext 的 ``tabCustomer Group`` 之类带空格的名字在 ERP 域里
+    占比很高——不引用产出的就是一条任何引擎都拒绝解析的 SQL。
+
+    未知引擎回落到默认 Adapter 的风格（反引号）：拼错引号总比不引号强，后者必然失败。
+    """
+    name = (engine or "").lower()
+    try:
+        adapter = get_adapter(_QUOTE_STYLE_OF.get(name, name))
+    except UnknownEngineError:
+        adapter = get_adapter(DEFAULT_ENGINE)
+    return adapter.quote_table_ref(ref)
+
+
+def session_timeout_statements(engine: str | None, seconds: float) -> list[str]:
+    """该引擎上「把本次会话的语句超时设为 ``seconds`` 秒」要执行的语句。
+
+    引擎不支持或秒数非正 → 空列表（调用方不设超时，照常执行）。
+    秒数向上取整到 1 秒：各家旋钮最小粒度不同，取 0 等于「不限时」，比不设更危险。
+    """
+    if not engine or seconds is None or seconds <= 0:
+        return []
+    templates = _SESSION_TIMEOUT_SQL.get(_ENGINE_ALIASES.get(engine.lower(), engine.lower()))
+    if not templates:
+        return []
+    whole_seconds = max(1, int(math.ceil(float(seconds))))
+    return [t.format(ms=whole_seconds * 1000, s=whole_seconds) for t in templates]

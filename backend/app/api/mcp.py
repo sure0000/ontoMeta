@@ -12,9 +12,9 @@ list_audit_logs 共用同一份），REST 只是薄壳。
 from __future__ import annotations
 
 from typing import Literal
-from fastapi.responses import Response
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -23,17 +23,17 @@ from app.database import get_db
 from app.mcp import introspection
 from app.mcp.audit import record_call
 from app.mcp.skills import (
+    export_zip,
     get_skill,
     install_to_dir,
     list_skills,
+    list_versions,
     reset_override,
+    restore_version,
     save_override,
     set_enabled,
     skill_coverage_gaps,
     skill_view_dict,
-    export_zip,
-    list_versions,
-    restore_version,
 )
 from app.mcp.tools import AuthContext
 
@@ -247,9 +247,17 @@ def submit_mcp_flow_form(
 @router.get("/mcp/skills")
 def mcp_skills(db: Session = Depends(get_db)):
     """Skill 清单与工具覆盖度（reader）。"""
+    skills = list_skills(db)
+    catalog = introspection.tool_catalog()
     return {
-        "skills": [skill_view_dict(item, include_body=False) for item in list_skills(db)],
-        "coverage_gaps": skill_coverage_gaps(db),
+        "skills": [
+            skill_view_dict(item, include_body=False, catalog=catalog)
+            for item in skills
+        ],
+        # The Skill page also needs the registry to explain uncovered tools;
+        # return the same snapshot here instead of issuing a second /info call.
+        "tools": catalog,
+        "coverage_gaps": skill_coverage_gaps(db, skills=skills),
     }
 
 

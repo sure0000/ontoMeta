@@ -39,12 +39,11 @@ from app.services.ontology_projection import (
 )
 from app.services.source_ref import (
     NO_PHYSICAL_SOURCE_NOTE,
-    source_platform_of,
     source_table_of,
 )
 from app.warehouse import (
-    CapabilityError,
     DEFAULT_ENGINE,
+    CapabilityError,
     LogicalColumn,
     LogicalConstraint,
     LogicalSchema,

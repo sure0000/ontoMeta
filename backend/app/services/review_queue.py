@@ -150,7 +150,7 @@ def group_key(
     return f"{segment_id or '-'}|{table_role}|{family or '-'}|{band}"
 
 
-def sort_key(group: "ReviewGroup") -> tuple:
+def sort_key(group: ReviewGroup) -> tuple:
     """组的排序键。**只用不随判定变化的量**——这是游标能重放的前提。
 
     曾想按「板块待判数」降序排（活儿最多的板块先干），但那个数每判一个就会变，

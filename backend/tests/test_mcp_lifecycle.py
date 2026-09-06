@@ -15,9 +15,8 @@ from app.agents.drafters.base import Drafter
 from app.agents.executors.base import Executor
 from app.database import SessionLocal
 from app.mcp import server as mcp_server
-from app.mcp.tools import AuthContext, TOOL_REGISTRY
+from app.mcp.tools import TOOL_REGISTRY, AuthContext
 from app.mcp.tools import tasks as task_tools
-from app.mcp.tools._common import artifact_approval_digest
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
 from app.models.agent import ArtifactStatus, GovernanceArtifact
 from app.services.agent_pipeline import AgentPipelineService

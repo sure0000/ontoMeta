@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import sqlglot
-from sqlglot import exp
 from sqlalchemy.orm import Session
+from sqlglot import exp
 
 from app.models import (
     DataSource,

@@ -207,7 +207,7 @@ def test_cache_avoids_second_query(client, tmp_path, monkeypatch):
     _, onto_id = _seed_ontology()
     proj, obj = _proj_and_obj(onto_id)
     dsn = _seed_db(tmp_path)
-    kwargs = dict(dsn=dsn, backend="sqlite", scope_key=onto_id)
+    kwargs = {"dsn": dsn, "backend": "sqlite", "scope_key": onto_id}
 
     first = profile_property(proj, obj, obj.resolve_property("status"), **kwargs)
     assert first.available

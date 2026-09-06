@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 
 from sqlalchemy import text
 
+from app.connectors.datahub import DataHubConnector
 from app.database import SessionLocal, engine
 from app.models.domain import DomainContext
-from app.connectors.datahub import DataHubConnector
 
 
 async def check_domain_exists(connector: DataHubConnector, domain_id: str) -> bool:
@@ -156,11 +155,11 @@ async def main_async(yes: bool = False):
             print(f"\n删除域 '{domain.name}' (ID: {domain.id}) 及其所有关联数据...")
             try:
                 delete_domain_cascade(db, domain.id)
-                print(f"  ✓ 成功删除")
+                print("  ✓ 成功删除")
             except Exception as e:
                 print(f"  ✗ 删除失败: {e}")
 
-        print(f"\n✓ 清理完成")
+        print("\n✓ 清理完成")
         print(f"✓ 保留 {len(valid_domains)} 个有效数据域")
 
     except Exception as e:

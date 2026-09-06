@@ -97,7 +97,12 @@ def _window_start(window_minutes: int) -> datetime:
     ``timestamp without time zone`` 列会被丢掉偏移当成 UTC 墙钟，于是
     「最近 24 小时」在 UTC+8 上实际取了 32 小时。窗口和桶必须同钟。
     """
-    return datetime.now() - timedelta(minutes=int(window_minutes))
+    # ⚠ 这里**刻意**用本地 now，不要"修"成 UTC。
+    # mcp_audit_logs.created_at 是 `server_default=func.now()` ——由**数据库**写入，
+    # 用的是库服务器的钟（Postgres 的 now() 在 timestamp without time zone 上给本地时间）。
+    # 窗口起点必须和行用同一套钟，否则「最近 24 小时」在 UTC+8 上会取成 32 小时。
+    # ruff 的 DTZ005 会报这一行；test_mcp_p0_hardening 里有两条用例钉住当前行为。
+    return datetime.now() - timedelta(minutes=int(window_minutes))  # noqa: DTZ005
 
 
 def compute_stats(
@@ -111,21 +116,29 @@ def compute_stats(
     def _scope(q):
         return q.filter(McpAuditLog.created_at >= since) if since is not None else q
 
-    total = _scope(db.query(McpAuditLog)).count()
-    succeeded = _scope(db.query(McpAuditLog).filter(McpAuditLog.success.is_(True))).count()
-    denied = _scope(db.query(McpAuditLog).filter(McpAuditLog.denied.is_(True))).count()
-    rate_limited = _scope(
-        db.query(McpAuditLog).filter(McpAuditLog.error.like(f"{RATE_LIMITED_PREFIX}%"))
-    ).count()
-    failed = _scope(db.query(McpAuditLog).filter(McpAuditLog.success.is_(False))).count()
+    # The five counters share the same time predicate.  Aggregate them in one
+    # round trip instead of scanning the audit table five times.
+    summary = _scope(
+        db.query(
+            func.count(McpAuditLog.id),
+            func.sum(cast(McpAuditLog.success, Integer)),
+            func.sum(cast(McpAuditLog.denied, Integer)),
+            func.sum(
+                case((McpAuditLog.error.like(f"{RATE_LIMITED_PREFIX}%"), 1), else_=0)
+            ),
+            func.sum(case((McpAuditLog.success.is_(False), 1), else_=0)),
+        )
+    ).one()
+    total = int(summary[0] or 0)
+    succeeded = int(summary[1] or 0)
+    denied = int(summary[2] or 0)
+    rate_limited = int(summary[3] or 0)
+    failed = int(summary[4] or 0)
 
-    durations = [
-        int(value[0])
-        for value in _scope(
-            db.query(McpAuditLog.duration_ms).filter(McpAuditLog.duration_ms.isnot(None))
-        ).all()
-        if value[0] is not None
-    ]
+    duration_rows = _scope(
+        db.query(McpAuditLog.duration_ms).filter(McpAuditLog.duration_ms.isnot(None))
+    ).yield_per(1000)
+    durations = [int(value[0]) for value in duration_rows if value[0] is not None]
     durations.sort()
     average_duration = round(sum(durations) / len(durations), 1) if durations else None
     p95_duration = durations[max(0, int(len(durations) * 0.95) - 1)] if durations else None
@@ -206,7 +219,7 @@ def compute_stats(
             McpAuditLog.denied,
             McpAuditLog.error,
         )
-    ).all()
+    ).yield_per(1000)
     if window_minutes is None or window_minutes <= 60:
         bucket_seconds = 15 * 60
     elif window_minutes <= 24 * 60:
@@ -230,7 +243,15 @@ def compute_stats(
         bucket = int(timestamp // bucket_seconds) * bucket_seconds
         item = buckets.setdefault(
             bucket,
-            {"bucket": datetime.fromtimestamp(bucket).isoformat(), "calls": 0, "succeeded": 0, "failed": 0, "denied": 0, "rate_limited": 0},
+            # fromtimestamp 不带 tz 是刻意的：与 _window_start 同一套钟（见那里的说明）。
+            {
+                "bucket": datetime.fromtimestamp(bucket).isoformat(),  # noqa: DTZ006
+                "calls": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "denied": 0,
+                "rate_limited": 0,
+            },
         )
         item["calls"] += 1
         if success:

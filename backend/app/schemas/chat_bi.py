@@ -1,7 +1,16 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
+
+# 表单结构住在 `schemas/task_form`（中性位置）——Web 任务面板与 MCP 建数流程都要用它，
+# 而它们不该为了发一张表单先依赖对话模块。这里按原名再导出，前端契约不动。
+from app.schemas.task_form import (  # noqa: F401
+    ChatBiFormField,
+    ChatBiFormOption,
+    ChatBiFormRequest,
+)
+
 
 class ChatBiReference(BaseModel):
     id: str | None = None
@@ -68,97 +77,6 @@ class ChatBiClarification(BaseModel):
     question: str
     options: list[str] = Field(default_factory=list)
     reason: str = ""
-
-
-class ChatBiFormOption(BaseModel):
-    """表单候选项：**显示什么**（label）与**回填什么**（value）分开。
-
-    此前两者是同一个字符串，于是需要带 id 的候选（数据源、对象）只能写成「名称｜id」，
-    那串 id 就直接糊在下拉里给人看。分开之后：界面只显示 label，id 留在 value 里，
-    提交时随回填文本带回给模型。
-
-    ``disabled`` 用于「摆出来但选不了」的候选——执行侧不支持的装载方式必须**看得见**
-    （否则用户以为系统只会全量），但不能真被选中（与 MaterializeModal 的置灰同口径）。
-    """
-
-    label: str
-    value: str
-    disabled: bool = False
-
-
-class ChatBiFormField(BaseModel):
-    """交互表单的单个字段（P6）。``type`` 决定前端用哪种控件渲染。
-
-    ``options`` 仅对 select/multiselect/radio/autocomplete 有意义，且**必须来自工具返回
-    的真实实体**（与 clarification.options 同一约束）；没有候选项时应退化为 text/number
-    让用户自填。为兼容纯字符串候选，字符串会被归一为 ``label == value`` 的候选项。
-    """
-
-    name: str  # 字段标识（回填时作键）
-    label: str  # 中文标签
-    # text/textarea/number/select/multiselect/radio/boolean/date/autocomplete/cron
-    type: str
-    options: list[ChatBiFormOption] = Field(default_factory=list)
-    required: bool = False
-    placeholder: str | None = None
-    help: str | None = None
-    default: Any | None = None
-    # 建数确认向导中的所属环节：requirement / ontology / data。通用表单留空。
-    confirmation_node: str | None = None
-    # 级联候选：depends_on 字段当前值 → options_by_value[value]。
-    depends_on: str | None = None
-    options_by_value: dict[str, list[ChatBiFormOption]] = Field(default_factory=dict)
-    # 候选实时取：``object_properties`` = 取 depends_on 那个对象的字段清单。
-    # 静态摊开几百个对象的字段是几 MB 的消息负载，故这类候选按需拉。
-    options_from: str | None = None
-    # 条件可见：``{"field": "mode", "in": ["incremental", "cdc"]}``。不满足时前端既不
-    # 渲染、也不校验、更不把值提交上来——避免「先选了 CDC 填了 sequence 列，又改回全量」
-    # 时把一个不该生效的参数留在 Spec 里（它会真的进建表语句）。
-    visible_when: dict[str, Any] | None = None
-
-    @field_validator("options", mode="before")
-    @classmethod
-    def _normalize_options(cls, v: Any) -> Any:
-        """字符串候选项归一为 {label, value}——老的纯字符串写法仍然合法。"""
-        if not isinstance(v, list):
-            return v
-        return [{"label": o, "value": o} if isinstance(o, str) else o for o in v]
-
-
-class ChatBiConfirmationStep(BaseModel):
-    """一个数据任务的一环人审；node 与决策闭环的六环同名。
-
-    ``phase`` 说明这一环在**哪儿**确认：``form`` = 对话内的表单向导（需求/本体/数据），
-    ``artifact`` = 任务详情抽屉（执行方案/执行/结果）。表单一次给全六环，前端据此把
-    「还剩几环、下一环在哪确认」画在同一条进度上，而不是让人以为填完表单就完事了。
-    """
-
-    node: str
-    title: str
-    description: str = ""
-    phase: str = "form"
-
-
-class ChatBiFormRequest(BaseModel):
-    """Agent 动态生成的**可填写表单**（P6）：一次向用户收集多个结构化参数。
-
-    与 clarification 一样是**终态出口**——本轮到此为止，等用户在前端填完提交后作为
-    新一轮问题带回（结构化回填文本进 history，Agent 据此继续）。表单只描述「要收集什么」，
-    不携带业务结论，故不入接地账本、不参与拒答判定。适用于取数（指标+时间+维度）、
-    建数任务（目标表+更新策略+调度）等需一次补齐多参数的场景。
-    """
-
-    title: str
-    intent: str = ""
-    #: 服务端改判/合并了这次请求时给人的一句解释（如「同步自带建表，已省掉物化那一步」）。
-    #: 空 = 没有可说的。改判不能只在后台发生——人得知道自己拿到的为什么是这张表单。
-    notice: str = ""
-    submit_label: str = "提交"
-    fields: list[ChatBiFormField] = Field(default_factory=list)
-    task_kind: str | None = None
-    ontology_id: str | None = None
-    confirmation_id: str | None = None
-    confirmation_steps: list[ChatBiConfirmationStep] = Field(default_factory=list)
 
 
 class ChatBiBlock(BaseModel):
@@ -291,97 +209,6 @@ class ChatBiTaskLinkRequest(BaseModel):
     chosen_context: dict[str, Any] | None = None
     message_id: str | None = None
     block_id: str | None = None
-
-
-class ChatBiDecisionRequest(BaseModel):
-    """记一条人工决策留痕。
-
-    **不含 operator/subject 字段**：责任人一律由服务端从已认证主体取，
-    前端传了也会被忽略——否则「谁确认的」可被客户端伪造，追踪与管理就失去依据。
-    """
-
-    node: str
-    outcome: str | None = None
-    stage: str | None = None
-    trigger: str | None = None
-    message_id: str | None = None
-    block_id: str | None = None
-    summary: str | None = None
-    proposed: Any | None = None
-    chosen: Any | None = None
-    ref_kind: str | None = None
-    ref_id: str | None = None
-    dedup_key: str | None = None
-
-
-class ChatBiDecisionOut(BaseModel):
-    id: str
-    conversation_id: str
-    # 仅跨会话查询（search_decisions）填充：会话内时间线本就在会话上下文里，不必重复。
-    conversation_title: str | None = None
-    message_id: str | None = None
-    block_id: str | None = None
-    seq: int = 0
-    node: str
-    stage: str | None = None
-    trigger: str | None = None
-    outcome: str
-    subject_id: str | None = None
-    subject_role: str | None = None
-    summary: str | None = None
-    proposed: Any | None = None
-    chosen: Any | None = None
-    overridden_fields: list[str] = []
-    ref_kind: str | None = None
-    ref_id: str | None = None
-    created_at: datetime | None = None
-
-
-class ChatBiClosureNode(BaseModel):
-    node: str
-    label: str
-    reached: bool
-    latest_outcome: str | None = None
-    latest_at: datetime | None = None
-    summary: str | None = None
-    count: int = 0
-
-
-class ChatBiClosureTask(BaseModel):
-    """本会话催生的一条数据任务**及它自己的六环闭环**。
-
-    闭环的粒度是任务，不是会话：一条会话可能连着建好几条任务，也可能通篇只是查数
-    什么都没建。前者混成一组六环就读不出"哪一环是给哪条任务走的"，后者压根没有要
-    闭的环。卡片一条任务一张，并据此给出「重新进入某一环」的入口。
-    """
-
-    artifact_id: str
-    name: str
-    kind: str | None = None
-    status: str | None = None
-    #: 催生它的表单向导 id；历史关联为空，此时前三环无从归属，如实标灰。
-    confirmation_id: str | None = None
-    nodes: list[ChatBiClosureNode] = []
-    reached_count: int = 0
-    total_count: int = 6
-    dangling: list[str] = []
-
-
-class ChatBiDecisionClosure(BaseModel):
-    """一次对话的决策总结。
-
-    ``tasks`` 是给人看的闭环——**一条任务一组六环**（恒六环，未到达的标灰而非隐藏）。
-    会话级的 ``nodes``/``reached_count``/``dangling`` 是审计聚合，供跨会话统计与
-    运行记录问答；界面不拿它当"闭环"画，否则一次纯查询也会顶着一张六环卡。
-    """
-
-    conversation_id: str
-    nodes: list[ChatBiClosureNode]
-    reached_count: int
-    total_count: int
-    dangling: list[str] = []
-    tasks: list[ChatBiClosureTask] = []
-    records: list[ChatBiDecisionOut] = []
 
 
 class ChatBiPreferenceRequest(BaseModel):

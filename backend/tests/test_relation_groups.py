@@ -47,12 +47,12 @@ def _seed_relations(ontology_id: str) -> None:
         c = _obj(db, ontology_id, "c")
         rows = [
             # display_name「属于」×3：类型/基数一致，置信度 0.5~0.6，同一状态
-            dict(display_name="属于", src=a, tgt=b, st="foreign_key", card="N:1", conf=0.5, desc="A 属于 B"),
-            dict(display_name="属于", src=b, tgt=c, st="foreign_key", card="N:1", conf=0.6, desc="B 属于 C"),
-            dict(display_name="属于", src=c, tgt=a, st="foreign_key", card="many_to_one", conf=0.6, desc="A 属于 B"),
+            {"display_name": "属于", "src": a, "tgt": b, "st": "foreign_key", "card": "N:1", "conf": 0.5, "desc": "A 属于 B"},
+            {"display_name": "属于", "src": b, "tgt": c, "st": "foreign_key", "card": "N:1", "conf": 0.6, "desc": "B 属于 C"},
+            {"display_name": "属于", "src": c, "tgt": a, "st": "foreign_key", "card": "many_to_one", "conf": 0.6, "desc": "A 属于 B"},
             # display_name「转化」×2：类型与基数各不相同 → 聚合为多值
-            dict(display_name="转化", src=a, tgt=c, st="derivation", card="1:N", conf=0.6, desc="派生"),
-            dict(display_name="转化", src=c, tgt=b, st="foreign_key", card="N:1", conf=0.6, desc="引用"),
+            {"display_name": "转化", "src": a, "tgt": c, "st": "derivation", "card": "1:N", "conf": 0.6, "desc": "派生"},
+            {"display_name": "转化", "src": c, "tgt": b, "st": "foreign_key", "card": "N:1", "conf": 0.6, "desc": "引用"},
         ]
         for i, r in enumerate(rows):
             db.add(

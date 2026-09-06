@@ -63,7 +63,7 @@ class LineagePackage(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
-    edges: Mapped[list["LineagePackageEdge"]] = relationship(
+    edges: Mapped[list[LineagePackageEdge]] = relationship(
         back_populates="package",
         cascade="all, delete-orphan",
         order_by="LineagePackageEdge.id",

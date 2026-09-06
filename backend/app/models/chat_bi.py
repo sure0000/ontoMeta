@@ -1,10 +1,19 @@
-from datetime import datetime
-
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
 import json
 import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -68,6 +77,16 @@ class ChatBiConversation(Base):
 
 class ChatBiMessage(Base):
     __tablename__ = "chat_bi_messages"
+    __table_args__ = (
+        # Conversation history is commonly read newest-first for the sidebar
+        # preview.  Pairing the foreign key with the timestamp lets the
+        # database satisfy that access pattern without scanning the full log.
+        Index(
+            "ix_chat_bi_messages_conversation_created",
+            "conversation_id",
+            "created_at",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     conversation_id: Mapped[str] = mapped_column(
@@ -142,4 +161,3 @@ class ChatBiDomainMemory(Base):
     hit_count: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-

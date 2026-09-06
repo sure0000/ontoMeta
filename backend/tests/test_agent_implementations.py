@@ -258,8 +258,12 @@ def test_metric_executor_compiles_formal_caliber(formal_logic):
 
 def test_doris_metric_execution_uses_ready_physical_projection(formal_logic, monkeypatch):
     from app.models import (
-        DataSource, ObjectType, Ontology, OntologyWarehouseDeployment,
-        WarehouseObjectProjection, WarehouseLogicProjection,
+        DataSource,
+        ObjectType,
+        Ontology,
+        OntologyWarehouseDeployment,
+        WarehouseLogicProjection,
+        WarehouseObjectProjection,
     )
     from app.services import doris_job_runner
 
@@ -662,77 +666,6 @@ def test_invalid_intent_returns_400_not_500(client, admin_headers, seeded):
 
 
 # ---------- 任务链（多任务编排） ----------
-
-
-def test_pipeline_endpoints_walk_a_chain_step_by_step(client, admin_headers, seeded):
-    """端到端：建链 → 起草第 1 步 → 走完它的校验/确认/执行 → 才起草第 2 步。
-
-    钉住「链不替谁确认」：第 2 步在第 1 步跑成功之前请求推进，必须 409 并说清卡在哪。
-    """
-    onto = seeded["ontology_id"]
-    created = client.post(
-        "/api/agents/pipelines",
-        headers=admin_headers,
-        json={
-            "name": "指标链",
-            "intent": "先算指标，再算一次",
-            "ontology_id": onto,
-            "steps": [
-                {"kind": "metric", "intent": "统计成交额", "context": {"ontology_id": onto}},
-                {"kind": "metric", "intent": "统计成交额（复算）", "context": {"ontology_id": onto}},
-            ],
-        },
-    )
-    assert created.status_code == 200, created.text
-    pipeline = created.json()
-    pid = pipeline["id"]
-    # 建链不起草任何制品
-    assert pipeline["status"] == "drafted"
-    assert all(s["artifact_id"] is None for s in pipeline["steps"])
-
-    advanced = client.post(f"/api/agents/pipelines/{pid}/advance", headers=admin_headers)
-    assert advanced.status_code == 200, advanced.text
-    first = advanced.json()["artifact"]
-    assert first["kind"] == "metric" and first["status"] == "drafted"
-    assert advanced.json()["pipeline"]["status"] == "running"
-
-    # 第 1 步还没跑成功 → 拒绝推进，并指明卡在第 1 步
-    blocked = client.post(f"/api/agents/pipelines/{pid}/advance", headers=admin_headers)
-    assert blocked.status_code == 409
-    assert "第 1 步" in blocked.json()["detail"]
-
-    aid = first["id"]
-    client.post(f"/api/agents/artifacts/{aid}/validate", headers=admin_headers, json={})
-    client.post(f"/api/agents/artifacts/{aid}/confirm", headers=admin_headers, json={})
-    done = client.post(f"/api/agents/artifacts/{aid}/execute", headers=admin_headers, json={}).json()
-    assert done["status"] == "succeeded"
-
-    second = client.post(f"/api/agents/pipelines/{pid}/advance", headers=admin_headers)
-    assert second.status_code == 200, second.text
-    assert second.json()["pipeline"]["next_step_index"] is None  # 两步都起草了
-
-    detail = client.get(f"/api/agents/pipelines/{pid}", headers=admin_headers).json()
-    assert [s["artifact_status"] for s in detail["steps"]] == ["succeeded", "drafted"]
-
-
-def test_pipeline_with_unregistered_kind_is_501(client, admin_headers, seeded):
-    """未实现的任务类型在建链时就拦掉，而不是等推进到那一步才炸。"""
-    resp = client.post(
-        "/api/agents/pipelines",
-        headers=admin_headers,
-        json={
-            "name": "坏链",
-            "ontology_id": seeded["ontology_id"],
-            "steps": [
-                {"kind": "metric", "intent": "统计成交额"},
-                {"kind": "nope", "intent": "不存在"},
-            ],
-        },
-    )
-    assert resp.status_code == 501
-
-
-# ---------- P2：物化 executor 强制 preflight 闸门 ----------
 
 
 def test_materialize_executor_blocks_on_preflight_failure(monkeypatch, seeded):

@@ -27,6 +27,10 @@ FRONTEND_PORT=5180
 # Flink 执行参数已迁到【设置页 → Airflow/Flink】，不再走环境变量。
 # ============================================================
 : "${ONTOMETA_ADMIN_TOKEN:=dev-admin-token-change-me}"; export ONTOMETA_ADMIN_TOKEN
+# 本脚本是**本地开发**启动器，上面那个令牌是写在仓库里的公开值。后端在 debug 关闭时
+# 会拒绝用它启动（见 app/auth.py 的 enforce_bootstrap_secrets），所以这里显式声明
+# 自己是开发态。生产部署不要用本脚本：注入随机 ONTOMETA_ADMIN_TOKEN 并让 DEBUG 保持关闭。
+: "${DEBUG:=true}"; export DEBUG
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

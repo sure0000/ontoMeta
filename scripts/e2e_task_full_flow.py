@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
-"""端到端驱动：任务管理所有任务走完整流程。
+"""端到端驱动：四类任务各走一遍完整流程。
 
-覆盖：
-  A. 四类独立任务（sync / transform / metric / materialize）各自走
-     draft → validate → confirm → execute，源库/目标库/Flink/Airflow 真实触达；
-  B. 任务链（materialize → transform → metric）：create → 逐步 advance（每步独立走完
-     validate → confirm → execute）→ schedule(cron) → compile(周期 DAG) → lineage 预览。
+覆盖四类独立任务（sync / transform / metric / materialize）各自走
+draft → validate → confirm → execute，源库/目标库/Flink/Airflow 真实触达。
 
-环境要求：后端 :8000、Airflow :8081 可达、Flink bin + SqlRunner JAR 已配、源库 pg ok。
+原先还有 B 段「任务链」（create → advance → schedule → compile → lineage）。
+**手工任务链已随六环确认一起删除**，那 5 个 ``/agents/pipelines*`` 端点后端不再存在，
+B 段跑起来只会得到一串 404，故整段移除。跨任务的依赖现在由 lineage_scheduler 推。
+
+环境要求：后端 :8000、Airflow :8081 可达、Flink bin + SqlRunner JAR 已配、源库可用。
 所有断言失败即整体失败；每步打印回执关键信号（dag_run_id / run_url / execute_mode）。
+
+**环境相关的 id 走环境变量**，不写死——写死的 id 换台机器就全错，而报出来的症状
+是「源库不可用」之类完全指错方向的话：
+
+    E2E_ONTOLOGY_ID=... E2E_DATASOURCE_ID=... E2E_LOGIC_ID=... python scripts/e2e_task_full_flow.py
+
+不给则自动挑：唯一的已发布本体 / 唯一状态 ok 的源 / 第一条业务口径；挑不出来就报错说清楚。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
-API = "http://localhost:8000"
-TOKEN = "dev-admin-token-change-me"
+API = os.environ.get("ONTOMETA_URL", "http://localhost:8000").rstrip("/")
+TOKEN = os.environ.get("ONTOMETA_ADMIN_TOKEN", "dev-admin-token-change-me")
 HEADERS = {"X-Admin-Token": TOKEN, "Content-Type": "application/json"}
 
-# 真实环境常量
-ONTOLOGY_ID = "60125f9f-8fab-4f45-b0a0-7464de77cebe"          # 734 对象，已发布
-PG_DATASOURCE_ID = "6dc0af33-5b8a-406d-bf46-97e3691aba02"     # pg (postgres, ok)
-BRAND_COUNT_LOGIC_ID = "9ad86671-8f47-4e4c-9006-6aca3d03c4f1" # brand_count 口径
+# 环境相关的 id：给了就用，没给就在 resolve_ids() 里挑。
+ONTOLOGY_ID = os.environ.get("E2E_ONTOLOGY_ID", "")
+PG_DATASOURCE_ID = os.environ.get("E2E_DATASOURCE_ID", "")
+BRAND_COUNT_LOGIC_ID = os.environ.get("E2E_LOGIC_ID", "")
 
 PASS = "\033[32m✓\033[0m"
 FAIL = "\033[31m✗\033[0m"
@@ -100,6 +109,39 @@ def full_flow(label: str, kind: str, intent: str, context: dict, *, expect_execu
     return art
 
 
+def resolve_ids() -> tuple[str, str, str]:
+    """本体 / 目标数据源 / 业务口径：给了就用，没给就挑，挑不出来就说清为什么。
+
+    写死 id 的老问题是换台机器全错，而报出来的是「源库不可用」这类指错方向的话。
+    """
+    ontology = ONTOLOGY_ID
+    if not ontology:
+        published = [o for o in _req("GET", "/ontologies?limit=50") or [] if o.get("status") == "published"]
+        if len(published) != 1:
+            raise SystemExit(
+                f"已发布本体有 {len(published)} 个，选不出来；请设 E2E_ONTOLOGY_ID"
+            )
+        ontology = published[0]["id"]
+
+    datasource = PG_DATASOURCE_ID
+    if not datasource:
+        usable = [d for d in _req("GET", "/data-sources") or [] if (d.get("status") or "") == "ok"]
+        if len(usable) != 1:
+            raise SystemExit(
+                f"状态 ok 的数据源有 {len(usable)} 个，选不出来；请设 E2E_DATASOURCE_ID"
+            )
+        datasource = usable[0]["id"]
+
+    logic = BRAND_COUNT_LOGIC_ID
+    if not logic:
+        logics = _req("GET", f"/business-logics?ontology_id={ontology}") or []
+        if not logics:
+            raise SystemExit("这个本体下没有业务口径，metric 任务跑不了；请设 E2E_LOGIC_ID")
+        logic = logics[0]["id"]
+
+    return ontology, datasource, logic
+
+
 def main() -> int:
     # 0. 环境探活
     print("=== 0. 环境探活 ===")
@@ -108,13 +150,17 @@ def main() -> int:
     kinds = _req("GET", "/agents/kinds")
     check("四类任务全注册", set(kinds["registered"]) >= {"sync", "transform", "metric", "materialize"},
           str(kinds["registered"]))
+
+    ontology_id, datasource_id, logic_id = resolve_ids()
+    print(f"      本体={ontology_id} 数据源={datasource_id} 口径={logic_id}")
+
     ds = _req("GET", "/data-sources")
-    pg = next((d for d in ds if d["id"] == PG_DATASOURCE_ID), None)
-    check("源库 pg 可用", pg and pg["status"] == "ok", str(pg and pg["status"]))
+    target = next((d for d in ds if d["id"] == datasource_id), None)
+    check("目标数据源可用", bool(target) and target["status"] == "ok", str(target and target["status"]))
     af = _req("GET", "/settings/airflow")
     check("Airflow available", af.get("available") is True, str(af.get("available")))
 
-    ctx_base = {"target_datasource_id": PG_DATASOURCE_ID, "target_database": "dw"}
+    ctx_base = {"target_datasource_id": datasource_id, "target_database": "dw"}
 
     # A. 四类独立任务完整流程
     print("\n=== A. 四类独立任务（draft→validate→confirm→execute）===")
@@ -144,77 +190,9 @@ def main() -> int:
     # A4. metric — brand_count 口径聚合，目标 pg → 走 Flink on YARN
     full_flow(
         "A4.metric", "metric", "按 brand_count 口径聚合",
-        {**ctx_base, "business_logic_id": BRAND_COUNT_LOGIC_ID, "execution_mode": "batch"},
+        {**ctx_base, "business_logic_id": logic_id, "execution_mode": "batch"},
         expect_execute="flink",
     )
-
-    # B. 任务链：materialize → transform → metric
-    print("\n=== B. 任务链（create→advance×3→schedule→compile→lineage）===")
-    chain = _req("POST", "/agents/pipelines", {
-        "name": "e2e-brand-链",
-        "intent": "物化 brand 到数仓后去重清洗，再按 brand_count 聚合",
-        "ontology_id": ONTOLOGY_ID,
-        "steps": [
-            {"kind": "materialize", "intent": "物化 brand 到数仓",
-             "context": {**ctx_base, "selected_targets": ["brand"]}},
-            {"kind": "transform", "intent": "对 brand 去重清洗",
-             "context": {"target_table": "brand", "cleansing_rules": ["deduplicate"]}},
-            {"kind": "metric", "intent": "按 brand_count 聚合",
-             "context": {"business_logic_id": BRAND_COUNT_LOGIC_ID}},
-        ],
-    })
-    check("B: 建链只落意图(无制品)", all(s["artifact_id"] is None for s in chain["steps"]),
-          str(chain["status"]))
-    check("B: 链态=drafted", chain["status"] == "drafted", chain["status"])
-    pid = chain["id"]
-
-    # 逐步推进：每步独立走完 validate → confirm → execute，再 advance 下一步
-    step_expect = ["airflow", "flink", "flink"]
-    for i in range(3):
-        adv = _req("POST", f"/agents/pipelines/{pid}/advance")
-        art = adv["artifact"]
-        check(f"B: advance 第{i+1}步 起草({art['kind']})", art["status"] == "drafted", art["status"])
-        aid = art["id"]
-        a = _req("POST", f"/agents/artifacts/{aid}/validate", {"context": {}})
-        vr = a.get("validation_report") or {}
-        check(f"B: 第{i+1}步 validate 无阻断", vr.get("blocking_count") == 0,
-              f"blocking={vr.get('blocking_count')}")
-        a = _req("POST", f"/agents/artifacts/{aid}/confirm", {"operator": "e2e-tester"})
-        check(f"B: 第{i+1}步 confirmed", a["status"] == "confirmed", a["status"])
-        a = _req("POST", f"/agents/artifacts/{aid}/execute", {"context": {}})
-        rc = a.get("execution_receipt") or {}
-        show_receipt(f"B.step{i+1}", rc)
-        exp = step_expect[i]
-        if exp == "flink":
-            check(f"B: 第{i+1}步 走 Flink", rc.get("execute_mode") == "flink_on_yarn",
-                  str(rc.get("execute_mode")))
-        else:
-            check(f"B: 第{i+1}步 触达 Airflow", bool(rc.get("dag_run_id")),
-                  str(rc.get("execute_mode")))
-        check(f"B: 第{i+1}步 succeeded", a["status"] == "succeeded", a["status"])
-
-    chain = _req("GET", f"/agents/pipelines/{pid}")
-    check("B: 链全部成功", chain["status"] == "succeeded", chain["status"])
-    check("B: 无下一步", chain["next_step_index"] is None, str(chain["next_step_index"]))
-
-    # 周期调度：设 cron → 编译成一条周期 DAG
-    chain = _req("PUT", f"/agents/pipelines/{pid}/schedule", {"schedule_cron": "0 2 * * *"})
-    check("B: 设 cron=0 2 * * *", chain["schedule_cron"] == "0 2 * * *", str(chain["schedule_cron"]))
-
-    compiled = _req("POST", f"/agents/pipelines/{pid}/compile")
-    check("B: 编译出周期 DAG", bool(compiled.get("compiled_dag_id")), str(compiled))
-    check("B: DAG 落盘", bool(compiled.get("dag_path")), str(compiled.get("dag_path")))
-    print(f"      compiled_dag_id = {compiled.get('compiled_dag_id')}")
-    print(f"      dag_path        = {compiled.get('dag_path')}")
-
-    chain = _req("GET", f"/agents/pipelines/{pid}")
-    check("B: 链记录 compiled_dag_id", bool(chain["compiled_dag_id"]), str(chain["compiled_dag_id"]))
-
-    # 链级血缘预览
-    lineage = _req("GET", f"/agents/pipelines/{pid}/lineage")
-    check("B: 血缘预览有返回", isinstance(lineage, (list, dict)) and lineage is not None,
-          str(lineage)[:200])
-    print(f"      lineage preview = {json.dumps(lineage, ensure_ascii=False)[:300]}")
 
     # 汇总
     print("\n=== 汇总 ===")

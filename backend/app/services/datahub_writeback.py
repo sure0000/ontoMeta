@@ -28,7 +28,6 @@ from app.models import (
     ObjectType,
     Ontology,
     OntologyStatus,
-    Property,
 )
 
 

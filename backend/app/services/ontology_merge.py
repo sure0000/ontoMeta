@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -504,7 +505,7 @@ class OntologyMergeService:
         # 兜底去碰撞：分块生成时同名的两张不同表可能分属不同块，合并后才撞名。
         # 先 flush 让新建对象可见（会话可能关闭 autoflush），再全本体消歧。
         db.flush()
-        for obj_id, old_name, new_name in resolve_duplicate_object_names(db, ontology_id):
+        for obj_id, _old_name, new_name in resolve_duplicate_object_names(db, ontology_id):
             report.record(
                 "object_types", "updated", obj_id, new_name, new_name, fields=["name"]
             )
@@ -1052,7 +1053,7 @@ class OntologyMergeService:
             db.flush()
 
         # 2. 合并对象和属性
-        object_ref_to_id = self.merge_objects(
+        self.merge_objects(
             db, ontology_id, draft.object_types, draft.properties, gen_id, report,
             handle_removal=True,
         )

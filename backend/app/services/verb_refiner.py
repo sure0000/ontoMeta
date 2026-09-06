@@ -8,10 +8,8 @@ S2 空动词细化服务：根据外键列名规则推断精确动词，剩余�
 - 外键展示：改完之前，界面显示「源 —动词→ 目标」短语而非裸动词
 """
 import re
-from typing import Optional
 
 from app.models.ontology import RelationType
-
 
 # 空泛动词：说不出业务语义的那几个。既是全本体扫描的候选口径，
 # 也是建议的**下限**——把「引用」换成「属于」不叫细化，队列里那条告警一个字都不会少。
@@ -73,9 +71,9 @@ FOREIGN_KEY_VERB_RULES = {
 def infer_verb_from_foreign_key(
     source_obj_name: str,
     target_obj_name: str,
-    foreign_key_column: Optional[str],
+    foreign_key_column: str | None,
     relation_name: str,
-) -> Optional[str]:
+) -> str | None:
     """根据外键列名和对象名推断精确动词（S2 规则）。
 
     Args:
@@ -101,7 +99,7 @@ def infer_verb_from_foreign_key(
     return None
 
 
-def compact_relation_term(raw_term: Optional[str]) -> str:
+def compact_relation_term(raw_term: str | None) -> str:
     """压缩关系术语：抽取核心动词或截断过长文本。
 
     这是后备规则，用于 LLM 未覆盖或规则推断失败的情况。
@@ -222,7 +220,7 @@ def suggest_verb_refinements(
     return suggestions
 
 
-def _extract_foreign_key_column(rel: RelationType) -> Optional[str]:
+def _extract_foreign_key_column(rel: RelationType) -> str | None:
     """从关系证据中提取外键列名。"""
     if not rel.source_evidence:
         return None

@@ -1,6 +1,6 @@
 ---
 name: ontometa-query
-description: ontoMeta 数据查询：已有指标口径优先用 compile_metric 编译成权威 SQL；自由查询先用 find_join_path 定关联、profile_values 定字面量，再校验执行只读 SQL，识别样本与截断，必要时返回 Vega-Lite 图表预览并用证据解释结果。
+description: ontoMeta 数据查询：已有指标口径优先用 compile_metric 编译成权威 SQL；自由查询先用 find_join_path 定关联、profile_values 定字面量，再校验执行只读 SQL，必要时用 analyze_query 做确定性统计并返回 Vega-Lite 图表预览，识别样本与截断后用证据解释结果。
 whenToUse: Use when the user asks to query warehouse data, inspect rows, validate SQL, compare values, calculate a metric or KPI, look up a business caliber definition, or render a chart from execute_sql results.
 disable-model-invocation: false
 user-invocable: true
@@ -37,11 +37,13 @@ user-invocable: true
    本体只保证字段存在，不保证你猜的写法在库里；猜错的字面量返回 0 行且不报错。
 4. 调用 `validate_sql`，确认 SQL 是单条只读 `SELECT/WITH`。
 5. 用户明确要求取数且当前角色满足 `execute_sql` 最低角色时，调用 `execute_sql`。
-6. 需要图表时传 `include_vega_lite=true`；Vega-Lite 只基于最多 100 行结果样本。
+6. 问“分布/异常/离群/趋势/突变”时调用 `analyze_query`，把同一条已核实的 SQL 交给它；它会在服务端确定性计算，不要让模型凭几行样本口算。
+7. 需要图表时传 `include_vega_lite=true`；Vega-Lite 只基于最多 100 行结果样本。
 
 ## 准确性规则
 
 - `execute_sql` 返回的是样本还是全集，依据 `truncated` 和 `sample_note` 判断；截断结果不能支持全量结论。
+- `analyze_query` 的统计只覆盖本次实际返回的行；`truncated=true` 时必须明确写“返回行样本”，不能写成全表分布。
 - 先说明 SQL 实际查到的表和筛选条件，再解释数值；不要把 SQL 推测成已执行。
 - `success=true` 只表示工具调用成功，不表示业务结论正确；空结果也要明确报告。
 - `search_logics` 里 `formalized=false` 的口径只有文字、编译不出 SQL：如实说明“该口径尚未形式化”，不要把文字翻译成 SQL 顶上。

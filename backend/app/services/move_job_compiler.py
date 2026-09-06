@@ -15,14 +15,13 @@ Session、不重建 schema，故可脱离 DB 单元测试。
 
 from __future__ import annotations
 
+# Airflow DAG 构建层的任务载体。放在函数级 import 会更干净，但这里模块级也无环
+# （airflow_dag_builder 不反过来 import 本模块）。
+from app.services.airflow_dag_builder import FlinkSqlTask
 from app.services.flink_sql_generator import FlinkEndpoint, generate_move_sql
 from app.services.flink_sql_lineage import task_lineage_urns
 from app.warehouse.jobs.base import JobSpec, endpoint_credential_env
 from app.warehouse.logical_schema import LogicalColumn, LogicalTable
-
-# Airflow DAG 构建层的任务载体。放在函数级 import 会更干净，但这里模块级也无环
-# （airflow_dag_builder 不反过来 import 本模块）。
-from app.services.airflow_dag_builder import FlinkSqlTask
 
 
 def _source_logical_table(job: JobSpec) -> LogicalTable:

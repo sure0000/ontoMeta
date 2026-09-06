@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import desc
@@ -24,7 +24,13 @@ from sqlalchemy.orm import Session
 from app.agents import registry
 from app.agents.validation import is_blocking, validate_spec
 from app.governance import active_standard
-from app.models.agent import ArtifactKind, ArtifactStatus, GovernanceArtifact
+from app.models.agent import (
+    RESULT_OUTCOMES,
+    TERMINAL_STATUSES,
+    ArtifactKind,
+    ArtifactStatus,
+    GovernanceArtifact,
+)
 
 
 class PipelineError(ValueError):
@@ -42,6 +48,21 @@ def _loads(raw: str | None, fallback):
         return json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _overridden_fields(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """最终 spec 相对起草基线差在哪几个顶层键。
+
+    比较用 ``_dumps``（sort_keys）而不是 ``==``：嵌套字典键序不同但语义相同的两份
+    spec 不该被算成"人改过"。
+
+    粒度只取顶层键——那正是人在表单上看到的那几格。再往下钻会把 drafter 依据新
+    context 重新派生出的内部结构一并记成"人改的"，那不是事实。
+    """
+    keys = set(baseline) | set(current)
+    return sorted(
+        k for k in keys if _dumps(baseline.get(k)) != _dumps(current.get(k))
+    )
 
 
 # 问题清单的展示优先级。数越小越靠前。
@@ -129,6 +150,8 @@ class AgentPipelineService:
         spec: dict[str, Any] | None = None,
         name: str | None = None,
         user_created: bool = False,
+        created_by: str | None = None,
+        created_via: str | None = None,
     ) -> GovernanceArtifact:
         if kind not in {k.value for k in ArtifactKind}:
             raise PipelineError(
@@ -175,6 +198,8 @@ class AgentPipelineService:
             status=ArtifactStatus.DRAFTED.value,
             origin=origin,
             user_created=is_user_created,
+            created_by=created_by,
+            created_via=created_via,
         )
         db.add(artifact)
         db.commit()
@@ -237,10 +262,15 @@ class AgentPipelineService:
         artifact.validation_report_json = None
         artifact.confirmed_by = None
         artifact.confirmed_at = None
-        # 人工编辑过，标记溯源（与 confirm() 里 machine_edited 呼应）；不改
-        # machine_baseline——它是起草时的机器基线，编辑是人工覆盖，改了就失去了
-        # 「人工相对基线改了什么」的对比意义。
+        # 人工编辑过，标记溯源；不改 machine_baseline——它是起草时的机器基线，编辑是
+        # 人工覆盖，改了就失去了「人工相对基线改了什么」的对比意义。
         artifact.origin = "user"
+        # 把这次覆盖落成字段清单。**confirmed_by 在上面被清掉了**——旧确认对新 spec 无效，
+        # 这是对的，但代价是"人确认过又改了参数"只剩终态。终态里唯一还答得出"人改了什么"
+        # 的就是这份清单，所以它必须在这里落，不能等到某个读路径去现算。
+        artifact.overridden_fields = _dumps(
+            _overridden_fields(_loads(artifact.machine_baseline, {}), resolved_spec)
+        )
         db.commit()
         db.refresh(artifact)
         return artifact
@@ -294,7 +324,7 @@ class AgentPipelineService:
                 "dry_run_error": dry_run_error,
                 # 版本戳：审计「本制品在哪版规约下过闸」，规约升级后可据此判是否需 re-lint。
                 "standard_version": active_standard(db).version,
-                "validated_at": datetime.now(timezone.utc).isoformat(),
+                "validated_at": datetime.now(UTC).isoformat(),
             }
         )
         # 有阻断项、或高危制品拿不到 dry-run 差异 → 不得进入 validated。
@@ -325,8 +355,21 @@ class AgentPipelineService:
 
         artifact.status = ArtifactStatus.CONFIRMED.value
         artifact.confirmed_by = operator
-        artifact.confirmed_at = datetime.now(timezone.utc)
-        artifact.origin = "machine_edited"
+        artifact.confirmed_at = datetime.now(UTC)
+        # 确认这一步把溯源定死。三个取值沿用既有词汇（machine / machine_edited / user），
+        # 不新造：
+        #   - 人工建的任务确认后仍是人工创建——此前一律盖成 machine_edited，把"这条是人
+        #     自己开的"这个事实抹了；
+        #   - 机器起草、人改过参数 → machine_edited；
+        #   - 机器起草、原样接受 → machine。判据是 overridden_fields 而不是"调用过
+        #     edit 没有"——改了又改回去的仍是原样接受。
+        artifact.origin = (
+            "user"
+            if artifact.user_created
+            else "machine_edited"
+            if artifact.pinned_fields
+            else "machine"
+        )
         db.commit()
         db.refresh(artifact)
         return artifact
@@ -418,7 +461,7 @@ class AgentPipelineService:
         except Exception as exc:  # noqa: BLE001
             artifact.status = ArtifactStatus.FAILED.value
             artifact.execution_receipt_json = _dumps({"error": str(exc)})
-            artifact.executed_at = datetime.now(timezone.utc)
+            artifact.executed_at = datetime.now(UTC)
             db.commit()
             db.refresh(artifact)
             return artifact
@@ -437,7 +480,7 @@ class AgentPipelineService:
         else:
             artifact.status = ArtifactStatus.SUCCEEDED.value
         artifact.execution_receipt_json = _dumps(receipt)
-        artifact.executed_at = datetime.now(timezone.utc)
+        artifact.executed_at = datetime.now(UTC)
         db.commit()
         db.refresh(artifact)
         return artifact
@@ -450,6 +493,53 @@ class AgentPipelineService:
         if not claimed:
             return artifact
         return self.execute_claimed(db, artifact_id, context=context)
+
+    # ---------- 结果表态 ----------
+
+    def confirm_result(
+        self,
+        db: Session,
+        artifact_id: str,
+        *,
+        outcome: str,
+        note: str | None = None,
+        operator: str | None = None,
+        via: str | None = None,
+    ) -> GovernanceArtifact:
+        """记下人对这次执行结果的判断：符不符合预期。
+
+        **跑完了 ≠ 跑对了。** ``status`` 与回执说的是系统这侧发生了什么；这里记的是人看过
+        之后认不认——回执自陈成功而数据其实没搬对，本仓真实发生过。故这条判断只能由人给，
+        绝不从 ``status`` 推：``outcome`` 必须显式传，没人表态就一直空着。
+
+        只在终态可写。对一条还在跑的任务谈"结果符不符合预期"，记下来的也不是结果。
+
+        可改判：人先说符合、看细了又说不符合，覆盖写即可——与 ``confirmed_by`` 同一口径，
+        只答"最近一次"。
+        """
+        artifact = self._require(db, artifact_id)
+        if artifact.status not in TERMINAL_STATUSES:
+            raise PipelineError(
+                f"{artifact.status} 状态还没有结果可判断"
+                "（只有执行成功或失败之后才谈得上结果是否符合预期）"
+            )
+        if outcome not in RESULT_OUTCOMES:
+            raise ValueError(
+                f"outcome 须为 {'/'.join(sorted(RESULT_OUTCOMES))}，收到「{outcome}」"
+            )
+        artifact.result_outcome = outcome
+        artifact.result_note = (note or "").strip() or None
+        artifact.result_confirmed_by = operator
+        artifact.result_confirmed_at = datetime.now(UTC)
+        artifact.result_via = via
+        db.commit()
+        db.refresh(artifact)
+        return artifact
+
+    @staticmethod
+    def result_pending(artifact: GovernanceArtifact) -> bool:
+        """跑完了但还没人说对不对——该问人的时候。"""
+        return artifact.status in TERMINAL_STATUSES and not artifact.result_outcome
 
     # ---------- 查询 ----------
 
@@ -490,9 +580,15 @@ class AgentPipelineService:
                 self._reconcile_orchestrated_status(db, a)
         return rows
 
-    def get(self, db: Session, artifact_id: str) -> GovernanceArtifact | None:
+    def get(
+        self,
+        db: Session,
+        artifact_id: str,
+        *,
+        reconcile: bool = True,
+    ) -> GovernanceArtifact | None:
         artifact = db.get(GovernanceArtifact, artifact_id)
-        if artifact:
+        if artifact and reconcile:
             self._reconcile_orchestrated_status(db, artifact)
         return artifact
 
@@ -615,3 +711,11 @@ class AgentPipelineService:
         if artifact is None:
             raise LookupError("制品不存在")
         return artifact
+
+
+#: 进程内共享的流水线单例。
+#
+# 它此前只住在 ``app.api.deps`` 里，于是任何要用流水线的模块——MCP 工具、就绪判定——
+# 都得先 import 那一包 API 单例，连带把 Data Agent 拽进导入图。单例的家应该是它自己的
+# 服务模块；``app.api.deps`` 改为再导出同一个对象，既有 import 与测试替身都不受影响。
+agent_pipeline = AgentPipelineService()

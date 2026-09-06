@@ -570,7 +570,9 @@
 .lin-table-name-db,
 .lin-table-name-kind {
   flex: none;
-  font-family: var(--om-font-sans);
+  /* 与同级的 -main（等宽）对比：这里要正文字体。仓库里没有 --om-font-sans 这个 token
+     （只有 --om-font-mono），正文字体一律用 inherit 从 body/antd 继承。 */
+  font-family: inherit;
   font-size: 10px;
   font-weight: 500;
   color: var(--om-text-tertiary);

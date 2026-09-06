@@ -22,8 +22,8 @@ import json
 import logging
 import math
 import threading
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
 
 from sqlalchemy.orm import Session
 
@@ -186,7 +186,7 @@ def build_index(
 
     dim = int(getattr(env_settings, "agent_embedding_dim", 256) or 0)
     model = (getattr(env_settings, "agent_embedding_model", "") or "").strip()
-    for (kind, entity_id, text), vec in zip(rows, vectors):
+    for (kind, entity_id, text), vec in zip(rows, vectors, strict=False):
         norm = _normalize(vec, dim)
         db.add(
             SemanticIndexEntry(

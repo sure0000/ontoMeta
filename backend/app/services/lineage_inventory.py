@@ -30,11 +30,11 @@ logger = logging.getLogger("ontometa.lineage_inventory")
 #: 缓存存活秒数。够一次操作序列复用，短到不会让人看见过期的孤岛数。
 CACHE_TTL_SECONDS = 90.0
 
-_cache: dict[str, tuple[float, "DomainInventory"]] = {}
+_cache: dict[str, tuple[float, DomainInventory]] = {}
 # A cache only helps after the first request completes.  The page fans out to
 # several endpoints at once, so coalesce concurrent misses as well; otherwise
 # every endpoint starts its own expensive DataHub index scan.
-_inflight: dict[str, asyncio.Task["DomainInventory"]] = {}
+_inflight: dict[str, asyncio.Task[DomainInventory]] = {}
 
 
 @dataclass(frozen=True)

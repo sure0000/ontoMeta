@@ -15,18 +15,61 @@ from __future__ import annotations
 from typing import Any
 
 import sqlparse
-from sqlalchemy.orm import Session
 
+from app.services.agent_sql import (  # noqa: F401  (Data Agent 侧的既有私名契约)
+    RUN_SQL_LIMIT as _RUN_SQL_LIMIT,
+)
+from app.services.agent_sql import (
+    SQL_TIMEOUT_SECONDS as _SQL_TIMEOUT_SECONDS,
+)
 from app.services.chat_bi_skills import SKILLS, Skill, skill_choices_text
 from app.services.metric_compiler import COMPARE_OPS, LOGIC_TYPES, METRIC_OPS
+from app.services.task_form import (  # noqa: F401
+    _CRON_PRESETS,
+    _FORM_DATASOURCE_PROBE_LIMIT,
+    _FORM_LOCATION_LIMIT,
+    _LOAD_STRATEGIES,
+    _TASK_OPTIONS_LIMIT,
+)
 
+# 建数表单的骨架、候选与 context 校验住在 `task_form`（中性位置，见该模块首段）。
+# 这里只做**别名再导出**：本文件的私名是 Data Agent 一侧的既有 import 契约，
+# 而同一份判据同时被 Web 任务面板和 MCP 建数流程使用——两处不能各留一份。
+from app.services.task_form import (  # noqa: F401
+    ACTION_CONTEXT_HINT as _ACTION_CONTEXT_HINT,
+)
+from app.services.task_form import (
+    ACTION_KIND_LABEL as _ACTION_KIND_LABEL,
+)
+from app.services.task_form import (
+    ACTION_KINDS as _ACTION_KINDS,
+)
+from app.services.task_form import (
+    AUTO_ACTION_CONTEXT_KEYS as _AUTO_ACTION_CONTEXT_KEYS,
+)
+from app.services.task_form import (
+    action_context_candidates as _action_context_candidates,
+)
+from app.services.task_form import (
+    apply_prefill as _apply_prefill,
+)
+from app.services.task_form import (
+    match_option as _match_option,
+)
+from app.services.task_form import (
+    missing_action_context as _missing_action_context,
+)
+from app.services.task_form import (
+    normalize_form_options as _normalize_form_options,
+)
+from app.services.task_form import (
+    sync_context_errors as _sync_context_errors,
+)
 
 # 预算只会更紧——真被拒一次就没有余量修正了。
 _AGENT_MAX_STEPS = 8            # 工具轮上限，超出强制收尾作答
 _AGENT_REPAIR_ATTEMPTS = 1      # 自愈重写次数上限（独立预算，不占工具轮）
-_RUN_SQL_LIMIT = 100           # run_sql 默认返回行上限
 _TOOL_RESULT_MAX_CHARS = 8000  # 单个工具结果回灌前的截断阈值
-_SQL_TIMEOUT_SECONDS = 15      # run_sql 语句超时（execute_sql 既有能力）
 _SEARCH_LIMIT = 8              # 检索类工具默认返回条数
 _OVERVIEW_LIST_LIMIT = 100     # 概览里 objects/relations 样本清单各自的条数上限
 _OVERVIEW_TOP_CONNECTED = 10   # 概览里「关系最多的对象」Top N
@@ -707,16 +750,6 @@ _LINT_TOOL: dict[str, Any] = {
     },
 }
 
-# 数据任务类型白名单——agent 只在「物化/同步/加工」车道出提案；metric 归 propose_draft、
-# cluster（基建）不开，避免与口径提案重叠混淆。
-_ACTION_KINDS: tuple[str, ...] = ("materialize", "sync", "transform", "metric")
-_ACTION_KIND_LABEL: dict[str, str] = {
-    "materialize": "物化", "sync": "同步", "transform": "加工", "metric": "聚合",
-}
-
-# 当前已落地的 Doris 执行能力。
-_PIPELINE_KINDS: tuple[str, ...] = ("materialize", "sync", "transform", "metric")
-_PIPELINE_MAX_STEPS: int = 8
 
 _PROPOSE_ACTION_TOOL: dict[str, Any] = {
     "type": "function",
@@ -750,95 +783,6 @@ _PROPOSE_ACTION_TOOL: dict[str, Any] = {
     },
 }
 
-_PROPOSE_PIPELINE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "propose_pipeline",
-        "description": (
-            "当用户要的是**前后相继的多个任务**（如「物化到数仓，然后清洗，再按口径聚合」）时，"
-            "产出一条**任务链提案**（不执行、不写库）。链上每一步仍是一条独立任务，"
-            "与单发任务一样由用户逐环确认「需求 → 本体 → 数据 → 执行方案 → 执行 → 结果」"
-            "六环；链负责的是记住下一步、并把上游已定下的目标数据源/默认 Doris/本体版本"
-            "接到下游作为默认值，用户不必逐步重报（但仍要逐环过目确认）。\n"
-            "**只有一个任务时用 propose_action**，别为单步套一条链。\n"
-            "当前标准链是 sync(业务源经 Flink 写 ODS) → transform(Doris ODS→DIM/DWD/DWS) → "
-            "metric(Doris ADS)。metric 必须引用已发布且形式化的口径。\n"
-            "**不要在 sync 前面加 materialize**：同步自己会对目标 ODS 表下幂等 "
-            "CREATE TABLE IF NOT EXISTS（落点恒为 ODS），为同步而排的物化步骤会被服务端删掉。"
-            "materialize 只用于没有物理源表的人工建模对象——那些表只能靠物化建出来。"
-            "sync 的 source_datasource_id、ODS 库、主键/水位/CDC 策略"
-            "不能从 materialize 继承，必须显式给；ODS 表名由后端固定生成，"
-            "target_datasource_id 固定继承默认 Doris。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "这条链叫什么，一句话（如「客户主数据入仓链」）"},
-                "intent": {"type": "string", "description": "整条链要达成什么，一句话"},
-                "steps": {
-                    "type": "array",
-                    "description": f"有序步骤（2-{_PIPELINE_MAX_STEPS} 步），按执行先后排列",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "kind": {
-                                "type": "string", "enum": list(_PIPELINE_KINDS),
-                                "description": "当前可执行：materialize / sync / transform / metric",
-                            },
-                            "intent": {"type": "string", "description": "这一步做什么，一句话"},
-                            "depends_on": {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                                "description": "血缘依赖：这一步依赖的上游步序（从 0 起）。"
-                                "默认空 = 依赖上一步；如「清洗依赖同步」则第 1 步 depends_on=[0]。"
-                            },
-                            "context": {
-                                "type": "object",
-                                "description": (
-                                    "这一步的结构化上下文，键与 propose_action 同；"
-                                    "上游已给过的落点（数据源/库/引擎）不必重复"
-                                ),
-                            },
-                        },
-                        "required": ["kind", "intent"],
-                    },
-                },
-            },
-            "required": ["name", "steps"],
-        },
-    },
-}
-
-# ---- P1：建数任务的可选项目录 ----
-# 建数表单此前长不出下拉框，根因是模型没有任何工具能读到物理侧的候选（数据源/库/契约/
-# 装载方式/调度）——request_form 的「options 必须来自真实实体」于是永远无法满足，只能退化
-# 成文本输入。本工具就是那份缺失的目录：与物化弹窗（MaterializeModal）读同一批服务，
-# 保证「对话里选到的」和「弹窗里选到的」是同一套事实。
-
-# 调度频率预置项。与前端 CronPicker 同域：那里是任意 cron 的下拉编辑器，这里给几个常用
-# 值让模型直接摆进表单；用户要别的频率仍可自填合法 cron 表达式。
-_CRON_PRESETS: tuple[dict[str, str], ...] = (
-    {"expr": "0 2 * * *", "label": "每天 02:00"},
-    {"expr": "0 */6 * * *", "label": "每 6 小时"},
-    {"expr": "0 * * * *", "label": "每小时"},
-    {"expr": "0 3 * * 1", "label": "每周一 03:00"},
-    {"expr": "0 4 1 * *", "label": "每月 1 日 04:00"},
-    {"expr": "", "label": "不定时（仅手动触发）"},
-)
-
-# Flink source→Doris ODS 的三种接入语义。
-_LOAD_STRATEGIES: tuple[dict[str, str], ...] = (
-    {"value": "full", "label": "全量覆盖",
-     "hint": "Flink batch 写 ODS staging，质量检查后 Doris atomic replace；失败不影响正式表"},
-    {"value": "incremental", "label": "增量同步",
-     "hint": "按 incremental_column + 成功水位做有界 JDBC batch，Doris Unique Key UPSERT"},
-    {"value": "cdc", "label": "CDC 变更捕获",
-     "hint": "Flink CDC detached 长期作业；必须配置主键、sequence、checkpoint 与 DELETE 策略"},
-)
-
-# 候选清单的回灌上限。物化契约会有几百条（一个 734 对象的域即如此），整份倒进上下文
-# 既挤爆预算也没人读——按 search_* 的既有约定给 {total, returned, truncated, items}。
-_TASK_OPTIONS_LIMIT: int = 30
 
 _GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
     "type": "function",
@@ -867,137 +811,14 @@ _GET_TASK_OPTIONS_TOOL: dict[str, Any] = {
     },
 }
 
-# 由服务端注入的 context 键——当前会话的本体是确定的，模型不必（也无从）给。
-_AUTO_ACTION_CONTEXT_KEYS: frozenset[str] = frozenset({"ontology_id"})
-
-_ACTION_CONTEXT_HINT = (
-    "这些是起草该任务必须先定下、且无法从本体推导的选项。用 request_form 把它们做成一张表单"
-    "让用户选（候选项用本结果里给出的真实值），拿到回填后再重新 propose_action。不要自己编 id。"
-)
 
 
-def _sync_context_errors(
-    db: Session, context: dict[str, Any], *, ontology_id: str | None = None
-) -> list[str]:
-    """Deterministic mirror of the Doris ODS sync prompt contract."""
-    from app.models import DataSource, ObjectType
-
-    errors: list[str] = []
-    source_id = context.get("source_datasource_id")
-    target_id = context.get("target_datasource_id")
-    source = db.get(DataSource, source_id) if source_id else None
-    target = db.get(DataSource, target_id) if target_id else None
-    if source is not None and (source.purpose != "business_source" or not source.enabled):
-        errors.append("source_datasource_id 必须是启用的 business_source")
-    if source is not None and ontology_id and context.get("object_type"):
-        from app.services.source_datasource import source_datasource_candidates
-
-        obj = (
-            db.query(ObjectType)
-            .filter(
-                ObjectType.ontology_id == ontology_id,
-                ObjectType.name == str(context["object_type"]),
-            )
-            .first()
-        )
-        if obj is not None:
-            allowed = {candidate.id for candidate in source_datasource_candidates(db, obj)}
-            if source.id not in allowed:
-                errors.append(
-                    "source_datasource_id 与所选本体的 source_ref 平台/库/表来源不匹配"
-                )
-    if target is not None and not (
-        target.purpose == "warehouse" and target.kind == "doris"
-        and target.is_default_warehouse and target.enabled
-        and bool((target.dsn_secret_ref or "").strip())
-    ):
-        errors.append("target_datasource_id 必须是启用、已配置连接的默认 Doris")
-    mode = str(context.get("mode") or "full")
-    if mode in {"incremental", "cdc"} and not context.get("primary_keys"):
-        errors.append(f"{mode} 必须配置 primary_keys")
-    if mode == "incremental":
-        for key in ("incremental_column", "initial_watermark"):
-            if context.get(key) in (None, ""):
-                errors.append(f"incremental 必须配置 {key}")
-    if mode == "cdc":
-        for key in ("sequence_column", "delete_policy"):
-            if context.get(key) in (None, ""):
-                errors.append(f"CDC 必须配置 {key}")
-        # checkpoint 目录是「这套部署长什么样」的事实：设置页配了全局默认就跟随，不逼每条
-        # CDC 任务重填一遍（见 DEVELOPMENT_PRINCIPLES P1「全局配置 ≠ 唯一取值」）。
-        # 两处都没有才拦——没有读位点持久化，CDC 作业一重启就从头重搬。
-        if context.get("flink_checkpoint_dir") in (None, "") and not _settings_checkpoint_dir(db):
-            errors.append(
-                "CDC 必须配置 flink_checkpoint_dir（或在设置页 → Airflow/Flink 配一个全局默认）"
-            )
-    return errors
 
 
-def _settings_checkpoint_dir(db: Session) -> str:
-    """设置页配的 Flink checkpoint 目录（读不到返回空串，绝不因此炸校验）。"""
-    try:
-        from app.api.deps import settings_service
-
-        return (settings_service.get_airflow_runtime(db).flink_checkpoint_dir or "").strip()
-    except Exception:  # noqa: BLE001
-        return ""
 
 
-def _missing_action_context(kind: str, context: dict[str, Any]) -> list[str]:
-    """该类任务起草前还缺哪些 context 键。
-
-    判据取 Drafter 自己声明的 ``required_context``（其 ``require_context`` 的同一份字面值），
-    不在这里另抄一份——否则两处迟早分叉。注意**不能**改用规约的
-    ``required_metadata.per_artifact``：那约束的是 Spec 字段（如 sync 的 source/target），
-    由 Drafter 从本体推导，不是调用方要给的 context 键。
-    """
-    # 局部导入：app.agents 在导入期注册 Drafter/Executor（连带拉起 materialization_runner），
-    # 读侧模块不该为一次校验把整条写侧流水线拽进导入图。
-    from app.agents import registry
-
-    try:
-        drafter = registry.get_drafter(kind)
-    except registry.UnregisteredKindError:
-        return []
-    required = list(drafter.required_context)
-    if kind in {"materialize", "transform", "metric"}:
-        required.append("target_datasource_id")
-    if kind == "materialize":
-        required.append("target_database")
-    if kind == "metric":
-        required.append("business_logic_id")
-    if kind == "sync":
-        # 落点库不在其中：同步恒写 ODS（ods_naming.ODS_DATABASE），不是调用方的配置项。
-        required.extend(("source_datasource_id", "target_datasource_id"))
-    return [
-        key
-        for key in dict.fromkeys(required)
-        if key not in _AUTO_ACTION_CONTEXT_KEYS and not context.get(key)
-    ]
 
 
-def _action_context_candidates(db: Session, missing: list[str]) -> dict[str, Any]:
-    """缺失键的真实候选值——只说「缺 target_datasource_id」模型和用户都无从下手。
-
-    只返回选项本身（id/名称/类型/连通状态），凭据不出现（DSN 存的本就是 ``dsn_secret_ref``）。
-    """
-    from app.models import DataSource
-
-    rows = db.query(DataSource).order_by(DataSource.name).limit(50).all()
-    out: dict[str, Any] = {}
-    if "source_datasource_id" in missing:
-        out["source_datasource_id_options"] = [
-            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
-            for s in rows if s.purpose == "business_source" and s.enabled
-        ]
-    if "target_datasource_id" in missing:
-        out["target_datasource_id_options"] = [
-            {"id": s.id, "name": s.name, "kind": s.kind, "status": s.status}
-            for s in rows
-            if s.purpose == "warehouse" and s.kind == "doris"
-            and s.is_default_warehouse and s.enabled
-        ]
-    return out
 
 
 _GET_TASK_STATUS_TOOL: dict[str, Any] = {
@@ -1053,8 +874,9 @@ _GET_OPS_RECORD_TOOL: dict[str, Any] = {
         "name": "get_ops_record",
         "description": (
             "读取已经发生过的权威运行记录，只读，不创建或执行任务。"
-            "task_run 查单任务状态、执行时间和失败原因；pipeline 查整条任务链及逐步状态；"
-            "decision 查当前会话的六环确认与决策人；ontology_version 查当前本体发布版本或版本差异；"
+            "task_run 查单任务状态、执行时间、失败原因，谁建的、谁确认的、人改过哪些参数，"
+            "以及人看过之后认为结果对不对；"
+            "ontology_version 查当前本体发布版本或版本差异；"
             "standard 查当前生效治理规约与发布历史；draft_run 查草稿生成进度；"
             "merge_report 查重新生成的合并结果；conflict 查待复核字段冲突；"
             "datasource 查数据源上次拨测状态；data_app 查数据应用发布版本；"
@@ -1067,14 +889,13 @@ _GET_OPS_RECORD_TOOL: dict[str, Any] = {
                 "family": {
                     "type": "string",
                     "enum": [
-                        "task_run", "pipeline", "decision", "ontology_version", "standard",
+                        "task_run", "ontology_version", "standard",
                         "draft_run", "merge_report", "conflict", "datasource", "data_app",
                         "component", "migration",
                     ],
                     "description": "运行记录问题族",
                 },
                 "artifact_id": {"type": "string", "description": "指定任务制品 id"},
-                "pipeline_id": {"type": "string", "description": "指定任务链 id"},
                 "task_id": {"type": "string", "description": "指定草稿生成任务 id"},
                 "app_id": {"type": "string", "description": "指定数据应用 id"},
                 "batch_id": {"type": "string", "description": "指定生产割接批次 id"},
@@ -1098,9 +919,9 @@ _GET_OPS_RECORD_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": ["conversation", "ontology", "global", "all"],
                     "description": (
-                        "查询范围；各族会严格校验：decision 仅 conversation，ontology_version "
-                        "及草稿/合并/冲突仅 ontology，pipeline/data_app/migration 支持 "
-                        "ontology/all，standard/datasource/component 支持 global/all"
+                        "查询范围；各族会严格校验：ontology_version 及草稿/合并/冲突仅 "
+                        "ontology，task_run/data_app/migration 支持 ontology/all，"
+                        "standard/datasource/component 支持 global/all"
                     ),
                 },
                 "limit": {"type": "integer", "description": "最多返回条数，默认 5"},
@@ -1174,104 +995,12 @@ _FORM_FIELD_TYPES: tuple[str, ...] = (
     "autocomplete", "cron",
 )
 _FORM_MAX_FIELDS: int = 10
-# 建表单时最多探几个数据源的库列表：每个源一次真实连接，全探会把发表单这一步拖成秒级。
-_FORM_DATASOURCE_PROBE_LIMIT: int = 8
-# 「数据源 → 库」合并候选的条数上限：一个源上几百个库时下拉本身就没法用了。
-_FORM_LOCATION_LIMIT: int = 200
 
 
-def _normalize_form_options(raw: Any) -> list[dict[str, str]]:
-    """候选项归一为 ``{label, value}``（可带 disabled）。
-
-    **显示什么和回填什么是两件事**：带 id 的候选（数据源、对象）此前只能写成「名称｜id」，
-    那串 id 就直接糊在下拉里给人看。模型给纯字符串时 label = value，行为不变。
-    """
-    if not isinstance(raw, list):
-        return []
-    out: list[dict[str, str]] = []
-    for item in raw:
-        if isinstance(item, str):
-            text = item.strip()
-            if text:
-                out.append({"label": text, "value": text})
-            continue
-        if not isinstance(item, dict):
-            continue
-        value = str(item.get("value") if item.get("value") is not None else "").strip()
-        label = str(item.get("label") or value).strip()
-        if not value:
-            value = label
-        if not label:
-            continue
-        option: dict[str, Any] = {"label": label[:120], "value": value[:255]}
-        if item.get("disabled"):
-            option["disabled"] = True
-        out.append(option)
-    return out
 
 
-def _match_option(field: dict, value: Any) -> Any | None:
-    """把一个预填值对到该字段的真实候选上；对不上返回 None。
-
-    对不上就**丢掉**：一个听错的库名若原样落进 default，用户看到的是一张「系统已经替我
-    确认过」的表单，而它是错的——错得比空着更贵。
-    """
-    options = field.get("options") or []
-    if not options:
-        # 无候选的字段（text/number/cron/…）自由取值，原样采用。
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    if field.get("type") == "autocomplete":
-        # 候选是**建议**不是闭集：分区键可以是本体没建模的物理列，对不上也照填。
-        for option in options:
-            if text in (option["value"], option["label"]):
-                return option["value"]
-        return text
-    for option in options:
-        if option.get("disabled"):
-            continue  # 选不了的候选不能被预填绕过（如执行侧不支持的装载方式）
-        if text == option["value"] or text == option["label"]:
-            return option["value"]
-    lowered = text.lower()
-    for option in options:
-        if option.get("disabled"):
-            continue
-        if lowered in (option["value"].lower(), option["label"].lower()):
-            return option["value"]
-    # 退到「唯一子串命中」：用户说「落到 dw 库」，候选是「仓库（hive） → dw」。
-    hits = [
-        o for o in options
-        if not o.get("disabled") and (lowered in o["label"].lower() or lowered in o["value"].lower())
-    ]
-    return hits[0]["value"] if len(hits) == 1 else None
 
 
-def _apply_prefill(fields: list[dict], raw: Any) -> list[str]:
-    """把模型读到的「用户已经说过的取值」核对后填成默认值。返回命中的字段名。"""
-    if not isinstance(raw, dict):
-        return []
-    by_name = {f["name"]: f for f in fields}
-    hit: list[str] = []
-    for name, value in raw.items():
-        field = by_name.get(str(name).strip())
-        if field is None or value is None or value == "":
-            continue
-        if field["type"] == "multiselect":
-            values = value if isinstance(value, list) else [value]
-            matched = [m for m in (_match_option(field, v) for v in values) if m is not None]
-            if matched:
-                field["default"] = matched
-                hit.append(field["name"])
-            continue
-        if isinstance(value, list):
-            continue
-        matched = _match_option(field, value)
-        if matched is not None:
-            field["default"] = matched
-            hit.append(field["name"])
-    return hit
 
 
 _REQUEST_FORM_TOOL: dict[str, Any] = {
@@ -1900,7 +1629,6 @@ _TOOL_BY_NAME: dict[str, dict[str, Any]] = {
         _PROPOSE_EXPRESSION_TOOL,
         _LINT_TOOL,
         _PROPOSE_ACTION_TOOL,
-        _PROPOSE_PIPELINE_TOOL,
         _GET_TASK_OPTIONS_TOOL,
         _GET_TASK_STATUS_TOOL,
         _GET_LANDING_TOOL,
@@ -2029,7 +1757,7 @@ SKILL_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
     }),
     "task": frozenset({
         "search_objects", "get_object",  # 只需要最基础的检索
-        "get_task_options", "propose_action", "propose_pipeline", "get_task_status",
+        "get_task_options", "propose_action", "get_task_status",
         "list_datasets",  # 清洗要读上游 ODS：先看它搬完没有
         "request_form",  # 六环确认表单
         "lint_against_standard",
@@ -2065,7 +1793,7 @@ DEFAULT_TOOL_ALLOWLIST: frozenset[str] = frozenset({
 
 
 def _tools_for_skill(
-    skill: "Skill | None", *, sql_allowed: bool = True
+    skill: Skill | None, *, sql_allowed: bool = True
 ) -> list[dict[str, Any]]:
     """当前可用工具集：根据 skill 收窄到白名单（V5 优化：真正收窄而非只解锁）。
 
@@ -2084,13 +1812,16 @@ def _tools_for_skill(
     else:
         allowlist = SKILL_TOOL_ALLOWLIST.get(skill.name, DEFAULT_TOOL_ALLOWLIST)
 
-    # 从注册表筛选白名单内的工具
-    tools = [t for t in _BASE_TOOL_SCHEMAS if t["function"]["name"] in allowlist]
-
-    # 补充白名单中未在 BASE 的工具（如 skill 特有的）
-    for name in allowlist:
-        if name in _TOOL_BY_NAME and not any(t["function"]["name"] == name for t in tools):
-            tools.append(_TOOL_BY_NAME[name])
+    # Preserve the base schema order, then add skill-specific tools in a
+    # deterministic order.  The old ``any(...)`` loop was O(base * allowlist)
+    # and iterated a frozenset, making prompt/tool ordering nondeterministic.
+    base_names = {tool["function"]["name"] for tool in _BASE_TOOL_SCHEMAS}
+    tools = [tool for tool in _BASE_TOOL_SCHEMAS if tool["function"]["name"] in allowlist]
+    tools.extend(
+        _TOOL_BY_NAME[name]
+        for name in sorted(allowlist - base_names)
+        if name in _TOOL_BY_NAME
+    )
 
     # 意图门控：结构性问题移除取数工具
     if not sql_allowed:
@@ -2158,10 +1889,7 @@ __all__ = [
     '_ACTION_KIND_LABEL',
     'SKILL_TOOL_ALLOWLIST',
     'DEFAULT_TOOL_ALLOWLIST',
-    '_PIPELINE_KINDS',
-    '_PIPELINE_MAX_STEPS',
     '_PROPOSE_ACTION_TOOL',
-    '_PROPOSE_PIPELINE_TOOL',
     '_CRON_PRESETS',
     '_LOAD_STRATEGIES',
     '_TASK_OPTIONS_LIMIT',

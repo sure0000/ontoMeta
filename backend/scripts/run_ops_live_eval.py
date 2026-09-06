@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -207,7 +207,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     summary = summarize_ops_results(results)
     return {
         "mode": "live",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "domain_id": domain.id,
         "domain_name": domain.name,
         "ontology_id": ontology.id,

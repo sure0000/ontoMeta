@@ -16,27 +16,27 @@ from app.models import (
     Property,
     RelationType,
 )
-from app.services.object_landing import bulk_object_landings
-from app.services.relation_terms import compact_relation_term, validate_relation_term
+from app.ontology_types import is_valid_cardinality, is_valid_semantic_type
+from app.schemas import (
+    BusinessLogicDetail,
+    BusinessLogicObjectBindingOut,
+    BusinessLogicOut,
+    BusinessLogicPropertyBindingOut,
+    ObjectTypeDetail,
+    ObjectTypeSummary,
+    PropertyOut,
+    RelationTypeOut,
+)
 from app.services.common import log_change
 from app.services.community_detection import vote_segment_for_node
-from app.ontology_types import is_valid_cardinality, is_valid_semantic_type
+from app.services.object_landing import bulk_object_landings
+from app.services.relation_terms import compact_relation_term, validate_relation_term
 from app.services.segment_kinds import SEGMENT_KIND_BUSINESS, SEGMENT_KIND_SHARED
 from app.services.segment_placement import (
     AffinityIndex,
     place_unsegmented,
     resettle_by_role,
     stranded_in_system,
-)
-from app.schemas import (
-    BusinessLogicDetail,
-    BusinessLogicObjectBindingOut,
-    BusinessLogicPropertyBindingOut,
-    BusinessLogicOut,
-    ObjectTypeDetail,
-    ObjectTypeSummary,
-    PropertyOut,
-    RelationTypeOut,
 )
 
 _OBJECT_BINDING_ROLES = {"subject", "dimension", "output"}
@@ -879,6 +879,12 @@ class EditService:
         if not rel:
             raise ValueError("Relation type not found")
 
+        # 改端点前先记下原来的两端：端点被改走之后，**旧的**那两个对象所在的板块同样
+        # 要重算（少了一条关系），只刷新新端点会把旧板块留在过期状态。
+        # 这个快照原本没有——函数末尾直接引用了一个从未定义的 previous_endpoint_ids，
+        # 走到那行就是 NameError。由 ruff 的 F821 扫出来。
+        previous_endpoint_ids = {rel.source_object_type_id, rel.target_object_type_id}
+
         if display_name is not None:
             term_error = validate_relation_term(display_name)
             if term_error:
@@ -1450,8 +1456,8 @@ class EditService:
         obj = db.get(ObjectType, binding.object_type_id)
         # 通过 setattr 附加显示字段；Pydantic from_attributes 会读取这些属性
         if obj:
-            setattr(binding, "object_type_name", obj.name)
-            setattr(binding, "object_type_display_name", obj.display_name)
+            binding.object_type_name = obj.name
+            binding.object_type_display_name = obj.display_name
         return binding
 
     @staticmethod
@@ -1460,10 +1466,10 @@ class EditService:
     ) -> BusinessLogicPropertyBinding:
         prop = db.get(Property, binding.property_id)
         if prop:
-            setattr(binding, "property_name", prop.name)
-            setattr(binding, "property_display_name", prop.display_name)
+            binding.property_name = prop.name
+            binding.property_display_name = prop.display_name
             obj = db.get(ObjectType, prop.object_type_id)
             if obj:
-                setattr(binding, "object_type_id", obj.id)
-                setattr(binding, "object_type_name", obj.name)
+                binding.object_type_id = obj.id
+                binding.object_type_name = obj.name
         return binding

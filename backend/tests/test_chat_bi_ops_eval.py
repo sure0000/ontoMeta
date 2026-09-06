@@ -1,4 +1,4 @@
-"""Data Agent V6 P3：104 题运营问题集与权威 reader 契约验收。"""
+"""Data Agent V6 P3：88 题运营问题集与权威 reader 契约验收。"""
 
 from __future__ import annotations
 
@@ -19,8 +19,7 @@ from tests.fixtures.ops_questions import (
     WRITE_INTENT_QUESTIONS,
     OpsQuestion,
 )
-from tests.test_chat_bi_golden import _seed_golden_domain
-from tests.test_chat_bi_golden import _StubCompletions
+from tests.test_chat_bi_golden import _seed_golden_domain, _StubCompletions
 
 
 def _route_outcome(case: OpsQuestion) -> tuple[bool, str]:
@@ -44,7 +43,7 @@ def _route_outcome(case: OpsQuestion) -> tuple[bool, str]:
 
 def test_ops_question_corpus_shape_and_distribution():
     counts = Counter(case.family for case in OPS_QUESTIONS)
-    assert len(OPS_QUESTIONS) == 104
+    assert len(OPS_QUESTIONS) == 88
     assert set(counts) == set(REGISTRY)
     assert set(counts.values()) == {8}, counts
     assert len({case.id for case in OPS_QUESTIONS}) == len(OPS_QUESTIONS)

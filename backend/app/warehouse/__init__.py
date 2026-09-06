@@ -26,6 +26,8 @@ from app.warehouse.registry import (
     get_adapter,
     list_adapters,
     list_engines,
+    quote_table_ref,
+    session_timeout_statements,
 )
 
 __all__ = [
@@ -46,4 +48,6 @@ __all__ = [
     "get_adapter",
     "list_adapters",
     "list_engines",
+    "quote_table_ref",
+    "session_timeout_statements",
 ]

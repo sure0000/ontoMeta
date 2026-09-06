@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 import uuid
+
+import pytest
 
 from app.models import DataSource, DomainContext, IngestionContract, ObjectType, Ontology, Property
 from app.services.ingestion_contract import IngestionContractError, IngestionContractService
@@ -202,8 +203,10 @@ def test_cdc_requires_real_flink_job_id_to_run(db, ingestion_seed):
 
 
 def test_cdc_health_check_uses_configured_flink_rest(db, ingestion_seed, monkeypatch):
-    import httpx
     from types import SimpleNamespace
+
+    import httpx
+
     from app.services.flink_health import check_ingestion_job
     from app.services.settings_service import SettingsService
 

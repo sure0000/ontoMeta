@@ -313,7 +313,6 @@ function OntologyDetailGraphInner({
       g.destroy();
       graphRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, centerNodeId]);
 
   // 容器尺寸变化(窗口缩放、侧栏折叠、Tab 切换)时通知画布重新计算尺寸，canvas 不会像 flex 布局的 DOM 那样自动响应。

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -15,7 +14,6 @@ from app.services.data_app_executor import (
     execute_sql,
     is_read_only,
 )
-
 
 # --------------------------------------------------------------- executor unit
 

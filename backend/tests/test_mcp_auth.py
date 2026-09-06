@@ -15,16 +15,15 @@ import asyncio
 import json
 from uuid import uuid4
 
+import mcp.types as types
 import pytest
 
-import mcp.types as types
 from app.config import settings
 from app.database import SessionLocal
 from app.mcp import server as mcp_server
 from app.mcp.auth import resolve_auth_context
-from app.mcp.tools import AuthContext, TOOL_REGISTRY, tool_required_role
+from app.mcp.tools import TOOL_REGISTRY, AuthContext, tool_required_role
 from app.models.mcp_audit import McpAuditLog
-from app.models.principal import Principal
 from app.services.principal_service import PrincipalService
 from app.services.settings_service import SettingsService
 

@@ -30,7 +30,8 @@ import re
 from typing import Any
 
 import sqlparse
-from sqlalchemy import create_engine, inspect as sa_inspect, text
+from sqlalchemy import create_engine, text
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import NoSuchModuleError
 
@@ -39,6 +40,7 @@ from app.warehouse import (
     engine_driver_hint,
     engine_for_dsn,
     get_adapter,
+    session_timeout_statements,
 )
 
 logger = logging.getLogger("ontometa.data_app.executor")
@@ -111,7 +113,22 @@ def _engine_or_error(dsn: str) -> Engine:
 
 
 def is_read_only(sql: str) -> tuple[bool, str | None]:
-    """校验 SQL 是否为安全的只读单条查询。返回 (ok, reason)。"""
+    """校验 SQL 是否为安全的只读单条查询。返回 (ok, reason)。
+
+    **按 token 判定，不在原文上跑正则。** 原来是把整条 SQL 小写化后逐个禁用词
+    ``re.search``，于是字符串字面量和注释里的词一样会命中::
+
+        SELECT name FROM t WHERE note = 'please delete this'  → 判「包含禁止的关键字：delete」
+        SELECT * FROM t -- create table x                     → 同样被拒
+
+    这不是边角情况——ERP 的文本字段里出现 delete/update/create 是常态，而 Data Agent
+    生成的正是这类查询，被无理由挡回去只会让人以为模型出错了。
+
+    改判之后**写侧防护一点没松**：禁用词只在 ``Keyword`` 类 token 上匹配，
+    叠句、Postgres 的数据修改型 CTE、``COPY ... TO PROGRAM`` 仍然全部拦住
+    （见 tests/test_read_only_guard.py）。反过来，被引号引起来的、真的叫
+    ``delete`` 的列名会被正确放行——那本来就该放行。
+    """
     if not sql or not sql.strip():
         return False, "空 SQL"
     statements = [s for s in sqlparse.parse(sql) if str(s).strip()]
@@ -126,10 +143,16 @@ def is_read_only(sql: str) -> tuple[bool, str | None]:
             break
     if stmt_type != "SELECT" and first_kw not in {"select", "with"}:
         return False, f"仅允许 SELECT 查询（检测到 {stmt_type or first_kw}）"
-    lowered = sql.lower()
-    for kw in _FORBIDDEN:
-        if re.search(rf"\b{kw}\b", lowered):
-            return False, f"包含禁止的关键字：{kw}"
+
+    for token in stmt.flatten():
+        # 只看关键字。字面量（String/Number）、注释、标识符一律不参与判定——
+        # 那正是误伤的来源。
+        if not token.is_keyword:
+            continue
+        # 复合关键字（"group by"、"insert into"）可能整段出现，逐词拆开比。
+        for part in str(token).strip().lower().split():
+            if part in _FORBIDDEN:
+                return False, f"包含禁止的关键字：{part}"
     return True, None
 
 
@@ -269,6 +292,26 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _apply_session_timeout(conn, backend: str, timeout_seconds: float) -> None:
+    """给连接设会话级语句超时。引擎不支持则不设，设失败则告警后继续。
+
+    **不因设不上就拒绝查询**：各家版本差异（MariaDB 的旋钮叫 max_statement_time、
+    老版本 MySQL 压根没有 max_execution_time）会让「设不上」成为常态而非异常，
+    在这里抛错等于把一个防护特性变成可用性回归。但也**不静默吞**——设不上就意味着
+    这条查询没有上限，日志里必须留下痕迹，否则就是审计里批评过的那种「静默失效」。
+    """
+    for statement in session_timeout_statements(backend, timeout_seconds):
+        try:
+            conn.exec_driver_sql(statement)
+        except Exception as exc:  # noqa: BLE001 —— 设不上超时不该让查询本身失败
+            logger.warning(
+                "无法在 %s 上设置语句超时（%s）：%s；本次查询将不受服务端超时保护",
+                backend,
+                statement,
+                exc,
+            )
+
+
 def execute_sql(
     *,
     dsn: str,
@@ -297,14 +340,11 @@ def execute_sql(
     engine = _engine_or_error(dsn)
     try:
         with engine.connect() as conn:
-            if backend == "postgres":
-                conn.exec_driver_sql(
-                    f"SET statement_timeout = {int(timeout_seconds) * 1000}"
-                )
+            _apply_session_timeout(conn, backend, timeout_seconds)
             result = conn.execute(text(prepared))
             keys = list(result.keys())
             rows = [
-                {k: _json_safe(v) for k, v in zip(keys, row)}
+                {k: _json_safe(v) for k, v in zip(keys, row, strict=False)}
                 for row in result.fetchall()
             ]
     except Exception as exc:  # noqa: BLE001
@@ -362,10 +402,7 @@ def execute_write(
     try:
         engine = _engine_or_error(dsn)
         with engine.begin() as conn:
-            if backend == "postgres":
-                conn.exec_driver_sql(
-                    f"SET statement_timeout = {int(timeout_seconds) * 1000}"
-                )
+            _apply_session_timeout(conn, backend, timeout_seconds)
             for idx, sql in prepared:
                 try:
                     conn.exec_driver_sql(sql)

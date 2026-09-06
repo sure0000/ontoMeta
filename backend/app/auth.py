@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -22,8 +23,11 @@ from starlette.types import ASGIApp
 
 from app.config import settings
 
+logger = logging.getLogger("ontometa.auth")
+
 # 管理鉴权豁免：健康检查、公开分享看板
-_ADMIN_EXEMPT_EXACT = frozenset({"/health"})
+# /ready 与 /health 同为探针：负载均衡与编排系统不会带管理令牌，鉴权必须豁免。
+_ADMIN_EXEMPT_EXACT = frozenset({"/health", "/ready"})
 _ADMIN_EXEMPT_PREFIXES = ("/api/public",)
 
 
@@ -78,6 +82,57 @@ def api_key_prefix(raw_key: str, length: int = 12) -> str:
 def generate_dev_admin_token() -> str:
     """仅用于文档示例，勿在生产使用固定值。"""
     return f"om_admin_{secrets.token_urlsafe(24)}"
+
+
+# 仓库里公开出现过的引导期令牌。它们在 docker-compose / service.sh / 冒烟脚本里都是
+# 默认值，等于「写在 README 上的密码」——谁 clone 了仓库谁就知道。
+_PUBLISHED_ADMIN_TOKENS = frozenset({"dev-admin-token-change-me", "changeme", "admin", "token"})
+# 生产令牌的长度下限。ONTOMETA_ADMIN_TOKEN 是 superuser 凭据（等价 publisher，且不查库），
+# 短到能被猜/爆破就没有意义。部署时注入的随机串一定过线，只有手敲的开发值过不了。
+_MIN_ADMIN_TOKEN_LENGTH = 16
+
+
+def check_bootstrap_secrets() -> list[str]:
+    """检查引导期凭据的强度，返回问题清单（空 = 无问题）。
+
+    只做判定、不决定后果——由调用方按 debug 决定是拒绝启动还是告警（见
+    ``app.main`` 的 lifespan）。分开是为了让测试能直接断言判据，不必去起进程。
+    """
+    problems: list[str] = []
+    token = (settings.ontometa_admin_token or "").strip()
+    if not token:
+        return problems  # 未配置是另一条既有路径：/api 直接 503，不在这里重复报
+    if token.lower() in _PUBLISHED_ADMIN_TOKENS:
+        problems.append(
+            "ONTOMETA_ADMIN_TOKEN 仍是仓库里公开的引导期默认值"
+            f"（{token[:4]}…），任何拿到本仓库的人都知道它"
+        )
+    elif len(token) < _MIN_ADMIN_TOKEN_LENGTH:
+        problems.append(
+            f"ONTOMETA_ADMIN_TOKEN 只有 {len(token)} 个字符，"
+            f"低于 {_MIN_ADMIN_TOKEN_LENGTH} 的下限；它是 superuser 凭据，须足够随机"
+        )
+    return problems
+
+
+def enforce_bootstrap_secrets() -> None:
+    """生产（debug 关）下凭据不合格即拒绝启动；开发下只告警。
+
+    **为什么是拒绝而不是告警**：弱令牌的后果是整套管理 API 对外敞开，而告警会淹没在
+    启动日志里没人看。开发不受影响——本地要么设 DEBUG=true，要么换个够长的令牌。
+    """
+    problems = check_bootstrap_secrets()
+    if not problems:
+        return
+    detail = "；".join(problems)
+    if settings.debug:
+        logger.warning("引导期凭据不安全（debug 模式下仅告警）：%s", detail)
+        return
+    raise RuntimeError(
+        f"拒绝以不安全的引导期凭据启动：{detail}。"
+        "请在部署时注入随机令牌（例如 `openssl rand -base64 32`）后重启；"
+        "本地开发可设 DEBUG=true 跳过本检查。"
+    )
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
@@ -172,6 +227,30 @@ def required_role(method: str, path: str) -> str:
     return _METHOD_DEFAULTS.get(method.upper(), "publisher")
 
 
+# ``last_used_at`` 的记录精度。低于这个间隔的重复使用不再写库。
+#
+# 改前是**每个带主体令牌的请求都 UPDATE + COMMIT 一次**——鉴权在中间件里，也就是说
+# 每一次 API 调用（含所有 GET）都要在热路径上多一次写事务。这个字段的用途只是设置页
+# 里那句「最近使用：X 分钟前」，秒级精度没有任何人会看，却让每个读请求都带上写代价，
+# 在 Postgres 上还会给同一行反复制造死元组。60 秒的记录精度对这个用途绰绰有余。
+_LAST_USED_RESOLUTION = timedelta(seconds=60)
+
+
+def _touch_last_used(db, principal) -> None:
+    """按 ``_LAST_USED_RESOLUTION`` 精度更新主体的最近使用时间。"""
+    now = datetime.now(UTC)
+    last = principal.last_used_at
+    if last is not None:
+        # 列是不带时区的 DateTime：读回来是 naive，直接与 aware 的 now 相减会 TypeError。
+        # 写入的一直是 UTC，所以按 UTC 补上时区再比。
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        if now - last < _LAST_USED_RESOLUTION:
+            return
+    principal.last_used_at = now
+    db.commit()
+
+
 def resolve_principal_token(token: str | None) -> tuple[str | None, str | None]:
     """裸 Token → ``(role, principal_id | None)``。传输无关，供 HTTP 与 MCP stdio 共用。
 
@@ -201,10 +280,9 @@ def resolve_principal_token(token: str | None) -> tuple[str | None, str | None]:
         )
         if principal is None:
             return None, None
-        principal.last_used_at = datetime.now(timezone.utc)
         role = principal.role
         principal_id = principal.id
-        db.commit()
+        _touch_last_used(db, principal)
         return role, principal_id
 
 
@@ -235,6 +313,29 @@ def require_role(minimum: str):
                 status_code=403,
                 detail=f"权限不足：该操作需要 {minimum} 角色，当前为 {role or '未知'}",
             )
-        return role
+        # role_satisfies 对 None 一定返回 False，走到这里必然有值；显式收窄让类型可核。
+        return str(role)
 
     return _dep
+
+
+def principal_label(db, request: Request) -> str | None:
+    """请求主体的人话标识：优先 ``Principal.name``，退回 principal_id。
+
+    存在的理由是**口径统一**：制品的 ``created_by`` / ``confirmed_by`` 由 REST 与 MCP
+    两个入口分别写，MCP 侧写的是 ``auth.principal_name or auth.principal_id``。这里不
+    对齐，同一个字段在库里就有两种形状，"这条任务是谁建的"要分情况解释——制品既然是
+    唯一的记录，就不能留这种分叉。
+
+    共享 Admin Token（未配置 principals）解析不出主体，返回 None。
+    """
+    principal_id = getattr(request.state, "principal_id", None)
+    if not principal_id:
+        return None
+    try:
+        from app.models.principal import Principal
+
+        row = db.query(Principal).filter(Principal.id == principal_id).first()
+        return (row.name if row and row.name else None) or principal_id
+    except Exception:  # noqa: BLE001 — 取不到名字退回 id，绝不因留痕炸掉正常请求
+        return principal_id

@@ -64,12 +64,10 @@ def _configure_logging() -> None:
 
 
 async def _execute(task_id: str) -> None:
-    from app.services.draft_generation_queue import await_running_slot
-    from app.services.workspace_service import WorkspaceService
-
     from app.database import SessionLocal
     from app.models import DraftGenerationTask
-    from app.services.draft_generation_queue import TERMINAL_STATUSES
+    from app.services.draft_generation_queue import TERMINAL_STATUSES, await_running_slot
+    from app.services.workspace_service import WorkspaceService
 
     # 读任务：拿 scope 与 domain，任务不存在/已终态（含被取消）直接退出。
     with SessionLocal() as db:

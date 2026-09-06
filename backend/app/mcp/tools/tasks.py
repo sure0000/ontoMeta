@@ -86,6 +86,19 @@ def _project(artifact) -> dict[str, Any]:
             if k in spec
         },
         "receipt_summary": _receipt_summary(artifact.execution_receipt_json),
+        # 人对结果的判断。与 status/receipt **分列**：那边是系统这侧发生了什么，
+        # 这边是人看过之后认不认。没人表态就是 None——绝不拿 status 顶上。
+        "result": {
+            "outcome": artifact.result_outcome,
+            "note": artifact.result_note,
+            "confirmed_by": artifact.result_confirmed_by,
+            "confirmed_at": (
+                artifact.result_confirmed_at.isoformat()
+                if artifact.result_confirmed_at
+                else None
+            ),
+            "via": artifact.result_via,
+        },
     }
 
 
@@ -126,6 +139,25 @@ def _read_task_status(task_id: str, *, include_spec: bool = False) -> ToolResult
             }
             if include_spec:
                 result["spec"] = loads(artifact.spec_json, {})
+
+            # 跑完了但没人说对不对 → 明确点出来，并把判断依据一起摆上。
+            # 不点出来，agent 就会拿"succeeded"当"用户满意"结掉整件事。
+            if _pipeline.result_pending(artifact):
+                result["result_pending"] = {
+                    "reason": "任务已到终态，但还没有人判断结果是否符合预期",
+                    "evidence": {
+                        "status": artifact.status,
+                        "executed_at": result.get("executed_at"),
+                        "receipt_summary": result["receipt_summary"],
+                        "target": result["target"],
+                    },
+                    "instruction": (
+                        "把上面这些事实原样摆给用户（宿主有 ask_user_question 就用它），"
+                        "问结果是否符合预期，再用 confirm_task_result 回写用户的原话答复。"
+                        "**执行成功不等于结果正确**——不要替用户判断，也不要因为 status "
+                        "是 succeeded 就跳过这一问。"
+                    ),
+                }
 
             # Airflow/Doris is the runtime authority; failures here fall back to the
             # persisted artifact state and remain visible in the regular status shape.

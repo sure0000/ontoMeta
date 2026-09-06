@@ -1,11 +1,8 @@
-import enum
 import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean,
     DateTime,
-    Float,
     ForeignKey,
     Integer,
     String,

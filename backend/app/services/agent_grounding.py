@@ -12,8 +12,7 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -68,7 +67,7 @@ def _numeric_tokens(value: Any) -> set[str]:
     if f == int(f):
         out.add(str(int(f)))  # 12.0 -> "12"
     # 归一到定点，去掉尾零：1234.50 -> "1234.5"
-    out.add(("%f" % f).rstrip("0").rstrip("."))
+    out.add((f"{f:f}").rstrip("0").rstrip("."))
     return out
 
 

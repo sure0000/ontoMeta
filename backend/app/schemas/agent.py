@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -63,6 +63,21 @@ class ArtifactAgentApprovalRequest(BaseModel):
     operator: str | None = None
 
 
+class ArtifactResultRequest(BaseModel):
+    """人对执行结果的判断：符不符合预期。
+
+    **不含 operator**：署名由服务端从已认证主体取。这条记录的全部价值就在于"是谁看过之后
+    认的"，让客户端自报等于没记。
+    """
+
+    outcome: Literal["accepted", "rejected"]
+    note: str | None = Field(
+        default=None,
+        description="不符合预期时写清哪里不对；符合时可留空",
+        max_length=2000,
+    )
+
+
 class GovernanceArtifactOut(BaseModel):
     id: str
     kind: str
@@ -85,6 +100,19 @@ class GovernanceArtifactOut(BaseModel):
     agent_execution_approved_by: str | None = None
     agent_execution_approved_at: datetime | None = None
     origin: str
+    # 人对结果的判断。与 status/receipt **分列**：那边说系统这侧发生了什么，
+    # 这边说人看过之后认不认。没人表态就是 None，绝不拿 status 顶上。
+    result_outcome: str | None = None
+    result_note: str | None = None
+    result_confirmed_by: str | None = None
+    result_confirmed_at: datetime | None = None
+    result_via: str | None = None
+    # 「机器提了什么、人改了什么、谁建的」——制品是这三件事的唯一记录，故一并出到读模型。
+    # pinned_fields 由 ProvenanceMixin 从 overridden_fields 解析（最终 spec 相对
+    # machine_baseline 差在哪几个顶层键）。
+    pinned_fields: list[str] = Field(default_factory=list)
+    created_by: str | None = None
+    created_via: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -95,109 +123,12 @@ class AgentKindsOut(BaseModel):
     high_risk: list[str]
 
 
-class PipelineStepInput(BaseModel):
-    """建链时的一步：**只描述打算做什么**，制品要等轮到它才起草。"""
-
-    kind: str = Field(description="materialize / sync / transform / metric")
-    intent: str
-    context: dict[str, Any] = Field(default_factory=dict)
-    # C2：血缘依赖（上游步序列表）。agent 从血缘/意图推导；空 = 线性默认（依赖上一步）。
-    depends_on: list[int] = Field(default_factory=list)
-
-
-class TaskPipelineCreateRequest(BaseModel):
-    name: str = ""
-    intent: str | None = None
-    ontology_id: str | None = None
-    steps: list[PipelineStepInput] = Field(default_factory=list)
-
-
-class PipelineStepOut(BaseModel):
-    id: str
-    step_index: int
-    kind: str
-    intent: str
-    context: dict[str, Any] = Field(default_factory=dict)
-    artifact_id: str | None = None
-    #: 还没起草的步骤没有制品，状态如实为 null——不拿 "drafted" 冒充。
-    artifact_status: str | None = None
-    artifact_name: str | None = None
-    # C2：血缘依赖（上游步序列表）。
-    depends_on: list[int] = Field(default_factory=list)
-
-
-class TaskPipelineOut(BaseModel):
-    id: str
-    name: str
-    intent: str | None = None
-    ontology_id: str | None = None
-    #: 由各步制品聚合推导：drafted / running / succeeded / failed。
-    status: str
-    steps: list[PipelineStepOut] = Field(default_factory=list)
-    #: 下一个待起草的步序；全起草完为 null。
-    next_step_index: int | None = None
-    #: 下一步为什么还不能起草（上游没跑成功）；能起草为 null。
-    next_blocked_reason: str | None = None
-    # P2: 编译成周期 DAG 的状态
-    schedule_cron: str | None = None
-    compiled_dag_id: str | None = None
-    compiled_at: datetime | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class PipelineAdvanceConfirmedRequest(BaseModel):
-    """任务链的**某一步**走完前三环确认后才起草它。
-
-    链不替谁确认：每一步都是一条独立的数据任务，与单发任务同样要人分别确认
-    需求 / 本体 / 数据，再在制品抽屉里确认执行方案 / 执行 / 结果。
-    """
-
-    conversation_id: str
-    confirmation_id: str
-    #: 人在向导里定下的参数；合并进该步的 context（显式的优先于链的继承值）。
-    context: dict[str, Any] = Field(default_factory=dict)
-    #: 人在「确认任务需求」那一环改定的需求，作为该步 intent。留空则沿用链上原意图。
-    intent: str | None = None
-
-
 class TaskFormRequest(BaseModel):
-    """按任务类型现取一张六环确认表单（任务链逐步确认、非对话入口共用）。"""
+    """按任务类型现取一张任务表单（供非对话入口取同一份字段骨架与真实候选）。"""
 
     kind: str
     ontology_id: str
     title: str = ""
     intent: str = ""
-    #: 已知取值（如链上游继承来的落点）：核对候选后填成默认值，核不上的丢弃。
+    #: 已知取值：核对候选后填成默认值，核不上的丢弃。
     prefill: dict[str, Any] = Field(default_factory=dict)
-
-
-class TaskPipelineAdvanceOut(BaseModel):
-    """推进一步的结果：新起草的制品 + 推进后的链态（前端一次拿全，不用再查一遍）。"""
-
-    pipeline: TaskPipelineOut
-    artifact: GovernanceArtifactOut
-
-
-class TaskPipelineDraftAllOut(BaseModel):
-    """C2：一键起草全部步骤的结果：新起草的制品列表 + 链态。"""
-
-    pipeline: TaskPipelineOut
-    artifacts: list[GovernanceArtifactOut]
-
-
-class PipelineScheduleRequest(BaseModel):
-    """给链设置周期调度 cron。"""
-
-    schedule_cron: str = Field(description="cron 表达式，如 '0 2 * * *'（每天凌晨 2 点）")
-
-
-class PipelineCompileOut(BaseModel):
-    """编译结果：链 → 一条周期 DAG。"""
-
-    pipeline_id: str
-    compiled_dag_id: str
-    schedule_cron: str
-    steps: list[dict[str, Any]] = Field(default_factory=list)
-    dag_path: str
-    spec_path: str

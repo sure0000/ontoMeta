@@ -249,7 +249,19 @@ class SettingsService:
         values = dict(data)
         values["mcp_http_enabled"] = True
         values["mcp_http_allow_anonymous"] = False
-        return self._deps.save_mcp(db, values)
+        result = self._deps.save_mcp(db, values)
+        # MCP rate limiting keeps a short-lived in-process settings cache to
+        # avoid a database read on every tool call.  Invalidate it here so a
+        # settings-page change takes effect on the next request.
+        try:
+            from app.mcp.rate_limit import invalidate_rate_limit_config
+
+            invalidate_rate_limit_config()
+        except ImportError:
+            # SettingsService is also used by bootstrap paths that do not load
+            # the MCP package.
+            pass
+        return result
 
     def get_mcp_runtime(self, db: Session) -> McpRuntimeConfig:
         self.ensure_defaults(db)

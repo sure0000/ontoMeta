@@ -32,9 +32,7 @@ from app.models import (
 )
 from app.services import agent_telemetry
 from app.services.chat_bi import ChatBiService
-
 from tests.fixtures.golden_questions import GOLDEN_CASES, FinalTurn, GoldenCase, ToolTurn
-
 
 # --------------------------------------------------------------------------- 种子
 

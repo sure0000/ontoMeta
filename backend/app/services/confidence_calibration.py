@@ -13,6 +13,19 @@
 **冷启动铁律**：真实人工复核信号不足（样本太少或只有单一类别）时**不拟合**，返回
 恒等校准并置 `cold_start=True`，绝不用管道噪声（如全量同组 overridden 字段）拟出
 垃圾映射。校准产物默认**不接入热路径**，由上层在确有真实复核数据后显式启用。
+
+.. admonition:: 状态：已建成，尚未接线
+
+   本模块目前**没有任何生产调用方**——只有它自己的测试引用它。这不是遗漏，是它
+   在等一个上层决策（见下），在那之前刻意不进热路径。
+
+   审计时它被当成死代码报了出来。留着不删的理由是它是完整且有测试的实现，删掉要
+   重写；但「读代码的人误以为它已经在用」是真问题，所以状态写在这里。
+   ``tests/test_unwired_modules.py`` 钉住了这份清单——接线或删除时记得同步更新。
+
+   **接线前提**：需要积累到足够的真实人工复核信号（当前生产库的复核痕迹尚不足以
+   拟合），并由上层显式决定是否用校准值替换 ``object_classifier._score_to_confidence``
+   的死映射。
 """
 
 from __future__ import annotations
@@ -133,7 +146,7 @@ def fit_platt(labels: list[WeakLabel], *, iters: int = 500, lr: float = 0.1) -> 
     ys = [1.0 if l.correct else 0.0 for l in labels]
     for _ in range(iters):
         gw = gb = 0.0
-        for x, y in zip(xs, ys):
+        for x, y in zip(xs, ys, strict=False):
             p = _sigmoid(w * x + b)
             err = p - y
             gw += err * x

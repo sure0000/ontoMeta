@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.mcp.tools import TOOL_REGISTRY
 from app.mcp.skills import OUTPUT_CONTRACT_HEADING, builtin_composed
+from app.mcp.tools import TOOL_REGISTRY
 
 SKILL_ROOT = Path(__file__).parents[1] / "app/mcp/skills"
 
@@ -28,11 +28,15 @@ ROUTER = "ontometa-mcp"
 CONTRACT = "ontometa-output"
 SPECIALIZED = (
     "ontometa-flow",
+    "ontometa-onboarding",
     "ontometa-discovery",
     "ontometa-query",
+    "ontometa-authoring",
+    "ontometa-modeling",
     "ontometa-task-plan",
     "ontometa-task-execute",
     "ontometa-admin",
+    "ontometa-lineage",
 )
 ALL_SKILLS = (ROUTER, CONTRACT, *SPECIALIZED)
 
@@ -46,10 +50,18 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "blocked",           # 缺前置条件是事实，不是可以绕过的提示
         "search",            # 候选几百条时怎么收窄
     ),
+    "ontometa-onboarding": (
+        "list_onboarding_targets", "create_datasource", "start_ontology_draft",
+        "connection_configured",   # 没填凭据的源不是「已接入」
+        "acknowledge_republish",   # 重跑不是原地覆盖，得先告诉用户
+        "DataHub",                 # 采集不归 ontoMeta 管，别把读不到说成库是空的
+        "get_ops_record",          # 生成是异步的，终态从记录读
+    ),
     "ontometa-discovery": (
         "query_ontology", "get_ontology_overview", "query_objects", "query_object_detail",
         "query_relations", "search_logics", "get_logic", "get_lineage", "get_landing",
-        "list_datasources",
+        "list_datasets", "list_datasources",
+        "queryable",         # 表在 ≠ 能查
         "formalized",        # 只有文字口径的那条编译不出 SQL
         "is_derivation",     # 外键不是「数据从这里来」
         "not_landed",        # 没登记就是没落地，不许拼表名
@@ -61,6 +73,30 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "caliber_trace",     # 口径证据
         "sql_hint", "fanout_risk", "safe_aggs",
         "sample_note",
+    ),
+    "ontometa-authoring": (
+        "compile_logic_expression", "create_logic", "update_logic_expression", "lint_spec",
+        "list_logic_categories", "update_logic", "bind_logic_object", "unbind_logic_object",
+        "bind_logic_property", "unbind_logic_property", "review_logic_publish", "publish_logic",
+        "search_logics",     # 建之前先查重
+        "caliber_trace",     # 给人核对口径的凭据
+        "formalized",        # 只有文字定义的那条要补全而不是新建
+        "compliant",         # 没有物理表名时是 null，不得说「合规」
+        "草稿",              # 建出来是草稿，不是已发布
+    ),
+    "ontometa-lineage": (
+        "get_lineage_inventory", "get_lineage_columns", "preview_lineage_supplement",
+        "preview_sql_lineage", "list_lineage_packages", "get_lineage_package",
+        "apply_lineage_package", "apply_lineage_supplement", "preview_digest", "isolated",
+        "DataHub", "join_keys", "宿主确认",
+    ),
+    "ontometa-modeling": (
+        "create_modeling_case", "save_modeling_spec", "confirm_modeling_spec",
+        "get_modeling_case", "create_dimensional_model",
+        "content_hash",      # 乐观锁：确认的必须是被审查的那一版
+        "business_goal",     # 需求规格的字段名是固定的
+        "grain",             # 先定粒度
+        "has_errors",        # 校验有错就是模型不能用
     ),
     "ontometa-task-plan": (
         "propose_sync", "propose_transform", "propose_materialize", "propose_metric",

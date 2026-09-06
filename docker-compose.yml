@@ -28,14 +28,25 @@ services:
       context: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg://ontometa:ontometa@postgres:5432/ontometa
+      # 本 compose 是**本地演示栈**：库口令是写死的 ontometa:ontometa、5432 直接映射到
+      # 宿主机、管理令牌用仓库里的公开默认值。DEBUG 默认开正是为了如实声明这一点——
+      # 后端在 DEBUG 关闭时会拒绝用公开令牌启动（app/auth.py 的 enforce_bootstrap_secrets）。
+      # 真要拿它上生产：注入随机 ONTOMETA_ADMIN_TOKEN 并设 DEBUG=false，届时那道闸会替你把关。
       ONTOMETA_ADMIN_TOKEN: ${ONTOMETA_ADMIN_TOKEN:-dev-admin-token-change-me}
-      DEBUG: ${DEBUG:-false}
+      DEBUG: ${DEBUG:-true}
       DATAHUB_GMS_URL: ${DATAHUB_GMS_URL:-http://host.docker.internal:8080}
       DATAHUB_FRONTEND_URL: ${DATAHUB_FRONTEND_URL:-http://localhost:9002}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       API_KEY_HASH_PEPPER: ${API_KEY_HASH_PEPPER:-}
       MAX_CONCURRENT_DRAFT_GENERATIONS: ${MAX_CONCURRENT_DRAFT_GENERATIONS:-2}
       CORS_ORIGINS: '["http://localhost:5180","http://127.0.0.1:5180"]'
+      # worker 数与连接池要一起调：连接数 = UVICORN_WORKERS × (DB_POOL_SIZE + DB_MAX_OVERFLOW)，
+      # 默认 4 × (5 + 10) = 60，低于 Postgres 默认 max_connections=100。
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
+      # 结构化日志：容器里默认走 JSON，便于采集；本地开发不设这项，保持人读格式。
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
     ports:
       - "8000:8000"
     depends_on:

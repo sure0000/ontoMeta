@@ -95,7 +95,7 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 `query_objects` 支持 `group_by=role|segment` 聚合模式，先返回分布再按需分页取明细，
 避免把大型本体的全部对象塞进 agent 上下文。
 
-**36 个已注册工具**（以 `app/mcp/tools/` 的 `TOOL_REGISTRY` 为准；括号内是服务器强制的最低角色。本节由 `tests/test_docs_tool_catalog.py` 钉住，加工具不同步会失败）：
+**67 个已注册工具**（以 `app/mcp/tools/` 的 `TOOL_REGISTRY` 为准；括号内是服务器强制的最低角色。本节由 `tests/test_docs_tool_catalog.py` 钉住，加工具不同步会失败）：
 
 ### 入口与指引（1 个）
 - `get_playbook`（reader）- 取回 ontoMeta 的操作指引（playbook）正文：某类问题该按什么顺序调哪些工具、每个结果字段怎么解读、哪些结论不许说
@@ -106,7 +106,7 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 - `open_task_form`（editor）- 客户端没有原生问答工具时，把当前这一步换成 ontoMeta 控制台上的一次性网页表单链接
 - `wait_task_form`（editor）- 服务端等那张网页表单被提交（最长 50 秒），回填后连同下一步一起返回
 
-字段与候选取自 `ChatBiService.build_task_form`——**与 Web 表单同源**。流程本身**无服务端状态**：
+字段与候选取自 `services/task_form.build_task_form`——**与 Web 表单同源**。流程本身**无服务端状态**：
 由 `(kind, answers)` 完全决定，断线、换会话、重连都能接着填。
 
 **只问定不下来的，最后给一次执行审查**：有默认值、唯一候选、可选项一律自动填；
@@ -131,19 +131,59 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 - `query_relations`（reader）- 查询本体中的业务对象关系（外键/引用/包含/转化）。关系两端给的是对象名，写 JOIN 时的连接键在 source_evidence 里
 - `search_logics`（reader）- 按关键词检索业务口径：指标（GMV/客单价）、标签（客户分层）、规则（金额必须为正）。关键词匹配标识名、显示名与描述；默认只看已发布口径
 
-### 血缘 / 落点 / 运行记录（3 个）
+### 血缘 / 落点 / 运行记录（4 个）
+- `list_datasets`（reader）- 列出一个本体在数仓里的**物理落点目录**：哪个对象/口径落到了哪张表、在哪一层（ods/dwd/dws/ads）、建了吗、数搬了吗、能不能查。只列已登记的落点
 - `get_landing`（reader）- 读业务对象或业务口径的**真实物理落点**：落到哪张表、表建了吗、数搬了吗、现在能不能查
 - `get_lineage`（reader）- 查某个业务对象的血缘与上下游邻域（中心对象 + depth 跳关系）
 - `get_ops_record`（reader）- 读**已经发生过**的权威运行记录，只读，不创建也不执行任何任务。按 family 选族：
 
-### 取数辅助（2 个）
+### 血缘补录（8 个）
+- `get_lineage_inventory`（reader）- 读取数据域 DataHub 家底、上下游计数、孤岛表与覆盖率
+- `get_lineage_columns`（reader）- 读取补录所需的真实字段与 DataHub URN
+- `preview_lineage_supplement`（editor）- 预览人工 source→target 边和关联键，校验表/字段并返回 confirmation digest，不写库
+- `preview_sql_lineage`（editor）- 解析 INSERT/CTAS/VIEW SQL 中的血缘并映射当前域的 DataHub 表，不写库
+- `list_lineage_packages`（reader）- 列出 SQL 代码包/画布补录历史和边统计
+- `get_lineage_package`（reader）- 查看单个代码包的解析失败、边映射和上报状态
+- `apply_lineage_package`（publisher）- 人工确认后把扫描包可映射边上报 DataHub
+- `apply_lineage_supplement`（publisher）- 人工确认后把预览通过的人工边上报 DataHub并留档
+
+### 取数辅助（3 个）
 - `find_join_path`（reader）- 查两个业务对象之间**本体认可的**关联路径：每一跳的关系、ON 连接键、基数链，以及可直接用的 `sql_hint`（FROM/JOIN 片段）
 - `profile_values`（publisher）- 查某个字段**实际存着什么值**：类别/标识字段给 TopN 取值与频次、去重数；度量字段给最小/最大/均值；时间字段给时间区间；另有空值率
+- `analyze_query`（publisher）- 执行一条受治理的只读查询并对返回行做确定性统计：分布、IQR 离群值、趋势和突变；`truncated=true` 时结果只能当作返回行样本
 
 ### 数据源与 SQL（3 个）
 - `execute_sql`（publisher）- 在默认 Doris 数仓执行只读 SQL 并返回结果行
 - `list_datasources`（reader）- 列出已配置的数据源：业务源库（business_source）与数仓（warehouse）。建同步任务时源端取 business_source、目标端取默认 Doris 仓。不返回任何凭据
 - `validate_sql`（reader）- 校验 SQL 是否为合法的单条只读查询。不连数据库、不执行
+
+### 口径创作与规约自检（4 个）
+- `compile_logic_expression`（reader）- 把一条口径的表达式编译成真 SQL 并自证，不写库。编不过回 `code` + 可用字段/支持的算子，照着改；编过了回 `compiled_sql` 与口径展开轨迹
+- `create_logic`（editor）- 新建一条业务口径（指标/标签/规则）**草稿**。带表达式时先编译自证，编不过就不建；不带表达式时 `description` 必填
+- `update_logic_expression`（editor）- 为已存在但只有文字定义的口径补全/替换表达式，在它自己所属的本体上编译
+- `lint_spec`（reader）- 用当前生效的数据治理规约自检一份建数/建表规格；`compliant=null` 表示 spec 里没有物理表名、一条规则都没跑过
+
+### 业务逻辑管理（8 个）
+- `list_logic_categories`（reader）- 列出业务逻辑分类及数量，供 category_id 选择
+- `update_logic`（editor）- 编辑业务逻辑元数据；表达式更新必须走编译工具
+- `bind_logic_object`（editor）- 绑定同一本体中的真实业务对象
+- `unbind_logic_object`（editor）- 解除对象绑定，不删除口径或对象
+- `bind_logic_property`（editor）- 绑定同一本体中的真实字段
+- `unbind_logic_property`（editor）- 解除字段绑定，不删除口径或字段
+- `review_logic_publish`（reader）- 重编已存表达式并生成发布审查结果和 confirmation digest，不发布
+- `publish_logic`（publisher）- 宿主确认后发布业务逻辑，远程/无交互客户端停在审查
+
+### 接数据（3 个）
+- `list_onboarding_targets`（reader）- 接数据时**可选什么**：DataHub 配没配、有哪些数据域（草稿/发布状态与对象数）、已登记哪些数据源
+- `create_datasource`（publisher）- 登记一个业务源库连接**骨架**（名称/类型/catalog）。**凭据不经过 agent**：DSN、用户名、口令由人在设置页填，入参里的凭据字段会被丢弃并回报
+- `start_ontology_draft`（publisher）- 为某个数据域启动本体草稿生成（异步）。该域已有发布本体时必须先把「重跑=新草稿走合并、复核标记会被重新灌满」告诉用户并带 `acknowledge_republish=true`
+
+### 建模工单与维度模型（5 个）
+- `create_modeling_case`（editor）- 为一次完整的分析/报表需求开建模工单：需求 → 上下文 → 维度模型 → 口径包 → 交付，逐份确认、逐份版本化
+- `save_modeling_spec`（editor）- 写入一份规格草稿（自动开新 revision；内容没变则不新开）。payload 按 kind 强类型校验，字段名对不上当场拒绝
+- `confirm_modeling_spec`（reviewer）- 确认某一版规格并推进阶段。必须带 `content_hash` 乐观锁，保证确认的就是被审查过的那一版
+- `get_modeling_case`（reader）- 回读工单当前阶段与各类规格的最新版本/确认状态；不给 case_id 就列最近若干张
+- `create_dimensional_model`（editor）- 设计星型/雪花维度模型（事实表带度量与维度键，维度表带代理键与 SCD），建完自动跑校验
 
 ### 任务提案（4 个）
 - `propose_materialize`（editor）- 生成本体物化任务提案：把本体对象建成物理表（只出建表 DDL，不搬数据）。人工建模、没有物理源表的对象要先物化。只出提案，不写库、不执行
@@ -155,6 +195,7 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 - `confirm_task`（publisher）- 确认一个已通过校验的治理任务。本工具只确认，不触发执行
 - `draft_task`（editor）- 把 propose_* 返回的 draft_payload 落成治理任务并立即校验。只写治理草稿并做 dry-run，不确认、不执行数仓变更
 - `execute_task`（publisher）- 异步执行一个已确认的治理任务并立即返回。返回成功只表示已受理；最终结果必须用 get_task_status 轮询
+- `confirm_task_result`（editor）- 记下用户对一个已跑完任务的判断：结果符不符合预期。执行成功不等于结果正确，这条只能来自问过用户之后，不得由 status 推出
 - `get_task_status`（reader）- 回读单个数据任务的状态、Spec、校验报告与执行回执，并尽力回读 Airflow DagRun 的实时状态（读不到就退回制品态）。只读，不触发执行
 - `wait_task_status`（reader）- 在服务端长轮询任务状态变化或终态，避免 dsh 用 Bash/sleep 高频重复查询；默认最多等待 50 秒，超时如实返回当前状态
 - `list_tasks`（reader）- 列出数据治理任务（同步 sync / 加工 transform / 聚合 metric / 物化 materialize）。可按类型、状态、本体过滤。只读，不触发执行
@@ -170,13 +211,11 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 下列工具只存在于 `MCP_TOOL_DESIGN.md` 等设计稿中，**registry 里没有**，调用会直接失败。
 它们对应 Data Agent 仍未追平的能力面，按优先级排：
 
-- 资产目录：`list_datasets`（`get_lineage`/`get_landing`/`get_ops_record` 已实现，见上）
-- 取数辅助：`scout_query`（`find_join_path`/`profile_values`/`resolve_subject` 已实现，见上）
-- 治理规约：`lint_against_standard`、`validate_against_policy`、`get_active_governance_standard`
-- 本体建模：`propose_ontology_draft`、`propose_dimensional_model`、`propose_logic_batch`、
-  `create_modeling_case`（写侧或长耗时，要先想清 MCP 下「异步 + 人工确认」怎么表达）
-- 数据接入：`list_onboarding_targets`、`propose_datasource`
+- 取数辅助：`scout_query`（把探路整体外包给子代理。通用 agent 宿主自带子代理，这条大概率不必再补）
+- 治理规约：`validate_against_policy`、`get_active_governance_standard`（Spec 级命名自检已实现，见上）
+- 批量口径：`propose_logic_batch`（一次编译一组口径。工具循环里逐条编译再建就够，批量只是省轮次）
 - 任务链与呈现：`propose_pipeline`、`propose_panel`、`propose_dashboard`
+  （数据应用面板/看板仍只有 Web 入口）
 
 ---
 

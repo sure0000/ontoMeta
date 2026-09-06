@@ -66,7 +66,7 @@ MCP 服务固定挂载在 `/mcp/`，所有请求都必须携带 Principal/Admin 
 ### dsh 工作流 skill
 
 DeepSeek Harness（dsh）可加载项目提供的 `ontometa-mcp` skill。skill 会把本体查询、
-大结果聚合、任务六环、publisher 门控、宿主交互确认、异步长轮询和结果呈现固化为一套提示，减少猜 ID、
+大结果聚合、建数流程、publisher 门控、宿主交互确认、异步长轮询和结果呈现固化为一套提示，减少猜 ID、
 把受理误报成成功、以及执行失败后重复提交等问题。
 
 在 dsh 中推荐显式调用：
@@ -129,6 +129,31 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 | `get_landing` | 对象/口径落到哪张物理表、建了吗、搬了吗、能不能查 |
 | `get_ops_record` | 按问题族读运行记录：任务执行 / 任务链 / 本体版本 / 治理规约 / 草稿生成 / 合并报告 / 待复核冲突 / 数据源 / 数据应用 / 依赖组件 / 生产割接 |
 
+### 血缘补录
+
+| 工具 | 最低角色 | 作用 |
+|------|----------|------|
+| `get_lineage_inventory` / `get_lineage_columns` | reader | 读取 DataHub 家底、孤岛表和真实字段 |
+| `preview_lineage_supplement` | editor | 校验人工 source→target 边、字段和 URN，返回 `preview_digest`，不写库 |
+| `preview_sql_lineage` | editor | 解析 SQL 中的 INSERT/CTAS/VIEW 血缘并映射本域表，不写库 |
+| `list_lineage_packages` / `get_lineage_package` | reader | 回读代码包/画布补录历史、失败与边状态 |
+| `apply_lineage_supplement` / `apply_lineage_package` | publisher | 宿主确认后幂等上报 DataHub，返回 applied/failed/resolved |
+
+血缘补录的写工具必须带预览摘要和本机 stdio 宿主 `ask_user_question` 的批准。远程 HTTP 或没有宿主交互的客户端只能停在预览，把写入交给 Web 血缘补录工作台。
+
+### 业务逻辑管理
+
+| 工具 | 最低角色 | 作用 |
+|------|----------|------|
+| `list_logic_categories` | reader | 分类目录与数量 |
+| `update_logic` | editor | 编辑名称、说明、类型、分类 |
+| `bind_logic_object` / `bind_logic_property` | editor | 绑定同一本体的真实对象/字段 |
+| `unbind_logic_object` / `unbind_logic_property` | editor | 解除绑定，不删除实体 |
+| `review_logic_publish` | reader | 重编已存表达式并返回发布审查与 digest，不发布 |
+| `publish_logic` | publisher | 宿主确认后创建发布确认记录并发布 |
+
+业务逻辑表达式仍必须走 `compile_logic_expression` / `update_logic_expression`；`review_logic_publish` 的 `ready` 不代表用户已批准，发布必须再次带同一 digest。
+
 三条使用纪律：
 
 1. **血缘只认 `structure_type=derivation` 的边**。外键/引用是业务关系，不是「数据从这里来」。
@@ -138,8 +163,8 @@ Claude 会调用 `query_ontology` 工具查询数据库。
    之类的规则推一个表名；keyword 定位默认跨本体，候选带 `domain_name` 用来消歧。
 3. **`get_ops_record` 的 task_run 给不出远端失败原因**。投递回执自陈的是「投递成功」，
    终态 failed 来自 Airflow 对账——此时 `metadata.failed_without_reason` 会点名这些任务，
-   改用 `get_task_status` 取 `run_url` 看远端日志。会话相关的族（`decision`、
-   `scope=conversation`）在 MCP 下明确拒绝：无会话协议塞假 id 会读到别人的记录。
+   改用 `get_task_status` 取 `run_url` 看远端日志。`scope=conversation` 在 MCP 下明确
+   拒绝：无会话协议塞假 id 会读到别人的记录。
 
 ### 取数辅助
 
@@ -147,6 +172,7 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 |------|----------|------|
 | `find_join_path` | reader | 两对象间本体认可的关联路径：每跳的 ON 键、基数链、扇出风险、可用的 `sql_hint` |
 | `profile_values` | 同 `execute_sql` | 某字段**实际存着什么值**：TopN 取值与频次 / 数值区间 / 时间区间 / 空值率 |
+| `analyze_query` | 同 `execute_sql` | 执行受治理的只读查询并计算返回行的分布、IQR 离群值、趋势与突变 |
 
 两者堵的都是「SQL 语法完全合法、结果却是错的」：
 
@@ -158,6 +184,8 @@ Claude 会调用 `query_ontology` 工具查询数据库。
   不写死）——一次画像等于一句 `SELECT DISTINCT`，写成 reader 就是一个绕过 SQL 权限的后门。
   数据没落地或投影未就绪时返回 `available=false` 与原因，不报错、也不得据此猜字面量。
   就绪判定与落点映射走 `query_routing.prepare_object_read`，与 Data Agent 同一份闸门。
+- `analyze_query` 的统计范围是本次实际返回的行；返回被截断时必须把它当作样本，不能把
+  统计量表述为全表事实。
 
 ### 数据源与 SQL
 
@@ -214,10 +242,15 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 | `confirm_task` | publisher | 确认已通过校验的任务 |
 | `execute_task` | publisher | 异步派发已确认任务，立即返回；用 `get_task_status` 轮询 |
 | `wait_task_status` | reader | 服务端等待状态变化/终态，避免客户端用 sleep 高频轮询 |
+| `confirm_task_result` | editor | 记下**用户**对已跑完任务的判断：结果对不对。不改状态、不重跑 |
 
 推荐工作流：先 `propose_*` 预览，再 `draft_task`；确认校验报告无阻断项后由有执行授权的
 publisher 调用 `confirm_task` 和 `execute_task`。`execute_task` 返回成功只代表已受理，
 不代表 Airflow 或数据搬运已经成功；受理后用 `wait_task_status` 等终态。
+
+到了终态还有一步：**执行成功不等于结果正确**。`get_task_status` 会在「终态且没人表过态」时
+带 `result_pending`（含终态、执行时间、回执摘要、落点这几条判断依据）——把它们摆给用户、
+问结果对不对，再用 `confirm_task_result` 回写他的答复。不要拿 `succeeded` 替人答。
 
 默认仍需在任务详情逐条开启「允许 Agent 代执行」。可信的 dsh Web 本机 stdio 部署可由管理员
 显式开启「本机宿主交互确认」：dsh 用原生 `ask_user_question` 展示任务方案并得到人类批准，
@@ -435,7 +468,9 @@ A: 检查：
 - [x] Phase 3 认证（env Token → 4 层角色）+ 授权（工具级 required_role，fail-closed）+ 审计
 - [x] Phase 4 限流（进程内滑动窗口）+ 运维自省（`server_info`）/ 监控（`get_mcp_stats`）
 - [x] Phase 5（部分）远程 HTTP 传输（`/mcp/`，逐请求鉴权）+ 前端管理页（设置页 MCP Tab）
-- [ ] Phase 5（剩余）资源级权限、本体建模类工具、血缘/落点工具、远程传输生产加固
+- [x] 血缘补录 MCP 工具与 `ontometa-lineage` Skill（预览/确认/上报边界）
+- [x] 业务逻辑管理 MCP 工具（分类、编辑、绑定、发布审查与宿主确认发布）
+- [ ] Phase 5（剩余）资源级权限、本体建模类工具、远程传输生产加固
 
 ## 参考
 

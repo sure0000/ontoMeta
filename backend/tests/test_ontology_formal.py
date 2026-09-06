@@ -145,7 +145,7 @@ def test_assert_publishable_blocks_on_error(client):
         # error 模式：抛错阻断
         try:
             assert_publishable(db, onto_id, "error")
-            assert False, "应抛 FormalValidationError"
+            raise AssertionError("应抛 FormalValidationError")
         except FormalValidationError:
             pass
         # warn 模式：不抛，返回问题清单

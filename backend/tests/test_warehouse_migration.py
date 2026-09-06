@@ -1,8 +1,8 @@
 """Phase 6 ordered migration, shadow privacy, approval and cut-over gates."""
 from __future__ import annotations
 
-from datetime import datetime
 import uuid
+from datetime import datetime
 
 import pytest
 

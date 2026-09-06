@@ -74,7 +74,9 @@ playbook 主题：
 - ontometa-output：所有回答共同遵守的出口契约（格式、状态口径、怎么向用户提问）
 - ontometa-flow：用户想建任务但参数没给全时，用 start_task_flow 一问一答带他走完
 - ontometa-discovery：用 query_ontology 探索本体、对象、关系、口径、血缘和落点
+- ontometa-lineage：读取血缘家底，预览 SQL/人工补录边，宿主确认后上报 DataHub
 - ontometa-query：核实口径、关联和字段取值，编译并执行查询
+- ontometa-authoring：创作、绑定、审查和宿主确认发布业务逻辑
 - ontometa-task-plan：起草并校验任务方案
 - ontometa-task-execute：确认、执行和追踪任务运行
 - ontometa-admin：查看服务身份、审计和统计
@@ -240,8 +242,11 @@ async def handle_call_tool(
 
     # ---- 限流（在授权之前）----
     # 放在授权前：失控循环可能全是被拒的调用，若只在放行后限流，被拒调用照样每次刷审计、
-    # 打 DB。限流命中的审计做去重（每工具每分钟至多一条），不逐次刷库。
-    verdict = check_rate_limit(name)
+    # 打 DB。限流命中的审计做去重（每桶每分钟至多一条），不逐次刷库。
+    #
+    # 配额按**调用方**分，不是全服务器一个总闸——远程 HTTP 传输下多个主体共用本进程，
+    # 全局窗口会让一个失控 agent 把其他主体一起拒掉（见 rate_limit 模块 docstring）。
+    verdict = check_rate_limit(name, principal=auth.rate_limit_key)
     if not verdict["allowed"]:
         elapsed = int((time.monotonic() - started) * 1000)
         result = ToolResult(

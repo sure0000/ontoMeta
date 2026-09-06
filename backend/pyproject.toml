@@ -1,0 +1,72 @@
+# 后端工具配置。审计前这个文件不存在——没有 lint、没有格式化、没有类型检查，
+# 86% 的返回注解全靠自觉维持。
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv", "alembic/versions", "unused-stubbed"]
+
+[tool.ruff.lint]
+# 选集刻意保守：先把「确定是 bug」和「确定该统一」的收进来，让它今天就能全绿并进 CI。
+# 一上来全开会得到几千条、没人看、也就没人修——那等于没有 lint。
+# 后续要收紧的候选：ANN（注解完整性）、PTH、RUF、SIM。
+select = [
+    "F",    # pyflakes：未使用的导入/变量、未定义名字——这些是真 bug
+    "E9",   # 语法/IO 错误
+    "I",    # 导入排序
+    "B",    # bugbear：可变默认参数、循环里绑定变量之类的经典陷阱
+    "UP",   # pyupgrade：跟上 py312 写法
+    "C4",   # 推导式写法
+    "T20",  # print：生产代码里不该有裸 print（脚本除外，见下）
+    "DTZ",  # 不带时区的 datetime——本仓踩过：naive 与 aware 相减直接抛
+]
+ignore = [
+    "B008",   # FastAPI 的 Depends() 就写在默认参数里，这是框架惯例
+    "UP042",  # `class X(str, Enum)` → StrEnum 会改变 str() 与格式化的结果，
+              # 而这些枚举值正被写进数据库和回执 JSON。收益是写法更新，代价是
+              # 一次静默的数据格式变更——不换。
+]
+
+[tool.ruff.lint.per-file-ignores]
+# SQLAlchemy 的 relationship 用字符串写前向引用（Mapped[list["Ontology"]]），
+# 由它的 registry 在运行期解析；ruff 看不到就报 undefined-name。
+# ⚠ 只在模型层豁免 F821——它在别处抓到过真 bug（datahub 丢了一整个 def、
+# edit.py 引用了从未定义的变量），那条规则值钱，不能全局关掉。
+"app/models/*" = ["F821"]
+# 服务/schema 层的字符串注解同理（延迟导入以避免循环依赖）。
+"app/services/ontology_query.py" = ["F821"]
+"app/services/chat_bi.py" = ["F821"]
+"app/schemas/ontology.py" = ["F821"]
+# 脚本就是给人在终端看的，print 是它的输出方式
+"scripts/*" = ["T20"]
+"app/jobs/*" = ["T20"]
+# 测试里 print 用于排查，datetime 常需要构造 naive 值做边界用例
+"tests/*" = ["T20", "DTZ"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+# 只报**被点名文件**里的错。不加这条，检查任何一个文件都会把整棵 import 树的错一起报出来
+# （实测：检查 app/config.py 报 172 条，全来自别的模块），结果就是没法按模块推进。
+follow_imports = "silent"
+warn_unused_ignores = true
+
+# ⚠ 全量开是 373 条，其中绝大多数是 SQLAlchemy 的 Optional/属性推断噪声
+# （sqlalchemy 的 mypy 插件已废弃），真 bug 一条没有——F821 那三处真 bug 是 ruff 抓到的。
+# 所以**按模块推进**：下面这些是当前已经干净的，先钉住不许退化；
+# 每收拾干净一个模块就往里加一个，而不是挂一个谁也满足不了的全量配置。
+files = [
+    "app/config.py",
+    "app/database.py",
+    "app/main.py",
+    "app/auth.py",
+    "app/governance",
+    "app/warehouse",
+    "app/mcp/rate_limit.py",
+    "app/services/data_app_executor.py",
+    "app/services/sync_reconciliation.py",
+    "app/services/dimensional_model_spec.py",
+]

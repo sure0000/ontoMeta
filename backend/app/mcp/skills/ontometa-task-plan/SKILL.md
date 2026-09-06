@@ -12,9 +12,10 @@ user-invocable: true
 
 把用户意图变成可审查的治理任务草稿。这个 skill 的出口是 `validated` 或带阻断项的 `drafted`，不触发数仓副作用。
 
-## 六环范围
+## 职责范围
 
 本 skill 负责：需求 → 本体 → 数据 → 执行方案 → 草稿 → 校验。
+人的放行只有一处，且不在这里——制品被确认之前不得执行，那一步归 `ontometa-task-execute`。
 
 0. **参数没给全就别猜**：用户没说清本体、对象、数据源、装载方式或调度时，先走 `ontometa-flow`
    （`start_task_flow` → `advance_task_flow`）把这些逐环问出来，拿到 `ready` 再回到这里。

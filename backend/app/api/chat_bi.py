@@ -2,15 +2,33 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import chat_bi_service
+from app.api.deps import get_legacy_chat_bi_service
 from app.database import get_db
-from app.services import agent_telemetry, chat_bi_ledger
+from app.schemas import (
+    ChatBiAgentRunDetail,
+    ChatBiAgentRunSummary,
+    ChatBiAnswer,
+    ChatBiAskRequest,
+    ChatBiCategoryDeleteRequest,
+    ChatBiCategoryList,
+    ChatBiCategoryRenameRequest,
+    ChatBiConversationCreate,
+    ChatBiConversationSummary,
+    ChatBiConversationUpdate,
+    ChatBiExecuteRequest,
+    ChatBiExecuteResult,
+    ChatBiMessageOut,
+    ChatBiPreferenceRequest,
+    ChatBiSuggestions,
+    ChatBiTaskLinkRequest,
+)
+from app.services import agent_telemetry
 from app.services.agent_run_store import (
     attach_agent_run,
     failed_run_payload,
@@ -18,30 +36,12 @@ from app.services.agent_run_store import (
 )
 from app.services.chat_bi_blocks import answer_to_blocks
 from app.services.data_app_executor import ExecutionError
-from app.schemas import (
-    ChatBiAnswer,
-    ChatBiAgentRunDetail,
-    ChatBiAgentRunSummary,
-    ChatBiAskRequest,
-    ChatBiCategoryDeleteRequest,
-    ChatBiCategoryList,
-    ChatBiCategoryRenameRequest,
-    ChatBiConversationCreate,
-    ChatBiDecisionClosure,
-    ChatBiDecisionOut,
-    ChatBiDecisionRequest,
-    ChatBiExecuteRequest,
-    ChatBiExecuteResult,
-    ChatBiConversationSummary,
-    ChatBiConversationUpdate,
-    ChatBiMessageOut,
-    ChatBiSuggestions,
-    ChatBiTaskLinkRequest,
-    ChatBiPreferenceRequest,
-)
 
 router = APIRouter()
 logger = logging.getLogger("ontometa.chat_bi_api")
+# Keep the legacy conversation service owned by this optional router. Shared
+# API dependencies and non-chat routes remain importable without Chat BI.
+chat_bi_service = get_legacy_chat_bi_service()
 
 @router.get(
     "/chat-bi/conversations", response_model=list[ChatBiConversationSummary]
@@ -135,83 +135,6 @@ def chat_bi_link_conversation_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return result
-
-
-@router.post("/chat-bi/conversations/{conversation_id}/decisions")
-def chat_bi_record_decision(
-    conversation_id: str,
-    data: ChatBiDecisionRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """记一条人工决策留痕。
-
-    **永远返回 200**（``recorded=false`` 表未记成），不返回 4xx/5xx：前端是
-    fire-and-forget 调用，返回错误码只会在控制台刷红而没人能处理，更不该让
-    留痕失败连累用户正在做的确认动作。
-    """
-    decision_id = chat_bi_ledger.safe_record(
-        db,
-        conversation_id=conversation_id,
-        node=data.node,
-        outcome=data.outcome,
-        stage=data.stage,
-        trigger=data.trigger,
-        message_id=data.message_id,
-        block_id=data.block_id,
-        summary=data.summary,
-        proposed=data.proposed,
-        chosen=data.chosen,
-        ref_kind=data.ref_kind,
-        ref_id=data.ref_id,
-        # 责任人只认已认证主体，请求体里给什么都不看。
-        subject_id=_principal_id(request),
-        subject_role=_principal_role(request),
-        dedup_key=data.dedup_key,
-    )
-    return {"id": decision_id, "recorded": decision_id is not None}
-
-
-@router.get(
-    "/chat-bi/conversations/{conversation_id}/decisions",
-    response_model=list[ChatBiDecisionOut],
-)
-def chat_bi_list_decisions(conversation_id: str, db: Session = Depends(get_db)):
-    """本会话的决策时间线（最早在前）。"""
-    return chat_bi_ledger.list_decisions(db, conversation_id)
-
-
-@router.get(
-    "/chat-bi/conversations/{conversation_id}/closure",
-    response_model=ChatBiDecisionClosure,
-)
-def chat_bi_decision_closure(conversation_id: str, db: Session = Depends(get_db)):
-    """一次对话的确认闭环总结：恒六环 + 悬挂项 + 完整时间线。"""
-    return chat_bi_ledger.build_closure(db, conversation_id)
-
-
-@router.get("/chat-bi/decisions", response_model=list[ChatBiDecisionOut])
-def chat_bi_search_decisions(
-    node: str | None = None,
-    outcome: str | None = None,
-    ref_kind: str | None = None,
-    subject_id: str | None = None,
-    since: datetime | None = None,
-    until: datetime | None = None,
-    limit: int = Query(default=200, ge=1, le=1000),
-    db: Session = Depends(get_db),
-):
-    """跨会话决策查询，供决策追踪页。"""
-    return chat_bi_ledger.search_decisions(
-        db,
-        node=node,
-        outcome=outcome,
-        ref_kind=ref_kind,
-        subject_id=subject_id,
-        since=since,
-        until=until,
-        limit=limit,
-    )
 
 
 @router.post("/chat-bi/domain-memory/preferences")
@@ -315,18 +238,6 @@ def _principal_role(request: Request) -> str | None:
     return getattr(request.state, "principal_role", None)
 
 
-def _principal_id(request: Request) -> str | None:
-    """当前请求主体的 id（由 AdminAuthMiddleware 写入 request.state）。
-
-    决策留痕的责任人**必须**由这里取，不能信前端请求体里的 operator——否则
-    「谁确认的」可被客户端随意伪造，追踪与管理就失去依据。
-
-    用共享 ``ONTOMETA_ADMIN_TOKEN`` 访问时 ``resolve_principal`` 不查库、返回 None，
-    此时只有角色可考；要精确到人需先把 Principal 逐人配起来（运营前提，非代码问题）。
-    """
-    return getattr(request.state, "principal_id", None)
-
-
 def _persist_failed_agent_run(
     db: Session,
     *,
@@ -369,7 +280,7 @@ async def chat_bi_ask(
     data: ChatBiAskRequest, request: Request, db: Session = Depends(get_db)
 ):
     run_id = str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     conversation_id = data.conversation_id
     user_saved = False
     try:
@@ -480,7 +391,7 @@ async def chat_bi_ask_stream(
     会话创建与 user 消息在流开始前落库；assistant 消息在 done 后落库。
     """
     run_id = str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     conversation_id = data.conversation_id
     if conversation_id:
         conv = chat_bi_service.get_conversation(db, conversation_id)

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.services.agent_compaction import compact_conversation, estimate_chars
 from app.services import agent_telemetry
+from app.services.agent_compaction import compact_conversation, estimate_chars
 from app.services.agent_telemetry import RunTelemetry
 
 

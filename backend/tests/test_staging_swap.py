@@ -133,7 +133,8 @@ def test_full_load_truncates_staging_before_writing():
     from app.services.airflow_dag_builder import _plan_staging
     from app.warehouse.jobs import JobPlan
     from app.warehouse.jobs.base import ColumnMapping, JobEndpoint, JobSpec
-    from app.warehouse.logical_schema import LogicalColumn, LogicalTable as LT
+    from app.warehouse.logical_schema import LogicalColumn
+    from app.warehouse.logical_schema import LogicalTable as LT
 
     target = LT(
         name="dim_customer", database="dw", layer="dim",

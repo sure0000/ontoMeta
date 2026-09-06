@@ -23,15 +23,15 @@ from app.services import flink_params
 
 def _airflow(tmp_path, **over):
     """设置页 Flink 默认值，供参数优先级单元测试使用。"""
-    defaults = dict(
-        flink_sql_runner_jar=str(tmp_path / "flink-sql-runner.jar"),
-        flink_sql_runner_class="com.ontometa.flink.SqlRunner",
-        flink_bin="flink",
-        flink_deploy_target="yarn-per-job",
-        flink_parallelism=1,
-        flink_yarn_queue="",
-        flink_checkpoint_dir="",
-    )
+    defaults = {
+        "flink_sql_runner_jar": str(tmp_path / "flink-sql-runner.jar"),
+        "flink_sql_runner_class": "com.ontometa.flink.SqlRunner",
+        "flink_bin": "flink",
+        "flink_deploy_target": "yarn-per-job",
+        "flink_parallelism": 1,
+        "flink_yarn_queue": "",
+        "flink_checkpoint_dir": "",
+    }
     defaults.update(over)
     return MagicMock(**defaults)
 

@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "antd/dist/reset.css";
 import "./styles/tokens.css";
 import "./styles/layout.css";
@@ -149,9 +150,13 @@ createRoot(document.getElementById("root")!).render(
         },
       }}
     >
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
+      {/* 最外层兜底：App 内部还有一层按路由重置的边界（见 App.tsx）。这一层接的是
+          外壳自身（Layout/导航）与 Router 层的异常——那时内层边界还没挂上。 */}
+      <ErrorBoundary>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </ErrorBoundary>
     </ConfigProvider>
   </StrictMode>,
 );

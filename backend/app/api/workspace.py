@@ -1,15 +1,9 @@
-import asyncio
-import os
-import subprocess
-import sys
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import edit_service, provenance_service, settings_service, workspace
-from app.config import settings
 from app.database import get_db
 from app.models import ObjectType
 from app.schemas import (
@@ -28,11 +22,10 @@ from app.schemas import (
     UnmodeledTableOut,
     UnmodeledTablesOut,
 )
-from app.services.draft_generation_queue import run_draft_generation_limited
 from app.services.draft_generator import LlmNotConfiguredError
-from app.services.manual_creation import ManualCreationService, ManualPropertyInput
+from app.services.draft_launch import launch_draft_task
 from app.services.draft_task_service import DraftGenerationAlreadyRunning
-from app.services.workspace_service import WorkspaceService
+from app.services.manual_creation import ManualCreationService, ManualPropertyInput
 
 router = APIRouter()
 
@@ -149,58 +142,10 @@ def get_domain(domain_id: str, db: Session = Depends(get_db)):
     return detail
 
 
-# backend 根目录（含 app/ 包），供子进程 cwd 与日志目录定位。
-_BACKEND_DIR = Path(__file__).resolve().parents[2]
-_LOG_DIR = _BACKEND_DIR.parent / ".logs"
-
-
-def _spawn_draft_worker(task_id: str) -> None:
-    """在分离子进程执行草稿生成（C）：start_new_session=True 使其脱离 uvicorn 的
-    进程组，``--reload`` 重启或异常退出杀 API worker 时不会波及生成任务。"""
-    try:
-        _LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_path = _LOG_DIR / f"draft-worker-{task_id}.log"
-        logfile = open(log_path, "ab", buffering=0)  # noqa: SIM115 —— 交由子进程持有
-    except OSError:
-        logfile = subprocess.DEVNULL
-
-    try:
-        subprocess.Popen(
-            [sys.executable, "-m", "app.jobs.draft_worker", task_id],
-            cwd=str(_BACKEND_DIR),
-            stdout=logfile,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env=os.environ.copy(),
-        )
-    finally:
-        # 父进程立即关闭自己的文件句柄；子进程已继承独立副本。
-        if logfile not in (subprocess.DEVNULL, None):
-            logfile.close()
-
-
 def _launch_draft_task(progress: DraftProgressOut, runner) -> None:
-    """派发某个范围的生成执行。
-
-    默认（``draft_worker_subprocess=True``）走分离子进程，reload 免疫；否则回退到进程内
-    asyncio 限流队列（测试/inline）。两条路径的进度/状态/取消都经由 DB，语义一致。
-    """
-    if settings.draft_worker_subprocess:
-        _spawn_draft_worker(progress.task_id)
-        return
-
-    async def _execute() -> None:
-        await runner(progress.task_id)
-
-    task = asyncio.create_task(
-        run_draft_generation_limited(
-            progress.task_id,
-            WorkspaceService._update_task_progress,
-            _execute,
-            WorkspaceService._is_task_cancelled,
-        )
-    )
-    workspace._track_draft_task(progress.task_id, task)
+    """派发某个范围的生成执行。派发方式本身住在 ``services.draft_launch``——Web 与 MCP
+    共用同一条派发路径，两处各写一份就一定会在 ``draft_worker_subprocess`` 的语义上分叉。"""
+    launch_draft_task(progress.task_id, runner)
 
 
 @router.post("/domains/{domain_id}/generate-draft", response_model=DraftProgressOut)

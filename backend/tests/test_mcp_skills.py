@@ -14,8 +14,8 @@ from app.mcp.skills import (
     builtin_pack,
     get_skill,
     list_skills,
-    reset_override,
     list_versions,
+    reset_override,
     restore_version,
     save_override,
     skill_coverage_gaps,
@@ -24,6 +24,9 @@ from app.mcp.skills import (
 from app.mcp.tools import TOOL_REGISTRY
 from app.models.mcp_skill import McpSkill
 
+#: 内置 skill 的份数由目录说了算——加一份 skill 不该顺带改掉七处硬编码的 8。
+_SKILL_COUNT = len(builtin_pack())
+
 
 def test_builtin_pack_is_complete(db):
     pack = builtin_pack()
@@ -31,14 +34,18 @@ def test_builtin_pack_is_complete(db):
         "ontometa-mcp",
         "ontometa-output",
         "ontometa-flow",
+        "ontometa-onboarding",
         "ontometa-discovery",
         "ontometa-query",
+        "ontometa-authoring",
+        "ontometa-modeling",
         "ontometa-task-plan",
         "ontometa-task-execute",
         "ontometa-admin",
+        "ontometa-lineage",
     }
     skills = list_skills(db)
-    assert len(skills) == 8
+    assert len(skills) == _SKILL_COUNT
     # 展示顺序是给人读的：总入口和出口契约在最前，不是字母序。
     assert [item.name for item in skills[:3]] == [
         "ontometa-mcp",
@@ -63,7 +70,7 @@ def test_skill_export_returns_effective_installable_zip(client, admin_headers, d
     assert all_response.status_code == 200, all_response.text
     with zipfile.ZipFile(io.BytesIO(all_response.content)) as archive:
         assert "ontometa-query/SKILL.md" in archive.namelist()
-        assert len(archive.namelist()) == 8
+        assert len(archive.namelist()) == _SKILL_COUNT
         # 导出的是合成正文：解压到客户端目录后，每份自带完整契约，不留待替换的占位符。
         # 总控自己除外——它的正文里在讲"别人怎么引用我"，那几处是说明文字。
         for name in archive.namelist():
@@ -203,7 +210,7 @@ def test_override_validation_reports_uncovered_tool(db, monkeypatch):
 def test_prompts_expose_enabled_skills_and_unknown_is_error(db):
     server._reset_session_auth()
     listed = asyncio.run(server.handle_list_prompts(None, None))
-    assert len(listed.prompts) == 8
+    assert len(listed.prompts) == _SKILL_COUNT
     assert {item.name for item in listed.prompts} >= {"ontometa-mcp", "ontometa-query"}
 
     prompt = asyncio.run(
@@ -316,7 +323,7 @@ def test_skill_install_previews_then_writes_and_is_idempotent(client, admin_head
     )
     assert preview.status_code == 200, preview.text
     plan = preview.json()
-    assert plan["created"] == 8 and plan["updated"] == 0
+    assert plan["created"] == _SKILL_COUNT and plan["updated"] == 0
     assert plan["exists"] is False
     # 预检**不写盘**：界面拿它给人看"会新建/覆盖哪几份"，此时还没做任何事。
     assert not target.exists()
@@ -326,7 +333,7 @@ def test_skill_install_previews_then_writes_and_is_idempotent(client, admin_head
     )
     assert written.status_code == 200, written.text
     result = written.json()
-    assert len(result["written"]) == 8
+    assert len(result["written"]) == _SKILL_COUNT
     body = (target / "ontometa-query" / "SKILL.md").read_text(encoding="utf-8")
     assert "## 输出格式（必须遵守）" in body
     assert "{{OUTPUT_CONTRACT}}" not in body  # 装进去的就是 Agent 直接读的正文
@@ -336,7 +343,7 @@ def test_skill_install_previews_then_writes_and_is_idempotent(client, admin_head
         headers=admin_headers,
         json={"target_dir": str(target), "dry_run": True},
     ).json()
-    assert again["unchanged"] == 8 and again["created"] == 0
+    assert again["unchanged"] == _SKILL_COUNT and again["created"] == 0
 
 
 def test_skill_install_only_touches_our_own_files(client, admin_headers, tmp_path):

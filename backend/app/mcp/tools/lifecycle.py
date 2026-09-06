@@ -8,15 +8,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.api.deps import agent_pipeline
 from app.jobs.artifact_execution_worker import spawn_artifact_execution_worker
-from app.models.agent import ArtifactKind, ArtifactStatus, GovernanceArtifact
-from app.services.agent_pipeline import PipelineError
-from app.services.chat_bi_tool_schemas import (
-    _ACTION_CONTEXT_HINT,
-    _action_context_candidates,
-    _missing_action_context,
-    _sync_context_errors,
+from app.models.agent import (
+    RESULT_OUTCOMES,
+    ArtifactKind,
+    ArtifactStatus,
+    GovernanceArtifact,
+)
+from app.services.agent_pipeline import PipelineError, agent_pipeline
+from app.services.task_form import (
+    ACTION_CONTEXT_HINT as _ACTION_CONTEXT_HINT,
+)
+from app.services.task_form import (
+    action_context_candidates as _action_context_candidates,
+)
+from app.services.task_form import (
+    missing_action_context as _missing_action_context,
+)
+from app.services.task_form import (
+    sync_context_errors as _sync_context_errors,
 )
 
 from . import AuthContext, ToolResult, register_tool
@@ -220,6 +230,11 @@ class DraftTaskTool:
                     context=context,
                     ontology_id=ontology_id,
                     user_created=True,
+                    # 制品是这条任务的唯一记录，创建时刻的身份不能是空的：外部 agent
+                    # 建的任务与人在 Web 上建的必须分得出来。与 confirm 那边的
+                    # operator 同一个口径。
+                    created_by=auth.principal_name or auth.principal_id,
+                    created_via=auth.client_type,
                 )
                 try:
                     artifact = agent_pipeline.validate(db, artifact.id)
@@ -425,3 +440,79 @@ class ExecuteTaskTool:
             return ToolResult(success=False, error=str(exc))
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, error=f"派发执行任务失败：{exc}")
+
+
+@register_tool
+class ConfirmTaskResultTool:
+    name = "confirm_task_result"
+    # 记的是人的判断，不是一次执行——它不推任何东西到远端，故不走代执行授权闸，
+    # 角色也停在 editor（与 draft_task 同级），不必要 publisher。
+    required_role = "editor"
+    description = (
+        "记下**用户**对一个已跑完任务的判断：结果符不符合预期。只写这条判断，不重跑、不改任务。\n"
+        "**执行成功不等于结果正确**：status/回执说的是系统这侧发生了什么，这条说的是人看过之后认不认。\n"
+        "调用前必须真的问过用户（宿主有 ask_user_question 就用它），把 get_task_status 的 "
+        "result_pending.evidence 原样摆给他看；**不要替用户判断**，也不要因为 status 是 "
+        "succeeded 就自己填 accepted。"
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "治理任务 ID"},
+            "outcome": {
+                "type": "string",
+                "enum": sorted(RESULT_OUTCOMES),
+                "description": "用户的判断：accepted=符合预期，rejected=不符合",
+            },
+            "note": {
+                "type": "string",
+                "description": "用户说的原话／哪里不对。rejected 时必填，accepted 时可空",
+            },
+        },
+        "required": ["task_id", "outcome"],
+    }
+
+    async def execute(self, arguments: dict, auth: AuthContext) -> ToolResult:
+        task_id = _task_id(arguments)
+        if not task_id:
+            return ToolResult(success=False, error="缺少 task_id")
+        outcome = str(arguments.get("outcome") or "").strip()
+        note = str(arguments.get("note") or "").strip()
+        # 说"不符合"却不说哪里不符合，这条记录对后来看的人没有用。
+        if outcome == "rejected" and not note:
+            return ToolResult(
+                success=False,
+                error="判为 rejected 时必须带 note：写清用户说哪里不对，否则这条记录没有价值",
+            )
+        try:
+            with session() as db:
+                artifact = agent_pipeline.confirm_result(
+                    db,
+                    task_id,
+                    outcome=outcome,
+                    note=note or None,
+                    # 署名取真实身份；经 agent 转述和人自己点，由 result_via 区分。
+                    operator=auth.principal_name or auth.principal_id,
+                    via=auth.client_type,
+                )
+                return ToolResult(
+                    success=True,
+                    data={
+                        "task_id": artifact.id,
+                        "status": artifact.status,
+                        "result": {
+                            "outcome": artifact.result_outcome,
+                            "note": artifact.result_note,
+                            "confirmed_by": artifact.result_confirmed_by,
+                            "via": artifact.result_via,
+                        },
+                        "note": "已记下这条判断；它不改变任务状态，也不会触发重跑",
+                    },
+                    metadata={"outcome": artifact.result_outcome},
+                )
+        except PipelineError as exc:
+            return ToolResult(success=False, error=str(exc))
+        except (LookupError, ValueError) as exc:
+            return ToolResult(success=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=f"记录结果判断失败：{exc}")

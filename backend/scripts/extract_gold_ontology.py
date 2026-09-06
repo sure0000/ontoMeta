@@ -36,9 +36,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -498,7 +499,7 @@ def _finalize(
     return {
         "version": "gold_v0",
         "system": system,
-        "extracted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "extracted_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "vocabulary": {
             "roles": [ROLE_BUSINESS_OBJECT, ROLE_BRIDGE, "data_table"],
             "cardinalities": ["one_to_one", "one_to_many", "many_to_one", "many_to_many"],

@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session, aliased, joinedload
 from app.models import (
     BusinessLogic,
     BusinessLogicObjectBinding,
-    BusinessLogicPropertyBinding,
     DomainContext,
     DraftEvidence,
     EntityStatus,
@@ -37,14 +36,12 @@ from app.schemas import (
     OntologyGroupedGraph,
     OntologySummary,
     PageResult,
-    RelationObjectRef,
     RelationGroupOut,
+    RelationObjectRef,
     RelationTypeDetail,
     RelationTypeOut,
     VersionRecordOut,
 )
-from app.services.object_landing import ObjectLanding, bulk_object_landings
-from app.services.segment_kinds import SEGMENT_KIND_BUSINESS
 from app.services.community_detection import (
     compute_graph_layout,
     identify_hub_nodes,
@@ -52,7 +49,9 @@ from app.services.community_detection import (
     name_cluster,
     split_dominant_clusters,
 )
+from app.services.object_landing import ObjectLanding, bulk_object_landings
 from app.services.relation_structure import infer_relation_structure_type
+from app.services.segment_kinds import SEGMENT_KIND_BUSINESS
 
 # 图谱局部展开默认节点上限（避免一次渲染全图）
 _DEFAULT_GRAPH_MAX_NODES = 80
@@ -276,21 +275,27 @@ class OntologyQueryService:
             return _finalize(query.filter(ontology_model.ontology_id == ontology_id))
 
         if domain_context_id:
-            ontologies = db.query(Ontology).filter(
+            # Keep the scope as a correlated subquery instead of loading all
+            # ontology ids into Python.  This avoids an extra round trip and an
+            # unbounded list allocation for large installations.
+            ontology_ids = db.query(Ontology.id).filter(
                 Ontology.domain_context_id == domain_context_id
             )
             if published_only:
-                ontologies = ontologies.filter(Ontology.status == OntologyStatus.PUBLISHED.value)
-            ontology_ids = [o.id for o in ontologies.all()]
-            if not ontology_ids:
-                return query.filter(False)
-            return _finalize(query.filter(ontology_model.ontology_id.in_(ontology_ids)))
+                ontology_ids = ontology_ids.filter(
+                    Ontology.status == OntologyStatus.PUBLISHED.value
+                )
+            return _finalize(
+                query.filter(ontology_model.ontology_id.in_(ontology_ids))
+            )
 
         if published_only:
-            ontology_ids = self._published_ontology_ids(db)
-            if not ontology_ids:
-                return query.filter(False)
-            return _finalize(query.filter(ontology_model.ontology_id.in_(ontology_ids)))
+            ontology_ids = db.query(Ontology.id).filter(
+                Ontology.status == OntologyStatus.PUBLISHED.value
+            )
+            return _finalize(
+                query.filter(ontology_model.ontology_id.in_(ontology_ids))
+            )
 
         return query
 
@@ -343,9 +348,9 @@ class OntologyQueryService:
         object_rows = object_q.group_by(ObjectType.ontology_id).all()
         relation_rows = relation_q.group_by(RelationType.ontology_id).all()
         logic_rows = logic_q.group_by(BusinessLogic.ontology_id).all()
-        omap = {oid: c for oid, c in object_rows}
-        rmap = {oid: c for oid, c in relation_rows}
-        lmap = {oid: c for oid, c in logic_rows}
+        omap = dict(object_rows)
+        rmap = dict(relation_rows)
+        lmap = dict(logic_rows)
         return {oid: (omap.get(oid, 0), rmap.get(oid, 0), lmap.get(oid, 0)) for oid in ontology_ids}
 
     def get_ontology(self, db: Session, ontology_id: str) -> OntologySummary | None:
@@ -526,7 +531,7 @@ class OntologyQueryService:
             .filter(OntologySegment.id.in_(ids))
             .all()
         )
-        return {sid: name for sid, name in rows}
+        return dict(rows)
 
     def _bulk_segment_kinds(
         self, db: Session, segment_ids: list[str | None]
@@ -543,7 +548,7 @@ class OntologyQueryService:
             .filter(OntologySegment.id.in_(ids))
             .all()
         )
-        return {sid: kind for sid, kind in rows}
+        return dict(rows)
 
     def _bulk_object_stats(
         self, db: Session, object_ids: list[str]
@@ -583,9 +588,9 @@ class OntologyQueryService:
             .filter(BusinessLogicObjectBinding.object_type_id.in_(object_ids))
             .all()
         )
-        pmap = {oid: c for oid, c in property_rows}
-        smap = {oid: c for oid, c in source_rows}
-        tmap = {oid: c for oid, c in target_rows}
+        pmap = dict(property_rows)
+        smap = dict(source_rows)
+        tmap = dict(target_rows)
         binding_map: dict[str, set[str]] = {oid: set() for oid in object_ids}
         for oid, lid in binding_rows:
             binding_map[oid].add(lid)
@@ -1782,7 +1787,7 @@ class OntologyQueryService:
 
         # 搜索过滤
         if q:
-            q_lower = q.lower()
+            q.lower()
             query_obj = query_obj.filter(
                 (OntologySegment.name.ilike(f"%{q}%"))
                 | (OntologySegment.display_name.ilike(f"%{q}%"))
@@ -1849,8 +1854,8 @@ class OntologyQueryService:
         ``neighbors``、按连接条数降序截断到 ``_SEGMENT_NEIGHBOR_CAP``，只带回
         这些邻居对应的边，保证画布还读得动。
         """
-        from app.models import OntologySegment, ObjectType, RelationType
-        from app.schemas import SegmentDetail, GraphEdge, SegmentNeighbor
+        from app.models import ObjectType, OntologySegment, RelationType
+        from app.schemas import GraphEdge, SegmentDetail, SegmentNeighbor
 
         segment_query = db.query(OntologySegment).filter(
             OntologySegment.id == segment_id,
@@ -1939,12 +1944,9 @@ class OntologyQueryService:
                 .filter(ObjectType.id.in_(neighbor_links.keys()))
                 .all()
             }
-            segment_names = {
-                seg_id: display
-                for seg_id, display in db.query(
+            segment_names = dict(db.query(
                     OntologySegment.id, OntologySegment.display_name
-                ).filter(OntologySegment.ontology_id == segment.ontology_id)
-            }
+                ).filter(OntologySegment.ontology_id == segment.ontology_id))
             ranked = sorted(
                 neighbor_links.items(),
                 # 连接条数降序；同分时按 id 定序，保证同一份数据每次返回同样的邻居集合
@@ -2305,7 +2307,7 @@ class OntologyQueryService:
         统计覆盖全部角色（与审核队列同口径）；卡发布的那部分单独给
         ``business_object_pending``。
         """
-        from app.models import OntologySegment, ObjectType
+        from app.models import ObjectType, OntologySegment
         from app.schemas import ReviewModeStats, SegmentReviewProgress
 
         # 全局统计

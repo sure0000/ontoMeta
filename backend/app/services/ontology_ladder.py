@@ -35,7 +35,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import BusinessLogic, EntityStatus, ObjectType
+from app.models import EntityStatus, ObjectType
 
 logger = logging.getLogger("ontometa.ontology_ladder")
 
@@ -200,7 +200,7 @@ class OntologyLadderLoader:
 
         ``with_profiles=False`` 时跳过数据样例/统计（纯元数据场景，省真实数据查询）。
         """
-        q_tokens = set(_tokens(question))
+        set(_tokens(question))
         entity_grams = self._entity_grams(question)
         result = LadderResult()
         loaded_ids: set[str] = set()
@@ -543,7 +543,6 @@ class OntologyLadderLoader:
                     ]
                 return out
             try:
-                from app.services import data_app_executor
                 from app.services.column_profiler import profile_property
                 from app.services.ontology_projection import build_projection
             except Exception as exc:  # noqa: BLE001

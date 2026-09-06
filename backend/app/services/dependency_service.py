@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -776,7 +776,7 @@ class DependencyComponentService:
 
     # -- 旧表迁移（幂等）：把既有 DatahubSetting/LlmServiceConfig 搬进注册表 --
     def migrate_from_legacy(self, db: Session) -> None:
-        from app.models import DatahubSetting, LlmServiceConfig, AirflowSetting
+        from app.models import AirflowSetting, DatahubSetting, LlmServiceConfig
 
         dh = db.get(DatahubSetting, "default")
         if dh and not self._get_singleton(db, "datahub"):
@@ -927,7 +927,7 @@ class DependencyComponentService:
                 "message": r.message, "latency_ms": r.latency_ms,
             }
             parts.append(part)
-            ledger[gid] = {**part, "at": datetime.now(timezone.utc).isoformat()}
+            ledger[gid] = {**part, "at": datetime.now(UTC).isoformat()}
 
         spec["_probe"] = ledger
         row.deploy_spec_json = _dumps(spec)
@@ -1123,6 +1123,7 @@ class DependencyComponentService:
 # --------------------------------------------------------------------- 拨测实现
 
 import time  # noqa: E402
+
 from app.services.common import make_http_client  # noqa: E402
 
 
@@ -1216,7 +1217,6 @@ def _probe_datahub(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
     并要求响应是 GraphQL JSON（含 ``data``、无 ``errors``），从而把"端口/路径填错"
     与"token 无权限"都暴露成明确失败，而非假绿灯。与 Airflow 拨测同款思路。
     """
-    import httpx
 
     base = (conn.get("gms_url") or "").strip().rstrip("/")
     if not base:

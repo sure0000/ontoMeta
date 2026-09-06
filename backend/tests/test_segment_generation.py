@@ -5,8 +5,8 @@ import json
 import pytest
 
 from app.database import Base, SessionLocal, engine
-from app.models import DomainContext, ObjectType, Ontology, OntologySegment, OntologyStatus
-from app.schemas import DraftObjectType, DraftRelationType, DraftSegment, OntologyDraftOutput
+from app.models import DomainContext, Ontology, OntologySegment, OntologyStatus
+from app.schemas import DraftObjectType, DraftRelationType, DraftSegment
 from app.services.ontology_merge import MergeReport, OntologyMergeService
 from app.services.segment_generator import generate_segments
 

@@ -269,8 +269,8 @@ def test_referenced_key_never_falls_back_to_any_identifier_column():
     回归：曾用「身份属性」顶替，于是 code_list 的被引用列被判成 publisher_id
     （一个恰好是标识语义的无关列），据此拼出的 ON 是会算错数的连接。
     """
-    from app.services.ontology_projection import ObjView, PropView, _referenced_key_of
     from app.ontology_types import SemanticType
+    from app.services.ontology_projection import ObjView, PropView, _referenced_key_of
 
     def _obj(name, props):
         return ObjView(

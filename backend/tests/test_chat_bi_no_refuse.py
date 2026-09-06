@@ -103,7 +103,7 @@ class _FakeStream:
         try:
             return next(self._it)
         except StopIteration:  # noqa: PERF203
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
 
 _FINAL_ANSWER = (

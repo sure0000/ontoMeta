@@ -14,9 +14,8 @@
 - ``get_ops_record``：按问题族读权威运行记录，薄壳套 ``services/ops_records.REGISTRY``
   的 reader，不在这里重写任何读模型。
 
-**scope 与身份**：``ops_records`` 里 `decision` 族按会话组织、`task_run` 的
-`scope=conversation` 也要会话 id——MCP 是无会话协议，这两条在本工具里明确拒绝并说明
-原因，而不是塞一个假的会话 id 进去（那会读出别人的决策记录）。
+**scope 与身份**：``task_run`` 的 `scope=conversation` 要会话 id——MCP 是无会话协议，
+这一条在本工具里明确拒绝并说明原因，而不是塞一个假的会话 id 进去（那会读出别人的记录）。
 """
 
 from __future__ import annotations
@@ -79,16 +78,12 @@ def _rank_candidates(items: list[dict[str, Any]], keyword: str) -> list[dict[str
 
 _query = OntologyQueryService()
 
-# 这两族在 MCP 下无法成立：REGISTRY 里有它们，但 reader 要会话上下文。
-# `landing` 也在 REGISTRY 里，但它需要先解析主体，那是 get_landing 的活。
-_CONVERSATION_BOUND_FAMILIES = ("decision",)
-_OPS_FAMILIES = tuple(
-    key
-    for key in REGISTRY
-    if key not in _CONVERSATION_BOUND_FAMILIES and key != "landing"
-)
+# 曾有一族（`decision`，按会话组织的六环决策账本）在 MCP 下无法成立；账本退场后
+# REGISTRY 里已没有需要会话上下文的族。`landing` 仍排除在外——它要先解析主体，
+# 那是 get_landing 的活。
+_OPS_FAMILIES = tuple(key for key in REGISTRY if key != "landing")
 
-# 「哪些族必须给 ontology_id」以前只在描述里写成「task_run/pipeline/draft_run **等**」——
+# 「哪些族必须给 ontology_id」以前只在描述里写成「task_run/draft_run **等**」——
 # 那个「等」让调用方只能撞一次才知道（真机审计里 get_ops_record 成功率 64%，
 # 失败大半是这一条）。改成从 REGISTRY 现算，两组各自摆明，加族时自动跟上。
 _ONTOLOGY_SCOPED_FAMILIES = tuple(
@@ -560,7 +555,6 @@ class GetOpsRecordTool:
                 "description": "读取范围；留空取该族默认。MCP 无会话，不支持 conversation",
             },
             "artifact_id": {"type": "string", "description": "指定任务制品 id（task_run）"},
-            "pipeline_id": {"type": "string", "description": "指定任务链 id（pipeline）"},
             "task_id": {"type": "string", "description": "指定草稿生成任务 id（draft_run）"},
             "app_id": {"type": "string", "description": "指定数据应用 id（data_app）"},
             "batch_id": {"type": "string", "description": "指定生产割接批次 id（migration）"},
@@ -588,9 +582,13 @@ class GetOpsRecordTool:
         family = (arguments.get("family") or "").strip()
         if family not in _OPS_FAMILIES:
             hint = None
-            if family in _CONVERSATION_BOUND_FAMILIES:
+            if family in ("decision", "pipeline"):
+                # 这两族已随决策账本与任务编排一起退场；调用方（或它的 skill 缓存）
+                # 还在用旧名字时，直接说清去哪儿读，别让它反复重试。
                 hint = (
-                    f"`{family}` 族按会话组织，MCP 是无会话协议，读不到也不该读别人的会话记录。"
+                    "`decision`/`pipeline` 族已移除。"
+                    "「谁建的、谁拍的板、人改过哪些参数」现在由 `task_run` 直接答"
+                    "（制品是这几件事的唯一记录）；多任务之间的依赖由血缘推导，没有手工任务链。"
                 )
             elif family == "landing":
                 hint = "物理落点用 get_landing（它会先解析主体）。"

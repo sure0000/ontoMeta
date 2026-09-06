@@ -312,7 +312,6 @@ def _enable_airflow(tmp_path, monkeypatch, *, triggered: dict):
     路径走真实 DAG 生成而非 handoff（不落地执行，只产 DAG + .sql + 触发替身）。
     """
     from app.services.settings_service import AirflowRuntimeConfig, SettingsService
-
     from tests.support.delivery import LocalTransportDelivery, make_runner_jar
 
     # 投递器给真的（SSH 逻辑完整跑，传输落到本地 tmp）：runner 经 build_delivery()

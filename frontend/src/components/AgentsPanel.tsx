@@ -1,6 +1,5 @@
 import {
   CheckCircleOutlined,
-  CloseCircleOutlined,
   EditOutlined,
   LinkOutlined,
   PlusOutlined,
@@ -15,6 +14,7 @@ import {
   Collapse,
   Descriptions,
   Drawer,
+  Input,
   Modal,
   Popconfirm,
   Select,
@@ -33,7 +33,6 @@ import { SectionCard } from "./SectionCard";
 import { SpecForm } from "./artifact-spec/SpecForm";
 import { CLEANSING_RULES, isFieldVisible, SPEC_FIELDS } from "./artifact-spec/specFields";
 import { useSpecOptions } from "./artifact-spec/useSpecOptions";
-import { TaskRingSteps, ringIndexForArtifact, ringsForKind } from "./TaskRingSteps";
 import type {
   AgentKinds,
   AgentValidationIssue,
@@ -216,7 +215,11 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
     setLoading(true);
     try {
       const [artifacts, kindsOut] = await Promise.all([
-        api.listArtifacts(kind ? { kind } : undefined),
+        api.listArtifacts({
+          kind,
+          reconcile: false,
+          include_details: false,
+        }),
         api.listAgentKinds(),
       ]);
       setRows(artifacts);
@@ -233,9 +236,9 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
     void load();
   }, [load]);
 
-  const refreshDetail = useCallback(async (id: string) => {
+  const refreshDetail = useCallback(async (id: string, reconcile = true) => {
     try {
-      setDetail(await api.getArtifact(id));
+      setDetail(await api.getArtifact(id, { reconcile }));
     } catch {
       /* 详情刷新失败不打断主流程 */
     }
@@ -625,7 +628,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
       title: "操作",
       key: "actions",
       render: (_, row) => (
-        <Button size="small" onClick={() => setDetail(row)}>
+        <Button size="small" onClick={() => void refreshDetail(row.id, false)}>
           查看
         </Button>
       ),
@@ -827,6 +830,7 @@ export function AgentsPanel({ kind }: { kind?: string } = {}) {
         onStep={runStep}
         onEdit={(a) => navigate(`/tasks/${a.id}/edit`)}
         ontologyName={ontologyName}
+        onArtifactChange={setDetail}
       />
     </SectionCard>
   );
@@ -836,6 +840,34 @@ const ORIGIN_LABEL: Record<string, string> = {
   machine: "机器创建",
   machine_edited: "机器创建·人工修改",
   user: "人工创建",
+};
+
+/** 从哪个入口建的。取值与后端 AuthContext.client_type 同一套词。 */
+const VIA_LABEL: Record<string, string> = {
+  frontend: "Web",
+  mcp_local: "MCP·本机",
+  mcp_remote: "MCP·远程",
+  api: "API",
+};
+
+/** Spec 顶层键 → 中文标签，用于展示「人工改过」的那几格。没收录的原样显示键名。 */
+const SPEC_FIELD_LABEL: Record<string, string> = {
+  source: "来源",
+  sources: "来源",
+  target: "落点",
+  target_table: "目标表",
+  target_database: "目标库",
+  target_layer: "分层",
+  target_datasource_id: "目标数据源",
+  selected_targets: "物化范围",
+  mode: "装载方式",
+  load_strategy: "装载策略",
+  primary_keys: "业务主键",
+  incremental_column: "增量字段",
+  partition_key: "分区键",
+  cleansing_rules: "清洗规则",
+  refresh_cron: "调度",
+  engine: "执行引擎",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -1080,8 +1112,137 @@ function SpecDescriptions({ kind, spec }: { kind: string; spec: Record<string, u
   );
 }
 
-/** 执行回执：Airflow 链接为主，建表/作业/未支持收敛进折叠面板。 */
-function ExecutionReceiptDetail({
+/** 结果表态的来路：人自己点的，还是通用 agent 问出来后转述的。可信度不同，如实标出。 */
+const RESULT_VIA_LABEL: Record<string, string> = {
+  frontend: "本人在界面确认",
+  mcp_local: "经 Agent 转述（本机）",
+  mcp_remote: "经 Agent 转述（远程）",
+  api: "经 API 写入",
+};
+
+/**
+ * 人对执行结果的判断：符不符合预期。
+ *
+ * **和上面的执行回执是两件事**：那边说系统这侧发生了什么（DAG 提交成功、写了多少行），
+ * 这边说人看过数据之后认不认。回执自陈成功而数据其实没搬对，本仓真出过——所以没人表态时
+ * 这里如实写「尚无人确认」，绝不因为 status 是 succeeded 就显示成"没问题"。
+ *
+ * 通用 agent 经 MCP 的 `confirm_task_result` 写的是同一列（它按 skill 把回执摆给用户、
+ * 问出答复再回写），故这里也会显示 agent 转述来的那一条。
+ */
+function ResultVerdict({
+  artifact,
+  onChanged,
+}: {
+  artifact: GovernanceArtifact;
+  onChanged?: (artifact: GovernanceArtifact) => void;
+}) {
+  const [outcome, setOutcome] = useState(artifact.result_outcome ?? null);
+  const [note, setNote] = useState(artifact.result_note ?? "");
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    setOutcome(artifact.result_outcome ?? null);
+    setNote(artifact.result_note ?? "");
+    setEditing(false);
+  }, [artifact.id, artifact.result_outcome, artifact.result_note]);
+
+  const submit = async (next: "accepted" | "rejected") => {
+    // 说"不符合"却不说哪里不符合，这条记录对后来看的人没有用——与 MCP 侧同一条规矩。
+    if (next === "rejected" && !note.trim()) {
+      setOutcome("rejected");
+      setEditing(true);
+      message.warning("请写清哪里不符合预期，再提交");
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await api.confirmArtifactResult(artifact.id, {
+        outcome: next,
+        note: note.trim() || undefined,
+      });
+      setOutcome(updated.result_outcome ?? null);
+      setNote(updated.result_note ?? "");
+      setEditing(false);
+      onChanged?.(updated);
+      message.success("已记下你对结果的判断");
+    } catch (e) {
+      message.error(`记录失败：${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmed = Boolean(artifact.result_outcome);
+  return (
+    <Space direction="vertical" size="small" style={{ width: "100%" }}>
+      {confirmed ? (
+        <Space wrap>
+          <Tag color={artifact.result_outcome === "accepted" ? "green" : "red"}>
+            {artifact.result_outcome === "accepted" ? "结果符合预期" : "结果不符合预期"}
+          </Tag>
+          {artifact.result_confirmed_by && (
+            <Text type="secondary">{artifact.result_confirmed_by}</Text>
+          )}
+          {artifact.result_via && (
+            <Text type="secondary">
+              · {RESULT_VIA_LABEL[artifact.result_via] ?? artifact.result_via}
+            </Text>
+          )}
+        </Space>
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          message="结果尚无人确认"
+          description="执行成功说明作业跑完了，说明不了搬过来的数对不对。核对上面的回执与实际落库结果后给个判断。"
+        />
+      )}
+      {artifact.result_note && !editing && (
+        <Text type="secondary">{artifact.result_note}</Text>
+      )}
+      {(editing || !confirmed) && (
+        <Input.TextArea
+          value={note}
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setNote(e.target.value)}
+          placeholder="不符合预期时写清哪里不对（符合可留空）"
+          autoSize={{ minRows: 1, maxRows: 3 }}
+          maxLength={2000}
+          disabled={busy}
+        />
+      )}
+      <Space>
+        <Button
+          type={outcome === "accepted" ? "primary" : "default"}
+          icon={<CheckCircleOutlined />}
+          loading={busy}
+          onClick={() => void submit("accepted")}
+        >
+          符合预期
+        </Button>
+        <Button
+          danger
+          type={outcome === "rejected" ? "primary" : "default"}
+          loading={busy}
+          onClick={() => void submit("rejected")}
+        >
+          不符合预期
+        </Button>
+        {confirmed && !editing && (
+          <Button type="link" size="small" onClick={() => setEditing(true)}>
+            改判
+          </Button>
+        )}
+      </Space>
+    </Space>
+  );
+}
+
+/** 执行回执：Airflow 链接为主，建表/作业/未支持收敛进折叠面板。
+ *
+ * 导出是为了能单测落数验证那块的三态渲染（通过 / 通过但有保留 / 失败）——
+ * 「0 行顶着绿勾」正是从这里长出来的，光靠后端测试盯不住展示层。 */
+export function ExecutionReceiptDetail({
   receipt,
   liveState,
 }: {
@@ -1110,9 +1271,23 @@ function ExecutionReceiptDetail({
         verified?: boolean;
         target_table?: string;
         row_count?: number;
+        source_table?: string;
+        source_row_count?: number | null;
+        comparison?: "match" | "mismatch" | "unavailable" | "skipped_incremental";
+        empty?: boolean;
+        caveat?: string | null;
         error?: string;
       }
     | undefined;
+
+  // 存量回执（本次改动之前跑的）没有 caveat 字段，但一直有 row_count。让展示层自己
+  // 补一句：否则历史上那些「0 行 + 绿勾」的任务在界面上永远保持误导——修了判定逻辑
+  // 却只对新任务生效，旧任务照旧顶着绿勾，等于问题只解决了一半。
+  const verificationCaveat =
+    verification?.caveat ??
+    (verification?.verified && (verification.row_count ?? 0) === 0
+      ? "目标表 0 行；本次执行早于行数核对上线，未与源表比对过"
+      : null);
 
   // 合并 live_state 与回执的状态：live_state 更权威（实时回读 Airflow）
   const displayState = liveState?.live_state ?? receiptState;
@@ -1150,13 +1325,43 @@ function ExecutionReceiptDetail({
 
       {verification && (
         <Alert
-          type={verification.verified ? "success" : "error"}
+          // 通过但带 caveat 的不给纯绿勾：0 行、或没能与源表核对，都是「跑完了但结论
+          // 有保留」。一律显示成功正是审计里那条——0 行的同步顶着绿勾，没人看得出
+          // 那张表其实是空的。
+          type={
+            !verification.verified
+              ? "error"
+              : verificationCaveat
+                ? "warning"
+                : "success"
+          }
           showIcon
-          message={verification.verified ? "Doris 落数验证通过" : "Doris 落数验证失败"}
+          message={
+            !verification.verified
+              ? "Doris 落数验证失败"
+              : verificationCaveat
+                ? "Doris 落数验证通过（有保留）"
+                : "Doris 落数验证通过"
+          }
           description={
-            verification.verified
-              ? `${verification.target_table ?? "目标表"} 共 ${verification.row_count ?? 0} 行`
-              : (verification.error ?? "目标表未产生可验证的数据")
+            !verification.verified ? (
+              (verification.error ?? "目标表未产生可验证的数据")
+            ) : (
+              <>
+                <div>
+                  {verification.target_table ?? "目标表"} 共 {verification.row_count ?? 0} 行
+                  {typeof verification.source_row_count === "number" && (
+                    <>
+                      ，源表 {verification.source_table ?? ""} 共{" "}
+                      {verification.source_row_count} 行
+                    </>
+                  )}
+                </div>
+                {verificationCaveat && (
+                  <div style={{ marginTop: 4 }}>{verificationCaveat}</div>
+                )}
+              </>
+            )
           }
         />
       )}
@@ -1380,9 +1585,7 @@ export function ArtifactDetail({
   onStep,
   onEdit,
   ontologyName,
-  onConfirmResult,
-  resultOutcome,
-  onAgentApprovalChange,
+  onArtifactChange,
 }: {
   artifact: GovernanceArtifact | null;
   busy: boolean;
@@ -1392,11 +1595,8 @@ export function ArtifactDetail({
   onEdit?: (artifact: GovernanceArtifact) => void;
   /** 本体 ID → 展示名（数据域名 + 版本）。不传则退回原始 UUID。 */
   ontologyName?: (id: string) => string;
-  /** 对话入口可提供结果验收；治理列表无会话上下文时不显示。 */
-  onConfirmResult?: (artifact: GovernanceArtifact, outcome: "accepted" | "rejected") => void;
-  resultOutcome?: "accepted" | "rejected";
-  /** 代执行授权改动后通知父组件重新拉取制品。不传则只更新抽屉内的本地态。 */
-  onAgentApprovalChange?: (artifact: GovernanceArtifact) => void;
+  /** 抽屉里改了制品（代执行授权、结果表态）后通知父组件重新拉取。不传则只更新本地态。 */
+  onArtifactChange?: (artifact: GovernanceArtifact) => void;
 }) {
   const [resolvedOntologyName, setResolvedOntologyName] = useState<string | null>(null);
   // 代执行授权：与角色正交的第二道闸，只影响外部 Agent（MCP）那条路，
@@ -1413,7 +1613,7 @@ export function ArtifactDetail({
     try {
       const updated = await api.setArtifactAgentApproval(artifact.id, next);
       setAgentApproved(Boolean(updated.agent_execution_approved));
-      onAgentApprovalChange?.(updated);
+      onArtifactChange?.(updated);
       message.success(next ? "已允许 Agent 代执行这条任务" : "已收回代执行授权");
     } catch (e) {
       setAgentApproved(!next);
@@ -1537,18 +1737,6 @@ export function ArtifactDetail({
       }
     >
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-        {/* ---- 六环确认进度 ----
-            与对话里的表单向导画的是同一条进度：人在那边确认完前三环（需求/本体/数据）后
-            来到这里，剩下的执行方案 / 执行 / 结果三环在此逐环确认。少了这条，填完表单的人
-            只看到几个按钮，不知道自己还差三环没确认。 */}
-        <TaskRingSteps
-          rings={ringsForKind(artifact.kind)}
-          {...ringIndexForArtifact(
-            status,
-            resultOutcome === "accepted" || resultOutcome === "rejected",
-          )}
-        />
-
         {/* ---- 基本信息 ---- */}
         <Descriptions size="small" column={1} bordered>
           <Descriptions.Item label="任务名称">{artifact.name}</Descriptions.Item>
@@ -1560,9 +1748,29 @@ export function ArtifactDetail({
               ? (ontologyName?.(artifact.ontology_id) ?? resolvedOntologyName ?? "当前任务本体")
               : "—"}
           </Descriptions.Item>
+          {/* 溯源：这条任务是谁建的、谁拍的板、人相对机器提案改了哪几格。
+              制品是这几件事的**唯一**记录（按会话组织的决策账本已退场），
+              所以它们必须在这里看得见，而不是只躺在库里。 */}
           <Descriptions.Item label="来源">
             {ORIGIN_LABEL[artifact.origin] ?? artifact.origin}
+            {artifact.created_by ? ` · ${artifact.created_by}` : ""}
+            {artifact.created_via ? `（${VIA_LABEL[artifact.created_via] ?? artifact.created_via}）` : ""}
           </Descriptions.Item>
+          {artifact.confirmed_by && (
+            <Descriptions.Item label="确认人">{artifact.confirmed_by}</Descriptions.Item>
+          )}
+          {artifact.agent_execution_approved_by && (
+            <Descriptions.Item label="代执行授权人">
+              {artifact.agent_execution_approved_by}
+            </Descriptions.Item>
+          )}
+          {artifact.pinned_fields?.length ? (
+            <Descriptions.Item label="人工改过">
+              {artifact.pinned_fields.map((f) => (
+                <Tag key={f}>{SPEC_FIELD_LABEL[f] ?? f}</Tag>
+              ))}
+            </Descriptions.Item>
+          ) : null}
         </Descriptions>
 
         {/* ---- 代执行授权 ----
@@ -1654,7 +1862,7 @@ export function ArtifactDetail({
         )}
 
         {/* ---- 执行结果（含 Airflow 实时状态） ---- */}
-        {(hasReceipt || hasLive || (onConfirmResult && terminal)) && (
+        {(hasReceipt || hasLive) && (
           <div>
             <SectionTitle>执行结果</SectionTitle>
             {hasReceipt ? (
@@ -1692,36 +1900,18 @@ export function ArtifactDetail({
                 }
               />
             )}
-            {onConfirmResult && terminal && !resultOutcome && (
-              <Alert
-                style={{ marginTop: 12 }}
-                type="info"
-                showIcon
-                message="还差最后一环：确认执行结果"
-                description="核对回执与实际落库结果后给出反馈；没有这一步，闭环会一直停在「已执行但结果未确认」。"
-              />
-            )}
-            {onConfirmResult && terminal && (
-              <Space style={{ marginTop: 12 }}>
-                <Button
-                  type={resultOutcome === "accepted" ? "primary" : "default"}
-                  icon={<CheckCircleOutlined />}
-                  disabled={resultOutcome === "accepted"}
-                  onClick={() => onConfirmResult(artifact, "accepted")}
-                >
-                  结果成功
-                </Button>
-                <Button
-                  danger
-                  type={resultOutcome === "rejected" ? "primary" : "default"}
-                  icon={<CloseCircleOutlined />}
-                  disabled={resultOutcome === "rejected"}
-                  onClick={() => onConfirmResult(artifact, "rejected")}
-                >
-                  结果失败
-                </Button>
-              </Space>
-            )}
+          </div>
+        )}
+
+        {/* ---- 结果表态 ----
+            **跑完了不等于跑对了**：上面那块是系统这侧的事实（终态、回执、Airflow），
+            这块是人看过之后认不认。两者分列，任何时候都不拿 status 替人答。
+            同一列也由通用 agent 经 MCP 的 confirm_task_result 写（它按 skill 问用户），
+            `result_via` 区分是人自己点的还是 agent 转述的。 */}
+        {terminal && (
+          <div>
+            <SectionTitle>结果确认</SectionTitle>
+            <ResultVerdict artifact={artifact} onChanged={onArtifactChange} />
           </div>
         )}
 

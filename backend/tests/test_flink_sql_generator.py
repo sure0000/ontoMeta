@@ -153,14 +153,14 @@ def test_batch_ignores_watermark():
 
 
 def test_generation_is_idempotent():
-    kwargs = dict(
-        source_table=_source(),
-        target_table=_target(),
-        source=_hive("erp"),
-        target=_hive("dw"),
-        select_body="SELECT `customer_id` FROM `customer`",
-        execution_mode="batch",
-    )
+    kwargs = {
+        "source_table": _source(),
+        "target_table": _target(),
+        "source": _hive("erp"),
+        "target": _hive("dw"),
+        "select_body": "SELECT `customer_id` FROM `customer`",
+        "execution_mode": "batch",
+    }
     assert generate_flink_sql(**kwargs) == generate_flink_sql(**kwargs)
 
 
@@ -334,10 +334,10 @@ def test_generate_move_sql_full_is_batch_insert():
 
 
 def test_generate_move_sql_is_idempotent():
-    kwargs = dict(
-        source_table=_source(), target_table=_target(),
-        source=_hive("erp"), target=_hive("dw"), target_engine="hive", mode="full",
-    )
+    kwargs = {
+        "source_table": _source(), "target_table": _target(),
+        "source": _hive("erp"), "target": _hive("dw"), "target_engine": "hive", "mode": "full",
+    }
     assert generate_move_sql(**kwargs) == generate_move_sql(**kwargs)
 
 

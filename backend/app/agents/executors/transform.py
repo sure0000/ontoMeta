@@ -477,7 +477,7 @@ class TransformExecutor(Executor):
         table = artifacts["target_logical_table"]
         staging_name = adapter.staging_table_name(table, artifact_id)
         staging = adapter._qual(table.database, staging_name)
-        target = adapter._qual(table.database, table.name)
+        adapter._qual(table.database, table.name)
         setup = [
             f"DROP TABLE IF EXISTS {staging};",
             adapter.render_create_staging(table, artifact_id),

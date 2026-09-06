@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import io
-import socket
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
@@ -36,7 +35,7 @@ class CommandResult:
     def ok(self) -> bool:
         return self.rc == 0
 
-    def check(self, what: str = "命令") -> "CommandResult":
+    def check(self, what: str = "命令") -> CommandResult:
         """非零退出即抛错，错误信息带上 stderr 尾部，便于回显给用户定位。"""
         if not self.ok:
             tail = (self.stderr or self.stdout or "").strip()[-400:]
@@ -79,7 +78,7 @@ class SSHSession:
         self._log_line(msg)
 
     # ---- 连接生命周期 ----
-    def connect(self, timeout: float = 15.0) -> "SSHSession":
+    def connect(self, timeout: float = 15.0) -> SSHSession:
         try:
             import paramiko
         except ImportError as exc:  # pragma: no cover - 依赖缺失时的明确报错
@@ -111,7 +110,7 @@ class SSHSession:
             client.connect(**kwargs)
         except SSHError:
             raise
-        except socket.timeout as exc:
+        except TimeoutError as exc:
             raise SSHError(f"SSH 连接超时：{self._host}:{self._port}") from exc
         except Exception as exc:  # noqa: BLE001 - paramiko 抛多种异常，统一收敛
             raise SSHError(f"SSH 连接失败：{type(exc).__name__}: {exc}") from exc
@@ -146,7 +145,7 @@ class SSHSession:
             finally:
                 self._client = None
 
-    def __enter__(self) -> "SSHSession":
+    def __enter__(self) -> SSHSession:
         return self.connect()
 
     def __exit__(
@@ -168,7 +167,7 @@ class SSHSession:
             out = stdout.read().decode("utf-8", "replace")
             err = stderr.read().decode("utf-8", "replace")
             rc = stdout.channel.recv_exit_status()
-        except socket.timeout as exc:
+        except TimeoutError as exc:
             raise SSHError(f"命令执行超时（{timeout}s）：{cmd[:80]}") from exc
         except Exception as exc:  # noqa: BLE001
             raise SSHError(f"命令执行失败：{type(exc).__name__}: {exc}") from exc

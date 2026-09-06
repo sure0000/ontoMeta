@@ -112,7 +112,7 @@ def test_name_cluster_small_cluster_joins_top_two_by_degree():
 def test_name_cluster_large_cluster_uses_common_prefix():
     ids = [f"dim_{i}" for i in range(6)]
     adjacency = _undirected([(ids[i], ids[i + 1]) for i in range(5)])
-    obj_by_id = {nid: _Obj(f"dim_{part}", f"维度{part}") for nid, part in zip(ids, "abcdef")}
+    obj_by_id = {nid: _Obj(f"dim_{part}", f"维度{part}") for nid, part in zip(ids, "abcdef", strict=False)}
     name = name_cluster(set(ids), obj_by_id, adjacency)
     assert name == "Dim Group"
 
@@ -143,7 +143,7 @@ def test_compute_graph_layout_sizes_prevent_overlap():
     # 给定较大的展开半径，任意两节点最终距离都不应小于半径之和（去重叠）。
     node_ids = [f"n{i}" for i in range(10)]
     edges = [("n0", "n1", 1.0), ("n2", "n3", 1.0)]
-    sizes = {nid: 1.2 for nid in node_ids}
+    sizes = dict.fromkeys(node_ids, 1.2)
     pos = compute_graph_layout(node_ids, edges, sizes=sizes)
     for i, a in enumerate(node_ids):
         for b in node_ids[i + 1 :]:

@@ -22,17 +22,17 @@ from app.schemas import (
     EvidenceBundle,
     OntologyDraftOutput,
 )
-from app.services.relation_terms import compact_relation_term, validate_relation_term
-from app.services.relation_structure import infer_relation_structure_type
+from app.services.common import make_async_http_client
+from app.services.draft_checkpoint import chunk_key
+from app.services.evidence_chunker import split_evidence, split_relations
 from app.services.object_classifier import (
     ROLE_BRIDGE,
     ROLE_BUSINESS_OBJECT,
     ROLE_TECHNICAL,
 )
-from app.services.common import make_async_http_client
 from app.services.object_naming import dedupe_object_names
-from app.services.draft_checkpoint import chunk_key
-from app.services.evidence_chunker import split_evidence, split_relations
+from app.services.relation_structure import infer_relation_structure_type
+from app.services.relation_terms import compact_relation_term, validate_relation_term
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +381,10 @@ class OntologyDraftGenerator:
         # not implement the separate segment response contract.
         if draft.segments and isinstance(self.client, AsyncOpenAI):
             try:
-                from app.services.segment_generator import name_segments_with_llm, dedupe_segment_names
+                from app.services.segment_generator import (
+                    dedupe_segment_names,
+                    name_segments_with_llm,
+                )
                 await name_segments_with_llm(
                     draft.segments, draft.object_types, draft.relation_types,
                     set(draft.hub_nodes), self.client, model=self.model, checkpoint=checkpoint

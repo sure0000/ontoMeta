@@ -42,7 +42,7 @@ docker compose up --build -d
 - 前端：http://localhost:5180  
 - API / OpenAPI：http://localhost:8000/docs  
 - 健康检查：`GET http://localhost:8000/health`  
-- 默认管理 Token：`dev-admin-token-change-me`（与 Compose 环境变量一致）  
+- 默认管理 Token：`dev-admin-token-change-me`（与 Compose 环境变量一致，仅限本地演示栈；生产须注入随机值，见「角色与令牌」下方提示）  
 - 未配置 DataHub / OpenAI 时，对应功能走确定性路径或显式报错（不再内置 Mock 开关）
 
 停止：`docker compose down`（数据卷 `ontometa_pg` 会保留）。
@@ -65,8 +65,9 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# 无需 .env：业务/连接配置全部在【设置页】配置（落库）。仅引导期鉴权根用环境变量：
-ONTOMETA_ADMIN_TOKEN=dev-admin-token-change-me \
+# 无需 .env：业务/连接配置全部在【设置页】配置（落库）。仅引导期鉴权根用环境变量。
+# DEBUG=true 声明这是开发态——不加的话后端会拒绝用这个公开令牌启动（见下方「上线前必读」）。
+DEBUG=true ONTOMETA_ADMIN_TOKEN=dev-admin-token-change-me \
   uvicorn app.main:app --reload --reload-dir app --port 8000
 # 或直接 ./service.sh start，脚本已内置引导期默认值。
 ```
@@ -128,7 +129,9 @@ npm run dev
 | `ONTOMETA_ADMIN_TOKEN` | 管理 API 共享 Token（必填） | — |
 | `API_KEY_HASH_PEPPER` | 主体令牌哈希 pepper（可选） | — |
 | `DATABASE_URL` | 开发 SQLite；生产 / Compose 用 PostgreSQL | `sqlite:///./ontometa.db` |
-| `DEBUG` | `false` 时 500 响应脱敏 | `true` |
+| `DEBUG` | `false` 时 500 响应脱敏，并强制校验管理令牌强度 | `false` |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | 应用库连接池（每 worker） | `5` / `10` |
+| `UVICORN_WORKERS` | 镜像内 uvicorn 进程数 | `4` |
 | `DATAHUB_GMS_URL` | DataHub GMS API 地址 | `http://localhost:8080` |
 | `DATAHUB_FRONTEND_URL` | DataHub 前端地址 | `http://localhost:9002` |
 | `DATAHUB_MAX_CONCURRENCY` | DataHub 拉取并发 | `5` |
@@ -137,6 +140,16 @@ npm run dev
 | `MAX_CONCURRENT_DRAFT_GENERATIONS` | 草稿生成并发上限 | `2` |
 
 主体令牌仅在创建/轮换时明文返回一次，库内只存 SHA-256 哈希与前缀。
+
+> **上线前必读**：`DEBUG` 未开启时，后端会在启动阶段校验 `ONTOMETA_ADMIN_TOKEN`——
+> 仍是仓库里公开的默认值（`dev-admin-token-change-me`）或短于 16 字符时**直接拒绝启动**，
+> 而不是打条警告继续跑。它是 superuser 凭据，请在部署时注入随机值
+> （`openssl rand -base64 32`）。本地开发的 `service.sh` / `docker compose` 已声明
+> `DEBUG=true`，行为不变。
+>
+> 连接数按 `UVICORN_WORKERS × (DB_POOL_SIZE + DB_MAX_OVERFLOW)` 计算，默认
+> `4 × (5 + 10) = 60`，低于 PostgreSQL 默认 `max_connections=100`；调 worker 数时
+> 这三个值要一起调。
 
 ### 数据库与迁移
 

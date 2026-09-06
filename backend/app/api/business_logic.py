@@ -9,7 +9,7 @@ from app.api.deps import (
     query,
 )
 from app.database import get_db
-from app.models import BusinessLogic, ObjectType
+from app.models import BusinessLogic
 from app.schemas import (
     BusinessLogicCategoryCreate,
     BusinessLogicCategoryOut,

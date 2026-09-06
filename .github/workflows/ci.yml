@@ -20,12 +20,21 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # 用 lock 装：CI 与生产必须是同一组版本，requirements.txt 的 `>=` 只是人编辑的源。
+        run: pip install -r requirements.lock
+      - name: Lint
+        # ruff 抓到过真 bug（datahub 丢了一整个 def、edit.py 引用未定义变量），
+        # 不是风格检查，是 CI 该拦的东西。
+        run: ruff check .
+      - name: Typecheck
+        # 按模块推进：files 清单在 pyproject.toml，收拾干净一个加一个。
+        run: mypy
       - name: Run pytest
         env:
+          # conftest 会自行固定这些值；这里保留是为了让「直接跑 pytest」也有一致环境。
+          # （曾经还设过 USE_MOCK_DATAHUB / USE_MOCK_LLM，对应开关早已随 mock 移除而删掉，
+          #  是留在 CI 里的死配置，一并清掉。）
           ONTOMETA_ADMIN_TOKEN: test-admin-token
-          USE_MOCK_DATAHUB: "true"
-          USE_MOCK_LLM: "true"
           DEBUG: "true"
           DATABASE_URL: sqlite:///./_ci_test.db
         run: pytest -q
@@ -47,5 +56,12 @@ jobs:
         run: npm ci
       - name: Lint
         run: npm run lint
+      # 设计 token 检查必须进 CI：未定义的 CSS 变量不会报错、不会告警，只是声明被浏览器
+      # 静默丢弃（字体/颜色悄悄失效）。仓库专门写了这个脚本来防它，但没接进 CI——于是
+      # styles/lineage.css 里的 var(--om-font-sans) 还是照样合进来了。
+      - name: Design tokens
+        run: npm run lint:tokens
+      - name: Unit tests
+        run: npm test
       - name: Typecheck & build
         run: npm run build

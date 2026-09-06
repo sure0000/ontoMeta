@@ -19,8 +19,6 @@ import type {
 import { ChatBiComposer } from "./ChatBiComposer";
 import { ChatBiMessages } from "./ChatBiMessages";
 import { ChatBiSidebar } from "./ChatBiSidebar";
-import { DecisionLedgerProvider } from "./DecisionLedger";
-import { recordDecisionQuietly } from "./ledger";
 import { EMPTY_DEPS, getTimeGroup, type ChatMessage, type TimeGroup } from "./utils";
 
 export function ChatBiPage() {
@@ -32,7 +30,7 @@ export function ChatBiPage() {
     EMPTY_DEPS,
   );
 
-  const domainList = domains ?? [];
+  const domainList = useMemo(() => domains ?? [], [domains]);
   // 不选域 = 全域通盘（domainIds 为空数组，合法状态）；仅系统一个域都没有时才算未接入。
   // 记忆依赖必须是 domainsParam 字符串（而非每次渲染都新建的数组），否则 domainIds 每帧都是新引用，
   // 会让下游依赖 [domainIds] 的 effect 无限重跑——表现为右侧消息区/推荐永远 loading。
@@ -46,6 +44,7 @@ export function ChatBiPage() {
     // 过滤掉已不存在的域 id
     return requested.filter((id) => domainList.some((d) => d.id === id));
   }, [domainsParam, domainList]);
+  const domainScopeKey = domainIds.join(",");
 
   useEffect(() => {
     // 同步 URL：去空白/空段归一化 domains 参数。空选 = 去掉参数（全域）。
@@ -122,7 +121,7 @@ export function ChatBiPage() {
     setBatchMode(false);
     setBatchSelectedIds(new Set());
     hasConversationDataRef.current = false;
-  }, [domainIds.join(",")]);
+  }, [domainScopeKey]);
 
   useEffect(() => {
     // 全域通盘（空选）也是合法作用域，照常拉取全部会话。
@@ -131,13 +130,15 @@ export function ChatBiPage() {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
       try {
-        const [active, archived, cats] = await Promise.all([
-          api.listChatBiConversations(domainIds, searchQuery || undefined, false),
+        const [allConversations, cats] = await Promise.all([
+          // One response contains both lists.  Fetching the same conversation
+          // history twice (once with and once without archived rows) doubled
+          // sidebar database work on every search and scope change.
           api.listChatBiConversations(domainIds, searchQuery || undefined, true),
           api.listChatBiCategories(domainIds),
         ]);
-        const archivedOnly = archived.filter((c) => c.is_archived);
-        setConversations(active.filter((c) => !c.is_archived));
+        const archivedOnly = allConversations.filter((c) => c.is_archived);
+        setConversations(allConversations.filter((c) => !c.is_archived));
         setArchivedConversations(archivedOnly);
         setCategories(cats.categories);
         hasConversationDataRef.current = true;
@@ -759,17 +760,6 @@ const ChatBiMain = memo(function ChatBiMain({
         });
         hide();
         message.success("已生成数据应用草稿");
-        // 留痕：数据应用落成即「结果确认」环——此前这个确认走 REST 旁路且立刻导航离开，
-        // 会话里完全看不出用户到底点没点、生成了哪个应用。
-        recordDecisionQuietly(activeConversationId ?? undefined, {
-          node: "result",
-          stage: "data_app",
-          trigger: "app_generated",
-          summary: `生成${appType === "dashboard" ? "看板" : appType === "screen" ? "大屏" : "表格"}「${app.name ?? name ?? question}」`,
-          chosen: { app_type: appType, question, name: app.name ?? name },
-          ref_kind: "data_app",
-          ref_id: app.id,
-        });
         navigate(`/data-apps/${app.id}/edit`);
       } catch (err) {
         hide();
@@ -838,28 +828,13 @@ const ChatBiMain = memo(function ChatBiMain({
       setAddDashOpen(false);
       setPendingAdd(null);
       message.success("已生成图表并加入看板");
-      // 留痕：面板落成同属「结果确认」环。记的是最终落到哪块看板，不是用户点开弹窗那一下——
-      // 打开弹窗又取消不该在账本里留下一条「他确认了」。
-      recordDecisionQuietly(activeConversationId ?? undefined, {
-        node: "result",
-        stage: "data_app",
-        trigger: "widget_added",
-        summary: `生成面板「${pendingAdd.title || pendingAdd.question}」并加入看板`,
-        chosen: {
-          question: pendingAdd.question,
-          widget_type: pendingAdd.vizType || "bar",
-          dashboard_id: dashboardId,
-        },
-        ref_kind: "data_app",
-        ref_id: dashboardId,
-      });
       navigate(`/data-apps/${dashboardId}/edit`);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加入失败");
     } finally {
       setAddingDash(false);
     }
-  }, [domainIds, pendingAdd, addDashTarget, navigate, activeConversationId]);
+  }, [domainIds, pendingAdd, addDashTarget, navigate]);
 
   /**
    * agent 主动提的面板/看板提案被点确认（app_proposal 块）。
@@ -1142,72 +1117,70 @@ const ChatBiMain = memo(function ChatBiMain({
   );
 
   return (
-    <DecisionLedgerProvider conversationId={activeConversationId ?? undefined}>
-      <section className="chatbi-shell">
-        <div className="chatbi-shell-topbar">
-          <Tooltip title={sidebarVisible ? "收起侧栏" : "展开侧栏"}>
-            <Button
-              type="text"
-              icon={sidebarVisible ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
-              onClick={onToggleSidebar}
-            />
-          </Tooltip>
-          {activeConversation && (
-            <div className="chatbi-shell-topbar-title">{activeConversation.title}</div>
-          )}
-          <div className="chatbi-shell-domain">
-            <Tag color="blue" style={{ borderRadius: 6 }}>
-              {scopeLabel}
-            </Tag>
-          </div>
-        </div>
-
-        <ChatBiMessages
-          scrollRef={scrollRef}
-          loadingMessages={loadingMessages}
-          messages={messages}
-          activeConversationId={activeConversationId}
-          scopeLabel={scopeLabel}
-          loadingSuggestions={loadingSuggestions}
-          suggestions={suggestions}
-          submitting={submitting}
-          onSuggestionClick={submit}
-          onGenerateApp={handleGenerateApp}
-          onAddToDashboard={openAddToDashboard}
-          onProposeApp={handleProposeApp}
-        />
-
-        <ChatBiComposer
-          scopeLabel={scopeLabel}
-          input={input}
-          submitting={submitting}
-          onInputChange={setInput}
-          onSubmit={submit}
-        />
-
-        <Modal
-          title="加入看板"
-          open={addDashOpen}
-          onCancel={() => setAddDashOpen(false)}
-          onOk={confirmAddToDashboard}
-          okText="生成图表并加入"
-          confirmLoading={addingDash}
-        >
-          <div style={{ marginBottom: 8, color: "var(--om-text-tertiary)" }}>
-            基于当前回答的口径生成一个可复用图表，并加入选定看板（不重调模型）。
-          </div>
-          <Select
-            style={{ width: "100%" }}
-            placeholder="选择目标看板（或新建）"
-            value={addDashTarget}
-            onChange={setAddDashTarget}
-            options={[
-              { label: "＋ 新建看板", value: "__new__" },
-              ...dashboards.map((d) => ({ label: d.name, value: d.id })),
-            ]}
+    <section className="chatbi-shell">
+      <div className="chatbi-shell-topbar">
+        <Tooltip title={sidebarVisible ? "收起侧栏" : "展开侧栏"}>
+          <Button
+            type="text"
+            icon={sidebarVisible ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
+            onClick={onToggleSidebar}
           />
-        </Modal>
-      </section>
-    </DecisionLedgerProvider>
+        </Tooltip>
+        {activeConversation && (
+          <div className="chatbi-shell-topbar-title">{activeConversation.title}</div>
+        )}
+        <div className="chatbi-shell-domain">
+          <Tag color="blue" style={{ borderRadius: 6 }}>
+            {scopeLabel}
+          </Tag>
+        </div>
+      </div>
+
+      <ChatBiMessages
+        scrollRef={scrollRef}
+        loadingMessages={loadingMessages}
+        messages={messages}
+        activeConversationId={activeConversationId}
+        scopeLabel={scopeLabel}
+        loadingSuggestions={loadingSuggestions}
+        suggestions={suggestions}
+        submitting={submitting}
+        onSuggestionClick={submit}
+        onGenerateApp={handleGenerateApp}
+        onAddToDashboard={openAddToDashboard}
+        onProposeApp={handleProposeApp}
+      />
+
+      <ChatBiComposer
+        scopeLabel={scopeLabel}
+        input={input}
+        submitting={submitting}
+        onInputChange={setInput}
+        onSubmit={submit}
+      />
+
+      <Modal
+        title="加入看板"
+        open={addDashOpen}
+        onCancel={() => setAddDashOpen(false)}
+        onOk={confirmAddToDashboard}
+        okText="生成图表并加入"
+        confirmLoading={addingDash}
+      >
+        <div style={{ marginBottom: 8, color: "var(--om-text-tertiary)" }}>
+          基于当前回答的口径生成一个可复用图表，并加入选定看板（不重调模型）。
+        </div>
+        <Select
+          style={{ width: "100%" }}
+          placeholder="选择目标看板（或新建）"
+          value={addDashTarget}
+          onChange={setAddDashTarget}
+          options={[
+            { label: "＋ 新建看板", value: "__new__" },
+            ...dashboards.map((d) => ({ label: d.name, value: d.id })),
+          ]}
+        />
+      </Modal>
+    </section>
   );
 });

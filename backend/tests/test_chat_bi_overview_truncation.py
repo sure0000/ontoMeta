@@ -20,8 +20,8 @@ from app.models import (
     OntologyStatus,
     RelationType,
 )
-from app.services.chat_bi import ChatBiService, _SEARCH_LIMIT, _search_items
 from app.services.agent_grounding import FactLedger
+from app.services.chat_bi import _SEARCH_LIMIT, ChatBiService, _search_items
 from app.services.publish import PublishService
 
 

@@ -1,9 +1,9 @@
 """维度模型制品：星型/雪花模型的显式设计与验证。"""
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Column, DateTime, Enum, ForeignKey, String, Text, Integer
+from sqlalchemy import JSON, Column, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -129,8 +129,8 @@ class DimensionalModel(Base):
     
     # 元数据
     created_by = Column(String(100), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
     
     # 关系
     modeling_case = relationship("ModelingCase", back_populates="dimensional_models")

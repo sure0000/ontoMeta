@@ -261,18 +261,18 @@ def test_child_table_not_promoted_by_pk_signal():
         FieldSignal(name="status", semantic_type="category"),
         FieldSignal(name="remark", semantic_type="attribute"),
     ]
-    args = dict(
-        fk_in_degree=0,
-        distinct_fk_targets=0,
-        lineage_upstream=0,
-        lineage_downstream=0,
-        glossary_terms=[],
-        row_count=None,
-        has_business_naming=True,
-        subtypes=[],
-        tags=[],
-        segment_size=8,  # 隶属业务环节，不触发 segment 降级
-    )
+    args = {
+        "fk_in_degree": 0,
+        "distinct_fk_targets": 0,
+        "lineage_upstream": 0,
+        "lineage_downstream": 0,
+        "glossary_terms": [],
+        "row_count": None,
+        "has_business_naming": True,
+        "subtypes": [],
+        "tags": [],
+        "segment_size": 8,  # 隶属业务环节，不触发 segment 降级
+    }
 
     def _run(is_child: bool):
         pack = ObjectTypeEvidencePack(

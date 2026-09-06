@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -25,7 +25,9 @@ from app.models import Ontology, OntologyStatus
 
 logger = logging.getLogger("ontometa.ontology_workspace")
 
-_EPOCH = datetime(1970, 1, 1)
+#: 排序兜底值。刻意是 naive——它要和 naive 的 DateTime 列比大小，带上 tzinfo 反而会抛
+#: "can't compare offset-naive and offset-aware datetimes"。
+_EPOCH = datetime(1970, 1, 1)  # noqa: DTZ001
 
 
 def _naive(value: datetime | None) -> datetime:
@@ -34,7 +36,7 @@ def _naive(value: datetime | None) -> datetime:
     if value is None:
         return _EPOCH
     if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(UTC).replace(tzinfo=None)
     return value
 
 

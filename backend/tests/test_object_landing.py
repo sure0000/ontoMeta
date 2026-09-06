@@ -20,8 +20,8 @@ from app.models import (
     OntologyWarehouseDeployment,
     WarehouseObjectProjection,
 )
-from app.services.ingestion_contract import mirror_contract_to_projection
 from app.services.doris_deployment import prepare_current_deployment
+from app.services.ingestion_contract import mirror_contract_to_projection
 from app.services.object_landing import (
     FAILED,
     LANDED,

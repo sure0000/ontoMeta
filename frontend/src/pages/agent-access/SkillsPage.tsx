@@ -33,13 +33,8 @@ import { api } from "../../api";
 import { PageContainer } from "../../components/PageContainer";
 import { PageHeader } from "../../components/PageHeader";
 import { SectionCard } from "../../components/SectionCard";
-import type {
-  McpSkill,
-  McpSkillInstallResult,
-  McpSkillVersion,
-  McpToolInfo,
-} from "../../types";
-import { MarkdownLite } from "../chat-bi/ChatBiReferences";
+import type { McpSkill, McpSkillInstallResult, McpSkillVersion, McpToolInfo } from "../../types";
+import { MarkdownLite } from "../../components/MarkdownLite";
 
 const { Text, Paragraph } = Typography;
 
@@ -64,16 +59,16 @@ export function SkillsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [result, info] = await Promise.all([api.getMcpSkills(), api.getMcpInfo()]);
+      const [result, settings] = await Promise.all([
+        api.getMcpSkills(),
+        api.getMcpSettings().catch(() => null),
+      ]);
       setSkills(result.skills);
-      setTools(info.tools);
+      setTools(result.tools);
       setSelected((current) => current ?? result.skills[0]?.name);
       // 安装目录只是"上次装到哪"，取不到不该让整页报错——那会把 Skill 清单一起吞掉。
-      try {
-        const settings = await api.getMcpSettings();
+      if (settings) {
         setInstallDir((current) => current || settings.mcp_skill_install_dir || "");
-      } catch {
-        // 读不到设置就让用户自己填一次。
       }
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载 Skill 失败");
@@ -215,8 +210,8 @@ export function SkillsPage() {
             {!plan.exists && <Text type="secondary">（不存在，将自动创建）</Text>}
           </Text>
           <Text type="secondary">
-            新建 {plan.created} · 覆盖 {plan.updated} · 已是最新 {plan.unchanged}；
-            只写 <Text code>&lt;skill-name&gt;/SKILL.md</Text>，目录里其它文件不动。
+            新建 {plan.created} · 覆盖 {plan.updated} · 已是最新 {plan.unchanged}； 只写{" "}
+            <Text code>&lt;skill-name&gt;/SKILL.md</Text>，目录里其它文件不动。
           </Text>
           <div style={{ maxHeight: 240, overflow: "auto" }}>
             <List
@@ -276,8 +271,8 @@ export function SkillsPage() {
       <SectionCard title="部署 Skill" icon={<FolderOpenOutlined />}>
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
           <Text>
-            把当前生效版本按 <Text code>&lt;skill-name&gt;/SKILL.md</Text>{" "}
-            直接写进 Agent 读取 Skill 的目录，不必再下载解压。
+            把当前生效版本按 <Text code>&lt;skill-name&gt;/SKILL.md</Text> 直接写进 Agent 读取 Skill
+            的目录，不必再下载解压。
           </Text>
           <Space.Compact style={{ width: "100%" }}>
             <Input
@@ -299,8 +294,8 @@ export function SkillsPage() {
           </Space.Compact>
           <Text type="secondary" style={{ fontSize: 12 }}>
             路径是 <Text strong>ontoMeta 后端所在主机</Text>
-            上的目录（安装由服务端写盘，不是浏览器下载）；Agent 装在别的机器上时用下面的 ZIP。
-            dsh 的目录见 <Text code>skill-filesystem.customSkillDirs</Text>。会先给出预检计划再写。
+            上的目录（安装由服务端写盘，不是浏览器下载）；Agent 装在别的机器上时用下面的 ZIP。 dsh
+            的目录见 <Text code>skill-filesystem.customSkillDirs</Text>。会先给出预检计划再写。
           </Text>
           <Divider style={{ margin: "4px 0" }} />
           <Space wrap>
@@ -457,7 +452,10 @@ export function SkillsPage() {
                   </Button>
                 }
                 {!detail?.is_output_contract && (
-                  <Button icon={<BookOutlined />} onClick={() => setShowComposed((value) => !value)}>
+                  <Button
+                    icon={<BookOutlined />}
+                    onClick={() => setShowComposed((value) => !value)}
+                  >
                     {showComposed ? "隐藏下发正文" : "查看下发正文"}
                   </Button>
                 )}
@@ -493,9 +491,13 @@ export function SkillsPage() {
                     description="正文里「输出格式（必须遵守）」以下的全部内容，会替换掉其它 Skill 里的 {{OUTPUT_CONTRACT}} 占位符。改这里等于同时改掉所有 Skill 的回答格式、状态口径与提问方式。"
                   />
                 ) : detail.contract_source === "inherited" ? (
-                  <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+                  <Paragraph
+                    type="secondary"
+                    style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}
+                  >
                     出口契约由 <Text code>ontometa-output</Text> 提供（正文里的{" "}
-                    <Text code>{"{{OUTPUT_CONTRACT}}"}</Text> 会在下发、导出和安装时替换成它的正文）。
+                    <Text code>{"{{OUTPUT_CONTRACT}}"}</Text>{" "}
+                    会在下发、导出和安装时替换成它的正文）。
                   </Paragraph>
                 ) : detail.contract_source === "inline" ? (
                   <Alert

@@ -15,11 +15,10 @@ import json
 import pytest
 
 from app.database import SessionLocal
+from app.models import Ontology
 from app.services.chat_bi import _TOOL_RESULT_MAX_CHARS, ChatBiService
 from app.services.domain_semantic_card import build_card
-from app.models import Ontology
 from app.services.tool_result_compaction import compact_tool_result
-
 from tests.fixtures.large_ontology import seed_large_ontology
 
 

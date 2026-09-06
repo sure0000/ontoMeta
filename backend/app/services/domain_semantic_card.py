@@ -30,6 +30,7 @@ from app.models import (
     Property,
     RelationType,
 )
+
 logger = logging.getLogger("ontometa.domain_card")
 
 _TOP_CLUSTERS = 8       # 业务板块最多列几个

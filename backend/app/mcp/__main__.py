@@ -6,8 +6,8 @@
     python -m app.mcp.server
 """
 import asyncio
-import sys
 import os
+import sys
 
 # 添加 backend 目录到 Python 路径
 backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

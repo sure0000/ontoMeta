@@ -83,8 +83,7 @@ async function resolveBreadcrumbs(
         BL_BASE,
         {
           label:
-            cat?.name ??
-            (catId === UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID ? "未分类" : "分类"),
+            cat?.name ?? (catId === UNCATEGORIZED_BUSINESS_LOGIC_CATEGORY_ID ? "未分类" : "分类"),
         },
       ];
     }
@@ -157,7 +156,12 @@ export function AppBreadcrumb() {
     let cancelled = false;
     setLoading(true);
 
-    resolveBreadcrumbs(location.pathname, location.search, params)
+    resolveBreadcrumbs(location.pathname, location.search, {
+      domainId: params.domainId,
+      objectId: params.objectId,
+      logicId: params.logicId,
+      relationId: params.relationId,
+    })
       .then((crumbs) => {
         if (cancelled) return;
         setItems(

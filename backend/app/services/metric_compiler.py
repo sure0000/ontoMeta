@@ -29,8 +29,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlglot import exp
 from sqlalchemy.orm import Session
+from sqlglot import exp
 
 from app.models import BusinessLogic, EntityStatus
 from app.ontology_types import SemanticType, can_aggregate, can_group_by

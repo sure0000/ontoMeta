@@ -28,7 +28,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { SectionCard } from "./SectionCard";
-import { MarkdownLite } from "../pages/chat-bi/ChatBiReferences";
+import { MarkdownLite } from "./MarkdownLite";
 import type {
   McpAuditEntry,
   McpServiceInfo,
@@ -179,7 +179,6 @@ export function McpServicePanel() {
     try {
       const next = await api.updateMcpSettings(values);
       settingsForm.setFieldsValue(next);
-      await loadInfo();
       message.success("配置已保存，立即生效");
     } catch (e) {
       message.error(`保存 MCP 配置失败：${(e as Error).message}`);
@@ -276,8 +275,8 @@ export function McpServicePanel() {
           <Paragraph type="secondary" style={{ margin: "10px 0 0", fontSize: 12 }}>
             开启时，Agent 通过 MCP 确认或执行任务，除角色外还需要有人在任务详情里逐条放行。
             角色是长期许可，「这一条现在可以自动跑」是另一个决定。关掉则退回「一个 publisher
-            令牌即可推到远端真跑」。启用「本机宿主交互确认」后，只有本机 stdio 的真实
-            Principal 可在宿主确认 UI 中批准，并以任务 digest 绑定本次确认；远程 HTTP 不适用。
+            令牌即可推到远端真跑」。启用「本机宿主交互确认」后，只有本机 stdio 的真实 Principal
+            可在宿主确认 UI 中批准，并以任务 digest 绑定本次确认；远程 HTTP 不适用。
             「控制台地址」用于 Agent 用 <Text code>open_task_form</Text>{" "}
             发网页表单链接时拼出可点的完整地址；留空只会给相对路径。
           </Paragraph>

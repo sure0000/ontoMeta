@@ -13,7 +13,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -129,11 +140,11 @@ class DataApp(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
-    datasets: Mapped[list["DataAppDataset"]] = relationship(
+    datasets: Mapped[list[DataAppDataset]] = relationship(
         back_populates="app",
         cascade="all, delete-orphan",
     )
-    versions: Mapped[list["DataAppVersion"]] = relationship(
+    versions: Mapped[list[DataAppVersion]] = relationship(
         back_populates="app",
         cascade="all, delete-orphan",
     )
@@ -159,7 +170,7 @@ class DataAppDataset(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
-    app: Mapped["DataApp"] = relationship(back_populates="datasets")
+    app: Mapped[DataApp] = relationship(back_populates="datasets")
 
 
 class DataAppWidget(Base):
@@ -205,4 +216,4 @@ class DataAppVersion(Base):
     operator: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
-    app: Mapped["DataApp"] = relationship(back_populates="versions")
+    app: Mapped[DataApp] = relationship(back_populates="versions")

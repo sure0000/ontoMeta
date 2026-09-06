@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.api.deps import chat_bi_service
 from app.services.agent_run_store import attach_agent_run, build_persisted_history
@@ -54,7 +54,7 @@ def test_run_manifest_keeps_safe_artifacts_and_excludes_result_rows():
         payload,
         run_id="run-safe",
         question="刚才查到了什么？",
-        started_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        started_at=datetime(2026, 8, 29, tzinfo=UTC),
         intent="operational",
     )
     encoded = json.dumps(persisted["agent_artifacts"], ensure_ascii=False)

@@ -52,7 +52,7 @@ _ECHO_SUFFIXES = ("_name", "_title", "_code", "_abbr", "_group", "_currency")
 _POLY_REF_SUFFIXES = ("_no", "_id", "_name")
 
 
-def _detect_reference_values(fields: "list[FieldSignal]") -> set[str]:
+def _detect_reference_values(fields: list[FieldSignal]) -> set[str]:
     """返回应视为「退维引用值」而非自有属性的列名（小写）。
 
     1. 多态标识对：同一词根同时出现 `X_type` 与 `X_no`/`X_id`/`X_name`（如
@@ -210,7 +210,7 @@ def classify_object_role(
     # 拷贝/退化标识当作实体属性而高估业务对象倾向。
     ref_value_cols = _detect_reference_values(fields)
 
-    def _is_ref_value(f: "FieldSignal") -> bool:
+    def _is_ref_value(f: FieldSignal) -> bool:
         return f.name.lower() in ref_value_cols
 
     descriptive = sum(

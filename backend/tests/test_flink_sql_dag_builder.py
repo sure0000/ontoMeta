@@ -20,7 +20,6 @@ from app.services.airflow_dag_builder import (
     flink_dag_id_for,
 )
 
-
 _JAR_PATH: str | None = None
 
 
@@ -44,20 +43,20 @@ def _fake_jar() -> str:
 
 
 def _cfg(**over) -> FlinkSubmitConfig:
-    base = dict(runner_jar=_fake_jar())
+    base = {"runner_jar": _fake_jar()}
     base.update(over)
     return FlinkSubmitConfig(**base)
 
 
 def _build(**over):
-    kwargs = dict(
-        ontology_id="artifact-abc-123",
-        engine="hive",
-        tasks=[FlinkSqlTask(task_id="clean_customer", sql="INSERT INTO t SELECT 1;")],
-        ddl_statements={"dim.customer": "CREATE TABLE t (x int)"},
-        warehouse_conn_id="warehouse_hive",
-        config=_cfg(),
-    )
+    kwargs = {
+        "ontology_id": "artifact-abc-123",
+        "engine": "hive",
+        "tasks": [FlinkSqlTask(task_id="clean_customer", sql="INSERT INTO t SELECT 1;")],
+        "ddl_statements": {"dim.customer": "CREATE TABLE t (x int)"},
+        "warehouse_conn_id": "warehouse_hive",
+        "config": _cfg(),
+    }
     kwargs.update(over)
     return build_flink_sql_dag(**kwargs)
 
@@ -199,7 +198,7 @@ def test_staging_dag_source_is_valid_python():
 
 def test_dag_id_base_defaults_to_ontology_but_can_be_overridden():
     """同一本体上并存的物化/同步两条制品必须落在不同 dag_id 上，否则互相覆盖投递。"""
-    same_ontology = dict(ontology_id="onto-1", dag_id_suffix="manual")
+    same_ontology = {"ontology_id": "onto-1", "dag_id_suffix": "manual"}
     a = _build(**same_ontology, dag_id_base="artifact-materialize")
     b = _build(**same_ontology, dag_id_base="artifact-sync")
     assert a.dag_id != b.dag_id

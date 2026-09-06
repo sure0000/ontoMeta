@@ -1,9 +1,9 @@
 from app.schemas import (
+    DataHubDomainBundle,
     DatasetInput,
     DomainInput,
     FieldInput,
     LineageInput,
-    DataHubDomainBundle,
 )
 from app.services.evidence_builder import EvidenceBuilder
 from app.services.object_classifier import (

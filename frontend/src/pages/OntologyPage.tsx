@@ -1,6 +1,6 @@
 import { ApartmentOutlined } from "@ant-design/icons";
 import { Alert, Segmented, Spin } from "antd";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -40,10 +40,7 @@ export function OntologyPage() {
   const [searchQuery, setSearchQuery] = useState(urlQuery);
   const [debouncedQ, setDebouncedQ] = useState(urlQuery);
   const [roleFilter, setRoleFilter] = useState<string[]>(["business_object"]);
-  const [browseView, setBrowseView] = useUrlState<"map" | "list">("browse", "map", [
-    "map",
-    "list",
-  ]);
+  const [browseView, setBrowseView] = useUrlState<"map" | "list">("browse", "map", ["map", "list"]);
   const [viewTab, setViewTab] = useUrlState<ViewTab>("tab", "business_object", VIEW_TABS);
 
   useEffect(() => {
@@ -137,7 +134,8 @@ export function OntologyPage() {
     };
   }, [domainId, objectPage, relationPage, pageSize, debouncedQ, roleFilter]);
 
-  const domains = bundle?.domains ?? [];
+  const bundleDomains = bundle?.domains;
+  const domains = useMemo(() => bundleDomains ?? [], [bundleDomains]);
   const domain = bundle?.domain ?? null;
   const objects = bundle?.objects ?? [];
   const relations = bundle?.relations ?? [];
@@ -174,16 +172,18 @@ export function OntologyPage() {
       <PageHeader
         icon={<ApartmentOutlined />}
         title={domain?.name ?? "本体浏览"}
-        extra={publishedOntologyId ? (
-          <Segmented
-            value={browseView}
-            onChange={(value) => setBrowseView(value as "map" | "list")}
-            options={[
-              { label: "业务地图", value: "map" },
-              { label: "对象清单", value: "list" },
-            ]}
-          />
-        ) : null}
+        extra={
+          publishedOntologyId ? (
+            <Segmented
+              value={browseView}
+              onChange={(value) => setBrowseView(value as "map" | "list")}
+              options={[
+                { label: "业务地图", value: "map" },
+                { label: "对象清单", value: "list" },
+              ]}
+            />
+          ) : null
+        }
       />
 
       {error && <Alert type="error" message={error} showIcon />}
@@ -194,51 +194,49 @@ export function OntologyPage() {
             title="该数据域尚无已发布本体"
             description="请在工作区完成草稿编辑并发布后，回到此页查看已固化的本体语义。"
           />
+        ) : browseView === "map" ? (
+          <OntologyOverviewPanel
+            ontologyId={publishedOntologyId}
+            publishedOnly
+            objectDetailPath={(objectId) => `/ontology/${objectId}`}
+            segmentPath={(segmentId) => `/segments/${segmentId}?published=1`}
+          />
         ) : (
-          browseView === "map" ? (
-            <OntologyOverviewPanel
-              ontologyId={publishedOntologyId}
-              publishedOnly
-              objectDetailPath={(objectId) => `/ontology/${objectId}`}
-              segmentPath={(segmentId) => `/segments/${segmentId}?published=1`}
-            />
-          ) : (
-            <OntologyWorkspaceView
-              objects={objects}
-              relations={relations}
-              showRoleClassification={false}
-              relationDetailPath={(relationId) => `/ontology/relations/${relationId}`}
-              relationScope={{ ontologyId: publishedOntologyId ?? undefined, publishedOnly: true }}
-              datasetOntologyId={publishedOntologyId ?? undefined}
-              relationGroupDetailPath={(displayName) =>
-                `/ontology/relation-groups/${encodeURIComponent(displayName)}?oid=${publishedOntologyId}&pub=1`
-              }
-              viewTab={viewTab}
-              onViewTabChange={setViewTab}
-              objectTypeFilter={roleFilter}
-              onObjectTypeFilterChange={setRoleFilter}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              objectPaging={{
-                total: objectTotal,
-                page: objectPage,
-                pageSize,
-                onChange: (page, size) => {
-                  setObjectPage(page);
-                  setPageSize(size);
-                },
-              }}
-              relationPaging={{
-                total: relationTotal,
-                page: relationPage,
-                pageSize,
-                onChange: (page, size) => {
-                  setRelationPage(page);
-                  setPageSize(size);
-                },
-              }}
-            />
-          )
+          <OntologyWorkspaceView
+            objects={objects}
+            relations={relations}
+            showRoleClassification={false}
+            relationDetailPath={(relationId) => `/ontology/relations/${relationId}`}
+            relationScope={{ ontologyId: publishedOntologyId ?? undefined, publishedOnly: true }}
+            datasetOntologyId={publishedOntologyId ?? undefined}
+            relationGroupDetailPath={(displayName) =>
+              `/ontology/relation-groups/${encodeURIComponent(displayName)}?oid=${publishedOntologyId}&pub=1`
+            }
+            viewTab={viewTab}
+            onViewTabChange={setViewTab}
+            objectTypeFilter={roleFilter}
+            onObjectTypeFilterChange={setRoleFilter}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            objectPaging={{
+              total: objectTotal,
+              page: objectPage,
+              pageSize,
+              onChange: (page, size) => {
+                setObjectPage(page);
+                setPageSize(size);
+              },
+            }}
+            relationPaging={{
+              total: relationTotal,
+              page: relationPage,
+              pageSize,
+              onChange: (page, size) => {
+                setRelationPage(page);
+                setPageSize(size);
+              },
+            }}
+          />
         )}
       </Spin>
     </PageContainer>

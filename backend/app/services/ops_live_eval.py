@@ -3,12 +3,19 @@
 这个模块不发请求、不读数据库，也不写轨迹；它只把 ``ChatBiService.ask`` 的 payload
 投影成可比较的结果。真实调用由 ``scripts/run_ops_live_eval.py`` 负责，便于在没有 LLM
 凭据时安全地跑 dry-run，也便于未来把同一评分器接进 CI 或发布流水线。
+
+.. admonition:: 状态：评测工装，不该进生产路径
+
+   本模块没有生产调用方是**刻意的**——它是离线评测的一部分，由
+   ``scripts/run_ops_live_eval.py`` 驱动。登记在 ``tests/test_unwired_modules.py``
+   的清单里，免得下次审计又把它当成忘了删的死代码。
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
+
 
 class OpsQuestionLike(Protocol):
     """评估器所需的最小问题接口，避免生产服务依赖 tests 包。"""

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -36,7 +36,7 @@ class _ProvenanceReadMixin(BaseModel):
         return v or {}
 
 
-class PageResult(BaseModel, Generic[T]):
+class PageResult[T](BaseModel):
     """统一分页响应：limit 为 None 表示未截断（返回全部）。"""
 
     items: list[T]

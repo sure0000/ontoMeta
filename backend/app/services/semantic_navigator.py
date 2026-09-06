@@ -169,7 +169,7 @@ def _fanout_of(
     任一段为多、或基数未知，即判扇出（保守）。
     """
     near = measure
-    for hop, rel in zip(hops, rels):
+    for hop, rel in zip(hops, rels, strict=False):
         if rel.cardinality is not None and rel.cardinality.value == "many_to_many":
             return f"「{hop.from_obj}」↔「{hop.to_obj}」为多对多，会放大行"
         many = other_is_many(rel, near)

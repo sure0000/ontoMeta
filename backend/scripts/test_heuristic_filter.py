@@ -480,7 +480,7 @@ def _extract_first_when_op_val(body: dict):
 
 def test_mock_format() -> int:
     failed = 0
-    for idx, (desc, text_refs, ref_ids, logic_type, expect_op, expect_val) in enumerate(MOCK_CASES, 1):
+    for _idx, (desc, text_refs, ref_ids, logic_type, expect_op, expect_val) in enumerate(MOCK_CASES, 1):
         segments = make_segments(text_refs)
         refs = make_refs(ref_ids)
         result = _mock_format(segments, refs, logic_type, "")

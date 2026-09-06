@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import io
-import os
+import tempfile
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -26,22 +27,28 @@ CONTRACT_SKILL = "ontometa-output"
 CONTRACT_PLACEHOLDER = "{{OUTPUT_CONTRACT}}"
 
 _SPECIALIZED = {
+    "ontometa-onboarding",
     "ontometa-discovery",
     "ontometa-query",
     "ontometa-task-plan",
     "ontometa-task-execute",
     "ontometa-admin",
     "ontometa-flow",
+    "ontometa-authoring",
+    "ontometa-modeling",
 }
 
-#: 技能页与导出的展示顺序：先总入口和出口契约，再按"探索 → 取数 → 规划 → 执行 → 自省"。
+#: 技能页与导出的展示顺序：先总入口和出口契约，再按"接数 → 探索 → 取数 → 创作 → 建模 → 规划 → 执行 → 自省"。
 #: 字母序会把 admin 排在最前、把总控埋在中间——那是给机器看的顺序，不是给人读的。
 _DISPLAY_ORDER = (
     "ontometa-mcp",
     "ontometa-output",
     "ontometa-flow",
+    "ontometa-onboarding",
     "ontometa-discovery",
     "ontometa-query",
+    "ontometa-authoring",
+    "ontometa-modeling",
     "ontometa-task-plan",
     "ontometa-task-execute",
     "ontometa-admin",
@@ -213,12 +220,24 @@ def _order_key(name: str) -> tuple[int, str]:
     )
 
 
-def builtin_pack() -> dict[str, BuiltinSkill]:
-    """Load the immutable checked-in pack without touching the database."""
+@lru_cache(maxsize=1)
+def _builtin_pack_cached() -> dict[str, BuiltinSkill]:
+    """Read and validate the immutable checked-in pack once per process."""
     return {
         path.parent.name: _read_builtin(path)
         for path in sorted(_ROOT.glob("*/SKILL.md"))
     }
+
+
+def builtin_pack() -> dict[str, BuiltinSkill]:
+    """Return the immutable checked-in pack without touching the database.
+
+    The returned mapping is a shallow copy so callers cannot accidentally
+    mutate the process-wide cache.  Built-in files are deployment assets; a
+    process restart is the explicit refresh boundary, while database
+    overrides remain dynamic through ``_effective``.
+    """
+    return dict(_builtin_pack_cached())
 
 
 def builtin_composed(name: str) -> str:
@@ -289,13 +308,19 @@ def resolve_body(db: Session, name: str) -> str | None:
     return item.body if item else None
 
 
-def skill_coverage_gaps(db: Session, *, replacements: dict[str, str] | None = None) -> list[str]:
+def skill_coverage_gaps(
+    db: Session,
+    *,
+    replacements: dict[str, str] | None = None,
+    skills: list[SkillView] | None = None,
+) -> list[str]:
     """Return registered tools not mentioned by any enabled effective skill."""
     from app.mcp.tools import TOOL_REGISTRY
 
     replacements = replacements or {}
     bodies = []
-    for skill in _effective(db):
+    effective_skills = skills if skills is not None else _effective(db)
+    for skill in effective_skills:
         if not skill.enabled:
             continue
         bodies.append(replacements.get(skill.name, skill.body))
@@ -370,7 +395,7 @@ def save_override(db: Session, name: str, body: str, updated_by: str | None = No
     row.source = "override"
     row.builtin_digest = pack[name].digest
     row.updated_by = updated_by
-    row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    row.updated_at = datetime.now(UTC).replace(tzinfo=None)
     _record_version(
         db,
         name,
@@ -397,7 +422,7 @@ def reset_override(db: Session, name: str, updated_by: str | None = None) -> Ski
     row.source = "builtin"
     row.builtin_digest = None
     row.updated_by = updated_by
-    row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    row.updated_at = datetime.now(UTC).replace(tzinfo=None)
     if had_override:
         _record_version(
             db,
@@ -425,18 +450,23 @@ def set_enabled(db: Session, name: str, enabled: bool, updated_by: str | None = 
         db.add(row)
     row.enabled = bool(enabled)
     row.updated_by = updated_by
-    row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    row.updated_at = datetime.now(UTC).replace(tzinfo=None)
     db.commit()
     db.refresh(row)
     return get_skill(db, name)  # type: ignore[return-value]
 
 
-def skill_view_dict(item: SkillView, *, include_body: bool = True) -> dict[str, Any]:
+def skill_view_dict(
+    item: SkillView,
+    *,
+    include_body: bool = True,
+    catalog: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     from app.mcp.introspection import tool_catalog
 
     body = item.body if include_body else ""
     source_body = item.source_body if include_body else ""
-    catalog = tool_catalog()
+    catalog = tool_catalog() if catalog is None else catalog
     mentioned = {tool["name"] for tool in catalog if tool["name"] in item.body}
     return {
         "name": item.name,
@@ -592,27 +622,54 @@ def resolve_install_dir(target_dir: str) -> Path:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise ValueError("目标目录必须是绝对路径（相对路径会落在后端进程的工作目录）")
-    resolved = Path(os.path.normpath(str(path)))
-    if str(resolved) in _INSTALL_DENYLIST or resolved == Path.home():
+    # Resolve existing symlinks before applying the denylist.  Otherwise a
+    # seemingly harmless ``/tmp/agent-skills`` symlink to ``/etc`` would pass
+    # validation and the subsequent mkdir/write would follow it.
+    resolved = path.resolve(strict=False)
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    # macOS resolves /tmp and pytest's temporary roots through /private; keep
+    # those writable test/runtime roots allowed while rejecting system paths
+    # and their descendants after symlink resolution.
+    deny_prefixes = {
+        Path(value)
+        for value in _INSTALL_DENYLIST
+        if value not in {"/", "/tmp", "/Users", "/Volumes", "/private"}
+    }
+    canonical = resolved
+    if canonical.parts[:2] == ("/", "private"):
+        canonical = Path("/", *canonical.parts[2:])
+    unsafe = any(canonical == prefix or prefix in canonical.parents for prefix in deny_prefixes)
+    if resolved == temp_root or temp_root in resolved.parents:
+        unsafe = False
+    if unsafe or resolved == Path.home():
         raise ValueError(f"拒绝写入 {resolved}；请填 Agent 真正读取 Skill 的那个目录")
     if resolved == _ROOT or _ROOT in resolved.parents:
         raise ValueError("不能安装回仓库内置 Skill 目录：那份是不可变的上游基线")
     return resolved
 
 
-def install_plan(db: Session, *, target_dir: str, names: list[str] | None = None) -> dict[str, Any]:
+def install_plan(
+    db: Session,
+    *,
+    target_dir: str,
+    names: list[str] | None = None,
+    _skills: dict[str, SkillView] | None = None,
+) -> dict[str, Any]:
     """安装计划：每份 Skill 会写到哪、是新建还是覆盖，写盘前先给人看。
 
     只落 ``<目录>/<skill-name>/SKILL.md``，目录里的其它文件一概不碰——目标目录往往
     还放着别的 Agent 技能。
     """
     resolved = resolve_install_dir(target_dir)
-    skills = {item.name: item for item in list_skills(db)}
+    skills = _skills if _skills is not None else {
+        item.name: item for item in list_skills(db)
+    }
     if names:
-        unknown = [name for name in names if name not in skills]
+        requested_names = list(dict.fromkeys(names))
+        unknown = [name for name in requested_names if name not in skills]
         if unknown:
             raise ValueError(f"未知 Skill：{'、'.join(unknown)}")
-        selected = [skills[name] for name in names]
+        selected = [skills[name] for name in requested_names]
     else:
         selected = [item for item in skills.values() if item.enabled]
     if not selected:
@@ -620,7 +677,10 @@ def install_plan(db: Session, *, target_dir: str, names: list[str] | None = None
 
     items: list[dict[str, Any]] = []
     for skill in selected:
-        path = resolved / skill.name / "SKILL.md"
+        skill_dir = resolved / skill.name
+        path = skill_dir / "SKILL.md"
+        if skill_dir.is_symlink() or path.is_symlink():
+            raise ValueError(f"拒绝写入 symlink 路径：{path}")
         if path.exists():
             try:
                 current = path.read_text(encoding="utf-8")
@@ -660,18 +720,26 @@ def install_to_dir(
     写的是与导出 ZIP **同一条** ``SkillView.body``（含数据库覆写与合成后的出口契约），
     所以"装到目录"和"下载解压"得到的正文逐字节相同，只是省掉了解压那一步。
     """
-    plan = install_plan(db, target_dir=target_dir, names=names)
+    skills = {item.name: item for item in list_skills(db)}
+    plan = install_plan(
+        db,
+        target_dir=target_dir,
+        names=names,
+        _skills=skills,
+    )
     plan["dry_run"] = bool(dry_run)
     if dry_run:
         return plan
-    bodies = {item.name: item.body for item in list_skills(db)}
-    root = Path(plan["target_dir"])
     written: list[str] = []
     try:
         for item in plan["items"]:
+            if item["action"] == "unchanged":
+                continue
             path = Path(item["path"])
+            if path.parent.is_symlink() or path.is_symlink():
+                raise ValueError(f"拒绝写入 symlink 路径：{path}")
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(bodies[item["name"]], encoding="utf-8")
+            path.write_text(skills[item["name"]].body, encoding="utf-8")
             written.append(str(path))
     except OSError as exc:
         # 半途失败要说清写到哪一份为止：目标目录此刻是新旧混装的。

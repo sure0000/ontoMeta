@@ -9,12 +9,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import app.services.chat_bi as chat_bi_mod
 from app.database import SessionLocal
 from app.services.chat_bi import ChatBiService
-import app.services.chat_bi as chat_bi_mod
-
-from tests.test_chat_bi_golden import _StubClient, _StubCompletions, _seed_golden_domain
 from tests.fixtures.golden_questions import FinalTurn, ToolTurn
+from tests.test_chat_bi_golden import _seed_golden_domain, _StubClient, _StubCompletions
 
 
 def _run(script, question, aliases, domain_id):

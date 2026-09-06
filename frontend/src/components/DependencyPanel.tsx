@@ -404,7 +404,6 @@ export function DependencyPanel() {
       message.info(r.message ?? "部署已在后台开始，正在等待结果…");
       // 轮询：每 3s 拉一次，最多 ~10 分钟（SSH 装重组件耗时）。
       const deadline = Date.now() + 10 * 60 * 1000;
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         await new Promise((res) => setTimeout(res, 3000));
         await load(); // 顺带刷新整表，让状态列实时更新

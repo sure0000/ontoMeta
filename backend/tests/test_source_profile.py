@@ -8,9 +8,8 @@ from app.services.evidence_builder import EvidenceBuilder
 from app.services.object_classifier import (
     ROLE_BRIDGE,
     ROLE_BUSINESS_OBJECT,
-    ROLE_DATA_TABLE,
-    classify_object_role,
     FieldSignal,
+    classify_object_role,
 )
 from app.services.source_profile import (
     FrappeProfile,

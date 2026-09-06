@@ -7,6 +7,7 @@ from app.warehouse.jobs.base import (
     JobPlan,
     JobSpec,
 )
+
 __all__ = [
     "LOAD_MODES",
     "ColumnMapping",

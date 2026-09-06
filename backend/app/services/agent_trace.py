@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,7 @@ def _trace_path() -> Path:
         base = Path.cwd() / base
     base.mkdir(parents=True, exist_ok=True)
     # 按天分文件，便于滚动清理
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
     return base / f"agent-trace-{day}.jsonl"
 
 
@@ -36,7 +36,7 @@ def write_trace(record: dict[str, Any]) -> None:
     if not settings.agent_trace_enabled:
         return
     try:
-        record = {"ts": datetime.now(timezone.utc).isoformat(), **record}
+        record = {"ts": datetime.now(UTC).isoformat(), **record}
         line = json.dumps(record, ensure_ascii=False, default=str)
         with _trace_path().open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")

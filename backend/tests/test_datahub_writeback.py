@@ -13,7 +13,6 @@ import uuid
 
 import pytest
 
-from app.connectors import datahub as dh
 from app.database import SessionLocal
 from app.models import (
     DomainContext,

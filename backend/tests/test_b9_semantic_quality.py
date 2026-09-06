@@ -13,7 +13,6 @@ from app.models import (
 )
 from app.services.draft_consistency import validate_ontology
 from app.services.publish import PublishService
-from tests.conftest import ADMIN_HEADERS
 
 
 def _seed_domain_with_ontology(*, name: str = "B9域") -> tuple[str, str]:

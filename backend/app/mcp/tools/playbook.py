@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.mcp.skills import OUTPUT_CONTRACT, get_skill, list_skills
+from app.mcp.skills import OUTPUT_CONTRACT, list_skills
 
 from . import AuthContext, ToolResult, register_tool
 from ._common import session
@@ -75,8 +75,9 @@ class GetPlaybookTool:
         topic = str(arguments.get("topic") or "").strip()
         try:
             with session() as db:
+                skills = list_skills(db)
                 if not topic:
-                    enabled = [item for item in list_skills(db) if item.enabled]
+                    enabled = [item for item in skills if item.enabled]
                     return ToolResult(
                         success=True,
                         data={
@@ -86,9 +87,9 @@ class GetPlaybookTool:
                         metadata={"count": len(enabled)},
                     )
 
-                skill = get_skill(db, topic)
+                skill = next((item for item in skills if item.name == topic), None)
                 if skill is None or not skill.enabled:
-                    available = [item.name for item in list_skills(db) if item.enabled]
+                    available = [item.name for item in skills if item.enabled]
                     return ToolResult(
                         success=False,
                         error=f"未知或已停用的指引主题：{topic}",

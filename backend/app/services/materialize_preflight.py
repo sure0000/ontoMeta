@@ -17,10 +17,6 @@
 from __future__ import annotations
 
 import posixpath
-
-import os
-import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,13 +24,11 @@ from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError
 from app.models.data_app import DataSource
+from app.services import flink_params
 from app.services.job_planner import (
-    DEFAULT_SOURCE_ALIAS,
     DEFAULT_TARGET_ALIAS,
-    JobPlan,
     JobPlanner,
 )
-from app.services import flink_params
 from app.services.materialization_contract import MaterializationContractService
 from app.services.materialization_runner import (
     Emit,
@@ -482,7 +476,7 @@ def _check_managed_connections(
     labels = ["建表连接"]
     if source_ds is not None:
         labels.extend(["Doris Flink 写入连接", "源库连接"])
-    for payload, label in zip(payloads, labels):
+    for payload, label in zip(payloads, labels, strict=False):
         report.add(PreflightItem(
             key=(
                 "warehouse_conn" if label == "建表连接"
@@ -877,10 +871,10 @@ def _check_execution_channel(
             # 都写着 sync_dim_xxx——而同步从不写 dim，只是把预演结果说成了另一件事。
             target_ods_database=ODS_DATABASE,
             incremental_columns=(
-                {e: incremental_column for e in entities} if incremental_column else None
+                dict.fromkeys(entities, incremental_column) if incremental_column else None
             ),
             initial_watermarks=(
-                {e: initial_watermark for e in entities} if initial_watermark else None
+                dict.fromkeys(entities, initial_watermark) if initial_watermark else None
             ),
         )
     except Exception:

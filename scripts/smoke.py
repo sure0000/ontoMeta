@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # ---------- 配置 ----------
@@ -41,8 +42,11 @@ TOKEN = _env("ONTOMETA_ADMIN_TOKEN", "dev-admin-token-change-me")
 ONTOLOGY = _env("SMOKE_ONTOLOGY_ID", "")
 DATASOURCE = _env("SMOKE_DATASOURCE_ID", "")
 ENTITY = _env("SMOKE_ENTITY", "customer")
-ENGINE = _env("SMOKE_ENGINE", "hive")
-# 目标仓怎么查行数。Hive 用容器里的 beeline；换目标仓就换这两个。
+ENGINE = _env("SMOKE_ENGINE", "doris")
+# 目标仓怎么查行数。Doris/StarRocks 走 MySQL 线协议，直接连；给 DSN 就用它，
+# 不给就问后端要该数据源的连接信息（后端不回明文口令时会说清楚，见 _target_dsn）。
+SMOKE_TARGET_DSN = _env("SMOKE_TARGET_DSN", "")
+# 遗留 Hive 目标：架构统一到 Doris 之前的老路径，仍可用 SMOKE_ENGINE=hive 走。
 HIVE_CONTAINER = _env("SMOKE_HIVE_CONTAINER", "hive-server")
 HIVE_JDBC = _env("SMOKE_HIVE_JDBC", "jdbc:hive2://localhost:10000")
 RUN_TIMEOUT = float(_env("SMOKE_RUN_TIMEOUT", "900"))
@@ -93,8 +97,73 @@ def call(method: str, path: str, body: dict | None = None, timeout: float = 300)
     return {}
 
 
-def hive_scalar(sql: str) -> str | None:
-    """在 Hive 上跑一条返回单值的 SQL。取不到值返回 None（不抛，调用方决定怎么算）。"""
+def target_scalar(sql: str) -> str | None:
+    """在目标仓上跑一条返回单值的 SQL。取不到值返回 None（不抛，调用方决定怎么算）。
+
+    **刻意不走后端的取数接口**：冒烟要验的就是「数据真的搬过去了」，用被测系统自己的
+    读路径去验，等于让它自证——那条路径上的 bug（映射错表、投影指错库）恰好会把失败
+    掩盖成成功。所以这里直连目标仓，绕开 ontoMeta 的一切代码。
+    """
+    if ENGINE.lower() in ("hive", "kyuubi"):
+        return _hive_scalar(sql)
+    return _mysql_protocol_scalar(sql)
+
+
+def _mysql_protocol_scalar(sql: str) -> str | None:
+    """Doris / StarRocks / MySQL：直连跑一条标量查询。"""
+    dsn = _target_dsn()
+    if not dsn:
+        return None
+    try:
+        import pymysql  # 后端 requirements 里就有
+    except ImportError:
+        warn("缺 pymysql，装了才能校验 Doris 行数：pip install pymysql")
+        return None
+
+    parsed = urllib.parse.urlparse(dsn)
+    try:
+        conn = pymysql.connect(
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 9030,
+            user=urllib.parse.unquote(parsed.username or "root"),
+            password=urllib.parse.unquote(parsed.password or ""),
+            connect_timeout=10,
+            read_timeout=600,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 连不上就是「验不了」，交调用方判断
+        warn(f"连不上目标仓：{exc}")
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            row = cur.fetchone()
+        return str(row[0]) if row else None
+    except Exception as exc:  # noqa: BLE001
+        warn(f"目标仓查询失败：{exc}")
+        return None
+    finally:
+        conn.close()
+
+
+def _target_dsn() -> str | None:
+    """目标仓 DSN：优先用 SMOKE_TARGET_DSN，否则问后端要。"""
+    if SMOKE_TARGET_DSN:
+        return SMOKE_TARGET_DSN
+    for item in call("GET", "/api/data-sources") or []:
+        if (item.get("kind") or "").lower() == ENGINE.lower():
+            dsn = item.get("dsn_secret_ref") or ""
+            if dsn and "@" in dsn:
+                return dsn
+            warn(
+                "后端没有回带口令的连接串（正常，凭据不外泄）。"
+                "请设 SMOKE_TARGET_DSN=mysql://user:pass@host:9030 后重跑。"
+            )
+            return None
+    return None
+
+
+def _hive_scalar(sql: str) -> str | None:
+    """遗留 Hive 目标：在容器里用 beeline 跑一条返回单值的 SQL。"""
     cmd = [
         "docker", "exec", HIVE_CONTAINER, "bash", "-lc",
         f"beeline -u {HIVE_JDBC} --silent=true --outputformat=csv2 -e \"{sql}\" 2>/dev/null",
@@ -232,9 +301,9 @@ def verify_rows(receipt: dict) -> None:
         die("回执里没有目标表名，无从校验")
     bad = []
     for table in tables:
-        n = hive_scalar(f"select count(*) from {table}")
+        n = target_scalar(f"select count(*) from {table}")
         if n is None:
-            warn(f"{table}：查不到行数（beeline 不可用？容器名 {HIVE_CONTAINER} 对吗）")
+            warn(f"{table}：查不到行数（目标仓连不上？见上面的提示）")
             continue
         if n.isdigit() and int(n) > 0:
             ok(f"{table}：{n} 行")

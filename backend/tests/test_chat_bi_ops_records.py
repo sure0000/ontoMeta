@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from app.models import (
@@ -19,15 +19,12 @@ from app.models import (
     WarehouseMigrationEvidence,
 )
 from app.models.agent import ArtifactStatus, GovernanceArtifact
-from app.models.chat_bi_ledger import ChatBiDecisionRecord
 from app.models.governance import GovernanceStandardRecord
 from app.models.ontology import VersionRecord
-from app.services import chat_bi_ledger
 from app.services.agent_grounding import FactLedger
 from app.services.chat_bi import ChatBiService
 from app.services.chat_bi_tool_schemas import _GET_OPS_RECORD_TOOL
 from app.services.ops_records import ledger_names, ledger_values
-from app.services.task_pipeline import TaskPipelineService
 from tests.test_chat_bi_golden import _seed_golden_domain
 
 
@@ -213,112 +210,6 @@ def test_landing_missing_subject_is_authoritative_empty_envelope(db):
     assert result["source"] == "OntologyQueryService（当前已发布本体目录）"
 
 
-def test_pipeline_reader_returns_whole_chain_and_enforces_ontology_boundary(db):
-    _domain_id, ontology_id, _aliases = _seed_golden_domain()
-    service = TaskPipelineService()
-    pipeline = service.create(
-        db,
-        name="订单加工链",
-        intent="先同步再加工",
-        ontology_id=ontology_id,
-        steps=[
-            {"kind": "sync", "intent": "同步订单"},
-            {"kind": "transform", "intent": "清洗订单"},
-        ],
-    )
-
-    try:
-        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
-            db,
-            ontology_id=ontology_id,
-            args={"family": "pipeline", "pipeline_id": pipeline.id},
-        )
-        assert is_error is False
-        assert result["family"] == "pipeline"
-        assert result["subject"] == "订单加工链"
-        assert [item["kind"] for item in result["items"]] == ["sync", "transform"]
-        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
-        assert facts["status"] == "drafted"
-        assert facts["step_count"] == 2
-        assert facts["next_step_index"] == 0
-
-        hidden, _summary, is_error = ChatBiService._dispatch_get_ops_record(
-            db,
-            ontology_id="another-ontology",
-            args={"family": "pipeline", "pipeline_id": pipeline.id},
-        )
-        assert is_error is False
-        assert "不属于当前数据域" in (hidden.get("note") or "")
-
-        invalid, _summary, is_error = ChatBiService._dispatch_get_ops_record(
-            db,
-            ontology_id=ontology_id,
-            args={"family": "pipeline", "scope": "conversation"},
-        )
-        assert is_error is True
-        assert "pipeline" in invalid["error"]
-    finally:
-        db.delete(pipeline)
-        db.commit()
-
-
-def test_decision_reader_is_current_conversation_only_and_reports_closure(db):
-    domain_id, ontology_id, _aliases = _seed_golden_domain()
-    conversation = ChatBiConversation(domain_id=domain_id, title="六环审计")
-    db.add(conversation)
-    db.commit()
-    chat_bi_ledger.record_decision(
-        db,
-        conversation_id=conversation.id,
-        node="requirement",
-        subject_id="reviewer-1",
-        subject_role="admin",
-        summary="确认订单分析需求",
-    )
-    chat_bi_ledger.record_decision(
-        db,
-        conversation_id=conversation.id,
-        node="plan",
-        subject_id="reviewer-2",
-        ref_kind="artifact",
-        ref_id="artifact-pending",
-        summary="确认执行方案",
-    )
-
-    try:
-        result, _summary, is_error = ChatBiService._dispatch_get_ops_record(
-            db,
-            ontology_id=ontology_id,
-            domain_id=domain_id,
-            conversation_id=conversation.id,
-            args={"family": "decision", "limit": 20},
-        )
-        assert is_error is False
-        facts = {fact["key"]: fact["value"] for fact in result["facts"]}
-        assert facts["reached_count"] == 2
-        assert facts["total_count"] == 6
-        assert facts["dangling_count"] >= 1
-        assert {item["subject_id"] for item in result["items"]} == {
-            "reviewer-1",
-            "reviewer-2",
-        }
-        assert all(isinstance(item["created_at"], str) for item in result["items"])
-
-        missing, _summary, is_error = ChatBiService._dispatch_get_ops_record(
-            db,
-            ontology_id=ontology_id,
-            args={"family": "decision"},
-        )
-        assert is_error is True
-        assert "对话上下文" in missing["error"]
-    finally:
-        db.query(ChatBiDecisionRecord).filter(
-            ChatBiDecisionRecord.conversation_id == conversation.id
-        ).delete(synchronize_session=False)
-        db.delete(conversation)
-        db.commit()
-
-
 def test_ontology_version_reader_lists_versions_and_expands_diff(db):
     _domain_id, ontology_id, _aliases = _seed_golden_domain()
     version = 9001
@@ -377,7 +268,7 @@ def test_ontology_version_reader_lists_versions_and_expands_diff(db):
 
 
 def test_standard_reader_returns_active_standard_and_publication_history(db):
-    active_at = datetime.now(timezone.utc) + timedelta(seconds=1)
+    active_at = datetime.now(UTC) + timedelta(seconds=1)
     record = GovernanceStandardRecord(
         version="1.0.0",
         status="published",
@@ -400,7 +291,7 @@ def test_standard_reader_returns_active_standard_and_publication_history(db):
         assert facts["enforced_rule_count"] > 0
         assert any(item["id"] == record.id for item in result["items"])
         assert datetime.fromisoformat(result["as_of"]).replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         ) == active_at
         assert all(isinstance(item["created_at"], str) for item in result["items"])
 
@@ -418,12 +309,12 @@ def test_standard_reader_returns_active_standard_and_publication_history(db):
 
 def test_ops_ledger_values_registers_numeric_facts():
     result = {
-        "family": "decision",
+        "family": "task_run",
         "facts": [
-            {"key": "reached_count", "label": "已到达环数", "value": 3},
-            {"key": "total_count", "label": "六环总数", "value": 6},
+            {"key": "rows", "label": "写入行数", "value": 3},
+            {"key": "duration_ms", "label": "耗时", "value": 6},
         ],
-        "items": [{"node": "需求确认", "count": 2}],
+        "items": [{"kind": "sync", "count": 2}],
     }
     assert {2, 3, 6} <= set(ledger_values(result))
 
@@ -438,8 +329,6 @@ def test_ops_tool_schema_exposes_all_registered_read_families():
     family_schema = _GET_OPS_RECORD_TOOL["function"]["parameters"]["properties"]["family"]
     assert set(family_schema["enum"]) == {
         "task_run",
-        "pipeline",
-        "decision",
         "ontology_version",
         "standard",
         "draft_run",
@@ -579,7 +468,7 @@ def test_conflict_reader_returns_only_current_ontology_conflicts(db):
 
 def test_datasource_reader_is_global_read_only_and_redacts_dsn(db):
     tag = uuid4().hex[:8]
-    tested_at = datetime.now(timezone.utc)
+    tested_at = datetime.now(UTC)
     datasource = DataSource(
         name=f"ERP-{tag}",
         kind="mysql",
@@ -627,7 +516,7 @@ def test_data_app_reader_honors_ontology_scope_and_lists_versions(db):
         status="published",
         current_version=3,
         published_version=2,
-        published_at=datetime.now(timezone.utc),
+        published_at=datetime.now(UTC),
     )
     db.add(app)
     db.flush()

@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -9,6 +8,7 @@ from app.schemas.ontology import (
     PropertyOut,
     VersionRecordOut,
 )
+
 
 class BusinessLogicObjectBindingOut(BaseModel):
     id: str

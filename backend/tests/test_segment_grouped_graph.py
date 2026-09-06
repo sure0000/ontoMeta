@@ -1,17 +1,17 @@
 """测试板块与 grouped-graph 的集成"""
 import uuid
-import pytest
+
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import (
     DomainContext,
+    EntityStatus,
     ObjectType,
-    RelationType,
     Ontology,
     OntologySegment,
-    EntityStatus,
     OntologyStatus,
+    RelationType,
 )
 from app.services.ontology_query import OntologyQueryService
 

@@ -26,6 +26,7 @@ from app.services.source_ref import (
     has_physical_source,
     source_platform_of,
 )
+from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse.jobs import (
     ColumnMapping,
     JobEndpoint,
@@ -33,7 +34,6 @@ from app.warehouse.jobs import (
     JobSpec,
 )
 from app.warehouse.jobs.flink import FlinkAdapter
-from app.services.warehouse_generator import WarehouseGenerator
 from app.warehouse.logical_schema import LogicalConstraint
 
 # 源/目标连接别名的缺省值。**别名不是凭据**：执行侧按别名解析连接串，

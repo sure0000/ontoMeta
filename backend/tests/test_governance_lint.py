@@ -9,7 +9,6 @@ from app.governance import DEFAULT_STANDARD, lint_against_standard, lint_spec
 from app.governance.lint import lint_logical_table
 from app.warehouse.logical_schema import LogicalColumn, LogicalConstraint, LogicalTable
 
-
 # ---------- lint_spec：Spec 层命名自检 ----------
 
 

@@ -24,7 +24,7 @@ Projection 上的状态，不猜测运行。
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -113,7 +113,7 @@ def reconcile_blocking_runs(
     if not contracts:
         return False
 
-    from app.api.deps import agent_pipeline
+    from app.services.agent_pipeline import agent_pipeline
 
     advanced = False
     for contract in contracts:
@@ -132,7 +132,7 @@ def reconcile_blocking_runs(
 def _age(started: datetime | None) -> str:
     if started is None:
         return "开始时间未知"
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     started_naive = started.replace(tzinfo=None) if started.tzinfo else started
     minutes = max(0, int((now - started_naive).total_seconds() // 60))
     if minutes < 60:

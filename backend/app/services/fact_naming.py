@@ -42,7 +42,7 @@ _LATIN_FACT_TOKENS: frozenset[str] = frozenset(
         "settlement", "settle", "journal", "voucher", "posting", "post",
         "refund", "payment", "receipt", "transfer", "changelog",
         "audit", "approval", "approve", "writeoff", "reconcile", "reconciliation",
-        "movement", "issue", "receipt", "checkin", "checkout",
+        "movement", "issue", "checkin", "checkout",
     }
 )
 

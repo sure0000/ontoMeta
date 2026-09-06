@@ -19,6 +19,7 @@ from app.agents.drafters.sync import SyncDrafter
 from app.agents.executors.sync import SyncExecutor
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, Property
+from app.services import task_form
 from app.services.chat_bi import ChatBiService
 
 _URN = "urn:li:dataset:(urn:li:dataPlatform:postgres,erp.public.{t},PROD)"
@@ -204,7 +205,7 @@ def test_cdc_checkpoint_follows_the_settings_default(sync_domain, monkeypatch):
         # 表单也不该再问一遍。
         fields = {
             f["name"]
-            for f in ChatBiService()._sync_strategy_fields(db)
+            for f in task_form.sync_strategy_fields(db)
         }
         assert "flink_checkpoint_dir" not in fields
 

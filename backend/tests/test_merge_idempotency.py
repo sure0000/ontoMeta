@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from app.database import Base, SessionLocal, engine
+from app.database import Base, engine
 from app.models import (
     DomainContext,
     ObjectType,

@@ -1,6 +1,6 @@
 ---
 name: ontometa-mcp
-description: ontoMeta MCP 总入口：按用户目标路由到本体探索、取数、任务规划、任务执行与运行追溯、服务自省五个专用 skill，并声明所有 skill 共同遵守的底线与输出契约。
+description: ontoMeta MCP 总入口：按用户目标路由到接数据、本体探索、取数、口径创作、建模工单、任务规划、任务执行与运行追溯、服务自省八个专用 skill，并声明所有 skill 共同遵守的底线与输出契约。
 whenToUse: Use when the user asks about ontoMeta ontologies, business objects, relations, data sources, synchronization, transformation, materialization, metrics, governance tasks, or MCP execution.
 disable-model-invocation: true
 user-invocable: true
@@ -12,8 +12,12 @@ user-invocable: true
 
 | 用户目标 | skill | 典型问法 |
 |---|---|---|
+| 接数据（新库进来、起草本体） | `ontometa-onboarding` | 把这个库接进来、有哪些域和源、给这个域生成本体草稿 |
 | 结构探索（只读） | `ontometa-discovery` | 有哪些本体/对象/关系/指标口径、如何分布、数据从哪来、落到哪张表 |
+| 血缘补录 | `ontometa-lineage` | 哪些表是血缘孤岛、补录一条上游→落点边、扫描 SQL 血缘包、上报 DataHub |
 | 取数与算指标 | `ontometa-query` | 查明细、算某个已有指标、比较数值、验证 SQL、出图 |
+| 定义新口径 / 形式化已有口径 | `ontometa-authoring` | 我要建一个指标、把这条口径写成表达式、这份规格合不合规约 |
+| 完整分析需求、维度建模 | `ontometa-modeling` | 我要做一张报表、开个建模工单、设计事实表和维度表 |
 | 参数没给全、要一步步问用户 | `ontometa-flow` | 我想同步/建指标，但没说清哪个对象、哪个源、什么频率 |
 | 任务规划（到 `validated` 为止） | `ontometa-task-plan` | 我想同步/加工/物化/建指标，先看看方案 |
 | 任务执行与运行追溯 | `ontometa-task-execute` | 执行它、跑到哪了、为什么失败、之前发生过什么 |

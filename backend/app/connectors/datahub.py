@@ -413,6 +413,19 @@ def _parse_lineage_edges_from_entities(entities: list[dict]) -> list[LineageInpu
                 )
 
     return edges
+
+
+def _parse_query_logic_evidences(
+    dataset: DatasetInput, queries: list[dict]
+) -> list[LogicEvidenceInput]:
+    """把一张表的 DataHub 查询记录解析成口径证据。
+
+    ⚠ 这个 ``def`` 曾在一次重构里连同缩进一起丢掉，函数体被粘在
+    ``_parse_lineage_edges_from_entities`` 的 ``return edges`` 之后——永远执行不到，
+    而 ``_fetch_all_dataset_queries`` 里的调用点直接 NameError。
+    整条「从查询记录提取口径证据」的链路因此是坏的，且没有任何测试覆盖到。
+    由 ruff 的 F821（undefined-name）扫出来。
+    """
     source_ref = f"{dataset.container}.{dataset.name}" if dataset.container else dataset.name
     evidences: list[LogicEvidenceInput] = []
     for query in queries:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -307,7 +307,7 @@ class IngestionContractService:
             contract.status = "running"
         else:
             contract.status = "ready"
-            contract.last_success_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            contract.last_success_at = datetime.now(UTC).replace(tzinfo=None)
             next_watermark = payload.get("watermark_after")
             if contract.mode == "incremental" and next_watermark not in (None, ""):
                 contract.sync_watermark = str(next_watermark)

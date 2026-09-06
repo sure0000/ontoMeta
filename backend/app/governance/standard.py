@@ -12,8 +12,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Literal, Mapping
+from typing import Literal
 
 from sqlalchemy.orm import Session
 

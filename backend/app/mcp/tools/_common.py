@@ -8,12 +8,64 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+
+
+def host_confirmation_gate(db, auth: Any, supplied: Any, digest: str, *, action: str) -> Any | None:
+    """Require an explicit local-host user confirmation for non-task writes.
+
+    MCP proposals are safe to preview from any client.  Writes that have no
+    GovernanceArtifact to carry the per-item approval (lineage and logic
+    publication) use the same local stdio host assertion as task execution.
+    Remote clients must use the Web confirmation surface.
+    """
+    from app.services.settings_service import SettingsService
+
+    runtime = SettingsService().get_mcp_runtime(db)
+    if not runtime.mcp_allow_stdio_interactive_approval:
+        from . import ToolResult
+
+        return ToolResult(
+            success=False,
+            error=f"本部署未启用本机 MCP 宿主交互确认；请在 Web 中由人确认后执行{action}",
+            metadata={"gate": "host_interactive_approval_disabled"},
+        )
+    if not auth.is_local_mcp or not auth.principal_id:
+        from . import ToolResult
+
+        return ToolResult(
+            success=False,
+            error=f"{action}只接受本机 stdio 的真实 Principal 宿主确认，远程 HTTP 不能自带批准",
+            metadata={"gate": "host_interactive_approval_not_allowed"},
+        )
+    if (
+        not isinstance(supplied, dict)
+        or supplied.get("approved") is not True
+        or supplied.get("channel") != "ask_user_question"
+    ):
+        from . import ToolResult
+
+        return ToolResult(
+            success=False,
+            error="必须先由宿主 ask_user_question 得到 approved=true，再传回确认摘要",
+            metadata={"gate": "host_interactive_approval_invalid"},
+        )
+    if str(supplied.get("digest") or "").strip() != digest:
+        from . import ToolResult
+
+        return ToolResult(
+            success=False,
+            error="预览内容已经变化，旧确认摘要失效；请重新展示并确认",
+            data={"current_digest": digest},
+            metadata={"gate": "host_interactive_approval_stale"},
+        )
+    return None
 
 
 @contextmanager

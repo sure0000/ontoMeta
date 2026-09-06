@@ -1,3 +1,11 @@
+# 直接依赖，写范围便于升级。
+#
+# **锁版本在 requirements.lock**：本文件全是 `>=` 下界，两次构建可能装出不同版本——
+# 对要进生产的服务是硬伤。生产/CI 用 lock 装（`pip install -r requirements.lock`），
+# 本文件是人编辑的那一份，改完用下面这条命令重新生成 lock：
+#
+#     pip install -r requirements.txt && pip freeze --exclude-editable > requirements.lock
+#
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 sqlalchemy>=2.0.36
@@ -13,7 +21,11 @@ Jinja2>=3.1.0
 paramiko>=3.4.0
 python-multipart>=0.0.9   # 血缘补录的代码包上传（multipart，避免 base64 撑爆 nginx 体积限制）
 PyYAML>=6.0
+
+# --- 开发工具 ---
 pytest>=8.0.0
+ruff>=0.16.0            # lint + import 排序，配置在 pyproject.toml
+mypy>=1.18              # 类型检查，按模块推进（files 清单见 pyproject.toml）
 
 # --- MCP Server ---
 # 2.x 起低层 Server 收 on_list_tools / on_call_tool 回调（1.x 是 @server.list_tools()

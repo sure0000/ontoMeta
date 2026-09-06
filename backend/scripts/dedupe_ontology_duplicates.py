@@ -59,15 +59,15 @@ def dedupe_ontology(db, ontology: Ontology, *, apply: bool) -> Counter:
     for p in db.query(Property).filter(Property.object_type_id.in_(obj_ids)).all():
         props_by_obj[p.object_type_id].append(p)
 
-    for oid, plist in props_by_obj.items():
+    for _oid, plist in props_by_obj.items():
         groups: dict[str, list[Property]] = defaultdict(list)
         for p in plist:
             groups[_prop_key(p.name)].append(p)
-        for name_key, dups in groups.items():
+        for _name_key, dups in groups.items():
             if len(dups) < 2:
                 continue
             dups.sort(key=_prop_rank, reverse=True)
-            keep, extras = dups[0], dups[1:]
+            _keep, extras = dups[0], dups[1:]
             for e in extras:
                 if _is_user_touched(e):
                     stats["prop_dup_kept_user"] += 1  # 人工编辑的重复份，保留交人工
@@ -81,7 +81,7 @@ def dedupe_ontology(db, ontology: Ontology, *, apply: bool) -> Counter:
     for o in objects:
         by_name[o.name].append(o)
     prop_count = {oid: len(props_by_obj.get(oid, [])) for oid in obj_ids}
-    for name, group in by_name.items():
+    for _name, group in by_name.items():
         if len(group) < 2:
             continue
         stats["obj_dup_groups"] += 1

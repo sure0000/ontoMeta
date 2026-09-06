@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.agents.validation import validate_spec
 from app.models import DataSource, DorisWarehouseConfig
 from app.services.data_app import DataAppService, resolve_domain_data_source
 from app.warehouse import DEFAULT_ENGINE
 from app.warehouse.policy import ALLOWED_EXECUTION_ENGINES, require_doris
-import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -26,8 +27,8 @@ def test_agent_prompt_is_short_and_execution_boundaries_are_structural():
     """提示词只说明目标；Doris/ODS 边界由工具 schema 与执行代码承担。"""
     from app.services.chat_bi import ChatBiService
     from app.services.chat_bi_tool_schemas import (
+        _ACTION_KINDS,
         _AGENT_SYSTEM_PROMPT,
-        _PIPELINE_KINDS,
         _TOOL_BY_NAME,
         _tools_for_skill,
     )
@@ -36,7 +37,7 @@ def test_agent_prompt_is_short_and_execution_boundaries_are_structural():
     assert len(_AGENT_SYSTEM_PROMPT) < 300
     run_sql = _TOOL_BY_NAME["run_sql"]["function"]["parameters"]["properties"]
     assert "target" not in run_sql
-    assert _PIPELINE_KINDS == ("materialize", "sync", "transform", "metric")
+    assert _ACTION_KINDS == ("materialize", "sync", "transform", "metric")
     compact = ChatBiService._compact_tools_for_prompt_retry(_tools_for_skill(None))
     assert all("description" not in tool["function"] for tool in compact)
     assert "description" not in str(compact)

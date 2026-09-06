@@ -11,8 +11,8 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 from app.models._provenance import ProvenanceMixin
@@ -48,6 +48,15 @@ class ArtifactStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+#: 已经有结果、可以谈"结果符不符合预期"的状态。
+TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {ArtifactStatus.SUCCEEDED.value, ArtifactStatus.FAILED.value}
+)
+
+#: 人对结果的取态。只有两个值——"跑完了没有"已经由 status 回答，这里回答的是"对不对"。
+RESULT_OUTCOMES: frozenset[str] = frozenset({"accepted", "rejected"})
+
+
 class GovernanceArtifact(Base, ProvenanceMixin):
     __tablename__ = "governance_artifacts"
 
@@ -67,6 +76,36 @@ class GovernanceArtifact(Base, ProvenanceMixin):
     confirmed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # 谁、从哪个入口建的这条任务。
+    #
+    # **制品是「机器提了什么、人定了什么」的唯一记录**（此前另有一张按会话组织的决策
+    # 账本，随 Data Agent 会话一起退场）。既然唯一，创建时刻的身份就不能是空的——
+    # ``origin`` 只分得出 machine/user，分不出是谁、是 Web 还是外部 agent 经 MCP 建的。
+    #
+    # ``created_via`` 取 ``AuthContext.client_type`` 的同一套词：frontend / mcp_local /
+    # mcp_remote / api。两个入口写同一个字段，才谈得上"这条是哪个 agent 做的"。
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_via: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+
+    # 人对执行结果的判断：**跑完了**和**跑对了**是两件事。
+    #
+    # ``status`` / ``execution_receipt_json`` 说的是系统这一侧发生了什么（DAG 提交成功、
+    # Airflow 终态、写了多少行）；这几列说的是人看过之后认不认。系统答不了后者——回执自陈
+    # 成功而数据其实没搬对，是这套东西真实出过的事。故两者分列，**任何时候都不许拿 status
+    # 自动填 outcome**：没人表态就是没人表态，如实空着。
+    #
+    # 表态从哪儿来：人在任务详情里点，或通用 agent 按 skill 问出来后经 confirm_task_result
+    # 回写。``result_via`` 记的就是这个区别（词汇与 ``created_via`` 同一套）——经 agent 转述
+    # 的答复和人自己点的，可信度不一样，读的人有权知道。
+    #
+    # 只在终态（succeeded/failed）可写：还没有结果时谈"结果符不符合预期"没有意义。
+    # 可改判（覆盖写），与 confirmed_by 一样只答"最近一次"。
+    result_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    result_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_confirmed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    result_via: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     # 代执行授权：**与角色正交的第二道闸**，只挡 MCP（外部 agent）那条路。
     #
@@ -90,6 +129,14 @@ class GovernanceArtifact(Base, ProvenanceMixin):
     origin: Mapped[str] = mapped_column(
         String(30), default="machine", server_default="machine"
     )
+    # 最终 spec 相对 ``machine_baseline`` 差在哪几个顶层键（JSON 字符串数组，与
+    # ObjectType 那套同形）。粒度取顶层键是刻意的：spec 的顶层键就是人在表单上看到的
+    # 那几格（source / target / mode / primary_keys / refresh_cron…），再往下钻只会
+    # 把 drafter 派生出的内部结构当成"人改的"。
+    #
+    # 由 ``agent_pipeline.edit()`` 落，``confirm()`` 据此定 origin：空 = 原样接受机器
+    # 提案，非空 = 接受但改过参数。**这是"用户的选择"在库里唯一的落点**，别让它再变回
+    # 声明了没人写的死字段。
     overridden_fields: Mapped[str | None] = mapped_column(Text, nullable=True)
     machine_baseline: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_created: Mapped[bool] = mapped_column(
@@ -112,83 +159,3 @@ class GovernanceArtifact(Base, ProvenanceMixin):
     @property
     def is_high_risk(self) -> bool:
         return self.kind in HIGH_RISK_KINDS
-
-
-class PipelineStatus(str, enum.Enum):
-    """任务链的整体状态。**由各步制品聚合推导，不独立维护**——两处状态迟早分叉。"""
-
-    DRAFTED = "drafted"  # 已建链，还没起草任何一步
-    RUNNING = "running"  # 有步骤在走（已起草但未全部成功）
-    SUCCEEDED = "succeeded"  # 每一步都成功
-    FAILED = "failed"  # 某一步执行失败，链停在那里
-
-
-class GovernanceTaskPipeline(Base):
-    """任务链：把「物化 → 清洗 → 聚合」这种前后相继的多个任务串成一条可编排的东西。
-
-    **链只管顺序与上下文传递，不碰治理门槛**：每一步仍是一条独立的 GovernanceArtifact，
-    照旧各自走「校验 → dry-run → 人工确认 → 执行」。链做的是两件此前只能靠人肉完成的事——
-    ①记住下一步是什么；②把上游已经定下的选项（目标数据源/库/引擎）接到下游，不必逐步重问。
-
-    「未确认不得执行」因此**逐制品仍然成立**：链不会替谁确认，也不会跳过任何一步的 dry-run。
-
-    形态是**线性链**，不是 DAG。用户要的是「物化完清洗、清洗完聚合」这种前后相继；扇出/汇聚
-    的真正去处是把整条链编译成一条 Airflow DAG（下一步），在这里做半个调度器只会两头不到岸。
-    """
-
-    __tablename__ = "governance_task_pipelines"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(255), default="")
-    intent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ontology_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # P2：编译成周期 DAG 后的状态。链态仍由各步制品聚合推导（不落第二份），但「已挂成
-    # 周期任务」是链级事实、无处可聚合，故在此落：schedule_cron 是挂的 cron，compiled_dag_id
-    # 是编译出的 DAG，compiled_at 是编译时间。任一步 spec 确认后变动，compiled_dag_id 失效、需重编。
-    schedule_cron: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    compiled_dag_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    compiled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    )
-
-    steps: Mapped[list["GovernanceTaskPipelineStep"]] = relationship(
-        back_populates="pipeline",
-        order_by="GovernanceTaskPipelineStep.step_index",
-        cascade="all, delete-orphan",
-    )
-
-
-class GovernanceTaskPipelineStep(Base):
-    """链上的一步：**先是一份待起草的意图，起草后才有制品**。
-
-    下游不能在建链时就起草：它的 context 要等上游真的跑完才配得齐（上游落到哪个库、建了哪张
-    表）。故这里存「打算做什么」，``artifact_id`` 在轮到它时才由 advance() 填上——那一刻上游
-    的 spec 与回执都已存在，继承来的取值才是事实而不是预测。
-    """
-
-    __tablename__ = "governance_task_pipeline_steps"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    pipeline_id: Mapped[str] = mapped_column(
-        ForeignKey("governance_task_pipelines.id"), index=True
-    )
-    # 从 0 起的执行序。线性链：第 n 步等第 n-1 步成功。
-    step_index: Mapped[int] = mapped_column(Integer, default=0)
-    kind: Mapped[str] = mapped_column(String(30))
-    intent: Mapped[str] = mapped_column(Text, default="")
-    # P3-2：显式依赖的上游步序列表（JSON 数组）。空/None = 沿用线性默认（依赖上一步）。
-    # 给了则支持扇出/汇聚：一个上游分叉到多个下游（扇出）、多个上游汇到一个下游（汇聚）。
-    # 提案层仍以线性为主（易读易起草），分叉只在编译成 DAG 时生效。
-    depends_on_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 本步显式给定的 context；起草时与上游继承来的合并，**显式的优先**。
-    context_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 软引用（不设 FK）：制品的权威在 agent 流水线，这里只记「这一步落成了哪条制品」。
-    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    )
-
-    pipeline: Mapped["GovernanceTaskPipeline"] = relationship(back_populates="steps")

@@ -87,7 +87,6 @@ def test_materialize_runs_pipeline_and_records_run(client, admin_headers, tmp_pa
     # 投递器给真的（SSH 逻辑完整跑，传输落到本地 tmp）：runner 经 build_delivery()
     # 拿实例，patch 类方法覆盖全部用例，避免真 ssh 到不存在的 test 主机。
     from app.services.settings_service import AirflowRuntimeConfig
-
     from tests.support.delivery import LocalTransportDelivery
 
     monkeypatch.setattr(

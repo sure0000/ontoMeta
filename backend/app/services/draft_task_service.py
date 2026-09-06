@@ -2,13 +2,14 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, InternalServerError
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
     BusinessLogic,
     BusinessLogicObjectBinding,
@@ -30,12 +31,11 @@ from app.schemas import (
     EvidenceBundle,
     TaskRecordOut,
 )
-from app.config import settings
+from app.services import ontology_workspace
 from app.services.common import log_change
 from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generation_queue import ACTIVE_STATUSES
 from app.services.evidence_builder import scope_evidence
-from app.services import ontology_workspace
 
 logger = logging.getLogger("ontometa.workspace")
 
@@ -731,7 +731,7 @@ class DraftTaskService:
                 self._purge_stale_draft_rows(db, ontology)
 
                 report = self.merge.merge_full(db, ontology.id, draft, task_id)
-                ontology.generated_at = datetime.now(timezone.utc)
+                ontology.generated_at = datetime.now(UTC)
                 ontology.draft_revision = (ontology.draft_revision or 0) + 1
                 summary = self._store_merge_report(db, task_id, report)
                 _log_change(
@@ -873,7 +873,7 @@ class DraftTaskService:
                     db, ontology.id, object_types, properties, task_id, report,
                     handle_removal=False,
                 )
-                ontology.generated_at = datetime.now(timezone.utc)
+                ontology.generated_at = datetime.now(UTC)
                 ontology.draft_revision = (ontology.draft_revision or 0) + 1
                 summary = self._store_merge_report(db, task_id, report)
                 _log_change(
@@ -1010,7 +1010,7 @@ class DraftTaskService:
                     report,
                     handle_removal=False,
                 )
-                ontology.generated_at = datetime.now(timezone.utc)
+                ontology.generated_at = datetime.now(UTC)
                 ontology.draft_revision = (ontology.draft_revision or 0) + 1
                 summary = self._store_merge_report(db, task_id, report)
                 _log_change(

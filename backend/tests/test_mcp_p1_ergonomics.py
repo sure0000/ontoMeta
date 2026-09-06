@@ -335,7 +335,7 @@ def test_get_ops_record_names_the_families_that_need_ontology_id(call_via_server
     只能撞一次才知道。两组都要摆明，且从 REGISTRY 现算，加族时自动跟上。"""
     tool = TOOL_REGISTRY["get_ops_record"]
     hint = tool.input_schema["properties"]["ontology_id"]["description"]
-    for family in ("task_run", "pipeline", "ontology_version", "data_app", "migration"):
+    for family in ("task_run", "ontology_version", "data_app", "migration"):
         assert family in hint
     for family in ("standard", "datasource", "component"):
         assert family in hint

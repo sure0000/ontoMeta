@@ -24,9 +24,7 @@ from app.services.retrieval_agent import (
     locate_entities,
 )
 from app.services.tool_result_compaction import compact_tool_result
-
 from tests.fixtures.large_ontology import seed_large_ontology
-
 
 # ---------------------------------------------------------------- stub
 

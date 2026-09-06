@@ -316,7 +316,7 @@ def stranded_in_system(db: Session, obj: ObjectType) -> bool:
 def resettle_by_role(
     db: Session,
     obj: ObjectType,
-    index: "AffinityIndex | None" = None,
+    index: AffinityIndex | None = None,
     *,
     apply: bool = True,
 ) -> str | None:

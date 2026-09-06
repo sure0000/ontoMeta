@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from app.models import EntityStatus, ObjectType, Property, RelationType
-from app.ontology_types import Cardinality, SemanticType, normalize_cardinality, normalize_semantic_type
+from app.ontology_types import (
+    Cardinality,
+    SemanticType,
+    normalize_cardinality,
+    normalize_semantic_type,
+)
 
 
 @dataclass(frozen=True)
@@ -235,7 +240,7 @@ class OntologyProjection:
         """
         key = (obj_name or "").strip().lower()
         out: list[str] = []
-        for pair, rels in self.relations_by_pair.items():
+        for pair, _rels in self.relations_by_pair.items():
             if key not in pair:
                 continue
             for other in pair - {key} or {key}:

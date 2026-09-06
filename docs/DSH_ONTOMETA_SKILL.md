@@ -14,6 +14,7 @@ dsh 通过后端包内 `backend/app/mcp/skills/` 提供按用户目标拆分的 
 | `ontometa-output` | **出口契约总控**：所有回答的格式、状态口径、截断与 ID 规则、需要用户选择时怎么提问 | 不调工具 |
 | `ontometa-flow` | 用户想建任务但参数没给全：一问一答、逐环确认，直到拿到可提案的参数 | 只出提案参数，不写库 |
 | `ontometa-discovery` | 本体、对象、关系、业务口径、血缘上下游、物理落点、数据源、角色/板块分布 | 只读 |
+| `ontometa-lineage` | 血缘家底、孤岛表、SQL/人工边预览、代码包回读与人工确认上报 | 预览只读；上报需 publisher + 宿主确认 |
 | `ontometa-query` | 指标口径编译取数、关联路径与字段画像、SQL 校验执行、Vega-Lite 结果预览 | 只读，取数需满足 `agent_run_sql_min_role` |
 | `ontometa-task-plan` | 四类任务提案、落草稿、校验 | 最多到 `validated`；editor 即可（无副作用） |
 | `ontometa-task-execute` | 确认、异步执行、终态轮询、运行记录追溯 | 写侧需 publisher；运行追溯只读 |

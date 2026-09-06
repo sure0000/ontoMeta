@@ -47,16 +47,16 @@ class _RecordingSsh(SshDelivery):
 
 
 def _deliver(delivery, dags_dir, **over):
-    kwargs = dict(
-        dags_dir=dags_dir,
-        jobs_dir=os.path.join(dags_dir, "jobs"),
-        dag_filename="my_dag.py",
-        dag_source="# generated\n",
-        spec_filename="my_dag.json",
-        spec={"dag_id": "my_dag", "tasks": []},
-        job_files={"t1.sql": "SELECT 1;", "cfg.json": {"a": 1}},
-        lib_files={"sql-runner-abc123def456.jar": b"\xca\xfe\xba\xbe"},
-    )
+    kwargs = {
+        "dags_dir": dags_dir,
+        "jobs_dir": os.path.join(dags_dir, "jobs"),
+        "dag_filename": "my_dag.py",
+        "dag_source": "# generated\n",
+        "spec_filename": "my_dag.json",
+        "spec": {"dag_id": "my_dag", "tasks": []},
+        "job_files": {"t1.sql": "SELECT 1;", "cfg.json": {"a": 1}},
+        "lib_files": {"sql-runner-abc123def456.jar": b"\xca\xfe\xba\xbe"},
+    }
     kwargs.update(over)
     return delivery.deliver(**kwargs)
 
@@ -86,7 +86,7 @@ def test_delivery_writes_all_artifacts_to_remote_layout():
     with tempfile.TemporaryDirectory() as tmp:
         dags = os.path.join(tmp, "ontometa", "art123")
         d = _RecordingSsh(host="localhost")
-        result = _deliver(d, dags)
+        _deliver(d, dags)
 
         assert os.path.isfile(os.path.join(dags, "my_dag.py"))
         assert os.path.isfile(os.path.join(dags, "my_dag.json"))

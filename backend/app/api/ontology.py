@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from app.api.deps import edit_service, provenance_service, publish_service, query
 from app.database import get_db
 from app.models import ObjectType, Property
-from app.services import dataset_catalog, derived_object, unclaimed_tables
 from app.schemas import (
     ClaimTableRequest,
     ClusterDetail,
@@ -16,8 +15,6 @@ from app.schemas import (
     DerivedDefinitionOut,
     DerivedObjectCreate,
     DerivedObjectCreated,
-    UnclaimedTableOut,
-    UnclaimedTablesOut,
     FieldPinRequest,
     FormalIssueOut,
     FormalValidationResult,
@@ -36,18 +33,20 @@ from app.schemas import (
     PageResult,
     PropertyOut,
     PropertyUpdate,
-    RelationTypeCreate,
-    RelationTypeDetail,
     RelationGroupOut,
-    RelationTypeOut,
-    RelationTypeUpdate,
     RelationTypeBatchUpdate,
     RelationTypeBatchUpdateResult,
+    RelationTypeCreate,
+    RelationTypeDetail,
+    RelationTypeOut,
+    RelationTypeUpdate,
     ReviewModeStats,
     ReviewQueueOut,
     SegmentDetail,
     SegmentSummary,
     SegmentUpdate,
+    UnclaimedTableOut,
+    UnclaimedTablesOut,
     ValidationIssueOut,
     VerbRefinementBatchApplyRequest,
     VerbRefinementBatchOut,
@@ -57,6 +56,7 @@ from app.schemas import (
     VersionRecordOut,
     VersionSnapshotOut,
 )
+from app.services import dataset_catalog, derived_object, unclaimed_tables
 
 router = APIRouter()
 
@@ -1002,7 +1002,6 @@ async def suggest_verb_refinements(
     from app.models import RelationType
     from app.services.verb_refiner import EMPTY_VERBS
     from app.services.verb_refiner import suggest_verb_refinements as generate_suggestions
-    from app.schemas import VerbRefinementBatchOut, VerbSuggestion
 
     requested_ids = [rid for rid in (payload.relation_ids or []) if rid] if payload else []
 
@@ -1029,7 +1028,7 @@ async def suggest_verb_refinements(
     raw_suggestions = generate_suggestions(candidates)
 
     fallback_relations = [
-        rel for rel, suggestion in zip(candidates, raw_suggestions)
+        rel for rel, suggestion in zip(candidates, raw_suggestions, strict=False)
         if suggestion.get("method") == "fallback"
     ]
     # 规则没覆盖到的那批，只有 LLM 能给出更好的说法。它有没有真的跑，决定了
@@ -1043,6 +1042,7 @@ async def suggest_verb_refinements(
             llm_status = "unavailable"
         if runtime.api_key and runtime.model:
             from openai import AsyncOpenAI
+
             from app.services.common import make_async_http_client
             from app.services.verb_refiner import build_llm_renaming_prompt
 
@@ -1152,8 +1152,8 @@ def apply_verb_refinements(
     关系重新打成待复核，净增审核债，而人明明刚刚看过它们。
     """
     from app.models import RelationType
-    from app.services.edit import _mark_edited, _mark_overridden
     from app.services.common import log_change
+    from app.services.edit import _mark_edited, _mark_overridden
     from app.services.relation_terms import compact_relation_term, validate_relation_term
 
     updated_count = 0

@@ -19,7 +19,6 @@ from app.models import (
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
     ObjectType,
-    Property,
 )
 from app.services.ontology_query import _logic_relates_to_object, _logic_text_blob
 

@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
+import anyio.to_thread
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,16 +9,53 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import router
-from app.auth import AdminAuthMiddleware
+from app.auth import AdminAuthMiddleware, enforce_bootstrap_secrets
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, max_pooled_connections
+from app.observability import (
+    RequestContextMiddleware,
+    check_readiness,
+    configure_logging,
+)
 
+configure_logging()
 logger = logging.getLogger("ontometa")
-logging.basicConfig(level=logging.INFO)
+
+
+def _align_threadpool_to_db_pool() -> None:
+    """把 FastAPI 的线程池容量对齐到应用库连接池容量。
+
+    同步 ``def`` 端点跑在 anyio 的线程池里（默认 40 条），每个在飞的请求占一条数据库
+    连接。线程数大于池容量时，多出来的线程不会排队等一会儿就好——它们在 checkout 上
+    等满 ``pool_timeout`` 然后抛 TimeoutError，也就是把「稍慢」变成了「报错」。
+    对齐之后，超出容量的请求排在线程队列里等，延迟上升但不失败。
+
+    SQLite 不限容量（返回 0），保持 anyio 默认值不动。
+    """
+    capacity = max_pooled_connections()
+    if capacity <= 0:
+        return
+    try:
+        limiter = anyio.to_thread.current_default_thread_limiter()
+    except Exception as exc:  # noqa: BLE001 — 对齐失败不该拦住启动，退回默认值即可
+        logger.warning("无法对齐线程池容量，沿用 anyio 默认值：%s", exc)
+        return
+    if limiter.total_tokens != capacity:
+        logger.info(
+            "线程池容量 %s → %s（对齐数据库连接池 %s + %s 溢出）",
+            limiter.total_tokens,
+            capacity,
+            settings.db_pool_size,
+            settings.db_max_overflow,
+        )
+        limiter.total_tokens = capacity
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # 凭据检查在建库之前：不合格就不该启动，更不该先把 schema 迁移跑一遍。
+    enforce_bootstrap_secrets()
+    _align_threadpool_to_db_pool()
     init_db()
     if not (settings.ontometa_admin_token or "").strip():
         logger.warning(
@@ -42,8 +80,14 @@ from app.mcp.http_app import MCP_HTTP_PATH, build_mcp_asgi
 
 app.mount(MCP_HTTP_PATH, build_mcp_asgi())
 
-# 先加 CORS，再加鉴权：鉴权中间件在内层，CORS 能正确处理预检与响应头
+# ⚠ ``add_middleware`` 是**后加的在外层**，所以下面的书写顺序与执行顺序相反。
+# 实际执行：CORS → 请求上下文 → 鉴权 → 路由。
+#
+# 请求上下文必须在**鉴权外层**：鉴权失败时中间件直接返回 401/403，根本不会往内走。
+# 放内层的话，最需要关联 id 的那类响应（谁被挡了、为什么）恰好一个 id 都没有。
+# CORS 仍在最外层，预检与错误响应的跨域头才加得上。
 app.add_middleware(AdminAuthMiddleware)
+app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -86,4 +130,19 @@ app.include_router(router, prefix="/api")
 
 @app.get("/health")
 def health():
+    """**存活**探针：进程还在就算数。
+
+    刻意不探数据库——数据库挂了重启容器救不回来，反而会把好好的实例拖进重启循环。
+    「依赖是否可用」是就绪的事，见 /ready。
+    """
     return {"status": "ok", "app": settings.app_name}
+
+
+@app.get("/ready")
+def ready():
+    """**就绪**探针：真连一次应用库。未就绪返回 503，让负载均衡摘掉这个实例。"""
+    ok, detail = check_readiness()
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"status": "ready" if ok else "not_ready", **detail},
+    )

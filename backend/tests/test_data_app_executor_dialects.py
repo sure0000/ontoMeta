@@ -15,7 +15,6 @@ from app.models import ChatBiConversation, ChatBiMessage, DataSource, DomainCont
 from app.services import data_app_executor as ex
 from app.warehouse import get_adapter
 
-
 # ---------- backend 识别 ----------
 
 
@@ -201,7 +200,7 @@ def test_execute_message_requires_publisher_service_gate():
                 db, ids["message_id"], data_source_id=ids["data_source_id"],
                 principal_role="editor",
             )
-            assert False, "editor 应被拒"
+            raise AssertionError("editor 应被拒")
         except PermissionError as exc:
             assert "无权执行 SQL" in str(exc)
     # publisher（admin 等价）放行：走到 SQL 执行才报「消息不存在」之外的错——用合法消息验证放行

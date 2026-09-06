@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-
 from unittest.mock import MagicMock, patch
 
 from app.agents.executors.transform import TransformExecutor
@@ -84,9 +83,14 @@ def test_doris_job_runner_delivers_and_triggers(tmp_path):
 
 def test_transform_reconciliation_opens_projection_only_after_success(db):
     import uuid
+
     from app.models import (
-        DataSource, DomainContext, ObjectType, Ontology,
-        OntologyWarehouseDeployment, WarehouseObjectProjection,
+        DataSource,
+        DomainContext,
+        ObjectType,
+        Ontology,
+        OntologyWarehouseDeployment,
+        WarehouseObjectProjection,
     )
     from app.services.transform_reconciliation import reconcile_transform_receipt
 
@@ -121,9 +125,14 @@ def test_transform_reconciliation_opens_projection_only_after_success(db):
 
 def test_metric_reconciliation_opens_ads_only_after_success(db):
     import uuid
+
     from app.models import (
-        BusinessLogic, DataSource, DomainContext, Ontology,
-        OntologyWarehouseDeployment, WarehouseLogicProjection,
+        BusinessLogic,
+        DataSource,
+        DomainContext,
+        Ontology,
+        OntologyWarehouseDeployment,
+        WarehouseLogicProjection,
     )
     from app.services.metric_reconciliation import reconcile_metric_receipt
 

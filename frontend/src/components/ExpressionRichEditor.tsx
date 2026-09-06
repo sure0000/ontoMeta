@@ -238,7 +238,7 @@ function detectTrigger(): Trigger | null {
     while (i >= 0) {
       const ch = text[i];
       if (ch === "@") {
-        const beforeOk = i === 0 || /\s/.test(text[i - 1]) || /[（(\[,.]/.test(text[i - 1]);
+        const beforeOk = i === 0 || /\s/.test(text[i - 1]) || /[（([,.]/.test(text[i - 1]);
         if (beforeOk) {
           const query = text.slice(i + 1, offset);
           if (!/\s/.test(query)) {

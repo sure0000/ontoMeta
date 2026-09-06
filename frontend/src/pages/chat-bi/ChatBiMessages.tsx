@@ -1,10 +1,7 @@
 import { ArrowUpOutlined, RobotOutlined } from "@ant-design/icons";
-import { Spin, message } from "antd";
+import { Spin } from "antd";
 import type { RefObject } from "react";
-import { api } from "../../api";
-import { ChatBubble, useArtifactDrawer } from "./ChatBiReferences";
-import { ClosureCards } from "./ClosureCard";
-import { useDecisionLedger } from "./DecisionLedger";
+import { ChatBubble } from "./ChatBiReferences";
 import type { ChatMessage } from "./utils";
 
 export interface ChatBiMessagesProps {
@@ -109,42 +106,7 @@ export function ChatBiMessages({
           );
         })
       )}
-      {/*
-        确认闭环（P2）：**一条数据任务一张卡，钉在对话末尾**。
-        它是任务的当前状态，不是某一条消息的属性——做成随消息落库的块，就得在
-        「每轮都重复同一张图」和「靠时间戳猜有没有新决策」之间二选一，两条都不成立。
-        数据来自 DecisionLedgerProvider，每次留痕写入后自动重取，故恒为最新。
-      */}
-      {activeConversationId && messages.length > 0 && <ConversationClosure />}
     </div>
   );
 }
 
-/**
- * 本会话建过的每条数据任务各一张闭环卡。
- *
- * **没建任务就一张都不画**：闭环是"要落一条数据任务"才谈得上的东西。此前只要账本里有
- * 任何一条记录就出卡，于是随口问一句数、在结果上点个「认可」，对话末尾就顶出一张
- * 「1/6 环已确认」——那次查询没有任何要闭的环，卡片只是在自说自话。
- */
-function ConversationClosure() {
-  const { closure } = useDecisionLedger();
-  // 后三环都在这个抽屉里确认。抽屉挂在闭环卡这一层，就与任何一条消息块的生命周期
-  // 无关了——人关掉窗口、甚至刷新页面，卡片还在，点一下就重新进来。
-  const drawer = useArtifactDrawer(undefined, closure?.conversation_id);
-  if (!closure?.tasks?.length) return null;
-  const enterTask = (artifactId: string) => {
-    void api
-      .getArtifact(artifactId)
-      .then(drawer.open)
-      .catch((err) =>
-        message.error(err instanceof Error ? err.message : "任务详情读取失败，请重试"),
-      );
-  };
-  return (
-    <>
-      <ClosureCards tasks={closure.tasks} onEnterTask={enterTask} />
-      {drawer.node}
-    </>
-  );
-}

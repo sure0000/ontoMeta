@@ -1,16 +1,16 @@
 """ORM models — domain modules with stable re-exports."""
 
+from app.models.agent import (
+    HIGH_RISK_KINDS,
+    ArtifactKind,
+    ArtifactStatus,
+    GovernanceArtifact,
+)
 from app.models.chat_bi import (
     ChatBiConversation,
     ChatBiConversationTask,
     ChatBiDomainMemory,
     ChatBiMessage,
-)
-from app.models.chat_bi_ledger import (
-    NODE_SEQUENCE,
-    ChatBiDecisionRecord,
-    DecisionNode,
-    DecisionOutcome,
 )
 from app.models.data_app import (
     DataApp,
@@ -20,11 +20,13 @@ from app.models.data_app import (
     DataSource,
     DorisWarehouseConfig,
 )
+from app.models.dimensional_model import DimensionalModel
 from app.models.domain import (
     DomainContext,
     DraftChunkCheckpoint,
     DraftGenerationTask,
 )
+from app.models.governance import GovernanceStandardRecord
 from app.models.lineage import (
     LineagePackage,
     LineagePackageEdge,
@@ -34,6 +36,17 @@ from app.models.logic import (
     BusinessLogicCategory,
     BusinessLogicObjectBinding,
     BusinessLogicPropertyBinding,
+)
+from app.models.mcp_audit import McpAuditLog
+from app.models.mcp_flow_form import McpFlowForm
+from app.models.mcp_skill import McpSkill, McpSkillVersion
+from app.models.modeling import (
+    ModelingCase,
+    ModelingCaseLink,
+    ModelingCaseSpec,
+    ModelingCaseSpecKind,
+    ModelingCaseSpecStatus,
+    ModelingCaseStage,
 )
 from app.models.ontology import (
     ChangeConfirmation,
@@ -49,20 +62,7 @@ from app.models.ontology import (
     RelationType,
     VersionRecord,
 )
-from app.models.agent import (
-    ArtifactKind,
-    ArtifactStatus,
-    GovernanceArtifact,
-    GovernanceTaskPipeline,
-    GovernanceTaskPipelineStep,
-    HIGH_RISK_KINDS,
-    PipelineStatus,
-)
-from app.models.mcp_audit import McpAuditLog
-from app.models.mcp_flow_form import McpFlowForm
-from app.models.mcp_skill import McpSkill, McpSkillVersion
 from app.models.principal import Principal, Role, role_rank, role_satisfies
-from app.models.governance import GovernanceStandardRecord
 from app.models.semantic_index import SemanticIndexEntry
 from app.models.settings import (
     AirflowSetting,
@@ -76,26 +76,18 @@ from app.models.warehouse import (
     IngestionContract,
     LoadStrategy,
     MaterializationContract,
+    MaterializationLayer,
     OntologyWarehouseDeployment,
-    WarehouseObjectProjection,
+    ScdType,
+    TargetKind,
     WarehouseLogicProjection,
     WarehouseMigrationBatch,
     WarehouseMigrationEvidence,
-    MaterializationLayer,
-    ScdType,
-    TargetKind,
+    WarehouseObjectProjection,
 )
-from app.models.modeling import (
-    ModelingCase,
-    ModelingCaseLink,
-    ModelingCaseSpec,
-    ModelingCaseSpecKind,
-    ModelingCaseSpecStatus,
-    ModelingCaseStage,
-)
-from app.models.dimensional_model import DimensionalModel
 
 __all__ = [
+    "DependencyComponent",
     "OntologyStatus",
     "EntityStatus",
     "ConfirmationStatus",
@@ -123,10 +115,6 @@ __all__ = [
     "ChatBiConversationTask",
     "ChatBiDomainMemory",
     "ChatBiMessage",
-    "ChatBiDecisionRecord",
-    "DecisionNode",
-    "DecisionOutcome",
-    "NODE_SEQUENCE",
     "DataSource",
     "DorisWarehouseConfig",
     "DataApp",
@@ -151,12 +139,9 @@ __all__ = [
     "role_rank",
     "role_satisfies",
     "GovernanceArtifact",
-    "GovernanceTaskPipeline",
-    "GovernanceTaskPipelineStep",
     "GovernanceStandardRecord",
     "ArtifactKind",
     "ArtifactStatus",
-    "PipelineStatus",
     "HIGH_RISK_KINDS",
     "ModelingCase",
     "ModelingCaseSpec",

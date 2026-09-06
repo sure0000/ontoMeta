@@ -161,14 +161,14 @@ async def name_with_runtime(db, segments, objects, relations, hubs, domain_conte
                 items = payload if isinstance(payload, list) else payload.get("segments", [])
                 checkpoint.save(checkpoint_key, {"items": items})
             by_index = {int(item["index"]): item for item in items if isinstance(item, dict)}
-            for local_index, segment in enumerate(batch_segments):
+            for local_index, _segment in enumerate(batch_segments):
                 global_index = start + local_index
                 item = by_index.get(global_index) or by_index.get(local_index)
                 if item is None:
                     raise RuntimeError(f"LLM 未为板块 {global_index} 返回命名")
                 named_items[global_index] = item
 
-        for index, segment in enumerate(segments):
+        for index, _segment in enumerate(segments):
             item = named_items[index]
             display_name = str(item.get("display_name", "")).strip()
             name = str(item.get("name", "")).strip()

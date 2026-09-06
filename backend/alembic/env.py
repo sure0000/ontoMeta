@@ -4,17 +4,27 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
+from app import models  # noqa: F401  — 注册全部表到 metadata
 from app.config import settings
 from app.database import Base
-from app import models  # noqa: F401  — 注册全部表到 metadata
 
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ⚠ disable_existing_loggers 必须显式关掉（默认是 True）。
+    #
+    # 迁移不只在 `alembic` 命令行里跑——``init_db()`` 在**每个 API 进程启动时**都会跑一遍。
+    # 而 fileConfig 的默认行为是把「调用时已存在、且不在这份 ini 里」的 logger 全部
+    # ``disabled = True``：也就是 ontometa / ontometa.database / ontometa.auth /
+    # ontometa.data_app.executor …… 在启动迁移跑完的那一刻集体失声。
+    #
+    # 后果不是少几行日志，而是**整个应用的日志在生产里根本不输出**，包括
+    # main.py 里那句 `logger.exception("Unhandled server error")`——500 现场无迹可寻。
+    # 由 tests/test_p0_production_hardening.py 的 caplog 断言在全量跑时暴露。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

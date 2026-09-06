@@ -14,6 +14,7 @@ Airflow 负责重试、补数、水位与并发，本模块只做两件事——
 from __future__ import annotations
 
 import logging
+from datetime import UTC
 from typing import Any
 
 import httpx
@@ -46,12 +47,12 @@ def build_run_id(
     （见 ``agent_pipeline.execute``）。走到这里就说明人确实要再跑一次，那就该是**新的一次**
     运行，回执里记的也是这个新 run_id。
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     parts = ["ontometa", artifact_id or "manual"]
     if suffix:
         parts.append(suffix)
-    parts.append(stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    parts.append(stamp or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
     return "__".join(parts)
 
 
@@ -356,7 +357,7 @@ def is_terminal(state: str | None) -> bool:
     return (state or "").lower() in TERMINAL_STATES
 
 
-def explain_ping_failure(client: "AirflowClient", error: "AirflowError") -> str:
+def explain_ping_failure(client: AirflowClient, error: AirflowError) -> str:
     """把 ``ping_api`` 的失败翻成人能照做的解释。
 
     ``/health`` 能通但带版本前缀的 REST 打不通时，失败几乎只有两类，分别给出下一步：

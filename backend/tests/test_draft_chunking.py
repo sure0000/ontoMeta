@@ -10,6 +10,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import settings
 from app.schemas import (
     EvidenceBundle,
@@ -18,9 +20,7 @@ from app.schemas import (
     PropertyEvidencePack,
     RelationEvidencePack,
 )
-import pytest
-
-from app.services.draft_checkpoint import DraftCheckpointStore, chunk_key
+from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generator import (
     LlmNotConfiguredError,
     ObjectNamingIncompleteError,
@@ -692,7 +692,7 @@ def test_object_and_relation_pipelines_checkpoint_independently(monkeypatch):
 
     try:
         asyncio.run(gen.generate(bundle, checkpoint=store))
-        assert False, "expected relation pipeline failure to propagate"
+        raise AssertionError("expected relation pipeline failure to propagate")
     except RuntimeError:
         pass
 

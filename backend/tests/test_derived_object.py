@@ -23,7 +23,7 @@ from app.models import (
     WarehouseObjectProjection,
 )
 from app.models.warehouse import TargetKind
-from app.services import dataset_catalog, derived_object
+from app.services import dataset_catalog
 from app.services.derived_object import (
     DerivedObjectError,
     DerivedObjectInput,
@@ -128,23 +128,23 @@ def derived_seed(db):
 
 
 def _payload(order_ref, item_ref, token, **overrides):
-    data = dict(
-        name=f"order_wide_{token}",
-        display_name="订单商品宽表",
-        grain="一行 = 一张订单的一个商品行",
-        upstream_refs=[order_ref, item_ref],
-        joins=[
+    data = {
+        "name": f"order_wide_{token}",
+        "display_name": "订单商品宽表",
+        "grain": "一行 = 一张订单的一个商品行",
+        "upstream_refs": [order_ref, item_ref],
+        "joins": [
             UpstreamJoin(
                 left_ref=order_ref,
                 right_ref=item_ref,
                 on=[JoinCondition(left="id", right="order_id")],
             )
         ],
-        fields=[
+        "fields": [
             FieldSource(property="order_id", from_ref=order_ref, from_column="id"),
             FieldSource(property="amount", from_ref=order_ref, from_column="amount"),
         ],
-    )
+    }
     data.update(overrides)
     return DerivedObjectInput(**data)
 

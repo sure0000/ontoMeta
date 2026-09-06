@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +87,7 @@ def _dumps(value: Any) -> str:
 
 def _now() -> datetime:
     # SQLAlchemy's SQLite DateTime returns naive values; use naive UTC in DB.
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _checksum(report: dict[str, Any]) -> str:
@@ -100,7 +100,7 @@ def _receipt(artifact: GovernanceArtifact) -> dict[str, Any]:
 
 def _artifacts(db: Session, ids: list[str]) -> list[GovernanceArtifact]:
     rows = [db.get(GovernanceArtifact, artifact_id) for artifact_id in ids]
-    missing = [artifact_id for artifact_id, row in zip(ids, rows) if row is None]
+    missing = [artifact_id for artifact_id, row in zip(ids, rows, strict=False) if row is None]
     if missing:
         raise MigrationGateError(f"Artifact 不存在：{', '.join(missing)}")
     return [row for row in rows if row is not None]

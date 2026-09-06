@@ -56,7 +56,7 @@ class RunResultStore:
 
 
 def project_run_sql_for_model(
-    result: dict[str, Any], store: "RunResultStore", *, sample_rows: int
+    result: dict[str, Any], store: RunResultStore, *, sample_rows: int
 ) -> dict[str, Any]:
     """把 run_sql 的完整结果投影成**回给模型的紧凑引用**，并把全量行寄存进 store。
 

@@ -1,4 +1,4 @@
-"""交互式任务流程：把六环确认表单变成一问一答。
+"""交互式任务流程：把建数表单变成一问一答。
 
 **为什么要有**：Web 里的 Data Agent 有 ``request_form``——弹一张带真实候选的表单让人点。
 接在 dsh / Claude Code 这类纯文本客户端上的通用 Agent 没有这个出口，于是它要么把七八个
@@ -10,13 +10,13 @@
 
 三条设计约束：
 
-1. **问题与候选与 Web 同源**。字段骨架取 ``ChatBiService.build_task_form``——同一个同步
-   任务，在对话里问哪几项、候选是什么，与在 Web 表单里看到的逐字一致。这里另写一份"该问
-   什么"就等于让两个入口对同一件事有两套事实。
+1. **问题与候选与 Web 同源**。字段骨架取 ``services.task_form.build_task_form``——同一个
+   同步任务，在对话里问哪几项、候选是什么，与在 Web 表单里看到的逐字一致。这里另写一份
+   "该问什么"就等于让两个入口对同一件事有两套事实。
 2. **无服务端状态**。整条流程由 ``(kind, answers)`` 完全决定，每次重算。stdio、无状态
    HTTP、断线重连、换个会话接着问，行为都一样，也不需要一张会话表。
 3. **不替用户选**。工具只把候选摆出来；只有"候选唯一"或"字段自带确定默认值"才自动采纳，
-   且必须在这一环的确认步骤里原样展示出来让人核对（六环确认的文本版）。
+   且必须在确认步骤里原样展示出来让人核对。
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ import re
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+from app.services import task_form
 
 from . import AuthContext, ToolResult, register_tool
 from ._common import session
@@ -51,7 +53,7 @@ _KIND_MARKERS = {
 
 #: 执行方案的确认位。以 ``__`` 开头的键都是流程自己的记账，不进 propose 的 context。
 #: **整条流程只有这一次确认**：其余参数由本体、契约和默认值推导，在审查里一次核对。
-#: （此前是按六环各确认一次，用户实测后的原话是"6 环确实太繁琐"。）
+#: （此前是按六环各确认一次，用户实测后的原话是"6 环确实太繁琐"；Web 侧后来也收敛到了同一处。）
 _PLAN_CONFIRM = "__confirm_plan"
 
 #: 执行审查里要摆出来的 Spec 字段与它们的人话标签（按这个顺序展示，缺的跳过）。
@@ -86,12 +88,6 @@ _MULTI_TYPES = {"multiselect"}
 _CHOICE_TYPES = {"select", "radio", "multiselect"}
 #: 一次最多摆多少个候选。几百个对象全倒进回答里，人读不完，模型也会开始编。
 _OPTION_LIMIT = 25
-
-
-def _service():
-    from app.services.chat_bi import ChatBiService
-
-    return ChatBiService()
 
 
 def build_proposal(db: Session, **kwargs: Any) -> dict[str, Any]:
@@ -233,8 +229,6 @@ def _resolve_field(db: Session, field: dict, *, ontology_id: str, answers: dict)
 
 def _match(field: dict, value: Any) -> Any | None:
     """把用户的回答对到真实候选上；对不上返回 None（宁可再问一遍，也不填一个假值）。"""
-    from app.services.chat_bi_tool_schemas import _match_option
-
     options = field.get("options") or []
     if field.get("type") in _MULTI_TYPES:
         values = value if isinstance(value, list) else [value]
@@ -254,7 +248,7 @@ def _match(field: dict, value: Any) -> Any | None:
         # 闭集字段却一个候选都没取到（目录读失败、上游还没选）：这时**不能**放行，
         # 否则一个没人校验过的 id 会一路带到 Spec 里，执行时才炸。
         return None
-    hit = _match_option({**field, "type": field.get("type") or "text"}, text)
+    hit = task_form.match_option({**field, "type": field.get("type") or "text"}, text)
     if hit is not None:
         return hit
     # 序号回答：用户说"3"，模型往往原样转发。仅在候选里没有同名值时才按序号解释，
@@ -362,7 +356,6 @@ def _form_payload(
     fields: list[dict],
     answers: dict,
     submit_key: str | None,
-    ring: dict | None = None,
     note: str = "",
 ) -> dict[str, Any]:
     instruction = _FORM_INSTRUCTION.replace("{submit_key}", submit_key or "")
@@ -370,7 +363,7 @@ def _form_payload(
         instruction = (
             "把 form.fields 做成一张表单问用户（宿主有 ask_user_question / "
             "AskUserQuestion 就用它，没有就摆编号清单），把取值写进 answers 后再调"
-            " advance_task_flow。这一步不属于六环确认，没有 submit_key。"
+            " advance_task_flow。这一步不是确认步，没有 submit_key。"
         )
     payload: dict[str, Any] = {
         "status": "ask",
@@ -383,12 +376,6 @@ def _form_payload(
         "answers": answers,
         "instruction": instruction,
     }
-    if ring:
-        payload["ring"] = ring
-        payload["form"]["note"] = (
-            f"六环的第 {ring['index']}/{ring['total']} 环。"
-            "一环一张表单，填完这一环再谈下一环，不要三环合成一张问完。"
-        )
     if note:
         payload["form"]["note"] = note
     return payload
@@ -462,7 +449,7 @@ def _review_payload(
         for f in fields
     ]
     grouped: dict[str, list[dict]] = {}
-    for view, field in zip(views, fields):
+    for view, field in zip(views, fields, strict=False):
         grouped.setdefault(str(field.get("confirmation_node") or "data"), []).append(view["key"])
     return {
         "status": "review",
@@ -591,7 +578,7 @@ def _plan(
             )
 
     intent = str(answers.get("task_requirement") or goal or "").strip()
-    form = _service().build_task_form(
+    form = task_form.build_task_form(
         db,
         kind=kind,
         ontology_id=ontology_id,
@@ -982,7 +969,7 @@ class StartTaskFlowTool:
     required_role = "editor"
     description = (
         "用户想建数据任务（同步 / 加工 / 物化 / 指标）但参数没给全时，**先调它**。\n"
-        "它按六环的节奏一次返回**一整环的表单**（form.fields：标签、控件类型、真实候选、"
+        "它一次返回**一组相关参数的表单**（form.fields：标签、控件类型、真实候选、"
         "系统预填了哪几格），你把这一环一次性做成表单问用户"
         "（宿主有 ask_user_question / AskUserQuestion 就用它，没有就摆编号清单），"
         "填完用 advance_task_flow 提交，直到 status=ready 时照抄 next_call 去 propose_*。\n"

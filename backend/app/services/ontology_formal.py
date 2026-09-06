@@ -13,7 +13,7 @@ F3（SQL 语义证明）依赖**基数可信**、F4（口径校验）依赖**AST
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 from sqlalchemy.orm import Session
 
@@ -115,7 +115,7 @@ def _check_derivation_acyclic(db: Session, ontology_id: str) -> list[FormalIssue
         graph.setdefault(r.target_object_type_id, set())
 
     WHITE, GRAY, BLACK = 0, 1, 2
-    color: dict[str, int] = {n: WHITE for n in graph}
+    color: dict[str, int] = dict.fromkeys(graph, WHITE)
     cycle_nodes: set[str] = set()
 
     def dfs(node: str, stack: list[str]) -> None:

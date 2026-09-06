@@ -19,6 +19,7 @@ import os
 
 from app.auth import resolve_principal_token
 from app.config import settings
+
 from .tools import AuthContext
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ def resolve_auth_context() -> AuthContext:
             role=default_role,
             principal_id=None,
             principal_name=None,
+            anonymous=True,
         )
 
     # 有身份：admin token 无 principal_id（superuser），Principal Token 带上 id。

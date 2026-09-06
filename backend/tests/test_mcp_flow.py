@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import pytest
 
-from app.database import SessionLocal
 from app.mcp.tools import TOOL_REGISTRY, AuthContext
 from app.models import DataSource, DomainContext, ObjectType, Ontology, Property
 from app.models.ontology import OntologyStatus
@@ -225,7 +224,7 @@ def test_only_undecidable_parameters_are_asked(sync_ready_ontology, default_ware
     ).data
     assert data["status"] == "ask"
     assert data["form"]["submit_key"] is None  # 定参数不是"确认"，没有确认位
-    assert set(f["key"] for f in data["form"]["fields"]) == {
+    assert {f["key"] for f in data["form"]["fields"]} == {
         "primary_keys",
         "incremental_column",
         "initial_watermark",

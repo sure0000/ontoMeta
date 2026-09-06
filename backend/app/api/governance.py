@@ -52,7 +52,7 @@ def publish_standard(body: PublishStandardIn, db: Session = Depends(get_db)):
     try:
         record = _service.publish(db, body.version, note=body.note)
     except ValueError as exc:  # 未登记版本 → 输入问题，4xx
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "version": record.version,
         "status": record.status,

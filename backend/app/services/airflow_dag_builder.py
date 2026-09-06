@@ -14,9 +14,7 @@ DDL 放同目录的 JSON。真实本体有 734 张表，把 SQL 内联进 .py �
 from __future__ import annotations
 
 import hashlib
-import json as _json
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any
 
 from app.warehouse.jobs import JobSpec
@@ -64,7 +62,6 @@ def _plan_staging(plan, *, engine: str, token: str, enabled: bool) -> _Staging:
     保证两次运行不重叠，而一张表只属于一个批次，故这个名字已经不会撞；用 run_id 反而会
     让每次失败的运行留下一张不会被回收的 staging 表，且 DAG 产物里要塞 Jinja 表达式。
     """
-    from dataclasses import replace
 
     staging = _Staging()
     if not enabled:

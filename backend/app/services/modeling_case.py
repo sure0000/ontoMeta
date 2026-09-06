@@ -10,10 +10,10 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, desc, or_
+from sqlalchemy import and_, desc
 from sqlalchemy.orm import Session
 
 from app.models.modeling import (
@@ -271,7 +271,7 @@ class ModelingCaseService:
         # 确认当前版本
         spec.status = ModelingCaseSpecStatus.CONFIRMED.value
         spec.confirmed_by = data.confirmed_by
-        spec.confirmed_at = datetime.utcnow()
+        spec.confirmed_at = datetime.now(UTC).replace(tzinfo=None)
         
         # 推进工单阶段
         case = ModelingCaseService.get(db, case_id)

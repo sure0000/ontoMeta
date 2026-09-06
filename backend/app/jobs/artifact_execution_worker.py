@@ -11,7 +11,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -67,7 +67,7 @@ def _mark_crashed(artifact_id: str, exc: Exception) -> None:
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            artifact.executed_at = datetime.now(timezone.utc)
+            artifact.executed_at = datetime.now(UTC)
             db.commit()
     except Exception:
         logging.exception("failed to mark artifact %s failed", artifact_id)

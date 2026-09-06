@@ -135,14 +135,14 @@ export function TaskCreatePage() {
       .finally(() => {
         setLoading(false);
       });
-  }, []);
+  }, [isEdit]);
 
   // 编辑模式：拉取现有制品，用其 kind/ontology_id/spec 回填向导各步初值。
   useEffect(() => {
     if (!id) return;
     setLoading(true);
     api
-      .getArtifact(id)
+      .getArtifact(id, { reconcile: false })
       .then((artifact) => {
         setKind(artifact.kind);
         setOntologyId(artifact.ontology_id ?? undefined);

@@ -40,8 +40,10 @@ class ServerInfoTool:
 
     async def execute(self, arguments: dict, auth: AuthContext) -> ToolResult:
         verbose = bool(arguments.get("verbose", False))
-        status = introspection.service_status()
         with session() as db:
+            # Reuse one session for runtime settings and audit health.  The
+            # previous path opened a second session for every server_info call.
+            status = introspection.service_status(db)
             audit = introspection.audit_health(db)
         tools = status.pop("tools", [])
         if verbose:

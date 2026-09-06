@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -27,7 +27,7 @@ _WEB_OPTION_LIMIT = 2000
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _plan_for(db: Session, form: McpFlowForm, answers: dict[str, Any]) -> dict[str, Any]:
