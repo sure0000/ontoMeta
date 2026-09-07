@@ -905,8 +905,7 @@ export function DomainDetailPage() {
                     label: "生成本体草稿",
                     onClick: () => handleGenerate("full"),
                   },
-                  // 对象/关系两个范围后端一直支持，此前只有 Data Agent 的提案块能触发，
-                  // 工作区点不到。
+                  // 对象/关系两个范围后端一直支持，工作区也可直接触发。
                   {
                     key: "objects",
                     icon: <ApartmentOutlined />,

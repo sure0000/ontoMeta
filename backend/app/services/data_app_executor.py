@@ -69,7 +69,7 @@ _FORBIDDEN = (
 
 # 写侧的**硬闸**：库级删除一律不许执行，任何调用方、任何理由。
 #
-# 只读路径（execute_sql / is_read_only）本就把 drop 整个关键字关在门外，Data Agent 碰不到。
+# 只读路径（execute_sql / is_read_only）本就把 drop 整个关键字关在门外，Agent 碰不到。
 # 但写侧（execute_write）为了物化落库必须放行 DDL——它把生成的语句原样交给 DBAPI，
 # 此前**一条校验都没有**。库级删除与「建数」这件事没有任何交集：物化最多重建一张表，
 # 从不需要删掉整个库；而一旦有人（或某个生成器的 bug）递进来一条 DROP DATABASE，
@@ -121,7 +121,7 @@ def is_read_only(sql: str) -> tuple[bool, str | None]:
         SELECT name FROM t WHERE note = 'please delete this'  → 判「包含禁止的关键字：delete」
         SELECT * FROM t -- create table x                     → 同样被拒
 
-    这不是边角情况——ERP 的文本字段里出现 delete/update/create 是常态，而 Data Agent
+    这不是边角情况——ERP 的文本字段里出现 delete/update/create 是常态，而 Agent
     生成的正是这类查询，被无理由挡回去只会让人以为模型出错了。
 
     改判之后**写侧防护一点没松**：禁用词只在 ``Keyword`` 类 token 上匹配，
@@ -163,7 +163,7 @@ def _ensure_limit(sql: str, limit: int) -> str:
         return body
     # 自动补 LIMIT 时，若原 SQL 无 ORDER BY，追加一个稳定排序键（按第一列）。
     # 否则 `LIMIT N` 返回哪几行、何顺序由引擎自由决定（数仓并行扫描尤甚），
-    # 同一份数据两次取样本会不一致——见 chat-bi「数据样例结果不同」问题。
+    # 同一份数据两次取样本会不一致，故追加稳定排序。
     # ORDER BY 1 按输出列位置排序，对 `SELECT *`/聚合/UNION 均合法，保证可复现。
     if not re.search(r"\border\s+by\b", body, flags=re.IGNORECASE):
         return f"{body}\nORDER BY 1\nLIMIT {limit}"
@@ -274,7 +274,7 @@ def _json_safe(value: Any) -> Any:
     这里是物理库的值进入应用的唯一入口，往后要经过：回给模型的工具结果、`ask` 的
     响应体、图表、`analyze_result` 的统计——任何一处遇到非原生类型都会当场炸。
     MySQL 的金额列返回 `decimal.Decimal`，此前一条 `SELECT grand_total FROM sales_order`
-    就能让 `POST /chat-bi/ask` 直接 500（`Object of type Decimal is not JSON serializable`），
+    就能让查询响应直接 500（`Object of type Decimal is not JSON serializable`），
     即「域一旦真能查，第一个金额问题就挂」。
 
     **Decimal 转 float 而不是 str**：下游的图表与统计要的是数，转成字符串虽然精确，

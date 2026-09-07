@@ -183,7 +183,7 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 - `profile_values` **读真实数据，与 `execute_sql` 同价**（取同一份 `agent_run_sql_min_role`，
   不写死）——一次画像等于一句 `SELECT DISTINCT`，写成 reader 就是一个绕过 SQL 权限的后门。
   数据没落地或投影未就绪时返回 `available=false` 与原因，不报错、也不得据此猜字面量。
-  就绪判定与落点映射走 `query_routing.prepare_object_read`，与 Data Agent 同一份闸门。
+  就绪判定与落点映射走 `query_routing.prepare_object_read`，所有 Agent 共用同一份闸门。
 - `analyze_query` 的统计范围是本次实际返回的行；返回被截断时必须把它当作样本，不能把
   统计量表述为全表事实。
 
@@ -211,7 +211,7 @@ Claude 会调用 `query_ontology` 工具查询数据库。
 | `advance_task_flow` | 提交答案并推进；参数齐了给 `status="review"`（执行审查），确认后给可照抄的 `draft_task` 参数 |
 | `open_task_form` / `wait_task_form` | 客户端没有原生问答工具时，改用控制台上的一次性网页表单 |
 
-问题与候选取自 `ChatBiService.build_task_form`，**与 Web 表单同源**。流程**不存服务端状态**：
+问题与候选取自 `services.task_form.build_task_form`，**与 Web 表单同源**。流程**不存服务端状态**：
 由 `(kind, answers)` 完全决定，`answers` 每次原样带回即可续问。
 
 **只问定不下来的**：有默认值、唯一候选、可选项一律自动填，摆进最后那张执行审查里一次核对。
@@ -292,7 +292,7 @@ publisher 调用 `confirm_task` 和 `execute_task`。`execute_task` 返回成功
 | `query_*` / `search_logics` / `get_logic` / `compile_metric` / `get_lineage` / `get_landing` / `get_ops_record` / `find_join_path` / `list_datasources` / `list_tasks` / `get_task_status` / `wait_task_status` / `validate_sql` | `reader` |
 | `propose_*` / `draft_task` / `validate_task` | `editor` |
 | `confirm_task` / `execute_task` | `publisher` |
-| `execute_sql` / `profile_values` | `agent_run_sql_min_role`（默认 `publisher`，与 Data Agent 代跑 SQL 同价） |
+| `execute_sql` / `profile_values` | `agent_run_sql_min_role`（默认 `publisher`，统一代跑 SQL 角色） |
 | `list_audit_logs` / `get_mcp_stats` | `publisher` |
 | `server_info` | `reader` |
 
@@ -463,7 +463,7 @@ A: 检查：
 
 - [x] Phase 1 基础设施
 - [x] Phase 2 核心只读工具（16 个）
-- [x] Data Agent parity P0/P1 生命周期工具（4 个）与对象聚合
+- [x] 生命周期工具（4 个）与对象聚合
 - [x] `get_ontology_overview`（本体概览聚合）
 - [x] Phase 3 认证（env Token → 4 层角色）+ 授权（工具级 required_role，fail-closed）+ 审计
 - [x] Phase 4 限流（进程内滑动窗口）+ 运维自省（`server_info`）/ 监控（`get_mcp_stats`）

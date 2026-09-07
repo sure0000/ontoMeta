@@ -122,7 +122,15 @@ async def ensure_object_type_from_dataset(
 
 
 @router.get("/domains", response_model=list[DomainContextSummary])
-async def list_domains(db: Session = Depends(get_db)):
+async def list_domains(
+    sync: bool = Query(True, description="是否先从 DataHub 同步域清单"),
+    db: Session = Depends(get_db),
+):
+    # Read-only workbenches can render from the local domain cache while a
+    # remote DataHub sync is in flight.  Keep the historical default for the
+    # other pages that explicitly need a fresh catalog.
+    if not sync:
+        return workspace.list_domains(db)
     try:
         return await workspace.sync_domains(db)
     except HTTPException:
@@ -364,4 +372,3 @@ def get_task_merge_report(domain_id: str, task_id: str, db: Session = Depends(ge
         return provenance_service.get_merge_report(db, domain_id, task_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-

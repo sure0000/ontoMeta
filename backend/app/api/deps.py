@@ -16,29 +16,6 @@ from app.services.settings_service import SettingsService
 from app.services.warehouse_generator import WarehouseGenerator
 from app.services.workspace_service import WorkspaceService
 
-# Chat BI is an optional, legacy router. Keep its singleton lazy so importing
-# shared dependencies does not make the whole application depend on the chat
-# service once that router is removed.
-_legacy_chat_bi_service = None
-
-
-def get_legacy_chat_bi_service():
-    global _legacy_chat_bi_service
-    if _legacy_chat_bi_service is None:
-        from app.services.chat_bi import ChatBiService
-
-        _legacy_chat_bi_service = ChatBiService()
-    return _legacy_chat_bi_service
-
-
-def __getattr__(name: str):
-    # Backward-compatible import for tests and external integrations. Resolve
-    # it only when a caller explicitly asks for the legacy service.
-    if name == "chat_bi_service":
-        return get_legacy_chat_bi_service()
-    raise AttributeError(name)
-
-
 workspace = WorkspaceService()
 query = OntologyQueryService()
 confirmation_service = ConfirmationService()

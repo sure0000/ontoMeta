@@ -28,6 +28,14 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# The in-product chat surface was removed, but its tables are retained as
+# historical data for one release cycle. They are intentionally outside the
+# current ORM schema and must not be proposed for deletion by ``alembic check``.
+def _include_object(object_, name, type_, reflected, compare_to):
+    if type_ == "table" and reflected and str(name).startswith("chat_bi_"):
+        return False
+    return True
+
 # 覆盖 ini 中的 sqlalchemy.url，与运行时 DATABASE_URL 一致
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
@@ -40,6 +48,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=_include_object,
         render_as_batch=url.startswith("sqlite") if url else False,
     )
 
@@ -66,6 +75,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_object=_include_object,
             render_as_batch=settings.database_url.startswith("sqlite"),
         )
 

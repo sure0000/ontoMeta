@@ -45,8 +45,8 @@ export function BusinessLogicPage() {
     ])
       .then(([nextCategories, uncategorizedPage]) => {
         setCategories(nextCategories);
-        // Data Agent proposals are intentionally created without a category. Keep
-        // them visible here so they are not lost between confirmation and manual categorization.
+        // Agent proposals are intentionally created without a category. Keep
+        // them visible so they are not lost between confirmation and manual categorization.
         setUncategorizedCount(uncategorizedPage.total);
       })
       .catch((err) => setError(err.message))

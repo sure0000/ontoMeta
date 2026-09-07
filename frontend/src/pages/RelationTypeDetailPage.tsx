@@ -208,7 +208,7 @@ export function RelationTypeDetailPage() {
 
   const loadRelation = async () => {
     if (!relationId) return;
-    // 非工作区（本体浏览）只取已发布关系，与 Data Agent 接地集一致。
+    // 非工作区（本体浏览）只取已发布关系，与 Agent 查询边界一致。
     const detail = await api.getRelationType(relationId, !inWorkspace);
     setRel(detail);
     form.setFieldsValue({

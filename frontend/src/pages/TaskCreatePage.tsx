@@ -119,7 +119,7 @@ export function TaskCreatePage() {
 
   useEffect(() => {
     setLoading(true);
-    // 新建任务只对齐 Data Agent 的已发布本体作用域；编辑历史任务仍加载完整本体列表，
+    // 新建任务只对齐已发布本体作用域；编辑历史任务仍加载完整本体列表，
     // 避免草稿本体上的存量制品在编辑页丢失当前选项。
     Promise.all([
       api.listOntologies(isEdit ? undefined : { publishedOnly: true }),
@@ -355,7 +355,7 @@ export function TaskCreatePage() {
           context,
           user_created: true,
         });
-        // 与 Data Agent 的 confirmed 创建保持一致：草稿落库后立即生成校验报告和 dry-run，
+        // 草稿落库后立即生成校验报告和 dry-run，
         // 但不越过后续人工确认/执行门禁。
         try {
           const validated = await api.validateArtifact(artifact.id);
@@ -390,7 +390,7 @@ export function TaskCreatePage() {
         }
         extra={
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(returnPath)}>
-            {returnPath === "/tasks" ? "返回任务列表" : "返回 Data Agent"}
+            {returnPath === "/tasks" ? "返回任务列表" : "返回上一页"}
           </Button>
         }
       />

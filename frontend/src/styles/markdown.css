@@ -1,0 +1,24 @@
+/* Shared Markdown rendering for Agent-facing panels. */
+.agent-markdown-compact .agent-markdown { gap: 2px; font-size: var(--font-size-sm); line-height: 1.6; color: var(--om-text-secondary); }
+.agent-markdown { display: flex; flex-direction: column; gap: var(--spacing-xs); font-size: var(--font-size-base); line-height: 1.72; color: var(--om-text); }
+.agent-markdown-hr { border: 0; height: 1px; margin: var(--spacing-md) 0 var(--spacing-sm); background: var(--om-border); }
+.agent-markdown-line { min-height: 1em; word-break: break-word; }
+.agent-markdown-h1, .agent-markdown-h2, .agent-markdown-h3, .agent-markdown-h4 { font-weight: 600; color: var(--om-text); line-height: 1.35; }
+.agent-markdown-h1 { font-size: var(--font-size-h1); margin: var(--spacing-md) 0 var(--spacing-xs); }
+.agent-markdown-h2 { font-size: var(--font-size-h2); margin: var(--spacing-md) 0 var(--spacing-xs); }
+.agent-markdown-h3 { font-size: var(--font-size-h3); margin: var(--spacing-sm) 0 var(--spacing-xs); }
+.agent-markdown-h4 { font-size: var(--font-size-base); margin: var(--spacing-sm) 0 var(--spacing-xs); color: var(--om-text-secondary); }
+.agent-markdown-listitem { display: flex; gap: var(--spacing-sm); padding-left: var(--spacing-xs); }
+.agent-markdown-listitem--ordered { padding-left: 0; }
+.agent-markdown-bullet { color: var(--om-text-tertiary); flex-shrink: 0; }
+.agent-markdown-num { color: var(--om-text-secondary); flex-shrink: 0; min-width: 1.4em; text-align: right; }
+.agent-markdown-quote { margin: var(--spacing-xs) 0; padding: var(--spacing-xs) var(--spacing-md); border-left: 3px solid var(--om-border-strong); color: var(--om-text-secondary); }
+.agent-markdown-inline-code { font-family: var(--om-font-mono); background: var(--om-neutral-soft); border: 1px solid var(--om-border); padding: 1px var(--spacing-xs); border-radius: var(--border-radius-sm); color: var(--om-text); }
+.agent-markdown-link { color: var(--om-primary); text-decoration: none; }
+.agent-markdown-codeblock { margin: 10px 0 6px; background: var(--om-text); color: var(--om-border-strong); padding: 14px 16px; border-radius: 8px; font-family: var(--om-font-mono); font-size: 12.5px; line-height: 1.6; overflow-x: auto; border: 1px solid #1e293b; }
+.agent-markdown-codeblock code { font-family: inherit; background: transparent; color: inherit; }
+.agent-markdown-tablewrap { margin: 16px 0; overflow-x: auto; border: 1px solid var(--om-border); border-radius: var(--om-radius); }
+.agent-markdown-table { border-collapse: collapse; width: 100%; font-size: 14px; line-height: 1.6; }
+.agent-markdown-table th, .agent-markdown-table td { padding: 10px 14px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--om-border); }
+.agent-markdown-table th { background: var(--om-surface-muted); font-weight: 600; color: var(--om-text); }
+.agent-markdown-table td { color: var(--om-text-secondary); }

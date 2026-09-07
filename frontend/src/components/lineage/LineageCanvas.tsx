@@ -7,7 +7,7 @@ import {
   PlusOutlined,
   SwapOutlined,
 } from "@ant-design/icons";
-import { Button, Tag, Tooltip } from "antd";
+import { Alert, Button, Tag, Tooltip } from "antd";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import type { LineageColumn } from "../../types";
@@ -46,6 +46,8 @@ export interface CanvasEdge {
   from: string;
   to: string;
   keys: CanvasKey[];
+  /** 智能关系补充给的建议边：画虚线、不可编辑，与人工连的实线分开看。 */
+  suggested?: boolean;
 }
 
 const NODE_W = 228;
@@ -471,6 +473,7 @@ export function LineageCanvas({
       id: `${edge.id}#${index}`,
       edgeId: edge.id,
       keyless: key === null,
+      suggested: Boolean(edge.suggested),
       d: curve(a.x + NODE_W, portY(a, key ? key.src : null), b.x, portY(b, key ? key.dst : null)),
     }));
   });
@@ -553,11 +556,15 @@ export function LineageCanvas({
 
             {links.map((link) => {
               const on = link.edgeId === selected;
+              // 建议边（智能关系补充）走细虚线：它是「推出来并被确认」的关系，
+              // 不是人在这张画布上连的，视觉上必须分得开。
               const stroke = on
                 ? "var(--om-primary)"
-                : link.keyless
-                  ? "var(--om-warning)"
-                  : "var(--om-machine)";
+                : link.suggested
+                  ? "var(--om-success)"
+                  : link.keyless
+                    ? "var(--om-warning)"
+                    : "var(--om-machine)";
               return (
                 <g key={link.id}>
                   <path
@@ -572,8 +579,10 @@ export function LineageCanvas({
                     d={link.d}
                     fill="none"
                     stroke={stroke}
-                    strokeWidth={on ? 2.2 : 1.5}
-                    strokeDasharray={link.keyless ? "5 4" : undefined}
+                    strokeWidth={on ? 2.2 : link.suggested ? 1.2 : 1.5}
+                    strokeDasharray={
+                      link.suggested ? "3 3" : link.keyless ? "5 4" : undefined
+                    }
                     markerEnd={`url(#${on ? "lin-tip-on" : link.keyless ? "lin-tip-warn" : "lin-tip"})`}
                   />
                 </g>
@@ -640,18 +649,29 @@ export function LineageCanvas({
               <LineageTableName className="lin-node lin-node--target" name={selectedEdge.to} />
             </div>
 
-            {/* 表名可以很长，按钮里塞不下方向说明——方向在上面那两行已经写清楚了 */}
-            <Tooltip title={`改成 ${selectedEdge.to} → ${selectedEdge.from}`}>
-              <Button
-                size="small"
-                icon={<SwapOutlined />}
-                disabled={frozen}
-                onClick={() => reverseEdge(selectedEdge.id)}
-                block
-              >
-                反向
-              </Button>
-            </Tooltip>
+            {/* 建议边由智能关系补充给出、在抽屉里按族表态，不在画布上单条改——
+                这里的编辑按钮对它无效（它不在 edges 状态里），与其点了没反应，不如不给。 */}
+            {selectedEdge.suggested ? (
+              <Alert
+                type="success"
+                showIcon
+                message="智能关系补充给出的建议"
+                description="已确认的键族推出的关系。要改判请回到「智能补充关系」抽屉，按族确认或否决。"
+              />
+            ) : (
+              /* 表名可以很长，按钮里塞不下方向说明——方向在上面那两行已经写清楚了 */
+              <Tooltip title={`改成 ${selectedEdge.to} → ${selectedEdge.from}`}>
+                <Button
+                  size="small"
+                  icon={<SwapOutlined />}
+                  disabled={frozen}
+                  onClick={() => reverseEdge(selectedEdge.id)}
+                  block
+                >
+                  反向
+                </Button>
+              </Tooltip>
+            )}
 
             <div className="lin-inspector-label">
               关联键
@@ -667,7 +687,7 @@ export function LineageCanvas({
                   <LineageJoinKey
                     value={`${selectedEdge.from}.${key.src} = ${selectedEdge.to}.${key.dst}`}
                   />
-                  {!frozen && (
+                  {!frozen && !selectedEdge.suggested && (
                     <button
                       type="button"
                       className="lin-tnode-x"
@@ -684,16 +704,18 @@ export function LineageCanvas({
               )}
             </ul>
 
-            <Button
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              disabled={frozen}
-              onClick={() => removeEdge(selectedEdge.id)}
-              block
-            >
-              删除这条血缘
-            </Button>
+            {!selectedEdge.suggested && (
+              <Button
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                disabled={frozen}
+                onClick={() => removeEdge(selectedEdge.id)}
+                block
+              >
+                删除这条血缘
+              </Button>
+            )}
           </div>
         )}
       </div>

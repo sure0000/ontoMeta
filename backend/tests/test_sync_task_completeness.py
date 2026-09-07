@@ -20,7 +20,6 @@ from app.agents.executors.sync import SyncExecutor
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, Property
 from app.services import task_form
-from app.services.chat_bi import ChatBiService
 
 _URN = "urn:li:dataset:(urn:li:dataPlatform:postgres,erp.public.{t},PROD)"
 
@@ -119,13 +118,11 @@ def test_sync_form_asks_for_schedule(sync_domain):
 
 def _sync_form_fields(ontology_id: str) -> dict:
     with SessionLocal() as db:
-        result, _s, is_error = ChatBiService()._dispatch_request_form(
-            db,
-            ontology_id=ontology_id,
-            args={"title": "同步参数", "task_kind": "sync", "intent": "同步 sale_order"},
+        result = task_form.build_task_form(
+            db, kind="sync", ontology_id=ontology_id,
+            title="同步参数", intent="同步 sale_order",
         )
-    assert is_error is False
-    return {f["name"]: f for f in result["form"]["fields"]}
+    return {f["name"]: f for f in result["fields"]}
 
 
 def test_sync_form_covers_every_load_strategy(sync_domain):
@@ -146,7 +143,7 @@ def test_sync_form_covers_every_load_strategy(sync_domain):
 
 
 def test_sync_form_covers_task_level_flink_overrides(sync_domain):
-    """Data Agent 与手动同步向导都能覆盖任务级 Flink 参数。"""
+    """通用 Agent 与手动同步向导都能覆盖任务级 Flink 参数。"""
     fields = _sync_form_fields(sync_domain["ontology_id"])
     assert {
         "flink_parallelism",
@@ -171,12 +168,12 @@ def test_sync_form_scopes_column_candidates_to_the_chosen_object(sync_domain):
 
 def test_sync_context_errors_match_the_form_fields(sync_domain):
     """提交闸门要的键，与表单给的格子必须一一对上。"""
-    from app.services.chat_bi_tool_schemas import _sync_context_errors
+    from app.services.task_form import sync_context_errors
 
     fields = _sync_form_fields(sync_domain["ontology_id"])
     with SessionLocal() as db:
-        incremental = _sync_context_errors(db, {"mode": "incremental"})
-        cdc = _sync_context_errors(db, {"mode": "cdc"})
+        incremental = sync_context_errors(db, {"mode": "incremental"}, ontology_id=sync_domain["ontology_id"])
+        cdc = sync_context_errors(db, {"mode": "cdc"}, ontology_id=sync_domain["ontology_id"])
     for message in incremental + cdc:
         named = [key for key in fields if key in message]
         assert named, f"闸门报「{message}」，但表单里没有对应字段"
@@ -188,7 +185,7 @@ def test_cdc_checkpoint_follows_the_settings_default(sync_domain, monkeypatch):
     见 DEVELOPMENT_PRINCIPLES P1「全局配置 ≠ 唯一取值」：设置页那份是默认值。
     """
     from app.api.deps import settings_service
-    from app.services.chat_bi_tool_schemas import _sync_context_errors
+    from app.services.task_form import sync_context_errors
 
     base = settings_service.get_airflow_runtime
 
@@ -199,8 +196,8 @@ def test_cdc_checkpoint_follows_the_settings_default(sync_domain, monkeypatch):
 
     monkeypatch.setattr(settings_service, "get_airflow_runtime", _with_dir)
     with SessionLocal() as db:
-        errors = _sync_context_errors(db, {"mode": "cdc", "sequence_column": "updated_at",
-                                           "delete_policy": "ignore"})
+        errors = sync_context_errors(db, {"mode": "cdc", "sequence_column": "updated_at",
+                                          "delete_policy": "ignore"}, ontology_id=sync_domain["ontology_id"])
         assert not [e for e in errors if "checkpoint" in e]
         # 表单也不该再问一遍。
         fields = {
@@ -213,7 +210,7 @@ def test_cdc_checkpoint_follows_the_settings_default(sync_domain, monkeypatch):
 def test_cdc_without_any_checkpoint_dir_is_still_blocked(sync_domain, monkeypatch):
     """两处都没有仍要拦：没有读位点持久化，CDC 一重启就从头重搬。"""
     from app.api.deps import settings_service
-    from app.services.chat_bi_tool_schemas import _sync_context_errors
+    from app.services.task_form import sync_context_errors
 
     base = settings_service.get_airflow_runtime
 
@@ -224,8 +221,8 @@ def test_cdc_without_any_checkpoint_dir_is_still_blocked(sync_domain, monkeypatc
 
     monkeypatch.setattr(settings_service, "get_airflow_runtime", _without_dir)
     with SessionLocal() as db:
-        errors = _sync_context_errors(db, {"mode": "cdc", "sequence_column": "updated_at",
-                                           "delete_policy": "ignore"})
+        errors = sync_context_errors(db, {"mode": "cdc", "sequence_column": "updated_at",
+                                          "delete_policy": "ignore"}, ontology_id=sync_domain["ontology_id"])
     assert [e for e in errors if "checkpoint" in e]
 
 

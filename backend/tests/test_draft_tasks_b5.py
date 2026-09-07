@@ -74,6 +74,75 @@ def test_recover_stale_draft_tasks(client):
         db.close()
 
 
+def test_recover_stale_draft_tasks_survives_timezone_aware_db_now(client, monkeypatch):
+    """Postgres 的 ``now()`` 带时区，``updated_at`` 列不带——直接比较会抛 TypeError。
+
+    这不是一条普通的边界：``recover_stale_draft_tasks`` 挂在 ``init_db()`` 的启动钩子里，
+    它一抛异常**整个服务起不来**（实测 uvicorn "Application startup failed"）。
+    触发条件正是它自己要处理的场景——库里留着一条 running 任务时重启。
+    本地跑 SQLite（``now()`` 是 naive）永远复现不了，所以这里把带时区的 now 造出来。
+    """
+    from datetime import UTC, datetime
+
+    import app.database as database_module
+
+    real_session_factory = database_module.SessionLocal
+
+    db = real_session_factory()
+    try:
+        domain = DomainContext(
+            datahub_domain_id="urn:li:domain:b5-tzaware", name="B5 TZ"
+        )
+        db.add(domain)
+        db.flush()
+        stale = DraftGenerationTask(
+            domain_context_id=domain.id,
+            status="running",
+            progress=10,
+            message="跑着呢",
+            updated_at=datetime(2020, 1, 1, 0, 0, 0),  # naive，且远早于宽限窗口
+        )
+        db.add(stale)
+        db.commit()
+        stale_id = stale.id
+    finally:
+        db.close()
+
+    class _AwareNowSession:
+        """只把 ``select(func.now())`` 的结果换成带时区的，其余原样转发。"""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, statement, *args, **kwargs):
+            if "now()" in str(statement).lower():
+                aware = datetime.now(UTC).astimezone()
+                return _Scalar(aware)
+            return self._inner.execute(statement, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    class _Scalar:
+        def __init__(self, value):
+            self._value = value
+
+        def scalar(self):
+            return self._value
+
+    monkeypatch.setattr(
+        database_module, "SessionLocal", lambda: _AwareNowSession(real_session_factory())
+    )
+
+    assert recover_stale_draft_tasks() >= 1
+
+    db = real_session_factory()
+    try:
+        assert db.get(DraftGenerationTask, stale_id).status == "failed"
+    finally:
+        db.close()
+
+
 def test_start_draft_generation_queued(client, llm_ready):
     db = SessionLocal()
     try:

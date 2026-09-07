@@ -13,12 +13,25 @@ from uuid import uuid4
 
 import pytest
 
+from app.database import SessionLocal
 from app.mcp.tools import TOOL_REGISTRY, AuthContext
 from app.models import DataSource, DomainContext, ObjectType, Ontology, Property
 from app.models.ontology import OntologyStatus
 
 AUTH = AuthContext(client_type="mcp_local", role="publisher", principal_id="flow-test")
 READER = AuthContext(client_type="mcp_local", role="reader", principal_id="flow-reader")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def isolate_flow_datasources():
+    """Keep same-platform sources from earlier modules out of candidate assertions."""
+    with SessionLocal() as db:
+        db.query(DataSource).delete()
+        db.commit()
+    yield
+    with SessionLocal() as db:
+        db.query(DataSource).delete()
+        db.commit()
 
 
 def call(name: str, arguments: dict, auth: AuthContext = AUTH):

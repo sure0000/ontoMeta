@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import random
+from urllib.parse import quote
 
 import httpx
 
@@ -988,6 +990,11 @@ mutation updateLineage($input: UpdateLineageInput!) {
 }
 """
 
+# DataHub 的 schemaMetadata 没有 GraphQL mutation。使用各版本均保留的 REST
+# MetadataChangeProposal 接口：先 GET 完整 aspect，再合并 foreignKeys 后 UPSERT。
+_SCHEMA_METADATA_ASPECT = "schemaMetadata"
+_SCHEMA_METADATA_ASPECT_TYPE = "com.linkedin.schema.SchemaMetadata"
+
 
 class DataHubWriteError(RuntimeError):
     """回写失败。保留原始 URN 与操作，便于定位与重放。"""
@@ -1006,6 +1013,136 @@ async def _mutate(connector: "DataHubConnector", operation: str, urn: str,
     except Exception as exc:  # noqa: BLE001
         raise DataHubWriteError(operation, urn, exc) from exc
     return bool(data.get(operation, True))
+
+
+async def _get_schema_metadata_aspect(
+    connector: "DataHubConnector", dataset_urn: str
+) -> dict | None:
+    """读取 DataHub 中完整的 ``schemaMetadata`` aspect 原文。
+
+    REST 响应在不同 GMS 版本上可能使用完整 aspect 类型名或 GenericAspect
+    ``value`` 包装；两种都支持，无法识别则显式报错而不是覆盖 schema。
+    """
+    url = (
+        f"{connector.api_url}/aspects/{quote(dataset_urn, safe='')}"
+        f"?aspect={_SCHEMA_METADATA_ASPECT}&version=0"
+    )
+    client = connector._get_client()
+    headers = {"Accept": "application/json"}
+    if connector.token:
+        headers["Authorization"] = f"Bearer {connector.token}"
+    try:
+        response = await client.get(url, headers=headers)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001 - caller records the concrete write failure
+        raise DataHubWriteError("getSchemaMetadata", dataset_urn, exc) from exc
+
+    aspect = payload.get("aspect") if isinstance(payload, dict) else None
+    if not isinstance(aspect, dict):
+        raise DataHubWriteError(
+            "getSchemaMetadata", dataset_urn, ValueError("REST 响应缺少 aspect")
+        )
+
+    value = aspect.get(_SCHEMA_METADATA_ASPECT_TYPE)
+    if value is None:
+        value = next(
+            (item for key, item in aspect.items() if str(key).endswith(".SchemaMetadata")),
+            None,
+        )
+    if value is None and isinstance(aspect.get("value"), str):
+        try:
+            value = json.loads(aspect["value"])
+        except json.JSONDecodeError as exc:
+            raise DataHubWriteError(
+                "getSchemaMetadata", dataset_urn, ValueError("aspect value 不是 JSON")
+            ) from exc
+    if not isinstance(value, dict):
+        raise DataHubWriteError(
+            "getSchemaMetadata", dataset_urn, ValueError("无法识别 schemaMetadata aspect")
+        )
+    return value
+
+
+async def add_foreign_key_constraints(
+    connector: "DataHubConnector",
+    dataset_urn: str,
+    constraints: list[dict[str, str]],
+) -> bool:
+    """向一个 dataset 的 ``schemaMetadata.foreignKeys`` 合并外键约束。
+
+    ``constraints`` 每项必须包含 ``name``、``source_field``、``target_field``、
+    ``target_dataset``。写回前读取并保留完整 schema aspect；目标不存在、版本不兼容、
+    或 REST/GMS 返回错误都会抛 ``DataHubWriteError``，绝不发送一个可能破坏 schema 的
+    部分 aspect。
+    """
+    if not constraints:
+        return True
+    current = await _get_schema_metadata_aspect(connector, dataset_urn)
+    if current is None:
+        raise DataHubWriteError(
+            "updateSchemaMetadata", dataset_urn, ValueError("目标 dataset 没有 schemaMetadata aspect")
+        )
+
+    foreign_keys = list(current.get("foreignKeys") or [])
+    existing = {
+        (
+            tuple(item.get("sourceFields") or []),
+            tuple(item.get("foreignFields") or []),
+            item.get("foreignDataset"),
+        )
+        for item in foreign_keys
+        if isinstance(item, dict)
+    }
+    for constraint in constraints:
+        source_field = constraint["source_field"]
+        target_field = constraint["target_field"]
+        target_dataset = constraint["target_dataset"]
+        signature = ((source_field,), (target_field,), target_dataset)
+        if signature in existing:
+            continue
+        foreign_keys.append(
+            {
+                "name": constraint["name"],
+                "sourceFields": [source_field],
+                "foreignFields": [target_field],
+                "foreignDataset": target_dataset,
+            }
+        )
+        existing.add(signature)
+    current["foreignKeys"] = foreign_keys
+
+    url = f"{connector.api_url}/aspects?action=ingestProposal"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if connector.token:
+        headers["Authorization"] = f"Bearer {connector.token}"
+    body = {
+        "proposal": {
+            "entityType": "dataset",
+            "entityUrn": dataset_urn,
+            "aspectName": _SCHEMA_METADATA_ASPECT,
+            "changeType": "UPSERT",
+            "aspect": {
+                "value": json.dumps(current, ensure_ascii=False),
+                "contentType": "application/json",
+            },
+        },
+        "async": "false",
+    }
+    client = connector._get_client()
+    try:
+        response = await client.post(url, json=body, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("errors"):
+            raise ValueError(str(payload["errors"]))
+    except DataHubWriteError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - preserve operation + dataset URN
+        raise DataHubWriteError("updateSchemaMetadata", dataset_urn, exc) from exc
+    return True
 
 
 async def update_dataset_description(
@@ -1059,14 +1196,45 @@ async def add_lineage_edge(
 
     幂等：DataHub 对已存在的边不重复建。以 downstream 作定位 URN（血缘挂在下游侧）。
     """
-    return await _mutate(
-        connector, "updateLineage", downstream_urn, _MUTATION_UPDATE_LINEAGE,
-        {
-            "input": {
-                "edgesToAdd": [
-                    {"upstreamUrn": upstream_urn, "downstreamUrn": downstream_urn}
-                ],
-                "edgesToRemove": [],
-            }
-        },
-    )
+    return await add_lineage_edges(connector, [(upstream_urn, downstream_urn)])
+
+
+#: 一次 updateLineage 里最多塞多少条边。``edgesToAdd`` 是数组，但一次塞太多
+#: 会让单次请求超时，且失败时要退回逐条重试的代价也变大。
+LINEAGE_BATCH_SIZE = 50
+
+
+async def add_lineage_edges(
+    connector: "DataHubConnector", edges: list[tuple[str, str]]
+) -> bool:
+    """批量上报表级血缘。``edges`` 是 ``(上游 URN, 下游 URN)`` 列表。
+
+    ``UpdateLineageInput.edgesToAdd`` 本来就是数组，此前却是**一条边一次往返**——
+    300 条边就是 300 次串行 GraphQL。这里按 :data:`LINEAGE_BATCH_SIZE` 分批。
+
+    整批失败时抛 :class:`DataHubWriteError`，由调用方决定是否退回逐条定位——
+    批量的代价是失败归因变粗，不能让它把「哪条边坏了」这个信息吞掉。
+    """
+    if not edges:
+        return True
+    for start in range(0, len(edges), LINEAGE_BATCH_SIZE):
+        chunk = edges[start : start + LINEAGE_BATCH_SIZE]
+        ok = await _mutate(
+            connector,
+            "updateLineage",
+            # 定位 URN 只用于错误信息；一批里有多个下游时取第一个作代表。
+            chunk[0][1],
+            _MUTATION_UPDATE_LINEAGE,
+            {
+                "input": {
+                    "edgesToAdd": [
+                        {"upstreamUrn": upstream, "downstreamUrn": downstream}
+                        for upstream, downstream in chunk
+                    ],
+                    "edgesToRemove": [],
+                }
+            },
+        )
+        if not ok:
+            return False
+    return True

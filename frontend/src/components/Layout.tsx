@@ -8,7 +8,6 @@ import {
   NodeIndexOutlined,
   MenuUnfoldOutlined,
   ProfileOutlined,
-  RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { Layout, Menu, Tooltip } from "antd";
@@ -38,7 +37,6 @@ function getSelectedKey(pathname: string, search: string) {
   }
   if (pathname.startsWith("/lineage-supplement")) return "/lineage-supplement";
   if (pathname.startsWith("/business-logic")) return "/business-logic";
-  if (pathname.startsWith("/chat-bi")) return "/chat-bi";
   if (pathname.startsWith("/tasks")) return "/tasks";
   if (pathname.startsWith("/data-apps")) return "/data-apps";
   if (pathname.startsWith("/agent-access/tools")) return "/agent-access/tools";
@@ -84,9 +82,6 @@ export function AppLayout() {
 
   const defaultOpenKeys = useMemo(() => getOpenKeys(location.pathname), [location.pathname]);
 
-  // Data Agent 等全高度三栏应用：内容区满幅铺满，去掉内边距
-  const isFlushPage = location.pathname.startsWith("/chat-bi");
-
   const menuItems = useMemo<MenuProps["items"]>(() => {
     const domainList = domains ?? [];
 
@@ -119,7 +114,6 @@ export function AppLayout() {
         icon: <FunctionOutlined />,
         label: "业务逻辑",
       },
-      { key: "/chat-bi", icon: <RobotOutlined />, label: "Data Agent" },
       // 任务中心曾有「任务编排」这个同级子项（手工任务链）。链退场后只剩一项，
       // 父子两层就没有意义了——拍平成一个入口。
       { key: "/tasks", icon: <ProfileOutlined />, label: "我的任务" },
@@ -204,7 +198,7 @@ export function AppLayout() {
       </Sider>
 
       <Layout>
-        <Content className={`app-content${isFlushPage ? " app-content--flush" : ""}`}>
+        <Content className="app-content">
           <AppBreadcrumb />
           <Outlet />
         </Content>

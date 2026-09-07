@@ -6,12 +6,6 @@ from app.models.agent import (
     ArtifactStatus,
     GovernanceArtifact,
 )
-from app.models.chat_bi import (
-    ChatBiConversation,
-    ChatBiConversationTask,
-    ChatBiDomainMemory,
-    ChatBiMessage,
-)
 from app.models.data_app import (
     DataApp,
     DataAppDataset,
@@ -31,6 +25,7 @@ from app.models.lineage import (
     LineagePackage,
     LineagePackageEdge,
 )
+from app.models.lineage_table_mapping import LineageTableMapping
 from app.models.logic import (
     BusinessLogic,
     BusinessLogicCategory,
@@ -63,6 +58,11 @@ from app.models.ontology import (
     VersionRecord,
 )
 from app.models.principal import Principal, Role, role_rank, role_satisfies
+from app.models.relation_candidate import RelationCandidateFamily
+from app.models.relation_inference_task import (
+    ACTIVE_INFERENCE_STATUSES,
+    RelationInferenceTask,
+)
 from app.models.semantic_index import SemanticIndexEntry
 from app.models.settings import (
     AirflowSetting,
@@ -111,10 +111,6 @@ __all__ = [
     "AirflowSetting",
     "DatahubSetting",
     "DraftGenerationSetting",
-    "ChatBiConversation",
-    "ChatBiConversationTask",
-    "ChatBiDomainMemory",
-    "ChatBiMessage",
     "DataSource",
     "DorisWarehouseConfig",
     "DataApp",
@@ -152,6 +148,10 @@ __all__ = [
     "DimensionalModel",
     "LineagePackage",
     "LineagePackageEdge",
+    "LineageTableMapping",
+    "RelationCandidateFamily",
+    "RelationInferenceTask",
+    "ACTIVE_INFERENCE_STATUSES",
     "McpAuditLog",
     "McpFlowForm",
     "McpSkill",

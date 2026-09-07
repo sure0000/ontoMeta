@@ -110,14 +110,14 @@ npm run dev
 | Publish Service | 草稿发布、版本 diff / 快照、发布前一致性校验 |
 | Query Service | 本体、对象、业务逻辑查询（分页、图谱邻域展开） |
 | Expression Formatter | 业务逻辑表达式富文本编辑与格式化 |
-| Chat BI | 基于已发布本体的智能问数（须落地引用，无命中不编造） |
+| MCP + Skill | 通过通用 Agent 访问本体、数据查询与治理操作（须落地引用，无命中不编造） |
 
 ## 前端导航
 
 - **本体浏览**：业务对象与关系（列表/卡片/图谱）
 - **本体建模（工作区）**：按数据域组织建模任务，触发草稿生成与发布
 - **业务逻辑**：指标、标签、规则；表达式编辑
-- **Data Agent（Chat BI）**：会话问数、本体引用，并可一键生成数据表格/大屏
+- **Agent 接入**：MCP 工具、Skill 管理、令牌与审计监控；问数和治理操作由外部通用 Agent 完成
 - **设置**：管理鉴权、LLM 服务、DataHub 配置
 
 ## 配置
@@ -187,12 +187,9 @@ GitHub Actions：`.github/workflows/ci.yml`（backend pytest + frontend lint/bui
 - [GOVERNANCE_STANDARD.md](./docs/GOVERNANCE_STANDARD.md) — 数据治理规约（G0–G3）
 - [FORMAL_VALIDATION_IMPL.md](./docs/FORMAL_VALIDATION_IMPL.md) — 形式化校验实现设计（F1/F3/F4）
 
-**Data Agent 改造链**（V2→V5 逐期交付，V5 为现行计划）
-- [DATA_AGENT_V5_PLAN.md](./docs/DATA_AGENT_V5_PLAN.md) — V5：实测调参 + 收尾拆模块 + 能力延伸（现行）
-- [DATA_AGENT_V4_HARNESS_PLAN.md](./docs/DATA_AGENT_V4_HARNESS_PLAN.md) — V4：专用 data-agent harness
-- [DATA_AGENT_V3_SKILLS_PLAN.md](./docs/DATA_AGENT_V3_SKILLS_PLAN.md) — V3：skill + 渲染块
-- [DATA_AGENT_V2_PLAN.md](./docs/DATA_AGENT_V2_PLAN.md) — V2：语义层从「否决者」变「生成器」
-- [FORMAL_VALIDATION_PLAN.md](./docs/FORMAL_VALIDATION_PLAN.md) — 形式化校验方案（V2–V4 前序，配套 IMPL）
+**Agent / MCP**
+- [MCP_README.md](./docs/MCP_README.md) — 通用 Agent 接入、工具与 Skill 使用说明
+- [MCP_ARCHITECTURE_REDESIGN.md](./docs/MCP_ARCHITECTURE_REDESIGN.md) — MCP 架构与迁移记录
 
 **物化编排**
 - [MATERIALIZE_ORCHESTRATION.md](./docs/MATERIALIZE_ORCHESTRATION.md) — 物化执行改造方案（同步工具 + Airflow 编排 + 血缘）

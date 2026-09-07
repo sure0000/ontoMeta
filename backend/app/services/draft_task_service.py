@@ -36,6 +36,8 @@ from app.services.common import log_change
 from app.services.draft_checkpoint import DraftCheckpointStore
 from app.services.draft_generation_queue import ACTIVE_STATUSES
 from app.services.evidence_builder import scope_evidence
+from app.services.observed_joins import evidence_fingerprint
+from app.services.observed_joins import load as load_observed_joins
 
 logger = logging.getLogger("ontometa.workspace")
 
@@ -624,7 +626,7 @@ class DraftTaskService:
         """
         from app.services import draft_evidence_cache
 
-        fingerprint = datahub_domain_id or "none"
+        fingerprint = evidence_fingerprint(domain_id, datahub_domain_id)
         cached = draft_evidence_cache.load(domain_id, fingerprint)
         if cached is not None:
             await self._update_task_progress(
@@ -652,7 +654,11 @@ class DraftTaskService:
 
         await self._update_task_progress(task_id, 30, "正在组装证据包...")
         phase_start = time.perf_counter()
-        evidence = self.evidence_builder.build(bundle, include_business_logics=False)
+        evidence = self.evidence_builder.build(
+            bundle,
+            include_business_logics=False,
+            observed_joins=load_observed_joins(domain_id),
+        )
         self._ensure_not_cancelled(task_id)
         logger.info(
             "%s phase=evidence task_id=%s domain_id=%s elapsed_ms=%.1f",
@@ -1290,6 +1296,12 @@ def recover_stale_draft_tasks() -> int:
     的启动钩子会误杀仍在另一存活进程里推进的任务。真死的任务其 updated_at 已冻结、必然
     超过窗口而被回收；活着的任务每写一次进度都会刷新 updated_at，从而被保护。now 取自
     数据库（func.now()）而非本地时钟，避免 Python 与 DB 时区口径不一致。
+
+    **db_now 必须去掉时区**：Postgres 的 ``now()`` 返回 **aware** 时间，而 ``updated_at``
+    是不带时区的 ``DateTime`` 列（naive）。两者直接比较抛 ``TypeError: can't compare
+    offset-naive and offset-aware datetimes``——而这里是 ``init_db()`` 的启动钩子，异常会
+    让**整个服务起不来**。讽刺的是触发条件正是它要处理的场景：库里留着一条 running 任务时
+    热重载重启。SQLite 的 ``now()`` 是 naive，所以本地 SQLite 一直没暴露。
     """
     from datetime import timedelta
 
@@ -1301,6 +1313,8 @@ def recover_stale_draft_tasks() -> int:
     try:
         grace = max(0, int(settings.draft_task_stale_grace_seconds))
         db_now = db.execute(select(func.now())).scalar()
+        if db_now is not None and db_now.tzinfo is not None:
+            db_now = db_now.replace(tzinfo=None)
         cutoff = db_now - timedelta(seconds=grace) if db_now is not None else None
 
         active = (

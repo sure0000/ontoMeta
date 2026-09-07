@@ -127,7 +127,7 @@ export function DataAppsPage() {
       title: "来源",
       dataIndex: "source",
       render: (s: string) =>
-        s === "chat_generated" ? <Tag color="blue">问数生成</Tag> : <Tag>手工</Tag>,
+        s === "chat_generated" || s === "agent_generated" ? <Tag color="blue">Agent生成</Tag> : <Tag>手工</Tag>,
     },
     {
       title: "版本",

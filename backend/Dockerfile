@@ -19,7 +19,6 @@ COPY app ./app
 # 三个目录交给它——写盘路径写死在这里，改 settings 里的默认值时要跟着改：
 #   data/lineage_packages  血缘代码包归档（重扫要用原包，必须落盘）
 #   .cache/draft_evidence  证据包缓存（settings.draft_evidence_cache_dir）
-#   .logs/agent_traces     运行轨迹（settings.agent_trace_dir，默认关）
 RUN useradd --system --create-home --uid 10001 ontometa \
     && chown -R root:root /app \
     && mkdir -p /app/data/lineage_packages /app/.cache/draft_evidence /app/.logs/agent_traces \

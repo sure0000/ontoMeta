@@ -5,11 +5,11 @@ export function MarkdownLite({ content }: { content: string }) {
   const blocks = splitMarkdownBlocks(content);
   let key = 0;
   return (
-    <div className="chatbi-md">
+    <div className="agent-markdown">
       {blocks.map((block) => {
         if (block.type === "code") {
           return (
-            <pre key={key++} className="chatbi-codeblock">
+            <pre key={key++} className="agent-markdown-codeblock">
               <code>{block.code}</code>
             </pre>
           );
@@ -18,7 +18,7 @@ export function MarkdownLite({ content }: { content: string }) {
           return <MarkdownTable key={key++} header={block.header} rows={block.rows} />;
         }
         if (block.type === "hr") {
-          return <hr key={key++} className="chatbi-md-hr" />;
+          return <hr key={key++} className="agent-markdown-hr" />;
         }
         return <Line key={key++} raw={block.raw} />;
       })}
@@ -28,8 +28,8 @@ export function MarkdownLite({ content }: { content: string }) {
 
 function MarkdownTable({ header, rows }: { header: string[]; rows: string[][] }) {
   return (
-    <div className="chatbi-md-tablewrap">
-      <table className="chatbi-md-table">
+    <div className="agent-markdown-tablewrap">
+      <table className="agent-markdown-table">
         <thead>
           <tr>
             {header.map((cell, index) => (
@@ -56,13 +56,13 @@ function MarkdownTable({ header, rows }: { header: string[]; rows: string[][] })
 }
 
 function Line({ raw }: { raw: string }) {
-  if (!raw.trim()) return <div className="chatbi-md-line" />;
+  if (!raw.trim()) return <div className="agent-markdown-line" />;
   if (/^(?:-{3,}|\*{3,}|_{3,})[\s-*_]*$/.test(raw.trim()) && !raw.includes("|")) {
-    return <hr className="chatbi-md-hr" />;
+    return <hr className="agent-markdown-hr" />;
   }
   if (raw.trim().startsWith(">")) {
     return (
-      <blockquote className="chatbi-md-quote">
+      <blockquote className="agent-markdown-quote">
         <InlineRender text={raw.replace(/^\s*>\s?/, "")} />
       </blockquote>
     );
@@ -73,10 +73,10 @@ function Line({ raw }: { raw: string }) {
   if (orderedMatch) {
     return (
       <div
-        className="chatbi-md-listitem chatbi-md-listitem--ordered"
+        className="agent-markdown-listitem agent-markdown-listitem--ordered"
         style={{ marginLeft: indentPx }}
       >
-        <span className="chatbi-md-num">{orderedMatch[1]}</span>
+        <span className="agent-markdown-num">{orderedMatch[1]}</span>
         <span>
           <InlineRender text={orderedMatch[2]} />
         </span>
@@ -86,8 +86,8 @@ function Line({ raw }: { raw: string }) {
   const listMatch = raw.match(/^\s*[-*]\s+(.*)$/);
   if (listMatch) {
     return (
-      <div className="chatbi-md-listitem" style={{ marginLeft: indentPx }}>
-        <span className="chatbi-md-bullet">•</span>
+      <div className="agent-markdown-listitem" style={{ marginLeft: indentPx }}>
+        <span className="agent-markdown-bullet">•</span>
         <span>
           <InlineRender text={listMatch[1]} />
         </span>
@@ -96,7 +96,7 @@ function Line({ raw }: { raw: string }) {
   }
   const headerMatch = raw.match(/^(#{1,4})\s+(.*)$/);
   if (headerMatch) {
-    const className = `chatbi-md-h${Math.min(headerMatch[1].length, 4)}`;
+    const className = `agent-markdown-h${Math.min(headerMatch[1].length, 4)}`;
     return (
       <div className={className}>
         <InlineRender text={headerMatch[2]} />
@@ -104,7 +104,7 @@ function Line({ raw }: { raw: string }) {
     );
   }
   return (
-    <div className="chatbi-md-line">
+    <div className="agent-markdown-line">
       <InlineRender text={raw} />
     </div>
   );
@@ -119,7 +119,7 @@ function InlineRender({ text }: { text: string }) {
         if (part.type === "bold") return <strong key={key++}>{part.value}</strong>;
         if (part.type === "code") {
           return (
-            <code key={key++} className="chatbi-md-inline-code">
+            <code key={key++} className="agent-markdown-inline-code">
               {part.value}
             </code>
           );
@@ -128,7 +128,7 @@ function InlineRender({ text }: { text: string }) {
           return (
             <a
               key={key++}
-              className="chatbi-md-link"
+              className="agent-markdown-link"
               href={part.href}
               target="_blank"
               rel="noopener noreferrer"

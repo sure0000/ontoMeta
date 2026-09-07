@@ -716,6 +716,6 @@ class AgentPipelineService:
 #: 进程内共享的流水线单例。
 #
 # 它此前只住在 ``app.api.deps`` 里，于是任何要用流水线的模块——MCP 工具、就绪判定——
-# 都得先 import 那一包 API 单例，连带把 Data Agent 拽进导入图。单例的家应该是它自己的
-# 服务模块；``app.api.deps`` 改为再导出同一个对象，既有 import 与测试替身都不受影响。
+# 都得先 import 那一包 API 单例，导致服务层耦合。单例的家应该是它自己的服务模块；
+# ``app.api.deps`` 改为再导出同一个对象，既有 import 与测试替身都不受影响。
 agent_pipeline = AgentPipelineService()

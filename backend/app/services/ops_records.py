@@ -1,8 +1,7 @@
-"""运行记录读模型注册表（Data Agent V6 P1）：把「发生过什么」接到 Agent 工具面上。
+"""运行记录读模型注册表：把「发生过什么」接到 Agent 工具面上。
 
 系统把运行记录记得很全——20+ 张表、40+ 个只读 REST 端点、十几个写好的读模型——
-但 Data Agent 一个都读不到：用户在界面上看得见的东西，在对话里问不出来。缺的不是记录，
-是读侧接线。本模块就是那层接线。
+MCP 客户端需要一套稳定的读侧接线，本模块提供该层。
 
 **它自己不查库、不做判定，只调既有服务并把结果装进统一信封。**
 一行判定逻辑都不重写——第二份口径就是下一个 bug。落点状态归 ``object_landing``、
@@ -19,7 +18,7 @@
   后者是本次读取的时点。两者必须分开——「三天前落的数」和「我刚读到的状态」是两回事，
   合成一个字段就会把陈旧事实说成新鲜的。
 
-注册表按「问题族」组织（见 ``docs/DATA_AGENT_V6_OPERATIONAL_RECALL_PLAN.md`` §3）。
+注册表按「问题族」组织，并由 MCP 读侧工具调用。
 ``landing`` / ``task_run`` 回答物理落点与单任务执行（含「谁建的、谁拍的板、人改过什么」——
 制品是这几件事的唯一记录），``ontology_version`` / ``standard`` 分别回读本体发布版本与
 治理规约。
@@ -274,8 +273,8 @@ _OPS_ROUTE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 def route_ops_question(question: str) -> OpsQuestionRoute | None:
     """把自然语言运营问题映射到最可能的权威 reader。
 
-    该函数故意不做 ``analytical``/写意图判定；调用方必须先经过 Data Agent 的顶层
-    意图门。这样「近 30 天任务失败次数」仍由 analytical 赢平局，而这里保持为一个
+    该函数故意不做 ``analytical``/写意图判定；调用方负责先做意图路由。这样「近 30 天
+    任务失败次数」仍由 analytical 赢平局，而这里保持为一个
     可复用、可离线评测的窄路由器。
     """
     q = (question or "").strip().lower()
@@ -1379,78 +1378,3 @@ REGISTRY: dict[str, RecordFamily] = {
         ),
     ),
 }
-
-
-def ledger_names(result: dict) -> list[str]:
-    """从一次读取结果里挑出「事实名」，供 ``FactLedger.add_context_name`` 登记。
-
-    F0 前置约束：不做这步，答案里复述的物理表名 / 任务名 / 制品 id 会被 F4 断言校验
-    判成幻觉，**整条回答被拒**。走 ``RecordFamily.ledger_fields`` 声明，
-    不在 chat_bi 里硬编字段名——加新族时只改注册表一处。
-    """
-    if not isinstance(result, dict):
-        return []
-    fam = REGISTRY.get(str(result.get("family") or ""))
-    if fam is None:
-        return []
-    names: list[str] = []
-
-    def _walk(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key in fam.ledger_fields and child is not None and not isinstance(
-                    child, (dict, list, tuple, set)
-                ):
-                    names.append(str(child))
-                _walk(child)
-        elif isinstance(value, (list, tuple, set)):
-            for child in value:
-                _walk(child)
-
-    for key in fam.ledger_fields:
-        if result.get(key) is not None:  # subject 这类平铺在信封顶层
-            names.append(str(result[key]))
-    for fct in result.get("facts") or []:
-        if isinstance(fct, dict) and fct.get("key") in fam.ledger_fields:
-            if fct.get("value") is not None:
-                names.append(str(fct["value"]))
-        if isinstance(fct, dict):
-            _walk(fct.get("value"))
-    for item in result.get("items") or []:
-        _walk(item)
-    return [n for n in names if n]
-
-
-def ledger_values(result: dict) -> list[Any]:
-    """提取 facts/items 的原始叶子值，供 FactLedger 校验数值断言。
-
-    ``ledger_names`` 解决具名实体，当前函数解决「共 6 环」「有 3 个版本」这类数值。
-    只遍历权威 reader 的值，不登记 key/label，也不碰模型生成文本。
-    """
-    if not isinstance(result, dict) or str(result.get("family") or "") not in REGISTRY:
-        return []
-
-    values: list[Any] = []
-
-    def _walk(value: Any) -> None:
-        if value is None:
-            return
-        if isinstance(value, dict):
-            for child in value.values():
-                _walk(child)
-            return
-        if isinstance(value, (list, tuple, set)):
-            for child in value:
-                _walk(child)
-            return
-        if isinstance(value, (str, int, float, bool)):
-            values.append(value)
-
-    for fact in result.get("facts") or []:
-        if isinstance(fact, dict):
-            _walk(fact.get("value"))
-    for item in result.get("items") or []:
-        if isinstance(item, dict):
-            for value in item.values():
-                _walk(value)
-    return values

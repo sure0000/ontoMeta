@@ -10,16 +10,6 @@ import type {
   ChangeLog,
   MergeReport,
   OntologyConflicts,
-  ChatBiAnswer,
-  ChatBiAgentRunDetail,
-  ChatBiAgentRunSummary,
-  ChatBiCategoryList,
-  ChatBiConversation,
-  ChatBiFormRequest,
-  ChatBiHistoryItem,
-  ChatBiMessageItem,
-  ChatBiStreamEvent,
-  ChatBiSuggestions,
   Confirmation,
   DataHubDatasetOption,
   DatasetEntry,
@@ -36,8 +26,13 @@ import type {
   LineageOverview,
   LineagePackageDetail,
   LineagePackageRow,
+  LineageTableMapping,
+  LineageTableMappingReceipt,
   LineageTableRow,
   ManualLineageEdge,
+  RelationCandidate,
+  RelationApplyReceipt,
+  RelationInferenceTask,
   DraftGenerationScope,
   DraftGenerationSettings,
   DraftProgress,
@@ -315,8 +310,76 @@ export const api = {
       body: JSON.stringify({ edges, label: label ?? null }),
     }),
 
-  listDomains: (signal?: AbortSignal) =>
-    request<DomainContext[]>("/api/domains", signal ? { signal } : undefined),
+  // 人工表名映射：给对不上 DataHub 的表指个目标，当场修复 blocked 边。
+  listLineageTableMappings: (domainId: string, signal?: AbortSignal) =>
+    request<LineageTableMapping[]>(
+      `/api/lineage/domains/${domainId}/table-mappings`,
+      { signal },
+    ),
+
+  saveLineageTableMapping: (domainId: string, sqlTable: string, targetUrn: string) =>
+    request<LineageTableMappingReceipt>(
+      `/api/lineage/domains/${domainId}/table-mappings`,
+      {
+        method: "POST",
+        body: JSON.stringify({ sql_table: sqlTable, target_urn: targetUrn }),
+      },
+    ),
+
+  deleteLineageTableMapping: (mappingId: string) =>
+    request<{ ok: boolean }>(`/api/lineage/table-mappings/${mappingId}`, {
+      method: "DELETE",
+    }),
+
+  // 智能关系补充。推断是异步的（LLM 判定实测数百秒），起任务后轮询。
+  startRelationInference: (domainId: string, refresh = false) =>
+    request<RelationInferenceTask>(
+      `/api/lineage/domains/${domainId}/infer-relations${refresh ? "?refresh=true" : ""}`,
+      { method: "POST" },
+    ),
+
+  getRelationInferenceTask: (taskId: string, signal?: AbortSignal) =>
+    request<RelationInferenceTask>(`/api/lineage/inference-tasks/${taskId}`, { signal }),
+
+  getLatestRelationInferenceTask: (domainId: string, signal?: AbortSignal) =>
+    request<RelationInferenceTask | null>(
+      `/api/lineage/domains/${domainId}/inference-task`,
+      { signal },
+    ),
+
+  listRelationCandidates: (
+    domainId: string,
+    options: { verdict?: string; state?: string; withPairs?: boolean } = {},
+    signal?: AbortSignal,
+  ) => {
+    const params = new URLSearchParams();
+    if (options.verdict) params.set("verdict", options.verdict);
+    if (options.state) params.set("state", options.state);
+    if (options.withPairs) params.set("with_pairs", "true");
+    const suffix = params.toString() ? `?${params}` : "";
+    return request<RelationCandidate[]>(
+      `/api/lineage/domains/${domainId}/relation-candidates${suffix}`,
+      { signal },
+    );
+  },
+
+  decideRelationCandidate: (candidateId: string, state: "confirmed" | "rejected") =>
+    request<RelationCandidate>(
+      `/api/lineage/relation-candidates/${candidateId}/decide`,
+      { method: "POST", body: JSON.stringify({ state }) },
+    ),
+
+  applyRelationCandidates: (domainId: string, candidateIds?: string[]) =>
+    request<RelationApplyReceipt>(`/api/lineage/domains/${domainId}/relations/apply`, {
+      method: "POST",
+      body: JSON.stringify({ candidate_ids: candidateIds ?? null }),
+    }),
+
+  listDomains: (signal?: AbortSignal, sync = true) =>
+    request<DomainContext[]>(
+      `/api/domains${sync ? "" : "?sync=false"}`,
+      signal ? { signal } : undefined,
+    ),
   getDomain: (id: string) => request<DomainContextDetail>(`/api/domains/${id}`),
   createManualObject: (
     domainId: string,
@@ -727,6 +790,23 @@ export const api = {
       })}`,
     ),
 
+  createSegment: (body: {
+    ontology_id: string;
+    display_name: string;
+    name?: string;
+    description?: string;
+    operator?: string;
+  }) =>
+    request<SegmentDetail>(`/api/ontologies/${body.ontology_id}/segments`, {
+      method: "POST",
+      body: JSON.stringify({
+        display_name: body.display_name,
+        name: body.name,
+        description: body.description,
+        operator: body.operator,
+      }),
+    }),
+
   getSegment: (id: string, publishedOnly?: boolean) =>
     request<SegmentDetail>(`/api/segments/${id}${buildQuery({ published_only: publishedOnly })}`),
   updateSegment: (
@@ -737,6 +817,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  deleteSegment: (id: string, operator?: string) =>
+    request<{ id: string; deleted: boolean; reassigned: number }>(
+      `/api/segments/${id}${buildQuery({ operator })}`,
+      { method: "DELETE" },
+    ),
 
   getReviewStats: (ontologyId: string) =>
     request<ReviewModeStats>(`/api/ontologies/${ontologyId}/review-stats`),
@@ -1078,164 +1163,6 @@ export const api = {
   teardownDependency: (id: string) =>
     request<{ status: string }>(`/api/settings/dependencies/${id}/teardown`, { method: "POST" }),
 
-  askChatBi: (body: {
-    domain_ids: string[];
-    question: string;
-    history?: ChatBiHistoryItem[];
-    conversation_id?: string;
-  }) =>
-    request<ChatBiAnswer>("/api/chat-bi/ask", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  /** SSE 流式问答：逐事件回调（meta/step_start/step_done/token/done/error）。 */
-  askChatBiStream: async (
-    body: {
-      domain_ids: string[];
-      question: string;
-      history?: ChatBiHistoryItem[];
-      conversation_id?: string;
-    },
-    onEvent: (ev: ChatBiStreamEvent) => void,
-    signal?: AbortSignal,
-  ): Promise<void> => {
-    const headers = new Headers({ "Content-Type": "application/json" });
-    const token = getAdminToken();
-    if (token) headers.set("X-Admin-Token", token);
-    const res = await fetch("/api/chat-bi/ask/stream", {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!res.ok || !res.body) {
-      let detail = `请求失败 (${res.status})`;
-      try {
-        const j = (await res.json()) as { detail?: string };
-        if (j.detail) detail = j.detail;
-      } catch {
-        // ignore
-      }
-      throw new ApiError(detail, res.status);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf("\n\n")) !== -1) {
-        const chunk = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const line = chunk.trim();
-        if (!line.startsWith("data:")) continue;
-        const jsonStr = line.slice(5).trim();
-        if (!jsonStr) continue;
-        try {
-          onEvent(JSON.parse(jsonStr) as ChatBiStreamEvent);
-        } catch {
-          // 忽略半包/坏行
-        }
-      }
-    }
-  },
-
-  chatBiSuggestions: (domainIds: string[]) =>
-    request<ChatBiSuggestions>(`/api/chat-bi/suggestions${buildQuery({ domain_ids: domainIds })}`),
-
-  listChatBiConversations: (domainIds: string[], q?: string, includeArchived?: boolean) =>
-    request<ChatBiConversation[]>(
-      `/api/chat-bi/conversations${buildQuery({ domain_ids: domainIds, q, include_archived: includeArchived ? "true" : undefined })}`,
-    ),
-
-  createChatBiConversation: (body: {
-    domain_ids: string[];
-    title?: string;
-    category?: string | null;
-  }) =>
-    request<ChatBiConversation>("/api/chat-bi/conversations", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  updateChatBiConversation: (
-    id: string,
-    body: {
-      title?: string;
-      category?: string | null;
-      is_pinned?: boolean;
-      is_archived?: boolean;
-    },
-  ) =>
-    request<ChatBiConversation>(`/api/chat-bi/conversations/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-
-  deleteChatBiConversation: (id: string) =>
-    request<{ id: string; deleted: boolean }>(`/api/chat-bi/conversations/${id}`, {
-      method: "DELETE",
-    }),
-
-  getChatBiMessages: (id: string) =>
-    request<ChatBiMessageItem[]>(`/api/chat-bi/conversations/${id}/messages`),
-
-  getChatBiAgentRuns: (id: string, limit = 20) =>
-    request<ChatBiAgentRunSummary[]>(
-      `/api/chat-bi/conversations/${id}/runs?limit=${encodeURIComponent(String(limit))}`,
-    ),
-
-  getChatBiAgentRun: (conversationId: string, runId: string) =>
-    request<ChatBiAgentRunDetail>(`/api/chat-bi/conversations/${conversationId}/runs/${runId}`),
-
-  /** P1：记录「本会话催生了某数据任务（治理制品）」，使会话可免 id 追踪任务。 */
-  linkChatBiTask: (
-    conversationId: string,
-    body: {
-      artifact_id: string;
-      kind?: string;
-      intent?: string;
-      /**
-       * 决策留痕：提案原样 vs 人确认前改成的样子。
-       * 两份都在前端手上（proposal.context 与本地编辑态），顺这一次已有的往返带回，
-       * 无需额外请求。服务端据此算出「人改了哪些参数」。
-       */
-      proposed_context?: Record<string, unknown>;
-      chosen_context?: Record<string, unknown>;
-      message_id?: string;
-      block_id?: string;
-    },
-  ) =>
-    request<{ id: string; artifact_id: string; linked: boolean }>(
-      `/api/chat-bi/conversations/${conversationId}/tasks`,
-      { method: "POST", body: JSON.stringify(body) },
-    ),
-
-  /** P3.1：把用户确认的约定落库为本域记忆（点「记住」后调用）。 */
-  rememberPreference: (domainId: string, text: string) =>
-    request<{ id: string; text: string; remembered: boolean }>(
-      "/api/chat-bi/domain-memory/preferences",
-      { method: "POST", body: JSON.stringify({ domain_id: domainId, text }) },
-    ),
-
-  listChatBiCategories: (domainIds: string[]) =>
-    request<ChatBiCategoryList>(`/api/chat-bi/categories${buildQuery({ domain_ids: domainIds })}`),
-
-  renameChatBiCategory: (body: { domain_ids: string[]; old_name: string; new_name: string }) =>
-    request<{ success: boolean }>("/api/chat-bi/categories/rename", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  deleteChatBiCategory: (body: { domain_ids: string[]; name: string }) =>
-    request<{ success: boolean }>("/api/chat-bi/categories/delete", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
   // ------------------------------------------------------------ Data Apps
 
   listDataApps: (domainId?: string, appType?: string) => {
@@ -1294,20 +1221,6 @@ export const api = {
       body: JSON.stringify({ version_comment: versionComment }),
     }),
   listDataAppVersions: (id: string) => request<DataAppVersion[]>(`/api/data-apps/${id}/versions`),
-  generateDataAppFromChat: (body: {
-    domain_id: string;
-    app_type: string;
-    question: string;
-    conversation_id?: string;
-    name?: string;
-    caliber_decomposition?: unknown[];
-    referenced_objects?: unknown[];
-  }) =>
-    request<DataAppDetail>(`/api/chat-bi/generate-app`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
   // Data sources
   listDataSources: () => request<DataSource[]>(`/api/data-sources`),
   createDataSource: (body: {
@@ -1420,20 +1333,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ widget_id: widgetId }),
     }),
-  generateWidgetFromChat: (body: {
-    domain_id: string;
-    question: string;
-    widget_type?: string;
-    name?: string;
-    caliber_decomposition?: unknown[];
-    referenced_objects?: unknown[];
-    dashboard_id?: string;
-  }) =>
-    request<DataAppWidget>(`/api/chat-bi/generate-widget`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
   // 公开分享
   getShareStatus: (appId: string) => request<PublicShareStatus>(`/api/data-apps/${appId}/share`),
   enableShare: (appId: string, body: { password?: string; expires_in_days?: number }) =>
@@ -1731,10 +1630,7 @@ export const api = {
       }[]
     >(`/api/ontologies/${ontologyId}/properties${buildQuery({ object_type: objectType })}`),
 
-  /**
-   * 按任务类型现取一张六环确认表单（字段骨架 + 真实候选 + 本次 confirmation_id）。
-   * 任务链逐步确认用的就是这张，与对话里 request_form 出的是同一份。
-   */
+  /** 按任务类型现取一张任务表单（字段骨架 + 真实候选）。 */
   taskConfirmationForm: (body: {
     kind: string;
     ontology_id: string;
@@ -1742,25 +1638,10 @@ export const api = {
     intent?: string;
     prefill?: Record<string, unknown>;
   }) =>
-    request<ChatBiFormRequest>("/api/agents/task-form", {
+    request<Record<string, unknown>>("/api/agents/task-form", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  draftConfirmedArtifact: (body: {
-    conversation_id: string;
-    confirmation_id: string;
-    kind: string;
-    intent: string;
-    context: Record<string, unknown>;
-    ontology_id: string;
-    message_id?: string;
-    block_id?: string;
-  }) =>
-    request<GovernanceArtifact>("/api/agents/draft-confirmed", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
   draftArtifact: (body: {
     kind: string;
     intent?: string | null;

@@ -27,7 +27,6 @@ from app.models import (
 )
 from app.ontology_types import SemanticType
 from app.services import column_profiler
-from app.services.chat_bi import ChatBiService
 from app.services.column_profiler import profile_property, strategy_for
 from app.services.ontology_projection import build_projection
 
@@ -220,61 +219,3 @@ def test_cache_avoids_second_query(client, tmp_path, monkeypatch):
     monkeypatch.setattr(data_app_executor, "execute_sql", _boom)
     second = profile_property(proj, obj, obj.resolve_property("status"), **kwargs)
     assert [v["value"] for v in second.top_values] == [v["value"] for v in first.top_values]
-
-
-# ---------------------------------------------------------------- 权限与工具接线
-
-
-def _seed_source(dsn: str) -> None:
-    with SessionLocal() as db:
-        db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).update(
-            {DataSource.is_default_warehouse: False}, synchronize_session=False
-        )
-        db.add(DataSource(
-            name=f"prof-{uuid.uuid4().hex[:6]}", kind="doris", purpose="warehouse",
-            is_default_warehouse=True, dsn_secret_ref=dsn, status="ok",
-        ))
-        db.commit()
-
-
-def test_tool_requires_same_role_as_run_sql(client, tmp_path):
-    """画像读的是真实数据，与 run_sql 同一类暴露 → 必须同一道权限闸门。"""
-    domain_id, onto_id = _seed_ontology()
-    _seed_source(_seed_db(tmp_path))
-
-    with SessionLocal() as db:
-        low, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="profile_values",
-            args={"object_id": "order", "property": "status"}, principal_role="editor",
-        )
-    assert is_error is False, "越权是降级不是报错"
-    assert low["available"] is False
-    assert "无权" in low["note"] and "权限不足" in summary
-
-
-def test_tool_requires_ready_projection_for_publisher(client, tmp_path):
-    domain_id, onto_id = _seed_ontology()
-    _seed_source(_seed_db(tmp_path))
-
-    with SessionLocal() as db:
-        result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="profile_values",
-            args={"object_id": "order", "property": "status"}, principal_role="publisher",
-        )
-    assert is_error is False, result
-    assert result["available"] is False
-    assert "Deployment" in result["note"] or "Projection" in summary
-
-
-def test_tool_rejects_unknown_property_with_candidates(client, tmp_path):
-    """字段不存在时也要给候选——与 P1.4 的修复信号取向一致。"""
-    domain_id, onto_id = _seed_ontology()
-    _seed_source(_seed_db(tmp_path))
-
-    with SessionLocal() as db:
-        result, _, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_ids=[domain_id], ontology_ids=[onto_id], name="profile_values",
-            args={"object_id": "order", "property": "state"}, principal_role="publisher",
-        )
-    assert is_error is True
-    assert "status" in result["available_columns"]

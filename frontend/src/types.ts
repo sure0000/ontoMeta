@@ -1086,496 +1086,6 @@ export interface DependencyDeployResult {
   message?: string;
 }
 
-export interface ChatBiConversation {
-  id: string;
-  domain_ids: string[];
-  domain_id?: string | null;
-  title: string;
-  category?: string | null;
-  is_pinned: boolean;
-  is_archived: boolean;
-  message_count: number;
-  last_message_preview?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ChatBiCategoryItem {
-  name: string;
-  conversation_count: number;
-}
-
-export interface ChatBiCategoryList {
-  categories: ChatBiCategoryItem[];
-}
-
-export interface ChatBiMessageItem {
-  id: string;
-  conversation_id: string;
-  role: "user" | "assistant";
-  content: string;
-  payload?: Record<string, unknown> | null;
-  created_at: string;
-}
-
-export interface ChatBiReference {
-  id?: string | null;
-  name?: string | null;
-  display_name?: string | null;
-}
-
-export type ChatBiCaliberKind = "object_type" | "property" | "relation_type" | "business_logic";
-
-export interface ChatBiCaliberReference {
-  kind: ChatBiCaliberKind;
-  id?: string | null;
-  name?: string | null;
-  display_name?: string | null;
-}
-
-export interface ChatBiCaliberItem {
-  label: string;
-  description?: string | null;
-  references: ChatBiCaliberReference[];
-}
-
-export interface ChatBiOpsRecord {
-  family: string;
-  subject?: string | null;
-  facts?: Array<{ key: string; label: string; value: unknown }>;
-  items?: Array<Record<string, unknown>>;
-  as_of?: string | null;
-  observed_at?: string | null;
-  source?: string;
-  truncated?: boolean;
-  note?: string | null;
-}
-
-export interface ChatBiAgentStep {
-  index: number;
-  /**
-   * "tool"（默认）= 工具调用步；"thought" = 工具间的模型自述；
-   * "repair" = 可靠性校验未过、正在重写（P4.3）。
-   */
-  kind?: "tool" | "thought" | "repair";
-  tool: string;
-  /** kind==="thought" 时的思考文本。 */
-  text?: string;
-  arguments?: Record<string, unknown>;
-  status?: "running" | "succeeded" | "failed";
-  summary?: string | null;
-}
-
-export interface ChatBiClarification {
-  question: string;
-  options: string[];
-  reason?: string;
-}
-
-/**
- * 表单候选项：**显示什么**（label）与**回填什么**（value）分开。
- *
- * 带 id 的候选（数据源、对象）此前只能写成「名称｜id」，那串 id 就直接糊在下拉里给人看。
- * `disabled` 用于「摆出来但选不了」的候选——执行侧不支持的装载方式必须看得见（否则用户
- * 以为系统只会全量），但不能真被选中（与 MaterializeModal 的置灰同口径）。
- */
-export interface ChatBiFormOption {
-  label: string;
-  value: string;
-  disabled?: boolean;
-}
-
-/** 交互表单字段（P6）：`type` 决定前端用哪种控件渲染。 */
-export interface ChatBiFormField {
-  name: string;
-  label: string;
-  type:
-    | "text"
-    | "textarea"
-    | "number"
-    | "select"
-    | "multiselect"
-    | "radio"
-    | "boolean"
-    | "date"
-    /** 带候选建议的文本框：候选是建议不是闭集（如分区键）。 */
-    | "autocomplete"
-    /** 调度选择器：与业务对象详情里那个「定时策略」同一个 CronPicker。 */
-    | "cron";
-  /** select/multiselect/radio/autocomplete 的候选项（须来自真实实体）。 */
-  options?: ChatBiFormOption[];
-  required?: boolean;
-  placeholder?: string;
-  help?: string;
-  default?: string | number | boolean | string[] | null;
-  /** 建数确认向导中的所属环节；通用表单留空。 */
-  confirmation_node?: "ontology" | "data" | "plan" | string;
-  /** 级联候选：监听该字段（同步源数据源监听 object_type）。 */
-  depends_on?: string;
-  /** 上游字段值 → 本字段候选。 */
-  options_by_value?: Record<string, ChatBiFormOption[]>;
-  /**
-   * 候选实时取而非静态摊开。`object_properties` = 拉 `depends_on` 那个对象的字段清单
-   * （几百对象的本体全摊开是几 MB 的消息负载）。
-   */
-  options_from?: "object_properties" | string;
-  /**
-   * 条件可见：`{ field: "mode", in: ["incremental", "cdc"] }`。不满足时不渲染、不校验、
-   * 也不提交该字段的值——否则改回全量后，先前填的 CDC 参数仍会进 Spec 并真的生效。
-   */
-  visible_when?: { field: string; in: string[] };
-}
-
-/**
- * Agent 动态生成的可填写表单（P6）：一次向用户收集多个结构化参数。
- * 与 clarification 同为终态出口——本轮结束、等用户填完提交带回（结构化回填文本进 history）。
- */
-export interface ChatBiFormRequest {
-  title: string;
-  intent?: string;
-  /**
-   * 服务端改判/合并了这次请求时给人的一句解释（如「同步自带建表，已省掉物化那一步」）。
-   * 改判不能只在后台发生——人得知道自己拿到的为什么是这张表单。
-   */
-  notice?: string;
-  submit_label?: string;
-  fields: ChatBiFormField[];
-  /** 数据任务表单元数据；存在时提交直接进入草稿+dry-run，不再续问 LLM。 */
-  task_kind?: string;
-  ontology_id?: string;
-  /** 一张任务确认单的隔离 id；防止复用同会话旧确认。 */
-  confirmation_id?: string;
-}
-
-export interface ChatBiDataResult {
-  columns: { key?: string; title?: string; [k: string]: unknown }[];
-  rows: Record<string, unknown>[];
-  truncated?: boolean;
-}
-
-/**
- * 渲染块（V3 S0）：Data Agent 回答由一串有类型的块组成，前端按 `type` 查注册表渲染，
- * 替代改造前写死的 JSX 阶梯。后端 `answer_to_blocks` 双写，缺失时 `answerToBlocks` 兜底。
- * 未来 S1 的 chart / lineage / draft_proposal 是新增的块类型，运行时由渲染器 default 跳过。
- */
-export type ChatBiBlock =
-  | { id: string; type: "steps"; steps: ChatBiAgentStep[] }
-  | { id: string; type: "markdown"; content: string }
-  | {
-      id: string;
-      type: "mapping";
-      variant: "inline" | "caliber";
-      items: ChatBiCaliberItem[];
-      /** 「命中本体」：去重的可跳转口径/对象引用，随口径卡一行展示。 */
-      references: ChatBiCaliberReference[];
-    }
-  | { id: string; type: "sql"; sql: string; compiled_from?: string }
-  | {
-      id: string;
-      type: "table";
-      columns: ChatBiDataResult["columns"];
-      rows: ChatBiDataResult["rows"];
-      truncated?: boolean;
-    }
-  | {
-      id: string;
-      type: "chart";
-      spec: { kind: "bar" | "line" | "area"; x: string; y: string; title?: string };
-      columns: ChatBiDataResult["columns"];
-      rows: ChatBiDataResult["rows"];
-    }
-  | {
-      id: string;
-      /** P5：结果统计画像 + 离群检测（analyze_result 产出）。 */
-      type: "insight";
-      analysis: {
-        row_count: number;
-        total_outliers: number;
-        total_jumps?: number;
-        ordered_by?: string;
-        columns: Array<{
-          column: string;
-          count: number;
-          nulls: number;
-          min: number;
-          max: number;
-          mean: number;
-          p25?: number;
-          median?: number;
-          p75?: number;
-          std?: number;
-          outlier_count?: number;
-          outliers?: number[];
-          trend?: {
-            direction: "up" | "down" | "flat";
-            slope: number;
-            first: number;
-            last: number;
-            change: number;
-            change_pct?: number | null;
-          };
-          jumps?: Array<{ at: unknown; from: number; to: number; delta: number }>;
-        }>;
-      };
-    }
-  | { id: string; type: "refs"; objects: ChatBiReference[]; logics: ChatBiReference[] }
-  | {
-      id: string;
-      /** P2：多步分析计划（update_plan 产出）。声明式路线图，与实时 steps 轨迹互补。 */
-      type: "plan";
-      steps: Array<{ title: string; status: "pending" | "active" | "done" }>;
-      note?: string;
-    }
-  | {
-      id: string;
-      type: "lineage";
-      center_id?: string | null;
-      nodes: GraphNode[];
-      edges: GraphEdge[];
-      truncated?: boolean;
-    }
-  | { id: string; type: "notice"; level: "info" | "warning"; variant: "refused" | "mock" }
-  | {
-      id: string;
-      type: "draft_proposal";
-      proposal: {
-        kind: string;
-        logic_type: string;
-        display_name: string;
-        name: string;
-        description?: string;
-        /**
-         * propose_expression 产的提案还带**已编译并自证过**的表达式：
-         * compiled_sql/caliber_trace 给人看（判断口径对不对，看的是真 SQL 不是承诺），
-         * expression_json 是要落库的权威 AST。propose_draft 产的提案没有这几项。
-         */
-        compiled_sql?: string;
-        caliber_trace?: string[];
-        expression_json?: Record<string, unknown>;
-        /** 当前系统可选的业务逻辑分类目录，供确认前人工调整。 */
-        category_options?: Array<{ id: string; name: string }>;
-        /** 新建：POST /api/business-logics。 */
-        create_payload?: BusinessLogicCreateInput;
-        /** 给已有口径补表达式：PATCH /api/business-logics/{logic_id}。 */
-        logic_id?: string;
-        update_payload?: {
-          logic_type?: string;
-          expression_summary?: string;
-          expression_json?: Record<string, unknown>;
-          category_id?: string | null;
-        };
-      };
-    }
-  | {
-      id: string;
-      /** P0：数据任务提案（物化/同步/加工）。agent 只出提案，点按钮才走既有 draft→…→execute。 */
-      type: "action_proposal";
-      proposal: {
-        kind: string;
-        intent: string;
-        context?: Record<string, unknown>;
-        ontology_id?: string | null;
-        /** request_form 生成的确认单号；有它时创建必须走 draft-confirmed。 */
-        confirmation_id?: string | null;
-        /** 「去校验并执行」按钮原样传给 api.draftArtifact 的载荷。 */
-        draft_payload: {
-          kind: string;
-          intent: string;
-          context?: Record<string, unknown>;
-          ontology_id?: string | null;
-        };
-      };
-    }
-  | {
-      id: string;
-      /**
-       * 数据应用提案（propose_panel / propose_dashboard 产出）：把本轮口径做成面板或新看板。
-       * agent 只出提案；点按钮才走既有的 generate-widget / generate-app，口径由本条消息的
-       * payload 附上（与动作条同一条路，保证生成的东西与对话里看到的一致）。
-       */
-      type: "app_proposal";
-      proposal: {
-        kind: "panel" | "dashboard";
-        /** 面板标题；kind=dashboard 时是首个面板的标题。 */
-        title: string;
-        /** 仅 kind=dashboard：看板名称。 */
-        name?: string;
-        viz_type: "bar" | "kpi" | "table";
-        domain_id: string;
-        create_payload: {
-          domain_id: string;
-          question: string;
-          /** kind=panel：面板图型（→ generate-widget 的 widget_type）。 */
-          widget_type?: string;
-          /** kind=dashboard：固定 "dashboard"（→ generate-app 的 app_type）。 */
-          app_type?: string;
-          name: string;
-        };
-      };
-    }
-  | {
-      id: string;
-      /**
-       * 接数据提案（propose_datasource / propose_ontology_draft 产出）。
-       * 建源的凭据**不由 agent 提供**：用户在卡里自己填连接信息后才 POST /api/data-sources。
-       */
-      type: "onboard_proposal";
-      proposal: {
-        kind: "datasource" | "ontology_draft";
-        /** kind=datasource：数据源显示名。 */
-        name?: string;
-        /** kind=datasource：数据源类型（mysql/postgres/…）。 */
-        datasource_kind?: string;
-        catalog_name?: string | null;
-        note?: string;
-        /** 提案里被丢弃的参数名（模型塞了凭据时如实回显）。 */
-        dropped_args?: string[];
-        credentials_required?: boolean;
-        /** kind=ontology_draft：目标域与生成范围。 */
-        domain_id?: string;
-        domain_name?: string;
-        scope?: "draft" | "objects" | "relations";
-        reason?: string;
-        has_published_ontology?: boolean;
-        create_payload: {
-          name?: string;
-          kind?: string;
-          catalog_name?: string | null;
-          domain_id?: string;
-          scope?: string;
-        };
-      };
-    }
-  | {
-      id: string;
-      /** P0：任务状态回读（get_task_status 产出）。 */
-      type: "task_status";
-      status: {
-        tasks: Array<{
-          id: string;
-          kind: string;
-          name: string;
-          status: string;
-          is_high_risk?: boolean;
-          executed_at?: string | null;
-          receipt_summary?: string | null;
-        }>;
-        total?: number;
-        /** L4 血缘：会话内任务间依赖（谁产出谁消费）。 */
-        lineage?: {
-          tasks: Array<{
-            task_id: string;
-            label?: string;
-            artifact_id?: string;
-            source_urns?: string[];
-            target_urn?: string;
-          }>;
-          dependencies: Array<{ upstream: string; downstream: string }>;
-        };
-      };
-    }
-  | { id: string; type: "record"; record: ChatBiOpsRecord }
-  | {
-      id: string;
-      /** P3.1：记忆提案（跨会话约定）。agent 只提案，点「记住」才写入本域约定。 */
-      type: "preference_proposal";
-      proposal: { kind: string; text: string; domain_id?: string | null };
-    }
-  | { id: string; type: "clarify"; clarification: ChatBiClarification }
-  | { id: string; type: "form"; form: ChatBiFormRequest };
-
-export interface ChatBiAgentRun {
-  id: string;
-  status: "succeeded" | "refused" | "waiting_input" | "failed" | "cancelled";
-  question: string;
-  intent?: string | null;
-  skill?: string | null;
-  grounded: boolean;
-  started_at: string;
-  finished_at: string;
-  error?: string | null;
-}
-
-export interface ChatBiAgentArtifact {
-  id: string;
-  kind: string;
-  label: string;
-  payload_path: string;
-  snapshot?: Record<string, unknown> | null;
-  source?: string | null;
-  as_of?: unknown;
-}
-
-export interface ChatBiAgentRunSummary extends ChatBiAgentRun {
-  message_id: string;
-  artifact_count: number;
-  answer_preview: string;
-  created_at: string;
-}
-
-export interface ChatBiAgentRunDetail {
-  message_id: string;
-  run: ChatBiAgentRun;
-  artifacts: ChatBiAgentArtifact[];
-  payload: Record<string, unknown>;
-  created_at: string;
-}
-
-export interface ChatBiAnswer {
-  domain_ids?: string[];
-  domain_names?: string[];
-  domain_id?: string | null;
-  domain_name?: string;
-  ontology_id?: string | null;
-  answer: string;
-  suggested_sql?: string | null;
-  caliber_decomposition?: ChatBiCaliberItem[];
-  referenced_objects?: ChatBiReference[];
-  referenced_logics?: ChatBiReference[];
-  used_mock: boolean;
-  grounding_refused?: boolean;
-  /**
-   * 需要用户澄清的缺口（P4.1）。与 grounding_refused 是**两种不同结局**：
-   * 拒答是「答不了」，澄清是「先确认再答」。
-   */
-  clarification?: ChatBiClarification | null;
-  /** P6：需一次补齐多个结构化参数时，Agent 生成的可填写表单（终态出口）。 */
-  form_request?: ChatBiFormRequest | null;
-  /** V6：物理落点/运行记录读模型。 */
-  ops_records?: ChatBiOpsRecord[];
-  steps?: ChatBiAgentStep[];
-  data_result?: ChatBiDataResult | null;
-  /** V3 S0 渲染块（后端双写）；缺失时前端 answerToBlocks 由旧字段兜底。 */
-  blocks?: ChatBiBlock[];
-  /** P4：持久化 run 信封与本轮结构化制品索引。 */
-  agent_run?: ChatBiAgentRun | null;
-  agent_artifacts?: ChatBiAgentArtifact[];
-  conversation_id?: string | null;
-  conversation_title?: string | null;
-}
-
-export type ChatBiStreamEvent =
-  | { type: "meta"; conversation_id: string; conversation_title?: string | null; run_id?: string }
-  | { type: "step_start"; index: number; tool: string; arguments?: Record<string, unknown> }
-  | { type: "step_done"; index: number; status: "succeeded" | "failed"; summary?: string | null }
-  | { type: "thought"; index: number; text: string }
-  /** 答案未过可靠性校验，正在让模型重写一次（P4.3 自愈回环）。 */
-  | { type: "repair"; reasons: string[] }
-  | { type: "token"; delta: string }
-  | { type: "done"; payload: ChatBiAnswer }
-  | { type: "error"; message: string; run_id?: string };
-
-export interface ChatBiSuggestions {
-  domain_ids?: string[];
-  domain_id?: string;
-  suggestions: string[];
-}
-
-export interface ChatBiHistoryItem {
-  role: "user" | "assistant";
-  content: string;
-}
-
 // ---- 字段级溯源：合并报告与冲突复核 ----
 
 export interface MergeReportSummary {
@@ -1683,7 +1193,7 @@ export interface DataAppSummary {
   name: string;
   description?: string | null;
   status: string; // draft / published / archived
-  source: string; // manual / chat_generated
+  source: string; // manual / agent_generated（兼容旧 chat_generated 数据）
   current_version: number;
   published_version?: number | null;
   published_at?: string | null;
@@ -2190,7 +1700,7 @@ export interface AgentKinds {
 
 /* ---------------------------------------------------------------- 血缘补录 */
 
-/** 域的血缘家底：补录页只讲一个数——多少张表是孤岛。 */
+/** 域的血缘家底：同时区分无血缘与无任何关系的表。 */
 export interface LineageOverview {
   domain_id: string;
   domain_name: string;
@@ -2199,6 +1709,8 @@ export interface LineageOverview {
   total: number;
   with_lineage: number;
   isolated: number;
+  no_lineage?: number;
+  no_any_relation?: number;
 }
 
 export interface LineageTableRow {
@@ -2221,6 +1733,8 @@ export type LineageEdgeState = "ok" | "blocked" | "skipped";
 
 export interface LineagePackageEdgeRow {
   id: string;
+  /** lineage=数据流动，会上报 DataHub；relation=DDL 外键，只进本体证据 */
+  kind?: "lineage" | "relation";
   source_table: string;
   target_table: string;
   join_key?: string | null;
@@ -2265,6 +1779,8 @@ export interface LineagePackageRow {
   edges_ok: number;
   edges_blocked: number;
   edges_skipped: number;
+  /** DDL 里声明的外键条数。不上报 DataHub，只作为关联证据进本体。 */
+  relations?: number;
   targets: number;
   isolated_targets: number;
 }
@@ -2284,6 +1800,96 @@ export interface ManualLineageEdge {
   source_table: string;
   target_table: string;
   join_keys: string[];
+}
+
+/** SQL 表名 → DataHub URN 的人工映射（域级复用，重扫自动套用）。 */
+export interface LineageTableMapping {
+  id: string;
+  sql_table: string;
+  target_urn: string;
+  target_table: string;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export interface LineageTableMappingReceipt {
+  mapping: LineageTableMapping;
+  /** 记下这条映射后当场修复了多少条 blocked 边。 */
+  repaired: number;
+}
+
+/** 智能关系补充：一个键族的成员列（带区分度，基数据此算出）。 */
+export interface RelationCandidateMember {
+  table: string;
+  column: string;
+  distinct: number;
+  rows: number;
+  distinct_ratio: number;
+  near_unique: boolean;
+}
+
+/** 展开后的一条两两关系。基数与方向都是算出来的，不是模型给的。 */
+export interface RelationCandidatePair {
+  source_table: string;
+  source_column: string;
+  target_table: string;
+  target_column: string;
+  cardinality: string;
+  structure_type: string;
+}
+
+/** 一个键族候选：机械聚族 + LLM 判定 + 人工表态。 */
+export interface RelationCandidate {
+  id: string;
+  family_id: string;
+  value_shape: string;
+  sample_values: string[];
+  table_count: number;
+  column_count: number;
+  /** entity_key（实体键）/ dimension_code（码表）/ not_a_key（不是键） */
+  verdict: string;
+  entity_name: string | null;
+  key_name: string | null;
+  predicate: string | null;
+  confidence: number;
+  /** 判据原文——复核界面要展示的就是这句。 */
+  reason: string | null;
+  /** proposed / confirmed / rejected / applied */
+  state: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  members: RelationCandidateMember[];
+  pair_count: number;
+  pairs: RelationCandidatePair[];
+}
+
+export interface RelationApplyReceipt {
+  attempted: number;
+  applied: number;
+  failed: number;
+  candidates_applied: number;
+  failures: Array<Record<string, string>>;
+}
+
+/** 推断任务。LLM 判定实测数百秒，所以是异步 + 轮询。 */
+export interface RelationInferenceTask {
+  id: string;
+  domain_id: string;
+  run_id: string | null;
+  status: "queued" | "running" | "succeeded" | "failed";
+  progress: number;
+  message: string | null;
+  error_summary: string | null;
+  summary: {
+    families?: number;
+    entity_key?: number;
+    dimension_code?: number;
+    not_a_key?: number;
+    tables?: number;
+    fields?: number;
+  } | null;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 // ---- MCP 服务（Phase 5：远程传输 + 管理页）----

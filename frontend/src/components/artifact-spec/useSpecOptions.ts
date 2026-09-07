@@ -90,7 +90,7 @@ export function useSpecOptions(
           }
           case "businessLogics": {
             if (!ontologyId) break;
-            // 与 Data Agent 的 metric_task_options 保持同一候选边界：只展示已发布且已
+            // 与 Agent 口径任务保持同一候选边界：只展示已发布且已
             // 形式化的口径。未形式化口径没有可执行 AST，选出来也会在校验阶段被阻断。
             const page = await api.listBusinessLogics({ ontologyId, publishedOnly: true });
             next = page.items.filter((b) => Boolean(b.expression_json)).map((b) => ({

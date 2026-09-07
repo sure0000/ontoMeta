@@ -178,7 +178,7 @@ export function DataAppPublicPage() {
 
         <div style={{ textAlign: "center", marginTop: 24 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            由 ontoMeta Data Agent 提供
+            由 ontoMeta 提供
           </Text>
         </div>
       </div>

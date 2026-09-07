@@ -124,10 +124,6 @@ async function resolveBreadcrumbs(
     return crumbs;
   }
 
-  if (pathname.startsWith("/chat-bi")) {
-    return [{ label: "Data Agent" }];
-  }
-
   if (pathname.startsWith("/tasks/")) {
     const TASK_KIND_LABEL: Record<string, string> = {
       materialize: "物化任务",

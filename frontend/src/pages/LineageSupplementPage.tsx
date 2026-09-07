@@ -1,19 +1,23 @@
 import {
   ArrowRightOutlined,
+  BulbOutlined,
   CloudUploadOutlined,
   LeftOutlined,
   NodeIndexOutlined,
   PlusOutlined,
   RightOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Input, Popconfirm, Segmented, Select, Tag, Tooltip, message } from "antd";
+import { Alert, Badge, Button, Input, Popconfirm, Segmented, Select, Tag, Tooltip, message } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { LineageCanvas } from "../components/lineage/LineageCanvas";
 import type { CanvasEdge, CanvasNode } from "../components/lineage/LineageCanvas";
 import { LineageTableName, readableDatabaseList } from "../components/lineage/LineageTableName";
 import { PackageRail } from "../components/lineage/PackageRail";
+import { RelationSuggestionDrawer } from "../components/lineage/RelationSuggestionDrawer";
 import { ScanReport } from "../components/lineage/ScanReport";
+import { TableMappingModal } from "../components/lineage/TableMappingModal";
 import { PageContainer } from "../components/PageContainer";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { useApi } from "../hooks/useApi";
@@ -24,7 +28,10 @@ import type {
   LineageOverview,
   LineagePackageDetail,
   LineagePackageRow,
+  LineageTableMapping,
   LineageTableRow,
+  RelationCandidate,
+  RelationInferenceTask,
 } from "../types";
 
 /**
@@ -61,6 +68,7 @@ function canvasEdgeSignature(edge: CanvasEdge) {
 }
 
 export function LineageSupplementPage() {
+  const navigate = useNavigate();
   const [domainId, setDomainId] = useUrlState<string>("domain", "");
   const [mode, setMode] = useState<Mode>("scan");
   const [railOpen, setRailOpen] = useState(true);
@@ -88,9 +96,24 @@ export function LineageSupplementPage() {
   const [optimisticResolvedTables, setOptimisticResolvedTables] = useState<Set<string>>(
     () => new Set<string>(),
   );
-  const railListRef = useRef<HTMLUListElement>(null);
+  // 人工表名映射：blocked 边此前只能重扫，而重扫用同一套解析、结果一样。
+  const [mapTarget, setMapTarget] = useState<string | null>(null);
+  const [mappings, setMappings] = useState<LineageTableMapping[]>([]);
+  const [savingMapping, setSavingMapping] = useState(false);
 
-  const domains = useApi<DomainContext[]>((signal) => api.listDomains(signal), []);
+  // 智能关系补充：推断异步跑（LLM 判定实测数百秒），这里只管起任务 + 轮询 + 表态。
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [inferTask, setInferTask] = useState<RelationInferenceTask | null>(null);
+  const [candidates, setCandidates] = useState<RelationCandidate[]>([]);
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const [applyingRelations, setApplyingRelations] = useState(false);
+
+  const railListRef = useRef<HTMLUListElement>(null);
+  const inventoryRefreshDomainRef = useRef<string | null>(null);
+
+  // Domain selection only needs the local workspace cache.  The regular
+  // /api/domains call also synchronizes DataHub and can take several seconds.
+  const domains = useApi<DomainContext[]>((signal) => api.listDomains(signal, false), []);
 
   // 没选域时落到**对象最多的那个**，不是列表第一个：域列表里排在最前的往往是
   // 调试域（datahub_domain_id 是假的），进来就是一屏 DataHub 报错。
@@ -103,26 +126,44 @@ export function LineageSupplementPage() {
   }, [domainId, domains.data, setDomainId]);
 
   useEffect(() => {
+    inventoryRefreshDomainRef.current = null;
     setNodes([]);
     setEdges([]);
     setColumns({});
     setAppliedCanvasEdges(new Set());
     setOptimisticResolvedTables(new Set());
+    setInferTask(null);
+    setCandidates([]);
   }, [domainId]);
 
   const overview = useApi<LineageOverview | null>(
     async (signal) => (domainId ? api.lineageOverview(domainId, false, signal) : null),
     [domainId],
   );
+  const needsTableInventory = mode === "canvas" || mapTarget !== null;
   const tables = useApi<LineageTableRow[]>(
-    async (signal) => (domainId ? api.lineageTables(domainId, { limit: 2000 }, signal) : []),
-    [domainId],
+    async (signal) => {
+      // The scan view works entirely from the local package detail. Fetch the
+      // potentially large table inventory only when the canvas or mapping modal
+      // needs it.
+      if (!domainId || !needsTableInventory) return [];
+      return api.lineageTables(domainId, { limit: 2000 }, signal);
+    },
+    [domainId, needsTableInventory],
   );
 
   const inventoryLoading = Boolean(
-    domainId && (overview.loading || tables.loading || overview.data?.domain_id !== domainId),
+    domainId &&
+      (overview.loading ||
+        (needsTableInventory && tables.loading) ||
+        overview.data?.domain_id !== domainId),
   );
-  const inventoryReady = Boolean(domainId && !inventoryLoading && overview.data && tables.data);
+  const inventoryReady = Boolean(
+    domainId &&
+      !overview.loading &&
+      overview.data?.domain_id === domainId &&
+      (!needsTableInventory || (!tables.loading && tables.data)),
+  );
   const selectedDomainKnown = Boolean(
     domainId && domains.data?.some((domain) => domain.id === domainId),
   );
@@ -152,11 +193,12 @@ export function LineageSupplementPage() {
   }, [domainId, refreshPackages]);
 
   useEffect(() => {
-    if (!inventoryReady) return;
+    if (!inventoryReady || !domainId || inventoryRefreshDomainRef.current === domainId) return;
+    inventoryRefreshDomainRef.current = domainId;
     void refreshPackages(pkgId ?? undefined, true).catch((err: Error) =>
       message.error(err.message),
     );
-  }, [inventoryReady, pkgId, refreshPackages]);
+  }, [domainId, inventoryReady, pkgId, refreshPackages]);
 
   const sourceTableRows = useMemo(() => tables.data ?? [], [tables.data]);
   const optimisticResolvedCount = useMemo(() => {
@@ -184,6 +226,14 @@ export function LineageSupplementPage() {
   const columnsOf = useCallback((table: string) => columns[table] ?? [], [columns]);
 
   const isolatedTotal = Math.max(0, (overview.data?.isolated ?? 0) - optimisticResolvedCount);
+  const noLineageTotal = Math.max(
+    0,
+    (overview.data?.no_lineage ?? overview.data?.isolated ?? 0) - optimisticResolvedCount,
+  );
+  const noAnyRelationTotal = Math.max(
+    0,
+    (overview.data?.no_any_relation ?? overview.data?.isolated ?? 0) - optimisticResolvedCount,
+  );
   const total = overview.data?.total ?? 0;
   const withLineage = Math.min(total, (overview.data?.with_lineage ?? 0) + optimisticResolvedCount);
   const coveragePct = total > 0 ? (withLineage / total) * 100 : 0;
@@ -259,6 +309,207 @@ export function LineageSupplementPage() {
       });
     },
     [loadColumns],
+  );
+
+  // --- 人工表名映射 -------------------------------------------------------
+
+  useEffect(() => {
+    if (!domainId) return;
+    let cancelled = false;
+    void api
+      .listLineageTableMappings(domainId)
+      .then((rows) => !cancelled && setMappings(rows))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [domainId]);
+
+  const saveMapping = async (targetUrn: string) => {
+    if (!domainId || !mapTarget) return;
+    setSavingMapping(true);
+    try {
+      const receipt = await api.saveLineageTableMapping(domainId, mapTarget, targetUrn);
+      setMappings((prev) => [
+        ...prev.filter((item) => item.id !== receipt.mapping.id),
+        receipt.mapping,
+      ]);
+      setMapTarget(null);
+      message.success(
+        receipt.repaired > 0
+          ? `已记下映射，当场修复 ${receipt.repaired} 条对不上的边`
+          : "已记下映射（当前没有可修复的边）",
+      );
+      // 边的状态变了，重拉当前包
+      if (pkgId) setDetail(await api.getLineagePackage(pkgId));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "保存映射失败");
+    } finally {
+      setSavingMapping(false);
+    }
+  };
+
+  // --- 智能关系补充 -------------------------------------------------------
+
+  const inferRunning =
+    inferTask?.status === "queued" || inferTask?.status === "running";
+
+  const reloadCandidates = useCallback(async () => {
+    if (!domainId) return;
+    try {
+      setCandidates(await api.listRelationCandidates(domainId, { withPairs: true }));
+    } catch {
+      /* 候选读不出来不该打断页面；抽屉里会显示空态 */
+    }
+  }, [domainId]);
+
+  // 进页面先看有没有在跑的推断——上一次可能是别的标签页/刷新前起的。
+  useEffect(() => {
+    if (!domainId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const task = await api.getLatestRelationInferenceTask(domainId);
+        if (!cancelled) setInferTask(task);
+      } catch {
+        /* 没有就没有 */
+      }
+      if (!cancelled) await reloadCandidates();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [domainId, reloadCandidates]);
+
+  // 轮询：推断是分钟级的，2 秒一次足够，跑完即停。
+  useEffect(() => {
+    if (!inferTask || !inferRunning) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.getRelationInferenceTask(inferTask.id);
+        setInferTask(next);
+        if (next.status === "succeeded") {
+          await reloadCandidates();
+          message.success(`推断完成：${next.summary?.families ?? 0} 个键族`);
+        } else if (next.status === "failed") {
+          message.error(next.error_summary ?? "推断失败");
+        }
+      } catch {
+        /* 轮询失败下一轮再来 */
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [inferTask, inferRunning, reloadCandidates]);
+
+  const runInference = async () => {
+    if (!domainId) return;
+    try {
+      setInferTask(await api.startRelationInference(domainId));
+      setSuggestOpen(true);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "无法开始推断");
+    }
+  };
+
+  const decideCandidate = async (
+    candidate: RelationCandidate,
+    state: "confirmed" | "rejected",
+  ) => {
+    setDeciding(candidate.id);
+    try {
+      const updated = await api.decideRelationCandidate(candidate.id, state);
+      setCandidates((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      message.success(
+        state === "confirmed"
+          ? `已确认「${updated.key_name ?? updated.value_shape}」，${updated.pair_count} 条关系将参与本体生成`
+          : "已否决",
+      );
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "表态失败");
+    } finally {
+      setDeciding(null);
+    }
+  };
+
+  const createMasterDataTask = useCallback(() => {
+    if (!domainId) return;
+    const returnTo = `/lineage-supplement?domain=${encodeURIComponent(domainId)}`;
+    navigate(`/tasks/create?kind=materialize&returnTo=${encodeURIComponent(returnTo)}`);
+  }, [domainId, navigate]);
+
+  const confirmedCandidateCount = useMemo(
+    () => candidates.filter((item) => item.state === "confirmed").length,
+    [candidates],
+  );
+
+  const applyRelations = async () => {
+    if (!domainId || confirmedCandidateCount === 0) return;
+    setApplyingRelations(true);
+    try {
+      const receipt = await api.applyRelationCandidates(domainId);
+      await reloadCandidates();
+      message.success(`已写回 ${receipt.applied} 条外键约束，${receipt.candidates_applied} 个键族完成`);
+      if (receipt.failed > 0) {
+        message.warning(`${receipt.failed} 条约束写回失败，候选仍保留为已确认，可重试`);
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "外键写回失败");
+    } finally {
+      setApplyingRelations(false);
+    }
+  };
+
+  /** 已确认的族 → 画布上的建议连线（虚线，与人工实线分开）。
+   *
+   * **表名要过一次归一**：画布节点名来自 ``lineage_inventory``（``库.表``，如
+   * ``jwsp.aj_bl_zl``），候选成员名来自 ``fetch_domain_bundle``（裸表名 ``aj_bl_zl``）——
+   * 两个 DataHub 查询给的形态不一样。按裸名匹配，且**只在画布上裸名唯一时才认**，
+   * 与后端 ``lineage_inventory.resolve`` 同一条口径：对不上就丢，不猜。
+   */
+  const suggestedEdges = useMemo<CanvasEdge[]>(() => {
+    const bare = (name: string) => name.split(".").pop() ?? name;
+    const byBare = new Map<string, string[]>();
+    for (const node of nodes) {
+      const key = bare(node.table);
+      byBare.set(key, [...(byBare.get(key) ?? []), node.table]);
+    }
+    const resolve = (name: string) => {
+      const hits = byBare.get(bare(name)) ?? [];
+      return hits.length === 1 ? hits[0] : null;
+    };
+
+    const seen = new Set<string>();
+    const result: CanvasEdge[] = [];
+    for (const candidate of candidates) {
+      if (candidate.state !== "confirmed") continue;
+      for (const pair of candidate.pairs) {
+        const from = resolve(pair.source_table);
+        const to = resolve(pair.target_table);
+        if (!from || !to || from === to) continue;
+        const id = `sug:${from}.${pair.source_column}->${to}.${pair.target_column}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        result.push({
+          id,
+          from,
+          to,
+          keys: [
+            { id: `${id}:k`, src: pair.source_column, dst: pair.target_column },
+          ],
+          suggested: true,
+        });
+      }
+    }
+    return result;
+  }, [candidates, nodes]);
+
+  /** 画布要画的边 = 人工连的（可编辑）+ 建议的（只读虚线）。
+      建议边**不进 edges 状态**，所以画布里的增删改只会作用在人工边上。 */
+  const canvasEdges = useMemo(
+    () => [...edges, ...suggestedEdges],
+    [edges, suggestedEdges],
   );
 
   const runScan = async (file: File) => {
@@ -437,9 +688,9 @@ export function LineageSupplementPage() {
 
           <div className="lin-stats">
             <div className="lin-stat lin-stat--iso">
-              <span className="lin-stat-label">孤岛表</span>
+              <span className="lin-stat-label">无血缘表</span>
               <span className="lin-stat-value">
-                <b>{inventoryLoading ? "…" : isolatedTotal}</b>
+                <b>{inventoryLoading ? "…" : noLineageTotal}</b>
                 {!inventoryLoading && pending.resolved > 0 && (
                   <>
                     <ArrowRightOutlined className="lin-stat-arrow" />
@@ -447,6 +698,9 @@ export function LineageSupplementPage() {
                     <em>预计</em>
                   </>
                 )}
+              </span>
+              <span className="lin-stat-note">
+                无任何关系 {inventoryLoading ? "…" : noAnyRelationTotal}
               </span>
             </div>
 
@@ -515,6 +769,20 @@ export function LineageSupplementPage() {
               </div>
 
               <div className="lin-submit-acts">
+                {mode === "canvas" && (
+                  <Tooltip title="按值形状聚出键族，再由 LLM 判定哪些是真实体键。确认后的族会作为关联证据参与本体生成。">
+                    <Badge count={confirmedCandidateCount} size="small" color="green">
+                      <Button
+                        size="small"
+                        icon={<BulbOutlined />}
+                        loading={inferRunning}
+                        onClick={() => setSuggestOpen(true)}
+                      >
+                        智能补充关系
+                      </Button>
+                    </Badge>
+                  </Tooltip>
+                )}
                 {mode === "scan" && (
                   <Select
                     size="small"
@@ -693,11 +961,12 @@ export function LineageSupplementPage() {
                 uncovered={uncovered}
                 inventoryLoading={inventoryLoading}
                 onSendToCanvas={addToCanvas}
+                onMapTable={setMapTarget}
               />
             ) : (
               <LineageCanvas
                 nodes={nodes}
-                edges={edges}
+                edges={canvasEdges}
                 setNodes={setNodes}
                 setEdges={setEdges}
                 isolated={isIsolated}
@@ -708,6 +977,31 @@ export function LineageSupplementPage() {
           </main>
         </div>
       </div>
+
+      <TableMappingModal
+        open={Boolean(mapTarget)}
+        sqlTable={mapTarget ?? ""}
+        tables={tables.data ?? []}
+        loading={needsTableInventory && tables.loading}
+        mappings={mappings}
+        saving={savingMapping}
+        onCancel={() => setMapTarget(null)}
+        onSave={saveMapping}
+      />
+
+      <RelationSuggestionDrawer
+        open={suggestOpen}
+        onClose={() => setSuggestOpen(false)}
+        task={inferTask}
+        candidates={candidates}
+        deciding={deciding}
+        onDecide={decideCandidate}
+        onCreateTask={createMasterDataTask}
+        onApply={applyRelations}
+        applying={applyingRelations}
+        onRun={runInference}
+        running={inferRunning}
+      />
     </PageContainer>
   );
 }

@@ -86,6 +86,8 @@ class AffinityIndex:
             .filter(
                 OntologySegment.ontology_id == ontology_id,
                 OntologySegment.kind.in_((SEGMENT_KIND_BUSINESS, SEGMENT_KIND_SHARED)),
+                OntologySegment.deleted_by_user == False,  # noqa: E712
+                OntologySegment.upstream_removed == False,  # noqa: E712
             )
             .all()
         }
@@ -160,6 +162,8 @@ def ensure_fallback_segment(db: Session, ontology_id: str, kind: str) -> Ontolog
         .filter(
             OntologySegment.ontology_id == ontology_id,
             OntologySegment.name == meta["name"],
+            OntologySegment.deleted_by_user == False,  # noqa: E712
+            OntologySegment.upstream_removed == False,  # noqa: E712
         )
         .first()
     )

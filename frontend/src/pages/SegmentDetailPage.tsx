@@ -1,7 +1,23 @@
-import { AppstoreOutlined, ArrowLeftOutlined, EditOutlined } from "@ant-design/icons";
-import { Alert, Button, Descriptions, Form, Input, Modal, Segmented, Tag, message } from "antd";
+import {
+  AppstoreOutlined,
+  ArrowLeftOutlined,
+  DeleteOutlined,
+  EditOutlined,
+} from "@ant-design/icons";
+import {
+  Alert,
+  Button,
+  Descriptions,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
+  Segmented,
+  Tag,
+  message,
+} from "antd";
 import { useEffect, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { ClusterMatrixView } from "../components/graph/ClusterMatrixView";
@@ -21,9 +37,11 @@ export function SegmentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const publishedOnly = searchParams.get("published") === "1";
+  const navigate = useNavigate();
   const [viewMode, setViewMode] = useState<"cards" | "matrix">("cards");
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [form] = Form.useForm();
 
   const {
@@ -65,6 +83,24 @@ export function SegmentDetailPage() {
       message.error(err instanceof Error ? err.message : "更新板块失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const deleteSegment = async () => {
+    if (!id) return;
+    try {
+      setDeleting(true);
+      await api.deleteSegment(id);
+      message.success("业务板块已删除");
+      navigate(
+        segment?.domain_context_id
+          ? `/workspace/${segment.domain_context_id}/segments`
+          : "/workspace",
+      );
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "删除业务板块失败");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -134,10 +170,28 @@ export function SegmentDetailPage() {
         extra={
           <>
             {segment.needs_review && <Tag color="warning">待复核</Tag>}
-            {!publishedOnly && (
-              <Button icon={<EditOutlined />} onClick={() => setEditing(true)}>
-                编辑
-              </Button>
+            {!publishedOnly && segment.kind !== "system" && (
+              <>
+                <Button icon={<EditOutlined />} onClick={() => setEditing(true)}>
+                  编辑
+                </Button>
+                <Popconfirm
+                  title={`删除「${segment.display_name}」？`}
+                  description={
+                    segment.member_count > 0
+                      ? `${segment.member_count} 个成员将重新分配到其他板块或系统表。`
+                      : "删除后不可在审核台继续使用该板块。"
+                  }
+                  okText="删除"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true, loading: deleting }}
+                  onConfirm={() => void deleteSegment()}
+                >
+                  <Button danger icon={<DeleteOutlined />} loading={deleting}>
+                    删除
+                  </Button>
+                </Popconfirm>
+              </>
             )}
           </>
         }

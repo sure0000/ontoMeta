@@ -27,8 +27,6 @@ from app.schemas import (
     DataSourceUpdate,
     DorisWarehouseConfigOut,
     DorisWarehouseConfigUpdate,
-    GenerateAppFromChatRequest,
-    GenerateWidgetFromChatRequest,
     PublicShareRequest,
     PublicShareStatus,
 )
@@ -175,7 +173,6 @@ def create_data_app(data: DataAppCreate, db: Session = Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return data_app_service.serialize_app(db, app, detail=True)
-
 
 @router.get("/data-apps/{app_id}", response_model=DataAppDetail)
 def get_data_app(app_id: str, db: Session = Depends(get_db)):
@@ -407,49 +404,6 @@ def add_widget_to_dashboard(
 ):
     try:
         app = data_app_service.add_widget_to_dashboard(db, app_id, data.widget_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return data_app_service.serialize_app(db, app, detail=True)
-
-
-# ------------------------------------------------------- chat bi → generate app
-
-
-@router.post("/chat-bi/generate-widget", response_model=DataAppWidgetOut)
-async def generate_widget_from_chat(
-    data: GenerateWidgetFromChatRequest, db: Session = Depends(get_db)
-):
-    try:
-        w = await data_app_service.generate_widget_from_chat(
-            db,
-            domain_id=data.domain_id,
-            question=data.question,
-            widget_type=data.widget_type,
-            name=data.name,
-            caliber_decomposition=data.caliber_decomposition,
-            referenced_objects=data.referenced_objects,
-            dashboard_id=data.dashboard_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return data_app_service.serialize_widget(w)
-
-
-@router.post("/chat-bi/generate-app", response_model=DataAppDetail)
-async def generate_app_from_chat(
-    data: GenerateAppFromChatRequest, db: Session = Depends(get_db)
-):
-    try:
-        app = await data_app_service.generate_from_chat(
-            db,
-            domain_id=data.domain_id,
-            app_type=data.app_type,
-            question=data.question,
-            conversation_id=data.conversation_id,
-            name=data.name,
-            caliber_decomposition=data.caliber_decomposition,
-            referenced_objects=data.referenced_objects,
-        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return data_app_service.serialize_app(db, app, detail=True)

@@ -22,7 +22,6 @@ from app.models import (
     SemanticIndexEntry,
 )
 from app.services import semantic_search
-from app.services.chat_bi import ChatBiService
 from app.services.semantic_search import (
     KIND_LOGIC,
     KIND_OBJECT,
@@ -213,43 +212,3 @@ def test_merge_respects_limit():
         for i in range(10)
     ]
     assert len(merge_hits(["a", "b"], semantic, limit=5)) == 5
-
-
-# ---------------------------------------------------------------- 接进工具
-
-
-def test_tool_augments_ilike_with_semantic(client, monkeypatch):
-    """`search_objects` 应把语义召回的实体补进结果，并标注来源。"""
-    did, oid = _seed()
-    _build(oid)
-    monkeypatch.setattr(
-        semantic_search, "default_embedder", lambda _db: _fake_embed
-    )
-
-    with SessionLocal() as db:
-        result, summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_ids=[did], ontology_ids=[oid], name="search_objects",
-            args={"keyword": "往来单位"},
-        )
-    assert not is_error, result
-    items = result.get("items") or result.get("sample") or []
-    names = [i.get("display_name") for i in items]
-    assert "客户" in names, f"语义召回未接进工具；实到 {names}"
-    hit = next(i for i in items if i["display_name"] == "客户")
-    assert hit["matched_by"] == "semantic", "语义召回须标注来源，供模型措辞时区分"
-
-
-def test_tool_degrades_silently_without_index(client, monkeypatch):
-    """没索引时工具照常工作——只是召回不全，绝不报错。"""
-    did, oid = _seed()
-    semantic_search.reset_cache()
-    monkeypatch.setattr(
-        semantic_search, "default_embedder", lambda _db: _fake_embed
-    )
-    with SessionLocal() as db:
-        result, _summary, is_error = ChatBiService()._dispatch_agent_tool(
-            db, domain_ids=[did], ontology_ids=[oid], name="search_objects",
-            args={"keyword": "往来单位"},
-        )
-    assert not is_error
-    assert result["items"] == [], result   # ILIKE 落空且无索引可补 → 空结果，非报错

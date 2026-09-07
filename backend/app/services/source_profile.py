@@ -24,10 +24,28 @@ from app.schemas import DataHubDomainBundle, DatasetInput
 
 @dataclass(frozen=True)
 class InferredFk:
-    """由源画像推断出的一条外键边（列 → 目标表）。"""
+    """一条**非声明式**的外键边（列 → 目标表）。
+
+    ``origin`` 说明这条边是谁给的，决定证据描述与置信度：
+
+    - ``profile``：源画像的建库约定推断（如 Frappe Link 字段），置信度 0.6；
+    - ``observed_join``：代码包里真实执行过的 JOIN 等值条件，置信度 0.75——
+      比命名推断强（它被执行过），比声明式外键弱（JOIN 得上不等于有参照完整性约束）；
+    - ``confirmed_inference``：智能关系补充推出、并由人工确认的键族，置信度同 0.75。
+
+    **三者的描述必须分开写**：混成一句话就抹掉了来源，复核的人分不清「机器见过」
+    「机器按命名猜的」和「机器猜的、我点过确认」。
+
+    ``target_column`` 只有后两种给得出（两端都有列名），源画像推断只知道指向哪张表，留空。
+    ``label`` 是来源的人话标签（文件名 / 键族名），进证据描述。
+    """
 
     column: str
     target_table: str
+    target_column: str | None = None
+    origin: str = "profile"
+    confidence: float = 0.6
+    label: str | None = None
 
 
 def _norm_token(name: str) -> str:

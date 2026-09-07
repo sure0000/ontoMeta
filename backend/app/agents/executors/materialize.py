@@ -68,7 +68,7 @@ class MaterializeExecutor(Executor):
         if not ontology_id:
             raise ValueError("Spec 缺少 ontology_id")
 
-        # P2：提交前强制跑 preflight，有阻断项就拒绝执行（保护 Data Agent 提交的制品）
+        # P2：提交前强制跑 preflight，有阻断项就拒绝执行。
         with SessionLocal() as db:
             from app.services.materialize_preflight import run_preflight
 

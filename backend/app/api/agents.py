@@ -1,7 +1,6 @@
 """治理智能体流水线（M5 · 写侧）。
 
-与读侧的 Data Agent（Chat BI）是同一个智能体的两类技能：读侧问数，写侧造数，
-共用本体做 grounding、共用 MCP 对外。
+通用 Agent 的治理流水线：通过 MCP 暴露并共用本体做 grounding。
 
 权限：本路由整体归 publisher —— 写侧智能体会改集群、建表、执行 SQL，
 不能让 editor 触碰（策略见 ``auth._ROLE_OVERRIDES``）。
@@ -26,11 +25,10 @@ from app.schemas import (
     ArtifactEditRequest,
     ArtifactExecuteRequest,
     ArtifactResultRequest,
-    ConfirmedArtifactDraftRequest,
     GovernanceArtifactOut,
     TaskFormRequest,
 )
-from app.schemas.task_form import ChatBiFormRequest
+from app.schemas.task_form import TaskFormResponse
 from app.services.agent_pipeline import PipelineError
 from app.services.task_form import ACTION_KIND_LABEL, build_task_form
 
@@ -159,7 +157,7 @@ def get_artifact(
     artifact = agent_pipeline.get(db, artifact_id, reconcile=reconcile)
     if artifact is None:
         raise HTTPException(status_code=404, detail="制品不存在")
-    # P1-6：best-effort 回读 DagRun 实时态（失败退制品 status，复用 chat_bi._live_task_state 逻辑）
+    # P1-6：best-effort 回读 DagRun 实时态（失败退制品 status）。
     ls = _try_live_state(db, artifact) if reconcile else None
     out = _to_out(artifact, live_state=ls)
     out.live_state = ls
@@ -276,11 +274,11 @@ def draft_artifact(
     return _to_out(artifact)
 
 
-@router.post("/agents/task-form", response_model=ChatBiFormRequest)
+@router.post("/agents/task-form", response_model=TaskFormResponse)
 def task_confirmation_form(data: TaskFormRequest, db: Session = Depends(get_db)):
     """按任务类型现取一张**建数表单**（字段骨架 + 真实候选 + 本次 confirmation_id）。
 
-    对话里的 ``request_form`` 是模型触发的同一张表；这个端点给**非模型触发**的入口用
+    MCP flow 使用的也是同一张表；这个端点给**非模型触发**的入口用
     ——任务链要逐步确认时，第 N 步也得拿到和单发任务一模一样的向导，否则「链上的任务
     可以少确认几环」就成了事实上的旁路。
     """
@@ -300,82 +298,7 @@ def task_confirmation_form(data: TaskFormRequest, db: Session = Depends(get_db))
             prefill=data.prefill,
         )
     )
-    return ChatBiFormRequest(**{k: v for k, v in form.items() if k != "prefilled"})
-
-
-@router.post("/agents/draft-confirmed", response_model=GovernanceArtifactOut)
-def draft_confirmed_artifact(
-    data: ConfirmedArtifactDraftRequest,
-    db: Session = Depends(get_db),
-):
-    """前三环确认（需求/本体/数据）走完 → 草稿 + dry-run；不再发起第二轮 LLM。
-
-    ``_dispatch_propose_action`` 会核对 confirmation_id 对应的 requirement/ontology/data
-    三条记录，并以人的 chosen 覆盖请求 context。随后建立会话关联，再产出执行方案预览——
-    后三环（执行方案 / 执行 / 结果）由人在任务详情里各自确认。
-    """
-    from app.api.deps import chat_bi_service
-    from app.models import Ontology
-
-    conversation = chat_bi_service.get_conversation(db, data.conversation_id)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="对话不存在")
-
-    ontology = db.get(Ontology, data.ontology_id)
-    if ontology is None:
-        raise HTTPException(status_code=404, detail="本体不存在")
-    conversation_domain_ids = set(conversation.domain_ids)
-    if (
-        conversation_domain_ids
-        and ontology.domain_context_id not in conversation_domain_ids
-    ):
-        raise HTTPException(status_code=409, detail="本体不属于当前会话的数据域作用域")
-
-    proposal, _summary, is_error = chat_bi_service._dispatch_propose_action(
-        db,
-        ontology_id=data.ontology_id,
-        domain_id=ontology.domain_context_id,
-        conversation_id=data.conversation_id,
-        args={
-            "kind": data.kind,
-            "intent": data.intent,
-            "context": {
-                **data.context,
-                "task_confirmation_id": data.confirmation_id,
-            },
-        },
-    )
-    if is_error:
-        raise HTTPException(status_code=409, detail=proposal.get("error") or "任务确认不完整")
-
-    payload = proposal["draft_payload"]
-    artifact = _guard(
-        lambda: agent_pipeline.draft(
-            db,
-            kind=payload["kind"],
-            intent=payload["intent"],
-            context={
-                "ontology_id": payload["ontology_id"],
-                **payload["context"],
-            },
-            ontology_id=payload["ontology_id"],
-            user_created=True,
-        )
-    )
-    from app.api.deps import chat_bi_service as chat_service
-
-    chat_service.link_conversation_task(
-        db,
-        data.conversation_id,
-        artifact.id,
-        kind=artifact.kind,
-        intent=artifact.intent,
-        # 前三环是按这张表单的 confirmation_id 记的账；不把它落到关联上，这条任务的
-        # 闭环就只剩后三环，前三环明明确认过却在界面上恒灰。
-        confirmation_id=data.confirmation_id,
-    )
-    artifact = _guard(lambda: agent_pipeline.validate(db, artifact.id, context={}))
-    return _to_out(artifact)
+    return TaskFormResponse(**{k: v for k, v in form.items() if k != "prefilled"})
 
 
 @router.patch("/agents/artifacts/{artifact_id}", response_model=GovernanceArtifactOut)

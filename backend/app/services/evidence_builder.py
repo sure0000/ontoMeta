@@ -1,4 +1,5 @@
 import re
+from typing import TYPE_CHECKING
 
 from app.schemas import (
     DataHubDomainBundle,
@@ -20,9 +21,48 @@ from app.services.object_classifier import (
 from app.services.relation_terms import infer_relation_term, reference_term
 from app.services.source_profile import InferredFk, SourceProfile, detect_source_profile
 
+if TYPE_CHECKING:  # pragma: no cover - 仅类型；运行期不引入 DB 依赖
+    from app.services.observed_joins import ObservedJoin
+
 
 def _to_snake(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
+
+
+def _fk_cardinality(
+    source_ds: DatasetInput, edge: InferredFk, target_ds: DatasetInput | None
+) -> str:
+    """按两端的 distinct/rows 算基数；**算不出就退回既有默认** ``many_to_one``。
+
+    本仓的关系基数一直是硬编码常量（外键一律 many_to_one），从没按数据算过。这里只在
+    两端都拿得到 profiling（distinct + rowCount）时才改判——``observed_join`` 带得出目标列，
+    源画像推断只知道指向哪张表、拿不到目标列，行为保持不变，不动存量。
+    """
+    if not edge.target_column or target_ds is None:
+        return "many_to_one"
+
+    from app.services.key_family import KeyColumn, cardinality_between
+
+    def build(dataset: DatasetInput, column: str) -> KeyColumn | None:
+        field = next(
+            (f for f in dataset.fields if f.name.lower() == column.lower()), None
+        )
+        if field is None or not field.unique_count or not dataset.row_count:
+            return None
+        return KeyColumn(
+            table=dataset.name,
+            column=field.name,
+            data_type=field.data_type,
+            distinct=field.unique_count,
+            rows=dataset.row_count,
+            samples=tuple(field.sample_values or []),
+        )
+
+    source = build(source_ds, edge.column)
+    target = build(target_ds, edge.target_column)
+    if source is None or target is None:
+        return "many_to_one"
+    return cardinality_between(source, target)
 
 
 # 桥表塌缩↔智能重判的迭代轮数上限：重判某桥表为业务对象可能让引用它的桥表凑出端点，
@@ -109,6 +149,7 @@ class EvidenceBuilder:
         bundle: DataHubDomainBundle,
         *,
         include_business_logics: bool = False,
+        observed_joins: list["ObservedJoin"] | None = None,
     ) -> EvidenceBundle:
         object_types: list[ObjectTypeEvidencePack] = []
         properties: list[PropertyEvidencePack] = []
@@ -132,6 +173,9 @@ class EvidenceBuilder:
         inferred_fk_by_name: dict[str, list[InferredFk]] = {
             ds.name: profile.inferred_fks(ds, table_index) for ds in bundle.datasets
         }
+        # 代码包里真实执行过的 JOIN：与源画像推断的边合流，一起参与关系证据与拓扑
+        # （入度/出度/业务环节聚类）。零声明式外键的源上，这往往是唯一的关系信号。
+        self._merge_observed_joins(bundle, observed_joins, inferred_fk_by_name)
         # 跨表拓扑：先聚合“每张表被多少张其它表通过外键指向”（入度）
         # 与血缘上/下游数量，供对象角色分类器使用。（含源画像推断的外键边）
         fk_in_degree, lineage_up, lineage_down, fk_out_degree, segment_size = (
@@ -301,9 +345,10 @@ class EvidenceBuilder:
                         )
                     )
 
-            # 源画像推断的外键（如 Frappe Link 字段：列名命中某 DocType 名）。
-            # 声明式外键为空时，这是恢复关系图与 fk 拓扑的主要来源。标注为推断、
-            # 置信度略低，交由人工/LLM 复核。
+            # 非声明式外键：源画像按建库约定推断的（如 Frappe Link 字段），
+            # 以及代码包里真实执行过的 JOIN。声明式外键为空时，这是恢复关系图与
+            # fk 拓扑的主要来源。两者证据强度不同，描述与置信度都按 origin 分开写，
+            # 免得人在复核时分不清「猜的」和「见过的」。
             declared_fk_cols = {
                 f.name for f in dataset.fields if f.is_foreign_key and f.foreign_key_target
             }
@@ -318,19 +363,42 @@ class EvidenceBuilder:
                     if target_ds
                     else edge.target_table
                 )
+                join_expr = (
+                    f"{edge.column} = {edge.target_column}"
+                    if edge.target_column
+                    else edge.column
+                )
+                if edge.origin == "ddl_foreign_key":
+                    provenance = (
+                        f"{source_label} 通过外键 {join_expr} 关联 {target_label}"
+                        f"（代码包 DDL 里声明的外键）"
+                    )
+                elif edge.origin == "observed_join":
+                    provenance = (
+                        f"{source_label} 通过 {join_expr} 关联 {target_label}"
+                        f"（代码包里真实执行过的 JOIN）"
+                    )
+                elif edge.origin == "confirmed_inference":
+                    provenance = (
+                        f"{source_label} 通过 {join_expr} 关联 {target_label}"
+                        f"（智能关系补充推断，已人工确认"
+                        f"{'：' + edge.label if edge.label else ''}）"
+                    )
+                else:
+                    provenance = (
+                        f"{source_label} 通过引用字段 {edge.column} 关联 {target_label}"
+                        f"（推断，来源 {profile.name} 源画像）"
+                    )
                 relations.append(
                     RelationEvidencePack(
                         name=f"{object_name}_to_{target_object}",
                         display_name=infer_relation_term("foreign_key", edge.column),
                         source_object=object_name,
                         target_object=target_object,
-                        cardinality="many_to_one",
+                        cardinality=_fk_cardinality(dataset, edge, target_ds),
                         structure_type="foreign_key",
-                        description=(
-                            f"{source_label} 通过引用字段 {edge.column} 关联 {target_label}"
-                            f"（推断，来源 {profile.name} 源画像）"
-                        ),
-                        confidence=0.6,
+                        description=provenance,
+                        confidence=edge.confidence,
                         evidence_refs=[f"{dataset.urn}#{edge.column}"],
                     )
                 )
@@ -709,6 +777,89 @@ class EvidenceBuilder:
             name: len(cluster) for cluster in clusters for name in cluster
         }
         return fk_counts, lineage_up, lineage_down, fk_out_counts, segment_size
+
+    @staticmethod
+    def _merge_observed_joins(
+        bundle: DataHubDomainBundle,
+        observed_joins: list["ObservedJoin"] | None,
+        inferred_fk_by_name: dict[str, list[InferredFk]],
+    ) -> None:
+        """把代码包里观察到的 JOIN 并进推断外键集合（原地修改）。
+
+        三条口径，都是为了不把「SQL 里写过」当成「结构上成立」：
+
+        1. **两端都要在本域找得到**（表名可带库名前缀，裸名唯一时才认）——对不上就丢，不猜；
+        2. **两端的列都要真实存在**于对应表的 schema 里——列名对不上说明这条边指向的
+           不是这张表（同名表、旧版本），留着只会污染拓扑；
+        3. **方向按区分度定**：近唯一的一端是被引用的主数据端，另一端是引用端。
+           判据与 ``_orient_relation`` 一致（明细 → 主数据），只是这里有 distinct 可用。
+        """
+        if not observed_joins:
+            return
+
+        from app.services.key_family import KeyColumn, orient_reference
+        from app.services.observed_joins import bare_table
+
+        by_name: dict[str, DatasetInput] = {}
+        bare_hits: dict[str, list[DatasetInput]] = {}
+        for dataset in bundle.datasets:
+            by_name[dataset.name.lower()] = dataset
+            bare_hits.setdefault(bare_table(dataset.name).lower(), []).append(dataset)
+
+        def resolve(table: str) -> DatasetInput | None:
+            key = table.strip().strip("`\"'").lower()
+            if key in by_name:
+                return by_name[key]
+            # 裸表名只在全域唯一时才认，与 ``lineage_inventory._build`` 同一条口径。
+            candidates = bare_hits.get(bare_table(key).lower(), [])
+            return candidates[0] if len(candidates) == 1 else None
+
+        def key_column(dataset: DatasetInput, column: str) -> KeyColumn | None:
+            field = next(
+                (f for f in dataset.fields if f.name.lower() == column.lower()), None
+            )
+            if field is None:
+                return None
+            return KeyColumn(
+                table=dataset.name,
+                column=field.name,
+                data_type=field.data_type,
+                distinct=field.unique_count or 0,
+                rows=dataset.row_count or 0,
+                samples=tuple(field.sample_values or []),
+            )
+
+        for join in observed_joins:
+            left_ds, right_ds = resolve(join.left_table), resolve(join.right_table)
+            if left_ds is None or right_ds is None or left_ds.name == right_ds.name:
+                continue
+            left = key_column(left_ds, join.left_column)
+            right = key_column(right_ds, join.right_column)
+            if left is None or right is None:
+                continue
+
+            # DDL 外键自带方向（REFERENCES 写着谁引用谁），不拿统计去二猜；
+            # 等值谓词是无向的，才按区分度定向。
+            source, target = (
+                (left, right) if join.directed else orient_reference(left, right)
+            )
+            edges = inferred_fk_by_name.setdefault(source.table, [])
+            if any(
+                edge.column.lower() == source.column.lower()
+                and edge.target_table == target.table
+                for edge in edges
+            ):
+                continue
+            edges.append(
+                InferredFk(
+                    column=source.column,
+                    target_table=target.table,
+                    target_column=target.column,
+                    origin=join.origin,
+                    confidence=join.confidence,
+                    label=join.source_file,
+                )
+            )
 
     def _collapse_reverse_relations(
         self,

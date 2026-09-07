@@ -64,7 +64,6 @@ def test_role_ordering(actual, minimum, ok):
         # 发布 / 执行 / 设置 / 主体自管理 → publisher
         ("POST", "/api/ontologies/x/publish", "publisher"),
         ("PATCH", "/api/object-types/x/pre-publish", "publisher"),
-        ("POST", "/api/chat-bi/messages/x/execute", "publisher"),
         ("POST", "/api/data-apps/x/share", "publisher"),
         ("PATCH", "/api/settings/llm", "publisher"),
         ("GET", "/api/principals", "publisher"),
@@ -241,17 +240,3 @@ def test_policy_endpoint_exposes_matrix(client, admin_headers):
     assert body["roles"] == ["reader", "editor", "reviewer", "publisher"]
     assert body["method_defaults"]["DELETE"] == "publisher"
     assert any(o["minimum_role"] == "reviewer" for o in body["overrides"])
-
-
-# ---------- 与 M4 的衔接 ----------
-
-
-def test_chat_bi_execute_requires_publisher(client, admin_headers):
-    """M4 留下的权限缺口在此闭合：执行 SQL 直接打物理源，必须 publisher。"""
-    editor = _make(client, admin_headers, "编辑不许执行", "editor")
-    resp = client.post(
-        "/api/chat-bi/messages/x/execute",
-        headers=editor["headers"],
-        json={"data_source_id": "y"},
-    )
-    assert resp.status_code == 403

@@ -363,8 +363,7 @@ class OntologyQueryService(_OntologyQueryBase):
         if not obj:
             return None
         # 已发布浏览：对象本身未发布则视为不存在，且其关系/邻居仅取已发布，
-        # 与 Data Agent 的接地集（只认 published 实体）保持一致，避免
-        # 「浏览可见但 Data Agent 拒答」的口径分裂。
+        # 与 Agent 查询边界（只认 published 实体）保持一致，避免读取未发布实体。
         if published_only and obj.status != EntityStatus.PUBLISHED.value:
             return None
         _pub = EntityStatus.PUBLISHED.value

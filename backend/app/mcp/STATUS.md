@@ -1,7 +1,7 @@
 # MCP 服务实施状态
 
-**当前阶段**：为「删掉 Data Agent」做的解耦与补齐已完成（67 工具 / 12 份 skill）。
-MCP 不再依赖对话模块，取数闸门与对话侧合一，口径创作 / 接数据 / 建模工单三族补齐。
+**当前阶段**：旧对话入口已删除，MCP + 通用 Agent + Skill 已成为唯一 Agent 入口（67 工具 / 12 份 skill）。
+取数闸门、口径创作、接数据与建模工单均由 MCP 提供。
 结果分析已通过中性服务和 `analyze_query` 暴露；血缘补录与业务逻辑管理已通过 MCP/Skill 暴露；资源级权限、数据应用面板/看板仍待做。
 **更新时间**：2026-09-06
 
@@ -9,30 +9,30 @@ MCP 不再依赖对话模块，取数闸门与对话侧合一，口径创作 / �
 
 ## ✅ 为删除 Data Agent 做的解耦与补齐（2026-09-06）
 
-目标是让 `app/services/chat_bi.py` 那一族可以整块删掉，而 MCP + skill 照常工作。分两半：
+目标是让旧对话模块整块删掉，而 MCP + skill 照常工作。该目标现已完成：
 
 ### A. 解耦：MCP 反过来依赖对话模块的那几条全部剪断
 
-此前 MCP 有五处 `from app.services.chat_bi...`——**对话模块成了建数流程的依赖底座**，删它
+此前 MCP 有五处 `from app.services.chat_bi...`——**旧对话模块曾是建数流程的依赖底座**，删它
 会让 MCP 静默哑掉。搬到中性位置：
 
 | 搬走的东西 | 新家 | 谁在用 |
 |---|---|---|
-| 建数表单骨架 / 候选目录 / context 校验（约 1100 行） | `services/task_form.py` | Web 任务面板、Data Agent、MCP 建数流程 |
-| 代跑 SQL 的整条闸门链 | `services/agent_sql.py` | Data Agent 的 run_sql、MCP 的 execute_sql |
-| 表单传输结构 | `schemas/task_form.py` | 同上 |
+| 建数表单骨架 / 候选目录 / context 校验 | `services/task_form.py` | Web 任务面板、MCP 建数流程 |
+| 代跑 SQL 的整条闸门链 | `services/agent_sql.py` | MCP 的 `execute_sql` |
+| 表单传输结构 | `schemas/task_form.py` | Web 任务面板 |
 | 草稿生成派发 | `services/draft_launch.py` | Web 工作区、MCP 的 start_ontology_draft |
 | `agent_pipeline` 单例 | `services/agent_pipeline.py`（`api.deps` 改为再导出） | 到处 |
 
 顺带剪掉两条间接依赖：`app/mcp/tools/lifecycle.py` 与 `services/query_readiness.py` 原本经
-`app.api.deps` 拿流水线单例，而那一包在导入期就 `ChatBiService()`。
+此前 `app.api.deps` 拿流水线单例，而那一包在导入期会实例化对话服务；现已解耦。
 
-`services/data_app.py` 的两处 `ChatBiService().ask()` 回退删掉了：生成数据应用/图表现在
+`services/data_app.py` 的两处旧对话回退删掉了：生成数据应用/图表现在
 **要求调用方带口径载荷**，缺了就报错。那条回退本来也有问题——它可能生成一份与用户看过的
 口径不是同一个的应用（LLM 两次未必给出同样的拆解）。
 
 **钉成被检查的属性**（`tests/test_mcp_independence.py`）：静态扫 `app/mcp/**` 的每个 import；
-再在**新解释器**里把 `app.services.chat_bi` 从 meta_path 上挡掉，断言工具注册表照样装配得出来
+再在**新解释器**里模拟旧对话模块不可用，断言工具注册表照样装配得出来
 ——那等于一次删除演练。
 
 ### B. 补齐：MCP 缺的能力面（37 → 50 工具）

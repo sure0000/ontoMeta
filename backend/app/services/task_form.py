@@ -1,10 +1,9 @@
 """建数任务表单：字段骨架 · 真实候选 · context 校验（中性位置，无对话依赖）。
 
-**为什么在这里而不在 `chat_bi` 里**：同一张同步表单有三个入口——Web 的任务面板、
-Data Agent 的 `request_form`、MCP 的 `start_task_flow`/`open_task_form`。三处各建一份的话，
+**为什么在这里**：同一张同步表单有两个入口——Web 的任务面板、
+MCP 的 `start_task_flow`/`open_task_form`。两处各建一份的话，
 同一个同步任务在单发时问四个参数、在流程里只问两个，那不是两种体验，是两套事实。
-此前这份骨架长在 `ChatBiService` 上，于是 MCP 反过来 `import ChatBiService` 才能发表单——
-对话模块成了建数流程的依赖底座。这里把它搬到中性位置：**表单不需要知道有没有对话**。
+此前这份骨架长在对话服务上，MCP 需要反向导入对话模块才能发表单；这里把它放在中性位置。
 
 内容：任务类型常量 · context 缺项/校验 · 候选目录（Doris 落点、对象、口径、物化范围）·
 四类任务的字段模板 · 预填对齐（`match_option`）。
@@ -61,8 +60,8 @@ AUTO_ACTION_CONTEXT_KEYS: frozenset[str] = frozenset({"ontology_id"})
 
 
 ACTION_CONTEXT_HINT = (
-    "这些是起草该任务必须先定下、且无法从本体推导的选项。用 request_form 把它们做成一张表单"
-    "让用户选（候选项用本结果里给出的真实值），拿到回填后再重新 propose_action。不要自己编 id。"
+    "这些是起草该任务必须先定下、且无法从本体推导的选项。用 MCP flow 把它们做成一张表单"
+    "让用户选（候选项用本结果里给出的真实值），拿到回填后再重新生成提案。不要自己编 id。"
 )
 
 
@@ -1365,7 +1364,7 @@ def build_task_form(
 ) -> dict:
     """一个数据任务的**六环确认表单**（骨架字段 + 六环之旅 + 本次确认 id）。
 
-    对话里的 ``request_form`` 与任务链的逐步确认走的是同一张表单——两处各建一份的话，
+    MCP 交互流程与 Web 任务向导走的是同一张表单——两处各建一份的话，
     同一个同步任务在单发时问四个参数、在链里只问两个，那不是两种体验，是两套事实。
     """
     fields = task_form_template(

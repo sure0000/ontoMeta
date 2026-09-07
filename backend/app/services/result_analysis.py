@@ -1,8 +1,7 @@
 """Deterministic analysis of tabular query results.
 
-The Data Agent used to own this calculation inside ``chat_bi.py``.  Keeping the
-algorithm in a neutral service lets MCP expose the same result without making
-the generic Agent ship all rows back into its context.
+The MCP server owns this calculation in a neutral service, so a generic Agent
+can receive bounded analysis without shipping all rows back into its context.
 """
 
 from __future__ import annotations

@@ -578,7 +578,7 @@ class PublishService:
             raise ValueError("Ontology not found")
 
         # 形式化不变式校验（F2）：``formal_enforcement=error`` 时，error 级违反阻断发布。
-        # warn/off 不阻断（迁移期安全）；这与发布后才能供 Data Agent 查询的时序契合——
+        # warn/off 不阻断（迁移期安全）；发布后才能进入 Agent 可查询范围——
         # 不让不可推理的本体进入已发布集。
         from app.config import settings as _env_settings
         from app.services.ontology_formal import assert_publishable

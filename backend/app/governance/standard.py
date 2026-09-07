@@ -312,7 +312,7 @@ class GovernanceStandard:
         """编译成给 agent 的**简短**约束卡（G2 塞进建数 skill 的 prompt_overlay）。
 
         只列人读要点，不倾倒整份 JSON——对齐「知识包裁剪」的教训（memory:
-        chatbi-sends-full-ontology-413），避免又把大 blob 塞进 prompt。
+        full-ontology-413），避免又把大 blob 塞进 prompt。
         """
         lines = [f"# 数据治理规约 v{self.version}（建表/建任务须遵循）", ""]
         lines.append("命名：")

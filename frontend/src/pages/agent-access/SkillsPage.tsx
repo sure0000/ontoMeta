@@ -510,7 +510,7 @@ export function SkillsPage() {
                 ) : null}
                 <Divider />
                 {preview ? (
-                  <div className="chatbi-md" style={{ maxHeight: 620, overflow: "auto" }}>
+                  <div className="agent-markdown" style={{ maxHeight: 620, overflow: "auto" }}>
                     <MarkdownLite content={draft} />
                   </div>
                 ) : (

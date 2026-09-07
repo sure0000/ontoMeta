@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.connectors.datahub import _extract_dataset_name
 from app.models import DomainContext, ObjectType
 from app.schemas import DataHubDomainBundle
-from app.services import draft_evidence_cache, ontology_workspace
+from app.services import draft_evidence_cache, observed_joins, ontology_workspace
 from app.services.evidence_builder import EvidenceBuilder
 from app.services.object_landing import bulk_object_landings
 from app.services.settings_service import SettingsService
@@ -91,8 +91,16 @@ async def list_unmodeled_tables(
         raise ValueError("数据域不存在")
 
     bundle = await fetch_domain_bundle(db, domain)
-    evidence = EvidenceBuilder().build(bundle, include_business_logics=False)
-    draft_evidence_cache.save(domain_id, domain.datahub_domain_id or "none", evidence)
+    evidence = EvidenceBuilder().build(
+        bundle,
+        include_business_logics=False,
+        observed_joins=observed_joins.load_relation_evidence(db, domain_id),
+    )
+    draft_evidence_cache.save(
+        domain_id,
+        observed_joins.evidence_fingerprint(domain_id, domain.datahub_domain_id),
+        evidence,
+    )
 
     ontology = ontology_workspace.get_working_ontology(db, domain_id)
     modeled: set[str] = set()

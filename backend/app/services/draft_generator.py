@@ -22,6 +22,7 @@ from app.schemas import (
     EvidenceBundle,
     OntologyDraftOutput,
 )
+from app.services import llm_json
 from app.services.common import make_async_http_client
 from app.services.draft_checkpoint import chunk_key
 from app.services.evidence_chunker import split_evidence, split_relations
@@ -90,12 +91,12 @@ class LlmNotConfiguredError(RuntimeError):
         )
 
 
-class LlmResponseFormatError(RuntimeError):
-    """LLM 返回内容无法解析成命名增强所需的 JSON 对象。
-
-    以前这里回退空字典 → 全部对象静默落回技术表名；现在如实抛错，由分块流水线
-    重试、最终失败并提示，绝不让「看起来生成成功、名字全是表名」的草稿出门。
-    """
+#: LLM 返回内容无法解析成命名增强所需的 JSON 对象。
+#:
+#: 定义搬到了 ``app.services.llm_json``（与键族判定共用同一层解析口径），这里保持
+#: **同一个类对象**的别名——分块流水线按它做重试（``also_retry=(LlmResponseFormatError,)``），
+#: 若两处各定义一个同名类，llm_json 抛出的那个就不会被 except 捕获，重试静默失效。
+LlmResponseFormatError = llm_json.LlmResponseFormatError
 
 
 class ObjectNamingIncompleteError(RuntimeError):
@@ -1020,70 +1021,15 @@ class OntologyDraftGenerator:
                 f"{'：响应被截断，建议调小分块表数或加大模型 max_tokens' if finish_reason == 'length' else ''}）"
             ) from exc
 
-    @staticmethod
-    def _unwrap_json_text(content: str) -> str:
-        """剥掉 LLM 常见的包装，返回第一段能解析成 JSON 的文本（都不行则返回空串）。
-
-        并非所有 provider/模型都遵守 ``response_format=json_object``：自建 GLM 端点
-        会把 JSON 裹进 ```json ... ``` 代码围栏，也有模型在 JSON 前后加一两句解说。
-        依次试：原文 → 围栏内容 → 最外层 ``{...}`` → 最外层 ``[...]``，逐个真解析，
-        谁先成功用谁（只截取不解析会把顶层数组的外层方括号剥掉，反而弄坏它）。
-        """
-        text = (content or "").strip()
-        if not text:
-            return ""
-        candidates = [text]
-        fenced = _JSON_FENCE_RE.search(text)
-        if fenced:
-            candidates.append(fenced.group(1).strip())
-        for opener, closer in (("{", "}"), ("[", "]")):
-            start, end = text.find(opener), text.rfind(closer)
-            if start != -1 and end > start:
-                candidates.append(text[start : end + 1])
-        for candidate in candidates:
-            if not candidate:
-                continue
-            try:
-                json.loads(candidate)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            return candidate
-        return ""
+    #: 「读懂模型这次怎么写的」这层口径已抽到 ``app.services.llm_json`` 共用——
+    #: 键族判定要发同样形态的请求，两份口径会各自漂移。这里保留同名薄封装，
+    #: 是因为本类内部与测试都按方法名调用它们。
+    _unwrap_json_text = staticmethod(llm_json.unwrap_json_text)
 
     @classmethod
     def _coerce_llm_response(cls, content: str, *, primary_list_key: str) -> dict:
-        """把 LLM 返回文本解析为 parse_* 期望的顶层字典。
-
-        归一化(都属于「读懂模型这次怎么写的」，不是降级)：
-        - 外层包装：代码围栏 / JSON 前后的解说文字，先剥掉（见 ``_unwrap_json_text``）。
-        - 顶层是 dict：原样返回。
-        - 顶层是 ``[dict]`` 单元素包裹：拆包（常见的「用数组裹一层」写法）。
-        - 顶层是其它数组：按调用方语境归到 ``primary_list_key``（对象命名调用
-          归为 object_types，关系命名调用归为 relations）。
-
-        实在读不出 JSON 对象则抛 :class:`LlmResponseFormatError`。**不再回退空字典**
-        ——那等于让整块表悄悄用回技术表名，正是要根除的降级：曾因 GLM 加了代码围栏，
-        整个域几十块命名全部静默落空，草稿看着「生成成功」，名字却全是表名。
-        """
-        text = cls._unwrap_json_text(content)
-        if not text:
-            raise LlmResponseFormatError(
-                f"LLM 返回内容不是合法 JSON（片段：{(content or '')[:120]!r}）"
-            )
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return data
-        if isinstance(data, list):
-            if len(data) == 1 and isinstance(data[0], dict):
-                return data[0]
-            logger.warning(
-                "LLM 返回顶层数组（未遵守 json_object），按 %s 归一化",
-                primary_list_key,
-            )
-            return {primary_list_key: data}
-        raise LlmResponseFormatError(
-            f"LLM 返回的不是 JSON 对象/数组（{type(data).__name__}）"
-        )
+        """把 LLM 返回文本解析为 parse_* 期望的顶层字典（见 ``llm_json.coerce_json_object``）。"""
+        return llm_json.coerce_json_object(content, primary_list_key=primary_list_key)
 
     @staticmethod
     def _build_candidate_lookup(evidence: EvidenceBundle) -> dict[str, Any]:

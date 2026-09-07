@@ -1,4 +1,4 @@
-"""M4 数仓方言接入：backend 识别、方言委托给 Adapter、Chat BI 执行端点。
+"""M4 数仓方言接入：backend 识别与方言委托给 Adapter。
 
 关键约束：数仓引擎的方言翻译**必须委托给 app/warehouse 的 Adapter**，
 不能在执行器里另开一套——否则同一引擎存在两份方言逻辑，迟早分叉。
@@ -6,12 +6,8 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from app.database import SessionLocal
-from app.models import ChatBiConversation, ChatBiMessage, DataSource, DomainContext
 from app.services import data_app_executor as ex
 from app.warehouse import get_adapter
 
@@ -80,133 +76,3 @@ def test_read_only_guard_applies_to_warehouse_sql():
 def test_select_on_warehouse_table_passes():
     ok, _ = ex.is_read_only("SELECT customer_id FROM dim_erp.customer")
     assert ok
-
-
-# ---------- Chat BI 执行端点 ----------
-
-
-def _seed_message(tag: str, sql: str | None, *, dsn: str, kind: str = "duckdb") -> dict:
-    with SessionLocal() as db:
-        domain = DomainContext(
-            datahub_domain_id=f"urn:li:domain:m4-{tag}", name=f"m4-{tag}"
-        )
-        db.add(domain)
-        db.flush()
-        conv = ChatBiConversation(domain_id=domain.id, title="t")
-        db.add(conv)
-        db.flush()
-        msg = ChatBiMessage(
-            conversation_id=conv.id,
-            role="assistant",
-            content="answer",
-            payload=json.dumps({"suggested_sql": sql}) if sql is not None else None,
-        )
-        source = DataSource(name=f"ds-{tag}", kind=kind, dsn_secret_ref=dsn)
-        db.add_all([msg, source])
-        db.commit()
-        return {"message_id": msg.id, "data_source_id": source.id}
-
-
-def test_execute_returns_rows(client, admin_headers, tmp_path):
-    """端到端：payload 里的 suggested_sql 被真正执行并返回数据。"""
-    db_file = tmp_path / "m4.db"
-    import sqlite3
-
-    conn = sqlite3.connect(db_file)
-    conn.execute("CREATE TABLE customer (customer_id INT, customer_name TEXT)")
-    conn.execute("INSERT INTO customer VALUES (1,'甲'),(2,'乙')")
-    conn.commit()
-    conn.close()
-
-    ids = _seed_message(
-        "ok", "SELECT customer_id, customer_name FROM customer",
-        dsn=f"sqlite:///{db_file}", kind="sqlite",
-    )
-    resp = client.post(
-        f"/api/chat-bi/messages/{ids['message_id']}/execute",
-        headers=admin_headers,
-        json={"data_source_id": ids["data_source_id"], "limit": 10},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["row_count"] == 2
-    assert {c["key"] for c in body["columns"]} == {"customer_id", "customer_name"}
-    assert body["rows"][0]["customer_name"] == "甲"
-
-
-def test_execute_rejects_message_without_sql(client, admin_headers):
-    ids = _seed_message("nosql", None, dsn="sqlite:///:memory:", kind="sqlite")
-    resp = client.post(
-        f"/api/chat-bi/messages/{ids['message_id']}/execute",
-        headers=admin_headers,
-        json={"data_source_id": ids["data_source_id"]},
-    )
-    assert resp.status_code == 404
-    assert "没有可执行的 SQL" in resp.json()["detail"]
-
-
-def test_execute_rejects_mock_data_source(client, admin_headers):
-    ids = _seed_message("mock", "SELECT 1", dsn="", kind="mock")
-    resp = client.post(
-        f"/api/chat-bi/messages/{ids['message_id']}/execute",
-        headers=admin_headers,
-        json={"data_source_id": ids["data_source_id"]},
-    )
-    assert resp.status_code == 404
-    assert "未配置连接串" in resp.json()["detail"]
-
-
-def test_execute_rejects_non_readonly_sql(client, admin_headers, tmp_path):
-    """只读校验对 Chat BI 生成的 SQL 同样生效。"""
-    db_file = tmp_path / "m4b.db"
-    import sqlite3
-
-    sqlite3.connect(db_file).close()
-    ids = _seed_message(
-        "write", "DELETE FROM customer", dsn=f"sqlite:///{db_file}", kind="sqlite"
-    )
-    resp = client.post(
-        f"/api/chat-bi/messages/{ids['message_id']}/execute",
-        headers=admin_headers,
-        json={"data_source_id": ids["data_source_id"]},
-    )
-    assert resp.status_code == 400
-    assert "只读校验" in resp.json()["detail"]
-
-
-def test_execute_unknown_message_returns_404(client, admin_headers):
-    ids = _seed_message("x", "SELECT 1", dsn="sqlite:///:memory:", kind="sqlite")
-    resp = client.post(
-        "/api/chat-bi/messages/does-not-exist/execute",
-        headers=admin_headers,
-        json={"data_source_id": ids["data_source_id"]},
-    )
-    assert resp.status_code == 404
-
-
-def test_execute_message_requires_publisher_service_gate():
-    """P2 权限门统一：手动执行与 run_sql 同一道工具粒度门。
-
-    端点层已按 required_role 拦 publisher；服务层再加 _may_run_sql 纵深防御，
-    且与 run_sql 的 agent_run_sql_min_role 配置联动（降级配置两处同价）。
-    """
-    from app.services.chat_bi import ChatBiService
-
-    ids = _seed_message("perm", "SELECT 1", dsn="sqlite:///:memory:", kind="sqlite")
-    svc = ChatBiService()
-    with SessionLocal() as db:
-        try:
-            svc.execute_message_sql(
-                db, ids["message_id"], data_source_id=ids["data_source_id"],
-                principal_role="editor",
-            )
-            raise AssertionError("editor 应被拒")
-        except PermissionError as exc:
-            assert "无权执行 SQL" in str(exc)
-    # publisher（admin 等价）放行：走到 SQL 执行才报「消息不存在」之外的错——用合法消息验证放行
-    with SessionLocal() as db:
-        out = svc.execute_message_sql(
-            db, ids["message_id"], data_source_id=ids["data_source_id"],
-            principal_role="publisher",
-        )
-        assert out["row_count"] == 1

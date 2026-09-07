@@ -31,7 +31,6 @@ const BusinessLogicDetailPage = lazyPage(
   "BusinessLogicDetailPage",
 );
 const BusinessLogicPage = lazyPage(() => import("./pages/BusinessLogicPage"), "BusinessLogicPage");
-const ChatBiPage = lazyPage(() => import("./pages/chat-bi/ChatBiPage"), "ChatBiPage");
 const DataAppEditorPage = lazyPage(() => import("./pages/DataAppEditorPage"), "DataAppEditorPage");
 const DataAppsPage = lazyPage(() => import("./pages/DataAppsPage"), "DataAppsPage");
 const DataAppViewPage = lazyPage(() => import("./pages/DataAppViewPage"), "DataAppViewPage");
@@ -119,7 +118,6 @@ export default function App() {
           />
           <Route path="/business-logic/create" element={<BusinessLogicCreatePage />} />
           <Route path="/business-logic/:logicId" element={<BusinessLogicDetailPage />} />
-          <Route path="/chat-bi" element={<ChatBiPage />} />
           <Route path="/tasks" element={<TasksOverviewPage />} />
           <Route path="/tasks/create" element={<TaskCreatePage />} />
           <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />

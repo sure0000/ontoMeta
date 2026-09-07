@@ -182,7 +182,7 @@ export function ObjectTypeDetailPage() {
 
   const loadObject = async () => {
     if (!objectId) return;
-    // 非工作区（即本体浏览）只取已发布实体，与 Data Agent 接地集一致，
+    // 非工作区（即本体浏览）只取已发布实体，与 Agent 查询边界一致，
     // 避免详情图谱/关系表泄露未发布的“建议”状态对象与关系。
     const detail = await api.getObjectType(objectId, !inWorkspace);
     setObj(detail);

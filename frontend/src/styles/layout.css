@@ -1490,6 +1490,20 @@ a.page-meta-item:hover strong {
   flex: none;
 }
 
+.review-pane-label--with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--om-space-2);
+}
+
+.review-pane-label--with-action .ant-btn {
+  flex: none;
+  color: var(--om-primary);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 /* ---------- 左栏：进度地形 ----------
    判完的板块留在原位折叠成 ✓ 而不是消失或重排——空间记忆是提速的一部分。 */
 
@@ -1510,6 +1524,36 @@ a.page-meta-item:hover strong {
   transition:
     background 0.15s,
     color 0.15s;
+}
+
+.review-seg-entry {
+  position: relative;
+}
+
+.review-seg-entry .review-seg {
+  padding-right: 68px;
+}
+
+.review-seg-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.review-seg-entry:hover .review-seg-actions,
+.review-seg-entry:focus-within .review-seg-actions {
+  opacity: 1;
+}
+
+.review-seg-actions .ant-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
 }
 
 .review-seg:hover {

@@ -2,8 +2,7 @@
  * 交互式建数流程的**网页表单**：通用 Agent 没有原生问答工具时的兜底渲染面。
  *
  * Agent 调 `open_task_form` 发一个链接，用户在这里把这一环填完提交，Agent 用
- * `wait_task_form` 取回填值继续。字段、候选、预填值都由服务端实时算（与对话里的宿主表单、
- * 与 Data Agent 的向导同一份定义），页面只负责渲染和回填——这里不该出现第二套"该问什么"。
+ * `wait_task_form` 取回填值继续。字段、候选、预填值都由服务端实时算，页面只负责渲染和回填。
  */
 import { CheckCircleOutlined, RobotOutlined } from "@ant-design/icons";
 import {

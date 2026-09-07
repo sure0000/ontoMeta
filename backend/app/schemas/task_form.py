@@ -1,8 +1,7 @@
 """建数/收参表单的传输结构（中性位置，无对话依赖）。
 
-同一张表单有三个入口——Web 任务面板、Data Agent 的 ``request_form``、MCP 的
-``open_task_form``。结构长在对话的 schema 里，就意味着「发一张表单」这件事必须先有对话。
-名字保留 ``ChatBi*`` 前缀：它是前端与既有 API 的字段契约，改名等于改接口。
+同一张表单有两个入口——Web 任务面板和 MCP 的交互式流程。表单契约放在这里，
+使通用 Agent 不依赖某个产品内置的对话实现。
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
-class ChatBiFormOption(BaseModel):
+class TaskFormOption(BaseModel):
     """表单候选项：**显示什么**（label）与**回填什么**（value）分开。
 
     此前两者是同一个字符串，于是需要带 id 的候选（数据源、对象）只能写成「名称｜id」，
@@ -28,7 +27,7 @@ class ChatBiFormOption(BaseModel):
     disabled: bool = False
 
 
-class ChatBiFormField(BaseModel):
+class TaskFormField(BaseModel):
     """交互表单的单个字段（P6）。``type`` 决定前端用哪种控件渲染。
 
     ``options`` 仅对 select/multiselect/radio/autocomplete 有意义，且**必须来自工具返回
@@ -40,7 +39,7 @@ class ChatBiFormField(BaseModel):
     label: str  # 中文标签
     # text/textarea/number/select/multiselect/radio/boolean/date/autocomplete/cron
     type: str
-    options: list[ChatBiFormOption] = Field(default_factory=list)
+    options: list[TaskFormOption] = Field(default_factory=list)
     required: bool = False
     placeholder: str | None = None
     help: str | None = None
@@ -49,7 +48,7 @@ class ChatBiFormField(BaseModel):
     confirmation_node: str | None = None
     # 级联候选：depends_on 字段当前值 → options_by_value[value]。
     depends_on: str | None = None
-    options_by_value: dict[str, list[ChatBiFormOption]] = Field(default_factory=dict)
+    options_by_value: dict[str, list[TaskFormOption]] = Field(default_factory=dict)
     # 候选实时取：``object_properties`` = 取 depends_on 那个对象的字段清单。
     # 静态摊开几百个对象的字段是几 MB 的消息负载，故这类候选按需拉。
     options_from: str | None = None
@@ -67,7 +66,7 @@ class ChatBiFormField(BaseModel):
         return [{"label": o, "value": o} if isinstance(o, str) else o for o in v]
 
 
-class ChatBiFormRequest(BaseModel):
+class TaskFormResponse(BaseModel):
     """Agent 动态生成的**可填写表单**（P6）：一次向用户收集多个结构化参数。
 
     与 clarification 一样是**终态出口**——本轮到此为止，等用户在前端填完提交后作为
@@ -82,7 +81,7 @@ class ChatBiFormRequest(BaseModel):
     #: 空 = 没有可说的。改判不能只在后台发生——人得知道自己拿到的为什么是这张表单。
     notice: str = ""
     submit_label: str = "提交"
-    fields: list[ChatBiFormField] = Field(default_factory=list)
+    fields: list[TaskFormField] = Field(default_factory=list)
     task_kind: str | None = None
     ontology_id: str | None = None
     confirmation_id: str | None = None

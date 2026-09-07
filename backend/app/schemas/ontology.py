@@ -543,6 +543,15 @@ class ReviewQueueOut(BaseModel):
     next_cursor: str | None = None
 
 
+class SegmentCreate(BaseModel):
+    """人工新建业务板块。``name`` 可省略，由服务端生成稳定的技术标识。"""
+
+    display_name: str
+    name: str | None = None
+    description: str | None = None
+    operator: str | None = None
+
+
 class SegmentUpdate(BaseModel):
     name: str | None = None
     display_name: str | None = None

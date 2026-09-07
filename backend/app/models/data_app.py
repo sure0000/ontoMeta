@@ -122,7 +122,7 @@ class DataApp(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="draft")
-    # chat_generated / manual
+    # agent_generated / manual（旧数据可能仍保留 chat_generated）
     source: Mapped[str] = mapped_column(String(30), default="manual")
     # 前端渲染契约（layout / widgets / columns …），Text(json)
     spec_json: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -127,7 +127,7 @@ export function WidgetLibraryModal({
         loading={loading}
         dataSource={widgets}
         locale={{
-          emptyText: <Empty description="面板库为空，点击「新建面板」或在 Data Agent 中生成" />,
+          emptyText: <Empty description="面板库为空，点击「新建面板」创建" />,
         }}
         renderItem={(w) => (
           <List.Item
@@ -147,7 +147,7 @@ export function WidgetLibraryModal({
                 <Space>
                   {w.name}
                   <Tag>{TYPE_LABEL[w.widget_type] ?? w.widget_type}</Tag>
-                  {w.source === "chat_generated" && <Tag color="blue">问数生成</Tag>}
+                  {(w.source === "chat_generated" || w.source === "agent_generated") && <Tag color="blue">Agent生成</Tag>}
                 </Space>
               }
               description={w.description}

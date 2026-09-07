@@ -53,3 +53,11 @@ def test_transport_error_falls_back_to_cache_200(client, admin_headers):
     res = _get_domains(client, admin_headers, httpx.ConnectError("connection refused"))
     assert res.status_code == 200, res.text
     assert isinstance(res.json(), list)
+
+
+def test_local_domain_listing_skips_datahub_sync(client, admin_headers):
+    """补录页的本地阶段不能被远端 DataHub 同步阻塞。"""
+    with patch.object(workspace, "sync_domains", side_effect=AssertionError("must not sync")):
+        res = client.get("/api/domains?sync=false", headers=admin_headers)
+    assert res.status_code == 200, res.text
+    assert isinstance(res.json(), list)

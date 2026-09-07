@@ -88,7 +88,7 @@ class DataAppTimeRange(BaseModel):
 
 
 class DataAppBinding(BaseModel):
-    """数据集口径绑定。直接复用 Chat BI 口径拆解的结构骨架。"""
+    """数据集口径绑定。复用 MCP/Agent 口径工具的结构骨架。"""
 
     primary_object_type_id: str | None = None
     measures: list[DataAppMeasure] = Field(default_factory=list)
@@ -217,9 +217,6 @@ class DataAppVersionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# --------------------------------------------------------- Chat BI → generate app
-
-
 # --------------------------------------------------------------------- Widgets
 
 
@@ -263,16 +260,6 @@ class DataAppWidgetOut(BaseModel):
     updated_at: datetime
 
 
-class GenerateWidgetFromChatRequest(BaseModel):
-    domain_id: str
-    question: str
-    widget_type: str = "bar"
-    name: str | None = None
-    caliber_decomposition: list[dict[str, Any]] | None = None
-    referenced_objects: list[dict[str, Any]] | None = None
-    dashboard_id: str | None = None
-
-
 class AddWidgetToDashboardRequest(BaseModel):
     widget_id: str
 
@@ -287,17 +274,6 @@ class PublicShareStatus(BaseModel):
     public_token: str | None = None
     password_set: bool = False
     public_expires_at: datetime | None = None
-
-
-class GenerateAppFromChatRequest(BaseModel):
-    domain_id: str
-    app_type: str  # data_table / screen
-    question: str
-    conversation_id: str | None = None
-    name: str | None = None
-    # 复用对话中已展示的回答载荷，保证生成应用与对话口径一致（不重调 LLM）
-    caliber_decomposition: list[dict[str, Any]] | None = None
-    referenced_objects: list[dict[str, Any]] | None = None
 
 
 # ------------------------------------------------------- public (external API)

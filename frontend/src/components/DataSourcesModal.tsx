@@ -40,7 +40,7 @@ interface ConnFormValues {
   catalog_name?: string;
 }
 
-/** 从别处（如 Data Agent 的接数据提案）带过来的非机密预填。凭据永远只由用户在本表单里填。 */
+/** 从 Agent 接入流程带过来的非机密预填。凭据永远只由用户在本表单里填。 */
 export interface DataSourcePrefill {
   name?: string;
   kind?: string;
@@ -215,7 +215,7 @@ export function DataSourcesPanel({
     load();
   }, [load]);
 
-  // 带预填打开（Data Agent 的接数据提案点进来）：直接弹「新增」表单并填好非机密字段。
+  // 带预填打开：直接弹「新增」表单并填好非机密字段。
   // 只认第一次——之后用户关掉表单不该被再次弹开。
   useEffect(() => {
     if (!prefill) return;
@@ -455,12 +455,12 @@ export function DataSourcesPanel({
               <Form.Item
                 name="catalog_name"
                 label="外部 Catalog 元数据（可选）"
-                tooltip="仅用于外部元数据记录，不参与 Data Agent 查询路由"
+                tooltip="仅用于外部元数据记录，不参与 Agent 查询路由"
               >
                 <Input placeholder="如 erp" style={{ width: 160 }} />
               </Form.Item>
             )}
-            {kind === "doris" && <Tag color="blue">默认 Doris 数仓（Data Agent 仅查询此处）</Tag>}
+            {kind === "doris" && <Tag color="blue">默认 Doris 数仓（Agent 仅查询此处）</Tag>}
           </Space>
 
           {editingId && (

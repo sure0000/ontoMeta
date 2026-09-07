@@ -42,6 +42,7 @@ from app.schemas import (
     RelationTypeUpdate,
     ReviewModeStats,
     ReviewQueueOut,
+    SegmentCreate,
     SegmentDetail,
     SegmentSummary,
     SegmentUpdate,
@@ -355,7 +356,8 @@ def publish_preflight(ontology_id: str, db: Session = Depends(get_db)):
     try:
         return publish_service.preflight(db, ontology_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status = 404 if str(exc) == "Segment not found" else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.get(
@@ -879,6 +881,25 @@ def pre_publish_relation_type(
 # ------------------------------------------------------------------
 
 
+@router.post("/ontologies/{ontology_id}/segments", response_model=SegmentDetail)
+def create_segment(
+    ontology_id: str,
+    data: SegmentCreate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.create_segment(
+            db,
+            ontology_id,
+            name=data.name,
+            display_name=data.display_name,
+            description=data.description,
+            operator=data.operator,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/ontologies/{ontology_id}/segments", response_model=PageResult[SegmentSummary])
 def list_segments(
     ontology_id: str,
@@ -931,7 +952,21 @@ def update_segment(
             raise ValueError("Segment not found")
         return result
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status = 404 if str(exc) == "Segment not found" else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@router.delete("/segments/{segment_id}")
+def delete_segment(
+    segment_id: str,
+    operator: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    try:
+        return edit_service.delete_segment(db, segment_id, operator=operator)
+    except ValueError as exc:
+        status = 404 if str(exc) == "Segment not found" else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.get("/ontologies/{ontology_id}/review-stats", response_model=ReviewModeStats)

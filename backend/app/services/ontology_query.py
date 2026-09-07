@@ -789,7 +789,7 @@ class OntologyQueryService:
         rel = db.get(RelationType, relation_type_id)
         if not rel:
             return None
-        # 已发布浏览：未发布的关系视为不存在，与 Data Agent 接地集一致。
+        # 已发布浏览：未发布的关系视为不存在，与 Agent 查询边界一致。
         if published_only and rel.status != EntityStatus.PUBLISHED.value:
             return None
 
@@ -853,7 +853,7 @@ class OntologyQueryService:
         obj_q = db.query(ObjectType).filter(ObjectType.ontology_id == ontology_id)
         rel_q = db.query(RelationType).filter(RelationType.ontology_id == ontology_id)
         if published_only:
-            # 与已发布列表/详情/Data Agent 一致：图谱只展现已发布实体。
+            # 与已发布列表/详情及 Agent 查询边界一致：图谱只展现已发布实体。
             _pub = EntityStatus.PUBLISHED.value
             obj_q = obj_q.filter(ObjectType.status == _pub)
             rel_q = rel_q.filter(RelationType.status == _pub)

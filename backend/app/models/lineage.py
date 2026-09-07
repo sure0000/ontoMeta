@@ -71,7 +71,15 @@ class LineagePackage(Base):
 
 
 class LineagePackageEdge(Base):
-    """代码包里解析出的一条血缘边（上游表 → 落点表 + 一对关联键）。"""
+    """代码包里解析出的一条边。
+
+    ``kind`` 区分两种语义完全不同的东西，别混着看：
+
+    - ``lineage``（默认）：**血缘**，上游表的数据加工进了落点表。上报到 DataHub 的就是它。
+    - ``relation``：**关联关系**，如 DDL 里声明的外键。「订单引用客户」不是「客户加工成订单」，
+      写进 DataHub 血缘图就是假的（会被下游判成 derivation、命名成「派生出」）。
+      所以它**不参与上报**，只作为关联证据进本体（见 ``observed_joins``）。
+    """
 
     __tablename__ = "lineage_package_edges"
 
@@ -80,9 +88,15 @@ class LineagePackageEdge(Base):
         ForeignKey("lineage_packages.id"), index=True
     )
 
+    #: lineage（数据流动，可上报）/ relation（关联关系，只进本体证据）
+    kind: Mapped[str] = mapped_column(
+        String(16), default="lineage", server_default="lineage", index=True
+    )
+
     source_table: Mapped[str] = mapped_column(String(512))
     target_table: Mapped[str] = mapped_column(String(512), index=True)
     #: 关联键的人话形态（``a.x = b.y``）。空＝这条边只有表级，喂不了关系推断。
+    #: ``kind=relation`` 的行这一列必然有值——外键本身就是一对列。
     join_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     source_file: Mapped[str] = mapped_column(String(1024))
 

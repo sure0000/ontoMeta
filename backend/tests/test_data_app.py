@@ -149,80 +149,6 @@ def test_data_app_full_flow(client, admin_headers):
     assert any(a["id"] == app_id for a in res.json())
 
 
-def test_generate_app_from_chat(client, admin_headers):
-    domain_id, _, obj_id, _ = _seed_published_ontology()
-
-    # 无载荷的 generate-app 会回退到 ask() 现问。去 mock 改造后，无 LLM 环境下
-    # ask() 返回配置提示（空引用），无法落地 → 400。真实落地能力由
-    # test_generate_app_reuses_provided_caliber 覆盖（传口径载荷，不走 ask）。
-    res = client.post(
-        "/api/chat-bi/generate-app",
-        headers=admin_headers,
-        json={
-            "domain_id": domain_id,
-            "app_type": "data_table",
-            "question": "最近 30 天各渠道的订单金额合计是多少？",
-        },
-    )
-    assert res.status_code == 400, res.text
-
-
-def test_generate_app_refuses_ungrounded(client, admin_headers):
-    domain_id, *_ = _seed_published_ontology()
-    res = client.post(
-        "/api/chat-bi/generate-app",
-        headers=admin_headers,
-        json={
-            "domain_id": domain_id,
-            "app_type": "screen",
-            "question": "关于火箭发射的无关问题 zzz",
-        },
-    )
-    assert res.status_code == 400, res.text
-
-
-def test_generate_app_reuses_provided_caliber(client, admin_headers):
-    """点击生成时复用对话已展示的口径，而非重新 ask（保证一致性）。"""
-    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
-    db = SessionLocal()
-    try:
-        channel = (
-            db.query(Property)
-            .filter(Property.object_type_id == obj_id, Property.name == "channel")
-            .first()
-        )
-        channel_id = channel.id
-    finally:
-        db.close()
-
-    caliber = [
-        {"label": "主对象", "references": [{"kind": "object_type", "id": obj_id, "name": "orders"}]},
-        {"label": "度量字段", "references": [{"kind": "property", "id": amount_id, "name": "amount"}]},
-        {"label": "维度", "references": [{"kind": "property", "id": channel_id, "name": "channel"}]},
-    ]
-    res = client.post(
-        "/api/chat-bi/generate-app",
-        headers=admin_headers,
-        json={
-            "domain_id": domain_id,
-            "app_type": "data_table",
-            "question": "各渠道金额合计",
-            "caliber_decomposition": caliber,
-            "referenced_objects": [{"id": obj_id, "name": "orders"}],
-        },
-    )
-    assert res.status_code == 200, res.text
-    app = res.json()
-    ds = app["datasets"][0]
-    assert ds["primary_object_type_id"] == obj_id
-    binding = ds["binding"]
-    measure_ids = [m["ref"]["id"] for m in binding["measures"]]
-    dim_ids = [d["id"] for d in binding["dimensions"]]
-    assert amount_id in measure_ids
-    assert channel_id in dim_ids
-    # 复用口径 → 编译 SQL 与该口径一致
-    assert "SUM(amount)" in (ds["compiled_sql"] or "")
-    assert "GROUP BY channel" in (ds["compiled_sql"] or "")
 
 
 def test_dashboard_create_and_generate(client, admin_headers):
@@ -295,19 +221,6 @@ def test_dashboard_create_and_generate(client, admin_headers):
     assert res.json()["status"] == "published"
 
 
-def test_generate_dashboard_from_chat(client, admin_headers):
-    domain_id, *_ = _seed_published_ontology()
-    # 同 test_generate_app_from_chat：无载荷 + 无 LLM → ask() 配置提示→无法落地→400。
-    res = client.post(
-        "/api/chat-bi/generate-app",
-        headers=admin_headers,
-        json={
-            "domain_id": domain_id,
-            "app_type": "dashboard",
-            "question": "最近 30 天各渠道的订单金额合计",
-        },
-    )
-    assert res.status_code == 400, res.text
 
 
 def test_widget_crud_and_add_to_dashboard(client, admin_headers):
@@ -384,38 +297,6 @@ def test_widget_crud_and_add_to_dashboard(client, admin_headers):
     assert res.status_code == 200
     assert res.json()["spec"]["panels"][0]["panel_id"] == widget_id
 
-
-def test_generate_widget_from_chat_into_dashboard(client, admin_headers):
-    domain_id, _ont, obj_id, amount_id = _seed_published_ontology()
-    dash = client.post(
-        "/api/data-apps",
-        headers=admin_headers,
-        json={"domain_id": domain_id, "app_type": "dashboard", "name": "问数看板"},
-    ).json()
-
-    caliber = [
-        {"label": "主对象", "references": [{"kind": "object_type", "id": obj_id, "name": "orders"}]},
-        {"label": "度量字段", "references": [{"kind": "property", "id": amount_id, "name": "amount"}]},
-    ]
-    res = client.post(
-        "/api/chat-bi/generate-widget",
-        headers=admin_headers,
-        json={
-            "domain_id": domain_id,
-            "question": "订单金额合计",
-            "widget_type": "kpi",
-            "caliber_decomposition": caliber,
-            "referenced_objects": [{"id": obj_id, "name": "orders"}],
-            "dashboard_id": dash["id"],
-        },
-    )
-    assert res.status_code == 200, res.text
-    widget = res.json()
-    assert widget["source"] == "chat_generated"
-
-    # 看板已追加该图表 tile
-    detail = client.get(f"/api/data-apps/{dash['id']}", headers=admin_headers).json()
-    assert any(t.get("panel_id") == widget["id"] for t in detail["spec"]["panels"])
 
 
 def _publish_simple_app(client, admin_headers, domain_id, obj_id, amount_id):

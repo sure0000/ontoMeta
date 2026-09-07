@@ -169,6 +169,7 @@ def run_migrations() -> None:
 def init_db() -> None:
     from app import models  # noqa: F401
     from app.services.draft_task_service import recover_stale_draft_tasks
+    from app.services.relation_inference import recover_stale_inference_tasks
     from app.services.settings_service import SettingsService
 
     # 整段放在启动锁里：迁移会互相踩（见 _startup_lock），而下面几个回填虽然各自幂等，
@@ -182,6 +183,9 @@ def init_db() -> None:
         _backfill_relation_structure_types()
         _backfill_ready_sync_projections()
         recover_stale_draft_tasks()
+        # 关系推断跑在 API 进程里，重启会把它打断，留下永远不动的「进行中」——
+        # 那会把同域的下一次推断永久挡在 InferenceAlreadyRunning 外面。
+        recover_stale_inference_tasks()
 
 
 def _backfill_relation_structure_types() -> None:

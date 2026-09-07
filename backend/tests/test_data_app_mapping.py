@@ -89,7 +89,7 @@ def test_catalog_qualified_internal_plain_name():
 
 
 def test_json_safe_converts_driver_types():
-    """MySQL 金额列返回 Decimal，直接进响应体会让 /chat-bi/ask 当场 500。"""
+    """MySQL 金额列返回 Decimal，直接进响应体会让查询请求当场 500。"""
     import datetime
     import decimal
 

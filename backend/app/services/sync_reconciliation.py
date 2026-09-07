@@ -181,7 +181,7 @@ def reconcile_sync_receipt(
         evidence["comparison_note"] = compare_note
 
     # 行数对不上 = 没搬完。这不是「验证不了」，是明确的失败：目标表现在装着一份
-    # 不完整的数据，而下游（Projection / Data Agent）会把它当成这个对象的全量。
+    # 不完整的数据，而下游（Projection / Agent）会把它当成这个对象的全量。
     if comparison == "mismatch":
         contract.status = "failed"
         mirror_contract_to_projection(db, contract)

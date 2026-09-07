@@ -4,8 +4,7 @@
  * **dayjs 必须转**：antd 的 DatePicker 给的是 dayjs 对象，直接 JSON.stringify
  * 会序列化出一坨内部结构（$D/$M/$y…），后端读不懂。
  *
- * 原先住在 Data Agent 的决策留痕工具里；留痕随六环退场，这个转换本身跟留痕无关，
- * 故搬到通用工具下——建数表单提交仍然要它。
+ * 该转换与决策留痕无关，供建数表单提交等通用入口复用。
  */
 export function toJsonSafe(value: unknown): unknown {
   if (value === null || value === undefined) return value;

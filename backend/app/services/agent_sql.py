@@ -1,16 +1,16 @@
 """Agent 代跑只读 SQL 的**唯一**闸门链（中性位置，无对话依赖）。
 
-任何 agent——对话里的 Data Agent、MCP 上的通用 agent——要读真实数据，走的都得是这一条：
+任何 Agent（尤其是 MCP 客户端）要读真实数据，走的都得是这一条：
 
     只读校验 → SQL 语义证明(F3) → 割接闸 → 就绪闸(必要时对账重判) → 落点映射 → 执行
 
 **为什么必须是同一条**：此前 MCP 的 ``execute_sql`` 只做了第一步（只读校验）就直连 Doris。
 两套校验一旦分叉，宽的那套就是实际的安全边界——一个通用 agent 于是可以写一条引用了本体
 里根本不存在的表/列的 SQL，或者去查一张同步还没跑完的表，拿到 0 行、再用权威口吻报出来。
-更隐蔽的是**落点映射**：本体对象名到物理表名的翻译只长在 Data Agent 那一侧，MCP 侧的
-agent 只能自己按命名规则拼表名——而那正是本仓反复禁止的动作。
+更隐蔽的是**落点映射**：本体对象名到物理表名必须由服务端统一解析，客户端不能按命名
+规则自行拼表名。
 
-出参沿用 Data Agent 既有的三元组 ``(payload, summary, is_error)``：
+出参使用统一的三元组 ``(payload, summary, is_error)``：
 ``is_error=True`` 表示这次调用本身不成立（缺参/被拒/执行报错），不计入接地；
 被闸门挡下但**结论有效**的（未就绪、无执行目标、权限不足）是 ``is_error=False`` 的
 「只给建议 SQL」——那是一条真事实，不是错误。
@@ -61,8 +61,7 @@ def published_ontology_ids(db: Session) -> list[str]:
 def may_run_sql(principal_role: str | None) -> bool:
     """当前主体是否够格让 Agent 代跑 SQL。
 
-    权限必须约束到**工具粒度**：问答端点兜底只要 editor，但它内部的 run_sql 直打真实
-    DSN，而手动执行端点要 publisher——不在这里卡一道，工具化就把权限模型绕过去了。
+    权限必须约束到**工具粒度**：代跑 SQL 直打真实 DSN，不能让客户端绕过角色闸门。
     fail-closed：拿不到角色一律视为不够格。
     """
     from app.models.principal import role_satisfies

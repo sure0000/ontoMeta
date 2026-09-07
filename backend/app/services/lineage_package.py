@@ -24,11 +24,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.connectors import datahub as dh
-from app.models import DomainContext, LineagePackage, LineagePackageEdge
+from app.models import (
+    DomainContext,
+    LineagePackage,
+    LineagePackageEdge,
+    LineageTableMapping,
+)
 from app.services import lineage_inventory
 from app.services.lineage_inventory import DomainInventory
 from app.services.settings_service import SettingsService
@@ -132,12 +138,16 @@ class _ScanOutcome:
     failures: list[dict] = field(default_factory=list)
     #: (source_table, target_table, join_key, source_file)
     edges: list[tuple[str, str, str | None, str]] = field(default_factory=list)
+    #: DDL 声明的外键，同样形状但 kind=relation——是关联不是血缘，不上报 DataHub。
+    relations: list[tuple[str, str, str | None, str]] = field(default_factory=list)
 
 
 def _scan_members(members: list[tuple[str, bytes]], dialect: str) -> _ScanOutcome:
     outcome = _ScanOutcome(sql_files=len(members))
     outcome.directories = len({str(Path(name).parent) for name, _ in members})
     seen: set[tuple[str, str, str | None]] = set()
+
+    seen_relations: set[tuple[str, str, str]] = set()
 
     for name, raw in members:
         result = extract(_decode(raw), dialect=dialect)
@@ -149,7 +159,25 @@ def _scan_members(members: list[tuple[str, bytes]], dialect: str) -> _ScanOutcom
 
         outcome.parsed_files += 1
         outcome.statements += result.statements
+
+        # DDL 声明的外键：与血缘完全独立。**一个纯建表包的 lineages 必然为空**
+        # （没有数据流动），但外键可以满满一把。此前不是「产出为 0」而是「产出错的」——
+        # 上游是从整条语句里扫表，REFERENCES 里的被引用表被当成了来源，
+        # 推出一条「customers 加工至 orders」的假血缘（见 sql_lineage_extractor 的说明）。
+        for fk in result.foreign_keys:
+            signature = (fk.table, fk.target_table, fk.render())
+            if signature in seen_relations:
+                continue
+            seen_relations.add(signature)
+            outcome.relations.append(
+                (fk.table, fk.target_table, fk.render(), name)
+            )
+
         if not result.lineages:
+            if result.foreign_keys:
+                # 有外键就不算「没有可推的落点」——这份文件贡献了关联关系，
+                # 记成失败会让人以为白扫了。
+                continue
             # 不是解析失败，是这份文件里没有落点（纯查询、纯 UPDATE）。
             # 单独一类：混进"解析失败"会让「解析成功 + 失败」对不上文件总数。
             outcome.failures.append(
@@ -176,11 +204,23 @@ def _scan_members(members: list[tuple[str, bytes]], dialect: str) -> _ScanOutcom
 
 
 def _classify(
-    inventory: DomainInventory, source: str, target: str
+    inventory: DomainInventory,
+    source: str,
+    target: str,
+    mappings: dict[str, str] | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
-    """给一条边定 URN 与状态：(state, reason, source_urn, target_urn)。"""
-    source_urn = inventory.resolve(source)
-    target_urn = inventory.resolve(target)
+    """给一条边定 URN 与状态：(state, reason, source_urn, target_urn)。
+
+    ``mappings`` 是人工映射（SQL 表名小写 → URN），**优先于自动解析**：人明确说过
+    「这张表就是那张」之后，就不该再让自动匹配把它判回 blocked。
+    """
+    mappings = mappings or {}
+
+    def resolve(name: str) -> str | None:
+        return mappings.get(name.strip().strip("`\"'").lower()) or inventory.resolve(name)
+
+    source_urn = resolve(source)
+    target_urn = resolve(target)
 
     if target_urn is None:
         if not inventory.in_domain(target):
@@ -257,11 +297,22 @@ async def rescan(db: Session, package_id: str, *, dialect: str | None = None) ->
     return package
 
 
+def load_mappings(db: Session, domain_id: str) -> dict[str, str]:
+    """该域的人工表名映射（小写 SQL 表名 → URN）。"""
+    rows = db.execute(
+        select(LineageTableMapping.sql_table, LineageTableMapping.target_urn).where(
+            LineageTableMapping.domain_context_id == domain_id
+        )
+    ).all()
+    return dict(rows)
+
+
 async def _rescan_into(
     db: Session, package: LineagePackage, members: list[tuple[str, bytes]]
 ) -> None:
     outcome = _scan_members(members, package.dialect)
     inventory = await lineage_inventory.get_inventory(db, package.domain_context_id)
+    mappings = load_mappings(db, package.domain_context_id)
 
     applied = {
         (edge.source_table, edge.target_table, edge.join_key)
@@ -269,23 +320,27 @@ async def _rescan_into(
         if edge.applied_at is not None
     }
 
-    for source, target, key, source_file in outcome.edges:
-        if (source, target, key) in applied:
-            continue
-        state, reason, source_urn, target_urn = _classify(inventory, source, target)
-        db.add(
-            LineagePackageEdge(
-                package_id=package.id,
-                source_table=source,
-                target_table=target,
-                join_key=key,
-                source_file=source_file,
-                source_urn=source_urn,
-                target_urn=target_urn,
-                state=state,
-                reason=reason,
+    for kind, rows in (("lineage", outcome.edges), ("relation", outcome.relations)):
+        for source, target, key, source_file in rows:
+            if (source, target, key) in applied:
+                continue
+            state, reason, source_urn, target_urn = _classify(
+                inventory, source, target, mappings
             )
-        )
+            db.add(
+                LineagePackageEdge(
+                    package_id=package.id,
+                    kind=kind,
+                    source_table=source,
+                    target_table=target,
+                    join_key=key,
+                    source_file=source_file,
+                    source_urn=source_urn,
+                    target_urn=target_urn,
+                    state=state,
+                    reason=reason,
+                )
+            )
 
     package.sql_files = outcome.sql_files
     package.directories = outcome.directories
@@ -294,6 +349,101 @@ async def _rescan_into(
     package.failures_json = json.dumps(outcome.failures, ensure_ascii=False)
     package.scanned_at = _utc_naive()
     db.flush()
+
+
+async def save_mapping(
+    db: Session,
+    *,
+    domain_id: str,
+    sql_table: str,
+    target_urn: str,
+    operator: str | None = None,
+) -> int:
+    """记一条人工表名映射，并**立刻修复该域已有的 blocked 边**，返回修复条数。
+
+    只存映射不回填等于让人再点一次「重扫」——而且重扫要重新解析整个包。
+    映射是纯粹的补充信息，能当场用就当场用。
+    """
+    if db.get(DomainContext, domain_id) is None:
+        raise ValueError("数据域不存在")
+
+    key = sql_table.strip().strip("`\"'").lower()
+    if not key or not target_urn.strip():
+        raise ValueError("表名与目标 URN 都不能为空")
+
+    inventory = await lineage_inventory.get_inventory(db, domain_id)
+    target = next((t for t in inventory.tables if t.urn == target_urn), None)
+    if target is None:
+        raise ValueError("目标表不在本域的 DataHub 清单里")
+
+    existing = db.execute(
+        select(LineageTableMapping).where(
+            LineageTableMapping.domain_context_id == domain_id,
+            LineageTableMapping.sql_table == key,
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        existing = LineageTableMapping(
+            domain_context_id=domain_id, sql_table=key, created_by=operator
+        )
+        db.add(existing)
+    existing.target_urn = target_urn
+    existing.target_table = target.name
+    db.flush()
+
+    mappings = load_mappings(db, domain_id)
+    blocked = db.execute(
+        select(LineagePackageEdge)
+        .join(LineagePackage, LineagePackage.id == LineagePackageEdge.package_id)
+        .where(
+            LineagePackage.domain_context_id == domain_id,
+            LineagePackageEdge.state == "blocked",
+        )
+    ).scalars().all()
+
+    repaired = 0
+    for edge in blocked:
+        state, reason, source_urn, target_urn_new = _classify(
+            inventory, edge.source_table, edge.target_table, mappings
+        )
+        # **理由也要跟着更新**，哪怕状态还是 blocked：一条边两端都对不上时，
+        # 映射了其中一端之后理由该从「落点表未找到」变成「上游表未找到」。
+        # 不更新的话，人映射完看见的还是原来那句，会以为映射没生效。
+        was_blocked = edge.state == "blocked"
+        edge.state, edge.reason = state, reason
+        edge.source_urn, edge.target_urn = source_urn, target_urn_new
+        if was_blocked and state != "blocked":
+            repaired += 1
+
+    db.commit()
+    logger.info(
+        "域 %s 记下映射 %s → %s，顺带修复 %d 条 blocked 边",
+        domain_id,
+        key,
+        target.name,
+        repaired,
+    )
+    return repaired
+
+
+def list_mappings(db: Session, domain_id: str) -> list[LineageTableMapping]:
+    return list(
+        db.execute(
+            select(LineageTableMapping)
+            .where(LineageTableMapping.domain_context_id == domain_id)
+            .order_by(LineageTableMapping.sql_table)
+        ).scalars()
+    )
+
+
+def delete_mapping(db: Session, mapping_id: str) -> None:
+    """删掉一条映射。**不会把之前修复的边打回 blocked**——那些边已经带上了正确的
+    URN，回退只会让人困惑；要改判就重扫。"""
+    mapping = db.get(LineageTableMapping, mapping_id)
+    if mapping is None:
+        raise ValueError("映射不存在")
+    db.delete(mapping)
+    db.commit()
 
 
 def delete(db: Session, package_id: str) -> None:
@@ -327,7 +477,10 @@ async def apply(
     pending = [
         edge
         for edge in package.edges
-        if edge.state == "ok"
+        # kind=relation 是关联关系（DDL 外键），**不上报**：写进 DataHub 血缘图
+        # 等于声明「被引用表的数据加工成了引用表」，那是假的。它只进本体证据。
+        if edge.kind == "lineage"
+        and edge.state == "ok"
         and edge.applied_at is None
         and edge.source_urn
         and edge.target_urn
@@ -345,7 +498,10 @@ async def apply(
     package.applied_resolved += receipt.resolved
     package.applied_at = _utc_naive()
     remaining = [
-        edge for edge in package.edges if edge.state == "ok" and edge.applied_at is None
+        edge
+        for edge in package.edges
+        # 与 pending 同一条口径：relation 边永远不上报，不该让包停在 partial。
+        if edge.kind == "lineage" and edge.state == "ok" and edge.applied_at is None
     ]
     package.status = "applied" if not remaining else "partial"
     db.commit()
@@ -422,7 +578,12 @@ async def _write_edges(
     edges: list[LineagePackageEdge],
     isolated_before: set[str],
 ) -> ApplyReceipt:
-    """真正向 DataHub 写表级边。按 (上游 URN, 下游 URN) 去重后逐条发。"""
+    """真正向 DataHub 写表级边。按 (上游 URN, 下游 URN) 去重后**分批**发。
+
+    ``edgesToAdd`` 本来就是数组，此前却是一对表一次往返——300 条边 300 次串行请求。
+    现在按批发；**整批失败时退回逐条重发**定位到具体的边，否则回执会退化成
+    「这 50 条全挂了」，人拿着这种回执什么也修不了。
+    """
     receipt = ApplyReceipt()
     pairs: dict[tuple[str, str], list[LineagePackageEdge]] = {}
     for edge in edges:
@@ -430,30 +591,48 @@ async def _write_edges(
 
     connector = dh.DataHubConnector(SettingsService().get_datahub_runtime(db))
     written_targets: set[str] = set()
-    try:
-        for (source_urn, target_urn), group in pairs.items():
-            try:
-                ok = await dh.add_lineage_edge(connector, source_urn, target_urn)
-            except dh.DataHubWriteError as exc:
-                ok = False
-                receipt.failures.append(
-                    {"source": source_urn, "target": target_urn, "error": str(exc)}
-                )
-            except Exception as exc:  # noqa: BLE001 — 单条失败不中断其余
-                ok = False
-                receipt.failures.append(
-                    {"source": source_urn, "target": target_urn, "error": str(exc)}
-                )
+    stamped = _utc_naive()
 
-            if not ok:
-                receipt.failed += len(group)
+    def _mark(pair: tuple[str, str]) -> None:
+        for edge in pairs[pair]:
+            edge.applied_at = stamped
+        receipt.applied += len(pairs[pair])
+        written_targets.add(pair[1])
+
+    def _fail(pair: tuple[str, str], error: str) -> None:
+        receipt.failed += len(pairs[pair])
+        receipt.failures.append({"source": pair[0], "target": pair[1], "error": error})
+
+    async def _send(chunk: list[tuple[str, str]]) -> bool:
+        """发一批。传输层抛错也算整批没成，交给调用方决定要不要逐条定位。"""
+        try:
+            return await dh.add_lineage_edges(connector, chunk)
+        except Exception:  # noqa: BLE001 — 失败归因在下面逐条重发时做
+            return False
+
+    try:
+        keys = list(pairs)
+        for start in range(0, len(keys), dh.LINEAGE_BATCH_SIZE):
+            chunk = keys[start : start + dh.LINEAGE_BATCH_SIZE]
+            if await _send(chunk):
+                for pair in chunk:
+                    _mark(pair)
                 continue
 
-            stamped = _utc_naive()
-            for edge in group:
-                edge.applied_at = stamped
-            receipt.applied += len(group)
-            written_targets.add(target_urn)
+            # 批失败 → 逐条重发，把「哪条边坏了」找出来。
+            logger.warning(
+                "域 %s 批量上报失败（%d 条），退回逐条定位", domain_id, len(chunk)
+            )
+            for pair in chunk:
+                try:
+                    ok = await dh.add_lineage_edge(connector, pair[0], pair[1])
+                except Exception as exc:  # noqa: BLE001 — 单条失败不中断其余
+                    _fail(pair, str(exc))
+                    continue
+                if ok:
+                    _mark(pair)
+                else:
+                    _fail(pair, "DataHub 返回失败")
     finally:
         await connector.aclose()
 

@@ -187,6 +187,12 @@
   color: var(--om-text-tertiary);
 }
 
+.lin-stat-note {
+  color: var(--om-text-tertiary);
+  font-size: var(--om-text-2xs);
+  white-space: nowrap;
+}
+
 .lin-stat-arrow {
   font-size: 10px;
   color: var(--om-text-tertiary);
@@ -344,7 +350,7 @@
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 9px 32px 9px 10px;
+  padding: 9px 76px 9px 10px;
   border: 1px solid transparent;
   border-radius: var(--om-radius);
   background: transparent;
@@ -1459,4 +1465,251 @@
   to {
     background-position: -100% 0;
   }
+}
+
+/* ---------- 智能关系补充：建议抽屉 ---------- */
+
+.lin-cand-intro {
+  margin: 0 0 var(--om-space-3);
+  font-size: var(--om-text-xs);
+  line-height: 1.7;
+  color: var(--om-text-tertiary);
+}
+
+.lin-cand-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: var(--om-space-3);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+}
+
+.lin-cand-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--om-space-3);
+  padding: 8px 10px;
+  border-radius: var(--om-radius);
+  background: var(--om-surface-muted);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+}
+
+.lin-cand-summary b {
+  font-family: var(--om-font-mono);
+  color: var(--om-text);
+}
+
+.lin-cand-section {
+  margin-bottom: var(--om-space-4);
+}
+
+.lin-cand-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: var(--om-text-sm);
+  font-weight: 600;
+  color: var(--om-text);
+}
+
+.lin-cand-section h4 span {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xs);
+  font-weight: 400;
+  color: var(--om-text-tertiary);
+}
+
+/* 一个键族一张卡：人审的粒度是族，不是两两关系 */
+.lin-cand {
+  margin-bottom: 8px;
+  padding: 10px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  background: var(--om-surface);
+}
+
+.lin-cand--on {
+  border-color: var(--om-success);
+  background: var(--om-success-soft, var(--om-surface-muted));
+}
+
+.lin-cand-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.lin-cand-head .ant-tag {
+  margin-inline-end: 0;
+}
+
+.lin-cand-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--om-text-sm);
+  color: var(--om-text);
+}
+
+.lin-cand-key {
+  color: var(--om-text-secondary);
+  font-size: var(--om-text-xs);
+}
+
+.lin-cand-conf {
+  flex: none;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-cand-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-cand-meta i {
+  width: 3px;
+  height: 3px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-text-disabled);
+}
+
+.lin-cand-meta code,
+.lin-cand-samples code {
+  padding: 1px 5px;
+  border-radius: var(--om-radius-sm);
+  background: var(--om-surface-muted);
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-secondary);
+}
+
+.lin-cand-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+/* 判据原文：人审的就是这句，给足行高 */
+.lin-cand-reason {
+  margin: 0 0 8px;
+  font-size: var(--om-text-xs);
+  line-height: 1.7;
+  color: var(--om-text-secondary);
+}
+
+.lin-cand-cols {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text-tertiary);
+}
+
+.lin-cand-cols b {
+  color: var(--om-text-secondary);
+  font-weight: 600;
+}
+
+.lin-cand-cols .ant-tag {
+  margin-inline-start: 4px;
+  margin-inline-end: 0;
+}
+
+.lin-cand-more {
+  color: var(--om-text-disabled);
+}
+
+.lin-cand-pairs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: var(--om-radius-sm);
+  background: var(--om-surface-muted);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-cand-pairs .ant-tag {
+  margin-inline-start: 4px;
+  margin-inline-end: 0;
+}
+
+.lin-cand-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lin-cand-note {
+  font-size: var(--om-text-xs);
+  color: var(--om-text-disabled);
+}
+
+/* ---------- 人工表名映射 ---------- */
+
+.lin-map-intro {
+  margin: 0 0 var(--om-space-3);
+  font-size: var(--om-text-sm);
+  line-height: 1.8;
+  color: var(--om-text-secondary);
+}
+
+.lin-map-intro code {
+  padding: 1px 6px;
+  border-radius: var(--om-radius-sm);
+  background: var(--om-surface-muted);
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text);
+}
+
+.lin-map-list {
+  margin-top: var(--om-space-3);
+  padding: 8px 10px;
+  border-radius: var(--om-radius);
+  background: var(--om-surface-muted);
+}
+
+.lin-map-list-head {
+  margin-bottom: 6px;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-map-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+}
+
+.lin-map-row code {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+  color: var(--om-text);
+}
+
+.lin-map-row .ant-tag {
+  margin-inline-end: 0;
 }

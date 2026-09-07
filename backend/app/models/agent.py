@@ -80,7 +80,7 @@ class GovernanceArtifact(Base, ProvenanceMixin):
     # 谁、从哪个入口建的这条任务。
     #
     # **制品是「机器提了什么、人定了什么」的唯一记录**（此前另有一张按会话组织的决策
-    # 账本，随 Data Agent 会话一起退场）。既然唯一，创建时刻的身份就不能是空的——
+    # 账本随旧对话入口一起退场）。既然唯一，创建时刻的身份就不能是空的——
     # ``origin`` 只分得出 machine/user，分不出是谁、是 Web 还是外部 agent 经 MCP 建的。
     #
     # ``created_via`` 取 ``AuthContext.client_type`` 的同一套词：frontend / mcp_local /

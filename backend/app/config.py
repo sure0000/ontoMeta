@@ -125,15 +125,12 @@ class Settings(BaseSettings):
     # DeepSeek 64K token 上下文，此处默认 ~48000 字符（约 16-20K token），
     # 为 system prompt 与输出预留充足余量。
     llm_context_budget_chars: int = 48000
-    # Data Agent 形式化可靠性闸门（FORMAL_VALIDATION_IMPL.md）：
+    # Agent 形式化可靠性闸门（FORMAL_VALIDATION_IMPL.md）：
     #   off  — 完全关闭，回到现状（零风险回滚）
     #   warn — 只记录「本应拒答」到回执，不真拒（观测泄漏基线/误杀率）
     #   on   — 正式生效：SQL 语义证明不过则不执行、断言不可证则拒答
     agent_soundness: str = "on"
-    # Data Agent 的 run_sql 工具最低角色（P1.1）。
-    # 手动执行端点 `POST /chat-bi/messages/{id}/execute` 要求 publisher，而 `/chat-bi/ask`
-    # 兜底只要 editor——工具化会绕过权限模型：editor 自己跑 SQL 被 403，让 Agent 代跑却放行。
-    # 故 run_sql 在**工具粒度**上与 /execute 同价。降为 "editor" 可回到改造前行为。
+    # Agent 代跑 SQL 工具最低角色。手动执行和 MCP 调用都复用这一条闸门。
     agent_run_sql_min_role: str = "publisher"
     # 字段取值画像（P1.3）：缓存秒数（0=禁用缓存）与 TopN 条数。
     # 取值分布变化慢，缓存主要是防「每问一次就打一次库」。
@@ -147,33 +144,6 @@ class Settings(BaseSettings):
     agent_embedding_dim: int = 256
     # 余弦相似度下限：低于此分不作为召回结果（0 表示不过滤）
     agent_embedding_min_score: float = 0.0
-    # V4 O1 上下文 compaction：对齐 pi 的结构化摘要 + 近轮保留。
-    #   on  — 历史超预算时把旧轮抽取为结构化摘要，仅保留近轮原文
-    #   off — 回到 history[-6:] 硬截断（零风险回滚）
-    agent_compaction: str = "on"
-    # 近轮保留的字符预算（约等于 token×2，CJK 场景取字符更稳）。超此预算的更早轮被摘要。
-    agent_history_char_budget: int = 6000
-    # V4 O2 大结果离场存储：run_sql 结果表辇大时，回给模型的只是「列名 + 样例 N 行 + 总行数 + 句柄」，
-    # 全量行存在进程内 per-run store，模型需要更多行时用 read_result(handle, offset, limit) 分页取。
-    #   上下文只看到样例，不再被整张表污染、也不被字符截断丢列。前端/渲染/analyze 仍拿全量。
-    agent_result_offload: str = "on"  # on/off（off 回到直接回灰全量行的旧行为）
-    # 回给模型的样例行数。**V5 T2 实测过 5 vs 20，维持 5**（详见 DATA_AGENT_V5_PLAN §P0.9）。
-    #
-    # 调大的理由曾经很硬：ERP 域实测显示结果一超过 5 行，模型下一步必定
-    # `read_result(offset=5, limit=剩余)` 把余下的**全部**翻回来（20 行取走 15、8 行取走 3），
-    # 那次离场等于白花一次 LLM 往返；而多带 15 行只要 ~1000 字符，多一次往返要重付
-    # 一整轮 prefill ≈30800 字符——账面上差 30 倍。
-    #
-    # **同一问句序列跑 5 与 20 的对照，把这个预测推翻了**：往返确实省掉了
-    # （read_result 2→0、离场字符→0），但 `avg_llm_calls` 反而 6.2→8.0、步数 7.0→9.5，
-    # 逐轮配对是 5 涨 1 平 0 降——不是个别轮次的偏差。样例行变多之后模型在结果上
-    # 兜圈子的轮次也变多，省下的那一次往返被这个盖过去了。
-    # 「不回涨 avg_llm_calls」是 V5 的验收护栏，故按实测维持 5，不按算术预测改。
-    agent_result_sample_rows: int = 5
-    # V4 O6 运行轨迹落地（pi JSONL session 风格，非 DB 表，改造后可整目录摘除）。
-    #   关闭时不写文件；开启后每问追加一行 JSON 到 agent_trace_dir。
-    agent_trace_enabled: bool = False
-    agent_trace_dir: str = ".logs/agent_traces"
     # 发布时形式化不变式校验（F2）：
     #   off  — 不检查
     #   warn — 检查并返回报告，不阻断发布（默认，迁移期安全）
@@ -194,8 +164,17 @@ class Settings(BaseSettings):
     # 预生成的 evidence 证据包磁盘缓存 TTL（秒）：续跑/重试时命中则跳过 DataHub 的
     # 分钟级抓取，直接进入分块生成。0 = 禁用缓存。默认 6 小时。
     draft_evidence_cache_ttl_seconds: int = 21600
-    # evidence 缓存落盘目录（相对 backend 工作目录，跟随 agent_trace_dir 的约定）。
+    # evidence 缓存落盘目录（相对 backend 工作目录）。
     draft_evidence_cache_dir: str = ".cache/draft_evidence"
+    # DataHub **原始** bundle 的磁盘缓存 TTL（秒）：键族聚类要的是物理表名/列名/样例值，
+    # 与组装后的 evidence 不是一份东西，故单独缓存。0 = 禁用。默认 6 小时，与 evidence 对齐。
+    datahub_bundle_cache_ttl_seconds: int = 21600
+    # DataHub bundle 缓存落盘目录（相对 backend 工作目录）。
+    datahub_bundle_cache_dir: str = ".cache/datahub_bundle"
+    # 键族判定的 LLM 超时（秒）。**必须比 llm_timeout_seconds 宽**：那是按「一次命名一小块」
+    # 定的，而键族判定是整域一次长生成——实测自建 glm-5.2-fp8 上 12 个族要 ~430s，
+    # 用 300s 的通用超时会在中途超时后整轮重来（max_retries 叠加最坏能烧十几分钟）。
+    key_family_verdict_timeout_seconds: float = 900.0
     # 连接类瞬时失败时自动续跑的最大次数（0 = 禁用，退回人工重试）：自动入队的续跑
     # 任务复用 checkpoint + evidence 缓存，只补缺失块，绝不重跑抓取。
     draft_auto_resume_max: int = 2

@@ -1,4 +1,6 @@
 import json
+import re
+import uuid
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -231,15 +233,17 @@ def _mark_edited(entity) -> None:
     发布这一刻仍有意义：打版本快照 + 提升新确认的实体。已发布内容被直接改动会由
     「N 项待固化」提示条呈现，见 workspace_service 的 unpublished_change_count。
     """
-    if entity.status == EntityStatus.PUBLISHED.value:
+    status = getattr(entity, "status", None)
+    if status == EntityStatus.PUBLISHED.value:
         # 已发布内容被直接改动：状态不动（立即生效），但要留下「待固化」凭据，
         # 否则这件事在界面上完全不可见。publish() 提升实体时清零。
         if hasattr(entity, "has_unpublished_change"):
             entity.has_unpublished_change = True
         return
-    if entity.status == EntityStatus.PRE_PUBLISHED.value:
+    if status == EntityStatus.PRE_PUBLISHED.value:
         return
-    entity.status = EntityStatus.EDITED.value
+    if hasattr(entity, "status"):
+        entity.status = EntityStatus.EDITED.value
 
 
 def _mark_overridden(entity, fields: list[str]) -> None:
@@ -327,7 +331,7 @@ class EditService:
             # 验证板块存在且属于同一本体
             if segment_id != "":  # 空字符串表示移出板块
                 segment = db.get(OntologySegment, segment_id)
-                if not segment:
+                if not segment or segment.deleted_by_user or segment.upstream_removed:
                     raise ValueError(f"板块不存在：{segment_id}")
                 if segment.ontology_id != obj.ontology_id:
                     raise ValueError("不能将对象移动到其他本体的板块")
@@ -412,7 +416,11 @@ class EditService:
         target_segment = None
         if segment_id:
             target_segment = db.get(OntologySegment, segment_id)
-            if not target_segment:
+            if (
+                not target_segment
+                or target_segment.deleted_by_user
+                or target_segment.upstream_removed
+            ):
                 raise ValueError(f"板块不存在：{segment_id}")
             if any(o.ontology_id != target_segment.ontology_id for o in objs):
                 raise ValueError("不能将对象移动到其他本体的板块")
@@ -688,8 +696,10 @@ class EditService:
         operator: str | None = None,
     ):
         segment = db.get(OntologySegment, segment_id)
-        if not segment or segment.deleted_by_user:
+        if not segment or segment.deleted_by_user or segment.upstream_removed:
             raise ValueError("Segment not found")
+        if segment.kind == "system":
+            raise ValueError("系统表板块不能修改")
         changed: list[str] = []
         if name is not None and name != segment.name:
             clash = db.query(OntologySegment).filter(
@@ -714,6 +724,100 @@ class EditService:
             _log_change(db, "ontology_segment", segment.id, "edit", operator, "更新业务板块")
             db.commit()
         return self.query.get_segment_detail(db, segment.id)
+
+    def create_segment(
+        self,
+        db: Session,
+        ontology_id: str,
+        *,
+        name: str | None = None,
+        display_name: str,
+        description: str | None = None,
+        operator: str | None = None,
+    ):
+        """Create a user-owned business segment in an existing working ontology."""
+        ontology = db.get(Ontology, ontology_id)
+        if not ontology:
+            raise ValueError("Ontology not found")
+
+        display_name = (display_name or "").strip()
+        if not display_name:
+            raise ValueError("板块显示名称不能为空")
+        requested_name = (name or "").strip()
+        if requested_name:
+            segment_name = requested_name
+        else:
+            # Keep technical names readable for ASCII input while supporting Chinese names.
+            slug = re.sub(r"[^a-zA-Z0-9]+", "_", display_name).strip("_").lower()
+            segment_name = slug or f"segment_{uuid.uuid4().hex[:10]}"
+
+        clash = db.query(OntologySegment).filter(
+            OntologySegment.ontology_id == ontology_id,
+            OntologySegment.name == segment_name,
+            OntologySegment.deleted_by_user == False,  # noqa: E712
+        ).first()
+        if clash:
+            raise ValueError(f"板块标识名「{segment_name}」已被占用")
+
+        segment = OntologySegment(
+            ontology_id=ontology_id,
+            name=segment_name,
+            display_name=display_name,
+            kind=SEGMENT_KIND_BUSINESS,
+            description=description.strip() if description else None,
+            member_count=0,
+            user_created=True,
+            origin="manual",
+        )
+        db.add(segment)
+        db.flush()
+        _log_change(db, "ontology_segment", segment.id, "create", operator, "新建业务板块")
+        db.commit()
+        return self.query.get_segment_detail(db, segment.id)
+
+    def delete_segment(
+        self,
+        db: Session,
+        segment_id: str,
+        *,
+        operator: str | None = None,
+    ) -> dict:
+        """Soft-delete a segment and re-place its members into the remaining partition."""
+        segment = db.get(OntologySegment, segment_id)
+        if not segment or segment.deleted_by_user or segment.upstream_removed:
+            raise ValueError("Segment not found")
+        if segment.kind == "system":
+            raise ValueError("系统表板块不能删除")
+
+        members = db.query(ObjectType).filter(
+            ObjectType.ontology_id == segment.ontology_id,
+            ObjectType.segment_id == segment.id,
+            ObjectType.deleted_by_user == False,  # noqa: E712
+        ).all()
+        segment.deleted_by_user = True
+        segment.member_count = 0
+        _mark_overridden(segment, ["deleted_by_user"])
+        # Let the normal placement rules choose another business segment where possible;
+        # otherwise the objects land in the system fallback and remain visible for review.
+        for obj in members:
+            obj.segment_id = None
+        db.flush()
+        placement = place_unsegmented(db, segment.ontology_id)
+        _log_change(
+            db,
+            "ontology_segment",
+            segment.id,
+            "delete",
+            operator,
+            f"删除业务板块，重新分配 {len(members)} 个成员",
+        )
+        db.commit()
+        return {
+            "id": segment.id,
+            "deleted": True,
+            "reassigned": len(members),
+            "placement": placement,
+        }
 
     def delete_relation_type(
         self,

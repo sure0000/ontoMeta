@@ -3,7 +3,10 @@ import {
   AuditOutlined,
   BulbOutlined,
   CheckCircleOutlined,
+  DeleteOutlined,
+  EditOutlined,
   PartitionOutlined,
+  PlusOutlined,
   QuestionCircleOutlined,
   RollbackOutlined,
   UndoOutlined,
@@ -13,6 +16,10 @@ import {
   Button,
   Checkbox,
   Empty,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
   Popover,
   Progress,
   Segmented,
@@ -190,6 +197,14 @@ export function ReviewWorkbenchPage() {
   const [verbDrawerOpen, setVerbDrawerOpen] = useState(false);
   // 看细节不离开队列：跳出去再回来，位置/选择集/判到哪一组全得重建。
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [segmentEditor, setSegmentEditor] = useState<"create" | "edit" | null>(null);
+  const [editingSegment, setEditingSegment] = useState<SegmentSummary | null>(null);
+  const [segmentSaving, setSegmentSaving] = useState(false);
+  const [segmentForm] = Form.useForm<{
+    name?: string;
+    display_name: string;
+    description?: string;
+  }>();
 
   const [applying, setApplying] = useState(false);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
@@ -393,6 +408,75 @@ export function ReviewWorkbenchPage() {
   const refresh = useCallback(async () => {
     await Promise.all([queue.reload(), stats.reload(), segments.reload()]);
   }, [queue, stats, segments]);
+
+  const openCreateSegment = useCallback(() => {
+    setEditingSegment(null);
+    segmentForm.resetFields();
+    setSegmentEditor("create");
+  }, [segmentForm]);
+
+  const openEditSegment = useCallback(
+    (segment: SegmentSummary) => {
+      setEditingSegment(segment);
+      segmentForm.setFieldsValue({
+        name: segment.name,
+        display_name: segment.display_name,
+        description: segment.description || "",
+      });
+      setSegmentEditor("edit");
+    },
+    [segmentForm],
+  );
+
+  const saveSegment = useCallback(async () => {
+    if (!ontologyId) return;
+    try {
+      const values = await segmentForm.validateFields();
+      setSegmentSaving(true);
+      if (segmentEditor === "create") {
+        const created = await api.createSegment({ ontology_id: ontologyId, ...values });
+        setMoveTarget(created.id);
+        message.success(`已新建业务板块「${created.display_name}」`);
+      } else if (editingSegment) {
+        await api.updateSegment(editingSegment.id, values);
+        message.success("业务板块已重命名");
+      }
+      setSegmentEditor(null);
+      setEditingSegment(null);
+      await refresh();
+    } catch (err) {
+      if (err instanceof Error) {
+        message.error(err.message);
+      }
+    } finally {
+      setSegmentSaving(false);
+    }
+  }, [ontologyId, segmentForm, segmentEditor, editingSegment, refresh]);
+
+  const removeSegment = useCallback(
+    async (segment: SegmentSummary) => {
+      try {
+        setSegmentSaving(true);
+        const result = await api.deleteSegment(segment.id);
+        if (segmentFilter === segment.id) {
+          setSegmentFilter("");
+          setCursor("");
+        }
+        if (moveTarget === segment.id) setMoveTarget(undefined);
+        message.success(
+          result.reassigned > 0
+            ? `已删除「${segment.display_name}」，${result.reassigned} 个成员已重新分配`
+            : `已删除「${segment.display_name}」`,
+        );
+        await refresh();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "删除业务板块失败");
+      } finally {
+        setSegmentSaving(false);
+      }
+    },
+    [segmentFilter, moveTarget, refresh, setSegmentFilter, setCursor],
+  );
 
   const applyVerdict = useCallback(
     async (verdict: Verdict) => {
@@ -945,7 +1029,22 @@ export function ReviewWorkbenchPage() {
 
         <div className="review-panes">
           <aside className="review-pane review-pane--queue">
-            <div className="review-pane-label">{relationScope ? "按板块筛选" : "队列"}</div>
+            <div className="review-pane-label review-pane-label--with-action">
+              <span>{relationScope ? "按板块筛选" : "队列"}</span>
+              {ontologyId && (
+                <Tooltip title="新建业务板块">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<PlusOutlined />}
+                    disabled={segmentSaving}
+                    onClick={openCreateSegment}
+                  >
+                    新建板块
+                  </Button>
+                </Tooltip>
+              )}
+            </div>
             {/* 判完不等于看不见：同一批组、同一套 key，换的只是成员的那一半。
                 判错了能退回重判，判完的板块能原样打开复查。 */}
             <Segmented
@@ -986,43 +1085,83 @@ export function ReviewWorkbenchPage() {
             </button>
             {(stats.data?.segment_progress ?? []).map((seg) => {
               const scoped = segmentScope(seg);
+              const segment = segments.data?.items.find((item) => item.id === seg.segment_id);
               return (
-                <button
-                  type="button"
-                  key={seg.segment_id}
-                  className={`review-seg ${
-                    segmentFilter === seg.segment_id ? "review-seg--on" : ""
-                  } ${scoped.total > 0 && scoped.pending === 0 ? "review-seg--done" : ""}`}
-                  onClick={() => {
-                    setSegmentFilter(seg.segment_id);
-                    setCursor("");
-                    // 判完的板块点进去不该是一片空白：直接给它已判的那一半。
-                    if (scoped.total > 0 && scoped.pending === 0) setStatus("reviewed");
-                  }}
-                >
-                  <span className="review-seg-name" title={seg.segment_name}>
-                    {scoped.total > 0 && scoped.pending === 0 ? "✓ " : ""}
-                    {seg.segment_name}
-                  </span>
-                  <PendingSup count={scoped.pending} />
-                  {/* 计数跟着当前范围走：对象页排除关系表，外键数边，关系表数
-                      bridge 对象。此前关系页只显示板块名不给数字，是因为拿对象进度
-                      顶替会读成假数字——现在后端按各自口径给，数字就可以给全。 */}
-                  <span className="review-seg-num">
-                    {scoped.total - scoped.pending}/{scoped.total}
-                  </span>
-                  <span className="review-seg-bar">
-                    <i
-                      style={{
-                        width: `${
-                          scoped.total > 0
-                            ? Math.round(((scoped.total - scoped.pending) / scoped.total) * 100)
-                            : 100
-                        }%`,
-                      }}
-                    />
-                  </span>
-                </button>
+                <div className="review-seg-entry" key={seg.segment_id}>
+                  <button
+                    type="button"
+                    className={`review-seg ${
+                      segmentFilter === seg.segment_id ? "review-seg--on" : ""
+                    } ${scoped.total > 0 && scoped.pending === 0 ? "review-seg--done" : ""}`}
+                    onClick={() => {
+                      setSegmentFilter(seg.segment_id);
+                      setCursor("");
+                      // 判完的板块点进去不该是一片空白：直接给它已判的那一半。
+                      if (scoped.total > 0 && scoped.pending === 0) setStatus("reviewed");
+                    }}
+                  >
+                    <span className="review-seg-name" title={seg.segment_name}>
+                      {scoped.total > 0 && scoped.pending === 0 ? "✓ " : ""}
+                      {seg.segment_name}
+                    </span>
+                    <PendingSup count={scoped.pending} />
+                    {/* 计数跟着当前范围走：对象页排除关系表，外键数边，关系表数
+                        bridge 对象。此前关系页只显示板块名不给数字，是因为拿对象进度
+                        顶替会读成假数字——现在后端按各自口径给，数字就可以给全。 */}
+                    <span className="review-seg-num">
+                      {scoped.total - scoped.pending}/{scoped.total}
+                    </span>
+                    <span className="review-seg-bar">
+                      <i
+                        style={{
+                          width: `${
+                            scoped.total > 0
+                              ? Math.round(((scoped.total - scoped.pending) / scoped.total) * 100)
+                              : 100
+                          }%`,
+                        }}
+                      />
+                    </span>
+                  </button>
+                  {segment && segment.kind !== "system" && (
+                    <span className="review-seg-actions">
+                      <Tooltip title="重命名业务板块">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<EditOutlined />}
+                          aria-label={`重命名${segment.display_name}`}
+                          disabled={segmentSaving}
+                          onClick={() => openEditSegment(segment)}
+                        />
+                      </Tooltip>
+                      <Popconfirm
+                        title={`删除「${segment.display_name}」？`}
+                        description={
+                          segment.member_count > 0
+                            ? `${segment.member_count} 个成员将重新分配到其他板块或系统表。`
+                            : "删除后不可在审核台继续使用该板块。"
+                        }
+                        okText="删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true, loading: segmentSaving }}
+                        onConfirm={() => void removeSegment(segment)}
+                      >
+                        <Tooltip title="删除业务板块">
+                          <Button
+                            type="text"
+                            danger
+                            size="small"
+                            icon={<DeleteOutlined />}
+                            aria-label={`删除${segment.display_name}`}
+                            disabled={segmentSaving}
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        </Tooltip>
+                      </Popconfirm>
+                    </span>
+                  )}
+                </div>
               );
             })}
             {unsegmentedScope.total > 0 && <div className="review-seg-divider" />}
@@ -1457,6 +1596,41 @@ export function ReviewWorkbenchPage() {
             onApplied={refresh}
           />
         )}
+
+        <Modal
+          title={segmentEditor === "create" ? "新建业务板块" : "重命名业务板块"}
+          open={segmentEditor !== null}
+          onOk={() => void saveSegment()}
+          onCancel={() => {
+            if (!segmentSaving) {
+              setSegmentEditor(null);
+              setEditingSegment(null);
+            }
+          }}
+          confirmLoading={segmentSaving}
+          destroyOnClose
+        >
+          <Form form={segmentForm} layout="vertical">
+            <Form.Item
+              name="display_name"
+              label="板块名称"
+              rules={[{ required: true, whitespace: true, message: "请输入板块名称" }]}
+            >
+              <Input placeholder="例如：销售管理" maxLength={255} autoFocus />
+            </Form.Item>
+            <Form.Item
+              name="name"
+              label="技术标识名"
+              extra={segmentEditor === "create" ? "可留空，系统会根据板块名称自动生成。" : undefined}
+              rules={[{ whitespace: true, message: "技术标识名不能只包含空格" }]}
+            >
+              <Input placeholder="可选，例如 sales_management" maxLength={255} />
+            </Form.Item>
+            <Form.Item name="description" label="描述">
+              <Input.TextArea rows={3} maxLength={1000} />
+            </Form.Item>
+          </Form>
+        </Modal>
       </div>
     </PageContainer>
   );

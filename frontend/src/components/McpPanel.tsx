@@ -500,7 +500,7 @@ function ToolDescription({ text }: { text: string }) {
 
   return (
     <div style={{ fontSize: 12 }}>
-      <div className="chatbi-md-compact">
+      <div className="agent-markdown-compact">
         <MarkdownLite content={open ? content : summary} />
       </div>
       {hasMore && (

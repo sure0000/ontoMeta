@@ -32,8 +32,8 @@ _RULE_PATTERNS: tuple[tuple[str, str, str], ...] = (
 )
 
 # 可产出的清洗规则词表（闭集）。**对外公开**是因为这是一份能力边界：说不出的清洗需求
-# 会被静默丢掉（只留在 notes 里），故 Data Agent 要在提需求时就把这份词表摆给用户，
-# 而不是产出一个什么都不做的 ETL 任务。见 chat_bi._entity_task_options。
+# 会被静默丢掉（只留在 notes 里），故 Agent 要在提需求时就把这份词表摆给用户，
+# 而不是产出一个什么都不做的 ETL 任务。
 SUPPORTED_CLEANSING_RULES: tuple[tuple[str, str], ...] = tuple(
     (code, desc) for _pattern, code, desc in _RULE_PATTERNS
 )

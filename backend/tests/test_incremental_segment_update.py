@@ -169,3 +169,56 @@ def test_segment_validation():
     finally:
         db.rollback()
         db.close()
+
+
+def test_create_and_rename_manual_segment():
+    """人工板块可创建并重命名，且技术标识在本体内保持唯一。"""
+    edit = EditService()
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        created = edit.create_segment(db, ontology.id, display_name="销售管理")
+
+        assert created.display_name == "销售管理"
+        assert created.kind == "business"
+        assert created.member_count == 0
+        stored = db.get(OntologySegment, created.id)
+        assert stored is not None and stored.user_created is True
+
+        renamed = edit.update_segment(db, created.id, display_name="销售运营")
+        assert renamed.display_name == "销售运营"
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_delete_segment_rehomes_members():
+    """删除板块不会丢失成员：按既有规则重新落到剩余分区。"""
+    edit = EditService()
+    db = SessionLocal()
+    try:
+        ontology = _fresh_ontology(db)
+        segment = edit.create_segment(db, ontology.id, display_name="待拆分板块")
+        obj = ObjectType(
+            ontology_id=ontology.id,
+            segment_id=segment.id,
+            name="orphan_order",
+            display_name="待拆订单",
+            table_role="business_object",
+        )
+        db.add(obj)
+        db.commit()
+
+        result = edit.delete_segment(db, segment.id)
+
+        assert result["deleted"] is True
+        assert result["reassigned"] == 1
+        db.refresh(obj)
+        assert obj.segment_id is not None
+        target = db.get(OntologySegment, obj.segment_id)
+        assert target is not None and target.kind == "system"
+        deleted = db.get(OntologySegment, segment.id)
+        assert deleted is not None and deleted.deleted_by_user is True
+    finally:
+        db.rollback()
+        db.close()

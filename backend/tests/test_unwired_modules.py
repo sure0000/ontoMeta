@@ -23,7 +23,6 @@ _APP = pathlib.Path(__file__).resolve().parent.parent / "app"
 KNOWN_UNWIRED = {
     "app.services.confidence_calibration": "等真实人工复核信号积累够，再决定是否替换分类器的死映射",
     "app.services.object_resolution": "等归并候选落到哪条治理流程的决策",
-    "app.services.ops_live_eval": "评测工装，由 scripts/run_ops_live_eval.py 驱动，本就不该进生产路径",
 }
 
 #: 不参与可达性判定的模块。它们不经 import 图被引用，静态分析必然判成不可达。
@@ -37,6 +36,13 @@ _DYNAMIC_ENTRYPOINTS = (
     "app.agents.executors",
     "app.warehouse.adapters",
     "app.schemas.",         # Pydantic 模型按需 import，不都在主图里
+    # MCP tool modules import these services through local imports at call time.
+    "app.services.agent_sql",
+    "app.services.column_profiler",
+    "app.services.expression_candidate",
+    "app.services.lineage_scheduler",
+    "app.services.ops_records",
+    "app.services.result_analysis",
 )
 
 

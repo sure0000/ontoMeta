@@ -42,6 +42,8 @@ interface Props {
   inventoryLoading: boolean;
   /** 把一张表送进画布：两条路径在这里交接。 */
   onSendToCanvas: (table: string) => void;
+  /** 给一张对不上 DataHub 的表指个目标——blocked 边此前只能重扫，而重扫结果一样。 */
+  onMapTable: (sqlTable: string) => void;
 }
 
 function countEdges(groups: LineagePackageGroup[]) {
@@ -76,6 +78,7 @@ export function ScanReport({
   uncovered,
   inventoryLoading,
   onSendToCanvas,
+  onMapTable,
 }: Props) {
   const [view, setView] = useState<DetailView>("list");
 
@@ -308,10 +311,31 @@ export function ScanReport({
                     ) : (
                       <Tag variant="filled">无 JOIN 条件 · 仅表级</Tag>
                     )}
-                    {edge.state === "blocked" && (
-                      <Tag color="warning" variant="filled">
-                        {edge.reason}
+                    {edge.kind === "relation" && (
+                      <Tag color="processing" variant="filled" title="DDL 里声明的外键：这是关联关系不是血缘，不上报 DataHub，只作为关联证据进本体">
+                        外键 · 不上报
                       </Tag>
+                    )}
+                    {edge.state === "blocked" && (
+                      <>
+                        <Tag color="warning" variant="filled">
+                          {edge.reason}
+                        </Tag>
+                        {/* 对不上 DataHub 的那一端才是要映射的那个 */}
+                        <Button
+                          size="small"
+                          type="link"
+                          onClick={() =>
+                            onMapTable(
+                              edge.reason?.includes("上游")
+                                ? edge.source_table
+                                : edge.target_table,
+                            )
+                          }
+                        >
+                          指定对应表
+                        </Button>
+                      </>
                     )}
                     {edge.state === "skipped" && <Tag variant="filled">{edge.reason}</Tag>}
                     {edge.applied && (

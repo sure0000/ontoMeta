@@ -22,37 +22,6 @@ def _cleanup_doris_sources():
         db.query(DataSource).delete()
         db.commit()
 
-
-def test_agent_prompt_is_short_and_execution_boundaries_are_structural():
-    """提示词只说明目标；Doris/ODS 边界由工具 schema 与执行代码承担。"""
-    from app.services.chat_bi import ChatBiService
-    from app.services.chat_bi_tool_schemas import (
-        _ACTION_KINDS,
-        _AGENT_SYSTEM_PROMPT,
-        _TOOL_BY_NAME,
-        _tools_for_skill,
-    )
-
-    assert "数据查询使用默认 Doris" in _AGENT_SYSTEM_PROMPT
-    assert len(_AGENT_SYSTEM_PROMPT) < 300
-    run_sql = _TOOL_BY_NAME["run_sql"]["function"]["parameters"]["properties"]
-    assert "target" not in run_sql
-    assert _ACTION_KINDS == ("materialize", "sync", "transform", "metric")
-    compact = ChatBiService._compact_tools_for_prompt_retry(_tools_for_skill(None))
-    assert all("description" not in tool["function"] for tool in compact)
-    assert "description" not in str(compact)
-
-
-def test_prompt_flag_detection_is_narrow():
-    from app.services.chat_bi import ChatBiService
-
-    assert ChatBiService._is_prompt_flag_error(
-        ValueError("Invalid prompt: your prompt was flagged as potentially violating our usage policy")
-    )
-    assert not ChatBiService._is_prompt_flag_error(ValueError("401 unauthorized"))
-    assert not ChatBiService._is_prompt_flag_error(ValueError("context length exceeded"))
-
-
 def test_doris_is_the_new_default_engine():
     assert DEFAULT_ENGINE == "doris"
     assert ALLOWED_EXECUTION_ENGINES["materialize"] == frozenset({"doris"})

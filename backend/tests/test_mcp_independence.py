@@ -1,8 +1,7 @@
-"""MCP 不得依赖 Data Agent（对话模块）。
+"""MCP 不得依赖已删除的产品内置对话模块。
 
-目标是「Data Agent 可以整块删掉，MCP + skill 照常工作」。这条只靠人自觉是守不住的：
-`from app.services.chat_bi import ...` 写下去，测试全绿、真机也全绿，直到有人真去删
-`chat_bi.py` 那天才发现建数流程整条哑掉。所以把它钉成一条被检查的属性。
+目标是「旧对话模块可以整块删掉，MCP + skill 照常工作」。这条只靠人自觉是守不住的：
+旧模块一旦重新进入 import 图，MCP 就会被重新耦合。因此把它钉成一条被检查的属性。
 
 它抓的是**静态 import**（含函数内的局部导入），不是运行期反射——后者本仓没有先例，
 真出现了会在删除演练里当场炸出来。
@@ -17,7 +16,7 @@ import pytest
 
 _MCP_ROOT = pathlib.Path(__file__).resolve().parents[1] / "app" / "mcp"
 
-#: 对话模块的全部入口。删除 Data Agent 时这几个模块会一起消失。
+#: 对话模块的全部入口，必须保持删除状态且不得被 MCP 引用。
 _FORBIDDEN_PREFIXES = (
     "app.services.chat_bi",
     "app.schemas.chat_bi",
@@ -42,7 +41,7 @@ def _imported_modules(path: pathlib.Path) -> set[str]:
 
 
 @pytest.mark.parametrize("path", _module_files(), ids=lambda p: p.name)
-def test_mcp_module_does_not_import_chat_bi(path: pathlib.Path) -> None:
+def test_mcp_module_does_not_import_legacy_chat(path: pathlib.Path) -> None:
     offenders = sorted(
         module
         for module in _imported_modules(path)
@@ -51,7 +50,7 @@ def test_mcp_module_does_not_import_chat_bi(path: pathlib.Path) -> None:
     assert not offenders, (
         f"{path.relative_to(_MCP_ROOT.parent.parent)} 依赖了对话模块：{offenders}。"
         "共用的东西请搬到中性位置（services/task_form、services/agent_sql、"
-        "schemas/task_form），别让 MCP 反过来依赖 Data Agent。"
+        "schemas/task_form），别让 MCP 依赖旧对话模块。"
     )
 
 
@@ -59,7 +58,7 @@ _ISOLATION_SCRIPT = """
 import sys
 
 class _Block:
-    '''把对话模块从导入图上摘掉——等价于「chat_bi.py 已经被删了」。'''
+    '''把旧对话模块从导入图上摘掉——等价于模块已经被删了。'''
 
     def find_module(self, name, path=None):
         return self if name.startswith("app.services.chat_bi") else None
@@ -77,8 +76,8 @@ print(len(TOOL_REGISTRY))
 """
 
 
-def test_mcp_tools_load_in_a_process_without_chat_bi() -> None:
-    """在**新解释器**里把 `app.services.chat_bi` 挡掉，MCP 工具注册表仍要装配得出来。
+def test_mcp_tools_load_in_a_process_without_legacy_chat() -> None:
+    """在**新解释器**里把旧对话模块挡掉，MCP 工具注册表仍要装配得出来。
 
     比静态扫描更进一步：它证明的是「删了那个模块，整套工具照样起得来」，也覆盖了经由
     `app.api.deps` 之类中转包间接被拽进来的情况。放子进程跑是为了不污染本进程的
@@ -96,13 +95,13 @@ def test_mcp_tools_load_in_a_process_without_chat_bi() -> None:
         text=True,
     )
     assert proc.returncode == 0, (
-        "屏蔽 app.services.chat_bi 后 MCP 装配失败——说明还有一条依赖对话模块的路：\n"
+        "屏蔽旧对话模块后 MCP 装配失败——说明还有一条旧依赖路径：\n"
         + proc.stderr[-3000:]
     )
     assert int(proc.stdout.strip().splitlines()[-1]) >= 37
 
 
-def test_shared_api_dependencies_are_lazy_without_chat_bi() -> None:
+def test_shared_api_dependencies_are_independent_of_legacy_chat() -> None:
     """Removing the optional chat router must not break unrelated API imports."""
     script = """
 import sys
@@ -129,3 +128,12 @@ print("OK")
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert proc.stdout.strip() == "OK"
+
+
+def test_legacy_chat_surface_is_removed() -> None:
+    """The supported product surface is MCP + Skill, with no in-product chat route."""
+    from app.main import app
+
+    assert not any("chat-bi" in getattr(route, "path", "") for route in app.routes)
+    assert not (pathlib.Path(__file__).resolve().parents[1] / "app/api/chat_bi.py").exists()
+    assert not (pathlib.Path(__file__).resolve().parents[1] / "app/services/chat_bi.py").exists()

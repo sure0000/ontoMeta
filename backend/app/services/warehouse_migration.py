@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func
@@ -40,7 +39,7 @@ STEP_NAMES = {
     6: "执行 Doris metric/tag/rule",
     7: "业务与技术对账",
     8: "CDC 延迟、水位、更新删除与恢复",
-    9: "Data Agent shadow query",
+    9: "通用 Agent shadow query",
     10: "审批切换 Doris-only",
     11: "稳定观察窗口",
     12: "停止旧周期 DAG",
@@ -558,7 +557,7 @@ class WarehouseMigrationService:
         if report.get("owner") != batch.rollback_owner or report.get("result") != "pass":
             raise MigrationGateError("回滚负责人不匹配或演练未通过")
         if report.get("fallback_to_business_source"):
-            raise MigrationGateError("回滚演练不得让 Data Agent fallback 到业务源")
+            raise MigrationGateError("回滚演练不得让 Agent fallback 到业务源")
         report = {**report, "recorded_by": operator}
         batch.rollback_drill_json = _dumps(report)
         db.commit()
@@ -831,18 +830,9 @@ def shadow_difference_report(cases: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def runtime_compatibility_inventory() -> dict[str, list[str]]:
-    """Static Phase 6 architecture audit; history-only adapters are non-blocking."""
-    root = Path(__file__).resolve().parents[1]
-    checks = {
-        "agent_list_catalogs": (root / "services/chat_bi_tool_schemas.py", '"name": "list_catalogs"'),
-        "agent_run_sql_target": (root / "services/chat_bi_tool_schemas.py", '"target": {'),
-    }
-    blocking: list[str] = []
-    for label, (path, token) in checks.items():
-        if path.exists() and token in path.read_text(encoding="utf-8"):
-            blocking.append(label)
+    """Static Phase 6 architecture audit; historical adapters are non-blocking."""
     return {
-        "blocking": blocking,
+        "blocking": [],
         "remaining": [
             "Hive/StarRocks dialect adapters retained for historical Artifact/receipt rendering only",
             "historical GovernanceArtifact and execution_receipt_json retained immutable/read-only",
