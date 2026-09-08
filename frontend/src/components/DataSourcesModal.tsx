@@ -143,35 +143,7 @@ export function DataSourceStatusTag({ status }: { status: string }) {
   );
 }
 
-export function DataSourcesModal({
-  open,
-  onClose,
-  prefill,
-  onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  /** 带着预填打开时，直接弹出「新增数据源」表单并填好非机密字段（连接信息仍由用户填）。 */
-  prefill?: DataSourcePrefill;
-  /** 新建成功后的回调（仅新建，不含编辑）。供调用方留痕/刷新，可选。 */
-  onCreated?: (source: { id: string; name: string; kind: string }) => void;
-}) {
-  return (
-    <Modal
-      title="数据源管理"
-      open={open}
-      onCancel={onClose}
-      footer={null}
-      width={720}
-      destroyOnClose
-    >
-      <DataSourcesPanel prefill={prefill} onCreated={onCreated} />
-    </Modal>
-  );
-}
-
-/** 数据源管理面板：登记 / 测试 / 删除可写连接。供物化落库与数据应用取数复用；
- *  可内嵌于设置页 Tab，或包在 {@link DataSourcesModal} 里从数据应用编辑器打开。
+/** 数据源管理面板：登记 / 测试 / 删除可写连接。供物化落库与设置页复用。
  *  新增 / 编辑通过弹框填写，连接按类型给结构化表单（账号密码分列）。 */
 export function DataSourcesPanel({
   prefill,

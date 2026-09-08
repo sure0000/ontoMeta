@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.config import settings
-from app.services.data_app import resolve_domain_data_source
+from app.services.datasource_service import resolve_domain_data_source
 from app.services.logic_query import OntologyQueryService
 from app.services.ontology_projection import build_projection
 from app.services.query_routing import prepare_object_read

@@ -6,7 +6,7 @@ from app.api import (
     agents,
     business_logic,
     confirmations,
-    data_app,
+    datasources,
     dependencies,
     dimensional_model,
     governance,
@@ -15,8 +15,8 @@ from app.api import (
     modeling,
     ontology,
     principals,
-    public_routes,
     settings,
+    superset,
     warehouse,
     warehouse_migration,
     workspace,
@@ -29,14 +29,14 @@ router.include_router(workspace.router)
 router.include_router(ontology.router)
 router.include_router(business_logic.router)
 router.include_router(confirmations.router)
-router.include_router(data_app.router)
+router.include_router(datasources.router)
 router.include_router(warehouse.router)
 router.include_router(warehouse_migration.router)
 router.include_router(principals.router)
 router.include_router(mcp.router)
+router.include_router(superset.router)
 router.include_router(agents.router)
 router.include_router(governance.router)
 router.include_router(lineage.router)
 router.include_router(modeling.router)
 router.include_router(dimensional_model.router)
-router.include_router(public_routes.router)

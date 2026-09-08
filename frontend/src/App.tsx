@@ -31,11 +31,8 @@ const BusinessLogicDetailPage = lazyPage(
   "BusinessLogicDetailPage",
 );
 const BusinessLogicPage = lazyPage(() => import("./pages/BusinessLogicPage"), "BusinessLogicPage");
-const DataAppEditorPage = lazyPage(() => import("./pages/DataAppEditorPage"), "DataAppEditorPage");
-const DataAppsPage = lazyPage(() => import("./pages/DataAppsPage"), "DataAppsPage");
-const DataAppViewPage = lazyPage(() => import("./pages/DataAppViewPage"), "DataAppViewPage");
-const DataAppEmbedPage = lazyPage(() => import("./pages/DataAppEmbedPage"), "DataAppEmbedPage");
-const DataAppPublicPage = lazyPage(() => import("./pages/DataAppPublicPage"), "DataAppPublicPage");
+const VizAssetsPage = lazyPage(() => import("./pages/VizAssetsPage"), "VizAssetsPage");
+const VizAssetViewPage = lazyPage(() => import("./pages/VizAssetViewPage"), "VizAssetViewPage");
 const DomainDetailPage = lazyPage(() => import("./pages/DomainDetailPage"), "DomainDetailPage");
 const ExecutionRecordsPage = lazyPage(
   () => import("./pages/ExecutionRecordsPage"),
@@ -121,8 +118,8 @@ export default function App() {
           <Route path="/tasks" element={<TasksOverviewPage />} />
           <Route path="/tasks/create" element={<TaskCreatePage />} />
           <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />
-          <Route path="/data-apps" element={<DataAppsPage />} />
-          <Route path="/data-apps/:appId/edit" element={<DataAppEditorPage />} />
+          <Route path="/data-apps" element={<VizAssetsPage />} />
+          <Route path="/data-apps/:assetId" element={<VizAssetViewPage />} />
           <Route path="/agent-access" element={<Navigate to="/agent-access/service" replace />} />
           <Route path="/agent-access/service" element={<ServicePage />} />
           <Route path="/agent-access/tools" element={<ToolsPage />} />
@@ -132,9 +129,6 @@ export default function App() {
           <Route path="/agent-access/tokens" element={<TokensPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
-        <Route path="/apps/:appId" element={<DataAppViewPage />} />
-        <Route path="/embed/apps/:appId" element={<DataAppEmbedPage />} />
-        <Route path="/public/apps/:token" element={<DataAppPublicPage />} />
       </Routes>
       </Suspense>
     </ErrorBoundary>

@@ -7,6 +7,7 @@ import type {
   BusinessLogicObjectBinding,
   BusinessLogicPropertyBinding,
   BusinessLogicUpdateInput,
+  CanvasSuggestReport,
   ChangeLog,
   MergeReport,
   OntologyConflicts,
@@ -39,14 +40,6 @@ import type {
   UnmodeledTables,
   ExpressionDraft,
   ExpressionJson,
-  DataAppSummary,
-  DataAppDetail,
-  DataAppPreviewResult,
-  DataAppVersion,
-  DataAppDatasetInput,
-  DataAppBinding,
-  DataAppWidget,
-  PublicShareStatus,
   DataSource,
   DorisWarehouseConfig,
   DorisWarehouseConfigInput,
@@ -98,7 +91,8 @@ import type {
   DependencySchema,
   DependencyComponent,
   DependencyProbeResult,
-  DependencyDeployResult,
+  SupersetAsset,
+  SupersetStatus,
   PublishPreflight,
   McpServiceInfo,
   McpStats,
@@ -330,6 +324,14 @@ export const api = {
     request<{ ok: boolean }>(`/api/lineage/table-mappings/${mappingId}`, {
       method: "DELETE",
     }),
+
+  // 画布智能补录：只看选中的这几张表，同步返回一根根具体的线。
+  // 与整域推断是两条路——那条产出键族让人按族表态，这条产出边让人在图上删改。
+  suggestCanvasEdges: (domainId: string, tables: string[], refresh = false) =>
+    request<CanvasSuggestReport>(
+      `/api/lineage/domains/${domainId}/canvas-suggestions`,
+      { method: "POST", body: JSON.stringify({ tables, refresh }) },
+    ),
 
   // 智能关系补充。推断是异步的（LLM 判定实测数百秒），起任务后轮询。
   startRelationInference: (domainId: string, refresh = false) =>
@@ -1009,20 +1011,6 @@ export const api = {
 
   getLlmService: (id: string) => request<LlmServiceConfig>(`/api/settings/llm-services/${id}`),
 
-  createLlmService: (body: {
-    name: string;
-    provider?: string;
-    api_base_url?: string;
-    api_key?: string;
-    model: string;
-    is_default?: boolean;
-    enabled?: boolean;
-  }) =>
-    request<LlmServiceConfig>("/api/settings/llm-services", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
   updateLlmService: (
     id: string,
     body: {
@@ -1031,18 +1019,12 @@ export const api = {
       api_base_url?: string;
       api_key?: string;
       model?: string;
-      is_default?: boolean;
       enabled?: boolean;
     },
   ) =>
     request<LlmServiceConfig>(`/api/settings/llm-services/${id}`, {
       method: "PUT",
       body: JSON.stringify(body),
-    }),
-
-  deleteLlmService: (id: string) =>
-    request<{ id: string; deleted: boolean }>(`/api/settings/llm-services/${id}`, {
-      method: "DELETE",
     }),
 
   testLlmConnection: (body: {
@@ -1116,41 +1098,21 @@ export const api = {
       method: "POST",
     }),
 
-  // ===== 依赖组件统一部署管理 =====
+  // ===== 基础设施组件（固定几样，只登记连接）=====
   getDependencySchema: () => request<DependencySchema>("/api/settings/dependencies/schema"),
   listDependencies: () => request<DependencyComponent[]>("/api/settings/dependencies"),
-  getDependency: (id: string) => request<DependencyComponent>(`/api/settings/dependencies/${id}`),
-  createDependency: (body: {
-    key: string;
-    name?: string;
-    deploy_mode?: string;
-    deploy_spec?: Record<string, unknown>;
-    connection?: Record<string, unknown>;
-    enabled?: boolean;
-    is_default?: boolean;
-  }) =>
-    request<DependencyComponent>("/api/settings/dependencies", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
   updateDependency: (
     id: string,
     body: {
       name?: string;
-      deploy_mode?: string;
-      deploy_spec?: Record<string, unknown>;
+      settings?: Record<string, unknown>;
       connection?: Record<string, unknown>;
       enabled?: boolean;
-      is_default?: boolean;
     },
   ) =>
     request<DependencyComponent>(`/api/settings/dependencies/${id}`, {
       method: "PUT",
       body: JSON.stringify(body),
-    }),
-  deleteDependency: (id: string) =>
-    request<{ id: string; deleted: boolean }>(`/api/settings/dependencies/${id}`, {
-      method: "DELETE",
     }),
   /** 拨测组件连接。`target` 只测其中一条（如 airflow 的 api / ssh），省略则全测。 */
   probeDependency: (id: string, target?: string) =>
@@ -1158,69 +1120,32 @@ export const api = {
       `/api/settings/dependencies/${id}/probe${target ? `?target=${encodeURIComponent(target)}` : ""}`,
       { method: "POST" },
     ),
-  deployDependency: (id: string) =>
-    request<DependencyDeployResult>(`/api/settings/dependencies/${id}/deploy`, { method: "POST" }),
-  teardownDependency: (id: string) =>
-    request<{ status: string }>(`/api/settings/dependencies/${id}/teardown`, { method: "POST" }),
 
-  // ------------------------------------------------------------ Data Apps
-
-  listDataApps: (domainId?: string, appType?: string) => {
+  // ===== Superset 资产（图表/看板在 Superset，这里只登记与取嵌入令牌）=====
+  getSupersetStatus: () => request<SupersetStatus>("/api/superset/status"),
+  listSupersetAssets: (params?: { assetType?: string; ontologyId?: string; q?: string }) => {
     const qs = new URLSearchParams();
-    if (domainId) qs.set("domain_id", domainId);
-    if (appType) qs.set("app_type", appType);
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return request<DataAppSummary[]>(`/api/data-apps${suffix}`);
+    if (params?.assetType) qs.set("asset_type", params.assetType);
+    if (params?.ontologyId) qs.set("ontology_id", params.ontologyId);
+    if (params?.q) qs.set("q", params.q);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return request<{ items: SupersetAsset[] }>(`/api/superset/assets${suffix}`);
   },
-  getDataApp: (id: string) => request<DataAppDetail>(`/api/data-apps/${id}`),
-  createDataApp: (body: {
-    domain_id: string;
-    app_type: string;
-    name?: string;
-    description?: string;
-    source?: string;
-    spec?: Record<string, unknown>;
-    datasets?: DataAppDatasetInput[];
-  }) =>
-    request<DataAppDetail>(`/api/data-apps`, {
+  /** 与 Superset 对一次账：只刷新 state，不删登记、也不动 Superset。 */
+  reconcileSupersetAssets: () =>
+    request<{ active: number; missing: number }>("/api/superset/assets/reconcile", {
       method: "POST",
-      body: JSON.stringify(body),
     }),
-  updateDataApp: (
-    id: string,
-    body: {
-      name?: string;
-      description?: string;
-      spec?: Record<string, unknown>;
-      datasets?: DataAppDatasetInput[];
-    },
-  ) =>
-    request<DataAppDetail>(`/api/data-apps/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-  deleteDataApp: (id: string) =>
-    request<{ status: string }>(`/api/data-apps/${id}`, { method: "DELETE" }),
-  previewDataAppDataset: (
-    appId: string,
-    datasetId: string,
-    limit = 50,
-    runtimeFilters?: {
-      ref: { kind: string; id?: string | null; name?: string | null; display_name?: string | null };
-      op: string;
-      value?: unknown;
-    }[],
-  ) =>
-    request<DataAppPreviewResult>(`/api/data-apps/${appId}/datasets/${datasetId}/preview`, {
-      method: "POST",
-      body: JSON.stringify({ limit, runtime_filters: runtimeFilters ?? [] }),
-    }),
-  publishDataApp: (id: string, versionComment?: string) =>
-    request<DataAppDetail>(`/api/data-apps/${id}/publish`, {
-      method: "POST",
-      body: JSON.stringify({ version_comment: versionComment }),
-    }),
-  listDataAppVersions: (id: string) => request<DataAppVersion[]>(`/api/data-apps/${id}/versions`),
+  /** 取看板嵌入用的 guest token。**只能由后端签发**，前端不持 Superset 凭据。 */
+  supersetGuestToken: (assetId: string) =>
+    request<{ token: string; superset_domain: string }>(
+      `/api/superset/assets/${assetId}/guest-token`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  /** 只解除登记，不删 Superset 里的图或看板。 */
+  unlinkSupersetAsset: (assetId: string) =>
+    request<{ ok: boolean }>(`/api/superset/assets/${assetId}`, { method: "DELETE" }),
+
   // Data sources
   listDataSources: () => request<DataSource[]>(`/api/data-sources`),
   createDataSource: (body: {
@@ -1272,90 +1197,6 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-
-  // Widgets（可复用图表资产）
-  listWidgets: (params?: { domainId?: string; q?: string; widgetType?: string }) => {
-    const qs = new URLSearchParams();
-    if (params?.domainId) qs.set("domain_id", params.domainId);
-    if (params?.q) qs.set("q", params.q);
-    if (params?.widgetType) qs.set("widget_type", params.widgetType);
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return request<DataAppWidget[]>(`/api/data-app-widgets${suffix}`);
-  },
-  getWidget: (id: string) => request<DataAppWidget>(`/api/data-app-widgets/${id}`),
-  createWidget: (body: {
-    domain_id: string;
-    name?: string;
-    description?: string;
-    widget_type: string;
-    primary_object_type_id?: string | null;
-    binding: DataAppBinding;
-    viz?: Record<string, unknown> | null;
-    data_source_id?: string | null;
-    source?: string;
-  }) =>
-    request<DataAppWidget>(`/api/data-app-widgets`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  updateWidget: (
-    id: string,
-    body: {
-      name?: string;
-      description?: string;
-      widget_type?: string;
-      binding?: DataAppBinding;
-      viz?: Record<string, unknown> | null;
-      data_source_id?: string | null;
-    },
-  ) =>
-    request<DataAppWidget>(`/api/data-app-widgets/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-  deleteWidget: (id: string) =>
-    request<{ status: string }>(`/api/data-app-widgets/${id}`, { method: "DELETE" }),
-  previewWidget: (
-    id: string,
-    limit = 50,
-    runtimeFilters?: {
-      ref: { kind: string; id?: string | null; name?: string | null };
-      op: string;
-      value?: unknown;
-    }[],
-  ) =>
-    request<DataAppPreviewResult>(`/api/data-app-widgets/${id}/preview`, {
-      method: "POST",
-      body: JSON.stringify({ limit, runtime_filters: runtimeFilters ?? [] }),
-    }),
-  addWidgetToDashboard: (appId: string, widgetId: string) =>
-    request<DataAppDetail>(`/api/data-apps/${appId}/widgets`, {
-      method: "POST",
-      body: JSON.stringify({ widget_id: widgetId }),
-    }),
-  // 公开分享
-  getShareStatus: (appId: string) => request<PublicShareStatus>(`/api/data-apps/${appId}/share`),
-  enableShare: (appId: string, body: { password?: string; expires_in_days?: number }) =>
-    request<PublicShareStatus>(`/api/data-apps/${appId}/share`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  disableShare: (appId: string) =>
-    request<PublicShareStatus>(`/api/data-apps/${appId}/share`, { method: "DELETE" }),
-  getDataAppLineage: (appId: string) =>
-    request<{
-      app_id: string;
-      name: string;
-      nodes: {
-        kind: string;
-        id: string;
-        name: string;
-        object_type_ids: string[];
-        property_ids: string[];
-      }[];
-      object_types: { id: string; name: string; display_name: string }[];
-      properties: { id: string; name: string; display_name: string; object_type_id: string }[];
-    }>(`/api/data-apps/${appId}/lineage`),
 
   // ---- 物化契约（M1）----
   listIngestionContracts: (ontologyId: string) =>

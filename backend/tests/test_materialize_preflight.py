@@ -529,7 +529,7 @@ def test_preflight_endpoint_wires_and_serializes(client, admin_headers, monkeypa
     """端点层：路由 + _require_ontology/_require_engine + response_model 序列化打通。"""
     from app.database import SessionLocal
     from app.models import DomainContext, Ontology, OntologyStatus
-    from app.models.data_app import DataSource
+    from app.models.datasource import DataSource
 
     with SessionLocal() as db:
         domain = DomainContext(datahub_domain_id="urn:li:domain:pf", name="pf")

@@ -17,7 +17,6 @@ import pytest
 
 from app.database import SessionLocal
 from app.models import (
-    DataSource,
     DomainContext,
     EntityStatus,
     ObjectType,

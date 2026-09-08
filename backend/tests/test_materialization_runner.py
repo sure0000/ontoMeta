@@ -22,7 +22,7 @@ from app.models import (
     Property,
     RelationType,
 )
-from app.models.data_app import DataSource
+from app.models.datasource import DataSource
 from app.services import data_app_executor, materialization_runner
 from app.services.materialization_contract import MaterializationContractService
 

@@ -31,6 +31,7 @@ SPECIALIZED = (
     "ontometa-onboarding",
     "ontometa-discovery",
     "ontometa-query",
+    "ontometa-viz",
     "ontometa-authoring",
     "ontometa-modeling",
     "ontometa-task-plan",
@@ -73,6 +74,15 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "caliber_trace",     # 口径证据
         "sql_hint", "fanout_risk", "safe_aggs",
         "sample_note",
+    ),
+    "ontometa-viz": (
+        "list_superset_datasets", "ensure_superset_dataset", "create_superset_chart",
+        "update_superset_chart", "create_superset_dashboard", "list_superset_assets",
+        "dataset_ref",       # 数据集只能从落点建，不许在 Superset 里凭空造
+        "source_ready",      # 落点没建出来就不该往下走
+        "columns",           # 列名从数据集读，不是拿本体属性名猜
+        "整体替换",           # update 不是增量，漏传等于清空
+        "superset_not_configured",  # 配置问题不是网络问题，别重试
     ),
     "ontometa-authoring": (
         "compile_logic_expression", "create_logic", "update_logic_expression", "lint_spec",

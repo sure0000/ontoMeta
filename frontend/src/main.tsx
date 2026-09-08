@@ -11,8 +11,6 @@ import "./styles/layout.css";
 import "./styles/markdown.css";
 import "./styles/graph.css";
 import "./styles/expression.css";
-import "./styles/dashboard.css";
-import "./styles/big-screen.css";
 import "./styles/materialize.css";
 import "./styles/lineage.css";
 

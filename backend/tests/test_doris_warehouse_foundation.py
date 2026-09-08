@@ -6,7 +6,7 @@ import pytest
 
 from app.agents.validation import validate_spec
 from app.models import DataSource, DorisWarehouseConfig
-from app.services.data_app import DataAppService, resolve_domain_data_source
+from app.services.datasource_service import DataSourceService, resolve_domain_data_source
 from app.warehouse import DEFAULT_ENGINE
 from app.warehouse.policy import ALLOWED_EXECUTION_ENGINES, require_doris
 
@@ -31,7 +31,7 @@ def test_doris_is_the_new_default_engine():
 
 
 def test_explicit_warehouse_rejects_non_doris_and_duplicate_default(db):
-    svc = DataAppService()
+    svc = DataSourceService()
     first = svc.create_data_source(
         db,
         name="Doris",
@@ -67,7 +67,7 @@ def test_explicit_warehouse_rejects_non_doris_and_duplicate_default(db):
 
 
 def test_query_resolver_is_explicit_and_fail_closed(db):
-    svc = DataAppService()
+    svc = DataSourceService()
     source = svc.create_data_source(
         db,
         name="Doris",
@@ -96,7 +96,7 @@ def test_query_resolver_is_explicit_and_fail_closed(db):
 def test_doris_config_api_masks_reader_secret_and_sets_stable_conn_ids(
     client, admin_headers, db
 ):
-    svc = DataAppService()
+    svc = DataSourceService()
     ds = svc.create_data_source(
         db,
         name="Doris",
@@ -127,7 +127,7 @@ def test_doris_config_api_masks_reader_secret_and_sets_stable_conn_ids(
 
 
 def test_doris_config_edit_keeps_masked_reader_password(db):
-    svc = DataAppService()
+    svc = DataSourceService()
     ds = svc.create_data_source(
         db,
         name="Doris",
@@ -167,7 +167,7 @@ def test_doris_config_edit_keeps_masked_reader_password(db):
 
 
 def test_validation_gate_rejects_non_doris_when_default_is_configured(db):
-    svc = DataAppService()
+    svc = DataSourceService()
     svc.create_data_source(
         db,
         name="Doris",

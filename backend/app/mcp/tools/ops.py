@@ -556,7 +556,7 @@ class GetOpsRecordTool:
             },
             "artifact_id": {"type": "string", "description": "指定任务制品 id（task_run）"},
             "task_id": {"type": "string", "description": "指定草稿生成任务 id（draft_run）"},
-            "app_id": {"type": "string", "description": "指定数据应用 id（data_app）"},
+            "asset_id": {"type": "string", "description": "指定 Superset 资产 id（data_app）"},
             "batch_id": {"type": "string", "description": "指定生产割接批次 id（migration）"},
             "component_key": {
                 "type": "string",
@@ -566,7 +566,7 @@ class GetOpsRecordTool:
                 "type": "string",
                 "description": "任务类型过滤：sync/transform/materialize/metric（task_run）",
             },
-            "keyword": {"type": "string", "description": "按数据源/数据应用/组件名称过滤"},
+            "keyword": {"type": "string", "description": "按数据源/图表看板/组件名称过滤"},
             "version": {"type": "integer", "description": "指定本体发布版本（ontology_version）"},
             "limit": {
                 "type": "integer",

@@ -208,8 +208,8 @@ _OPS_ROUTE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "data_app",
         (
-            "数据应用", "看板版本", "看板发布", "大屏版本", "面板版本",
-            "应用版本", "应用发布", "发布了几版", "应用发布记录",
+            "数据应用", "建了哪些图", "建过哪些看板", "图表列表", "看板列表",
+            "superset 图表", "superset 看板", "可视化资产",
         ),
     ),
     (
@@ -1009,9 +1009,9 @@ def read_datasource(db: Session, params: dict) -> RecordAnswer:
     ``test_data_source``（写 ``status``/``tested_at``），这里只回读它写下的结果，
     **不主动发起拨测**（只读族不该有副作用，拨测也可能是秒级阻塞）。
     """
-    from app.services.data_app import DataAppService  # noqa: PLC0415
+    from app.services.datasource_service import DataSourceService  # noqa: PLC0415
 
-    service = DataAppService()
+    service = DataSourceService()
     rows = service.list_data_sources(db)
     source = "DataSource.status/tested_at（上次拨测结果，本次不重新拨测）"
     keyword = str(params.get("keyword") or "").strip().lower()
@@ -1063,87 +1063,65 @@ def read_datasource(db: Session, params: dict) -> RecordAnswer:
 
 
 def read_data_app(db: Session, params: dict) -> RecordAnswer:
-    """J 族：这个看板/数据表发了几版、当前发布的是哪版。
+    """J 族：这个域建过哪些图表/看板、建在哪个落点上、现在还在不在。
 
-    委托 ``data_app.list_apps`` / ``list_versions``。
+    图表与看板住在 Superset，本平台只有登记簿（``SupersetAsset``），故这里回的是
+    「建过什么」而不是「发了几版」——版本归 Superset 自己管，ontoMeta 不复制一份。
+
+    ``state`` 直接回读上次对账的结果，**不主动对账**：只读族不该有副作用，
+    对账还要打好几次外部 API。要刷新走 ``list_superset_assets(reconcile=true)``。
     """
-    from app.services.data_app import DataAppService  # noqa: PLC0415
+    from app.services import superset_service  # noqa: PLC0415
 
     ontology_id = str(params.get("ontology_id") or "").strip() or None
     scope = str(params.get("scope") or "ontology").strip()
-    domain_id = None if scope == "all" else (
-        str(params.get("domain_id") or "").strip() or _domain_id_of(db, ontology_id)
+    keyword = str(params.get("keyword") or "").strip() or None
+    source = "SupersetAsset（登记簿；state 为上次对账结果，本次不重新对账）"
+
+    rows = superset_service.list_assets(
+        db,
+        ontology_id=None if scope == "all" else ontology_id,
+        keyword=keyword,
+        limit=200,
     )
-    service = DataAppService()
-    source = "DataApp / DataAppVersion（发布快照）"
-
-    app_id = str(params.get("app_id") or "").strip()
-    keyword = str(params.get("keyword") or "").strip().lower()
-    apps = service.list_apps(db, domain_id=domain_id)
-    if app_id:
-        apps = [a for a in apps if a.id == app_id]
-    elif keyword:
-        apps = [a for a in apps if keyword in (a.name or "").lower()]
-
-    if not apps:
+    if not rows:
         return RecordAnswer(
             family="data_app",
             observed_at=_now(),
             source=source,
-            note="没有匹配的数据应用。",
-        )
-
-    if len(apps) == 1:
-        app = apps[0]
-        versions = service.list_versions(db, app.id)
-        return RecordAnswer(
-            family="data_app",
-            subject=app.name,
-            facts=[
-                _fact("app_id", "应用 id", app.id),
-                _fact("name", "应用名", app.name),
-                _fact("app_type", "类型", app.app_type),
-                _fact("status", "状态", app.status),
-                _fact("current_version", "当前编辑版本", app.current_version),
-                _fact("published_version", "已发布版本", app.published_version),
-                _fact("published_at", "发布时间", _iso(app.published_at)),
-                _fact("version_count", "累计发布版本数", len(versions)),
-            ],
-            items=[
-                {
-                    "version": v.version,
-                    "diff_summary": v.diff_summary,
-                    "operator": v.operator,
-                    "created_at": _iso(v.created_at),
-                }
-                for v in versions[: _limit(params)]
-            ],
-            as_of=app.published_at,
-            observed_at=_now(),
-            source=source,
-            truncated=len(versions) > _limit(params),
+            note=(
+                "还没有经 ontoMeta 建到 Superset 的图表或看板。"
+                if scope == "all"
+                else "这个本体下还没有建过图表或看板。"
+            ),
         )
 
     limit = _limit(params, default=10)
-    shown = apps[:limit]
-    published = [a.published_at for a in shown if a.published_at]
+    shown = rows[:limit]
+    seen = [r.last_seen_at for r in shown if r.last_seen_at]
+    items = [
+        {
+            "asset_id": r.id,
+            "name": r.title,
+            "asset_type": r.asset_type,
+            "viz_type": r.viz_type,
+            "dataset_ref": r.dataset_ref,
+            "created_by": r.created_by,
+            "created_via": r.created_via,
+            "state": r.state,
+            "last_seen_at": _iso(r.last_seen_at),
+        }
+        for r in shown
+    ]
     return RecordAnswer(
         family="data_app",
-        items=[
-            {
-                "app_id": a.id,
-                "name": a.name,
-                "app_type": a.app_type,
-                "status": a.status,
-                "published_version": a.published_version,
-                "published_at": _iso(a.published_at),
-            }
-            for a in shown
-        ],
-        as_of=max(published) if published else None,
+        subject=items[0]["name"] if len(shown) == 1 else None,
+        facts=[_fact(k, k, v) for k, v in items[0].items()] if len(shown) == 1 else [],
+        items=items if len(shown) > 1 else [],
+        as_of=max(seen) if seen else None,
         observed_at=_now(),
         source=source,
-        truncated=len(apps) > len(shown),
+        truncated=len(rows) > len(shown),
     )
 
 
@@ -1151,7 +1129,7 @@ def read_data_app(db: Session, params: dict) -> RecordAnswer:
 
 
 def read_component(db: Session, params: dict) -> RecordAnswer:
-    """C 族（组件侧）：依赖组件装好了吗、部署失败在哪。
+    """C 族（组件侧）：依赖组件连得上吗、上次拨测断在哪。
 
     委托 ``dependency_service.list_components`` + ``to_out``——**必须过 to_out**，
     它做了口令/密钥脱敏；直接读 ``connection_json`` 会把明文密码带进对话上下文。
@@ -1162,7 +1140,7 @@ def read_component(db: Session, params: dict) -> RecordAnswer:
 
     service = DependencyComponentService()
     rows = service.list_components(db)
-    source = "DependencyComponent.deploy_status（上次部署结果）"
+    source = "DependencyComponent.connection_status（上次拨测结果）"
     key = str(params.get("component_key") or params.get("keyword") or "").strip().lower()
     if key:
         rows = [
@@ -1186,9 +1164,8 @@ def read_component(db: Session, params: dict) -> RecordAnswer:
         {
             "key": o.get("key"),
             "name": o.get("name"),
-            "deploy_mode": o.get("deploy_mode"),
-            "deploy_status": o.get("deploy_status"),
-            "deploy_error": o.get("deploy_error"),
+            "connection_status": o.get("connection_status"),
+            "connection_error": o.get("connection_error"),
             "enabled": o.get("enabled"),
             "updated_at": _iso(o.get("updated_at")),
         }
@@ -1356,16 +1333,16 @@ REGISTRY: dict[str, RecordFamily] = {
     "data_app": RecordFamily(
         key="data_app",
         display="数据应用",
-        answers="数据表或看板当前状态、编辑版本、已发布版本和发布历史",
+        answers="经 ontoMeta 建到 Superset 的图表与看板：叫什么、建在哪个落点上、谁建的、上次对账还在不在",
         reader=read_data_app,
-        ledger_fields=("subject", "app_id", "name", "diff_summary", "operator"),
+        ledger_fields=("subject", "asset_id", "name", "dataset_ref", "created_by"),
     ),
     "component": RecordFamily(
         key="component",
         display="依赖组件",
-        answers="全局依赖组件是否部署成功、部署方式和最近一次部署失败原因",
+        answers="全局依赖组件是否连得上、最近一次拨测失败的原因",
         reader=read_component,
-        ledger_fields=("subject", "key", "name", "deploy_error"),
+        ledger_fields=("subject", "key", "name", "connection_error"),
     ),
     "migration": RecordFamily(
         key="migration",

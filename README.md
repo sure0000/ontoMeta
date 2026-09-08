@@ -175,11 +175,12 @@ GitHub Actions：`.github/workflows/ci.yml`（backend pytest + frontend lint/bui
 - [TECH_DESIGN.md](./docs/TECH_DESIGN.md) — 技术设计
 - [DOMAIN_MODEL.md](./docs/DOMAIN_MODEL.md) — 领域模型
 - [IA.md](./docs/IA.md) — 信息架构
-- [DATA_APP_GRAFANA_MODEL.md](./docs/DATA_APP_GRAFANA_MODEL.md) — 数据应用概念模型（Panel / Dashboard，Grafana 范式）
+- [SUPERSET_INTEGRATION.md](./docs/SUPERSET_INTEGRATION.md) — 数据应用：图表与看板交给 Apache Superset，本平台只提供口径与登记
+- [DATA_APP_GRAFANA_MODEL.md](./docs/DATA_APP_GRAFANA_MODEL.md) — ~~自研数据应用概念模型（Panel / Dashboard）~~ 已废弃，见上一条
 
 **部署与运维**
 - [DEPLOYMENT.md](./docs/DEPLOYMENT.md) — 部署文档（功能×依赖矩阵、逐功能配置与验收、生产加固）
-- [DEPENDENCY_DEPLOYMENT_REDESIGN.md](./docs/DEPENDENCY_DEPLOYMENT_REDESIGN.md) — 依赖组件统一部署管理设计（物理机/Docker/K8s，设置页纳管）
+- [DEPENDENCY_COMPONENTS.md](./docs/DEPENDENCY_COMPONENTS.md) — 基础设施组件（固定几样，只登记连接与拨测）
 - [docker/orchestration/README.md](./docker/orchestration/README.md) — 物化编排本地验证栈
 
 **已建成执行规格（as-built）**

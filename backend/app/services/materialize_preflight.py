@@ -23,7 +23,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError
-from app.models.data_app import DataSource
+from app.models.datasource import DataSource
 from app.services import flink_params
 from app.services.job_planner import (
     DEFAULT_TARGET_ALIAS,

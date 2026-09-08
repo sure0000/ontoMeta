@@ -6,7 +6,7 @@ import pytest
 
 from app.database import SessionLocal
 from app.models import DataSource
-from app.services.data_app import resolve_domain_data_source
+from app.services.datasource_service import resolve_domain_data_source
 
 
 @pytest.fixture(autouse=True)

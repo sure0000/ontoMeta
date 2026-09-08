@@ -30,6 +30,7 @@ _SPECIALIZED = {
     "ontometa-onboarding",
     "ontometa-discovery",
     "ontometa-query",
+    "ontometa-viz",
     "ontometa-task-plan",
     "ontometa-task-execute",
     "ontometa-admin",
@@ -38,7 +39,7 @@ _SPECIALIZED = {
     "ontometa-modeling",
 }
 
-#: 技能页与导出的展示顺序：先总入口和出口契约，再按"接数 → 探索 → 取数 → 创作 → 建模 → 规划 → 执行 → 自省"。
+#: 技能页与导出的展示顺序：先总入口和出口契约，再按"接数 → 探索 → 取数 → 呈现 → 创作 → 建模 → 规划 → 执行 → 自省"。
 #: 字母序会把 admin 排在最前、把总控埋在中间——那是给机器看的顺序，不是给人读的。
 _DISPLAY_ORDER = (
     "ontometa-mcp",
@@ -47,6 +48,7 @@ _DISPLAY_ORDER = (
     "ontometa-onboarding",
     "ontometa-discovery",
     "ontometa-query",
+    "ontometa-viz",
     "ontometa-authoring",
     "ontometa-modeling",
     "ontometa-task-plan",

@@ -426,9 +426,9 @@ def _materialize_locations(
     列不出库的源不静默丢掉——记下原因，让它以「手填库名」的形式仍能被选到，否则一个
     连接暂时不通的仓就凭空从候选里消失了。
     """
-    from app.services.data_app import DataAppService
+    from app.services.datasource_service import DataSourceService
 
-    svc = DataAppService()
+    svc = DataSourceService()
     out: list[dict[str, Any]] = []
     for s in sources:
         try:
@@ -485,10 +485,10 @@ def materialize_options(
     databases: list[str] | None = None
     databases_error: str | None = None
     if chosen is not None:
-        from app.services.data_app import DataAppService
+        from app.services.datasource_service import DataSourceService
 
         try:
-            databases = DataAppService().list_databases(db, chosen.id)
+            databases = DataSourceService().list_databases(db, chosen.id)
         except Exception as exc:  # noqa: BLE001 — 列不出库只降级为手填，不该中断建数
             databases_error = f"列不出该数据源的库（{exc}）；请让用户手填库名"
 

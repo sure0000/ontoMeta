@@ -6,14 +6,7 @@ from app.models.agent import (
     ArtifactStatus,
     GovernanceArtifact,
 )
-from app.models.data_app import (
-    DataApp,
-    DataAppDataset,
-    DataAppVersion,
-    DataAppWidget,
-    DataSource,
-    DorisWarehouseConfig,
-)
+from app.models.datasource import DataSource, DorisWarehouseConfig
 from app.models.dimensional_model import DimensionalModel
 from app.models.domain import (
     DomainContext,
@@ -71,6 +64,7 @@ from app.models.settings import (
     DraftGenerationSetting,
     LlmServiceConfig,
 )
+from app.models.superset import ASSET_STATES, ASSET_TYPES, SupersetAsset
 from app.models.warehouse import (
     DerivedDefinition,
     IngestionContract,
@@ -113,10 +107,6 @@ __all__ = [
     "DraftGenerationSetting",
     "DataSource",
     "DorisWarehouseConfig",
-    "DataApp",
-    "DataAppDataset",
-    "DataAppVersion",
-    "DataAppWidget",
     "IngestionContract",
     "DerivedDefinition",
     "MaterializationContract",
@@ -156,4 +146,7 @@ __all__ = [
     "McpFlowForm",
     "McpSkill",
     "McpSkillVersion",
+    "SupersetAsset",
+    "ASSET_TYPES",
+    "ASSET_STATES",
 ]

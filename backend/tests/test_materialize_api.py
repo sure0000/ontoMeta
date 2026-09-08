@@ -10,7 +10,7 @@ import pytest
 
 from app.database import SessionLocal
 from app.models import DomainContext, ObjectType, Ontology, OntologyStatus
-from app.models.data_app import DataSource
+from app.models.datasource import DataSource
 
 
 @pytest.fixture(autouse=True)

@@ -95,7 +95,7 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 `query_objects` 支持 `group_by=role|segment` 聚合模式，先返回分布再按需分页取明细，
 避免把大型本体的全部对象塞进 agent 上下文。
 
-**67 个已注册工具**（以 `app/mcp/tools/` 的 `TOOL_REGISTRY` 为准；括号内是服务器强制的最低角色。本节由 `tests/test_docs_tool_catalog.py` 钉住，加工具不同步会失败）：
+**73 个已注册工具**（以 `app/mcp/tools/` 的 `TOOL_REGISTRY` 为准；括号内是服务器强制的最低角色。本节由 `tests/test_docs_tool_catalog.py` 钉住，加工具不同步会失败）：
 
 ### 入口与指引（1 个）
 - `get_playbook`（reader）- 取回 ontoMeta 的操作指引（playbook）正文：某类问题该按什么顺序调哪些工具、每个结果字段怎么解读、哪些结论不许说
@@ -157,6 +157,14 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 - `list_datasources`（reader）- 列出已配置的数据源：业务源库（business_source）与数仓（warehouse）。建同步任务时源端取 business_source、目标端取默认 Doris 仓。不返回任何凭据
 - `validate_sql`（reader）- 校验 SQL 是否为合法的单条只读查询。不连数据库、不执行
 
+### 可视化（Superset）（6 个）
+- `list_superset_datasets`（reader）- 列出 Superset 里已有的数据集，并标出哪些是由 ontoMeta 从落点登记过去的（带 dataset_ref 的那些口径可追溯到本体）
+- `ensure_superset_dataset`（editor）- 把一个已发布本体的落点登记成 Superset 数据集（幂等），并把本体的中文字段名与描述推成 verbose_name/description
+- `create_superset_chart`（editor）- 在 Superset 里建一张图（table/bar/line/pie/kpi），返回 chart_id 与可直接打开的链接。形状不对当场拒绝
+- `update_superset_chart`（editor）- 整体改写一张已有图表的口径或形态。是整体替换不是增量
+- `create_superset_dashboard`（editor）- 把若干已建好的图表拼成看板并放进布局，返回链接与嵌入 uuid
+- `list_superset_assets`（reader）- 列出经 ontoMeta 建到 Superset 的数据集/图表/看板；`state` 是对账结果不是猜测
+
 ### 口径创作与规约自检（4 个）
 - `compile_logic_expression`（reader）- 把一条口径的表达式编译成真 SQL 并自证，不写库。编不过回 `code` + 可用字段/支持的算子，照着改；编过了回 `compiled_sql` 与口径展开轨迹
 - `create_logic`（editor）- 新建一条业务口径（指标/标签/规则）**草稿**。带表达式时先编译自证，编不过就不建；不带表达式时 `description` 必填
@@ -214,8 +222,8 @@ MCP 现在可以在不绕道 REST 的情况下编排治理任务：`propose_*` �
 - 取数辅助：`scout_query`（把探路整体外包给子代理。通用 agent 宿主自带子代理，这条大概率不必再补）
 - 治理规约：`validate_against_policy`、`get_active_governance_standard`（Spec 级命名自检已实现，见上）
 - 批量口径：`propose_logic_batch`（一次编译一组口径。工具循环里逐条编译再建就够，批量只是省轮次）
-- 任务链与呈现：`propose_pipeline`、`propose_panel`、`propose_dashboard`
-  （数据应用面板/看板仍只有 Web 入口）
+- 任务链与呈现：`propose_pipeline`
+  （图表与看板已改由 Superset 承载，见上「可视化（Superset）」；ontoMeta 只提供口径与登记）
 
 ---
 

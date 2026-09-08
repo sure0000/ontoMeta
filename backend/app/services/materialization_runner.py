@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from app.connectors.airflow import AirflowClient, AirflowError, build_run_id
 from app.models import IngestionContract, MaterializationContract, ObjectType, Ontology
-from app.models.data_app import DataSource, DorisWarehouseConfig
+from app.models.datasource import DataSource, DorisWarehouseConfig
 from app.models.warehouse import TargetKind
 from app.services import flink_params
 from app.services.airflow_dag_builder import (

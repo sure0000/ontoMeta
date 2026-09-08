@@ -43,6 +43,11 @@ _DYNAMIC_ENTRYPOINTS = (
     "app.services.lineage_scheduler",
     "app.services.ops_records",
     "app.services.result_analysis",
+    # 自研数据应用下线后，取数闸门只剩 Agent 通道在用：agent_sql 在函数里按需 import
+    # query_routing / query_readiness，mcp/tools/query_aids 又是装饰器注册的动态入口，
+    # 于是静态图看不见这两条边。它们是**在用**的，不是待接线。
+    "app.services.query_routing",
+    "app.services.query_readiness",
 )
 
 

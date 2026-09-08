@@ -186,7 +186,7 @@ def test_editor_allowed_proposal_but_not_sql(call_via_server, seeded_ontology_fo
 def test_publisher_allowed_execute_sql_reaches_tool(call_via_server, monkeypatch):
     """publisher 过授权闸门；无默认仓时工具自身 fail-closed（业务失败，非授权拒绝）。"""
     with SessionLocal() as db:
-        from app.models.data_app import DataSource
+        from app.models.datasource import DataSource
 
         has_wh = (
             db.query(DataSource).filter(DataSource.is_default_warehouse.is_(True)).first()

@@ -1,5 +1,14 @@
 # 数据应用概念重构：Panel / Dashboard 统一模型（Grafana 范式）
 
+> ## ⛔ 本文已废弃（2026-09-08）
+>
+> 自研数据应用整体下线：`DataApp` / `DataAppDataset` / `DataAppWidget` / `DataAppVersion`
+> 四张表、编辑器与手写 SVG 渲染器均已删除（迁移 `drop_data_apps_20260908`）。
+> 图表与看板改由 **Apache Superset** 承载，ontoMeta 只提供口径与登记 ——
+> 见 **[SUPERSET_INTEGRATION.md](./SUPERSET_INTEGRATION.md)**。
+>
+> 本文保留为设计沿革：下面这套 Panel/Dashboard 模型**不再对应任何代码**。
+
 > 本文是数据应用的**权威概念定义**，取代此前「数据表格 / 数据大屏 / 数据看板」三分的模型。
 > 参照 **Grafana** 的成熟范式，把数据应用收敛为两个一等概念：**Panel** 与 **Dashboard**。
 

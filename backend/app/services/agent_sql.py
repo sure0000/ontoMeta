@@ -234,7 +234,7 @@ def run_agent_sql(
     好把用例钉在一个确定的数据源上而不是全库里随手捞到的那一个）。
     """
     from app.services import data_app_executor
-    from app.services.data_app import resolve_domain_data_source
+    from app.services.datasource_service import resolve_domain_data_source
 
     sql = (sql or "").strip()
     if not sql:

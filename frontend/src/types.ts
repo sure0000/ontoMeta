@@ -1017,7 +1017,7 @@ export interface AirflowSettings {
   updated_at: string;
 }
 
-// ===== 依赖组件统一部署管理（DEPENDENCY_DEPLOYMENT_REDESIGN Phase 0） =====
+// ===== 基础设施组件（固定几样，只登记连接；见 docs/DEPENDENCY_COMPONENTS.md） =====
 
 export interface DependencySchemaField {
   name: string;
@@ -1029,7 +1029,6 @@ export interface DependencySchemaField {
 export interface DependencyComponentMeta {
   key: string;
   label: string;
-  multi: boolean;
 }
 /** 连接分组：一个组件可能握着几条互不相干的连接（Airflow = 调度 API + DAG 投递）。 */
 export interface DependencyConnectionGroup {
@@ -1041,26 +1040,19 @@ export interface DependencySchema {
   components: DependencyComponentMeta[];
   connection_schemas: Record<string, DependencySchemaField[]>;
   connection_groups: Record<string, DependencyConnectionGroup[]>;
-  deploy_modes: string[];
-  // 每组件允许的部署方式（未列出=全支持）；前端据此收窄模式选择器。
-  component_deploy_modes?: Record<string, string[]>;
-  deploy_spec_schemas: Record<string, DependencySchemaField[]>;
-  bare_metal_params: Record<string, DependencySchemaField[]>;
-  docker_params: Record<string, DependencySchemaField[]>;
-  deploy_statuses: string[];
+  connection_statuses: string[];
 }
 export interface DependencyComponent {
   id: string;
   key: string;
   name: string;
-  deploy_mode: string;
-  deploy_spec: Record<string, unknown>;
-  deploy_status: string;
-  deploy_error?: string | null;
-  deploy_log?: string | null;
+  /** 组件附加配置：Airflow 编排参数 extra、逐条拨测记账 _probe */
+  settings: Record<string, unknown>;
+  /** unknown | connected | failed —— 只由拨测写入 */
+  connection_status: string;
+  connection_error?: string | null;
   connection: Record<string, unknown>;
   enabled: boolean;
-  is_default: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1077,13 +1069,44 @@ export interface DependencyProbePart {
   ok: boolean;
   message: string;
   latency_ms?: number | null;
-  /** 记账时间（ISO）。只在组件行的 deploy_spec._probe 里有。 */
+  /** 记账时间（ISO）。只在组件行的 settings._probe 里有。 */
   at?: string;
 }
-export interface DependencyDeployResult {
-  status: string;
-  ok: boolean;
-  message?: string;
+
+// ---- Superset 资产（图表与看板住在 Superset，这里只是登记簿）----
+
+export interface SupersetStatus {
+  configured: boolean;
+  /** 没配好时说明原因，供页面给出"去设置页"的指引。 */
+  reason: string | null;
+  /** 用户浏览器可达的 Superset 地址；没配好时为 null。 */
+  base_url: string | null;
+  database_id?: number | null;
+}
+
+export interface SupersetAsset {
+  id: string;
+  asset_type: "dataset" | "chart" | "dashboard";
+  superset_id: number;
+  /** 看板开启嵌入后的 uuid，是 embedDashboard 的 id；没开嵌入时为 null。 */
+  embedded_uuid: string | null;
+  title: string;
+  /** 可直接打开的绝对地址（未配 Superset 时退化为相对路径）。 */
+  url: string;
+  url_path: string;
+  viz_type: string | null;
+  /** 建在哪个落点上，指回本体治理。 */
+  dataset_ref: string | null;
+  superset_dataset_id: number | null;
+  ontology_id: string | null;
+  domain_id: string | null;
+  created_by: string | null;
+  created_via: "mcp" | "web" | string;
+  /** 对账结果：unknown=还没对过账（不等于不存在），missing=Superset 那边已经没有了。 */
+  state: "unknown" | "active" | "missing";
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ---- 字段级溯源：合并报告与冲突复核 ----
@@ -1138,104 +1161,6 @@ export interface OntologyConflicts {
   ontology_id: string;
   items: ConflictItem[];
   total: number;
-}
-
-// ------------------------------------------------------------ Data App (数据应用)
-
-export interface DataAppBindingRef {
-  kind: "object_type" | "property" | "business_logic";
-  id?: string | null;
-  name?: string | null;
-  display_name?: string | null;
-}
-
-export interface DataAppMeasure {
-  ref: DataAppBindingRef;
-  agg: string; // sum / count / avg / max / min
-}
-
-export interface DataAppFilter {
-  ref: DataAppBindingRef;
-  op: string; // eq / ne / gt / lt / ge / le / like
-  value?: unknown;
-}
-
-export interface DataAppTimeRange {
-  ref?: DataAppBindingRef | null;
-  window?: string | null; // last_7d / last_30d / today / this_month
-}
-
-export interface DataAppBinding {
-  primary_object_type_id?: string | null;
-  measures: DataAppMeasure[];
-  dimensions: DataAppBindingRef[];
-  filters: DataAppFilter[];
-  time_range?: DataAppTimeRange | null;
-  row_limit: number;
-}
-
-export interface DataAppDataset {
-  id: string;
-  app_id: string;
-  name: string;
-  primary_object_type_id?: string | null;
-  binding: DataAppBinding;
-  compiled_sql?: string | null;
-  data_source_id?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface DataAppSummary {
-  id: string;
-  domain_id: string;
-  app_type: "data_table" | "screen" | "dashboard";
-  name: string;
-  description?: string | null;
-  status: string; // draft / published / archived
-  source: string; // manual / agent_generated（兼容旧 chat_generated 数据）
-  current_version: number;
-  published_version?: number | null;
-  published_at?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface DataAppDetail extends DataAppSummary {
-  ontology_id?: string | null;
-  spec?: Record<string, unknown> | null;
-  datasets: DataAppDataset[];
-}
-
-export interface DataAppColumn {
-  key: string;
-  title: string;
-}
-
-export interface DataAppPreviewResult {
-  dataset_id?: string | null;
-  compiled_sql?: string | null;
-  columns: DataAppColumn[];
-  rows: Record<string, unknown>[];
-  used_mock: boolean;
-  warnings: string[];
-}
-
-export interface DataAppVersion {
-  id: string;
-  app_id: string;
-  version: number;
-  diff_summary?: string | null;
-  operator?: string | null;
-  created_at: string;
-}
-
-export interface DataAppDatasetInput {
-  id?: string;
-  name?: string;
-  primary_object_type_id?: string | null;
-  binding: DataAppBinding;
-  data_source_id?: string | null;
 }
 
 export interface DorisWarehouseConfig {
@@ -1302,44 +1227,6 @@ export interface DataSource {
   path?: string | null; // 文件类（sqlite/duckdb）
 }
 
-export interface RuntimeFilter {
-  ref: { kind: string; id?: string | null; name?: string | null; display_name?: string | null };
-  op: string; // eq / ne / gt / lt / like
-  value?: unknown;
-}
-
-export interface ScreenParam {
-  id: string;
-  label: string;
-  column: string; // 物理/本体列名，用于匹配各数据集
-  op?: string; // 默认 eq
-  default?: string;
-}
-
-export interface DataAppWidget {
-  id: string;
-  domain_id: string;
-  ontology_id?: string | null;
-  name: string;
-  description?: string | null;
-  widget_type: string; // table/bar/kpi/line/pie
-  primary_object_type_id?: string | null;
-  binding: DataAppBinding;
-  viz?: Record<string, unknown> | null;
-  compiled_sql?: string | null;
-  data_source_id?: string | null;
-  status: string;
-  source: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PublicShareStatus {
-  public_enabled: boolean;
-  public_token?: string | null;
-  password_set: boolean;
-  public_expires_at?: string | null;
-}
 
 // ---- 物化契约（M1）----
 // 本体是一级源数据、物理表是二级投影；契约补齐本体不承载的落地配置。
@@ -1890,6 +1777,34 @@ export interface RelationInferenceTask {
   } | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+/** 画布预连线给出的一根线。表名是请求里传的原样，直接对得上画布节点。 */
+export interface CanvasSuggestion {
+  source_table: string;
+  source_column: string;
+  target_table: string;
+  target_column: string;
+  cardinality: string;
+  structure_type: string;
+  confidence: number;
+  /** key_family（本次现推）/ confirmed_family（此前人工确认过的族） */
+  origin: string;
+  key_name: string | null;
+  entity_name: string | null;
+  value_shape: string;
+  reason: string | null;
+}
+
+export interface CanvasSuggestReport {
+  suggestions: CanvasSuggestion[];
+  scanned_tables: string[];
+  /** 在 DataHub 元数据里对不上号、没参与分析的表——要如实告诉人。 */
+  skipped_tables: string[];
+  families: number;
+  dismissed_families: number;
+  cached_bundle: boolean;
+  truncated: boolean;
 }
 
 // ---- MCP 服务（Phase 5：远程传输 + 管理页）----

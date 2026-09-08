@@ -17,7 +17,7 @@ from app.config import settings
 from app.services import agent_sql, data_app_executor
 from app.services.agent_sql import RUN_SQL_LIMIT as _RUN_SQL_LIMIT
 from app.services.agent_sql import SQL_TIMEOUT_SECONDS as _SQL_TIMEOUT_SECONDS
-from app.services.data_app import resolve_domain_data_source
+from app.services.datasource_service import resolve_domain_data_source
 
 from . import AuthContext, ToolResult, register_tool
 from ._common import as_int, session

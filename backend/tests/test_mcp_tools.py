@@ -25,7 +25,7 @@ from app.models import (
     RelationType,
 )
 from app.models.agent import ArtifactStatus, GovernanceArtifact
-from app.models.data_app import DataSource
+from app.models.datasource import DataSource
 
 AUTH = AuthContext(user_id=None, client_type="mcp_local")
 
@@ -53,6 +53,12 @@ EXPECTED_TOOLS = {
     "get_ontology_overview",
     "start_task_flow",
     "advance_task_flow",
+    "list_superset_datasets",
+    "ensure_superset_dataset",
+    "create_superset_chart",
+    "update_superset_chart",
+    "create_superset_dashboard",
+    "list_superset_assets",
 }
 
 

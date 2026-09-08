@@ -274,7 +274,7 @@ def test_create_datasource_drops_credentials(client):
     assert set(result.data["dropped_args"]) == {"dsn", "password"}
     assert result.data["connection_configured"] is False
 
-    from app.models.data_app import DataSource
+    from app.models.datasource import DataSource
 
     with SessionLocal() as db:
         row = db.query(DataSource).filter(DataSource.name == name).first()

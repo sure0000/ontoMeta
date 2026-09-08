@@ -56,7 +56,7 @@ Airflow 终态、写了多少行）；「搬过来的数对不对」只有人答
 
 - `task_run` 任务跑完没有、失败没有，谁建的、谁拍的板、人改过哪几个参数，以及**人认为结果对不对**
   （`result_outcome` 为空 = 没人看过，不等于没问题）；
-- `component` 依赖组件（airflow/datahub/llm）部署与连通状态；`datasource` 数据源上次拨测结果；
+- `component` 依赖组件（airflow/datahub/llm）连通状态；`datasource` 数据源上次拨测结果；
 - `ontology_version` / `draft_run` / `merge_report` / `conflict` / `standard` / `data_app` / `migration` 各自的历史。
 - 按本体组织的族要传 `ontology_id`。
 

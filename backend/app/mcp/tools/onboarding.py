@@ -52,7 +52,7 @@ class ListOnboardingTargetsTool:
     input_schema = {"type": "object", "properties": {}}
 
     async def execute(self, arguments: dict, auth: AuthContext) -> ToolResult:
-        from app.models.data_app import DataSource
+        from app.models.datasource import DataSource
         from app.services.settings_service import SettingsService
 
         try:
@@ -150,8 +150,8 @@ class CreateDatasourceTool:
     }
 
     async def execute(self, arguments: dict, auth: AuthContext) -> ToolResult:
-        from app.models.data_app import DataSource
-        from app.services.data_app import DataAppService
+        from app.models.datasource import DataSource
+        from app.services.datasource_service import DataSourceService
 
         name = str(arguments.get("name") or "").strip()
         if not name:
@@ -176,7 +176,7 @@ class CreateDatasourceTool:
                         data={"data_source_id": clash.id, "kind": clash.kind},
                         metadata={"hint": "先看 list_onboarding_targets，别建重复的源"},
                     )
-                ds = DataAppService().create_data_source(
+                ds = DataSourceService().create_data_source(
                     db,
                     name=name,
                     kind=kind,

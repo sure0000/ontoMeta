@@ -37,6 +37,7 @@ def test_builtin_pack_is_complete(db):
         "ontometa-onboarding",
         "ontometa-discovery",
         "ontometa-query",
+        "ontometa-viz",
         "ontometa-authoring",
         "ontometa-modeling",
         "ontometa-task-plan",

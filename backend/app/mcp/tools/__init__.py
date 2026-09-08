@@ -193,6 +193,7 @@ from . import (  # noqa: E402,F401
     query_aids,
     resolve,
     sql,
+    superset,
     tasks,
 )
 

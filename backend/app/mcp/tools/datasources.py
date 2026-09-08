@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from app.models.data_app import DataSource
+from app.models.datasource import DataSource
 
 from . import AuthContext, ToolResult, register_tool
 from ._common import session

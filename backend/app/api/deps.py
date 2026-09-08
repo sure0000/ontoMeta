@@ -1,8 +1,8 @@
 """Shared service singletons for API routers."""
 
 from app.services.agent_pipeline import agent_pipeline  # noqa: F401  (再导出)
-from app.services.data_app import DataAppService
 from app.services.datahub_writeback import DataHubWritebackService
+from app.services.datasource_service import DataSourceService
 from app.services.edit import EditService
 from app.services.expression_formatter import ExpressionFormatterService
 from app.services.lineage_emitter import LineageEmitter
@@ -25,7 +25,7 @@ settings_service = SettingsService()
 logic_import_service = LogicImportService()
 provenance_service = ProvenanceService()
 expression_formatter_service = ExpressionFormatterService()
-data_app_service = DataAppService()
+datasource_service = DataSourceService()
 materialization_contract_service = MaterializationContractService()
 warehouse_generator = WarehouseGenerator()
 principal_service = PrincipalService()

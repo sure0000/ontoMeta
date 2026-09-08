@@ -36,7 +36,7 @@ export interface ClusterMatrixViewProps {
 /**
  * 稠密簇下钻：成员×成员邻接矩阵（行=关系源，列=关系目标）。
  * 有关系的格子按结构类型着色，避免节点-连线图在稠密簇里重叠成毛线球。
- * 纯内联 SVG（无第三方图表依赖），仿 DataAppRenderer 的手绘模式。
+ * 纯内联 SVG（无第三方图表依赖）。
  */
 export function ClusterMatrixView({ detail, onRelationClick }: ClusterMatrixViewProps) {
   const nodes = useMemo(() => detail.nodes.slice(0, MATRIX_MAX), [detail.nodes]);
