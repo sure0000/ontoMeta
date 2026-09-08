@@ -27,6 +27,7 @@ from app.models import (
     RelationInferenceTask,
 )
 from app.services import (
+    canvas_suggest,
     datahub_bundle_cache,
     key_family,
     lineage_inventory,
@@ -748,6 +749,78 @@ async def apply_relation_candidates(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RelationApplyReceipt(**receipt)
+
+
+# --------------------------------------------------------------------------- 画布预连线
+
+
+class CanvasSuggestRequest(BaseModel):
+    #: 画布上要分析的表名，用画布节点上的原样（``库.表``）传。
+    tables: list[str] = Field(default_factory=list)
+    #: 强制重抓 DataHub 元数据（缓存里的样例值/行数过时才用得上）。
+    refresh: bool = False
+
+
+class CanvasSuggestionRow(BaseModel):
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    cardinality: str
+    structure_type: str
+    confidence: float
+    #: key_family（本次现推）/ confirmed_family（此前人工确认过的族）
+    origin: str
+    key_name: str | None = None
+    entity_name: str | None = None
+    value_shape: str
+    reason: str | None = None
+
+
+class CanvasSuggestReport(BaseModel):
+    suggestions: list[CanvasSuggestionRow] = Field(default_factory=list)
+    scanned_tables: list[str] = Field(default_factory=list)
+    #: 在 DataHub 元数据里对不上号、没参与分析的表。
+    skipped_tables: list[str] = Field(default_factory=list)
+    families: int = 0
+    dismissed_families: int = 0
+    cached_bundle: bool = False
+    truncated: bool = False
+
+
+@router.post("/domains/{domain_id}/canvas-suggestions", response_model=CanvasSuggestReport)
+async def suggest_canvas_edges(
+    domain_id: str, body: CanvasSuggestRequest, db: Session = Depends(get_db)
+):
+    """在画布上选中的这几张表之间**直接预连线**，交给人在图上删改。
+
+    与 ``/infer-relations`` 是两条路：那条整域跑、产出键族让人按族表态；这条只看选中的
+    表、产出一根根具体的边。**同步返回**——作用域小，LLM 只判这几张表聚出的那几个族，
+    等得起；而且这个交互本来就是「点一下，线就出来了」。
+
+    **不碰 DataHub，也不碰任何人工表态**；唯一的写是把新判出来的键族缓存成
+    ``state=proposed`` 的候选行，下次点同一批表秒回（实测 34s → 0.1s）。
+    """
+    try:
+        result = await canvas_suggest.suggest(
+            db, domain_id, body.tables, refresh=body.refresh
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — DataHub/LLM 不通要说清是哪一头
+        logger.exception("画布预连线失败 domain_id=%s", domain_id)
+        raise HTTPException(status_code=502, detail=f"预连线失败：{exc}") from exc
+    return CanvasSuggestReport(
+        suggestions=[CanvasSuggestionRow(**item.__dict__) for item in result.suggestions],
+        scanned_tables=result.scanned_tables,
+        skipped_tables=result.skipped_tables,
+        families=result.families,
+        dismissed_families=result.dismissed_families,
+        cached_bundle=result.cached_bundle,
+        truncated=result.truncated,
+    )
 
 
 # --------------------------------------------------------------------------- 代码包

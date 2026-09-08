@@ -26,8 +26,6 @@ type DetailView = "list" | "graph";
 
 interface Props {
   pkg: LineagePackageDetail | null;
-  /** 正在上传新包：主区让位给上传区。 */
-  uploading: boolean;
   scanning: boolean;
   onScan: (file: File) => void;
   selected: string[];
@@ -67,7 +65,6 @@ function stamp(value?: string | null) {
 
 export function ScanReport({
   pkg,
-  uploading,
   scanning,
   onScan,
   selected,
@@ -98,7 +95,7 @@ export function ScanReport({
     };
   }, [groups, isolatedTotal]);
 
-  if (uploading || !pkg) {
+  if (!pkg) {
     return (
       <div className="lin-dropzone">
         <Upload.Dragger
@@ -121,9 +118,21 @@ export function ScanReport({
           </p>
         </Upload.Dragger>
         <div className="lin-dropzone-foot">
-          <Button type="primary" icon={<FileSearchOutlined />} loading={scanning} disabled>
-            {scanning ? "扫描中…" : "等待选择文件"}
-          </Button>
+          {/* 这里原来是个**永远禁用**的按钮，写着「等待选择文件」——占着主行动位却点不动。
+              现在它就是文件选择器本身，和上面的拖拽区两条路都通。 */}
+          <Upload
+            multiple={false}
+            showUploadList={false}
+            disabled={scanning}
+            beforeUpload={(file) => {
+              onScan(file as unknown as File);
+              return false;
+            }}
+          >
+            <Button type="primary" icon={<FileSearchOutlined />} loading={scanning}>
+              {scanning ? "扫描中…" : "选择文件"}
+            </Button>
+          </Upload>
           <span className="lin-muted">扫描只落库，不写 DataHub；上报是单独一步</span>
         </div>
       </div>
@@ -132,11 +141,19 @@ export function ScanReport({
 
   const done = pkg.applied_edges > 0;
 
+  /** 列宽必须**每一列都写死**（配合 tableLayout=fixed）。
+   *
+   * 原来只给了几列 width 又用默认的 auto 布局：源文件那一列全是
+   * ``gflow/bi-gflow-ry-group-model-risk-score/code/hy_score_ex.sql`` 这种没有断点的
+   * 长串，浏览器把它撑到 666px，反过来把「补录后」挤成 30px，于是「补充上下游」
+   * 五个字竖着排成五行——**每一行 127px 高**，1211 个落点滚 15 万像素。
+   */
   const columns: ColumnsType<LineagePackageGroup> = [
     {
       title: "目标表（血缘落点）",
       dataIndex: "target",
       key: "target",
+      ellipsis: true,
       render: (target: string, row) => (
         <div className="lin-cell-table">
           <LineageTableName className="lin-cell-name" name={target} />
@@ -151,12 +168,14 @@ export function ScanReport({
     {
       title: "可补的边",
       key: "edges",
-      width: 172,
+      width: 150,
       render: (_, row) => {
         const counts = countEdges([row]);
         return (
           <span className="lin-cell-edges">
-            <b>{counts.ok}</b> 条
+            {/* 0 条不加粗：这一列扫一眼是找"有多少能补"，把 0 也做成大号数字，
+                满屏都是显眼的零，反而看不见真正有边的那几行。 */}
+            <b className={counts.ok === 0 ? "lin-cell-zero" : undefined}>{counts.ok}</b> 条
             {counts.blocked > 0 && (
               <Tag color="warning" variant="filled">
                 待映射 {counts.blocked}
@@ -170,7 +189,7 @@ export function ScanReport({
     {
       title: "来源文件",
       key: "files",
-      width: 240,
+      width: 300,
       render: (_, row) => (
         <span className="lin-cell-file" title={row.files.join("\n")}>
           {row.files[0]}
@@ -181,7 +200,7 @@ export function ScanReport({
     {
       title: "补录后",
       key: "after",
-      width: 108,
+      width: 104,
       render: (_, row) =>
         row.isolated ? (
           <Tag color="success" variant="filled">
@@ -286,11 +305,36 @@ export function ScanReport({
           rowKey="target"
           columns={columns}
           dataSource={groups}
-          pagination={false}
+          // 列宽写死了就必须 fixed，否则 width 只是建议、长文件名照样把版面撑歪。
+          tableLayout="fixed"
+          /* **必须分页**：实测一个包有 1211 个落点，不分页就是 1211 行同时进 DOM
+             （每行还挂着可展开的边清单），滚动条 15 万像素长，人也翻不到底。
+             勾选按 rowKey 记在外面，翻页不会丢。 */
+          pagination={{
+            size: "small",
+            defaultPageSize: 20,
+            pageSizeOptions: [20, 50, 100],
+            showSizeChanger: true,
+            showTotal: (total, [from, to]) => `${from}-${to} / 共 ${total} 个落点`,
+          }}
           rowSelection={{
             selectedRowKeys: selected,
             onChange: (keys) => onSelectedChange(keys as string[]),
             getCheckboxProps: () => ({ disabled: frozen }),
+            /* 全选只勾当前页会让人以为"我已经全选了"，而上报只发这 20 个。
+               这里明确给出「选中全部 N 个」与「清空」两个动作。 */
+            selections: [
+              {
+                key: "all",
+                text: `选中全部 ${groups.length} 个落点`,
+                onSelect: () => onSelectedChange(groups.map((group) => group.target)),
+              },
+              {
+                key: "none",
+                text: "清空选择",
+                onSelect: () => onSelectedChange([]),
+              },
+            ],
           }}
           expandable={{
             expandedRowRender: (row) => (
@@ -343,7 +387,14 @@ export function ScanReport({
                         已上报
                       </Tag>
                     )}
-                    <span className="lin-cell-file">{edge.source_file}</span>
+                    {/* 落点只来自一个文件时不重复印路径：那一行的「来源文件」列已经写了，
+                        而这里的路径动辄七八十个字符，每条边都挂一遍就把每条边挤成两行。
+                        跨多个文件时才要标出这条边到底出自哪一个。 */}
+                    {row.files.length > 1 && (
+                      <span className="lin-cell-file" title={edge.source_file}>
+                        {edge.source_file}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>

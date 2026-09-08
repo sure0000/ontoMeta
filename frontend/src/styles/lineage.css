@@ -6,16 +6,25 @@
  * 永远在视野里（补录是"边看结论边决定写不写"的活）。
  *
  * 两族颜色：机器扫出来的边走 --om-machine（与审核工作台的「机器判的」同一套印记），
- * 人工连的、选中的走 --om-primary。语义色只表示「能不能写」：待映射/缺键=warning。
+ * 人工连的、选中的走 --om-primary。智能补录**预连**、还没经人看过的线单挑
+ * --om-machine-edge（暖色虚线）——它是这一屏唯一要人主动处置的东西，混进冷灰蓝
+ * 就等于没标。语义色只表示「能不能写」：待映射/缺键=warning。
  * 孤岛红是全页唯一的红，别处不许用，否则它就不显眼了。
  * ============================================================ */
+
+/* 这一屏的产出全在画布上，所以外面能省的都省掉：全局 app-content 的
+   28/40/32 内边距在这里换成 10/12/14，光这一项就把画布还回 46px 高、36px 宽。
+   用 :has 精确挂在本页上，不动别的页面的版式。 */
+.app-content:has(.lin-workbench) {
+  padding: 10px 14px 12px;
+}
 
 .lin-workbench {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--om-space-2);
+  gap: 6px;
 }
 
 .lin-muted {
@@ -39,8 +48,8 @@
   display: grid;
   grid-template-columns: auto 168px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px 16px;
-  padding: 7px var(--om-space-3);
+  gap: 8px 14px;
+  padding: 5px var(--om-space-3);
   background: var(--om-surface);
   border: 1px solid var(--om-border);
   border-radius: var(--om-radius-lg);
@@ -252,11 +261,12 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
-  gap: var(--om-space-2);
+  /* 300px 够放两行表名 + 勾选框 + 「＋」，再宽就是白给的——那 60px 归画布。 */
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 6px;
 }
 
-/* 收起后只留一条可点的窄边——画布铺满时这 288px 很值钱 */
+/* 收起后只留一条可点的窄边——画布铺满时这 300px 很值钱 */
 .lin-body--rail-closed {
   grid-template-columns: 38px minmax(0, 1fr);
 }
@@ -445,6 +455,33 @@
 
 /* ---------- 左栏：表清单 ---------- */
 
+/* 全选条：口径是「当前筛选出的全部」，所以它跟在筛选器下面、列表上面——
+   人先定范围，再一次勾中。 */
+.lin-rail-select {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: 6px var(--om-space-3);
+  border-bottom: 1px solid var(--om-border);
+  font-size: var(--om-text-sm);
+}
+
+.lin-rail-select .ant-checkbox-wrapper {
+  font-size: var(--om-text-sm);
+}
+
+.lin-rail-select-count {
+  margin-inline-start: auto;
+  color: var(--om-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-rail-select .ant-btn-link {
+  padding: 0;
+  height: auto;
+}
+
 .lin-rail-list {
   position: relative;
   flex: 1;
@@ -458,6 +495,7 @@
 
 .lin-rail-row {
   box-sizing: border-box;
+  min-height: 56px;
   display: flex;
   align-items: center;
   gap: var(--om-space-2);
@@ -465,12 +503,152 @@
   border-radius: var(--om-radius-sm);
 }
 
-.lin-rail-virtual-spacer {
-  display: block;
-  pointer-events: none;
+.lin-rail-row:hover {
+  background: var(--om-surface-muted);
 }
 
-.lin-rail-row:hover {
+/* 已经在画布上的表压暗：它勾不动也加不了，留在原位是为了让人看见「这张已经放过了」。 */
+.lin-rail-row--on {
+  opacity: 0.5;
+}
+
+/* 取字段失败时节点里那一行：按钮长得跟字段行一样宽，点哪都能重试。 */
+.lin-col-retry {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--om-warning);
+  font-size: var(--om-text-sm);
+}
+
+.lin-col-retry:hover {
+  background: var(--om-warning-soft);
+}
+
+/* ---------- 左栏：连通分量队列 ---------- */
+
+.lin-rail-view {
+  flex: 1;
+  min-width: 0;
+}
+
+.lin-group-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px var(--om-space-2);
+  border-bottom: 1px solid var(--om-border);
+}
+
+.lin-group-pos {
+  flex: 1;
+  text-align: center;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-group-pos b {
+  font-size: var(--om-text-base);
+  color: var(--om-text);
+}
+
+.lin-group-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: var(--om-space-2);
+}
+
+.lin-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 4px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--om-radius);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.lin-group:hover {
+  background: var(--om-surface-muted);
+}
+
+.lin-group--on {
+  background: var(--om-primary-soft);
+  border-color: var(--om-primary-border);
+}
+
+.lin-group-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--om-text-sm);
+  font-weight: 600;
+  color: var(--om-text);
+}
+
+.lin-group-ord {
+  font-style: normal;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+}
+
+.lin-group-name em {
+  margin-inline-start: auto;
+  flex: none;
+  font-style: normal;
+  font-weight: 400;
+  font-size: var(--om-text-xs);
+  color: var(--om-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 组没有名字，只能靠成员认。压到两行截断——这里要的是「认出是哪一摊」，不是读全名单。 */
+.lin-group-members {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--om-text-xs);
+  line-height: 1.5;
+  color: var(--om-text-tertiary);
+}
+
+.lin-group-members .lin-table-name {
+  display: inline;
+  margin-inline-end: 6px;
+}
+
+.lin-group-members i {
+  font-style: normal;
+}
+
+.lin-rail-pager {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding: 6px var(--om-space-3);
+  border-top: 1px solid var(--om-border);
+}
+
+.lin-rail-batch {
+  flex: none;
+  padding: var(--om-space-2) var(--om-space-3);
+  border-top: 1px solid var(--om-border);
   background: var(--om-surface-muted);
 }
 
@@ -763,13 +941,29 @@
 }
 
 .lin-scan-table .ant-table-cell {
+  padding: 6px 10px;
+}
+
+/* 一行就是一行：所有单元格都不换行。这张表有上千行，任何一列一旦折行，
+   整表的行高就跟着涨——原来「补充上下游」被挤成 30px 宽竖排五行，
+   一行 127px，1211 行滚 15 万像素。 */
+.lin-scan-table .ant-table-tbody > tr > td {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 表头也压紧一档，并让它在表体滚动时留在原地 */
+.lin-scan-table .ant-table-thead > tr > th {
   padding: 7px 10px;
+  white-space: nowrap;
+  font-size: var(--om-text-sm);
 }
 
 .lin-cell-table {
   display: flex;
   align-items: center;
   gap: var(--om-space-2);
+  min-width: 0;
 }
 
 .lin-cell-name {
@@ -778,31 +972,68 @@
   font-size: var(--om-code-base);
 }
 
+/* 表名超宽时截断而不是换行；完整名在 title 里 */
+.lin-scan-table .lin-cell-name .lin-table-name-main,
+.lin-scan-table .lin-cell-name .lin-table-name-db {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-cell-table .ant-tag {
+  flex: none;
+  margin-inline-end: 0;
+}
+
 .lin-cell-edges {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: var(--om-text-sm);
   color: var(--om-text-secondary);
+  white-space: nowrap;
 }
 
 .lin-cell-edges b {
   font-family: var(--om-font-mono);
-  font-size: var(--om-text-lg);
+  font-size: var(--om-text-base);
   color: var(--om-text);
   font-variant-numeric: tabular-nums;
 }
 
+/* 0 条不抢视线：这一列扫的是"哪几行有边可补" */
+.lin-cell-edges b.lin-cell-zero {
+  font-weight: 400;
+  color: var(--om-text-tertiary);
+}
+
+.lin-cell-edges .ant-tag {
+  margin-inline-end: 0;
+}
+
+/* 文件路径是没有断点的长串，必须显式截断——它正是把这张表撑歪的那一列。
+   完整路径（可能多份）在 title 里。 */
 .lin-cell-file {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
   font-family: var(--om-font-mono);
   font-size: var(--om-code-sm);
   color: var(--om-text-secondary);
 }
 
+.lin-scan-table .ant-pagination {
+  margin: 10px 2px 2px;
+}
+
 .lin-edge-list {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 2px;
   padding: 2px 0 2px 8px;
 }
 
@@ -811,7 +1042,23 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 3px 0;
+  padding: 2px 0;
+}
+
+/* 跨多文件时才出现的那个路径：靠右、截断，不要把整条边顶成两行 */
+.lin-edge-line .lin-cell-file {
+  margin-inline-start: auto;
+  flex: 0 1 auto;
+  max-width: 300px;
+}
+
+.lin-edge-line .ant-tag {
+  margin-inline-end: 0;
+}
+
+.lin-edge-line .ant-btn-link {
+  padding: 0 2px;
+  height: auto;
 }
 
 .lin-edge-line--off {
@@ -1102,6 +1349,45 @@
   box-shadow: var(--om-shadow-md);
 }
 
+/* 工具条分两段：左边是「让机器先连一遍」，右边是视图控制。中间这条竖线
+   把「会改数据的动作」和「只改看法的动作」分开——别让人误点。 */
+.lin-toolbar-gap {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 2px;
+  background: var(--om-border);
+}
+
+.lin-scope-badge {
+  margin-inline-start: 5px;
+  padding: 0 5px;
+  border-radius: var(--om-radius-full);
+  background: rgba(255, 255, 255, 0.24);
+  font-size: var(--om-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-machine-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-inline: 4px;
+  font-size: var(--om-text-sm);
+  color: var(--om-machine-edge);
+  white-space: nowrap;
+}
+
+.lin-machine-note b {
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-machine-dot {
+  width: 14px;
+  height: 0;
+  flex: none;
+  border-top: 2px dashed var(--om-machine-edge);
+}
+
 .lin-zoom {
   display: flex;
   align-items: center;
@@ -1179,6 +1465,38 @@
 .lin-tnode--drop {
   border-color: var(--om-primary);
   box-shadow: 0 0 0 2px var(--om-primary-soft);
+}
+
+/* 点选中的表 = 智能补录的作用域。用外环而不是改底色：底色是节点自己的语义
+   （孤岛点、字段行），选中只是「这次算它」，不该盖掉表本身在说什么。 */
+.lin-tnode--picked {
+  border-color: var(--om-machine-strong);
+  box-shadow: 0 0 0 2px var(--om-machine-border);
+}
+
+.lin-tnode--picked .lin-tnode-head {
+  background: var(--om-machine-soft);
+}
+
+/* 与选中的表直接相连的表：给一圈浅环，比选中的弱一档——一眼分得出"我选的"和
+   "跟我选的有关的"。 */
+.lin-tnode--related {
+  border-color: var(--om-primary-border);
+  box-shadow: 0 0 0 2px var(--om-primary-soft);
+}
+
+/* 无关的表压暗而不是藏起来：一百多个节点里突然少一半，人会以为界面出错了。
+   压到 0.28 还看得见轮廓，够判断"那边还有东西"。 */
+.lin-tnode--dim {
+  opacity: 0.28;
+}
+
+.lin-tnode--dim:hover {
+  opacity: 0.75;
+}
+
+.lin-wire--dim {
+  opacity: 0.14;
 }
 
 .lin-tnode-head {
@@ -1344,7 +1662,8 @@
   position: absolute;
   top: 58px;
   right: var(--om-space-3);
-  width: 262px;
+  /* 面板主体是「哪两个字段在关联」的两个下拉，262px 塞不下两个可读的字段名。 */
+  width: 306px;
   z-index: 3;
   display: flex;
   flex-direction: column;
@@ -1377,6 +1696,13 @@
   padding-left: 6px;
 }
 
+.lin-inspector-conf {
+  margin-inline-start: auto;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--om-text-tertiary);
+}
+
 .lin-inspector-label {
   display: flex;
   align-items: center;
@@ -1396,15 +1722,68 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 148px;
+  max-height: 168px;
   overflow-y: auto;
 }
 
 .lin-inspector-keys li {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
+}
+
+/* 两个下拉平分剩下的宽度：字段名长短差很多，谁也不该固定死。 */
+.lin-key-select {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.lin-key-select .ant-select-selector {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-code-sm);
+}
+
+.lin-inspector-eq {
+  flex: none;
+  color: var(--om-text-tertiary);
+}
+
+.lin-inspector-acts {
+  display: flex;
   gap: 6px;
+}
+
+.lin-inspector-acts > * {
+  flex: 1 1 0;
+}
+
+/* 判据压成一行贴在面板底部：它是「改完之后核对一下」的东西，不该占掉顶上一大块，
+   那正好挤掉了人真正要看的两列字段。完整判据在悬停里。 */
+.lin-inspector-why {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: var(--om-space-2);
+  border-top: 1px dashed var(--om-border);
+  font-size: var(--om-text-sm);
+  color: var(--om-machine-edge);
+  cursor: help;
+}
+
+.lin-inspector-why b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lin-why-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--om-text-sm);
+  line-height: 1.5;
 }
 
 @media (max-width: 1100px) {
@@ -1465,203 +1844,6 @@
   to {
     background-position: -100% 0;
   }
-}
-
-/* ---------- 智能关系补充：建议抽屉 ---------- */
-
-.lin-cand-intro {
-  margin: 0 0 var(--om-space-3);
-  font-size: var(--om-text-xs);
-  line-height: 1.7;
-  color: var(--om-text-tertiary);
-}
-
-.lin-cand-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: var(--om-space-3);
-  font-size: var(--om-text-xs);
-  color: var(--om-text-secondary);
-}
-
-.lin-cand-summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: var(--om-space-3);
-  padding: 8px 10px;
-  border-radius: var(--om-radius);
-  background: var(--om-surface-muted);
-  font-size: var(--om-text-xs);
-  color: var(--om-text-secondary);
-}
-
-.lin-cand-summary b {
-  font-family: var(--om-font-mono);
-  color: var(--om-text);
-}
-
-.lin-cand-section {
-  margin-bottom: var(--om-space-4);
-}
-
-.lin-cand-section h4 {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 0 8px;
-  font-size: var(--om-text-sm);
-  font-weight: 600;
-  color: var(--om-text);
-}
-
-.lin-cand-section h4 span {
-  font-family: var(--om-font-mono);
-  font-size: var(--om-text-xs);
-  font-weight: 400;
-  color: var(--om-text-tertiary);
-}
-
-/* 一个键族一张卡：人审的粒度是族，不是两两关系 */
-.lin-cand {
-  margin-bottom: 8px;
-  padding: 10px;
-  border: 1px solid var(--om-border);
-  border-radius: var(--om-radius);
-  background: var(--om-surface);
-}
-
-.lin-cand--on {
-  border-color: var(--om-success);
-  background: var(--om-success-soft, var(--om-surface-muted));
-}
-
-.lin-cand-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.lin-cand-head .ant-tag {
-  margin-inline-end: 0;
-}
-
-.lin-cand-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--om-text-sm);
-  color: var(--om-text);
-}
-
-.lin-cand-key {
-  color: var(--om-text-secondary);
-  font-size: var(--om-text-xs);
-}
-
-.lin-cand-conf {
-  flex: none;
-  font-family: var(--om-font-mono);
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-}
-
-.lin-cand-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-  font-variant-numeric: tabular-nums;
-}
-
-.lin-cand-meta i {
-  width: 3px;
-  height: 3px;
-  border-radius: var(--om-radius-full);
-  background: var(--om-text-disabled);
-}
-
-.lin-cand-meta code,
-.lin-cand-samples code {
-  padding: 1px 5px;
-  border-radius: var(--om-radius-sm);
-  background: var(--om-surface-muted);
-  font-family: var(--om-font-mono);
-  font-size: var(--om-code-sm);
-  color: var(--om-text-secondary);
-}
-
-.lin-cand-samples {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 6px;
-}
-
-/* 判据原文：人审的就是这句，给足行高 */
-.lin-cand-reason {
-  margin: 0 0 8px;
-  font-size: var(--om-text-xs);
-  line-height: 1.7;
-  color: var(--om-text-secondary);
-}
-
-.lin-cand-cols {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 8px;
-  font-family: var(--om-font-mono);
-  font-size: var(--om-code-sm);
-  color: var(--om-text-tertiary);
-}
-
-.lin-cand-cols b {
-  color: var(--om-text-secondary);
-  font-weight: 600;
-}
-
-.lin-cand-cols .ant-tag {
-  margin-inline-start: 4px;
-  margin-inline-end: 0;
-}
-
-.lin-cand-more {
-  color: var(--om-text-disabled);
-}
-
-.lin-cand-pairs {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 8px;
-  padding: 6px 8px;
-  border-radius: var(--om-radius-sm);
-  background: var(--om-surface-muted);
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-}
-
-.lin-cand-pairs .ant-tag {
-  margin-inline-start: 4px;
-  margin-inline-end: 0;
-}
-
-.lin-cand-acts {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.lin-cand-note {
-  font-size: var(--om-text-xs);
-  color: var(--om-text-disabled);
 }
 
 /* ---------- 人工表名映射 ---------- */

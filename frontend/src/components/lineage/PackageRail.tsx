@@ -1,5 +1,5 @@
 import { CloudUploadOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Button, Popconfirm, Tag, Tooltip } from "antd";
+import { Button, Popconfirm, Tag, Tooltip, Upload } from "antd";
 import type { LineagePackageRow } from "../../types";
 
 /**
@@ -13,10 +13,15 @@ import type { LineagePackageRow } from "../../types";
 interface Props {
   packages: LineagePackageRow[];
   currentId: string | null;
+  /** 正在重扫的那个包的 id。 */
   scanningId: string | null;
+  /** 正在上传并扫描一个**新**包。 */
   uploading: boolean;
   onSelect: (id: string) => void;
-  onUpload: () => void;
+  /** 选好文件就直接开扫。**按钮自己就是文件选择器**——它写着「上传新代码包」，
+      点了却只是把主区切成拖拽区，看起来就是「没有任何反应」（尤其一个包都没有时，
+      主区本来就是拖拽区，点了画面一点不变）。 */
+  onPick: (file: File) => void;
   onRescan: (id: string) => void;
   onDelete: (id: string) => void;
 }
@@ -33,22 +38,32 @@ export function PackageRail({
   scanningId,
   uploading,
   onSelect,
-  onUpload,
+  onPick,
   onRescan,
   onDelete,
 }: Props) {
   return (
     <>
       <div className="lin-rail-controls">
-        <Button
-          size="small"
-          type={uploading ? "default" : "primary"}
-          icon={<CloudUploadOutlined />}
-          block
-          onClick={onUpload}
+        <Upload
+          multiple={false}
+          showUploadList={false}
+          disabled={uploading}
+          beforeUpload={(file) => {
+            onPick(file as unknown as File);
+            return false; // 走自己的上传接口，不让 antd 发请求
+          }}
         >
-          上传新代码包
-        </Button>
+          <Button
+            size="small"
+            type="primary"
+            icon={<CloudUploadOutlined />}
+            block
+            loading={uploading}
+          >
+            {uploading ? "扫描中…" : "上传新代码包"}
+          </Button>
+        </Upload>
       </div>
 
       <ul className="lin-pkg-list">

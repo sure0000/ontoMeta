@@ -1,21 +1,32 @@
 import {
   ArrowRightOutlined,
-  BulbOutlined,
   CloudUploadOutlined,
   LeftOutlined,
   NodeIndexOutlined,
   PlusOutlined,
   RightOutlined,
 } from "@ant-design/icons";
-import { Alert, Badge, Button, Input, Popconfirm, Segmented, Select, Tag, Tooltip, message } from "antd";
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Input,
+  Pagination,
+  Popconfirm,
+  Segmented,
+  Select,
+  Tag,
+  Tooltip,
+  message,
+} from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { LineageCanvas } from "../components/lineage/LineageCanvas";
 import type { CanvasEdge, CanvasNode } from "../components/lineage/LineageCanvas";
+import { reviewGroups } from "../components/lineage/graphLayout";
+import { GroupRail, LONERS_GROUP } from "../components/lineage/GroupRail";
 import { LineageTableName, readableDatabaseList } from "../components/lineage/LineageTableName";
 import { PackageRail } from "../components/lineage/PackageRail";
-import { RelationSuggestionDrawer } from "../components/lineage/RelationSuggestionDrawer";
 import { ScanReport } from "../components/lineage/ScanReport";
 import { TableMappingModal } from "../components/lineage/TableMappingModal";
 import { PageContainer } from "../components/PageContainer";
@@ -23,6 +34,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { useApi } from "../hooks/useApi";
 import { useUrlState } from "../hooks/useUrlState";
 import type {
+  CanvasSuggestion,
   DomainContext,
   LineageColumn,
   LineageOverview,
@@ -30,8 +42,6 @@ import type {
   LineagePackageRow,
   LineageTableMapping,
   LineageTableRow,
-  RelationCandidate,
-  RelationInferenceTask,
 } from "../types";
 
 /**
@@ -43,7 +53,9 @@ import type {
  *
  * - **扫代码包**：丢一个没有格式约定的 SQL 包进来，递归扫 .sql，自动提血缘；
  *   包留在历史里，什么时候投的、上报没上报都查得到。
- * - **画布补录**：把已知的表摆上画布，像连 ER 图一样手工连。
+ * - **画布补录**：把已知的表摆上画布连线。摆好后点「智能补录」，机器按共用键先把线
+ *   连出来（琥珀虚线），人在图上删掉不对的那几根、需要时反向或补键，剩下的一起上报。
+ *   **审的单位是线，不是候选**——这一屏的人本来就在看图。
  *
  * 两条路径在「所有包都没覆盖的孤岛表」处交接：这些表一键送进画布。
  *
@@ -53,35 +65,39 @@ import type {
 
 type Mode = "scan" | "canvas";
 type RailFilter = "all" | "isolated";
+/** 左栏在画布模式下的两副面孔：往画布上放表，或按连通分量逐组审。 */
+type RailView = "tables" | "groups";
 
 const CANVAS_COL_W = 320;
 const CANVAS_ROW_H = 250;
-const RAIL_ROW_H = 64;
-const RAIL_OVERSCAN = 6;
+/** 批量放上来的节点默认折叠，行距按折叠后的高度给（表头 32px + 呼吸）。 */
+const CANVAS_ROW_H_COLLAPSED = 76;
+/** 超过这个数就折叠着放：30 张表 × 每张几十个字段一次全展开，画布直接不能看。 */
+const COLLAPSE_ABOVE = 8;
+const RAIL_PAGE_SIZE = 50;
+/** 同时向 DataHub 取字段的并发数。批量放 50 张表不能变成 50 个并发请求。 */
+const COLUMN_FETCH_CONCURRENCY = 6;
+/** 字段结果攒多久落一次 state。攒太久看着像没反应，不攒就是一表一次重渲染。 */
+const COLUMN_FLUSH_MS = 150;
 const DIALECTS = ["mysql", "postgres", "hive", "doris", "starrocks"];
 
-function canvasEdgeSignature(edge: CanvasEdge) {
-  return `${edge.id}|${edge.keys
-    .map((key) => key.id)
-    .sort()
-    .join("|")}`;
-}
-
 export function LineageSupplementPage() {
-  const navigate = useNavigate();
   const [domainId, setDomainId] = useUrlState<string>("domain", "");
   const [mode, setMode] = useState<Mode>("scan");
   const [railOpen, setRailOpen] = useState(true);
   const [railFilter, setRailFilter] = useState<RailFilter>("isolated");
   const [keyword, setKeyword] = useState("");
-  const [railScrollTop, setRailScrollTop] = useState(0);
-  const [railViewportHeight, setRailViewportHeight] = useState(0);
+  const [railPage, setRailPage] = useState(1);
+  const [railView, setRailView] = useState<RailView>("tables");
+  /** 正在审的连通分量 id；null = 画布上全部显示。 */
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  /** 表清单里勾中的表。**跨页保留**——不然「全选 138 张」翻一页就没了。 */
+  const [checked, setChecked] = useState<Set<string>>(() => new Set());
   const [dialect, setDialect] = useState("mysql");
 
   const [packages, setPackages] = useState<LineagePackageRow[]>([]);
   const [pkgId, setPkgId] = useState<string | null>(null);
   const [detail, setDetail] = useState<LineagePackageDetail | null>(null);
-  const [uploading, setUploading] = useState(false);
   const [scanningId, setScanningId] = useState<string | null>(null);
   const [selection, setSelection] = useState<Record<string, string[]>>({});
   const [uncovered, setUncovered] = useState<string[]>([]);
@@ -90,9 +106,9 @@ export function LineageSupplementPage() {
   const [nodes, setNodes] = useState<CanvasNode[]>([]);
   const [edges, setEdges] = useState<CanvasEdge[]>([]);
   const [columns, setColumns] = useState<Record<string, LineageColumn[]>>({});
-  const [appliedCanvasEdges, setAppliedCanvasEdges] = useState<Set<string>>(
-    () => new Set<string>(),
-  );
+  /** 取字段失败的表。没有它，节点会永远停在「正在取字段…」——DataHub 忙起来
+      单次 get_dataset_by_urn 实测能到一分钟以上并超时。 */
+  const [columnFailures, setColumnFailures] = useState<Set<string>>(() => new Set());
   const [optimisticResolvedTables, setOptimisticResolvedTables] = useState<Set<string>>(
     () => new Set<string>(),
   );
@@ -101,15 +117,14 @@ export function LineageSupplementPage() {
   const [mappings, setMappings] = useState<LineageTableMapping[]>([]);
   const [savingMapping, setSavingMapping] = useState(false);
 
-  // 智能关系补充：推断异步跑（LLM 判定实测数百秒），这里只管起任务 + 轮询 + 表态。
-  const [suggestOpen, setSuggestOpen] = useState(false);
-  const [inferTask, setInferTask] = useState<RelationInferenceTask | null>(null);
-  const [candidates, setCandidates] = useState<RelationCandidate[]>([]);
-  const [deciding, setDeciding] = useState<string | null>(null);
-  const [applyingRelations, setApplyingRelations] = useState(false);
+  // 智能补录：作用域是画布上（或点选中的）那几张表，同步返回，直接把线摆上去。
+  const [suggesting, setSuggesting] = useState(false);
 
   const railListRef = useRef<HTMLUListElement>(null);
   const inventoryRefreshDomainRef = useRef<string | null>(null);
+  /** 已取过或正在取字段的表。``columns`` 是 state，批量循环里读到的是同一份旧快照，
+      靠它去重才不会对同一张表连发几次请求。 */
+  const columnsInFlightRef = useRef<Set<string>>(new Set());
 
   // Domain selection only needs the local workspace cache.  The regular
   // /api/domains call also synchronizes DataHub and can take several seconds.
@@ -130,10 +145,13 @@ export function LineageSupplementPage() {
     setNodes([]);
     setEdges([]);
     setColumns({});
-    setAppliedCanvasEdges(new Set());
     setOptimisticResolvedTables(new Set());
-    setInferTask(null);
-    setCandidates([]);
+    setChecked(new Set());
+    setRailPage(1);
+    setRailView("tables");
+    setActiveGroup(null);
+    setColumnFailures(new Set());
+    columnsInFlightRef.current = new Set();
   }, [domainId]);
 
   const overview = useApi<LineageOverview | null>(
@@ -224,6 +242,11 @@ export function LineageSupplementPage() {
   );
   const isIsolated = useCallback((table: string) => isolatedNames.has(table), [isolatedNames]);
   const columnsOf = useCallback((table: string) => columns[table] ?? [], [columns]);
+  const columnStateOf = useCallback(
+    (table: string): "loading" | "loaded" | "failed" =>
+      columns[table] ? "loaded" : columnFailures.has(table) ? "failed" : "loading",
+    [columnFailures, columns],
+  );
 
   const isolatedTotal = Math.max(0, (overview.data?.isolated ?? 0) - optimisticResolvedCount);
   const noLineageTotal = Math.max(
@@ -246,7 +269,7 @@ export function LineageSupplementPage() {
   );
 
   const scanPending = useMemo(() => {
-    if (!detail || uploading) return { edges: 0, blocked: 0, skipped: 0, resolved: 0 };
+    if (!detail) return { edges: 0, blocked: 0, skipped: 0, resolved: 0 };
     const groups = detail.groups.filter((group) => selected.includes(group.target));
     const all = groups.flatMap((group) => group.edges).filter((edge) => !edge.applied);
     return {
@@ -255,21 +278,21 @@ export function LineageSupplementPage() {
       skipped: all.filter((edge) => edge.state === "skipped").length,
       resolved: groups.filter((group) => group.isolated).length,
     };
-  }, [detail, selected, uploading]);
+  }, [detail, selected]);
 
+  // 画布上留着的线**就是待上报的线**：上报成功的那些已经在 releaseReportedEdges 里撤掉了。
   const canvasPending = useMemo(() => {
-    const pendingEdges = edges.filter((edge) => !appliedCanvasEdges.has(canvasEdgeSignature(edge)));
-    const writable = pendingEdges.filter((edge) => edge.keys.length > 0);
+    const writable = edges.filter((edge) => edge.keys.length > 0);
     const resolved = new Set(
       writable.map((edge) => edge.to).filter((table) => isolatedNames.has(table)),
     );
     return {
       edges: writable.length,
-      blocked: pendingEdges.length - writable.length,
+      blocked: edges.length - writable.length,
       skipped: 0,
       resolved: resolved.size,
     };
-  }, [appliedCanvasEdges, edges, isolatedNames]);
+  }, [edges, isolatedNames]);
 
   const pending = mode === "scan" ? scanPending : canvasPending;
   const frozen = mode === "scan" ? pending.edges === 0 && (detail?.applied_edges ?? 0) > 0 : false;
@@ -277,38 +300,129 @@ export function LineageSupplementPage() {
 
   /* ---------- 动作 ---------- */
 
-  const loadColumns = useCallback(
-    async (table: string) => {
-      const row = tableByName.get(table);
-      if (!domainId || !row || columns[table]) return;
-      try {
-        const cols = await api.lineageColumns(domainId, row.urn);
-        setColumns((prev) => ({ ...prev, [table]: cols }));
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : String(err));
+  /** 取若干表的字段。**限并发 + 去重**：批量放 50 张表时，一张一个请求地并发轰
+      DataHub 会把它打趴（每个请求是一次 get_dataset_by_urn）。失败的从在途集合里
+      摘掉，下次还能重试。 */
+  const loadColumnsFor = useCallback(
+    async (tables: string[]) => {
+      if (!domainId) return;
+      // 家底里已经没有的表（清单刷新后消失了）标成失败，不是默默跳过——跳过的话
+      // 节点会永远停在「正在取字段…」。
+      const unknown = tables.filter((table) => !tableByName.has(table));
+      if (unknown.length > 0) {
+        setColumnFailures((prev) => {
+          const next = new Set(prev);
+          for (const table of unknown) next.add(table);
+          return next;
+        });
       }
+      const queue = tables.filter((table) => {
+        if (columnsInFlightRef.current.has(table)) return false;
+        if (!tableByName.has(table)) return false;
+        columnsInFlightRef.current.add(table);
+        return true;
+      });
+      if (queue.length === 0) return;
+      setColumnFailures((prev) => {
+        if (!queue.some((table) => prev.has(table))) return prev;
+        const next = new Set(prev);
+        for (const table of queue) next.delete(table);
+        return next;
+      });
+
+      // 结果攒起来批量落 state。一张表一次 setColumns 的话，放 138 张表就是 138 次
+      // 重渲染，而画布上此时正挂着 138 个节点——界面会肉眼可见地卡住。
+      let buffer: Record<string, LineageColumn[]> = {};
+      let timer: number | null = null;
+      const flush = () => {
+        if (timer !== null) {
+          window.clearTimeout(timer);
+          timer = null;
+        }
+        if (Object.keys(buffer).length === 0) return;
+        const batch = buffer;
+        buffer = {};
+        setColumns((prev) => ({ ...prev, ...batch }));
+      };
+      const scheduleFlush = () => {
+        if (timer === null) timer = window.setTimeout(flush, COLUMN_FLUSH_MS);
+      };
+
+      let cursor = 0;
+      let failed = 0;
+      const worker = async () => {
+        while (cursor < queue.length) {
+          const table = queue[cursor++];
+          const row = tableByName.get(table);
+          if (!row) continue;
+          try {
+            buffer[table] = await api.lineageColumns(domainId, row.urn);
+            scheduleFlush();
+          } catch {
+            // 从在途集合里摘掉，节点上的「重试」才能真的再发一次。
+            columnsInFlightRef.current.delete(table);
+            setColumnFailures((prev) => new Set(prev).add(table));
+            failed += 1;
+          }
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(COLUMN_FETCH_CONCURRENCY, queue.length) }, worker),
+      );
+      flush();
+      // 逐条弹错会刷屏；批量只报一次总数，节点上会留一个「点此重试」。
+      if (failed > 0) message.warning(`${failed} 张表的字段没取到，展开表头点「重试」再试`);
     },
-    [columns, domainId, tableByName],
+    [domainId, tableByName],
   );
 
-  const addToCanvas = useCallback(
-    (table: string) => {
+  /** 把若干表放到画布。
+   *
+   * 位置从**现有内容下方**另起一片网格，不跟已有节点抢格子——已有节点可能已经被人
+   * 拖过位置，按序号硬算会盖上去。数量多时折叠着放：几十张表全展开字段，画布不能看。
+   */
+  const addManyToCanvas = useCallback(
+    (tables: string[]) => {
       setMode("canvas");
-      void loadColumns(table);
       setNodes((prev) => {
-        if (prev.some((node) => node.table === table)) return prev;
-        const index = prev.length;
+        const present = new Set(prev.map((node) => node.table));
+        const fresh = tables.filter((table) => !present.has(table));
+        if (fresh.length === 0) return prev;
+
+        const total = prev.length + fresh.length;
+        const collapsed = total > COLLAPSE_ABOVE;
+        const cols = collapsed
+          ? Math.min(6, Math.max(3, Math.ceil(Math.sqrt(total))))
+          : 3;
+        const rowH = collapsed ? CANVAS_ROW_H_COLLAPSED : CANVAS_ROW_H;
+        const baseY = 16 + Math.ceil(prev.length / 3) * CANVAS_ROW_H;
+
+        // 折叠着放就先不取字段：一张表一次 DataHub 往返（实测数秒），138 张要几分钟，
+        // 而折叠状态下这些字段一个都不显示。展开哪张再取哪张（见 LineageCanvas）。
+        if (!collapsed) void loadColumnsFor(fresh);
+
         return [
           ...prev,
-          {
+          ...fresh.map((table, index) => ({
             table,
-            x: 16 + (index % 3) * CANVAS_COL_W,
-            y: 16 + Math.floor(index / 3) * CANVAS_ROW_H,
-          },
+            x: 16 + (index % cols) * CANVAS_COL_W,
+            y: baseY + Math.floor(index / cols) * rowH,
+            collapsed,
+          })),
         ];
       });
     },
-    [loadColumns],
+    [loadColumnsFor],
+  );
+
+  const addToCanvas = useCallback(
+    (table: string) => addManyToCanvas([table]),
+    [addManyToCanvas],
+  );
+
+  const addToCanvasColumns = useCallback(
+    (table: string) => void loadColumnsFor([table]),
+    [loadColumnsFor],
   );
 
   // --- 人工表名映射 -------------------------------------------------------
@@ -349,175 +463,130 @@ export function LineageSupplementPage() {
     }
   };
 
-  // --- 智能关系补充 -------------------------------------------------------
+  // --- 智能补录 -----------------------------------------------------------
 
-  const inferRunning =
-    inferTask?.status === "queued" || inferTask?.status === "running";
-
-  const reloadCandidates = useCallback(async () => {
-    if (!domainId) return;
-    try {
-      setCandidates(await api.listRelationCandidates(domainId, { withPairs: true }));
-    } catch {
-      /* 候选读不出来不该打断页面；抽屉里会显示空态 */
-    }
-  }, [domainId]);
-
-  // 进页面先看有没有在跑的推断——上一次可能是别的标签页/刷新前起的。
-  useEffect(() => {
-    if (!domainId) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const task = await api.getLatestRelationInferenceTask(domainId);
-        if (!cancelled) setInferTask(task);
-      } catch {
-        /* 没有就没有 */
-      }
-      if (!cancelled) await reloadCandidates();
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [domainId, reloadCandidates]);
-
-  // 轮询：推断是分钟级的，2 秒一次足够，跑完即停。
-  useEffect(() => {
-    if (!inferTask || !inferRunning) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await api.getRelationInferenceTask(inferTask.id);
-        setInferTask(next);
-        if (next.status === "succeeded") {
-          await reloadCandidates();
-          message.success(`推断完成：${next.summary?.families ?? 0} 个键族`);
-        } else if (next.status === "failed") {
-          message.error(next.error_summary ?? "推断失败");
-        }
-      } catch {
-        /* 轮询失败下一轮再来 */
-      }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [inferTask, inferRunning, reloadCandidates]);
-
-  const runInference = async () => {
-    if (!domainId) return;
-    try {
-      setInferTask(await api.startRelationInference(domainId));
-      setSuggestOpen(true);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "无法开始推断");
-    }
-  };
-
-  const decideCandidate = async (
-    candidate: RelationCandidate,
-    state: "confirmed" | "rejected",
-  ) => {
-    setDeciding(candidate.id);
-    try {
-      const updated = await api.decideRelationCandidate(candidate.id, state);
-      setCandidates((prev) =>
-        prev.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      message.success(
-        state === "confirmed"
-          ? `已确认「${updated.key_name ?? updated.value_shape}」，${updated.pair_count} 条关系将参与本体生成`
-          : "已否决",
-      );
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "表态失败");
-    } finally {
-      setDeciding(null);
-    }
-  };
-
-  const createMasterDataTask = useCallback(() => {
-    if (!domainId) return;
-    const returnTo = `/lineage-supplement?domain=${encodeURIComponent(domainId)}`;
-    navigate(`/tasks/create?kind=materialize&returnTo=${encodeURIComponent(returnTo)}`);
-  }, [domainId, navigate]);
-
-  const confirmedCandidateCount = useMemo(
-    () => candidates.filter((item) => item.state === "confirmed").length,
-    [candidates],
-  );
-
-  const applyRelations = async () => {
-    if (!domainId || confirmedCandidateCount === 0) return;
-    setApplyingRelations(true);
-    try {
-      const receipt = await api.applyRelationCandidates(domainId);
-      await reloadCandidates();
-      message.success(`已写回 ${receipt.applied} 条外键约束，${receipt.candidates_applied} 个键族完成`);
-      if (receipt.failed > 0) {
-        message.warning(`${receipt.failed} 条约束写回失败，候选仍保留为已确认，可重试`);
-      }
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "外键写回失败");
-    } finally {
-      setApplyingRelations(false);
-    }
-  };
-
-  /** 已确认的族 → 画布上的建议连线（虚线，与人工实线分开）。
+  /** 一批建议 → 画布上的边。
    *
-   * **表名要过一次归一**：画布节点名来自 ``lineage_inventory``（``库.表``，如
-   * ``jwsp.aj_bl_zl``），候选成员名来自 ``fetch_domain_bundle``（裸表名 ``aj_bl_zl``）——
-   * 两个 DataHub 查询给的形态不一样。按裸名匹配，且**只在画布上裸名唯一时才认**，
-   * 与后端 ``lineage_inventory.resolve`` 同一条口径：对不上就丢，不猜。
+   * 两条规矩：
+   *
+   * 1. **人连过的那对表原样留着**——机器不覆盖人的结论，与本仓既有的三级字段权威
+   *    同一口径。人连的边哪怕方向反了，也是人的判断。
+   * 2. **同一对表的多条建议并成一条边的多对键**，不是丢掉后来的那几条：案件编号和
+   *    人员编号可以同时把两张表连起来，只画一根线但键要都在。这也是画布本来的口径
+   *    （「同一对表再拖一次＝追加关联键」）。
    */
-  const suggestedEdges = useMemo<CanvasEdge[]>(() => {
-    const bare = (name: string) => name.split(".").pop() ?? name;
-    const byBare = new Map<string, string[]>();
-    for (const node of nodes) {
-      const key = bare(node.table);
-      byBare.set(key, [...(byBare.get(key) ?? []), node.table]);
-    }
-    const resolve = (name: string) => {
-      const hits = byBare.get(bare(name)) ?? [];
-      return hits.length === 1 ? hits[0] : null;
-    };
+  const mergeSuggestions = useCallback((items: CanvasSuggestion[]) => {
+    setEdges((prev) => {
+      const next = [...prev];
+      const find = (from: string, to: string) =>
+        next.findIndex((edge) => edge.from === from && edge.to === to);
 
-    const seen = new Set<string>();
-    const result: CanvasEdge[] = [];
-    for (const candidate of candidates) {
-      if (candidate.state !== "confirmed") continue;
-      for (const pair of candidate.pairs) {
-        const from = resolve(pair.source_table);
-        const to = resolve(pair.target_table);
-        if (!from || !to || from === to) continue;
-        const id = `sug:${from}.${pair.source_column}->${to}.${pair.target_column}`;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        result.push({
-          id,
+      for (const item of items) {
+        const { source_table: from, target_table: to } = item;
+        if (from === to) continue;
+        const key = {
+          id: `${from}.${item.source_column}->${to}.${item.target_column}`,
+          src: item.source_column,
+          dst: item.target_column,
+        };
+
+        const same = find(from, to);
+        const reversed = find(to, from);
+        const at = same >= 0 ? same : reversed;
+        if (at >= 0) {
+          const edge = next[at];
+          // 人连的、或方向和建议相反的，都不动——前者是人的结论，后者动了就等于
+          // 替人改方向。已经有的机器边则追加这一对键。
+          if (!edge.machine || same < 0) continue;
+          if (edge.keys.some((k) => k.id === key.id)) continue;
+          next[at] = {
+            ...edge,
+            keys: [...edge.keys, key],
+            machine: {
+              ...edge.machine,
+              extraKeys: [
+                ...(edge.machine.extraKeys ?? []),
+                item.key_name ?? item.value_shape,
+              ],
+            },
+          };
+          continue;
+        }
+
+        next.push({
+          id: `${from}->${to}`,
           from,
           to,
-          keys: [
-            { id: `${id}:k`, src: pair.source_column, dst: pair.target_column },
-          ],
-          suggested: true,
+          keys: [key],
+          machine: {
+            confidence: item.confidence,
+            keyName: item.key_name,
+            entityName: item.entity_name,
+            valueShape: item.value_shape,
+            cardinality: item.cardinality,
+            reason: item.reason,
+            source: item.origin,
+          },
         });
       }
-    }
-    return result;
-  }, [candidates, nodes]);
+      return next;
+    });
+  }, []);
 
-  /** 画布要画的边 = 人工连的（可编辑）+ 建议的（只读虚线）。
-      建议边**不进 edges 状态**，所以画布里的增删改只会作用在人工边上。 */
-  const canvasEdges = useMemo(
-    () => [...edges, ...suggestedEdges],
-    [edges, suggestedEdges],
+  const runSuggest = useCallback(
+    async (scope: string[]) => {
+      if (!domainId || scope.length < 2) return;
+      setSuggesting(true);
+      try {
+        const report = await api.suggestCanvasEdges(domainId, scope);
+        mergeSuggestions(report.suggestions);
+
+        if (report.suggestions.length === 0) {
+          message.info(
+            report.families > 0
+              ? `这 ${report.scanned_tables.length} 张表聚出 ${report.families} 个键族，但没有一个判成可连的键`
+              : "这些表之间没找到共用的键——手工连或者再多选几张表",
+          );
+        } else {
+          message.success(
+            `预连了 ${report.suggestions.length} 条线，删掉不对的再上报`,
+          );
+        }
+        // 对不上号的表要如实说，否则人只会看到「怎么没连出线」。
+        if (report.skipped_tables.length > 0) {
+          message.warning(
+            `${report.skipped_tables.length} 张表在 DataHub 元数据里对不上号，没参与分析：` +
+              report.skipped_tables.slice(0, 3).join("、") +
+              (report.skipped_tables.length > 3 ? " …" : ""),
+          );
+        }
+        if (report.truncated) {
+          message.warning("建议过多，只画了把握最高的一批；先审完这批再补下一轮");
+        }
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "预连线失败");
+      } finally {
+        setSuggesting(false);
+      }
+    },
+    [domainId, mergeSuggestions],
   );
+
+  const clearMachineEdges = useCallback(() => {
+    setEdges((prev) => prev.filter((edge) => !edge.machine));
+  }, []);
+
+  const machineEdgeCount = useMemo(
+    () => edges.filter((edge) => edge.machine).length,
+    [edges],
+  );
+
 
   const runScan = async (file: File) => {
     if (!domainId) return;
     setScanningId("uploading");
     try {
       const created = await api.uploadLineagePackage(domainId, file, dialect);
-      setUploading(false);
       await refreshPackages(created.id);
       message.success(`扫描完成：${created.targets} 个落点、${created.edges_ok} 条边可上报`);
     } catch (err) {
@@ -552,13 +621,40 @@ export function LineageSupplementPage() {
 
   const selectPackage = async (id: string) => {
     setPkgId(id);
-    setUploading(false);
     try {
       setDetail(await api.getLineagePackage(id, inventoryReady));
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err));
     }
   };
+
+  /** 上报成功之后的收尾：把已经写进 DataHub 的那些线从画布上撤掉。
+   *
+   * 不撤会连着坏两件事：**已上报的线一直留在画布和分组队列里**（审完的东西永远不消失，
+   * 看不出还剩什么没审），而且**这些表一直算「已在画布上」，表清单里就永远勾不动了**
+   * ——上报完等于把工作台锁死，只能刷新页面。
+   *
+   * 节点按需回收：只收那些「参与了这次上报、且身上已经一根线都不剩」的。人自己加上来
+   * 还没连的表留着——他可能正打算手工连。
+   */
+  const releaseReportedEdges = useCallback((reported: CanvasEdge[]) => {
+    const reportedIds = new Set(reported.map((edge) => edge.id));
+    const touched = new Set(reported.flatMap((edge) => [edge.from, edge.to]));
+    setEdges((prev) => {
+      const kept = prev.filter((edge) => !reportedIds.has(edge.id));
+      const stillLinked = new Set(kept.flatMap((edge) => [edge.from, edge.to]));
+      setNodes((nodes) =>
+        nodes.filter((node) => !touched.has(node.table) || stillLinked.has(node.table)),
+      );
+      return kept;
+    });
+    setOptimisticResolvedTables((prev) => {
+      const next = new Set(prev);
+      for (const table of touched) if (isolatedNames.has(table)) next.add(table);
+      return next;
+    });
+    setActiveGroup(null);
+  }, [isolatedNames]);
 
   const apply = async () => {
     if (!domainId) return;
@@ -575,9 +671,7 @@ export function LineageSupplementPage() {
         await refreshPackages(detail.id);
         await Promise.all([overview.reload(), tables.reload()]);
       } else {
-        const pendingCanvasEdges = edges.filter(
-          (edge) => edge.keys.length > 0 && !appliedCanvasEdges.has(canvasEdgeSignature(edge)),
-        );
+        const pendingCanvasEdges = edges.filter((edge) => edge.keys.length > 0);
         const payload = pendingCanvasEdges.map((edge) => ({
           source_table: edge.from,
           target_table: edge.to,
@@ -596,19 +690,16 @@ export function LineageSupplementPage() {
           receipt.applied === attemptedKeyCount &&
           attemptedKeyCount > 0
         ) {
-          setAppliedCanvasEdges(
-            (prev) => new Set([...prev, ...pendingCanvasEdges.map(canvasEdgeSignature)]),
-          );
-          const resolvedTables = new Set(
-            pendingCanvasEdges
-              .flatMap((edge) => [edge.from, edge.to])
-              .filter((table) => isolatedNames.has(table)),
-          );
-          if (resolvedTables.size > 0) {
-            setOptimisticResolvedTables((prev) => new Set([...prev, ...resolvedTables]));
-          }
+          releaseReportedEdges(pendingCanvasEdges);
+        } else if (receipt.failed > 0) {
+          // 部分失败时**一条都不撤**：回执只按 URN 报失败，对不回具体哪根线。
+          // 重复上报本来就是幂等的，留着整批重来比猜着删安全。
+          message.warning(`${receipt.failed} 条没写进去，画布原样留着，可直接重报`);
         }
         await refreshPackages(pkgId ?? undefined);
+        // 上报改掉的正是孤岛数与血缘覆盖率，家底必须重拉——扫描那条路径一直这么做，
+        // 画布这条以前漏了，于是上报完顶栏和左栏还停在旧数字上。
+        await Promise.all([overview.reload(), tables.reload()]);
       }
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err));
@@ -619,43 +710,119 @@ export function LineageSupplementPage() {
 
   /* ---------- 左栏 ---------- */
 
-  const railRows = tableRows.filter(
-    (row) =>
-      (railFilter === "all" || row.isolated) &&
-      row.name.toLowerCase().includes(keyword.trim().toLowerCase()),
+  const railRows = useMemo(
+    () =>
+      tableRows.filter(
+        (row) =>
+          (railFilter === "all" || row.isolated) &&
+          row.name.toLowerCase().includes(keyword.trim().toLowerCase()),
+      ),
+    [keyword, railFilter, tableRows],
   );
-  const railWindow = useMemo(() => {
-    const viewportHeight = railViewportHeight || 480;
-    const start = Math.min(
-      railRows.length,
-      Math.max(0, Math.floor(railScrollTop / RAIL_ROW_H) - RAIL_OVERSCAN),
-    );
-    const end = Math.min(
-      railRows.length,
-      Math.ceil((railScrollTop + viewportHeight) / RAIL_ROW_H) + RAIL_OVERSCAN,
-    );
-    return { start, end, rows: railRows.slice(start, end) };
-  }, [railRows, railScrollTop, railViewportHeight]);
-  const railRowCount = railRows.length;
-  const onCanvas = new Set(nodes.map((node) => node.table));
+  const railPageCount = Math.max(1, Math.ceil(railRows.length / RAIL_PAGE_SIZE));
+  // 行数变了（换筛选/搜关键字）可能把当前页顶没了，钳回最后一页而不是渲染空白。
+  const railPageSafe = Math.min(railPage, railPageCount);
+  const pageRows = useMemo(
+    () => railRows.slice((railPageSafe - 1) * RAIL_PAGE_SIZE, railPageSafe * RAIL_PAGE_SIZE),
+    [railPageSafe, railRows],
+  );
+  const onCanvas = useMemo(() => new Set(nodes.map((node) => node.table)), [nodes]);
 
-  useEffect(() => {
-    if (mode !== "canvas" || !railOpen) return;
-    const element = railListRef.current;
-    if (!element) return;
-    const updateHeight = () => setRailViewportHeight(element.clientHeight);
-    updateHeight();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [mode, railOpen]);
+  /* ---------- 连通分量：表一多就按组审 ---------- */
 
+  const graph = useMemo(
+    () =>
+      reviewGroups(
+        nodes.map((node) => node.table),
+        // 边的审核标签＝机器判出来的键名；人手工连的没有键名，归「手工连的」。
+        edges.map((edge) => ({
+          id: edge.id,
+          from: edge.from,
+          to: edge.to,
+          label: edge.machine?.keyName ?? null,
+        })),
+      ),
+    [edges, nodes],
+  );
+
+  /** 组没了（线被删光、表被移走）就退回全部显示，不要停在一个空组上。 */
   useEffect(() => {
-    if (mode !== "canvas") return;
-    setRailScrollTop(0);
+    if (activeGroup === LONERS_GROUP) {
+      if (graph.loners.length === 0) setActiveGroup(null);
+      return;
+    }
+    if (activeGroup && !graph.groups.some((item) => item.id === activeGroup)) {
+      setActiveGroup(null);
+    }
+  }, [activeGroup, graph]);
+
+  /** 正在审的那一组：**表和线都要过滤**。只过滤表的话，这一组的表之间由别的键
+      连出来的线也会画出来，人分不清哪几根是这一组要审的。 */
+  const canvasFocus = useMemo(() => {
+    if (!activeGroup) return null;
+    if (activeGroup === LONERS_GROUP) {
+      return { tables: new Set(graph.loners), edgeIds: new Set<string>() };
+    }
+    const hit = graph.groups.find((item) => item.id === activeGroup);
+    return hit
+      ? { tables: new Set(hit.tables), edgeIds: new Set(hit.edgeIds) }
+      : null;
+  }, [activeGroup, graph]);
+
+  const groupIndex = graph.groups.findIndex((item) => item.id === activeGroup);
+
+  /** 上一组 / 下一组：分组审核的主动作是「审完这组看下一组」，不该逼人回列表点。
+      走到头就停，不绕回第一组——绕回去人会以为还没审完。 */
+  const stepGroup = useCallback(
+    (delta: number) => {
+      const list = graph.groups.map((item) => item.id);
+      if (graph.loners.length > 0) list.push(LONERS_GROUP);
+      if (list.length === 0) return;
+      const at = activeGroup ? list.indexOf(activeGroup) : -1;
+      const next = Math.min(list.length - 1, Math.max(0, at + delta));
+      setActiveGroup(list[next]);
+    },
+    [activeGroup, graph],
+  );
+
+  /** 勾选与「加入画布」都只认还没在画布上的表——已经在上面的勾了也没有动作。 */
+  const selectableNames = useMemo(
+    () => railRows.filter((row) => !onCanvas.has(row.name)).map((row) => row.name),
+    [onCanvas, railRows],
+  );
+  const checkedCount = checked.size;
+  const allSelected = selectableNames.length > 0 && checkedCount >= selectableNames.length;
+
+  const toggleChecked = useCallback((table: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(table)) next.delete(table);
+      else next.add(table);
+      return next;
+    });
+  }, []);
+
+  const toggleAll = useCallback(() => {
+    setChecked((prev) => (prev.size >= selectableNames.length ? new Set() : new Set(selectableNames)));
+  }, [selectableNames]);
+
+  const addCheckedToCanvas = useCallback(() => {
+    const wanted = [...checked].filter((table) => !onCanvas.has(table));
+    if (wanted.length === 0) return;
+    addManyToCanvas(wanted);
+    setChecked(new Set());
+    message.success(
+      wanted.length > COLLAPSE_ABOVE
+        ? `已放上 ${wanted.length} 张表（折叠显示，双击表头展开）`
+        : `已放上 ${wanted.length} 张表`,
+    );
+  }, [addManyToCanvas, checked, onCanvas]);
+
+  // 换域/换筛选/改关键字都回到第一页；勾选按域清（换域时那些表名已经没意义了）。
+  useEffect(() => {
+    setRailPage(1);
     railListRef.current?.scrollTo({ top: 0 });
-  }, [domainId, keyword, mode, railFilter, railRowCount]);
+  }, [domainId, keyword, railFilter]);
 
   // A shared domain list can take a round trip to DataHub.  When a domain is
   // already present in the URL, render the workbench immediately and let the
@@ -766,23 +933,16 @@ export function LineageSupplementPage() {
                   </Tag>
                 )}
                 {pending.skipped > 0 && <Tag variant="filled">跳过 {pending.skipped}</Tag>}
+                {mode === "canvas" && machineEdgeCount > 0 && (
+                  <Tooltip title="机器预连、还没经人删改的线。不删就是通过——上报时一并写入。">
+                    <Tag color="orange" variant="filled">
+                      机器预连 {machineEdgeCount}
+                    </Tag>
+                  </Tooltip>
+                )}
               </div>
 
               <div className="lin-submit-acts">
-                {mode === "canvas" && (
-                  <Tooltip title="按值形状聚出键族，再由 LLM 判定哪些是真实体键。确认后的族会作为关联证据参与本体生成。">
-                    <Badge count={confirmedCandidateCount} size="small" color="green">
-                      <Button
-                        size="small"
-                        icon={<BulbOutlined />}
-                        loading={inferRunning}
-                        onClick={() => setSuggestOpen(true)}
-                      >
-                        智能补充关系
-                      </Button>
-                    </Badge>
-                  </Tooltip>
-                )}
                 {mode === "scan" && (
                   <Select
                     size="small"
@@ -833,14 +993,27 @@ export function LineageSupplementPage() {
         <div className={`lin-body${railOpen ? "" : " lin-body--rail-closed"}`}>
           <aside className="lin-rail">
             <div className="lin-rail-head">
-              {railOpen && (
-                <>
-                  <span className="lin-rail-title">{mode === "scan" ? "代码包" : "表清单"}</span>
-                  <span className="section-card-count">
-                    {mode === "scan" ? packages.length : railRows.length}
-                  </span>
-                </>
-              )}
+              {railOpen &&
+                (mode === "scan" ? (
+                  <>
+                    <span className="lin-rail-title">代码包</span>
+                    <span className="section-card-count">{packages.length}</span>
+                  </>
+                ) : (
+                  /* 左栏两副面孔：往画布上放表，或按连通分量逐组审。分组审核走左栏
+                     而不是画布上的浮层——它是个队列（还剩几组没审），而且这样一点
+                     画布空间都不占。 */
+                  <Segmented
+                    size="small"
+                    className="lin-rail-view"
+                    value={railView}
+                    onChange={(value) => setRailView(value as RailView)}
+                    options={[
+                      { label: `表清单 ${railRows.length}`, value: "tables" },
+                      { label: `分组审核 ${graph.groups.length}`, value: "groups" },
+                    ]}
+                  />
+                ))}
               <Tooltip title={railOpen ? "收起" : "展开"} placement="right">
                 <button
                   type="button"
@@ -853,18 +1026,27 @@ export function LineageSupplementPage() {
               </Tooltip>
             </div>
 
+            {railOpen && mode === "canvas" && railView === "groups" ? (
+              <GroupRail
+                components={graph.groups}
+                loners={graph.loners}
+                active={activeGroup}
+                onPick={setActiveGroup}
+                onStep={stepGroup}
+                index={groupIndex}
+              />
+            ) : null}
+
             {railOpen &&
+              !(mode === "canvas" && railView === "groups") &&
               (mode === "scan" ? (
                 <PackageRail
                   packages={packages}
-                  currentId={uploading ? null : pkgId}
+                  currentId={pkgId}
                   scanningId={scanningId}
-                  uploading={uploading}
+                  uploading={scanningId === "uploading"}
                   onSelect={(id) => void selectPackage(id)}
-                  onUpload={() => {
-                    setMode("scan");
-                    setUploading(true);
-                  }}
+                  onPick={(file) => void runScan(file)}
                   onRescan={(id) => void rescan(id)}
                   onDelete={(id) => void removePackage(id)}
                 />
@@ -893,53 +1075,97 @@ export function LineageSupplementPage() {
                     />
                   </div>
 
-                  <ul
-                    ref={railListRef}
-                    className="lin-rail-list"
-                    onScroll={(event) => setRailScrollTop(event.currentTarget.scrollTop)}
-                  >
-                    {railWindow.start > 0 && (
-                      <li
-                        className="lin-rail-virtual-spacer"
-                        aria-hidden="true"
-                        style={{ height: railWindow.start * RAIL_ROW_H }}
-                      />
+                  {/* 全选的口径是**当前筛选出的全部**，不是本页——所以数字要写在按钮上，
+                      点之前就知道会勾中多少张。已经在画布上的表不参与。 */}
+                  <div className="lin-rail-select">
+                    <Checkbox
+                      checked={allSelected}
+                      indeterminate={checkedCount > 0 && !allSelected}
+                      disabled={selectableNames.length === 0}
+                      onChange={toggleAll}
+                    >
+                      全选 {selectableNames.length}
+                    </Checkbox>
+                    {checkedCount > 0 && (
+                      <>
+                        <span className="lin-rail-select-count">已选 {checkedCount}</span>
+                        <Button size="small" type="link" onClick={() => setChecked(new Set())}>
+                          清除
+                        </Button>
+                      </>
                     )}
-                    {railWindow.rows.map((row) => (
-                      <li key={row.urn} className="lin-rail-row" style={{ height: RAIL_ROW_H }}>
-                        <span className="lin-rail-main">
-                          <span className="lin-rail-name" title={row.name}>
-                            {row.isolated && <i className="lin-iso-dot" title="孤岛表" />}
-                            <LineageTableName name={row.name} />
-                          </span>
-                          <span className="lin-rail-meta">
-                            上游 {row.upstream} · 下游 {row.downstream}
-                          </span>
-                        </span>
-                        <Tooltip title={onCanvas.has(row.name) ? "已在画布上" : "放到画布"}>
-                          <Button
-                            size="small"
-                            type="text"
-                            icon={<PlusOutlined />}
-                            disabled={onCanvas.has(row.name)}
-                            onClick={() => addToCanvas(row.name)}
+                  </div>
+
+                  <ul ref={railListRef} className="lin-rail-list">
+                    {pageRows.map((row) => {
+                      const already = onCanvas.has(row.name);
+                      return (
+                        <li
+                          key={row.urn}
+                          className={`lin-rail-row${already ? " lin-rail-row--on" : ""}`}
+                        >
+                          <Checkbox
+                            checked={checked.has(row.name)}
+                            disabled={already}
+                            onChange={() => toggleChecked(row.name)}
                           />
-                        </Tooltip>
-                      </li>
-                    ))}
-                    {railWindow.end < railRows.length && (
-                      <li
-                        className="lin-rail-virtual-spacer"
-                        aria-hidden="true"
-                        style={{ height: (railRows.length - railWindow.end) * RAIL_ROW_H }}
-                      />
-                    )}
+                          <span className="lin-rail-main">
+                            <span className="lin-rail-name" title={row.name}>
+                              {row.isolated && <i className="lin-iso-dot" title="孤岛表" />}
+                              <LineageTableName name={row.name} />
+                            </span>
+                            <span className="lin-rail-meta">
+                              上游 {row.upstream} · 下游 {row.downstream}
+                            </span>
+                          </span>
+                          <Tooltip title={already ? "已在画布上" : "放到画布"}>
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<PlusOutlined />}
+                              disabled={already}
+                              onClick={() => addToCanvas(row.name)}
+                            />
+                          </Tooltip>
+                        </li>
+                      );
+                    })}
                     {railRows.length === 0 && (
                       <li className="lin-muted lin-rail-empty">
                         {tables.loading ? "加载中…" : "没有匹配的表"}
                       </li>
                     )}
                   </ul>
+
+                  {railRows.length > RAIL_PAGE_SIZE && (
+                    <div className="lin-rail-pager">
+                      <Pagination
+                        simple
+                        size="small"
+                        current={railPageSafe}
+                        pageSize={RAIL_PAGE_SIZE}
+                        total={railRows.length}
+                        onChange={(page) => {
+                          setRailPage(page);
+                          railListRef.current?.scrollTo({ top: 0 });
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {checkedCount > 0 && (
+                    <div className="lin-rail-batch">
+                      <Button
+                        size="small"
+                        type="primary"
+                        block
+                        icon={<PlusOutlined />}
+                        onClick={addCheckedToCanvas}
+                      >
+                        把选中的 {checkedCount} 张放到画布
+                      </Button>
+                    </div>
+                  )}
                 </>
               ))}
           </aside>
@@ -947,8 +1173,7 @@ export function LineageSupplementPage() {
           <main className={`lin-main lin-main--${mode}`}>
             {mode === "scan" ? (
               <ScanReport
-                pkg={uploading ? null : detail}
-                uploading={uploading}
+                pkg={detail}
                 scanning={scanningId !== null}
                 onScan={(file) => void runScan(file)}
                 selected={selected}
@@ -966,12 +1191,18 @@ export function LineageSupplementPage() {
             ) : (
               <LineageCanvas
                 nodes={nodes}
-                edges={canvasEdges}
+                edges={edges}
                 setNodes={setNodes}
                 setEdges={setEdges}
                 isolated={isIsolated}
                 columnsOf={columnsOf}
+                columnStateOf={columnStateOf}
+                onNeedColumns={addToCanvasColumns}
                 frozen={applying}
+                focus={canvasFocus}
+                onSuggest={(scope) => void runSuggest(scope)}
+                suggesting={suggesting}
+                onClearMachine={clearMachineEdges}
               />
             )}
           </main>
@@ -987,20 +1218,6 @@ export function LineageSupplementPage() {
         saving={savingMapping}
         onCancel={() => setMapTarget(null)}
         onSave={saveMapping}
-      />
-
-      <RelationSuggestionDrawer
-        open={suggestOpen}
-        onClose={() => setSuggestOpen(false)}
-        task={inferTask}
-        candidates={candidates}
-        deciding={deciding}
-        onDecide={decideCandidate}
-        onCreateTask={createMasterDataTask}
-        onApply={applyRelations}
-        applying={applyingRelations}
-        onRun={runInference}
-        running={inferRunning}
       />
     </PageContainer>
   );

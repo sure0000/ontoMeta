@@ -4,7 +4,9 @@ import {
   BulbOutlined,
   CheckCircleOutlined,
   DeleteOutlined,
+  DownOutlined,
   EditOutlined,
+  MoreOutlined,
   PartitionOutlined,
   PlusOutlined,
   QuestionCircleOutlined,
@@ -15,11 +17,11 @@ import {
   Alert,
   Button,
   Checkbox,
+  Dropdown,
   Empty,
   Form,
   Input,
   Modal,
-  Popconfirm,
   Popover,
   Progress,
   Segmented,
@@ -29,7 +31,6 @@ import {
   Table,
   Tag,
   Tooltip,
-  Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -52,20 +53,20 @@ import type {
   SegmentReviewProgress,
   SegmentSummary,
 } from "../types";
-import { reviewFlags, riskRank, roleVerdict, ROLE_OPTIONS, summarizeFlags } from "../utils/role";
+import {
+  getRoleMeta,
+  LOW_CONFIDENCE,
+  parseRoleReason,
+  reviewFlags,
+  riskRank,
+  ROLE_OPTIONS,
+  summarizeFlags,
+} from "../utils/role";
 import type { ReviewFlag } from "../utils/role";
 import { getRelationStructureLabel, parseJoinKey, relationReviewFlags } from "../utils/relation";
 import { VerbRefinementDrawer } from "../components/review/VerbRefinementDrawer";
 import { ObjectArchiveDrawer } from "../components/review/ObjectArchiveDrawer";
-import {
-  FlagChips,
-  MachineMark,
-  MachineVerdict,
-  VerdictHeadline,
-  WhyReview,
-} from "../components/review/ReviewSignals";
-
-const { Text } = Typography;
+import { FlagChips, MachineMark, WhyReview } from "../components/review/ReviewSignals";
 
 /** 队列成员：对象与关系共用选择/判定逻辑，那部分只认 id 与 needs_review。 */
 type QueueMember = ObjectTypeSummary | RelationType;
@@ -155,13 +156,140 @@ function NumCell({ value, flag }: { value: string | number | null; flag?: boolea
   return <span className={`review-num${flag ? " review-num--flag" : ""}`}>{value}</span>;
 }
 
-/** 组内某个信号的取值跨度：全组同值就不必逐行看，有跨度才去找例外。 */
-function spread(members: ObjectTypeSummary[], read: (m: ObjectTypeSummary) => number | null) {
-  const values = members.map(read).filter((v): v is number => v != null);
-  if (values.length === 0) return null;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  return min === max ? formatCount(min) : `${formatCount(min)}–${formatCount(max)}`;
+/** 图连通性：优先读 connected，回落到 isolated 的反面；两者皆无＝这一项没测过。 */
+function connectivity(obj: ObjectTypeSummary): boolean | null {
+  const s = obj.role_signals?.signals;
+  if (!s) return null;
+  if (s.connected !== undefined && s.connected !== null) return Boolean(s.connected);
+  if (s.isolated !== undefined && s.isolated !== null) return !s.isolated;
+  return null;
+}
+
+/**
+ * 把握：低于阈值就染色。
+ *
+ * 机器自己没底恰恰是这一条被推给人看的理由，它不该是一个小号灰数字。
+ */
+function ConfCell({ value }: { value?: number | null }) {
+  if (typeof value !== "number") return <span className="review-num">—</span>;
+  const shaky = value < LOW_CONFIDENCE;
+  return (
+    <span className={`review-num${shaky ? " review-num--flag" : ""}`}>
+      {Math.round(value * 100)}%
+    </span>
+  );
+}
+
+/** 连通是常态，说了等于没说；孤立才是要看的那一条，所以只给孤立上色。 */
+function ConnCell({ connected }: { connected: boolean | null }) {
+  if (connected === null) return <span className="review-num">—</span>;
+  if (connected) return <span className="review-cell-ok">连通</span>;
+  return (
+    <Tooltip title="图上孤立：既无外键关联也无血缘，业务对象很少是这样">
+      <span className="review-cell-bad">孤立</span>
+    </Tooltip>
+  );
+}
+
+/**
+ * 判定依据进列。
+ *
+ * 右栏撤掉之后这一列得自带深度：行内一句话说完「机器为什么心虚 + 这张表是干什么的」，
+ * 悬停展开的才是原来右栏那一整块（逐条信号、结构判据、邻居）。两级之间不重复也不丢。
+ */
+function ObjectBasisCell({ obj, flags }: { obj: ObjectTypeSummary; flags: ReviewFlag[] }) {
+  const reading = parseRoleReason(obj.role_reason).llmReading;
+  // 图连通性自己是一列了，chip 里不必再说一遍——省下的宽度归 LLM 读表那句话。
+  const chips = flags.filter((f) => f.key !== "connected");
+  return (
+    <Popover
+      trigger="hover"
+      mouseEnterDelay={0.3}
+      placement="left"
+      title={obj.display_name}
+      content={
+        <div className="review-basis-pop">
+          <DecisionEvidencePanel obj={obj} compact />
+          <div className="review-evidence-row">
+            <span>行数</span>
+            <span>{obj.row_count == null ? "—" : formatCount(obj.row_count)}</span>
+          </div>
+          {obj.top_neighbors && obj.top_neighbors.length > 0 && (
+            <div className="review-neighbors">
+              <span className="review-neighbors-label">邻居</span>
+              {obj.top_neighbors.slice(0, 6).map((n) => (
+                <Tooltip key={n.id} title={n.relation_name}>
+                  <span className="review-neighbor">
+                    {n.direction === "inbound" ? "←" : "→"} {n.display_name || n.name}
+                  </span>
+                </Tooltip>
+              ))}
+            </div>
+          )}
+        </div>
+      }
+    >
+      <div className="review-basis">
+        <FlagChips flags={chips} max={2} />
+        {reading && <span className="review-basis-reading">{reading}</span>}
+      </div>
+    </Popover>
+  );
+}
+
+/** 关系的判定依据：结构/基数/连接键这类窄事实进悬停，行内只留旗标与证据首句。 */
+function RelationBasisCell({
+  relation,
+  flags,
+  domainId,
+}: {
+  relation: RelationType;
+  flags: ReviewFlag[];
+  domainId?: string;
+}) {
+  const note = relation.source_evidence || relation.description;
+  return (
+    <Popover
+      trigger="hover"
+      mouseEnterDelay={0.3}
+      placement="left"
+      title={relation.display_name}
+      content={
+        <div className="review-basis-pop">
+          <WhyReview flags={flags} />
+          <div className="review-evidence-row">
+            <span>结构</span>
+            <span>{getRelationStructureLabel(relation.structure_type)}</span>
+          </div>
+          <div className="review-evidence-row">
+            <span>基数</span>
+            <span>{relation.cardinality || "—"}</span>
+          </div>
+          <div className="review-evidence-row">
+            <span>连接键</span>
+            <span>{parseJoinKey(relation.source_evidence || relation.description) || "—"}</span>
+          </div>
+          <div className="review-evidence-note">{note || "暂无证据说明"}</div>
+          {domainId && (
+            <div className="review-evidence-foot">
+              <Link
+                to={`/workspace/${domainId}/relations/${relation.id}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                打开关系详情 →
+              </Link>
+            </div>
+          )}
+        </div>
+      }
+    >
+      <div className="review-basis">
+        <FlagChips flags={flags} max={2} />
+        {note && <span className="review-basis-reading">{note}</span>}
+      </div>
+    </Popover>
+  );
 }
 
 /**
@@ -317,45 +445,22 @@ export function ReviewWorkbenchPage() {
       .map((entry) => entry.member);
   }, [members, memberFlags, flagSummary]);
 
-  /**
-   * 组头的判定用**组内最低**的把握与得分：能不能整组确认，取决于最弱的那一条。
-   * 角色本身是分组键的一部分，全组必然相同，所以只有把握/得分需要取值。
-   */
-  const { groupVerdict, groupVerdictNote } = useMemo(() => {
-    const objects = isRelation ? [] : (members as ObjectTypeSummary[]);
-    const confidences = objects
-      .map((m) => m.role_confidence)
-      .filter((v): v is number => typeof v === "number");
-    const scores = objects
-      .map((m) => (typeof m.role_signals?.score === "number" ? m.role_signals.score : null))
-      .filter((v): v is number => v != null);
-    const verdict = roleVerdict({
-      table_role: activeGroup?.table_role,
-      role_confidence: confidences.length ? Math.min(...confidences) : undefined,
-      role_signals: scores.length ? { score: Math.min(...scores) } : undefined,
-    });
-    // 取了最低值就得说是最低值：组内 10 张 95% 配 1 张 60%，只写「60%」会读成全组都虚。
-    const spans: string[] = [];
-    if (confidences.length && Math.min(...confidences) !== Math.max(...confidences)) {
-      spans.push(
-        `把握 ${Math.round(Math.min(...confidences) * 100)}–${Math.round(
-          Math.max(...confidences) * 100,
-        )}%`,
-      );
-    }
-    if (scores.length && Math.min(...scores) !== Math.max(...scores)) {
-      spans.push(`得分 ${Math.min(...scores).toFixed(1)}–${Math.max(...scores).toFixed(1)}`);
-    }
-    return {
-      groupVerdict: verdict,
-      groupVerdictNote: spans.length ? `组内${spans.join("、")}，这里显示的是最低值` : undefined,
-    };
-  }, [activeGroup, members, isRelation]);
-
-  // 当前组换了就把焦点挪到最该看的那条——右栏判据永远指着某一行。
+  // 当前组换了就把焦点挪回表首——判过一组之后，选中行不该停在上一组的位置。
   useEffect(() => {
     setActiveMemberId(orderedMembers[0]?.id ?? null);
   }, [activeGroup?.key, orderedMembers]);
+
+  // 默认非全选：进入一个新组时把全部成员排除（=空选），审核人逐条勾选要判的。
+  // 已有记录的组不重复初始化，避免覆盖用户已做的选择。
+  useEffect(() => {
+    if (!activeGroup) return;
+    const groupKey = activeGroup.key;
+    const allIds = orderedMembers.map((m) => m.id);
+    setExcluded((prev) => {
+      if (prev[groupKey] !== undefined || allIds.length === 0) return prev;
+      return { ...prev, [groupKey]: allIds };
+    });
+  }, [activeGroup, orderedMembers]);
 
   // useMemo：这个数组进了下面两个 useMemo 的依赖，每次渲染新建会让它们永远失效。
   const excludedIds = useMemo(
@@ -377,19 +482,19 @@ export function ReviewWorkbenchPage() {
     });
   }, []);
 
-  /**
-   * 全组同旗时「机器存疑」列只剩破折号，宽度还给对象名/外键——
-   * 中栏的宽度是零和的，一列 200px 只用来显示「跟组头说的一样」不值。
-   */
-  const flagColumnWidth = useMemo(
-    () =>
-      members.some((m) =>
-        (memberFlags.get(m.id) ?? []).some((f) => !flagSummary.commonKeys.has(f.key)),
-      )
-        ? 150
-        : 64,
-    [members, memberFlags, flagSummary],
-  );
+  // 全选状态：非全选时表头复选框为半选，空选时为空，全选时为勾。
+  const allSelected = selectedIds.length > 0 && selectedIds.length === members.length;
+  const someSelected = selectedIds.length > 0 && selectedIds.length < members.length;
+
+  const toggleSelectAll = useCallback(() => {
+    if (!activeGroup) return;
+    const groupKey = activeGroup.key;
+    setExcluded((prev) => {
+      // 当前已全选 → 清空（空选）；否则 → 全选（排除集清空）。
+      const isAll = members.length > 0 && selectedIds.length === members.length;
+      return { ...prev, [groupKey]: isAll ? members.map((m) => m.id) : [] };
+    });
+  }, [activeGroup, members, selectedIds.length]);
 
   /**
    * 一键把「例外」剔出选择集：组内多数一次确认，剩下那几条单独看。
@@ -508,7 +613,13 @@ export function ReviewWorkbenchPage() {
               ...(verdict.review === undefined ? {} : { needs_review: verdict.review }),
             });
         setUndoStack((prev) => [{ ids: selectedIds, before, kind }, ...prev].slice(0, 10));
-        setExcluded((prev) => ({ ...prev, [activeGroup.key]: [] }));
+        // 判完后该组记录清除，刷新后若仍是同组会被上面的 effect 重新初始化为空选。
+        setExcluded((prev) => {
+          if (!activeGroup) return prev;
+          const next = { ...prev };
+          delete next[activeGroup.key];
+          return next;
+        });
         // 报服务端实际改了几条：已经是目标状态的不计数，别让人以为多判了。
         // 判成业务对象却归不进任何业务模块的那批还留在系统表里——不说清楚，
         // 看起来就像整组归好位了。
@@ -580,22 +691,48 @@ export function ReviewWorkbenchPage() {
    * 没补的会在回执里如实报出来。
    */
   const runPrimary = useCallback(() => {
-    if (isReviewedView) {
-      void applyVerdict({ label: "退回复核", review: true });
+    if (selectedIds.length === 0) {
+      message.warning("请先勾选要判的成员");
       return;
     }
-    void applyVerdict({ label: "确认", review: false });
-  }, [applyVerdict, isReviewedView]);
+    if (isReviewedView) {
+      Modal.confirm({
+        title: `退回复核 ${selectedIds.length} 个？`,
+        content: "退回的成员将重新进入待复核队列。",
+        okText: "退回",
+        cancelText: "取消",
+        onOk: () => applyVerdict({ label: "退回复核", review: true }),
+      });
+      return;
+    }
+    Modal.confirm({
+      title: `确认这 ${selectedIds.length} 个？`,
+      content: "确认后将标记为已复核，⌘Z 可撤销。",
+      okText: "确认",
+      cancelText: "取消",
+      onOk: () => applyVerdict({ label: "确认", review: false }),
+    });
+  }, [applyVerdict, isReviewedView, selectedIds.length]);
 
   /** 移动并确认：挪板块与判复核是同一次请求，后端因此看得到挪过之后的归属。 */
   const moveGroup = useCallback(() => {
+    if (selectedIds.length === 0) {
+      message.warning("请先勾选要移动的成员");
+      return;
+    }
     if (!moveTarget) {
       message.warning("先选一个板块");
       return;
     }
     const name = moveTargets.find((opt) => opt.value === moveTarget)?.label ?? "所选板块";
-    void applyVerdict({ segmentId: moveTarget, review: false, label: `移入 ${name}` });
-  }, [applyVerdict, moveTarget, moveTargets]);
+    Modal.confirm({
+      title: `把 ${selectedIds.length} 个移入「${name}」？`,
+      content: "移动并计为已复核，⌘Z 可撤销。",
+      okText: "移动",
+      cancelText: "取消",
+      onOk: () => applyVerdict({ segmentId: moveTarget, review: false, label: `移入 ${name}` }),
+    });
+  }, [applyVerdict, moveTarget, moveTargets, selectedIds.length]);
 
   // ---- 键盘：审核是重复动作，鼠标点选是最慢的输入方式 ----
   // overlayOpen：抽屉盖着时按 A 会把底下那组直接确认掉——人以为在抽屉里操作，
@@ -668,12 +805,68 @@ export function ReviewWorkbenchPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  /** 点对象名＝开完整档案：看细节不离开队列，位置、选择集、判到哪一组都还在。 */
+  const openArchive = useCallback((id: string) => {
+    setActiveMemberId(id);
+    setArchiveOpen(true);
+  }, []);
+
+  /**
+   * 改判收进下拉，键位仍在原处。
+   *
+   * 键位是**位置固定**的（1..4 直连 VERDICTS），所以先带上原下标再过滤：关系表页里
+   * 「改判关系表」是空操作，去掉，但 1/2/4 不能跟着挪。留下的正是「误判的关系表调回
+   * 业务对象」这条路。
+   */
+  const recastItems = useMemo(
+    () =>
+      ROLE_OPTIONS.map((option, index) => ({ option, index }))
+        .filter(({ option }) => !(isBridgeScope && option.value === "bridge"))
+        .map(({ option, index }) => ({
+          key: option.value,
+          label: (
+            <span>
+              <kbd className="review-key">{index + 1}</kbd>
+              {option.label}
+            </span>
+          ),
+        })),
+    [isBridgeScope],
+  );
+
+  const onRecast = useCallback(
+    ({ key }: { key: string }) => {
+      if (selectedIds.length === 0) {
+        message.warning("请先勾选要改判的成员");
+        return;
+      }
+      const option = ROLE_OPTIONS.find((o) => o.value === key);
+      if (!option) return;
+      Modal.confirm({
+        title: `把 ${selectedIds.length} 个改判为「${option.label}」？`,
+        content: "改判角色同时计为已复核，⌘Z 可撤销。",
+        okText: "改判",
+        cancelText: "取消",
+        onOk: () => applyVerdict({ role: option.value, label: `改判${option.label}` }),
+      });
+    },
+    [applyVerdict, selectedIds.length],
+  );
+
   const relationColumns: ColumnsType<RelationType> = useMemo(
     () => [
       {
-        title: "",
+        title: (
+          <Checkbox
+            checked={allSelected}
+            indeterminate={someSelected}
+            onChange={toggleSelectAll}
+            onClick={(e) => e.stopPropagation()}
+            aria-label="全选"
+          />
+        ),
         key: "select",
-        width: 44,
+        width: 40,
         render: (_, row) => (
           <Checkbox
             checked={!excludedIds.includes(row.id)}
@@ -685,8 +878,9 @@ export function ReviewWorkbenchPage() {
       {
         // 外键的最小可读单元是「源对象 —动词→ 目标对象」，不是一个动词——
         // 只列动词等于什么都没说。
-        title: "外键关系",
+        title: "关系",
         key: "triple",
+        width: "26%",
         render: (_, row) => (
           <span className="review-obj-name">
             {row.source_object_name || "?"}
@@ -696,47 +890,70 @@ export function ReviewWorkbenchPage() {
         ),
       },
       {
+        title: <MachineMark bare label="判定类型" />,
+        key: "structure",
+        width: 104,
+        render: (_, row) => (
+          <span className="review-verdict-role review-verdict-role--bridge">
+            {getRelationStructureLabel(row.structure_type)}
+          </span>
+        ),
+      },
+      {
+        title: "把握",
+        key: "confidence",
+        width: 76,
+        align: "right",
+        sorter: (a, b) => (a.source_confidence ?? -1) - (b.source_confidence ?? -1),
+        render: (_, row) => <ConfCell value={row.source_confidence} />,
+      },
+      {
+        title: "判定依据",
+        key: "basis",
+        render: (_, row) => (
+          <RelationBasisCell
+            relation={row}
+            flags={memberFlags.get(row.id) ?? []}
+            domainId={domainId}
+          />
+        ),
+      },
+      {
         // 机器凭哪一列认定这条关系：不给这个，动词对不对就只能猜。
         title: "连接键",
         key: "join_key",
-        width: 116,
+        width: 132,
         ellipsis: true,
         render: (_, row) => {
           const key = parseJoinKey(row.source_evidence || row.description);
           return key ? <span className="review-obj-sub">{key}</span> : <NumCell value={null} />;
         },
       },
-      {
-        title: <MachineMark bare label="机器存疑" />,
-        key: "flags",
-        width: flagColumnWidth,
-        render: (_, row) => (
-          <FlagChips flags={memberFlags.get(row.id) ?? []} hiddenKeys={flagSummary.commonKeys} />
-        ),
-      },
-      {
-        title: "置信度",
-        key: "confidence",
-        width: 72,
-        align: "right",
-        sorter: (a, b) => (a.source_confidence ?? -1) - (b.source_confidence ?? -1),
-        render: (_, row) => (
-          <NumCell
-            value={row.source_confidence?.toFixed(2) ?? null}
-            flag={(row.source_confidence ?? 1) < 0.6}
-          />
-        ),
-      },
     ],
-    [excludedIds, activeGroup, toggleMember, memberFlags, flagSummary, flagColumnWidth],
+    [excludedIds, activeGroup, toggleMember, memberFlags, domainId, allSelected, someSelected, toggleSelectAll],
   );
 
+  /**
+   * 判定结果、把握、依据全部进列——判据不在列表旁边，而**就是**列表。
+   *
+   * 原来它们分散在三处：组头一张机器判定卡（只说组内最低值）、右栏一整块判据（只说
+   * 选中那一行）、中间一列光溜溜的数字。要比较两行的判定强弱，得逐行点过去看右栏。
+   * 摊进列之后，一屏之内可以直接扫、直接排序，例外自己会跳出来。
+   */
   const columns: ColumnsType<ObjectTypeSummary> = useMemo(
     () => [
       {
-        title: "",
+        title: (
+          <Checkbox
+            checked={allSelected}
+            indeterminate={someSelected}
+            onChange={toggleSelectAll}
+            onClick={(e) => e.stopPropagation()}
+            aria-label="全选"
+          />
+        ),
         key: "select",
-        width: 44,
+        width: 40,
         render: (_, row) => (
           <Checkbox
             checked={!excludedIds.includes(row.id)}
@@ -746,74 +963,81 @@ export function ReviewWorkbenchPage() {
         ),
       },
       {
-        title: "对象",
+        title: "对象名",
         key: "name",
+        width: "22%",
         render: (_, row) => (
-          // 固定布局下长表名会被省略，title 让悬停仍能读到全名
-          <div title={`${row.display_name}\n${row.name}`}>
+          // 固定布局下长表名会被省略，title 让悬停仍能读到全名。
+          <button
+            type="button"
+            className="review-obj-link"
+            title={`${row.display_name}\n${row.name}\n点击查看完整档案`}
+            onClick={(event) => {
+              event.stopPropagation();
+              openArchive(row.id);
+            }}
+          >
             <span className="review-obj-name">{row.display_name}</span>
             <span className="review-obj-sub">{row.name}</span>
-          </div>
+          </button>
         ),
       },
-      // 下面五列就是判据本身：可排序，异常值染色后不排序也能一眼看见
-      // （0 主键 / 0 入度 / 90 万行 一眼是日志表）。
+      // 判定类型 / 把握 / 判定依据：这三列是机器说的，表头的芯片印记标明来源——
+      // 一枚绿色的「业务对象」和人工敲定后的结果长得一模一样，不标就会被读成已定。
       {
-        title: "主键",
-        key: "pk",
-        width: 54,
-        align: "right",
-        sorter: (a, b) => (signal(a, "pk_columns") ?? -1) - (signal(b, "pk_columns") ?? -1),
+        title: <MachineMark bare label="判定类型" />,
+        key: "role",
+        width: 104,
         render: (_, row) => {
-          const v = signal(row, "pk_columns");
-          return <NumCell value={v} flag={v === 0 || (v ?? 0) > 1} />;
+          const meta = getRoleMeta(row.table_role);
+          return (
+            <span className={`review-verdict-role review-verdict-role--${meta.cls}`}>
+              {meta.label}
+            </span>
+          );
         },
       },
       {
-        title: "入度",
-        key: "fk_in",
-        width: 54,
+        title: "把握",
+        key: "confidence",
+        width: 76,
         align: "right",
-        sorter: (a, b) => (signal(a, "fk_in_degree") ?? -1) - (signal(b, "fk_in_degree") ?? -1),
+        sorter: (a, b) => (a.role_confidence ?? -1) - (b.role_confidence ?? -1),
+        render: (_, row) => <ConfCell value={row.role_confidence} />,
+      },
+      {
+        title: "判定依据",
+        key: "basis",
+        render: (_, row) => <ObjectBasisCell obj={row} flags={memberFlags.get(row.id) ?? []} />,
+      },
+      // 两条最能一眼定性的结构信号留在列里（孤立的表、几乎没有描述性字段的表，
+      // 基本不是业务对象）；主键/入度/属性/行数这些在「判定依据」里展开。
+      {
+        title: "图连通性",
+        key: "connected",
+        width: 92,
+        sorter: (a, b) => Number(connectivity(a) ?? -1) - Number(connectivity(b) ?? -1),
+        render: (_, row) => <ConnCell connected={connectivity(row)} />,
+      },
+      {
+        title: "描述性字段占比",
+        key: "descriptive_ratio",
+        width: 122,
+        align: "right",
+        sorter: (a, b) =>
+          (signal(a, "descriptive_ratio") ?? -1) - (signal(b, "descriptive_ratio") ?? -1),
         render: (_, row) => {
-          const v = signal(row, "fk_in_degree");
-          return <NumCell value={v} flag={v === 0} />;
+          const v = signal(row, "descriptive_ratio");
+          return (
+            <NumCell
+              value={v == null ? null : `${Math.round(v * 100)}%`}
+              flag={v != null && v < 0.4}
+            />
+          );
         },
-      },
-      {
-        title: "属性",
-        dataIndex: "property_count",
-        key: "property_count",
-        width: 54,
-        align: "right",
-        sorter: (a, b) => a.property_count - b.property_count,
-        render: (_, row) => <NumCell value={row.property_count} flag={row.property_count <= 2} />,
-      },
-      {
-        title: "行数",
-        key: "row_count",
-        width: 68,
-        align: "right",
-        sorter: (a, b) => (a.row_count ?? -1) - (b.row_count ?? -1),
-        render: (_, row) => (
-          <NumCell
-            value={row.row_count == null ? null : formatCount(row.row_count)}
-            flag={(row.row_count ?? 0) >= 100000}
-          />
-        ),
-      },
-      {
-        // 判据里最贵的一列：数字告诉你这张表长什么样，这一列告诉你**机器自己哪里没底**。
-        // 全组共有的旗标压暗（组头已经讲过），只有跟大家不一样的那条会亮起来。
-        title: <MachineMark bare label="机器存疑" />,
-        key: "flags",
-        width: flagColumnWidth,
-        render: (_, row) => (
-          <FlagChips flags={memberFlags.get(row.id) ?? []} hiddenKeys={flagSummary.commonKeys} />
-        ),
       },
     ],
-    [excludedIds, activeGroup, toggleMember, memberFlags, flagSummary, flagColumnWidth],
+    [excludedIds, activeGroup, toggleMember, memberFlags, openArchive, allSelected, someSelected, toggleSelectAll],
   );
 
   if (domain.loading && !domain.data) return <PageSkeleton type="detail" />;
@@ -875,29 +1099,15 @@ export function ReviewWorkbenchPage() {
   const percent = total > 0 ? Math.round((reviewed / total) * 100) : 100;
   const activeMember = members.find((m) => m.id === activeMemberId) ?? members[0] ?? null;
   const activeObject = !isRelation ? (activeMember as ObjectTypeSummary | null) : null;
-  const activeRelation = isRelation ? (activeMember as RelationType | null) : null;
   // 「本组已判 N 个」由服务端在完整人口上分组后给出——前端拿 size 减 members 是算不出的，
   // 判过的成员根本不在队列载荷里。
   const confirmedInGroup = activeGroup?.reviewed_in_group ?? 0;
-  // 组内信号跨度：全组同值就不必逐行读，有跨度才去找例外。
-  const groupSpread = isRelation
-    ? []
-    : (
-        [
-          ["主键", (m: ObjectTypeSummary) => signal(m, "pk_columns")],
-          ["入度", (m: ObjectTypeSummary) => signal(m, "fk_in_degree")],
-          ["属性", (m: ObjectTypeSummary) => m.property_count],
-          ["行数", (m: ObjectTypeSummary) => m.row_count ?? null],
-        ] as const
-      )
-        .map(([label, read]) => [label, spread(members as ObjectTypeSummary[], read)] as const)
-        .filter(([, value]) => value !== null);
 
   return (
     <PageContainer full>
       <div className="review-workbench">
         <div className="review-topbar">
-          <Space size={12}>
+          <Space size={12} className="review-topbar-leading">
             <Link to={`/workspace/${domainId}`}>
               <Button icon={<ArrowLeftOutlined />} aria-label="返回工作区" />
             </Link>
@@ -980,7 +1190,7 @@ export function ReviewWorkbenchPage() {
               {isRelation ? "条" : isBridgeScope ? "张" : "个"} · 已判 {reviewed} / {total}
             </span>
           </div>
-          <Space>
+          <Space className="review-topbar-actions">
             {strandedCount > 0 && systemSegmentId && (
               <Tooltip title="这些对象的角色确认过，却还是业务对象压在「系统表」里：不属于任何业务模块，也就不会出现在业务地图上。点开逐组移出去。">
                 <button
@@ -1087,7 +1297,12 @@ export function ReviewWorkbenchPage() {
               const scoped = segmentScope(seg);
               const segment = segments.data?.items.find((item) => item.id === seg.segment_id);
               return (
-                <div className="review-seg-entry" key={seg.segment_id}>
+                <div
+                  className={`review-seg-entry ${
+                    segmentFilter === seg.segment_id ? "review-seg-entry--on" : ""
+                  } ${scoped.total > 0 && scoped.pending === 0 ? "review-seg-entry--done" : ""}`}
+                  key={seg.segment_id}
+                >
                   <button
                     type="button"
                     className={`review-seg ${
@@ -1124,42 +1339,51 @@ export function ReviewWorkbenchPage() {
                     </span>
                   </button>
                   {segment && segment.kind !== "system" && (
-                    <span className="review-seg-actions">
-                      <Tooltip title="重命名业务板块">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<EditOutlined />}
-                          aria-label={`重命名${segment.display_name}`}
-                          disabled={segmentSaving}
-                          onClick={() => openEditSegment(segment)}
-                        />
-                      </Tooltip>
-                      <Popconfirm
-                        title={`删除「${segment.display_name}」？`}
-                        description={
-                          segment.member_count > 0
-                            ? `${segment.member_count} 个成员将重新分配到其他板块或系统表。`
-                            : "删除后不可在审核台继续使用该板块。"
-                        }
-                        okText="删除"
-                        cancelText="取消"
-                        okButtonProps={{ danger: true, loading: segmentSaving }}
-                        onConfirm={() => void removeSegment(segment)}
-                      >
-                        <Tooltip title="删除业务板块">
-                          <Button
-                            type="text"
-                            danger
-                            size="small"
-                            icon={<DeleteOutlined />}
-                            aria-label={`删除${segment.display_name}`}
-                            disabled={segmentSaving}
-                            onClick={(event) => event.stopPropagation()}
-                          />
-                        </Tooltip>
-                      </Popconfirm>
-                    </span>
+                    <Dropdown
+                      trigger={["click"]}
+                      placement="bottomRight"
+                      disabled={segmentSaving}
+                      menu={{
+                        items: [
+                          {
+                            key: "edit",
+                            icon: <EditOutlined />,
+                            label: "重命名板块",
+                            onClick: () => openEditSegment(segment),
+                          },
+                          { type: "divider" as const },
+                          {
+                            key: "delete",
+                            danger: true,
+                            icon: <DeleteOutlined />,
+                            label: "删除板块",
+                            onClick: () => {
+                              Modal.confirm({
+                                title: `删除「${segment.display_name}」？`,
+                                content:
+                                  segment.member_count > 0
+                                    ? `${segment.member_count} 个成员将重新分配到其他板块或系统表。`
+                                    : "删除后不可在审核台继续使用该板块。",
+                                okText: "删除",
+                                cancelText: "取消",
+                                okButtonProps: { danger: true, loading: segmentSaving },
+                                onOk: () => removeSegment(segment),
+                              });
+                            },
+                          },
+                        ],
+                      }}
+                    >
+                      <Button
+                        type="text"
+                        size="small"
+                        className="review-seg-more"
+                        icon={<MoreOutlined />}
+                        aria-label={`板块操作 ${segment.display_name}`}
+                        disabled={segmentSaving}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    </Dropdown>
                   )}
                 </div>
               );
@@ -1225,119 +1449,71 @@ export function ReviewWorkbenchPage() {
               </div>
             ) : (
               <>
+                {/* 组头收成一行：判成什么、多大把握、凭什么，现在全在下面的列里，
+                    这里只留「这是哪一组、在队列的什么位置」。原来的机器判定卡说的是
+                    组内**最低**把握，摊进列之后每行各说各的，那张卡就没有存在理由了。 */}
                 <div className="review-group-head">
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    {/* 机器判定是这块屏幕的第一句话：先知道机器判成了什么，再决定认不认。 */}
-                    {isRelation ? (
-                      <MachineVerdict
-                        size="lg"
-                        hint={isReviewedView ? "已确认" : undefined}
-                        ariaLabel={`机器判定：${getRelationStructureLabel(
-                          activeGroup.table_role,
-                        )}，${isReviewedView ? "已人工确认" : "待人工确认"}`}
-                      >
-                        <span className="review-verdict-role review-verdict-role--bridge">
-                          {getRelationStructureLabel(activeGroup.table_role)}
-                        </span>
-                        <span
-                          className={`review-verdict-band review-verdict-band--${activeGroup.score_band}`}
-                        >
-                          {activeGroup.score_band_label}
-                        </span>
-                      </MachineVerdict>
-                    ) : (
-                      // 分带标签已经跟在得分刻度后面了（分带是分组键的一部分，全组同值），
-                      // 再挂一个同名 Tag 只会跟「机器判定」抢注意力。
-                      <div className="review-verdict-line">
-                        <VerdictHeadline
-                          verdict={groupVerdict}
-                          size="lg"
-                          note={groupVerdictNote}
-                          reviewed={isReviewedView}
-                        />
-                      </div>
+                  <div className="review-group-title">
+                    {activeGroup.segment_name} · <em>{familyLabel(activeGroup.name_family)}</em> ·{" "}
+                    {activeGroup.size} {isRelation ? "条" : "张"}
+                    {isReviewedView && (
+                      <Tag color="green" style={{ marginInlineStart: 8 }}>
+                        回看已判 {members.length}
+                      </Tag>
                     )}
-                    <div className="review-group-title">
-                      {activeGroup.segment_name} · <em>{familyLabel(activeGroup.name_family)}</em> ·{" "}
-                      {activeGroup.size} {isRelation ? "条" : "张"}
-                      {isReviewedView && (
-                        <Tag color="green" style={{ marginInlineStart: 8 }}>
-                          回看已判 {members.length}
+                    {activeGroup.truncated && (
+                      <Tooltip title="本组过大，先判这一批，剩下的下次进来继续">
+                        <Tag style={{ marginInlineStart: 8 }}>仅显示前 {members.length} 个</Tag>
+                      </Tooltip>
+                    )}
+                    {/* 这一组的角色判对了、位置没放对。整段解释收进悬停：常驻一整块
+                        黄底说明读一次就够了，之后每屏都在吃判据表的高度。 */}
+                    {isStranded && (
+                      <Tooltip title="这批表判成了业务对象/关系表，却压在系统表里：机器按关系邻居和命名族都推不出它们属于哪个业务模块。用下面那行「移动到板块」移到对应的业务板块，它们才会出现在业务地图上；确实不是业务数据的，改判为数据表/技术表即可留在系统表。">
+                        <Tag
+                          color="warning"
+                          icon={<PartitionOutlined />}
+                          style={{ marginInlineStart: 8 }}
+                        >
+                          压在系统表
                         </Tag>
-                      )}
-                      {activeGroup.truncated && (
-                        <Tooltip title="本组过大，先判这一批，剩下的下次进来继续">
-                          <Tag style={{ marginInlineStart: 8 }}>仅显示前 {members.length} 个</Tag>
-                        </Tooltip>
-                      )}
-                    </div>
-                    {groupSpread.length > 0 && (
-                      <div className="review-group-spread">
-                        {groupSpread.map(([label, value]) => (
-                          <span key={label}>
-                            {label} <b>{value}</b>
-                          </span>
-                        ))}
-                      </div>
+                      </Tooltip>
                     )}
                   </div>
                   <div className="review-group-aside">
+                    {exceptionIds.length > 0 && (
+                      <Tooltip title="这些成员带有本组其他成员没有的分歧/证据问题，已排在表首">
+                        <span className="review-group-exception">{exceptionIds.length} 个例外</span>
+                      </Tooltip>
+                    )}
+                    {confirmedInGroup > 0 && (
+                      <span className="review-group-pos">本组已判 {confirmedInGroup}</span>
+                    )}
                     <span className="review-group-pos">
                       {(queue.data?.group_offset ?? 0) + 1} / {queue.data?.group_total ?? 0} 组
                     </span>
+                    {/* 用法说明读一次就够了，放判定条上是每屏都在占宽度——那一行的宽度
+                        要留给真正在推进队列的动作。 */}
+                    <Popover
+                      placement="bottomRight"
+                      content={
+                        <div style={{ maxWidth: 320, lineHeight: 1.8 }}>
+                          组内默认全选，反选掉例外后再判；判完自动进入下一组，误判按 ⌘Z 撤销。
+                          「判定类型 / 把握 / 判定依据」是机器给的结论——悬停判定依据看完整
+                          判据，点对象名开完整档案。主动作按 <kbd className="review-key">A</kbd>
+                          ，跳过 <kbd className="review-key">S</kbd>，排除例外{" "}
+                          <kbd className="review-key">X</kbd>，改判直接按{" "}
+                          <kbd className="review-key">1</kbd>
+                          <kbd className="review-key">2</kbd>
+                          <kbd className="review-key">3</kbd>
+                          <kbd className="review-key">4</kbd>。
+                        </div>
+                      }
+                    >
+                      <Button type="text" size="small" icon={<QuestionCircleOutlined />} />
+                    </Popover>
                   </div>
                 </div>
-
-                {/* 这一组为什么整体在队列里：共性一次讲清，例外单独点名。 */}
-                <div
-                  className={`review-group-why${
-                    exceptionIds.length > 0 ? " review-group-why--exception" : ""
-                  }`}
-                >
-                  {flagSummary.common.length > 0 ? (
-                    <span className="review-group-why-main">
-                      <MachineMark bare label="全组共性" />
-                      {flagSummary.common.slice(0, 3).map((entry) => (
-                        <Tooltip key={entry.flag.key} title={entry.flag.detail}>
-                          <span className={`review-flag review-flag--${entry.flag.tone}`}>
-                            {entry.flag.label}
-                            <i>
-                              {entry.count}/{flagSummary.size}
-                            </i>
-                          </span>
-                        </Tooltip>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="review-group-why-main">
-                      <MachineMark bare label="本组无共性存疑" />
-                      <span className="review-group-why-hint">逐行看「机器存疑」列</span>
-                    </span>
-                  )}
-                  {exceptionIds.length > 0 ? (
-                    <Tooltip title="这些成员带有本组其他成员没有的分歧/证据问题，已排在表首">
-                      <span className="review-group-why-exception">
-                        {exceptionIds.length} 个例外需单独看
-                      </span>
-                    </Tooltip>
-                  ) : (
-                    <span className="review-group-why-clean">无例外，可整组处置</span>
-                  )}
-                </div>
-
-                {/* 这一组的角色判对了，位置没放对——把缺的那一半说出来，
-                    人才知道下面那行「移动到」是给谁用的。 */}
-                {isStranded && (
-                  <div className="review-classify-note">
-                    <PartitionOutlined />
-                    <span>
-                      这批表判成了业务对象/关系表，却压在<b>系统表</b>里：机器按关系邻居和
-                      命名族都推不出它们属于哪个业务模块。用下面那行移到对应的业务板块，
-                      它们才会出现在业务地图上；确实不是业务数据的，改判为数据表/技术表
-                      即可留在系统表。
-                    </span>
-                  </div>
-                )}
 
                 <div className="review-group-body">
                   <Spin spinning={queue.loading}>
@@ -1356,7 +1532,6 @@ export function ReviewWorkbenchPage() {
                       rowClassName={(row) =>
                         [
                           row.id === activeMemberId ? "review-row--active" : "",
-                          excludedIds.includes(row.id) ? "review-row--excluded" : "",
                           exceptionSet.has(row.id) ? "review-row--exception" : "",
                         ]
                           .filter(Boolean)
@@ -1367,216 +1542,108 @@ export function ReviewWorkbenchPage() {
                   </Spin>
                 </div>
 
-                {/* 两行是**排定**的，不是挤出来的：第一行「确认 / 排除 / 跳过」是走流程，
-                    第二行「改判为 …」是改结论。挤在一行里会随宽度乱折，且两类动作混在一起。 */}
-                <div className="review-actions">
-                  <div className="review-actions-row">
-                    <Tooltip
-                      title={
-                        !isReviewedView && isStranded ? STRAND_HINT : undefined
-                      }
+                {/* 判定条压成一行。
+                    原来是三行：走流程的一行、常驻的「移动到」一行、四个改判按钮一行，
+                    加起来吃掉近 150px——那是七八行判据表的高度，而这三行里真正每屏都
+                    要用的只有「确认」。改判收进下拉（键位 1..4 不变），移动缩成一个
+                    下拉加一个按钮，走流程的动作靠右。 */}
+                <div className={`review-actions${isStranded ? " review-actions--urgent" : ""}`}>
+                  <Tooltip title={!isReviewedView && isStranded ? STRAND_HINT : undefined}>
+                    {/* 已判视图里主动作换成「退回复核」：回看的目的就是把判错的捞回来。
+                        键位不变（A 永远是这一屏最该做的那件事）。 */}
+                    <Button
+                      type="primary"
+                      danger={isReviewedView}
+                      icon={isReviewedView ? <RollbackOutlined /> : undefined}
+                      loading={applying}
+                      disabled={applying}
+                      onClick={runPrimary}
                     >
-                      {/* 已判视图里主动作换成「退回复核」：回看的目的就是把判错的捞回来。
-                          键位不变（A 永远是这一屏最该做的那件事）。 */}
+                      <kbd className="review-key">A</kbd>
+                      {isReviewedView
+                        ? `退回复核 ${selectedIds.length} 个`
+                        : `确认这 ${selectedIds.length} 个`}
+                    </Button>
+                  </Tooltip>
+                  {/* 紧挨确认，因为它是**同一批**的另一种处置：动词说不出业务语义时，
+                      先把词改准再算复核，而不是原样确认下去。范围＝上面勾中的这些。 */}
+                  {isRelation && (
+                    <Tooltip title="给上面勾中的这批关系换上更精确的动词，逐条可改，采纳即计为已复核">
                       <Button
-                        type="primary"
-                        size="large"
-                        danger={isReviewedView}
-                        icon={isReviewedView ? <RollbackOutlined /> : undefined}
-                        loading={applying}
-                        disabled={selectedIds.length === 0}
-                        onClick={runPrimary}
+                        icon={<BulbOutlined />}
+                        disabled={applying}
+                        onClick={() => {
+                          if (selectedIds.length === 0) {
+                            message.warning("请先勾选要改动词的关系");
+                            return;
+                          }
+                          setVerbDrawerOpen(true);
+                        }}
                       >
-                        <kbd className="review-key">A</kbd>
-                        {isReviewedView
-                          ? `退回复核 ${selectedIds.length} 个`
-                          : `确认这 ${selectedIds.length} 个`}
+                        动词建议
                       </Button>
                     </Tooltip>
-                    {/* 紧挨确认，因为它是**同一批**的另一种处置：动词说不出业务语义时，
-                        先把词改准再算复核，而不是原样确认下去。范围＝上面勾中的这些。 */}
-                    {isRelation && (
-                      <Tooltip title="给上面勾中的这批关系换上更精确的动词，逐条可改，采纳即计为已复核">
-                        <Button
-                          size="large"
-                          icon={<BulbOutlined />}
-                          disabled={applying || selectedIds.length === 0}
-                          onClick={() => setVerbDrawerOpen(true)}
-                        >
-                          动词建议
-                        </Button>
-                      </Tooltip>
-                    )}
-                    <span className="review-spacer" />
-                    {exceptionIds.length > 0 && (
-                      <Tooltip title="把带有非共性分歧的成员剔出选择集，先把没争议的一次判掉；再按一次恢复全选">
-                        <Button disabled={applying} onClick={toggleExceptions}>
-                          <kbd className="review-key">X</kbd>
-                          排除 {exceptionIds.length} 个例外
-                        </Button>
-                      </Tooltip>
-                    )}
-                    <Button disabled={applying} onClick={skipGroup}>
-                      <kbd className="review-key">S</kbd>
-                      跳过本组
-                    </Button>
-                    {/* 常驻两行操作说明读一次就够了，之后每一屏都在占位。收进气泡，
-                        把那 40px 还给判据表。 */}
-                    <Popover
-                      placement="topRight"
-                      content={
-                        <div style={{ maxWidth: 300, lineHeight: 1.7 }}>
-                          组内默认全选，反选掉例外后再判；判完自动进入下一组，误判按 ⌘Z 撤销。
-                          「机器存疑」列里压暗的是全组共性，亮起来的才是这一行独有的问题。
-                        </div>
-                      }
-                    >
-                      <Button type="text" size="small" icon={<QuestionCircleOutlined />} />
-                    </Popover>
-                  </div>
-                  {/* 移动到板块是常驻动作，不再只在「归错地方」那一组出现：分错板块的
-                      对象哪一组里都可能有，得随时能移走。归错地方的那一组会被高亮。 */}
+                  )}
                   {!isRelation && (
-                    <div
-                      className={`review-actions-row review-actions-row--classify${
-                        isStranded ? " review-actions-row--urgent" : ""
-                      }`}
+                    <Dropdown
+                      trigger={["click"]}
+                      disabled={applying}
+                      menu={{ items: recastItems, onClick: onRecast }}
                     >
-                      <span className="review-actions-label">移动到</span>
+                      <Button>
+                        改判为 <DownOutlined />
+                      </Button>
+                    </Dropdown>
+                  )}
+                  {/* 移动到板块是常驻动作：分错板块的对象哪一组里都可能有，得随时能移走。
+                      归错地方的那一组把它提成主按钮。 */}
+                  {!isRelation && (
+                    <span className="review-move">
                       <Select
-                        size="small"
                         showSearch
                         allowClear
                         optionFilterProp="label"
-                        placeholder={isStranded ? "选择业务板块" : "选择目标板块"}
-                        style={{ minWidth: 210 }}
+                        placeholder={isStranded ? "移到业务板块" : "移动到板块"}
+                        style={{ width: 160 }}
                         value={moveTarget}
                         onChange={setMoveTarget}
                         options={moveTargets}
                         notFoundContent="本体里还没有其他板块"
                       />
-                      <Button
-                        type={isStranded ? "primary" : "default"}
-                        size="small"
-                        icon={<PartitionOutlined />}
-                        disabled={applying || selectedIds.length === 0 || !moveTarget}
-                        onClick={moveGroup}
+                      {/* 图标按钮：动作名已经写在它左边的下拉占位符里（「移动到板块」），
+                          再写一遍「移动」只是重复，而这一行的宽度是零和的。 */}
+                      <Tooltip
+                        title={`把勾中的 ${selectedIds.length} 个移到所选板块，并计为已复核`}
                       >
-                        移动并确认 {selectedIds.length} 个
+                        <Button
+                          type={isStranded ? "primary" : "default"}
+                          icon={<PartitionOutlined />}
+                          aria-label="移动并确认"
+                          disabled={applying || !moveTarget}
+                          onClick={moveGroup}
+                        />
+                      </Tooltip>
+                    </span>
+                  )}
+                  <span className="review-spacer" />
+                  {/* 排除例外 / 跳过 / 说明小一号：它们不是每屏都要用的动作，
+                      让位给确认、改判、移动这三个真正在推进队列的。 */}
+                  {exceptionIds.length > 0 && (
+                    <Tooltip title="把带有非共性分歧的成员剔出选择集，先把没争议的一次判掉；再按一次恢复全选">
+                      <Button size="small" disabled={applying} onClick={toggleExceptions}>
+                        <kbd className="review-key">X</kbd>
+                        排除例外 {exceptionIds.length}
                       </Button>
-                      {isStranded && (
-                        <span className="review-actions-hint">{STRAND_HINT}</span>
-                      )}
-                    </div>
+                    </Tooltip>
                   )}
-                  {!isRelation && (
-                    <div className="review-actions-row review-actions-row--recast">
-                      <span className="review-actions-label">改判为</span>
-                      {/* 键位是**位置固定**的（1..4 直连 VERDICTS），所以先带上原下标再过滤：
-                          关系表页里「改判关系表」是空操作，去掉，但 1/2/4 的键位不能跟着挪。
-                          留下的正是「误判的关系表调回业务对象」这条路。 */}
-                      {ROLE_OPTIONS.map((option, index) => ({ option, index }))
-                        .filter(({ option }) => !(isBridgeScope && option.value === "bridge"))
-                        .map(({ option, index }) => (
-                          <Button
-                            key={option.value}
-                            size="small"
-                            disabled={applying || selectedIds.length === 0}
-                            onClick={() =>
-                              void applyVerdict({
-                                role: option.value,
-                                label: `改判${option.label}`,
-                              })
-                            }
-                          >
-                            <kbd className="review-key">{index + 1}</kbd>
-                            {option.label}
-                          </Button>
-                        ))}
-                    </div>
-                  )}
+                  <Button size="small" disabled={applying} onClick={skipGroup}>
+                    <kbd className="review-key">S</kbd>
+                    跳过
+                  </Button>
                 </div>
               </>
             )}
           </section>
-
-          <aside className="review-pane review-pane--evidence">
-            <div className="review-pane-label">判定依据</div>
-            {activeMember && (
-              <div className="review-evidence-title">{activeMember.display_name}</div>
-            )}
-            {activeObject ? (
-              <div className="review-evidence-body">
-                <DecisionEvidencePanel obj={activeObject} compact />
-                {/* 邻居从表格让位到这里：表格里 118px 只放得下两个被截断的名字，
-                    这一栏能把方向、对象、关系动词一次说全。 */}
-                {activeObject.top_neighbors && activeObject.top_neighbors.length > 0 && (
-                  <div className="review-neighbors">
-                    <span className="review-neighbors-label">邻居</span>
-                    {activeObject.top_neighbors.slice(0, 4).map((n) => (
-                      <Tooltip key={n.id} title={n.relation_name}>
-                        <span className="review-neighbor">
-                          {n.direction === "inbound" ? "←" : "→"} {n.display_name || n.name}
-                        </span>
-                      </Tooltip>
-                    ))}
-                  </div>
-                )}
-                {confirmedInGroup > 0 && (
-                  <div className="review-evidence-streak">
-                    本组已判 <b>{confirmedInGroup}</b> 个，还剩 {activeGroup?.size ?? 0} 个
-                  </div>
-                )}
-                <div className="review-evidence-foot">
-                  <Button type="link" style={{ padding: 0 }} onClick={() => setArchiveOpen(true)}>
-                    打开完整档案 →
-                  </Button>
-                </div>
-              </div>
-            ) : activeRelation ? (
-              <div className="review-evidence-body">
-                <div style={{ marginBottom: 12 }}>
-                  {activeRelation.source_object_name}
-                  <span className="review-triple-verb">— {activeRelation.display_name} →</span>
-                  {activeRelation.target_object_name}
-                </div>
-                <WhyReview flags={memberFlags.get(activeRelation.id) ?? []} />
-                <div className="review-evidence-row">
-                  <span>连接键</span>
-                  <span>
-                    {parseJoinKey(activeRelation.source_evidence || activeRelation.description) ||
-                      "—"}
-                  </span>
-                </div>
-                <div className="review-evidence-row">
-                  <span>结构</span>
-                  <span>{getRelationStructureLabel(activeRelation.structure_type)}</span>
-                </div>
-                <div className="review-evidence-row">
-                  <span>基数</span>
-                  <span>{activeRelation.cardinality || "—"}</span>
-                </div>
-                <div className="review-evidence-row">
-                  <span>置信度</span>
-                  <span>{activeRelation.source_confidence?.toFixed(2) ?? "—"}</span>
-                </div>
-                <div className="review-evidence-note">
-                  {activeRelation.source_evidence || activeRelation.description || "暂无证据说明"}
-                </div>
-                <div className="review-evidence-foot">
-                  <Link
-                    to={`/workspace/${domainId}/relations/${activeRelation.id}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    打开关系详情 →
-                  </Link>
-                </div>
-              </div>
-            ) : (
-              <Text type="secondary">选中左侧任一行查看判定依据。</Text>
-            )}
-          </aside>
         </div>
 
         <ObjectArchiveDrawer
@@ -1621,7 +1688,9 @@ export function ReviewWorkbenchPage() {
             <Form.Item
               name="name"
               label="技术标识名"
-              extra={segmentEditor === "create" ? "可留空，系统会根据板块名称自动生成。" : undefined}
+              extra={
+                segmentEditor === "create" ? "可留空，系统会根据板块名称自动生成。" : undefined
+              }
               rules={[{ whitespace: true, message: "技术标识名不能只包含空格" }]}
             >
               <Input placeholder="可选，例如 sales_management" maxLength={255} />

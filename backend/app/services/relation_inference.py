@@ -69,7 +69,7 @@ class InferenceResult:
     dropped: dict[str, int]
 
 
-def _members_payload(family: KeyFamily) -> str:
+def members_payload(family: KeyFamily) -> str:
     """成员列表落库。**带 distinct 与 rows**——基数是按它们算的，不能只存列名。"""
     return json.dumps(
         [
@@ -230,7 +230,7 @@ async def infer(
         row.sample_values_json = json.dumps(
             list(family.sample_values), ensure_ascii=False
         )
-        row.members_json = _members_payload(family)
+        row.members_json = members_payload(family)
         row.table_count = len(family.tables)
         row.column_count = len(family.members)
         row.verdict = verdict.verdict

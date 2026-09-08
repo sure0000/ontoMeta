@@ -36,6 +36,13 @@
   --om-machine-soft: #f4f6fc;
   --om-machine-border: #dde3f1;
 
+  /* 「机器预连、还没经人看过」——血缘画布上唯一要人主动处置的一类线。
+     机器冷灰蓝表示「这是机器产出的」，但预连线还多一层「等你看一眼」，
+     所以在机器色系里单挑一个暖色：它和 --om-warning 是一族，
+     语义是「悬而未决」，不是「出错了」。 */
+  --om-machine-edge: #c2760a;
+  --om-machine-edge-soft: #fdf3e2;
+
   --om-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
   --om-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06);
   --om-shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08);

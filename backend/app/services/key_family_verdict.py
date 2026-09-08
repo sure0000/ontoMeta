@@ -57,8 +57,15 @@ _SYSTEM_PROMPT = (
     "- dimension_code：这是**分类/编码体系**的取值，不是具体实体的标识。"
     "例如行政区划代码、国家代码、证件类型代码、行业分类码。它们也跨表复用，但连接的是"
     "「同一套码表」而不是「同一个实体」。\n"
-    "- not_a_key：不是键。例如枚举值（IDCARD、居民身份证、汉族）、随机串、"
+    "- not_a_key：不是键。例如枚举值（IDCARD、居民身份证、汉族）、"
     "脱敏后的无意义值、明显是描述性内容的字段。\n\n"
+    "**注意区分「随机串」与「不透明标识符」**：md5/sha/uuid 这类哈希值看起来像乱码，"
+    "但它们恰恰是设备、账号、会话这类没有自然编号的实体最常用的标识符（如设备 gid、"
+    "oaid、idfa、用户 uid）。判 not_a_key 的理由必须是「这个值不指向任何实体」，"
+    "不能仅仅因为它不可读。\n\n"
+    "value_shape 是值的形状签名：``A<n>`` 是 n 位字母、``N<n>`` 是 n 位数字，"
+    "``H<n>`` 是 n 位十六进制摘要（32=md5、40=sha1、64=sha256），``U<36>`` 是 UUID。"
+    "其余字符原样保留。\n\n"
     "判据优先看**值样例的形态**，其次看列名词元（可能是拼音缩写：bh=编号、hm=号码、"
     "dm=代码、sfz=身份证、dh=电话、aj=案件、ry=人员、jq=警情），再次看跨表分布"
     "（覆盖表数过多且区分度极低的，多半是码值不是实体键）。\n\n"
@@ -87,7 +94,14 @@ _SYSTEM_PROMPT = (
     'reason:"6 位数字且前两位为省级代码，是国标行政区划编码，连接的是码表而非具体实体"}\n'
     '- 输入 {family_id:"f_3", value_shape:"A<6>", samples:["IDCARD","MILID"], ...} → '
     '{family_id:"f_3", verdict:"not_a_key", entity_name:"", key_name:"", predicate:"", '
-    'confidence:0.85, reason:"取值是证件类型的英文枚举常量，不是标识某个实体的键"}'
+    'confidence:0.85, reason:"取值是证件类型的英文枚举常量，不是标识某个实体的键"}\n'
+    '- 输入 {family_id:"f_4", value_shape:"H<32>", '
+    'samples:["66e31ba2a55eb1e8ff66f0be0db24af8","e92d66fa5cbd7141e9562878ce4bd54b"], '
+    'members:[{table:"dmp_gid_ids",column:"gid"},'
+    '{table:"dmp_device_portrait_merge_center",column:"gid"}]} → '
+    '{family_id:"f_4", verdict:"entity_key", entity_name:"设备", key_name:"设备标识", '
+    'predicate:"归属", confidence:0.85, reason:"32 位十六进制摘要，是设备的不透明标识符；'
+    '列名 gid 在设备画像与设备 ID 映射表中复用同一套取值，指向同一台设备"}'
 )
 
 

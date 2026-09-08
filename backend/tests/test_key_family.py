@@ -3,11 +3,13 @@
 钉住的行为（每条都对着真实 jwsp 域的形态写，不是编的）：
 
 1. 形状签名一次扫完——分两次替换会把 ``A<2>`` 里的 2 也当数字段，变成 ``A<N<1>>``；
-2. 六道闸门各自的剔除对象：跨表过于普遍、无画像、形状不稳定、时间、度量、常量/低基数；
-3. 常量族（``汉族``/``中国``/``居民身份证``）必须被「形状里没有占位符」这一条清掉；
-4. 时间戳列即使 distinct/rows = 1.0 也不能当键——这是第一版漏斗炸成 26178 对的根因；
-5. 基数按 distinct/rows 算，不是硬编码；
-6. 方向按区分度定：近唯一的一端是被引用的主数据端。
+2. 不透明标识符（md5/uuid）整体成形，不按字母数字段拆——拆了每个样例签名都不同；
+3. 六道闸门各自的剔除对象：跨表过于普遍、无画像、形状不稳定、时间、度量、常量/低基数；
+4. 闸门 1 对高区分度列的豁免：域级实体主键天然无处不在，不能因此判它没区分度；
+5. 常量族（``汉族``/``中国``/``居民身份证``）必须被「形状里没有占位符」这一条清掉；
+6. 时间戳列即使 distinct/rows = 1.0 也不能当键——这是第一版漏斗炸成 26178 对的根因；
+7. 基数按 distinct/rows 算，不是硬编码；
+8. 方向按区分度定：近唯一的一端是被引用的主数据端。
 """
 
 from __future__ import annotations
@@ -68,6 +70,63 @@ def test_constant_value_keeps_literal_shape():
     assert value_shape("居民身份证") == "居民身份证"
 
 
+def test_opaque_identifier_gets_one_whole_shape():
+    """md5/uuid 按段拆会给出每个样例都不同的签名，必须整体成形。
+
+    这是 ``gid`` 整类不可见的根因：逐段拆 ``66e31ba2…`` 给 ``N<2>A<1>N<2>A<2>…``、
+    ``e92d66fa…`` 给 ``A<1>N<2>A<1>N<2>…``，5 个样例 5 种形状 → 撞「形状不稳定」闸门。
+    """
+    assert value_shape("66e31ba2a55eb1e8ff66f0be0db24af8") == "H<32>"
+    assert value_shape("e92d66fa5cbd7141e9562878ce4bd54b") == "H<32>"
+    assert value_shape("da39a3ee5e6b4b0d3255bfef95601890afd80709") == "H<40>"
+    assert value_shape("550e8400-e29b-41d4-a716-446655440000") == "U<36>"
+    assert value_shape("6C6F0B36-8D6B-44F5-B004-5EFB3D22314E") == "U<36>"
+
+
+def test_opaque_shape_is_not_mistaken_for_an_enum():
+    """``H<32>`` 里没有 ``A``/``N``，占位符正则若不认它，整族会被当常量清掉。"""
+    datasets = [
+        _dataset(
+            f"t{i}",
+            [_field("gid", ["66e31ba2a55eb1e8ff66f0be0db24af8"], distinct=900)],
+            rows=1200,
+        )
+        for i in range(3)
+    ]
+    kept, stats = candidate_key_columns(datasets)
+
+    assert stats.constant_or_low_cardinality == 0
+    assert len(kept) == 3
+
+
+def test_long_digit_run_is_not_a_digest():
+    """纯数字长串是号码不是摘要——十六进制归一必须同时要求含字母和数字。"""
+    assert value_shape("3101042026457051") == "N<16>"
+    assert value_shape("RY00000183") == "A<2>N<8>"
+    assert value_shape("ABC123") == "A<3>N<3>"
+
+
+def test_hex_columns_across_tables_form_one_family():
+    """两张表的 md5 值形状归一后才聚得成族——``family_id`` 是形状的哈希。"""
+    datasets = [
+        _dataset(
+            "dmp_device_portrait_merge_center",
+            [_field("gid", ["66e31ba2a55eb1e8ff66f0be0db24af8"], distinct=915)],
+            rows=1215,
+        ),
+        _dataset(
+            "dmp_gid_ids",
+            [_field("gid", ["53583bcbd9ff6a63e6d88a7c0dce63b4"], distinct=1016)],
+            rows=1413,
+        ),
+    ]
+    families, _ = build_key_families(datasets)
+
+    assert len(families) == 1
+    assert families[0].value_shape == "H<32>"
+    assert len(families[0].tables) == 2
+
+
 # --------------------------------------------------------------------------- 闸门
 
 
@@ -101,20 +160,56 @@ def test_temporal_detected_by_physical_type_even_when_shape_is_opaque():
     assert stats.temporal == 3
 
 
-def test_ubiquitous_column_is_dropped():
-    """出现在绝大多数表里的列是 ETL/审计列，不可能是有区分度的实体键。"""
+def test_ubiquitous_low_cardinality_column_is_dropped():
+    """出现在绝大多数表里、且取值来回重复的列是码值/审计列，不是实体键。"""
     datasets = [
         _dataset(
             f"t{i}",
             [
-                _field("row_id", ["1", "2", "3"], distinct=1000),
-                _field("logdate", ["20260907"], distinct=30),
+                _field("local_code", ["370102", "110105"], distinct=20),
+                _field("sj_ly", ["公安内网采集", "互联网抓取"], distinct=5),
             ],
         )
         for i in range(12)
     ]
     _, stats = candidate_key_columns(datasets)
     assert stats.ubiquitous == 24
+
+
+def test_ubiquitous_column_is_exempt_when_it_carries_row_identity():
+    """域级实体主键天然无处不在——不能因为出现在很多表里就判它没区分度。
+
+    jwsp 的 ``gid``（设备标识）在 44/138 张表里，超过阈值 34.5，改前被当成 ETL 列整列
+    剔掉，于是这个域最重要的那根关联主干在画布上一根线都连不出来。
+    """
+    digests = [
+        "66e31ba2a55eb1e8ff66f0be0db24af8",
+        "e92d66fa5cbd7141e9562878ce4bd54b",
+    ]
+    datasets = [
+        _dataset(f"t{i}", [_field("gid", digests, distinct=900)], rows=1200)
+        for i in range(12)
+    ]
+    kept, stats = candidate_key_columns(datasets)
+
+    assert stats.ubiquitous == 0
+    assert len(kept) == 12
+
+
+def test_row_id_survives_ubiquity_exemption_but_dies_to_the_short_code_gate():
+    """豁免不等于放行：``row_id`` 区分度 1.0 会绕过闸门 1，但形状 ``N<1>`` 撞短码闸。
+
+    实测把闸门 1 整个关掉重跑 jwsp 全域，9 个「普遍列」里只有 ``local_code`` 能活到聚族，
+    其余 8 个都由其余五道闸各自拦下——这是豁免敢开的前提。
+    """
+    datasets = [
+        _dataset(f"t{i}", [_field("row_id", ["1", "2", "3"], distinct=1000)])
+        for i in range(12)
+    ]
+    _, stats = candidate_key_columns(datasets)
+
+    assert stats.ubiquitous == 0
+    assert stats.constant_or_low_cardinality == 12
 
 
 def test_unstable_shape_is_dropped():

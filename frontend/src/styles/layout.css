@@ -1385,7 +1385,7 @@ a.page-meta-item:hover strong {
   display: flex;
   flex-direction: column;
   gap: var(--om-space-3);
-  height: calc(100vh - var(--om-header-h) - 56px);
+  height: calc(100vh - var(--om-header-h) - 48px);
   min-height: 520px;
 }
 
@@ -1396,17 +1396,34 @@ a.page-meta-item:hover strong {
   align-items: center;
   gap: var(--om-space-4);
   flex-wrap: wrap;
-  padding: 10px var(--om-space-4);
+  min-height: 58px;
+  padding: 8px 12px;
   background: var(--om-surface);
-  border: 1px solid var(--om-border);
+  border: 1px solid var(--om-border-strong);
   border-radius: var(--om-radius-lg);
   box-shadow: var(--om-shadow-sm);
+}
+
+.review-topbar-leading,
+.review-topbar-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.review-topbar-leading {
+  flex: 0 1 auto;
+}
+
+.review-topbar-actions {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
 }
 
 .review-topbar-title {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  min-width: 0;
   font-size: var(--om-text-md);
   font-weight: 600;
   white-space: nowrap;
@@ -1414,11 +1431,11 @@ a.page-meta-item:hover strong {
 
 .review-topbar-progress {
   /* 顶栏一折行就吃掉 50px 判据表高度；进度条是最能让步的那一个，给它更小的下限 */
-  flex: 1 1 160px;
+  flex: 1 1 220px;
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 120px;
+  min-width: 180px;
 }
 
 .review-topbar-progress .ant-progress {
@@ -1444,15 +1461,16 @@ a.page-meta-item:hover strong {
   color: var(--om-text);
 }
 
-/* ---------- 三栏 ---------- */
+/* ---------- 两栏 ----------
+   右侧判据栏撤掉了：判定结果、把握、依据都成了判据表的列，一栏 320px 只为
+   「选中那一行」重说一遍同样的话，代价是判据表永远少 320px——而它才是工作面。 */
 
 .review-panes {
   flex: 1;
   min-height: 0;
   display: grid;
-  /* 中栏给足最小宽度：判据表被挤窄时对象名会被压成竖排单字。
-     两侧是辅助信息，宽度固定；中栏是工作面，吃掉全部余量。 */
-  grid-template-columns: 196px minmax(420px, 1fr) 332px;
+  /* 左栏是进度地形，宽度固定；右栏是工作面，吃掉全部余量。 */
+  grid-template-columns: minmax(180px, 196px) minmax(0, 1fr);
   gap: var(--om-space-3);
   align-items: stretch;
 }
@@ -1467,10 +1485,10 @@ a.page-meta-item:hover strong {
   flex-direction: column;
 }
 
-.review-pane--queue,
-.review-pane--evidence {
+.review-pane--queue {
   overflow-y: auto;
-  padding: var(--om-space-3);
+  padding: var(--om-space-4);
+  box-shadow: var(--om-shadow-sm);
 }
 
 .review-pane--group {
@@ -1528,36 +1546,94 @@ a.page-meta-item:hover strong {
 
 .review-seg-entry {
   position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  border-radius: var(--om-radius-sm);
+  transition: background 0.15s;
 }
 
 .review-seg-entry .review-seg {
-  padding-right: 68px;
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  margin-bottom: 0;
+  padding-right: 6px;
 }
 
-.review-seg-actions {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
+/* 三点菜单：初始零占位，hover 行时展开淡入，数字自适应向左让位 */
+.review-seg-more.ant-btn {
+  flex: none;
+  align-self: center;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  height: 22px;
+  padding: 0;
+  margin-right: 0;
+  overflow: hidden;
+  color: var(--om-text-tertiary);
   opacity: 0;
-  transition: opacity 0.15s;
+  transition:
+    max-width 0.2s ease,
+    width 0.2s ease,
+    opacity 0.18s ease,
+    margin-right 0.2s ease,
+    color 0.15s ease,
+    background 0.15s ease;
 }
 
-.review-seg-entry:hover .review-seg-actions,
-.review-seg-entry:focus-within .review-seg-actions {
+.review-seg-entry:hover .review-seg-more.ant-btn,
+.review-seg-entry:focus-within .review-seg-more.ant-btn {
+  width: 22px;
+  max-width: 22px;
+  margin-right: 2px;
   opacity: 1;
 }
 
-.review-seg-actions .ant-btn {
-  width: 24px;
-  height: 24px;
-  padding: 0;
+.review-seg-entry--on .review-seg-more.ant-btn {
+  width: 22px;
+  max-width: 22px;
+  margin-right: 2px;
+  opacity: 1;
+  color: var(--om-primary);
+}
+
+.review-seg-more.ant-btn:hover {
+  color: var(--om-text);
+  background: var(--om-surface-muted);
+}
+
+/* 触屏没有 hover：保留一个稳定的入口，否则编辑/删除会变成不可发现、不可操作。 */
+@media (hover: none), (pointer: coarse) {
+  .review-seg-entry .review-seg-more.ant-btn {
+    width: 22px;
+    max-width: 22px;
+    margin-right: 2px;
+    opacity: 1;
+  }
+}
+
+.review-seg-entry:hover,
+.review-seg-entry:focus-within {
+  background: var(--om-surface-muted);
+}
+
+.review-seg-entry--on {
+  background: var(--om-primary-soft);
+}
+
+.review-seg-entry--on .review-seg {
+  color: var(--om-primary);
+  font-weight: 600;
+}
+
+.review-seg-entry--done .review-seg {
+  color: var(--om-text-tertiary);
 }
 
 .review-seg:hover {
-  background: var(--om-surface-muted);
   color: var(--om-text);
 }
 
@@ -1628,21 +1704,27 @@ a.page-meta-item:hover strong {
 
 /* ---------- 中栏：当前组 ---------- */
 
+/* 组头只回答「这是哪一组、在队列的什么位置」——判定与判据都在下面的列里。 */
 .review-group-head {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--om-space-3);
-  padding: var(--om-space-3) var(--om-space-4);
+  padding: 9px var(--om-space-5);
   border-bottom: 1px solid var(--om-border);
-  background: linear-gradient(180deg, #fbfcfe 0%, #ffffff 100%);
+  background: var(--om-surface);
   flex: none;
 }
 
 .review-group-title {
-  font-size: var(--om-text-lg);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  min-width: 0;
+  font-size: var(--om-text-md);
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
 .review-group-title em {
@@ -1660,43 +1742,47 @@ a.page-meta-item:hover strong {
   font-variant-numeric: tabular-nums;
 }
 
-/* 组内信号跨度：一眼看出这组齐不齐。全组同值就不必逐行看，有跨度才去排序找例外。 */
-.review-group-spread {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  margin-top: 6px;
+/* 本组要单独看的那几条：数字放组头，行本身在表里已经排到最前并带竖线。 */
+.review-group-exception {
+  padding: 1px 8px;
+  border-radius: var(--om-radius-full);
+  background: var(--om-warning-soft);
+  color: #92400e;
   font-size: var(--om-text-sm);
-  color: var(--om-text-tertiary);
-}
-
-.review-group-spread b {
-  font-family: var(--om-font-mono);
   font-weight: 600;
-  color: var(--om-text-secondary);
-  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .review-group-body {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 var(--om-space-2);
+  padding: 0 var(--om-space-3);
 }
 
 .review-group-table .ant-table-cell {
-  padding-top: 7px !important;
-  padding-bottom: 7px !important;
+  padding-top: 9px !important;
+  padding-bottom: 9px !important;
 }
 
 .review-group-table tbody tr {
   cursor: pointer;
 }
 
+.review-group-table tbody tr:hover td {
+  background: #f8faff !important;
+}
+
 /* 表头不折行：数字列窄，「主键」被排序箭头挤成上下两行会把表头顶成两倍高，
    而 auto 布局本来就会替不折行的表头挪出宽度（代价由最宽的名称列出）。 */
 .review-group-table thead th {
   white-space: nowrap;
+  height: 36px;
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
+  border-bottom: 1px solid var(--om-border-strong) !important;
+  color: var(--om-text-secondary);
+  font-size: var(--om-text-sm);
 }
 
 /* 数字列等宽：扫一列的时候位数对齐，异常值自己会跳出来。 */
@@ -1721,28 +1807,104 @@ a.page-meta-item:hover strong {
   box-shadow: inset 2px 0 0 var(--om-primary);
 }
 
-/* 反选掉的行压暗但**留在原位**：例外要看得见，一勾就消失等于看不见自己排除了什么。 */
-.review-row--excluded td {
-  opacity: 0.42;
-}
+/* 未勾选的行保留原样：默认非全选后，进入新组时整组都是未勾选状态，
+   压暗会让整张表灰蒙蒙一片。勾选与否只由 Checkbox 表达，行本身不变样。 */
 
-.review-row--excluded /* 固定布局下必须能缩：不给省略号，长表名会把整列撑破，把判据列挤出视口 */
+/* 固定布局下必须能缩：不给省略号，长表名会把整列撑破，把判据列挤出视口。 */
 .review-obj-name,
 .review-obj-sub {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.review-obj-name {
-  text-decoration: line-through;
-}
 
 .review-obj-name {
   display: block;
   font-weight: 500;
-  white-space: nowrap;
+}
+
+/* 对象名是入口：点开完整档案。做成按钮而不是链接——它不导航，只在同一屏开抽屉，
+   跳出去再回来的话，位置、选择集、判到哪一组全得重建。 */
+.review-obj-link {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-obj-link:hover .review-obj-name {
+  color: var(--om-primary);
+  text-decoration: underline;
+}
+
+.review-obj-link:focus-visible {
+  outline: 2px solid var(--om-primary);
+  outline-offset: 2px;
+  border-radius: var(--om-radius-sm);
+}
+
+/* 判定类型进了列：沿用角色配色，字号收回正文——它现在是一列，不再是头条。 */
+.review-group-table .review-verdict-role {
+  font-size: var(--om-text-sm);
+  font-weight: 600;
+  padding: 1px 8px;
+}
+
+/* 图连通性：连通是常态，说了等于没说；孤立才是要看的那一条，所以只给孤立上色。 */
+.review-cell-ok {
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+}
+
+.review-cell-bad {
+  font-size: var(--om-text-sm);
+  font-weight: 600;
+  color: var(--om-warning);
+}
+
+/* 判定依据列：行内一句话（旗标 + LLM 读表），完整判据在悬停里。
+   两级之间不重复也不丢——扫读时不必读完，要追问时不必跳走。 */
+.review-basis {
+  /* 上下两行而不是挤成一行：并排时旗标（不换行）会把读表那句话压成 0 宽度，
+     窄一点就整句消失，还会溢出到隔壁列上。分行之后各占满宽，各自省略。 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+  cursor: help;
+}
+
+.review-basis > .review-flags {
+  flex: none;
+  flex-wrap: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.review-basis-reading {
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--om-text-sm);
+  color: var(--om-text-tertiary);
+}
+
+/* 悬停展开的那一块：原来右栏那一整份判据，宽度按它自己的需要给，不再占屏。 */
+.review-basis-pop {
+  width: 380px;
+  max-height: 52vh;
+  overflow-y: auto;
+  font-size: var(--om-text-base);
+  line-height: 1.6;
 }
 
 .review-obj-sub {
@@ -1758,29 +1920,32 @@ a.page-meta-item:hover strong {
   padding: 0 4px;
 }
 
-/* ---------- 判定条：常驻底部，永远不用滚回去找 ---------- */
+/* ---------- 判定条：常驻底部一行，永远不用滚回去找 ----------
+   原来是三行（走流程 / 移动到板块 / 四个改判按钮），近 150px——那是七八行判据表的
+   高度，而每屏都用的只有「确认」。改判收进下拉、移动缩成一对控件，键位一个没动。 */
 
 .review-actions {
   flex: none;
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  align-items: center;
+  flex-wrap: wrap;
   gap: var(--om-space-2);
-  padding: var(--om-space-3) var(--om-space-4);
+  padding: 10px var(--om-space-5);
   border-top: 1px solid var(--om-border);
-  background: var(--om-surface-muted);
+  background: #fbfcfe;
+  box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.025);
 }
 
-.review-actions-sep {
-  width: 1px;
-  align-self: stretch;
-  background: var(--om-border-strong);
-  margin: 0 2px;
+/* 归错地方的那一组：移动才是它的主动作，给整条一道左边框把视线拉过来。 */
+.review-actions--urgent {
+  border-left: 3px solid var(--om-error);
 }
 
-.review-actions-label {
-  font-size: var(--om-text-sm);
-  color: var(--om-text-tertiary);
+/* 板块下拉和它的执行按钮是同一个动作：贴在一起，换行时也不会被拆散。 */
+.review-move {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .review-actions .review-spacer {
@@ -1813,35 +1978,6 @@ a.page-meta-item:hover strong {
   color: #fff;
 }
 
-.review-actions-row {
-  display: flex;
-  align-items: center;
-  gap: var(--om-space-2);
-  flex-wrap: wrap;
-}
-/* 改判是「改结论」，与上面走流程的动作分层：小一号、压低对比度，
-   不跟主操作抢眼，但键位仍在原处 */
-.review-actions-row--recast {
-  padding-top: var(--om-space-2);
-  border-top: 1px dashed var(--om-border);
-}
-
-/* 移动行排在改判之上：分错板块的对象哪一组里都可能有，所以它是常驻动作。 */
-.review-actions-row--classify {
-  padding-bottom: var(--om-space-2);
-}
-
-/* 归错地方的那一组：这一行才是它的主动作，给它一条左边框把视线拉过来。 */
-.review-actions-row--urgent {
-  padding-inline-start: var(--om-space-2);
-  border-left: 3px solid var(--om-error);
-}
-
-.review-actions-hint {
-  font-size: var(--om-text-sm);
-  color: var(--om-error);
-}
-
 /* 待判计数的红色上标。
    「还剩多少要判」是这一屏唯一持续变化的数字，混在灰色的 12/40 里根本读不出来。
    提成上标 + 红色之后扫一眼就知道哪几块没判完；判完不留占位，直接消失。 */
@@ -1870,7 +2006,7 @@ a.page-meta-item:hover strong {
    判完的板块不消失，只换到另一半——切换器就在板块列表正上方，位置不动。 */
 
 .review-status-switch {
-  margin-bottom: var(--om-space-2);
+  margin: 0 0 var(--om-space-3);
 }
 
 /* 「已确认、却还是业务对象压在系统表里」的存量入口。它是个数字，不是装饰：
@@ -1900,19 +2036,6 @@ a.page-meta-item:hover strong {
 }
 
 /* 归错地方那一组的说明条：角色判对了、位置没放对，这里说清楚缺的是哪一半。 */
-.review-classify-note {
-  flex: none;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px var(--om-space-4);
-  border-bottom: 1px solid #fde68a;
-  background: var(--om-warning-soft);
-  color: #92400e;
-  font-size: var(--om-text-sm);
-  line-height: 1.6;
-}
-
 /* ---------- 动词建议抽屉：三元组里直接改词 ---------- */
 
 /* 动词是这张表唯一要改的东西，所以它是行内的输入框而不是只读文字：
@@ -1970,19 +2093,7 @@ a.page-meta-item:hover strong {
   text-align: center;
 }
 
-/* ---------- 右栏：判据 ---------- */
-
-.review-evidence-title {
-  font-size: var(--om-text-md);
-  font-weight: 600;
-  margin-bottom: var(--om-space-1);
-}
-
-.review-evidence-body {
-  font-size: var(--om-text-base);
-  /* 1.85 的行距是给长段落的；判据栏是短行密排，松一分就少一条能看见的证据 */
-  line-height: 1.6;
-}
+/* ---------- 判据的展开态：悬停「判定依据」列时弹出的那一块 ---------- */
 
 /* LLM 读出的业务含义：整屏唯一一句「这张表是干什么的」，按头条排版 */
 .review-reading {
@@ -2110,17 +2221,7 @@ a.page-meta-item:hover strong {
 }
 
 /* 同组已判结果：让判定自我加强——「这组前 11 个都确认了」本身就是判据。 */
-.review-evidence-streak {
-  margin-top: var(--om-space-3);
-  padding: var(--om-space-2) var(--om-space-3);
-  border-radius: var(--om-radius-sm);
-  background: var(--om-success-soft);
-  color: #14532d;
-  font-size: var(--om-text-sm);
-}
-
 .review-evidence-foot {
-  margin-top: var(--om-space-4);
   padding-top: var(--om-space-3);
   border-top: 1px solid var(--om-border);
   font-size: var(--om-text-base);
@@ -2318,28 +2419,6 @@ a.page-meta-item:hover strong {
   color: #92400e;
 }
 
-/* 关系分支没有得分刻度，分带自己成标签（原来挂的是 antd Tag，
-   在这张卡里跟角色标签一样圆一样重，两枚同级标签谁是结论就分不出来了）。 */
-.review-verdict-band {
-  font-size: var(--om-text-sm);
-  color: var(--om-text-tertiary);
-  white-space: nowrap;
-}
-
-.review-verdict-band::before {
-  content: "证据 ";
-  color: var(--om-text-tertiary);
-}
-
-.review-verdict-band--strong {
-  color: var(--om-success);
-}
-
-.review-verdict-band--near,
-.review-verdict-band--weak {
-  color: var(--om-warning);
-}
-
 /* 得分刻度：一个孤零零的「3.0」说明不了什么，离阈值多远才说明问题。 */
 .review-meter {
   position: relative;
@@ -2518,45 +2597,6 @@ a.page-meta-item:hover strong {
   color: var(--om-text-tertiary);
 }
 
-/* 组头下面那条：这一组为什么整体在队列里，以及有没有需要单独看的例外。 */
-.review-group-why {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--om-space-3);
-  flex-wrap: wrap;
-  padding: 7px var(--om-space-4);
-  border-bottom: 1px solid var(--om-border);
-  background: var(--om-surface-muted);
-  font-size: var(--om-text-sm);
-}
-
-.review-group-why--exception {
-  background: var(--om-warning-soft);
-  border-bottom-color: #fde68a;
-}
-
-.review-group-why-main {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-  color: var(--om-text-secondary);
-}
-
-.review-group-why-hint,
-.review-group-why-clean {
-  color: var(--om-text-tertiary);
-}
-
-.review-group-why-exception {
-  font-weight: 600;
-  color: #92400e;
-  white-space: nowrap;
-}
-
 .review-group-aside {
   flex: none;
   display: flex;
@@ -2588,7 +2628,7 @@ a.page-meta-item:hover strong {
   color: var(--om-warning);
 }
 
-/* 邻居：从中栏让位过来的一列，这里有纵向空间把话说全。 */
+/* 邻居：判据展开态里才说得全的一条（方向 + 对象 + 关系动词）。 */
 .review-neighbors {
   display: flex;
   flex-wrap: wrap;
@@ -2618,30 +2658,60 @@ a.page-meta-item:hover strong {
 
 /* ---------- 窄屏：判据折到下面，队列与当前组保持并排 ---------- */
 
-@media (max-width: 1360px) {
+@media (max-width: 1120px) {
   .review-workbench {
-    height: auto;
+    height: calc(100vh - var(--om-header-h) - 32px);
+    min-height: 0;
+    overflow-y: auto;
+    padding-inline-end: 2px;
+  }
+  .review-topbar {
+    flex: none;
+    align-items: flex-start;
+  }
+  .review-topbar-leading {
+    flex: 1 1 auto;
+  }
+  .review-topbar-actions {
+    margin-inline-start: auto;
+  }
+  .review-topbar-progress {
+    order: 3;
+    flex: 1 0 100%;
+    min-width: 0;
   }
   .review-panes {
-    grid-template-columns: 200px minmax(0, 1fr);
-  }
-  .review-pane--evidence {
-    grid-column: 1 / -1;
+    flex: none;
+    grid-template-columns: 190px minmax(0, 1fr);
   }
   .review-pane--queue {
     max-height: 460px;
   }
   .review-pane--group {
-    min-height: 480px;
+    min-height: 620px;
   }
 }
 
 @media (max-width: 860px) {
+  .review-topbar {
+    align-items: flex-start;
+  }
+  .review-topbar-leading,
+  .review-topbar-actions,
+  .review-topbar-progress {
+    flex-basis: 100%;
+  }
+  .review-topbar-actions {
+    margin-inline-start: 0;
+  }
   .review-panes {
     grid-template-columns: minmax(0, 1fr);
   }
   .review-pane--queue {
     max-height: 220px;
+  }
+  .review-pane--group {
+    min-height: 580px;
   }
 }
 

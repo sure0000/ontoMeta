@@ -33,6 +33,11 @@ async function resolveBreadcrumbs(
     const domain = await api.getDomain(params.domainId);
     const domainPath = `/workspace/${params.domainId}`;
 
+    // 本体建模审核页顶部模块已含返回按钮，不再需要面包屑导航
+    if (pathname.endsWith("/review")) {
+      return [{ label: "本体建模" }];
+    }
+
     if (pathname.endsWith("/executions")) {
       return [...crumbs, { label: domain.name, path: domainPath }, { label: "执行记录" }];
     }
