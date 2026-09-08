@@ -13,7 +13,6 @@ from app.schemas import (
     LlmConnectionTestRequest,
     LlmConnectionTestResult,
     LlmModelOption,
-    LlmServiceConfigCreate,
     LlmServiceConfigDetail,
     LlmServiceConfigOut,
     LlmServiceConfigUpdate,
@@ -75,12 +74,6 @@ def list_llm_services(db: Session = Depends(get_db)):
     return [_llm_service_out(item) for item in settings_service.list_llm_services(db)]
 
 
-@router.post("/settings/llm-services", response_model=LlmServiceConfigDetail)
-def create_llm_service(data: LlmServiceConfigCreate, db: Session = Depends(get_db)):
-    service = settings_service.create_llm_service(db, data.model_dump())
-    return _llm_service_detail(service)
-
-
 @router.post("/settings/llm-services/test", response_model=LlmConnectionTestResult)
 def test_llm_connection(data: LlmConnectionTestRequest, db: Session = Depends(get_db)):
     return settings_service.test_llm_connection(db, data.model_dump())
@@ -103,13 +96,6 @@ def update_llm_service(
     if not service:
         raise HTTPException(status_code=404, detail="LLM 服务配置不存在")
     return _llm_service_detail(service)
-
-
-@router.delete("/settings/llm-services/{service_id}")
-def delete_llm_service(service_id: str, db: Session = Depends(get_db)):
-    if not settings_service.delete_llm_service(db, service_id):
-        raise HTTPException(status_code=404, detail="LLM 服务配置不存在")
-    return {"id": service_id, "deleted": True}
 
 
 @router.get("/settings/datahub", response_model=DatahubSettingsOut)

@@ -102,33 +102,30 @@ class AirflowSetting(Base):
 
 
 class DependencyComponent(Base):
-    """依赖组件统一注册表（DEPENDENCY_DEPLOYMENT_REDESIGN §3）。
+    """依赖组件登记表：LLM / DataHub / Airflow 的连接信息。
 
-    除 ontoMeta 自身前后端外，所有依赖组件（LLM / DataHub / Airflow / 目标数仓）
-    在此统一管理部署方式与连接信息。
+    ontoMeta 不部署任何依赖，一律**连接已经跑着的服务**：本表只记「怎么连」与
+    「上次拨测通不通」，没有部署方式/部署参数/部署日志。组件是固定的那几样
+    （见 ``dependency_service.COMPONENT_CATALOG``），不由用户增删。
 
-    - ``deploy_mode`` 决定「怎么来的」：external(已有)/docker/k8s/bare_metal。
-    - ``connection`` 记「怎么连」：部署成功自动回写，或 external 时手填。
-    - ``deploy_spec`` / ``connection`` 以 Text(json) 存储，与项目既有范式一致（SQLite/PG 通用）。
+    - ``connection_json``：连接信息，结构由 ``key`` 决定（见 ``CONNECTION_SCHEMAS``）。
+    - ``settings_json``：组件附加配置（Airflow 编排参数 ``extra``、逐条拨测记账 ``_probe``）。
+    - ``connection_status``：只由拨测写入，unknown/connected/failed。
 
-    Phase 0：本表与既有五张设置表并行存在，不接读取侧；Phase 1 起读取侧改为从本表投影。
     ERPNext 等外部源库不在此纳管——它们是外部数据源，走 ``DataSource``。
     """
 
     __tablename__ = "dependency_components"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    # 组件类型：llm/datahub/airflow
+    # 组件类型：llm/datahub/airflow（另有 mcp 借本表存运行期开关，不是外部服务）
     key: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(255))
-    # 部署：external | docker | k8s | bare_metal
-    deploy_mode: Mapped[str] = mapped_column(String(16), default="external")
-    deploy_spec_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # not_deployed|deploying|deployed|failed|connected
-    deploy_status: Mapped[str] = mapped_column(String(16), default="not_deployed")
-    deploy_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 最近一次部署的逐命令日志（SSH 安装等），部署失败时前端可查看定位
-    deploy_log: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 组件附加配置（JSON）：Airflow 编排参数 extra、拨测记账 _probe
+    settings_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # unknown|connected|failed —— 保存连接≠连接可用，只有拨测能把它改成 connected
+    connection_status: Mapped[str] = mapped_column(String(16), default="unknown")
+    connection_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 连接信息（JSON），结构由 key 决定（见 DependencyComponentService.CONNECTION_SCHEMAS）
     connection_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

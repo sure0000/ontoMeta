@@ -1,14 +1,16 @@
 /**
- * 依赖组件统一部署管理面板（DEPENDENCY_DEPLOYMENT_REDESIGN Phase 0）。
+ * 基础设施组件面板：固定几样服务的连接登记 + 拨测。
  *
- * 除 ontoMeta 自身前后端外，所有依赖组件在此统一管理：选一种部署方式
- * （已有服务 / Docker / Kubernetes / 物理机），部署成功自动回写连接信息，
- * 或选「已有」手填连接。ERPNext 等外部源库不在此纳管（走数据源管理）。
+ * ontoMeta 不部署任何依赖，一律**连接已经跑着的服务**——所以这里没有新增、没有删除、
+ * 没有部署方式：组件是固定的（Doris 数仓 / LLM / DataHub / Airflow），后端 ``ensure_components``
+ * 保证每样都有一行，面板只负责填连接、拨测、启停。
  *
- * 依赖组件面板独立管理 LLM/DataHub/Airflow 注册表。
- * Phase 1 起既有配置迁移进本表、读取侧改为投影。
+ * Doris 那行是**投影**：它的连接配在数据源里（DorisWarehousePanel），这里只是让四样
+ * 基础设施在同一张表里看得全，编辑走它自己的抽屉。
+ *
+ * ERPNext 等业务源库不在此纳管（走「数据源」标签页）。
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -19,7 +21,6 @@ import {
   Input,
   InputNumber,
   Modal,
-  Popconfirm,
   Select,
   Space,
   Switch,
@@ -29,18 +30,7 @@ import {
   Typography,
   message,
 } from "antd";
-import {
-  ApiOutlined,
-  CloudServerOutlined,
-  ContainerOutlined,
-  DeleteOutlined,
-  DesktopOutlined,
-  EditOutlined,
-  EyeInvisibleOutlined,
-  EyeOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from "@ant-design/icons";
+import { EditOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { ApiError, api } from "../api";
 import type { DependencyComponent, DependencySchema } from "../types";
@@ -48,15 +38,7 @@ import { DorisWarehouseDrawer, useDorisWarehouseController } from "./DorisWareho
 
 const { Text } = Typography;
 
-const MODE_LABEL: Record<string, string> = {
-  external: "已有服务",
-  docker: "Docker",
-  k8s: "Kubernetes",
-  bare_metal: "物理机",
-};
-
-// Airflow 编排专有参数（存 deploy_spec.extra）。从 AirflowSettingsPanel 合并而来，
-// 连接字段已归本面板的 connection，这里只剩编排旋钮。
+// Airflow 编排专有参数（存 settings.extra）。连接字段在 connection，这里只剩编排旋钮。
 const AIRFLOW_EXTRA_FIELDS = [
   "dags_dir",
   "ssh_host",
@@ -82,6 +64,9 @@ const FIELD_LABEL: Record<string, string> = {
   endpoint: "服务地址",
   username: "用户名",
   password: "密码",
+  base_url: "服务地址（后端访问）",
+  public_base_url: "对外地址（浏览器访问）",
+  database_id: "数仓 database ID",
 };
 
 // 由组件专有分节自己渲染的连接分组：airflow 的 SSH 密码要和 SSH 主机/端口/目录放在
@@ -90,69 +75,19 @@ const CONN_GROUPS_RENDERED_ELSEWHERE: Record<string, string[]> = {
   airflow: ["ssh"],
 };
 
-/**
- * 多行机密（PEM 私钥等）输入框：TextArea 无内置显隐切换，这里自带的「眼睛」按钮
- * 在掩码占位与明文 TextArea 间切换。Form.Item 注入 value/onChange，明文始终在表单
- * 状态里，只是隐藏时不渲染进可见的 TextArea。
- */
-function SecretTextArea(props: {
-  value?: string;
-  onChange?: (value: string) => void;
-  placeholder?: string;
-}) {
-  const [visible, setVisible] = useState(false);
-  const { value, onChange, placeholder } = props;
-  if (visible) {
-    return (
-      <Space direction="vertical" style={{ width: "100%" }} size={4}>
-        <Input.TextArea
-          rows={5}
-          value={value}
-          placeholder={placeholder}
-          onChange={(e) => onChange?.(e.target.value)}
-        />
-        <Button size="small" icon={<EyeInvisibleOutlined />} onClick={() => setVisible(false)}>
-          隐藏
-        </Button>
-      </Space>
-    );
-  }
-  return (
-    <Space>
-      <Input
-        disabled
-        style={{ width: 320 }}
-        value={value ? "****（已配置）" : ""}
-        placeholder={placeholder}
-      />
-      <Button size="small" icon={<EyeOutlined />} onClick={() => setVisible(true)}>
-        显示明文
-      </Button>
-    </Space>
-  );
-}
-
-const MODE_ICON: Record<string, React.ReactNode> = {
-  external: <CloudServerOutlined />,
-  docker: <ContainerOutlined />,
-  k8s: <ApiOutlined />,
-  bare_metal: <DesktopOutlined />,
-};
-
 const STATUS_COLOR: Record<string, string> = {
   connected: "success",
-  deployed: "success",
-  deploying: "processing",
   failed: "error",
-  not_deployed: "default",
+  unknown: "default",
 };
 const STATUS_LABEL: Record<string, string> = {
   connected: "已连接",
-  deployed: "已部署",
-  deploying: "部署中",
-  failed: "失败",
-  not_deployed: "未部署",
+  failed: "连接失败",
+  unknown: "未拨测",
 };
+
+// Doris 那行不是 dependency_components 里的行，用一个固定 id 占位（它不参与后端 CRUD）。
+const DORIS_ROW_ID = "__doris_warehouse__";
 
 export function DependencyPanel() {
   const [schema, setSchema] = useState<DependencySchema | null>(null);
@@ -163,28 +98,7 @@ export function DependencyPanel() {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState<Record<string, boolean>>({});
-  const [deploying, setDeploying] = useState<Record<string, boolean>>({});
-  const [logRow, setLogRow] = useState<DependencyComponent | null>(null);
   const doris = useDorisWarehouseController();
-
-  // 组件类型/部署方式切换时，上一组 conn_*/spec_* 字段靠 antd preserve 留在 store 里，
-  // 同名字段（如 conn_endpoint、conn_token 在 airflow/datahub 都存在）会把
-  // 上次填的值带过来——「新增时表单残留上次内容」即此。切换即清空动态字段。
-  const dynamicFieldNames = useMemo(() => {
-    if (!schema) return [];
-    const names: string[] = [];
-    Object.values(schema.connection_schemas).forEach((fs) =>
-      fs.forEach((f) => names.push(`conn_${f.name}`)),
-    );
-    [schema.bare_metal_params, schema.docker_params].forEach((m) =>
-      Object.values(m ?? {}).forEach((fs) => fs.forEach((f) => names.push(`spec_${f.name}`))),
-    );
-    (schema.deploy_spec_schemas?.k8s ?? []).forEach((f) => names.push(`spec_${f.name}`));
-    return names;
-  }, [schema]);
-  const clearDynamicFields = useCallback(() => {
-    if (dynamicFieldNames.length) form.resetFields(dynamicFieldNames);
-  }, [form, dynamicFieldNames]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -203,32 +117,15 @@ export function DependencyPanel() {
     void load();
   }, [load]);
 
-  const openCreate = () => {
-    setEditing(null);
-    form.resetFields();
-    form.setFieldsValue({ deploy_mode: "external", enabled: true });
-    setDrawerOpen(true);
-  };
-
   const openEdit = (row: DependencyComponent) => {
     setEditing(row);
     form.resetFields();
-    form.setFieldsValue({
-      key: row.key,
-      name: row.name,
-      deploy_mode: row.deploy_mode,
-      enabled: row.enabled,
-    });
+    form.setFieldsValue({ name: row.name, enabled: row.enabled });
     (schema?.connection_schemas[row.key] ?? []).forEach((f) => {
       form.setFieldValue(`conn_${f.name}`, row.connection[f.name] ?? "");
     });
-    // 部署参数回填
-    Object.entries(row.deploy_spec ?? {}).forEach(([k, v]) => {
-      if (k === "extra") return; // extra 单独回填到 extra_* 字段
-      form.setFieldValue(`spec_${k}`, v as unknown);
-    });
-    // Airflow 编排参数回填（存 deploy_spec.extra）
-    const extra = (row.deploy_spec?.extra ?? {}) as Record<string, unknown>;
+    // Airflow 编排参数回填（存 settings.extra）
+    const extra = (row.settings?.extra ?? {}) as Record<string, unknown>;
     AIRFLOW_EXTRA_FIELDS.forEach((f) => {
       if (f in extra) form.setFieldValue(`extra_${f}`, extra[f]);
     });
@@ -236,58 +133,35 @@ export function DependencyPanel() {
   };
 
   const handleSave = async (opts?: { keepOpen?: boolean }): Promise<boolean> => {
+    if (!editing) return false;
     let values: Record<string, unknown>;
     try {
       values = await form.validateFields();
     } catch {
       return false;
     }
-    const key = values.key as string;
-    const mode = values.deploy_mode as string;
     const conn: Record<string, unknown> = {};
-    (schema?.connection_schemas[key] ?? []).forEach((f) => {
+    (schema?.connection_schemas[editing.key] ?? []).forEach((f) => {
       conn[f.name] = values[`conn_${f.name}`] ?? null;
     });
-    // 收集部署参数（spec_*）
-    const deploySpec: Record<string, unknown> = {};
-    const specFields =
-      mode === "bare_metal"
-        ? (schema?.bare_metal_params?.[key] ?? [])
-        : mode === "docker"
-          ? (schema?.docker_params?.[key] ?? [])
-          : mode === "k8s"
-            ? (schema?.deploy_spec_schemas?.["k8s"] ?? [])
-            : [];
-    specFields.forEach((f) => {
-      const v = values[`spec_${f.name}`];
-      if (v !== undefined && v !== null && v !== "") deploySpec[f.name] = v;
-    });
-    // Airflow 编排参数 → deploy_spec.extra
-    if (key === "airflow") {
+    const body: Parameters<typeof api.updateDependency>[1] = {
+      name: values.name as string | undefined,
+      enabled: values.enabled as boolean,
+      connection: conn,
+    };
+    // Airflow 编排参数 → settings.extra
+    if (editing.key === "airflow") {
       const extra: Record<string, unknown> = {};
       AIRFLOW_EXTRA_FIELDS.forEach((f) => {
         const v = values[`extra_${f}`];
         if (v !== undefined && v !== null && v !== "") extra[f] = v;
       });
-      if (Object.keys(extra).length) deploySpec.extra = extra;
+      body.settings = { extra };
     }
-    const body = {
-      key,
-      name: values.name as string | undefined,
-      deploy_mode: mode,
-      enabled: values.enabled as boolean,
-      connection: mode === "external" ? conn : {},
-      deploy_spec: deploySpec,
-    };
     setSaving(true);
     try {
-      if (editing) {
-        await api.updateDependency(editing.id, body);
-        message.success("已保存");
-      } else {
-        await api.createDependency(body);
-        message.success("已新增");
-      }
+      await api.updateDependency(editing.id, body);
+      message.success("已保存");
       if (!opts?.keepOpen) setDrawerOpen(false);
       await load();
       return true;
@@ -308,28 +182,12 @@ export function DependencyPanel() {
     const v = form.getFieldsValue() as Record<string, unknown>;
     const out: string[] = [];
     (schema?.connection_schemas[editing.key] ?? []).forEach((f) => {
-      const cur = v[`conn_${f.name}`];
       // 机密现已明文回显，可与预填值直接比对（之前是掩码比不了，只能当非空即改过）。
-      if (norm(cur) !== norm(editing.connection[f.name])) {
+      if (norm(v[`conn_${f.name}`]) !== norm(editing.connection[f.name])) {
         out.push(FIELD_LABEL[f.name] ?? f.name);
       }
     });
-    // 部署参数里的 secret 也明文回显了，一并与预填值比对（含 spec_* 与 extra_*）。
-    const specExtra = (editing.deploy_spec ?? {}) as Record<string, unknown>;
-    const specFields =
-      (editing.deploy_mode === "bare_metal"
-        ? schema?.bare_metal_params?.[editing.key]
-        : editing.deploy_mode === "docker"
-          ? schema?.docker_params?.[editing.key]
-          : editing.deploy_mode === "k8s"
-            ? schema?.deploy_spec_schemas?.["k8s"]
-            : []) ?? [];
-    specFields.forEach((f) => {
-      if (norm(v[`spec_${f.name}`]) !== norm(specExtra[f.name])) {
-        out.push(f.name);
-      }
-    });
-    const extra = (editing.deploy_spec?.extra ?? {}) as Record<string, unknown>;
+    const extra = (editing.settings?.extra ?? {}) as Record<string, unknown>;
     AIRFLOW_EXTRA_FIELDS.forEach((f) => {
       if (norm(v[`extra_${f}`]) !== norm(extra[f])) out.push(f);
     });
@@ -354,8 +212,7 @@ export function DependencyPanel() {
     }
   };
 
-  // 某一条连接的「只测这条」按钮，放在该连接的配置分节里。拨测读的是**已保存**的
-  // 配置，故新增未保存时不给按钮，免得测的和刚填的不是一回事。
+  // 某一条连接的「只测这条」按钮，放在该连接的配置分节里。拨测读的是**已保存**的配置。
   const probeSaved = (id: string, target: string) => {
     const dirty = unsavedFields();
     if (!dirty.length) {
@@ -383,96 +240,26 @@ export function DependencyPanel() {
       >
         测试「{label}」
       </Button>
-    ) : (
-      <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-        保存后可单独测试这条连接
-      </Text>
-    );
-
-  const handleDeploy = async (id: string) => {
-    setDeploying((p) => ({ ...p, [id]: true }));
-    try {
-      const r = await api.deployDependency(id);
-      // external 同步返回最终态；docker/k8s/bare_metal（SSH 安装可能数分钟）先返回
-      // deploying，需轮询 getDependency 直到状态落定。
-      if (r.status !== "deploying") {
-        if (r.ok) message.success(r.message ?? "部署成功");
-        else message.warning(r.message ?? "部署未完成");
-        await load();
-        return;
-      }
-      message.info(r.message ?? "部署已在后台开始，正在等待结果…");
-      // 轮询：每 3s 拉一次，最多 ~10 分钟（SSH 装重组件耗时）。
-      const deadline = Date.now() + 10 * 60 * 1000;
-      while (true) {
-        await new Promise((res) => setTimeout(res, 3000));
-        await load(); // 顺带刷新整表，让状态列实时更新
-        let row: DependencyComponent;
-        try {
-          row = await api.getDependency(id);
-        } catch {
-          continue; // 单次拉取失败不终止轮询
-        }
-        if (row.deploy_status !== "deploying") {
-          if (row.deploy_status === "connected" || row.deploy_status === "deployed") {
-            message.success("SSH 远程安装完成并连通");
-          } else {
-            message.error(row.deploy_error || "部署失败，请查看状态详情");
-          }
-          break;
-        }
-        if (Date.now() > deadline) {
-          message.warning("部署仍在进行，已停止等待。可稍后刷新查看最终状态");
-          break;
-        }
-      }
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "部署失败");
-    } finally {
-      setDeploying((p) => ({ ...p, [id]: false }));
-    }
-  };
-
-  const handleTeardown = async (id: string) => {
-    try {
-      await api.teardownDependency(id);
-      message.success("已卸载");
-      await load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "卸载失败");
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    try {
-      await api.deleteDependency(id);
-      message.success("已删除");
-      await load();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "删除失败");
-    }
-  };
+    ) : null;
 
   const dorisRow: DependencyComponent = {
-    id: "__doris_warehouse__",
+    id: DORIS_ROW_ID,
     key: "doris",
     name: doris.source?.name ?? "默认 Doris 数仓",
-    deploy_mode: "external",
-    deploy_spec: {},
-    deploy_status:
+    settings: {},
+    connection_status:
       doris.config && doris.source?.status === "ok"
         ? "connected"
         : doris.config && doris.source?.status === "error"
           ? "failed"
-          : "not_deployed",
-    deploy_error: doris.config
+          : "unknown",
+    connection_error: doris.config
       ? `${doris.config.query_host ?? "未填写主机"}:${doris.config.query_port} · ${
           doris.config.fenodes.length
         } 个 FE HTTP 节点`
       : "尚未配置 Doris FE SQL/HTTP 端点和连接凭据",
     connection: {},
     enabled: doris.config?.enabled ?? false,
-    is_default: true,
     created_at: doris.config?.created_at ?? "",
     updated_at: doris.config?.updated_at ?? "",
   };
@@ -482,52 +269,33 @@ export function DependencyPanel() {
     {
       title: "组件",
       dataIndex: "key",
-      width: 160,
+      width: 200,
       render: (k: string) => {
         const meta = schema?.components.find((c) => c.key === k);
-        return <Tag>{k === "doris" ? "Apache Doris" : (meta?.label ?? k)}</Tag>;
+        return <Tag>{k === "doris" ? "Apache Doris（统一数仓）" : (meta?.label ?? k)}</Tag>;
       },
     },
     {
       title: "名称",
       dataIndex: "name",
-      width: 140,
-      render: (n: string, r) => (
-        <Space size={4}>
-          {n}
-          {r.is_default ? <Tag color="blue">默认</Tag> : null}
-        </Space>
-      ),
-    },
-    {
-      title: "部署方式",
-      dataIndex: "deploy_mode",
-      width: 120,
-      render: (m: string) => (
-        <Space size={4}>
-          {MODE_ICON[m]} {MODE_LABEL[m] ?? m}
-        </Space>
-      ),
+      width: 160,
     },
     {
       title: "状态",
-      dataIndex: "deploy_status",
-      width: 190,
+      dataIndex: "connection_status",
+      width: 220,
       render: (s: string, r) => {
-        // external 模式的 not_deployed 显示"未拨测"而非"未部署"
-        const label =
-          s === "not_deployed" && r.deploy_mode === "external" ? "未拨测" : (STATUS_LABEL[s] ?? s);
         // 多条连接的组件（airflow = 调度 API + DAG 投递）逐条显示最近一次拨测结果：
         // 总状态只说"失败"，说不出是哪条断了。
         const groups = schema?.connection_groups?.[r.key] ?? [];
-        const ledger = (r.deploy_spec?._probe ?? {}) as Record<
+        const ledger = (r.settings?._probe ?? {}) as Record<
           string,
           { ok: boolean; message: string }
         >;
         return (
           <Space direction="vertical" size={2} align="start">
-            <Tooltip title={r.deploy_error}>
-              <Tag color={STATUS_COLOR[s] ?? "default"}>{label}</Tag>
+            <Tooltip title={r.connection_error}>
+              <Tag color={STATUS_COLOR[s] ?? "default"}>{STATUS_LABEL[s] ?? s}</Tag>
             </Tooltip>
             {groups.length > 1
               ? groups.map((g) => {
@@ -546,88 +314,49 @@ export function DependencyPanel() {
       },
     },
     {
+      title: "启用",
+      dataIndex: "enabled",
+      width: 90,
+      render: (v: boolean) => (v ? <Tag color="blue">已启用</Tag> : <Tag>已停用</Tag>),
+    },
+    {
       title: "操作",
-      width: 280,
-      render: (_: unknown, r: DependencyComponent) => {
-        if (r.key === "doris") {
-          return (
-            <Space size="small">
-              <Button
-                size="small"
-                icon={<EditOutlined />}
-                onClick={() => doris.setDrawerOpen(true)}
-              />
-              <Button
-                size="small"
-                disabled={!doris.source}
-                loading={doris.testing}
-                onClick={() => void doris.handleTest()}
-              >
-                拨测
-              </Button>
-            </Space>
-          );
-        }
-        return (
+      width: 180,
+      render: (_: unknown, r: DependencyComponent) =>
+        r.key === "doris" ? (
           <Space size="small">
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
-            {r.deploy_log ? (
-              <Button size="small" onClick={() => setLogRow(r)}>
-                日志
-              </Button>
-            ) : null}
+            <Button size="small" icon={<EditOutlined />} onClick={() => doris.setDrawerOpen(true)}>
+              编辑连接
+            </Button>
+            <Button
+              size="small"
+              disabled={!doris.source}
+              loading={doris.testing}
+              onClick={() => void doris.handleTest()}
+            >
+              拨测
+            </Button>
+          </Space>
+        ) : (
+          <Space size="small">
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)}>
+              编辑连接
+            </Button>
             <Button size="small" onClick={() => void handleProbe(r.id)} loading={probing[r.id]}>
               拨测
             </Button>
-            {r.deploy_mode !== "external" ? (
-              <>
-                <Button
-                  size="small"
-                  type="primary"
-                  loading={deploying[r.id]}
-                  onClick={() => void handleDeploy(r.id)}
-                >
-                  部署
-                </Button>
-                <Popconfirm title="卸载该组件？" onConfirm={() => void handleTeardown(r.id)}>
-                  <Button size="small">卸载</Button>
-                </Popconfirm>
-              </>
-            ) : null}
-            <Popconfirm title="删除该组件？" onConfirm={() => void handleDelete(r.id)}>
-              <Button size="small" danger icon={<DeleteOutlined />} />
-            </Popconfirm>
           </Space>
-        );
-      },
+        ),
     },
   ];
-
-  const addable =
-    schema?.components
-      .filter((c) => c.key !== "airflow")
-      .filter((c) => c.multi || !rows.some((r) => r.key === c.key)) ?? [];
 
   return (
     <>
       <Space style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
         <Text type="secondary">共 {infrastructureRows.length} 个组件</Text>
-        <Space>
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={() => void Promise.all([load(), doris.load()])}
-          >
-            刷新
-          </Button>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={openCreate}
-            disabled={addable.length === 0}
-          >
-            新增
-          </Button>
-        </Space>
+        <Button icon={<ReloadOutlined />} onClick={() => void Promise.all([load(), doris.load()])}>
+          刷新
+        </Button>
       </Space>
       <Table
         rowKey="id"
@@ -635,14 +364,13 @@ export function DependencyPanel() {
         dataSource={infrastructureRows}
         loading={loading || doris.loading}
         pagination={false}
-        locale={{ emptyText: "暂无组件，点击「新增」" }}
         className="om-table"
         size="middle"
         scroll={{ x: "max-content" }}
       />
       <DorisWarehouseDrawer controller={doris} />
       <Drawer
-        title={editing ? "编辑依赖组件" : "新增依赖组件"}
+        title={editing ? `${editing.name} · 连接配置` : "连接配置"}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         forceRender
@@ -657,70 +385,20 @@ export function DependencyPanel() {
         }
       >
         <Form form={form} layout="vertical">
-          <Form.Item label="组件类型" name="key" rules={[{ required: true }]}>
-            <Select
-              disabled={!!editing}
-              placeholder="选择组件"
-              onChange={(k: string) => {
-                // 切组件类型：清掉上一组 conn_*/spec_*，避免同名字段残留上次填的值。
-                clearDynamicFields();
-                // 切组件后若当前部署方式不在该组件白名单内，回落到 external，
-                // 避免留下一个后端会拒绝的非法组合（datahub/llm 仅 external）。
-                const allowed = schema?.component_deploy_modes?.[k] ?? schema?.deploy_modes ?? [];
-                const cur = form.getFieldValue("deploy_mode") as string | undefined;
-                if (!cur || !allowed.includes(cur)) {
-                  form.setFieldValue("deploy_mode", allowed[0] ?? "external");
-                }
-              }}
-              options={(schema?.components ?? []).map((c) => ({
-                value: c.key,
-                label: c.label,
-              }))}
-            />
-          </Form.Item>
           <Form.Item label="展示名" name="name">
             <Input placeholder="留空则用组件默认名" />
           </Form.Item>
-          <Form.Item noStyle shouldUpdate>
-            {({ getFieldValue }) => {
-              const key = getFieldValue("key") as string | undefined;
-              // 未列出的组件默认全支持；列出的（datahub/llm）只回 external。
-              const allowed = key
-                ? (schema?.component_deploy_modes?.[key] ?? schema?.deploy_modes ?? [])
-                : (schema?.deploy_modes ?? []);
-              const onlyExternal = allowed.length === 1 && allowed[0] === "external";
-              return (
-                <Form.Item
-                  label="部署方式"
-                  name="deploy_mode"
-                  rules={[{ required: true }]}
-                  extra={
-                    onlyExternal
-                      ? "该组件仅支持登记已有服务（external）：其裸机安装随发行版/集群差异极大，请在别处装好后在此填连接。"
-                      : undefined
-                  }
-                >
-                  <Select
-                    options={allowed.map((m) => ({
-                      value: m,
-                      label: MODE_LABEL[m] ?? m,
-                    }))}
-                    onChange={() => clearDynamicFields()}
-                  />
-                </Form.Item>
-              );
-            }}
-          </Form.Item>
-          <Form.Item label="启用" name="enabled" valuePropName="checked">
+          <Form.Item
+            label="启用"
+            name="enabled"
+            valuePropName="checked"
+            extra="停用后上层功能不再使用该服务"
+          >
             <Switch />
           </Form.Item>
-          <Form.Item shouldUpdate noStyle>
-            {({ getFieldValue }) => {
-              const key = getFieldValue("key") as string | undefined;
-              const mode = getFieldValue("deploy_mode") as string;
-              if (!key) return <Text type="secondary">请先选择组件类型</Text>;
-              // external：手填连接信息；其余模式：填部署参数，部署后自动回收连接。
-              if (mode === "external") {
+          {editing
+            ? (() => {
+                const key = editing.key;
                 const groups = schema?.connection_groups?.[key] ?? [];
                 const movedOut = CONN_GROUPS_RENDERED_ELSEWHERE[key] ?? [];
                 // 已由专有分节渲染的字段在这里跳过，否则同一个字段填两遍。
@@ -747,13 +425,13 @@ export function DependencyPanel() {
                           name={`conn_${f.name}`}
                           rules={f.required ? [{ required: true, message: "必填" }] : []}
                           extra={
-                            editing && f.secret && editing.connection[f.name]
+                            f.secret && editing.connection[f.name]
                               ? "已回显，清空将保持原值不变"
                               : undefined
                           }
                         >
                           {f.secret ? (
-                            <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
+                            <Input.Password placeholder="清空将保持原值不变" />
                           ) : (
                             <Input />
                           )}
@@ -762,264 +440,156 @@ export function DependencyPanel() {
                     )}
                   </>
                 );
-              }
-              // bare_metal / docker / k8s：部署参数
-              const specFields =
-                mode === "bare_metal"
-                  ? (schema?.bare_metal_params?.[key] ?? [])
-                  : mode === "docker"
-                    ? (schema?.docker_params?.[key] ?? [])
-                    : (schema?.deploy_spec_schemas?.["k8s"] ?? []);
-              // bare_metal 下按认证方式隐藏无关的机密字段：
-              //   password 认证 → 隐藏私钥/口令；key 认证 → 隐藏密码。
-              const authMethod =
-                (getFieldValue("spec_auth_method") as string | undefined) ?? "password";
-              const hiddenForAuth = (name: string): boolean => {
-                if (mode !== "bare_metal") return false;
-                if (authMethod === "key") return name === "ssh_password";
-                return name === "ssh_private_key" || name === "ssh_key_passphrase";
-              };
-              return (
-                <>
-                  <Divider>部署参数</Divider>
-                  {specFields.map((f) =>
-                    hiddenForAuth(f.name) ? null : (
-                      <Form.Item
-                        key={f.name}
-                        label={f.name}
-                        name={`spec_${f.name}`}
-                        rules={
-                          f.required && !hiddenForAuth(f.name)
-                            ? [{ required: true, message: "必填" }]
-                            : []
-                        }
-                        extra={
-                          editing && f.secret && (editing.deploy_spec ?? {})[f.name]
-                            ? "已回显，清空将保持原值不变"
-                            : undefined
-                        }
-                      >
-                        {f.name === "auth_method" ? (
-                          <Select
-                            options={[
-                              { value: "password", label: "密码（password）" },
-                              { value: "key", label: "私钥（key）" },
-                            ]}
-                          />
-                        ) : f.type === "text" ? (
-                          <SecretTextArea placeholder="粘贴 PEM 私钥（-----BEGIN ... KEY-----）" />
-                        ) : f.secret ? (
-                          <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
-                        ) : f.type === "int" ? (
-                          <InputNumber style={{ width: "100%" }} />
-                        ) : (
-                          <Input />
-                        )}
-                      </Form.Item>
+              })()
+            : null}
+          {/* Airflow 编排专有参数（存 settings.extra） */}
+          {editing?.key === "airflow" ? (
+            <>
+              <Divider>编排参数</Divider>
+              <Collapse
+                defaultActiveKey={["delivery", "shape"]}
+                items={[
+                  {
+                    key: "delivery",
+                    label: "DAG 投递（SSH）",
+                    children: (
+                      <>
+                        {probeButton("ssh", "DAG 投递")}
+                        <Form.Item
+                          label="DAG 目录"
+                          name="extra_dags_dir"
+                          extra="Airflow 主机上、它已在扫描的 DAG 目录（容器部署填宿主机上的挂载源）"
+                        >
+                          <Input placeholder="~/airflow/dags" />
+                        </Form.Item>
+                        <Space align="start" wrap>
+                          <Form.Item label="SSH 主机" name="extra_ssh_host" extra="Airflow 所在主机">
+                            <Input placeholder="airflow-host" style={{ width: 200 }} />
+                          </Form.Item>
+                          <Form.Item label="SSH 端口" name="extra_ssh_port" extra="默认 22">
+                            <InputNumber min={1} max={65535} style={{ width: 110 }} />
+                          </Form.Item>
+                          <Form.Item label="SSH 用户名" name="extra_ssh_user" extra="留空用 ssh 默认">
+                            <Input placeholder="deploy" style={{ width: 160 }} />
+                          </Form.Item>
+                        </Space>
+                        <Form.Item
+                          label="SSH 密码"
+                          name="conn_ssh_password"
+                          extra="留空 = 用 ontoMeta 主机的默认 SSH 身份/agent（要指定私钥就写进该机 ~/.ssh/config）；填了则用密码认证，需装 sshpass"
+                        >
+                          <Input.Password placeholder="清空将保持原值不变" />
+                        </Form.Item>
+                      </>
                     ),
-                  )}
-                  {editing && Object.keys(editing.connection).length > 0 && (
-                    <>
-                      <Divider>已回收的连接（只读）</Divider>
-                      <Text type="secondary" style={{ fontSize: 13 }}>
-                        {JSON.stringify(editing.connection)}
-                      </Text>
-                    </>
-                  )}
-                </>
-              );
-            }}
-          </Form.Item>
-          {/* Airflow 编排专有参数（存 deploy_spec.extra）。从 AirflowSettingsPanel 合并而来。 */}
-          <Form.Item shouldUpdate noStyle>
-            {({ getFieldValue }) =>
-              getFieldValue("key") === "airflow" ? (
-                <>
-                  <Divider>编排参数</Divider>
-                  <Collapse
-                    defaultActiveKey={["delivery", "channel", "shape"]}
-                    items={[
-                      {
-                        key: "delivery",
-                        label: "DAG 投递（SSH）",
-                        children: (
-                          <>
-                            {probeButton("ssh", "DAG 投递")}
-                            <Form.Item
-                              label="DAG 目录"
-                              name="extra_dags_dir"
-                              extra="Airflow 主机上、它已在扫描的 DAG 目录（容器部署填宿主机上的挂载源）"
-                            >
-                              <Input placeholder="~/airflow/dags" />
-                            </Form.Item>
-                            <Space align="start" wrap>
-                              <Form.Item
-                                label="SSH 主机"
-                                name="extra_ssh_host"
-                                extra="Airflow 所在主机"
-                              >
-                                <Input placeholder="airflow-host" style={{ width: 200 }} />
-                              </Form.Item>
-                              <Form.Item label="SSH 端口" name="extra_ssh_port" extra="默认 22">
-                                <InputNumber min={1} max={65535} style={{ width: 110 }} />
-                              </Form.Item>
-                              <Form.Item
-                                label="SSH 用户名"
-                                name="extra_ssh_user"
-                                extra="留空用 ssh 默认"
-                              >
-                                <Input placeholder="deploy" style={{ width: 160 }} />
-                              </Form.Item>
-                            </Space>
-                            <Form.Item
-                              label="SSH 密码"
-                              name="conn_ssh_password"
-                              extra="留空 = 用 ontoMeta 主机的默认 SSH 身份/agent（要指定私钥就写进该机 ~/.ssh/config）；填了则用密码认证，需装 sshpass"
-                            >
-                              <Input.Password placeholder={editing ? "清空将保持原值不变" : ""} />
-                            </Form.Item>
-                          </>
-                        ),
-                      },
-                      {
-                        key: "shape",
-                        label: "DAG 形状与时序",
-                        children: (
-                          <>
-                            <Space align="start" wrap>
-                              <Form.Item
-                                label="单 DAG 最大任务数"
-                                name="extra_max_tasks_per_dag"
-                                extra="超出按此拆成多个 DAG"
-                              >
-                                <InputNumber min={1} max={1000} style={{ width: 160 }} />
-                              </Form.Item>
-                              <Form.Item
-                                label="单 DAG 并发上限"
-                                name="extra_max_active_tasks_per_dag"
-                                extra="层内不再一次性全放开"
-                              >
-                                <InputNumber min={1} max={256} style={{ width: 160 }} />
-                              </Form.Item>
-                            </Space>
-                            <Space align="start" wrap>
-                              <Form.Item
-                                label="等 DAG 解析超时（秒）"
-                                name="extra_dag_parse_timeout"
-                                extra="要大于 Airflow 的 dag_dir_list_interval（默认 300s）"
-                              >
-                                <InputNumber min={0} max={3600} style={{ width: 200 }} />
-                              </Form.Item>
-                            </Space>
-                            <Form.Item
-                              label="全量装载走 staging + 原子切换"
-                              name="extra_staging_swap"
-                              valuePropName="checked"
-                              extra="先搬进 staging 表、成功后再切换；关掉则直接写正式表"
-                            >
-                              <Switch />
-                            </Form.Item>
-                            <Divider plain>Flink 执行引擎（默认值）</Divider>
-                            <Alert
-                              type="info"
-                              showIcon
-                              style={{ marginBottom: 16 }}
-                              message="这里配的是默认值"
-                              description="并行度 / YARN 队列 / 提交目标 / Checkpoint 目录可在每个任务的「高级：Flink 执行参数」里单独覆盖，任务留空才用这里的值。SqlRunner JAR、main class、flink 命令路径是部署事实，只在这里配。"
+                  },
+                  {
+                    key: "shape",
+                    label: "DAG 形状与时序",
+                    children: (
+                      <>
+                        <Space align="start" wrap>
+                          <Form.Item
+                            label="单 DAG 最大任务数"
+                            name="extra_max_tasks_per_dag"
+                            extra="超出按此拆成多个 DAG"
+                          >
+                            <InputNumber min={1} max={1000} style={{ width: 160 }} />
+                          </Form.Item>
+                          <Form.Item
+                            label="单 DAG 并发上限"
+                            name="extra_max_active_tasks_per_dag"
+                            extra="层内不再一次性全放开"
+                          >
+                            <InputNumber min={1} max={256} style={{ width: 160 }} />
+                          </Form.Item>
+                        </Space>
+                        <Space align="start" wrap>
+                          <Form.Item
+                            label="等 DAG 解析超时（秒）"
+                            name="extra_dag_parse_timeout"
+                            extra="要大于 Airflow 的 dag_dir_list_interval（默认 300s）"
+                          >
+                            <InputNumber min={0} max={3600} style={{ width: 200 }} />
+                          </Form.Item>
+                        </Space>
+                        <Form.Item
+                          label="全量装载走 staging + 原子切换"
+                          name="extra_staging_swap"
+                          valuePropName="checked"
+                          extra="先搬进 staging 表、成功后再切换；关掉则直接写正式表"
+                        >
+                          <Switch />
+                        </Form.Item>
+                        <Divider plain>Flink 执行引擎（默认值）</Divider>
+                        <Alert
+                          type="info"
+                          showIcon
+                          style={{ marginBottom: 16 }}
+                          message="这里配的是默认值"
+                          description="并行度 / YARN 队列 / 提交目标 / Checkpoint 目录可在每个任务的「高级：Flink 执行参数」里单独覆盖，任务留空才用这里的值。SqlRunner JAR、main class、flink 命令路径是部署事实，只在这里配。"
+                        />
+                        <Form.Item
+                          label="Flink SqlRunner JAR"
+                          name="extra_flink_sql_runner_jar"
+                          extra="通用 SqlRunner JAR 路径；留空则搬运/计算只产出 SQL、不执行"
+                        >
+                          <Input placeholder="/opt/flink/sql-runner.jar" />
+                        </Form.Item>
+                        <Space align="start" wrap>
+                          <Form.Item label="flink 命令路径" name="extra_flink_bin">
+                            <Input
+                              placeholder="flink（在 PATH 上）或绝对路径"
+                              style={{ width: 260 }}
                             />
-                            <Form.Item
-                              label="Flink SqlRunner JAR"
-                              name="extra_flink_sql_runner_jar"
-                              extra="通用 SqlRunner JAR 路径；留空则搬运/计算只产出 SQL、不执行"
-                            >
-                              <Input placeholder="/opt/flink/sql-runner.jar" />
-                            </Form.Item>
-                            <Space align="start" wrap>
-                              <Form.Item label="flink 命令路径" name="extra_flink_bin">
-                                <Input
-                                  placeholder="flink（在 PATH 上）或绝对路径"
-                                  style={{ width: 260 }}
-                                />
-                              </Form.Item>
-                              <Form.Item label="提交目标" name="extra_flink_deploy_target">
-                                <Select
-                                  style={{ width: 180 }}
-                                  options={[
-                                    { value: "yarn-per-job", label: "yarn-per-job" },
-                                    { value: "yarn-session", label: "yarn-session" },
-                                    { value: "remote", label: "remote" },
-                                    { value: "local", label: "local" },
-                                  ]}
-                                  allowClear
-                                />
-                              </Form.Item>
-                              <Form.Item label="并行度" name="extra_flink_parallelism">
-                                <InputNumber min={1} max={512} style={{ width: 120 }} />
-                              </Form.Item>
-                            </Space>
-                            <Space align="start" wrap>
-                              <Form.Item label="YARN 队列" name="extra_flink_yarn_queue">
-                                <Input placeholder="default" style={{ width: 200 }} />
-                              </Form.Item>
-                              <Form.Item
-                                label="SqlRunner main class"
-                                name="extra_flink_sql_runner_class"
-                              >
-                                <Input
-                                  placeholder="com.ontometa.flink.SqlRunner"
-                                  style={{ width: 280 }}
-                                />
-                              </Form.Item>
-                            </Space>
-                            <Form.Item
-                              label="Checkpoint 目录"
-                              name="extra_flink_checkpoint_dir"
-                              extra="CDC 流式作业持久化读位点用；incremental 是有界水位 batch，不依赖 checkpoint"
-                            >
-                              <Input placeholder="file:///var/flink/checkpoints 或 hdfs://…" />
-                            </Form.Item>
-                            <Form.Item
-                              label="Flink REST Endpoint"
-                              name="extra_flink_rest_endpoint"
-                              extra="CDC 健康检查使用，如 http://flink-jobmanager:8081；配置落数据库"
-                            >
-                              <Input placeholder="http://flink-jobmanager:8081" />
-                            </Form.Item>
-                          </>
-                        ),
-                      },
-                    ]}
-                  />
-                </>
-              ) : null
-            }
-          </Form.Item>
+                          </Form.Item>
+                          <Form.Item label="提交目标" name="extra_flink_deploy_target">
+                            <Select
+                              style={{ width: 180 }}
+                              options={[
+                                { value: "yarn-per-job", label: "yarn-per-job" },
+                                { value: "yarn-session", label: "yarn-session" },
+                                { value: "remote", label: "remote" },
+                                { value: "local", label: "local" },
+                              ]}
+                              allowClear
+                            />
+                          </Form.Item>
+                          <Form.Item label="并行度" name="extra_flink_parallelism">
+                            <InputNumber min={1} max={512} style={{ width: 120 }} />
+                          </Form.Item>
+                        </Space>
+                        <Space align="start" wrap>
+                          <Form.Item label="YARN 队列" name="extra_flink_yarn_queue">
+                            <Input placeholder="default" style={{ width: 200 }} />
+                          </Form.Item>
+                          <Form.Item label="SqlRunner main class" name="extra_flink_sql_runner_class">
+                            <Input placeholder="com.ontometa.flink.SqlRunner" style={{ width: 280 }} />
+                          </Form.Item>
+                        </Space>
+                        <Form.Item
+                          label="Checkpoint 目录"
+                          name="extra_flink_checkpoint_dir"
+                          extra="CDC 流式作业持久化读位点用；incremental 是有界水位 batch，不依赖 checkpoint"
+                        >
+                          <Input placeholder="file:///var/flink/checkpoints 或 hdfs://…" />
+                        </Form.Item>
+                        <Form.Item
+                          label="Flink REST Endpoint"
+                          name="extra_flink_rest_endpoint"
+                          extra="CDC 健康检查使用，如 http://flink-jobmanager:8081；配置落数据库"
+                        >
+                          <Input placeholder="http://flink-jobmanager:8081" />
+                        </Form.Item>
+                      </>
+                    ),
+                  },
+                ]}
+              />
+            </>
+          ) : null}
         </Form>
       </Drawer>
-      <Modal
-        open={logRow !== null}
-        title={logRow ? `${logRow.name} 部署日志` : ""}
-        footer={null}
-        width={720}
-        onCancel={() => setLogRow(null)}
-      >
-        <pre
-          style={{
-            maxHeight: 480,
-            overflow: "auto",
-            background: "#0f1419",
-            color: "#d9e2ec",
-            padding: 12,
-            borderRadius: 6,
-            fontSize: 12,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-          }}
-        >
-          {logRow?.deploy_log}
-        </pre>
-      </Modal>
     </>
   );
 }

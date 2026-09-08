@@ -1,10 +1,12 @@
-"""依赖组件统一部署管理服务（DEPENDENCY_DEPLOYMENT_REDESIGN Phase 0）。
+"""依赖组件登记服务：LLM / DataHub / Airflow 的连接信息 + 拨测。
 
-每个依赖组件在 ``dependency_components`` 表里一行：选一种部署方式（external/docker/k8s/
-bare_metal），部署成功自动回写连接信息，或 external 时手填。上层功能经 ``get_*_runtime``
-投影消费（Phase 1 起接读取侧；Phase 0 本服务独立运作，不碰既有五表）。
+ontoMeta **不部署任何依赖**，一律连接已经跑着的服务。所以这里只有「怎么连」和
+「上次拨测通不通」，没有部署方式、部署参数、部署日志。组件也是**固定**的那几样
+（见 ``COMPONENT_CATALOG``），不由用户增删——``ensure_components`` 兜底把缺的行补齐，
+面板只负责填连接。上层功能经 ``get_*_runtime`` 投影消费。
 
-ERPNext 等外部源库不在此纳管——它们是外部数据源，走 ``DataSource``。
+ERPNext 等外部源库不在此纳管——它们是外部数据源，走 ``DataSource``；目标数仓走
+「数据源」标签页；ontoMeta 自身数据库属于 bootstrap 配置，都不是"依赖组件"。
 """
 
 from __future__ import annotations
@@ -12,32 +14,34 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal
 from app.models import DependencyComponent
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # --------------------------------------------------------------------- 组件目录
 
-# 组件 key → (展示名, 是否多实例)。单例组件在应用层保证每 key 至多一行。
-COMPONENT_CATALOG: dict[str, tuple[str, bool]] = {
-    "llm": ("LLM / 嵌入服务", True),
-    "datahub": ("DataHub（GMS + 前端）", False),
-    "airflow": ("Airflow 调度", False),
-    "mcp": ("MCP 服务", False),
-    # postgres：ontoMeta 自身数据库应在环境变量配置，不属于"依赖组件"
-    # - warehouse: 目标数仓连接由「数据源」标签页统一管理（DataSourcesPanel 完整 CRUD+测试）
+# 固定组件目录：key → 展示名，顺序即面板里的显示顺序。每 key 至多一行（单例）。
+COMPONENT_CATALOG: dict[str, str] = {
+    "llm": "LLM / 嵌入服务",
+    "datahub": "DataHub（GMS + 前端）",
+    "airflow": "Airflow 调度",
+    "superset": "Superset BI",
 }
 
-SINGLETON_KEYS = {k for k, (_, multi) in COMPONENT_CATALOG.items() if not multi}
-MULTI_KEYS = {k for k, (_, multi) in COMPONENT_CATALOG.items() if multi}
+# 借本表存运行期配置、但不是"外部服务"的 key（当前只有 mcp）：它们不在
+# COMPONENT_CATALOG 里，因此既不出现在面板上、也不被 ensure_components 补齐。
+# MCP 是 ontoMeta 自己的服务，由「Agent 接入」页管理。
+INTERNAL_KEYS = {"mcp"}
+
+# 补齐新行时默认**不启用**的组件：Airflow 一启用，物化/搬运就会真的往它上面投 DAG，
+# 而刚补出来的行只有占位地址。要等人填完连接、拨测通过再自己打开。
+# Superset 同理：刚补出来的行是 localhost:8088 占位，启用着只会让建图工具去连一个
+# 不存在的地址、报一句网络错；关着则能明说"组件未启用，请先在设置页配置并拨测"。
+DEFAULT_DISABLED_KEYS = {"airflow", "superset"}
 
 # 连接字段 schema：每 key 的 connection JSON 形态。
 # 字段元组 (字段名, 类型, 是否机密, 是否必填, 默认值/None)。
@@ -62,8 +66,8 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
     #   · 调度 API：endpoint + 账密。REST 版本不入配置——客户端 404 时自协商。
     #     也没有 token：Airflow 2.x REST 是 basic auth，没有任何部署路径产出过 bearer token，
     #     那个字段填了不生效，只会让人以为配了鉴权。
-    #   · DAG 投递（SSH）：主机/端口/用户/目录在 deploy_spec.extra，唯独密码落在这里——
-    #     extra 脱敏时原样透传（_SPEC_PRESERVE_KEYS），机密搁那儿会明文回显，且
+    #   · DAG 投递（SSH）：主机/端口/用户/目录在 settings.extra，唯独密码落在这里——
+    #     extra 脱敏时原样透传（_SETTINGS_PRESERVE_KEYS），机密搁那儿会明文回显，且
     #     「留空=保持不变」失效；落进本 schema 才有 _mask_connection/_merge_connection 兜着。
     "airflow": [
         ("endpoint", "str", False, True, "http://localhost:8081"),
@@ -71,6 +75,22 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("password", "str", True, False, None),
         ("ssh_password", "str", True, False, None),
     ],
+    # Superset：只连不部署，ontoMeta 只往里推数据集/图表/看板，不建 database。
+    #   · database_id 指 Superset 里那条指向数仓（Doris）的 database 连接。**不推导**：
+    #     由 Superset 侧建好并自测通过，ontoMeta 只认这个 id——否则就得把数仓凭据
+    #     再复制一份推给 Superset，那是另一个人管的另一套密钥。
+    #   · public_base_url 是用户浏览器可达的地址。后端从哪儿访问 Superset 与用户从哪儿
+    #     访问它是两回事（内网地址 vs 对外域名），嵌入与跳转链接只能用后者，故单独配。
+    #     留空则回落到 base_url。
+    "superset": [
+        ("base_url", "str", False, True, "http://localhost:8088"),
+        ("username", "str", False, True, None),
+        ("password", "str", True, True, None),
+        ("database_id", "int", False, False, None),
+        ("public_base_url", "str", False, False, None),
+    ],
+    # MCP 不是外部服务，是 ontoMeta 自己的一层：这里只是借本表存它的运行期开关
+    # （见 INTERNAL_KEYS），配置界面在「Agent 接入」页，不进基础设施面板。
     "mcp": [
         ("mcp_http_enabled", "bool", False, False, False),
         ("mcp_http_allow_anonymous", "bool", False, False, False),
@@ -111,116 +131,9 @@ def connection_groups(key: str) -> list[tuple[str, str, tuple[str, ...]]]:
     return [("default", "连接", tuple(f[0] for f in CONNECTION_SCHEMAS.get(key, [])))]
 
 
-def primary_connection_group(key: str) -> str:
-    """组件"自己那条"连接（第一组）。
-
-    部署完只验它：装完 Airflow 该验的是这台服务本身活没活，而 DAG 投递（SSH）是
-    ontoMeta 侧另配的一条连接，还没配就把整次安装判成失败是冤枉的。
-    """
-    return connection_groups(key)[0][0]
-
-# 部署参数 schema：按 mode（跨组件通用）。
-# Phase 0 只落地结构；docker/k8s/bare_metal 的实际部署在 Phase 3 实现。
-DEPLOY_MODES = ["external", "docker", "k8s", "bare_metal"]
-
-# 每组件允许的部署方式白名单：未列出的组件默认支持全部 DEPLOY_MODES。
-# datahub / llm 的裸机安装随发行版/集群差异极大，无自动化价值，
-# 只支持 external（登记已有服务）——前端据此收窄模式选择器，后端据此校验拦非法组合。
-COMPONENT_DEPLOY_MODES: dict[str, list[str]] = {
-    "datahub": ["external"],
-    "llm": ["external"],
-}
-
-
-def allowed_deploy_modes(key: str) -> list[str]:
-    """取组件允许的部署方式（无白名单则全支持）。"""
-    return COMPONENT_DEPLOY_MODES.get(key, DEPLOY_MODES)
-
-
-DEPLOY_SPEC_SCHEMAS: dict[str, list[ConnectionField]] = {
-    "external": [],
-    "docker": [
-        ("image", "str", False, False, None),
-        ("compose_file", "str", False, False, None),
-        ("network", "str", False, False, None),
-    ],
-    "k8s": [
-        ("namespace", "str", False, False, "default"),
-        ("manifest", "str", False, False, None),
-    ],
-    "bare_metal": [
-        ("host", "str", False, True, None),
-    ],
-}
-
-# 物理机模式：填目标机 IP + SSH 账密/私钥，ontoMeta 远程 SSH 安装、启动、回收连接、拨测。
-# 字段 = 通用 SSH 接入参数（所有组件共用）+ 每组件少量安装参数（端口/安装目录/管理员密码）。
-# 服务自身的 API 参数（如 Airflow 的端点）由安装流程自动生成回收，不再要人填。
-# 安装编排见 install_recipes.py；deploy() 开 SSH → 派发 recipe → 回收 connection → 拨测。
-_SSH_ACCESS_FIELDS: list[ConnectionField] = [
-    ("ssh_host", "str", False, True, None),
-    ("ssh_port", "int", False, False, 22),
-    ("ssh_user", "str", False, True, "root"),
-    ("auth_method", "str", False, False, "password"),  # password | key
-    ("ssh_password", "str", True, False, None),
-    ("ssh_private_key", "text", True, False, None),     # 多行 PEM 私钥
-    ("ssh_key_passphrase", "str", True, False, None),
-]
-
-# 每组件的安装参数（叠加在 SSH 接入参数之后）。端口给默认值即可，管理员密码等机密标 secret。
-_BARE_METAL_INSTALL_PARAMS: dict[str, list[ConnectionField]] = {
-    "datahub": [
-        ("gms_port", "int", False, False, 8080),
-        ("frontend_port", "int", False, False, 9002),
-    ],
-    "airflow": [
-        ("port", "int", False, False, 8081),
-        ("admin_username", "str", False, False, "admin"),
-        ("admin_password", "str", True, False, None),  # 留空则自动生成并回收
-    ],
-    "llm": [
-        ("port", "int", False, True, None),
-        ("path", "str", False, False, "/v1"),
-        ("model", "str", False, True, ""),
-        ("provider", "str", False, False, "openai-compatible"),
-    ],
-}
-
-BARE_METAL_PARAMS: dict[str, list[ConnectionField]] = {
-    key: [*_SSH_ACCESS_FIELDS, *_BARE_METAL_INSTALL_PARAMS.get(key, [])]
-    for key in COMPONENT_CATALOG
-}
-
-# Docker 模式：compose 片段 + 要探测的服务名与容器端口（用于 docker compose port 回收映射）。
-DOCKER_PARAMS: dict[str, list[ConnectionField]] = {
-    key: [
-        ("compose_file", "str", False, False, None),
-        ("service", "str", False, False, None),
-        ("container_port", "int", False, False, None),
-    ]
-    for key in COMPONENT_CATALOG
-}
-
-
-def build_bare_metal_connection(key: str, spec: dict[str, Any]) -> dict[str, Any]:
-    """从物理机参数（host + 端口 + 凭据）拼出 connection。"""
-    h = (spec.get("host") or "").strip()
-    if not h:
-        raise ValueError("缺少 host")
-    if key == "datahub":
-        return {"gms_url": f"http://{h}:{spec.get('gms_port', 8080)}",
-                "frontend_url": f"http://{h}:{spec.get('frontend_port', 9002)}",
-                "token": spec.get("token"), "fabric": "PROD"}
-    if key == "airflow":
-        return {"endpoint": f"http://{h}:{spec.get('port', 8081)}",
-                "username": spec.get("username"), "password": spec.get("password")}
-    if key == "llm":
-        return {"provider": spec.get("provider", "openai-compatible"),
-                "api_base_url": f"http://{h}:{spec.get('port')}{spec.get('path', '/v1')}",
-                "api_key": spec.get("api_key"), "model": spec.get("model", "")}
-    raise ValueError(f"组件 {key} 暂不支持物理机部署")
-
-DEPLOY_STATUSES = ["not_deployed", "deploying", "deployed", "failed", "connected"]
+# 连接状态：**只由拨测写入**。unknown = 还没测过——保存连接不等于连接可用，
+# 那种"填完地址就显示已连接"的假绿灯正是这套状态要避免的。
+CONN_STATUSES = ["unknown", "connected", "failed"]
 
 
 # --------------------------------------------------------------------- 工具
@@ -272,8 +185,8 @@ def _validate_connection(
 ) -> dict[str, Any]:
     """按 schema 校验连接信息：必填非空、类型粗验。返回清洗后的 dict。
 
-    ``require=False``：跳过必填校验——bare_metal/docker/k8s 的连接是**部署时**
-    从 deploy_spec 拼出来的，创建/编辑时连接还是空的，此刻不该以「必填」拦下。
+    ``require=False``：跳过必填校验——``ensure_components`` 补出来的空行还没人填过，
+    此刻不该以「必填」拦下（拦下就没有那一行可填了）。
     """
     schema = CONNECTION_SCHEMAS.get(key)
     if schema is None:
@@ -299,49 +212,19 @@ def _validate_connection(
     return cleaned
 
 
-def _spec_schema_for(key: str, mode: str) -> list[ConnectionField]:
-    """按部署方式取对应的 deploy_spec 字段 schema（脱敏/合并/校验共用同一张表）。"""
-    if mode == "bare_metal":
-        return BARE_METAL_PARAMS.get(key, [])
-    if mode == "docker":
-        return DOCKER_PARAMS.get(key, [])
-    if mode == "k8s":
-        return DEPLOY_SPEC_SCHEMAS.get("k8s", [])
-    return []
+# settings_json 里认得的键。其余键为安全起见不外泄（历史上部署流程往里写过东西）。
+#   · extra：组件附加参数（现只有 Airflow 编排/Flink 参数）
+#   · _probe：逐条连接的拨测记账
+_SETTINGS_PRESERVE_KEYS = {"extra", "_probe"}
 
 
-# deploy_spec 里由安装流程写回、不属于任何输入 schema 的内部键，脱敏时原样保留。
-_SPEC_PRESERVE_KEYS = {"extra", "_datasource_id", "_probe"}
+def _mask_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """组件附加配置回显：只带出认得的键。
 
-
-def _mask_deploy_spec(key: str, mode: str, spec: dict[str, Any]) -> dict[str, Any]:
-    """deploy_spec 回显：secret 字段（SSH 密码/私钥、管理员密码等）下发明文原值
-    （供前端预填+显隐切换），同时保留 *_set/*_hint 向前兼容。
-
-    非 secret 原样带出；schema 之外的内部键（extra/_datasource_id）保留，
-    其余未知键为安全起见不外泄。
+    这里没有机密——Airflow 的 SSH 密码在 CONNECTION_SCHEMAS 里（extra 不脱敏，
+    机密搁那儿会明文回显且「留空=保持不变」失效）。
     """
-    out: dict[str, Any] = {}
-    schema = _spec_schema_for(key, mode)
-    known = {f[0] for f in schema}
-    for name, _typ, secret, _req, _default in schema:
-        val = spec.get(name)
-        if secret:
-            out[name] = val  # 明文回显：str 型走 Input.Password 眼睛切换，text 型走 SecretTextArea
-            out[f"{name}_set"] = bool(val)
-            # text 型机密（PEM 私钥）尾 4 位识别价值≈0，固定占位；密码等短机密沿用 last-4 便于辨认。
-            if _typ == "text":
-                out[f"{name}_hint"] = "****" if val else None
-            else:
-                out[f"{name}_hint"] = mask_secret(val if isinstance(val, str) else None)
-        else:
-            out[name] = val
-    for k, v in spec.items():
-        if k in known or k.endswith("_set") or k.endswith("_hint"):
-            continue
-        if k in _SPEC_PRESERVE_KEYS:
-            out[k] = v  # 内部回写字段，原样保留
-    return out
+    return {k: v for k, v in settings.items() if k in _SETTINGS_PRESERVE_KEYS}
 
 
 def _drop_probe_ledger(row: DependencyComponent) -> None:
@@ -350,28 +233,14 @@ def _drop_probe_ledger(row: DependencyComponent) -> None:
     只退行状态、不清记账的话，前端那几个逐条 ✓/✗ 会拿着旧配置的结果继续显示——
     地址改对了却仍挂着红叉，是「保存即绿灯」那种假绿灯的镜像版假红灯。
     """
-    spec = _loads(row.deploy_spec_json)
-    if spec.pop("_probe", None) is not None:
-        row.deploy_spec_json = _dumps(spec)
+    settings = _loads(row.settings_json)
+    if settings.pop("_probe", None) is not None:
+        row.settings_json = _dumps(settings)
 
 
-def _merge_deploy_spec(
-    key: str, mode: str, current: dict[str, Any], incoming: dict[str, Any]
-) -> dict[str, Any]:
-    """编辑态合并 deploy_spec：secret 字段留空(None/"")表示保留原值；其余覆盖。
-
-    与连接信息的 secret-merge 语义一致，避免编辑时清空 SSH 密码/私钥。
-    """
-    merged = dict(current)
-    schema = _spec_schema_for(key, mode)
-    secret_names = {f[0] for f in schema if f[2]}
-    for k, v in incoming.items():
-        if k.endswith("_set") or k.endswith("_hint"):
-            continue  # 脱敏回显字段不回写
-        if k in secret_names and (v is None or v == ""):
-            continue  # 机密留空 = 保留原值
-        merged[k] = v
-    return merged
+def _merge_settings(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """编辑态合并附加配置：incoming 里出现的顶层键覆盖，其余（如 _probe）保留。"""
+    return {**current, **{k: v for k, v in incoming.items() if k in _SETTINGS_PRESERVE_KEYS}}
 
 
 # --------------------------------------------------------------------- 服务
@@ -388,7 +257,7 @@ class ProbeResult:
 
 
 class DependencyComponentService:
-    """依赖组件 CRUD + schema 分发 + 拨测分派 + 部署分派（Phase 0：部署仅 external 可用）。"""
+    """固定组件的连接登记：schema 自描述 + 补齐固定行 + 编辑 + 拨测分派。"""
 
     # ---- schema 自描述（供前端表单生成）----
     def schema(self) -> dict[str, Any]:
@@ -400,11 +269,10 @@ class DependencyComponentService:
 
         return {
             "components": [
-                {"key": k, "label": label, "multi": multi}
-                for k, (label, multi) in COMPONENT_CATALOG.items()
+                {"key": k, "label": label} for k, label in COMPONENT_CATALOG.items()
             ],
             "connection_schemas": {
-                k: field_list(fields) for k, fields in CONNECTION_SCHEMAS.items()
+                k: field_list(CONNECTION_SCHEMAS[k]) for k in COMPONENT_CATALOG
             },
             # 连接分组：一个组件可能握着几条互不相干的连接，前端据此分节渲染并逐条拨测。
             "connection_groups": {
@@ -414,31 +282,45 @@ class DependencyComponentService:
                 ]
                 for k in COMPONENT_CATALOG
             },
-            "deploy_modes": DEPLOY_MODES,
-            # 每组件允许的部署方式（前端据此收窄模式选择器）；未列出=全支持。
-            "component_deploy_modes": {
-                k: allowed_deploy_modes(k) for k in COMPONENT_CATALOG
-            },
-            "deploy_spec_schemas": {
-                m: field_list(fields) for m, fields in DEPLOY_SPEC_SCHEMAS.items()
-            },
-            "bare_metal_params": {
-                k: field_list(fields) for k, fields in BARE_METAL_PARAMS.items()
-            },
-            "docker_params": {
-                k: field_list(fields) for k, fields in DOCKER_PARAMS.items()
-            },
-            "deploy_statuses": DEPLOY_STATUSES,
+            "connection_statuses": CONN_STATUSES,
         }
 
     # ---- 查询 ----
-    def list_components(self, db: Session) -> list[DependencyComponent]:
-        rows = db.execute(
-            select(DependencyComponent).order_by(
-                DependencyComponent.key, DependencyComponent.is_default.desc()
+    def ensure_components(self, db: Session) -> None:
+        """把固定组件缺的行补齐（幂等）。
+
+        组件不由用户增删，面板要能直接显示"还没配的 DataHub"——没有这一步，新库里
+        表是空的，面板就只能显示"暂无组件"，而用户根本没有"新增"这个动作可做。
+        """
+        existing = set(db.execute(select(DependencyComponent.key)).scalars().all())
+        created = False
+        for key, label in COMPONENT_CATALOG.items():
+            if key in existing:
+                continue
+            db.add(
+                DependencyComponent(
+                    key=key,
+                    name=label,
+                    connection_status="unknown",
+                    connection_json=_dumps(
+                        _validate_connection(key, {}, require=False)
+                    ),
+                    enabled=key not in DEFAULT_DISABLED_KEYS,
+                    is_default=True,
+                )
             )
-        ).scalars().all()
-        return list(rows)
+            created = True
+        if created:
+            db.commit()
+
+    def list_components(self, db: Session) -> list[DependencyComponent]:
+        """列出基础设施组件：只认目录里的 key（INTERNAL_KEYS 因此天然不在内），按目录顺序。"""
+        rows = db.execute(select(DependencyComponent)).scalars().all()
+        order = list(COMPONENT_CATALOG)
+        return sorted(
+            (r for r in rows if r.key in COMPONENT_CATALOG),
+            key=lambda r: (order.index(r.key), not r.is_default, r.created_at),
+        )
 
     def get_component(self, db: Session, component_id: str) -> DependencyComponent | None:
         return db.get(DependencyComponent, component_id)
@@ -454,92 +336,41 @@ class DependencyComponentService:
             "id": row.id,
             "key": row.key,
             "name": row.name,
-            "deploy_mode": row.deploy_mode,
-            "deploy_spec": _mask_deploy_spec(
-                row.key, row.deploy_mode, _loads(row.deploy_spec_json)
-            ),
-            "deploy_status": row.deploy_status,
-            "deploy_error": row.deploy_error,
-            "deploy_log": row.deploy_log,
+            "settings": _mask_settings(_loads(row.settings_json)),
+            "connection_status": row.connection_status,
+            "connection_error": row.connection_error,
             "connection": _mask_connection(row.key, _loads(row.connection_json)),
             "enabled": row.enabled,
-            "is_default": row.is_default,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
 
-    # ---- 增删改 ----
-    def create_component(self, db: Session, data: dict[str, Any]) -> DependencyComponent:
-        key = data["key"]
-        if key not in COMPONENT_CATALOG:
-            raise ValueError(f"未知组件类型: {key}")
-        if key in SINGLETON_KEYS and self._get_singleton(db, key):
-            raise ValueError(f"组件 {key} 为单例，已存在")
-        mode = data.get("deploy_mode", "external")
-        # 非 external 模式：连接由部署时自动拼出，此时允许为空
-        conn = _validate_connection(key, data.get("connection") or {}, require=(mode == "external"))
-        if mode not in DEPLOY_MODES:
-            raise ValueError(f"未知部署方式: {mode}")
-        if mode not in allowed_deploy_modes(key):
-            raise ValueError(
-                f"组件 {key} 不支持部署方式 {mode}（仅支持 {'/'.join(allowed_deploy_modes(key))}）"
-            )
-        row = DependencyComponent(
-            key=key,
-            name=data.get("name") or COMPONENT_CATALOG[key][0],
-            deploy_mode=mode,
-            deploy_spec_json=_dumps(data.get("deploy_spec") or {}),
-            deploy_status="not_deployed",
-            connection_json=_dumps(conn),
-            enabled=data.get("enabled", True),
-            is_default=data.get("is_default", False),
-        )
-        if row.is_default:
-            self._clear_default(db, key)
-        db.add(row)
-        db.commit()
-        db.refresh(row)
-        return row
-
+    # ---- 编辑（组件固定，只能改不能增删）----
     def update_component(
-        self, db: Session, component_id: str, data: dict[str,Any]
+        self, db: Session, component_id: str, data: dict[str, Any]
     ) -> DependencyComponent | None:
         row = db.get(DependencyComponent, component_id)
         if not row:
             return None
         if "name" in data:
             row.name = data["name"]
-        if "deploy_mode" in data and data["deploy_mode"] in DEPLOY_MODES:
-            if data["deploy_mode"] not in allowed_deploy_modes(row.key):
-                raise ValueError(
-                    f"组件 {row.key} 不支持部署方式 {data['deploy_mode']}"
-                    f"（仅支持 {'/'.join(allowed_deploy_modes(row.key))}）"
-                )
-            row.deploy_mode = data["deploy_mode"]
-        # 连接参数分居两处（连接信息 + deploy_spec.extra 里的 SSH 主机/目录），
+        # 连接参数分居两处（连接信息 + settings.extra 里的 SSH 主机/目录），
         # 任一处变动都让上次拨测记账失效。
-        touched_config = "deploy_spec" in data or "connection" in data
-        if "deploy_spec" in data:
-            # secret-merge：机密字段（SSH 密码/私钥等）留空表示保留原值，避免编辑清空
-            merged_spec = _merge_deploy_spec(
-                row.key, row.deploy_mode, _loads(row.deploy_spec_json), data["deploy_spec"] or {}
+        touched_config = "settings" in data or "connection" in data
+        if "settings" in data:
+            row.settings_json = _dumps(
+                _merge_settings(_loads(row.settings_json), data["settings"] or {})
             )
-            row.deploy_spec_json = _dumps(merged_spec)
         if "enabled" in data:
             row.enabled = data["enabled"]
-        if "is_default" in data:
-            if data["is_default"]:
-                self._clear_default(db, row.key)
-            row.is_default = data["is_default"]
         # 连接信息：按 schema 校验；secret 字段留空(None)表示保留原值
         if "connection" in data:
             conn = self._merge_connection(row, data["connection"])
-            # 非 external 模式连接可为空（部署时自动拼），只在 external 模式强校验
-            row.connection_json = _dumps(_validate_connection(row.key, conn, require=(row.deploy_mode == "external")))
+            row.connection_json = _dumps(_validate_connection(row.key, conn))
             # 保存连接≠连接可用：连接信息变了就把状态退回未拨测，避免"填完地址就显示已连接"
-            # 的假绿灯。真正的 connected 只由拨测/部署成功回写（见 probe/deploy）。
-            row.deploy_status = "not_deployed"
-            row.deploy_error = None
+            # 的假绿灯。真正的 connected 只由拨测成功回写（见 probe）。
+            row.connection_status = "unknown"
+            row.connection_error = None
         if touched_config:
             _drop_probe_ledger(row)
         db.commit()
@@ -563,23 +394,7 @@ class DependencyComponentService:
                 current[k] = v
         return current
 
-    def delete_component(self, db: Session, component_id: str) -> bool:
-        row = db.get(DependencyComponent, component_id)
-        if not row:
-            return False
-        db.delete(row)
-        db.commit()
-        return True
-
-    def _clear_default(self, db: Session, key: str) -> None:
-        for r in db.execute(
-            select(DependencyComponent).where(
-                DependencyComponent.key == key, DependencyComponent.is_default.is_(True)
-            )
-        ).scalars().all():
-            r.is_default = False
-
-    # ---- Phase 1：投影读/写（供 SettingsService 委托，保持既有返回结构）----
+    # ---- 投影读/写（供 SettingsService 委托，保持既有返回结构）----
 
     def _conn(self, db: Session, key: str) -> dict[str, Any]:
         """取单例组件的连接信息（未配置时返回空 dict）。"""
@@ -596,15 +411,15 @@ class DependencyComponentService:
             row.connection_json = _dumps(validated)
             row.name = name
             row.enabled = enabled
-            row.deploy_status = "not_deployed"
+            row.connection_status = "unknown"
         else:
             row = DependencyComponent(
                 key=key,
                 name=name,
-                deploy_mode="external",
-                deploy_status="not_deployed",
+                connection_status="unknown",
                 connection_json=_dumps(validated),
                 enabled=enabled,
+                is_default=True,
             )
             db.add(row)
         db.commit()
@@ -638,6 +453,16 @@ class DependencyComponentService:
         c["updated_at"] = row.updated_at
         return c
 
+    # -- Superset（只连不部署：ontoMeta 只往里推数据集/图表/看板）--
+    def get_superset(self, db: Session) -> dict[str, Any]:
+        row = self._get_singleton(db, "superset")
+        if not row:
+            return {}
+        c = _loads(row.connection_json)
+        c["enabled"] = row.enabled
+        c["updated_at"] = row.updated_at
+        return c
+
     # -- MCP 运行期配置 --
     def get_mcp(self, db: Session) -> dict[str, Any]:
         row = self._get_singleton(db, "mcp")
@@ -658,7 +483,7 @@ class DependencyComponentService:
         c["updated_at"] = row.updated_at
         return c
 
-    # -- LLM (多实例) --
+    # -- LLM --
     def list_llm(self, db: Session) -> list[dict[str, Any]]:
         rows = db.execute(
             select(DependencyComponent)
@@ -689,63 +514,29 @@ class DependencyComponentService:
         return self._llm_view(row)
 
     def get_default_llm(self, db: Session) -> dict[str, Any] | None:
+        """当前在用的 LLM。
+
+        组件固定成一行，但历史库里可能残留多行（早先支持多实例），故仍按
+        默认行优先取一条，而不是断言只有一条。
+        """
         row = db.execute(
-            select(DependencyComponent).where(
+            select(DependencyComponent)
+            .where(
                 DependencyComponent.key == "llm",
-                DependencyComponent.is_default.is_(True),
                 DependencyComponent.enabled.is_(True),
             )
-        ).scalar_one_or_none()
-        if not row:
-            row = db.execute(
-                select(DependencyComponent).where(
-                    DependencyComponent.key == "llm", DependencyComponent.enabled.is_(True)
-                )
-            ).scalar_one_or_none()
+            .order_by(DependencyComponent.is_default.desc(), DependencyComponent.updated_at.desc())
+        ).scalars().first()
         return self._llm_view(row) if row else None
-
-    def create_llm(self, db: Session, data: dict[str, Any]) -> dict[str, Any]:
-        if data.get("is_default"):
-            self._clear_default(db, "llm")
-        row = DependencyComponent(
-            key="llm",
-            name=data.get("name", "LLM"),
-            deploy_mode="external",
-            deploy_status="not_deployed",
-            connection_json=_dumps(_validate_connection("llm", {
-                "provider": data.get("provider", "deepseek"),
-                "api_base_url": data.get("api_base_url", ""),
-                "api_key": data.get("api_key"),
-                "model": data.get("model", ""),
-            })),
-            enabled=data.get("enabled", True),
-            is_default=data.get("is_default", False),
-        )
-        db.add(row)
-        db.commit()
-        db.refresh(row)
-        if not db.execute(
-            select(DependencyComponent).where(
-                DependencyComponent.key == "llm", DependencyComponent.is_default.is_(True)
-            )
-        ).scalar_one_or_none():
-            row.is_default = True
-            db.commit()
-            db.refresh(row)
-        return self._llm_view(row)
 
     def update_llm(self, db: Session, service_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
         row = db.get(DependencyComponent, service_id)
         if not row or row.key != "llm":
             return None
-        if data.get("is_default"):
-            self._clear_default(db, "llm")
         if "name" in data:
             row.name = data["name"]
         if "enabled" in data:
             row.enabled = data["enabled"]
-        if "is_default" in data:
-            row.is_default = data["is_default"]
         conn = _loads(row.connection_json)
         for f in ("provider", "api_base_url", "model"):
             if f in data:
@@ -756,23 +547,6 @@ class DependencyComponentService:
         db.commit()
         db.refresh(row)
         return self._llm_view(row)
-
-    def delete_llm(self, db: Session, service_id: str) -> bool:
-        row = db.get(DependencyComponent, service_id)
-        if not row or row.key != "llm":
-            return False
-        was_default = row.is_default
-        db.delete(row)
-        db.commit()
-        if was_default:
-            fallback = db.execute(
-                select(DependencyComponent).where(DependencyComponent.key == "llm")
-                .order_by(DependencyComponent.updated_at.desc())
-            ).scalars().first()
-            if fallback:
-                fallback.is_default = True
-                db.commit()
-        return True
 
     # -- 旧表迁移（幂等）：把既有 DatahubSetting/LlmServiceConfig 搬进注册表 --
     def migrate_from_legacy(self, db: Session) -> None:
@@ -790,7 +564,7 @@ class DependencyComponentService:
         ).scalars().first():
             for svc in db.query(LlmServiceConfig).all():
                 row = DependencyComponent(
-                    key="llm", name=svc.name, deploy_mode="external", deploy_status="not_deployed",
+                    key="llm", name=svc.name, connection_status="unknown",
                     connection_json=_dumps(_validate_connection("llm", {
                         "provider": svc.provider, "api_base_url": svc.api_base_url,
                         "api_key": svc.api_key, "model": svc.model,
@@ -810,7 +584,7 @@ class DependencyComponentService:
             # 编排参数落 extra
             af_row = self._get_singleton(db, "airflow")
             if af_row:
-                af_row.deploy_spec_json = _dumps({"extra": {
+                af_row.settings_json = _dumps({"extra": {
                     "dags_dir": af.dags_dir, "max_tasks_per_dag": af.max_tasks_per_dag,
                     "max_active_tasks_per_dag": af.max_active_tasks_per_dag,
                     "dag_parse_timeout": af.dag_parse_timeout,
@@ -840,7 +614,7 @@ class DependencyComponentService:
     def get_airflow(self, db: Session) -> dict[str, Any]:
         af = self._get_singleton(db, "airflow")
         af_conn = _loads(af.connection_json) if af else {}
-        extra = (_loads(af.deploy_spec_json) if af else {}).get("extra", {})
+        extra = (_loads(af.settings_json) if af else {}).get("extra", {})
         out: dict[str, Any] = {
             "endpoint": af_conn.get("endpoint", ""),
             "username": af_conn.get("username"),
@@ -868,22 +642,22 @@ class DependencyComponentService:
             af_row.connection_json = _dumps(af_conn)
             af_row.enabled = data.get("enabled", af_row.enabled)
             # 保存连接≠连接可用：置未拨测，connected 只由拨测成功回写。
-            af_row.deploy_status = "not_deployed"
+            af_row.connection_status = "unknown"
         else:
             af_row = DependencyComponent(
-                key="airflow", name="Airflow 调度", deploy_mode="external",
-                deploy_status="not_deployed",
+                key="airflow", name="Airflow 调度",
+                connection_status="unknown", is_default=True,
                 connection_json=_dumps(af_conn), enabled=data.get("enabled", True),
             )
             db.add(af_row)
         # 编排参数落 extra（仅更新 data 中出现的字段）
-        spec = _loads(af_row.deploy_spec_json)
-        extra = dict(spec.get("extra", {}))
+        settings = _loads(af_row.settings_json)
+        extra = dict(settings.get("extra", {}))
         for f in self._AIRFLOW_EXTRA_FIELDS:
             if f in data:
                 extra[f] = data[f]
-        spec["extra"] = extra
-        af_row.deploy_spec_json = _dumps(spec)
+        settings["extra"] = extra
+        af_row.settings_json = _dumps(settings)
         _drop_probe_ledger(af_row)
         db.commit()
         return self.get_airflow(db)
@@ -897,7 +671,7 @@ class DependencyComponentService:
         ``target`` 指定只测哪一条连接（如 airflow 的 ``api`` / ``ssh``），省略则全测。
         一个组件的几条连接互不相干——调度 API 通不通与 SSH 投递通不通是两件事，混在
         一次拨测里只会得到一个说不清哪儿断了的红叉，故结果**逐条记账**（存
-        ``deploy_spec._probe``），行状态由各条的最新结果聚合而成。
+        ``settings._probe``），行状态由各条的最新结果聚合而成。
         """
         row = db.get(DependencyComponent, component_id)
         if not row:
@@ -912,9 +686,9 @@ class DependencyComponentService:
                     f"（可选：{'/'.join(g[0] for g in connection_groups(row.key))}）",
                 )
         conn = _loads(row.connection_json)
-        spec = _loads(row.deploy_spec_json)
-        extra = dict(spec.get("extra", {}))
-        ledger = dict(spec.get("_probe", {}))
+        settings = _loads(row.settings_json)
+        extra = dict(settings.get("extra", {}))
+        ledger = dict(settings.get("_probe", {}))
 
         parts: list[dict[str, Any]] = []
         for gid, label, _fields in groups:
@@ -929,8 +703,8 @@ class DependencyComponentService:
             parts.append(part)
             ledger[gid] = {**part, "at": datetime.now(UTC).isoformat()}
 
-        spec["_probe"] = ledger
-        row.deploy_spec_json = _dumps(spec)
+        settings["_probe"] = ledger
+        row.settings_json = _dumps(settings)
         # 行状态看**全部**连接的最新记账：只测了一条就通过，不足以把整行判成已连接。
         all_groups = connection_groups(row.key)
         recorded = [ledger.get(g[0]) for g in all_groups]
@@ -940,15 +714,15 @@ class DependencyComponentService:
             if ledger.get(g[0]) and not ledger[g[0]]["ok"]
         ]
         if failed:
-            row.deploy_status = "failed"
-            row.deploy_error = "；".join(failed)[:500]
+            row.connection_status = "failed"
+            row.connection_error = "；".join(failed)[:500]
         elif all(recorded):
-            row.deploy_status = "connected"
-            row.deploy_error = None
+            row.connection_status = "connected"
+            row.connection_error = None
         else:
             # 还有连接没测过：不算已连接，也别报错——如实停在「未拨测」。
-            row.deploy_status = "not_deployed"
-            row.deploy_error = None
+            row.connection_status = "unknown"
+            row.connection_error = None
         db.commit()
 
         ok = all(p["ok"] for p in parts)
@@ -960,165 +734,6 @@ class DependencyComponentService:
             message = "；".join(f"{p['label']}：{p['message']}" for p in parts if not p["ok"])
         latency = next((p["latency_ms"] for p in parts if p["latency_ms"] is not None), None)
         return ProbeResult(ok, message, latency, parts)
-
-    def _probe_after_deploy(self, db: Session, component_id: str) -> ProbeResult:
-        """部署后只拨测组件自身那条连接（见 primary_connection_group）。
-
-        通过时把行状态提到 ``deployed``：其余连接还没测过，聚合规则不会给 ``connected``，
-        但"装完了、服务自己是通的"不该显示成未部署——那会让前端把成功的安装报成失败。
-        """
-        row = db.get(DependencyComponent, component_id)
-        if not row:
-            return ProbeResult(False, "组件不存在")
-        result = self.probe(db, component_id, target=primary_connection_group(row.key))
-        db.refresh(row)
-        if result.ok and row.deploy_status == "not_deployed":
-            row.deploy_status = "deployed"
-            db.commit()
-        return result
-
-    # ---- 部署 ----
-    def deploy(self, db: Session, component_id: str) -> dict[str, Any]:
-        """执行部署，自动回收连接信息并拨测。
-
-        - external：不部署，直接拨测已填连接。
-        - bare_metal：从 host+端口+凭据拼出 connection，落库后拨测（登记一台现成物理服务）。
-        - docker：docker compose up 起服务，docker compose port 回收映射端口，拼 connection 后拨测。
-        - k8s：kubectl apply 起服务，kubectl get svc 回收端点，拼 connection 后拨测。
-        """
-        row = db.get(DependencyComponent, component_id)
-        if not row:
-            raise ValueError("组件不存在")
-        mode = row.deploy_mode
-        row.deploy_status = "deploying"
-        row.deploy_error = None
-        row.deploy_log = None
-        db.commit()
-        # 部署日志：本次部署的逐命令/阶段记录，失败/成功后都落库供前端查看
-        log: list[str] = [f"== {row.key} 部署开始（mode={mode}）=="]
-
-        try:
-            if mode == "external":
-                log.append("external：直接拨测已填连接")
-                result = self.probe(db, component_id)
-                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                return {"status": row.deploy_status, "ok": result.ok, "message": result.message}
-
-            spec = _loads(row.deploy_spec_json)
-
-            if mode == "bare_metal":
-                # SSH 远程安装：开会话 → 派发组件配方 → 回收 connection → 落库 → 拨测。
-                from app.services.install_recipes import run_install
-
-                conn = run_install(row.key, spec, log=log)
-                row.connection_json = _dumps(_validate_connection(row.key, conn))
-                # 回写配方解析出的端口等运行期值，重装/卸载保持一致。
-                # 对不改 spec 的既有配方是无害 no-op。
-                row.deploy_spec_json = _dumps(spec)
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                result = self._probe_after_deploy(db, component_id)
-                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                msg = result.message if not result.ok else f"SSH 远程安装完成并连通（{result.latency_ms}ms）"
-                return {"status": row.deploy_status, "ok": result.ok, "message": msg}
-
-            if mode == "docker":
-                conn = _deploy_docker(row.key, spec, log=log)
-                row.connection_json = _dumps(_validate_connection(row.key, conn))
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                result = self._probe_after_deploy(db, component_id)
-                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                msg = result.message if not result.ok else f"Docker 部署完成并连通（{result.latency_ms}ms）"
-                return {"status": row.deploy_status, "ok": result.ok, "message": msg}
-
-            if mode == "k8s":
-                conn = _deploy_k8s(row.key, spec, log=log)
-                row.connection_json = _dumps(_validate_connection(row.key, conn))
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                result = self._probe_after_deploy(db, component_id)
-                log.append(f"拨测：{'连接成功' if result.ok else result.message}")
-                row.deploy_log = "\n".join(log)
-                db.commit()
-                msg = result.message if not result.ok else f"K8s 部署完成并连通（{result.latency_ms}ms）"
-                return {"status": row.deploy_status, "ok": result.ok, "message": msg}
-
-            raise ValueError(f"未知部署方式: {mode}")
-        except Exception as exc:  # noqa: BLE001
-            log.append(f"! {type(exc).__name__}: {exc}")
-            row.deploy_status = "failed"
-            row.deploy_error = f"{type(exc).__name__}: {exc}"[:500]
-            row.deploy_log = "\n".join(log)
-            db.commit()
-            return {"status": row.deploy_status, "ok": False, "message": row.deploy_error}
-
-    def teardown(self, db: Session, component_id: str) -> dict[str, Any]:
-        row = db.get(DependencyComponent, component_id)
-        if not row:
-            raise ValueError("组件不存在")
-        spec = _loads(row.deploy_spec_json)
-        mode = row.deploy_mode
-        err = None
-        if mode == "docker":
-            err = _teardown_docker(row.key, spec)
-        elif mode == "k8s":
-            err = _teardown_k8s(row.key, spec)
-        elif mode == "bare_metal":
-            # SSH 模式在远端装了软件，卸载须回到目标机停服务/清理（best-effort，失败可见）
-            from app.services.install_recipes import run_teardown
-
-            err = run_teardown(row.key, spec)
-        # external 无需卸载（未在远端装东西）
-        row.deploy_status = "not_deployed"
-        row.deploy_error = err
-        db.commit()
-        return {"status": row.deploy_status, "message": err}
-
-    # ---- 部署调度（同步 external / 后台 docker·k8s·bare_metal）----
-    def start_deploy(self, db: Session, component_id: str) -> dict[str, Any]:
-        """部署入口：external 同步拨测直接返回；其余模式（尤其 bare_metal SSH 安装可能
-        持续数分钟）先置 deploying 落库并立即返回，实际部署交后台任务执行，前端轮询状态。
-
-        返回 need_background=True 时，调用方（路由）须调度 run_deploy_detached。
-        """
-        row = db.get(DependencyComponent, component_id)
-        if not row:
-            raise ValueError("组件不存在")
-        if row.deploy_mode == "external":
-            result = self.deploy(db, component_id)
-            return {**result, "need_background": False}
-        # 后台模式：先占位 deploying，避免前端在任务起来前看到旧状态
-        row.deploy_status = "deploying"
-        row.deploy_error = None
-        row.deploy_log = None
-        db.commit()
-        return {
-            "status": "deploying",
-            "ok": True,
-            "message": "部署已在后台开始，请稍候刷新查看状态",
-            "need_background": True,
-        }
-
-    def run_deploy_detached(self, component_id: str) -> None:
-        """后台任务体：用独立 DB session 跑实际部署。deploy() 自身管状态/错误落库，
-        这里只负责 session 生命周期与异常兜底（防止后台线程里未捕获异常吞掉状态）。"""
-        with SessionLocal() as db:
-            try:
-                self.deploy(db, component_id)
-            except Exception as exc:  # noqa: BLE001 - 后台任务不得静默失败
-                row = db.get(DependencyComponent, component_id)
-                if row is not None:
-                    row.deploy_status = "failed"
-                    row.deploy_error = f"{type(exc).__name__}: {exc}"[:500]
-                    db.commit()
-
 
 # --------------------------------------------------------------------- 拨测实现
 
@@ -1264,128 +879,61 @@ def _probe_datahub(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
     return ProbeResult(True, "连接成功", latency)
 
 
+def _probe_superset(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
+    """拨测 Superset：登录拿 JWT，再用它打一次真实 REST，最后确认 database_id 存在。
+
+    三步都不能省，每一步对应一种"填了等于没填"：
+    * 只看 ``/login`` 的状态码 → 反代/静态页会回 200 + HTML，假绿灯（与 DataHub 同款坑）；
+    * 登录成功但带版本前缀的 API 用不了（反代吞了 Authorization 头、账号没有任何角色）；
+    * ``database_id`` 填错 → 要到 Agent 真去建数据集时才炸，那时错误在另一个进程里。
+      没填则只提示，不算失败：先把连接配通、回头再补 id 是合理的次序。
+    """
+    from app.connectors.superset import SupersetClient, SupersetError
+
+    base = (conn.get("base_url") or "").strip()
+    if not base:
+        return ProbeResult(False, "缺少 base_url")
+    start = time.perf_counter()
+    client = SupersetClient(
+        base,
+        username=conn.get("username"),
+        password=conn.get("password"),
+        timeout=10.0,
+    )
+    try:
+        try:
+            client.ping()
+        except SupersetError as exc:
+            return ProbeResult(False, str(exc)[:300])
+        except Exception as exc:  # noqa: BLE001
+            return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
+        latency = int((time.perf_counter() - start) * 1000)
+
+        database_id = conn.get("database_id")
+        if database_id in (None, ""):
+            return ProbeResult(
+                True,
+                "连接成功（未填 database_id：建数据集前需在此填上 Superset 里指向数仓的 database）",
+                latency,
+            )
+        try:
+            client.get_database(int(database_id))
+        except SupersetError as exc:
+            return ProbeResult(
+                False, f"database_id={database_id} 读不到：{exc}"[:300], latency
+            )
+        except (TypeError, ValueError):
+            return ProbeResult(False, f"database_id 不是整数：{database_id!r}", latency)
+        return ProbeResult(True, "连接成功", latency)
+    finally:
+        client.close()
+
+
 # (组件 key, 连接分组 id) → 探针。分组见 CONNECTION_GROUPS；单连接组件用 "default"。
 _PROBES: dict[tuple[str, str], Any] = {
     ("llm", "default"): _probe_llm,
     ("datahub", "default"): _probe_datahub,
     ("airflow", "api"): _probe_airflow_api,
     ("airflow", "ssh"): _probe_airflow_ssh,
+    ("superset", "default"): _probe_superset,
 }
-
-
-# --------------------------------------------------------------------- Docker/K8s 部署
-
-import subprocess  # noqa: E402
-
-
-def _run(cmd: list[str], timeout: float = 120, log: list[str] | None = None) -> tuple[int, str, str]:
-    """跑一条命令，返回 (returncode, stdout, stderr)。超时则杀。``log``：部署日志收集器。"""
-    if log is not None:
-        log.append("$ " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if log is not None and proc.returncode != 0:
-        log.append(f"! rc={proc.returncode}：{(proc.stderr or proc.stdout or '').strip()[-300:]}")
-    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
-
-
-def _deploy_docker(key: str, spec: dict[str, Any], log: list[str] | None = None) -> dict[str, Any]:
-    """docker compose up + docker compose port 回收映射端口 → 拼 connection。
-
-    需 deploy_spec: compose_file（仓库内路径）、service（compose 服务名）、container_port。
-    缺 compose_file 时回退到 docker/components/<key>.yml；都没有则报错。
-    """
-    compose_file = spec.get("compose_file") or str(_REPO_ROOT / "docker" / "components" / f"{key}.yml")
-    service = spec.get("service") or key
-    container_port = spec.get("container_port")
-    if not container_port:
-        # 各组件默认容器端口
-        defaults = {"datahub": 8080, "airflow": 8080}
-        container_port = defaults.get(key)
-    if not container_port:
-        raise ValueError("docker 部署需指定 container_port")
-    rc, _, err = _run(["docker", "compose", "-f", compose_file, "up", "-d"], timeout=180, log=log)
-    if rc != 0:
-        raise RuntimeError(f"docker compose up 失败: {err or '未知错误'}（compose_file={compose_file}）")
-    rc, out, err = _run(["docker", "compose", "-f", compose_file, "port", service, str(container_port)], log=log)
-    if rc != 0:
-        raise RuntimeError(f"docker compose port 失败: {err}（service={service}, port={container_port}）")
-    # out 形如 "0.0.0.0:8080" 或 ":::8080"
-    host_port = out.split(":")[-1].strip()
-    if not host_port.isdigit():
-        raise RuntimeError(f"无法解析映射端口: {out!r}")
-    # 复用 bare_metal 的连接拼装逻辑（host=localhost + 端口=映射端口）
-    bm_spec = {**spec, "host": "localhost"}
-    # 把 container_port 映射到 bare_metal 参数里对应的端口字段
-    _fill_port(bm_spec, key, int(host_port))
-    return build_bare_metal_connection(key, bm_spec)
-
-
-def _fill_port(spec: dict[str, Any], key: str, port: int) -> None:
-    """把回收到的端口填进 bare_metal 参数里该组件的端口字段。"""
-    port_fields = {
-        "datahub": "gms_port", "airflow": "port",
-        "llm": "port",
-    }
-    f = port_fields.get(key)
-    if f:
-        spec[f] = port
-
-
-def _teardown_docker(key: str, spec: dict[str, Any]) -> str | None:
-    compose_file = spec.get("compose_file") or str(_REPO_ROOT / "docker" / "components" / f"{key}.yml")
-    rc, _, err = _run(["docker", "compose", "-f", compose_file, "down"], timeout=120)
-    return None if rc == 0 else f"docker compose down 失败: {err}"
-
-
-def _deploy_k8s(key: str, spec: dict[str, Any], log: list[str] | None = None) -> dict[str, Any]:
-    """kubectl apply + kubectl get svc 回收端点 → 拼 connection。
-
-    需 deploy_spec: manifest（YAML 文本，多文档）或其内含一个名为 <key> 的 Service。
-    namespace 默认 default。回收 Service 的第一个 node/host 端口。
-    """
-    namespace = spec.get("namespace", "default")
-    manifest = spec.get("manifest")
-    if not manifest:
-        raise ValueError("k8s 部署需提供 manifest（YAML 文本）")
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        f.write(manifest)
-        path = f.name
-    rc, _, err = _run(["kubectl", "apply", "-n", namespace, "-f", path], timeout=180, log=log)
-    if rc != 0:
-        raise RuntimeError(f"kubectl apply 失败: {err}")
-    # 取同名 Service 的端口
-    rc, out, err = _run(
-        ["kubectl", "get", "svc", key, "-n", namespace, "-o", "jsonpath={.spec.ports[0].nodePort}"],
-        log=log,
-    )
-    port_str = out.strip() if rc == 0 else ""
-    if not port_str or not port_str.isdigit():
-        # 试 clusterIP:port
-        rc, out, _ = _run(
-            ["kubectl", "get", "svc", key, "-n", namespace,
-             "-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}"],
-            log=log,
-        )
-        if rc == 0 and ":" in out:
-            host, p = out.split(":", 1)
-            bm_spec = {**spec, "host": host}
-            _fill_port(bm_spec, key, int(p))
-            return build_bare_metal_connection(key, bm_spec)
-        raise RuntimeError(f"无法回收 Service 端口: {err or out}")
-    bm_spec = {**spec, "host": "localhost"}
-    _fill_port(bm_spec, key, int(port_str))
-    return build_bare_metal_connection(key, bm_spec)
-
-
-def _teardown_k8s(key: str, spec: dict[str, Any]) -> str | None:
-    namespace = spec.get("namespace", "default")
-    manifest = spec.get("manifest")
-    if not manifest:
-        return None
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        f.write(manifest)
-        path = f.name
-    rc, _, err = _run(["kubectl", "delete", "-n", namespace, "-f", path, "--ignore-not-found=true"], timeout=120)
-    return None if rc == 0 else f"kubectl delete 失败: {err}"

@@ -11,8 +11,6 @@ Airflow 一个组件握着两条互不相干的连接——**调度 API**（触�
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from app.database import SessionLocal
@@ -41,8 +39,8 @@ def airflow_row(svc, db):
     row = svc._get_singleton(db, "airflow")
     created = row is None
     before = (
-        (row.connection_json, row.deploy_spec_json, row.deploy_status,
-         row.enabled, row.deploy_mode, row.name)
+        (row.connection_json, row.settings_json, row.connection_status,
+         row.enabled, row.name)
         if row
         else None
     )
@@ -60,8 +58,8 @@ def airflow_row(svc, db):
     elif before:
         # 每一项都要还原：airflow 是全库单例，落下一项就会把「默认未启用」之类的
         # 相邻用例带塌（这行状态是跨用例共享的）。
-        (row.connection_json, row.deploy_spec_json, row.deploy_status,
-         row.enabled, row.deploy_mode, row.name) = before
+        (row.connection_json, row.settings_json, row.connection_status,
+         row.enabled, row.name) = before
     db.commit()
 
 
@@ -136,13 +134,13 @@ def test_probing_one_connection_does_not_mark_the_whole_row_connected(
     _stub(monkeypatch, api=ds.ProbeResult(False, "boom"), ssh=ds.ProbeResult(True, "可写", 9))
     svc.probe(db, airflow_row.id, target="ssh")
     db.refresh(airflow_row)
-    assert airflow_row.deploy_status == "not_deployed"
+    assert airflow_row.connection_status == "unknown"
 
     # 两条都测过且都通，才算已连接
     _stub(monkeypatch, api=ds.ProbeResult(True, "连接成功", 5))
     svc.probe(db, airflow_row.id, target="api")
     db.refresh(airflow_row)
-    assert airflow_row.deploy_status == "connected"
+    assert airflow_row.connection_status == "connected"
 
 
 def test_failed_connection_is_named_not_just_reddened(svc, db, airflow_row, monkeypatch):
@@ -156,8 +154,8 @@ def test_failed_connection_is_named_not_just_reddened(svc, db, airflow_row, monk
     assert result.ok is False
     assert "DAG 投递" in result.message and "Permission denied" in result.message
     db.refresh(airflow_row)
-    assert airflow_row.deploy_status == "failed"
-    assert "DAG 投递" in (airflow_row.deploy_error or "")
+    assert airflow_row.connection_status == "failed"
+    assert "DAG 投递" in (airflow_row.connection_error or "")
     # 明细逐条回传，前端据此显示「调度 API ✓ / DAG 投递 ✗」
     assert [(p["group"], p["ok"]) for p in result.parts] == [("api", True), ("ssh", False)]
 
@@ -173,8 +171,8 @@ def test_recovered_connection_clears_the_row_error(svc, db, airflow_row, monkeyp
     _stub(monkeypatch, ssh=ds.ProbeResult(True, "可写", 9))
     svc.probe(db, airflow_row.id, target="ssh")
     db.refresh(airflow_row)
-    assert airflow_row.deploy_status == "connected"
-    assert airflow_row.deploy_error is None
+    assert airflow_row.connection_status == "connected"
+    assert airflow_row.connection_error is None
 
 
 def test_unknown_target_is_rejected_with_the_available_ones(svc, db, airflow_row):
@@ -184,7 +182,7 @@ def test_unknown_target_is_rejected_with_the_available_ones(svc, db, airflow_row
 
 
 def _ledger(row) -> dict:
-    return ds._loads(row.deploy_spec_json).get("_probe", {})
+    return ds._loads(row.settings_json).get("_probe", {})
 
 
 def test_saving_config_invalidates_the_probe_ledger(svc, db, airflow_row, monkeypatch):
@@ -201,17 +199,17 @@ def test_saving_config_invalidates_the_probe_ledger(svc, db, airflow_row, monkey
     svc.save_airflow(db, {"endpoint": "http://airflow-fixed:8080"})
     db.refresh(airflow_row)
     assert _ledger(airflow_row) == {}
-    assert airflow_row.deploy_status == "not_deployed"  # 保存≠可用，重测才有结论
+    assert airflow_row.connection_status == "unknown"  # 保存≠可用，重测才有结论
 
 
 def test_updating_connection_through_the_panel_also_invalidates(
     svc, db, airflow_row, monkeypatch
 ):
-    """面板走的是 update_component 这条路，同样要作废（SSH 主机在 deploy_spec.extra 里）。"""
+    """面板走的是 update_component 这条路，同样要作废（SSH 主机在 settings.extra 里）。"""
     _stub(monkeypatch, api=ds.ProbeResult(True, "连接成功", 5), ssh=ds.ProbeResult(False, "连不上"))
     svc.probe(db, airflow_row.id)
     svc.update_component(db, airflow_row.id, {
-        "deploy_spec": {"extra": {"ssh_host": "另一台", "dags_dir": "/opt/airflow/dags"}},
+        "settings": {"extra": {"ssh_host": "另一台", "dags_dir": "/opt/airflow/dags"}},
     })
     db.refresh(airflow_row)
     assert _ledger(airflow_row) == {}
@@ -224,31 +222,4 @@ def test_renaming_keeps_the_probe_ledger(svc, db, airflow_row, monkeypatch):
     svc.update_component(db, airflow_row.id, {"name": "Airflow 生产"})
     db.refresh(airflow_row)
     assert set(_ledger(airflow_row)) == {"api", "ssh"}
-    assert airflow_row.deploy_status == "connected"
-
-
-def test_deploy_verifies_only_the_component_itself(svc, db, airflow_row, monkeypatch):
-    """装完只验组件自身那条连接。
-
-    DAG 投递是 ontoMeta 侧另配的一条连接，装机时通常还没配——若部署后按「全部连接」
-    拨测，一次成功的安装会被那条没配的连接判成失败。
-    """
-    calls = _stub(
-        monkeypatch,
-        api=ds.ProbeResult(True, "连接成功", 5),
-        ssh=ds.ProbeResult(False, "缺少 SSH 主机（DAG 产物没有地方可投）"),
-    )
-    airflow_row.deploy_mode = "bare_metal"
-    airflow_row.deploy_spec_json = ds._dumps(
-        {"ssh_host": "1.2.3.4", "ssh_user": "root", "port": 8081}
-    )
-    db.commit()
-    installed = {"endpoint": "http://1.2.3.4:8081", "username": "admin", "password": "pw"}
-    with patch("app.services.install_recipes.run_install", return_value=installed):
-        result = svc.deploy(db, airflow_row.id)
-
-    assert result["ok"] is True
-    assert calls == {"api": 1, "ssh": 0}
-    db.refresh(airflow_row)
-    # 没测过的 DAG 投递不给 connected（那是假绿灯），但也不能报成未部署（那是假红叉）
-    assert airflow_row.deploy_status == "deployed"
+    assert airflow_row.connection_status == "connected"

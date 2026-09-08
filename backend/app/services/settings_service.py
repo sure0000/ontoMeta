@@ -72,11 +72,31 @@ class DatahubRuntimeConfig:
 
 
 @dataclass
+class SupersetRuntimeConfig:
+    """Superset 连接的运行期投影。
+
+    ``public_base_url`` 与 ``base_url`` 是两个地址：前者给用户的浏览器（跳转链接、
+    嵌入 SDK 的 supersetDomain），后者给后端发 REST。同一套部署里它们常常不同
+    （内网 ip vs 对外域名），推导任何一个都会在某一端断掉，故没填就退回 base_url。
+    """
+
+    base_url: str
+    username: str | None
+    password: str | None
+    database_id: int | None
+    public_base_url: str
+    enabled: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.username and self.password)
+
+
+@dataclass
 class LlmRuntimeConfig:
     api_base_url: str
     api_key: str | None
     model: str
-
 
 @dataclass
 class DraftGenerationRuntimeConfig:
@@ -168,8 +188,7 @@ def mask_secret(value: str | None) -> str | None:
 
 class SettingsService:
     # 进程级缓存：标记默认配置已在数据库中初始化过。
-    # 一旦确认存在，后续请求可跳过 ensure_defaults 的探针查询；
-    # 当唯一 LLM 行被删除时由 delete_llm_service 重置。
+    # 一旦确认存在，后续请求可跳过 ensure_defaults 的探针查询。
     _defaults_initialized: bool = False
 
     def __init__(self) -> None:
@@ -188,21 +207,9 @@ class SettingsService:
         self.ensure_defaults(db)
         return self._deps.get_llm(db, service_id)
 
-    def create_llm_service(self, db: Session, data: dict) -> dict:
-        self.ensure_defaults(db)
-        return self._deps.create_llm(db, data)
-
     def update_llm_service(self, db: Session, service_id: str, data: dict) -> dict | None:
         self.ensure_defaults(db)
         return self._deps.update_llm(db, service_id, data)
-
-    def delete_llm_service(self, db: Session, service_id: str) -> bool:
-        self.ensure_defaults(db)
-        ok = self._deps.delete_llm(db, service_id)
-        if ok and not self._deps.list_llm(db):
-            # 全部 LLM 配置被删除：下次访问需重新初始化默认项
-            SettingsService._defaults_initialized = False
-        return ok
 
     def get_datahub_settings(self, db: Session) -> dict:
         self.ensure_defaults(db)
@@ -221,6 +228,25 @@ class SettingsService:
             token=c.get("token"),
             fabric=c.get("fabric") or "PROD",
             request_timeout=float(c.get("request_timeout") or 90),
+        )
+
+    def get_superset_runtime(self, db: Session) -> SupersetRuntimeConfig:
+        """Superset 连接（纯数据库读取，见法则：配置只在设置页，不读环境变量）。"""
+        self.ensure_defaults(db)
+        c = self._deps.get_superset(db)
+        base = str(c.get("base_url") or "").rstrip("/")
+        database_id = c.get("database_id")
+        try:
+            database_id = int(database_id) if database_id not in (None, "") else None
+        except (TypeError, ValueError):
+            database_id = None
+        return SupersetRuntimeConfig(
+            base_url=base,
+            username=c.get("username") or None,
+            password=c.get("password") or None,
+            database_id=database_id,
+            public_base_url=str(c.get("public_base_url") or "").rstrip("/") or base,
+            enabled=bool(c.get("enabled")),
         )
 
     def get_mcp_settings(self, db: Session) -> dict:
@@ -490,7 +516,3 @@ class SettingsService:
         # Phase 1：把旧表（DatahubSetting/LlmServiceConfig）搬进统一注册表。
         # 幂等：已存在对应行则跳过。此后 DataHub/LLM 读取侧只认注册表。
         self._deps.migrate_from_legacy(db)
-
-    def _clear_default_llm(self, db: Session) -> None:
-        for item in db.query(LlmServiceConfig).filter(LlmServiceConfig.is_default.is_(True)).all():
-            item.is_default = False

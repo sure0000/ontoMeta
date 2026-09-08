@@ -138,7 +138,7 @@ export function SettingsPage() {
       <PageHeader
         icon={<SettingOutlined />}
         title="系统设置"
-        description="管理依赖组件、Doris 统一数仓、业务数据源、生成配置与鉴权。LLM / DataHub / Airflow 统一在「基础设施」中管理。"
+        description="连接 LLM / DataHub / Airflow / Doris 数仓等已有服务，并管理业务数据源、生成配置与鉴权。基础设施组件是固定的，只登记连接、不由 ontoMeta 部署。"
       />
 
       {error && (

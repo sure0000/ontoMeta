@@ -1,6 +1,6 @@
 """dependency_components: 依赖组件统一部署管理注册表（Phase 0）
 
-见 docs/DEPENDENCY_DEPLOYMENT_REDESIGN.md §3。本表与既有五张设置表并行存在，
+见 docs/DEPENDENCY_COMPONENTS.md。本表与既有五张设置表并行存在，
 Phase 0 不接读取侧；Phase 1 起读取侧改为从本表投影。
 ERPNext 等外部源库不在此纳管（走 data_sources）。
 

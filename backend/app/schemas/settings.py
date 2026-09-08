@@ -30,23 +30,12 @@ class LlmServiceConfigDetail(LlmServiceConfigOut):
     api_key: str | None = None
 
 
-class LlmServiceConfigCreate(BaseModel):
-    name: str
-    provider: str = "deepseek"
-    api_base_url: str = "https://api.deepseek.com"
-    api_key: str | None = None
-    model: str
-    is_default: bool = False
-    enabled: bool = True
-
-
 class LlmServiceConfigUpdate(BaseModel):
     name: str | None = None
     provider: str | None = None
     api_base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
-    is_default: bool | None = None
     enabled: bool | None = None
 
 

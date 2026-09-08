@@ -1,20 +1,17 @@
-"""依赖组件统一部署管理路由（DEPENDENCY_DEPLOYMENT_REDESIGN Phase 0）。
+"""依赖组件登记路由：固定组件的连接信息 + 拨测。
 
-每个依赖组件在设置页选一种部署方式（已有/Docker/K8s/物理机），部署成功自动回写连接，
-或选「已有」手填连接。本组路由独立于既有 /settings/llm-services 等（Phase 1 起读取侧
-改为从本表投影，旧路由转薄层）。
+ontoMeta 只连接已经跑着的服务，所以这里没有创建/删除/部署——组件由
+``ensure_components`` 兜底补齐，面板只能编辑连接和拨测。
 """
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas import (
-    DependencyComponentCreate,
     DependencyComponentOut,
     DependencyComponentUpdate,
     DependencySchemaOut,
-    DeployResultOut,
     ProbeResultOut,
 )
 from app.services.dependency_service import DependencyComponentService
@@ -25,22 +22,15 @@ _service = DependencyComponentService()
 
 @router.get("/settings/dependencies/schema", response_model=DependencySchemaOut)
 def get_dependency_schema():
-    """组件目录 + 连接/部署 schema 自描述，供前端表单生成。"""
+    """组件目录 + 连接 schema 自描述，供前端表单生成。"""
     return _service.schema()
 
 
 @router.get("/settings/dependencies", response_model=list[DependencyComponentOut])
 def list_dependencies(db: Session = Depends(get_db)):
+    # 组件不由用户新增，缺的行在这里补齐——否则新库里面板是空的，而用户没有"新增"可点。
+    _service.ensure_components(db)
     return [_service.to_out(r) for r in _service.list_components(db)]
-
-
-@router.post("/settings/dependencies", response_model=DependencyComponentOut)
-def create_dependency(data: DependencyComponentCreate, db: Session = Depends(get_db)):
-    try:
-        row = _service.create_component(db, data.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _service.to_out(row)
 
 
 @router.get("/settings/dependencies/{component_id}", response_model=DependencyComponentOut)
@@ -64,18 +54,11 @@ def update_dependency(
     return _service.to_out(row)
 
 
-@router.delete("/settings/dependencies/{component_id}")
-def delete_dependency(component_id: str, db: Session = Depends(get_db)):
-    if not _service.delete_component(db, component_id):
-        raise HTTPException(status_code=404, detail="依赖组件不存在")
-    return {"id": component_id, "deleted": True}
-
-
 @router.post("/settings/dependencies/{component_id}/probe", response_model=ProbeResultOut)
 def probe_dependency(
     component_id: str, target: str | None = None, db: Session = Depends(get_db)
 ):
-    """拨测当前连接信息（按组件类型分派，复用既有 LLM/Airflow/SQLAlchemy 拨测）。
+    """拨测当前连接信息（按组件类型分派）。
 
     ``target``：只测某一条连接（Airflow 的 ``api`` / ``ssh``），省略则全测。一个组件的
     几条连接互不相干，得能分开测——否则 SSH 没配好会把「调度 API 其实是通的」也盖掉。
@@ -84,28 +67,3 @@ def probe_dependency(
     return ProbeResultOut(
         ok=result.ok, message=result.message, latency_ms=result.latency_ms, parts=result.parts
     )
-
-
-@router.post("/settings/dependencies/{component_id}/deploy", response_model=DeployResultOut)
-def deploy_dependency(
-    component_id: str,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    """执行部署。external 同步拨测直接返回；docker/k8s/bare_metal（尤其 SSH 安装可能
-    持续数分钟）先置 deploying 立即返回，实际部署交后台执行，前端轮询组件状态。"""
-    try:
-        result = _service.start_deploy(db, component_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if result.pop("need_background", False):
-        background_tasks.add_task(_service.run_deploy_detached, component_id)
-    return DeployResultOut(**result)
-
-
-@router.post("/settings/dependencies/{component_id}/teardown")
-def teardown_dependency(component_id: str, db: Session = Depends(get_db)):
-    try:
-        return _service.teardown(db, component_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc

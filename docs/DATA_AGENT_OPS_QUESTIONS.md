@@ -176,10 +176,10 @@
 | `component-02` | DataHub 依赖组件是否可用？ | `get_ops_record(component)` |
 | `component-03` | Doris 组件部署失败原因是什么？ | `get_ops_record(component)` |
 | `component-04` | 列出所有依赖组件状态。 | `get_ops_record(component)` |
-| `component-05` | LLM 组件上次部署结果怎么样？ | `get_ops_record(component)` |
-| `component-06` | 哪个组件部署失败了？ | `get_ops_record(component)` |
-| `component-07` | Airflow 的组件状态和部署方式是什么？ | `get_ops_record(component)` |
-| `component-08` | 查看依赖组件的部署结果。 | `get_ops_record(component)` |
+| `component-05` | LLM 组件上次拨测结果怎么样？ | `get_ops_record(component)` |
+| `component-06` | 哪个组件连不上？ | `get_ops_record(component)` |
+| `component-07` | Airflow 组件现在是什么状态？ | `get_ops_record(component)` |
+| `component-08` | 查看依赖组件的连通结果。 | `get_ops_record(component)` |
 
 ### `migration`：K 生产割接
 
