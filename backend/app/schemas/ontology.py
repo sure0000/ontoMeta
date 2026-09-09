@@ -257,6 +257,7 @@ class ObjectLandingOut(BaseModel):
     queryable: bool = False
     last_success_at: datetime | None = None
     materialization_artifact_id: str | None = None
+    datasource_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -269,6 +270,7 @@ class LogicLandingOut(BaseModel):
     status: str | None = None
     queryable: bool = False
     last_success_at: datetime | None = None
+    datasource_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -293,6 +295,7 @@ class DatasetOut(BaseModel):
     source_ready: bool
     mode: str | None = None
     last_success_at: datetime | None = None
+    datasource_id: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -19,17 +19,52 @@ RATE_LIMITED_PREFIX = "RATE_LIMITED:"
 
 
 def tool_catalog() -> list[dict[str, Any]]:
-    """全部已注册工具：名称、描述、最低角色。按名称排序。"""
+    """全部已注册工具：名称、中文名、分类、描述、最低角色。
+
+    排序是**分类顺序优先、类内按名称**——目录的用途是"看职责"，而按英文名把
+    ``apply_lineage_package`` 和 ``advance_task_flow`` 排到一起没有任何意义。
+    """
     # 局部导入避免 import 期循环（tools 包在导入时注册，本模块被工具/REST 双向引用）。
-    from .tools import TOOL_REGISTRY, tool_required_role
+    from .tools import (
+        TOOL_CATEGORIES,
+        TOOL_REGISTRY,
+        tool_category,
+        tool_category_label,
+        tool_display_name,
+        tool_required_role,
+    )
+
+    order = list(TOOL_CATEGORIES)
+
+    def sort_key(t):
+        category = tool_category(t)
+        rank = order.index(category) if category in order else len(order)
+        return (rank, t.name)
 
     return [
         {
             "name": t.name,
+            "display_name": tool_display_name(t),
+            "category": tool_category(t),
+            "category_label": tool_category_label(t),
             "description": t.description,
             "required_role": tool_required_role(t),
         }
-        for t in sorted(TOOL_REGISTRY.values(), key=lambda t: t.name)
+        for t in sorted(TOOL_REGISTRY.values(), key=sort_key)
+    ]
+
+
+def category_catalog() -> list[dict[str, Any]]:
+    """分类目录：键、中文栏目名、工具数。按声明顺序，空分类不返回。"""
+    from .tools import TOOL_CATEGORIES
+
+    counts: dict[str, int] = {}
+    for tool in tool_catalog():
+        counts[tool["category"]] = counts.get(tool["category"], 0) + 1
+    return [
+        {"key": key, "label": label, "tool_count": counts[key]}
+        for key, label in TOOL_CATEGORIES.items()
+        if counts.get(key)
     ]
 
 
@@ -72,6 +107,7 @@ def service_status(db=None) -> dict[str, Any]:
         "default_role": (runtime.mcp_default_role or "").strip() or None,
         "rate_limit": rate_limit_config(runtime),
         "tool_count": len(tools),
+        "categories": category_catalog(),
         "tools": tools,
     }
 

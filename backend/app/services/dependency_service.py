@@ -76,9 +76,9 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("ssh_password", "str", True, False, None),
     ],
     # Superset：只连不部署，ontoMeta 只往里推数据集/图表/看板，不建 database。
-    #   · database_id 指 Superset 里那条指向数仓（Doris）的 database 连接。**不推导**：
-    #     由 Superset 侧建好并自测通过，ontoMeta 只认这个 id——否则就得把数仓凭据
-    #     再复制一份推给 Superset，那是另一个人管的另一套密钥。
+    #   · 挂哪条 database（**连接**）不在这里配：由落点自己的数据源解析出来并缓存在
+    #     ``data_sources.superset_database_id``（见 services/superset_database）。本体绑定的
+    #     数据源不止一个、将来还会有别的引擎，一个全局编号说不清该用哪条连接。
     #   · public_base_url 是用户浏览器可达的地址。后端从哪儿访问 Superset 与用户从哪儿
     #     访问它是两回事（内网地址 vs 对外域名），嵌入与跳转链接只能用后者，故单独配。
     #     留空则回落到 base_url。
@@ -86,7 +86,6 @@ CONNECTION_SCHEMAS: dict[str, list[ConnectionField]] = {
         ("base_url", "str", False, True, "http://localhost:8088"),
         ("username", "str", False, True, None),
         ("password", "str", True, True, None),
-        ("database_id", "int", False, False, None),
         ("public_base_url", "str", False, False, None),
     ],
     # MCP 不是外部服务，是 ontoMeta 自己的一层：这里只是借本表存它的运行期开关
@@ -880,13 +879,14 @@ def _probe_datahub(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
 
 
 def _probe_superset(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
-    """拨测 Superset：登录拿 JWT，再用它打一次真实 REST，最后确认 database_id 存在。
+    """拨测 Superset：登录拿 JWT，再用它打一次真实 REST。
 
-    三步都不能省，每一步对应一种"填了等于没填"：
+    两步都不能省，每一步对应一种"填了等于没填"：
     * 只看 ``/login`` 的状态码 → 反代/静态页会回 200 + HTML，假绿灯（与 DataHub 同款坑）；
-    * 登录成功但带版本前缀的 API 用不了（反代吞了 Authorization 头、账号没有任何角色）；
-    * ``database_id`` 填错 → 要到 Agent 真去建数据集时才炸，那时错误在另一个进程里。
-      没填则只提示，不算失败：先把连接配通、回头再补 id 是合理的次序。
+    * 登录成功但带版本前缀的 API 用不了（反代吞了 Authorization 头、账号没有任何角色）。
+
+    这里**不校验数据集挂哪条 database**：那由落点自己的数据源在建数据集时解析
+    （见 services/superset_database），不是一个可以在这一页预先填死的全局值。
     """
     from app.connectors.superset import SupersetClient, SupersetError
 
@@ -908,22 +908,6 @@ def _probe_superset(conn: dict[str, Any], extra: dict[str, Any]) -> ProbeResult:
         except Exception as exc:  # noqa: BLE001
             return ProbeResult(False, f"{type(exc).__name__}: {exc}"[:300])
         latency = int((time.perf_counter() - start) * 1000)
-
-        database_id = conn.get("database_id")
-        if database_id in (None, ""):
-            return ProbeResult(
-                True,
-                "连接成功（未填 database_id：建数据集前需在此填上 Superset 里指向数仓的 database）",
-                latency,
-            )
-        try:
-            client.get_database(int(database_id))
-        except SupersetError as exc:
-            return ProbeResult(
-                False, f"database_id={database_id} 读不到：{exc}"[:300], latency
-            )
-        except (TypeError, ValueError):
-            return ProbeResult(False, f"database_id 不是整数：{database_id!r}", latency)
         return ProbeResult(True, "连接成功", latency)
     finally:
         client.close()

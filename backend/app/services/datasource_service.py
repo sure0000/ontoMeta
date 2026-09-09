@@ -235,6 +235,7 @@ class DataSourceService:
             "status": ds.status,
             "mapping": _loads(ds.mapping_json, None),
             "catalog_name": ds.catalog_name,
+            "superset_database_id": ds.superset_database_id,
             "tested_at": ds.tested_at,
             "created_at": ds.created_at,
             "updated_at": ds.updated_at,

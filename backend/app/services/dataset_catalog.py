@@ -84,6 +84,9 @@ class DatasetEntry:
     queryable: bool
     mode: str | None = None  # 仅 ODS：full / incremental / cdc
     last_success_at: datetime | None = None
+    # 这张表所在的数据源（``data_sources.id``）。``physical`` 只说得清库和表，说不清
+    # 引擎与实例——要为这张表选一条外部连接（如 Superset 的 database）就得靠它。
+    datasource_id: str | None = None
 
     @property
     def source_ready(self) -> bool:
@@ -151,6 +154,7 @@ def _object_entries(
                 queryable=False,
                 mode=landing.ods_mode,
                 last_success_at=landing.last_success_at,
+                datasource_id=landing.datasource_id,
             )
         )
     if landing.serving_table:
@@ -172,6 +176,7 @@ def _object_entries(
                 ),
                 queryable=landing.queryable,
                 last_success_at=landing.last_success_at,
+                datasource_id=landing.datasource_id,
             )
         )
     return entries
@@ -194,6 +199,7 @@ def _logic_entry(
         state=landing.state,
         queryable=landing.queryable,
         last_success_at=landing.last_success_at,
+        datasource_id=landing.datasource_id,
     )
 
 

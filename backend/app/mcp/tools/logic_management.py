@@ -114,6 +114,8 @@ def _compile_stored_logic(db, logic: BusinessLogic):
 @register_tool
 class ListLogicCategoriesTool:
     name = "list_logic_categories"
+    display_name = "口径分类目录"
+    category = "logic"
     required_role = "reader"
     description = "列出业务逻辑分类及每类数量；create_logic/update_logic 的 category_id 必须来自此目录。"
     input_schema = {"type": "object", "properties": {}}
@@ -139,6 +141,8 @@ class ListLogicCategoriesTool:
 @register_tool
 class UpdateLogicTool:
     name = "update_logic"
+    display_name = "编辑口径"
+    category = "logic"
     required_role = "editor"
     description = "编辑业务逻辑的名称、说明、类型或分类；表达式必须使用 update_logic_expression 编译后更新。"
     input_schema = {
@@ -184,6 +188,8 @@ class UpdateLogicTool:
 @register_tool
 class BindLogicObjectTool:
     name = "bind_logic_object"
+    display_name = "绑定口径对象"
+    category = "logic"
     required_role = "editor"
     description = "把同一本体中的真实业务对象绑定到口径；对象 ID 必须来自 query_objects/query_object_detail。"
     input_schema = {"type": "object", "properties": {"logic_id": {"type": "string"}, "object_type_id": {"type": "string"}, "role": {"type": "string", "enum": list(_OBJECT_ROLES)}}, "required": ["logic_id", "object_type_id"]}
@@ -207,6 +213,8 @@ class BindLogicObjectTool:
 @register_tool
 class UnbindLogicObjectTool:
     name = "unbind_logic_object"
+    display_name = "解绑口径对象"
+    category = "logic"
     required_role = "editor"
     description = "解除一条业务逻辑对象绑定；只影响绑定关系，不删除对象或口径。"
     input_schema = {"type": "object", "properties": {"binding_id": {"type": "string"}}, "required": ["binding_id"]}
@@ -226,6 +234,8 @@ class UnbindLogicObjectTool:
 @register_tool
 class BindLogicPropertyTool:
     name = "bind_logic_property"
+    display_name = "绑定口径字段"
+    category = "logic"
     required_role = "editor"
     description = "把同一本体中的真实字段绑定到口径；property_id 必须来自 query_object_detail。"
     input_schema = {"type": "object", "properties": {"logic_id": {"type": "string"}, "property_id": {"type": "string"}, "role": {"type": "string", "enum": list(_PROPERTY_ROLES)}}, "required": ["logic_id", "property_id"]}
@@ -249,6 +259,8 @@ class BindLogicPropertyTool:
 @register_tool
 class UnbindLogicPropertyTool:
     name = "unbind_logic_property"
+    display_name = "解绑口径字段"
+    category = "logic"
     required_role = "editor"
     description = "解除一条业务逻辑字段绑定；只影响绑定关系，不删除字段或口径。"
     input_schema = {"type": "object", "properties": {"binding_id": {"type": "string"}}, "required": ["binding_id"]}
@@ -268,6 +280,8 @@ class UnbindLogicPropertyTool:
 @register_tool
 class ReviewLogicPublishTool:
     name = "review_logic_publish"
+    display_name = "口径发布审查"
+    category = "logic"
     required_role = "reader"
     description = "审查业务逻辑是否具备发布条件，编译已存表达式并返回警告、compiled_sql 要点和确认 digest；不发布、不写库。"
     input_schema = {"type": "object", "properties": {"logic_id": {"type": "string"}}, "required": ["logic_id"]}
@@ -307,6 +321,8 @@ class ReviewLogicPublishTool:
 @register_tool
 class PublishLogicTool:
     name = "publish_logic"
+    display_name = "发布口径"
+    category = "logic"
     required_role = "publisher"
     description = "发布已通过 review_logic_publish 的业务逻辑。必须传同一 confirmation_digest 和宿主 ask_user_question 的批准；否则只返回阻断。"
     input_schema = {"type": "object", "properties": {"logic_id": {"type": "string"}, "confirmation_digest": {"type": "string"}, "host_confirmation": {"type": "object"}}, "required": ["logic_id", "confirmation_digest"]}

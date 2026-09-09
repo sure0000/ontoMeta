@@ -113,15 +113,39 @@ class AuthContext:
         return role_satisfies(self.role, minimum)
 
 
+# 工具分类：键 → 中文栏目名。**顺序即展示顺序**（工具目录、前端工具页都照这个走），
+# 大致按一条数据从接进来到用出去的顺序排：本体 → 口径 → 建模 → 接入 → 血缘 →
+# 建数 → 执行 → 落点 → 取数 → 应用 → 服务自身。
+TOOL_CATEGORIES: dict[str, str] = {
+    "ontology": "本体与对象",
+    "logic": "业务口径",
+    "modeling": "建模工单",
+    "onboarding": "数据接入",
+    "lineage": "数据血缘",
+    "task_flow": "建数流程与提案",
+    "task_run": "任务执行与追踪",
+    "landing": "落点与运行记录",
+    "query": "取数与分析",
+    "viz": "数据应用",
+    "service": "服务与审计",
+}
+
+
 class McpTool(Protocol):
     """MCP 工具接口。
 
     ``required_role`` 声明调用该工具所需的最低角色（reader/editor/reviewer/publisher），
     由服务器在调用前统一强制（工具的 ``execute`` 自身不再各写一遍鉴权）。缺省 reader：
     Phase 2 全是只读工具。写侧/代跑 SQL 的工具必须显式抬高——见各工具的注释。
+
+    ``display_name``（中文名）与 ``category``（分类键，取自 ``TOOL_CATEGORIES``）是给**人**
+    看的：73 个工具排成一张英文平表没人读得下去。两者都由 ``register_tool`` 在注册时强制，
+    加工具时漏写会直接炸在导入期，而不是到了界面上才发现多出一行没归属的灰字。
     """
 
     name: str
+    display_name: str
+    category: str
     description: str
     input_schema: dict
     required_role: str
@@ -136,6 +160,21 @@ def tool_required_role(tool: "McpTool") -> str:
     return getattr(tool, "required_role", "reader") or "reader"
 
 
+def tool_display_name(tool: "McpTool") -> str:
+    """工具中文名；未声明时退回英文标识名（注册时已拦，这里只是防御）。"""
+    return getattr(tool, "display_name", "") or tool.name
+
+
+def tool_category(tool: "McpTool") -> str:
+    """工具分类键。"""
+    return getattr(tool, "category", "") or ""
+
+
+def tool_category_label(tool: "McpTool") -> str:
+    """工具分类的中文栏目名。"""
+    return TOOL_CATEGORIES.get(tool_category(tool), "")
+
+
 # 工具注册表
 TOOL_REGISTRY: dict[str, McpTool] = {}
 
@@ -148,6 +187,8 @@ def register_tool(tool_class):
         @register_tool
         class MyTool:
             name = "my_tool"
+            display_name = "中文名"
+            category = "ontology"   # 见 TOOL_CATEGORIES
             description = "..."
             input_schema = {...}
 
@@ -155,6 +196,15 @@ def register_tool(tool_class):
                 ...
     """
     tool = tool_class()
+    display = getattr(tool, "display_name", "")
+    category = getattr(tool, "category", "")
+    if not display:
+        raise ValueError(f"MCP 工具 {tool.name} 没有声明 display_name（中文名）")
+    if category not in TOOL_CATEGORIES:
+        raise ValueError(
+            f"MCP 工具 {tool.name} 的 category={category!r} 不在 TOOL_CATEGORIES 里："
+            f"{sorted(TOOL_CATEGORIES)}"
+        )
     TOOL_REGISTRY[tool.name] = tool
     return tool_class
 
@@ -199,10 +249,14 @@ from . import (  # noqa: E402,F401
 
 __all__ = [
     "TOOL_REGISTRY",
+    "TOOL_CATEGORIES",
     "register_tool",
     "get_tool",
     "list_tools",
     "tool_required_role",
+    "tool_display_name",
+    "tool_category",
+    "tool_category_label",
     "ToolResult",
     "AuthContext",
     "McpTool",

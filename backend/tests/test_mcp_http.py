@@ -157,6 +157,24 @@ def test_rest_info_returns_catalog(client, admin_headers):
     assert data["audit"]["reachable"] is True
 
 
+def test_rest_info_carries_chinese_names_and_categories(client, admin_headers):
+    """工具页拿这份回包分组渲染：少了任何一个字段，界面就退回英文平表。"""
+    data = client.get("/api/mcp/info", headers=admin_headers).json()
+    assert data["categories"], "缺分类目录"
+    assert sum(c["tool_count"] for c in data["categories"]) == data["tool_count"]
+
+    labels = {c["key"]: c["label"] for c in data["categories"]}
+    for tool in data["tools"]:
+        assert tool["display_name"], f"{tool['name']} 没有中文名"
+        assert tool["category"] in labels, f"{tool['name']} 的分类不在目录里"
+        assert tool["category_label"] == labels[tool["category"]]
+
+    # 同类相邻——前端的 rowSpan 合并靠的就是这个顺序。
+    order = [c["key"] for c in data["categories"]]
+    ranks = [order.index(t["category"]) for t in data["tools"]]
+    assert ranks == sorted(ranks)
+
+
 def test_rest_stats_and_audit_ok_for_admin(client, admin_headers):
     assert client.get("/api/mcp/stats", headers=admin_headers).status_code == 200
     r = client.get("/api/mcp/audit?limit=5", headers=admin_headers)

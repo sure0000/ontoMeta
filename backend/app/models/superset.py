@@ -50,8 +50,6 @@ class SupersetAsset(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     asset_type: Mapped[str] = mapped_column(String(16), index=True)
     superset_id: Mapped[int] = mapped_column(Integer, index=True)
-    #: 看板开启嵌入后拿到的 uuid，是 ``embedDashboard`` 的 id。只有 dashboard 有。
-    embedded_uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     title: Mapped[str] = mapped_column(String(255))
     #: Superset 内的相对路径（如 ``/explore/?slice_id=12``）。绝对地址由运行期配置的

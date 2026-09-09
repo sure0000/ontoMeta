@@ -29,7 +29,13 @@ from .audit import record_call
 from .auth import resolve_auth_context, resolve_http_auth
 from .rate_limit import check_rate_limit
 from .skills import OUTPUT_CONTRACT, get_skill, list_skills
-from .tools import TOOL_REGISTRY, AuthContext, ToolResult, tool_required_role
+from .tools import (
+    TOOL_REGISTRY,
+    AuthContext,
+    ToolResult,
+    tool_display_name,
+    tool_required_role,
+)
 
 # stdout 是 MCP 协议通道，日志一律走 stderr——print/日志落到 stdout 会撑破 JSON-RPC 帧。
 logging.basicConfig(level=logging.INFO)
@@ -135,10 +141,15 @@ def _error_result(message: str) -> types.CallToolResult:
 
 
 async def handle_list_tools(context, params) -> types.ListToolsResult:
-    """列出所有已注册工具。"""
+    """列出所有已注册工具。
+
+    ``title`` 给的是中文名：协议里它就是"给人看的显示名"，客户端（含 ontoMeta 自己的
+    工具页）拿它渲染列表，模型仍按 ``name`` 调用。
+    """
     tools = [
         types.Tool(
             name=tool.name,
+            title=tool_display_name(tool),
             description=f"{tool.description.rstrip()}{TOOL_OUTPUT_FALLBACK}",
             inputSchema=tool.input_schema,
         )

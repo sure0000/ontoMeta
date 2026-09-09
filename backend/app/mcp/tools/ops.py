@@ -139,6 +139,8 @@ class GetLineageTool:
     """对象的血缘 / 上下游邻域子图"""
 
     name = "get_lineage"
+    display_name = "对象血缘"
+    category = "lineage"
     required_role = "reader"
     description = (
         "查某个业务对象的血缘与上下游邻域（中心对象 + depth 跳关系）。\n"
@@ -312,6 +314,8 @@ class GetLandingTool:
     """对象 / 口径的物理落点"""
 
     name = "get_landing"
+    display_name = "落点查询"
+    category = "landing"
     required_role = "reader"
     description = (
         "读业务对象或业务口径的**真实物理落点**：落到哪张表、表建了吗、数搬了吗、"
@@ -516,6 +520,8 @@ class GetOpsRecordTool:
     """按问题族读运行记录"""
 
     name = "get_ops_record"
+    display_name = "运行记录"
+    category = "landing"
     required_role = "reader"
     description = (
         "读**已经发生过**的权威运行记录，只读，不创建也不执行任何任务。按 family 选族：\n"

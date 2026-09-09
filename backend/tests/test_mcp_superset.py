@@ -122,7 +122,7 @@ def test_create_chart_passes_the_actor_through(monkeypatch):
     """建的人要留在登记簿里，否则"这张图是谁建的"没人答得上。"""
     cfg = SupersetRuntimeConfig(
         base_url="http://s:8088", username="u", password="p",
-        database_id=1, public_base_url="http://s:8088", enabled=True,
+        public_base_url="http://s:8088", enabled=True,
     )
     seen: dict = {}
     monkeypatch.setattr(svc, "runtime", lambda db: cfg)
@@ -154,11 +154,15 @@ def test_create_chart_passes_the_actor_through(monkeypatch):
     assert seen["viz"] == "bar"
 
 
-def test_dashboard_reports_embed_unavailable_without_failing(monkeypatch):
-    """没开嵌入不是建失败：看板可用，只是不能内嵌，回执要说清。"""
+def test_dashboard_with_unlinked_charts_is_not_reported_as_done(monkeypatch):
+    """挂不上图的看板打开是空白的——回执不许说"完成"。
+
+    但看板已经建出来了：错误信息里必须带着它的 id 和链接，否则调用方只会重建一个，
+    Superset 上留下一串空看板。
+    """
     cfg = SupersetRuntimeConfig(
         base_url="http://s:8088", username="u", password="p",
-        database_id=1, public_base_url="http://s:8088", enabled=True,
+        public_base_url="http://s:8088", enabled=True,
     )
     monkeypatch.setattr(svc, "runtime", lambda db: cfg)
     monkeypatch.setattr(svc, "client", lambda cfg: _FakeClient())
@@ -168,12 +172,13 @@ def test_dashboard_reports_embed_unavailable_without_failing(monkeypatch):
         lambda *a, **k: {
             "dashboard_id": 3,
             "url": "http://s:8088/superset/dashboard/3/",
-            "embedded_uuid": None,
-            "embed_error": "HTTP 404",
-            "chart_ids": [1],
+            "chart_ids": [1, 2],
+            "unlinked_chart_ids": [2],
             "asset_id": "x",
         },
     )
-    result = call("create_superset_dashboard", {"title": "销售看板", "chart_ids": [1]})
-    assert result.success is True
-    assert result.metadata["embed_unavailable"] == "HTTP 404"
+    result = call("create_superset_dashboard", {"title": "销售看板", "chart_ids": [1, 2]})
+    assert result.success is False
+    assert "[2]" in result.error
+    assert "3" in result.error and "dashboard/3" in result.error
+    assert result.data["dashboard_id"] == 3  # 别让调用方以为看板没建成

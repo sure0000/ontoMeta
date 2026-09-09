@@ -83,7 +83,6 @@ class SupersetRuntimeConfig:
     base_url: str
     username: str | None
     password: str | None
-    database_id: int | None
     public_base_url: str
     enabled: bool = False
 
@@ -235,16 +234,10 @@ class SettingsService:
         self.ensure_defaults(db)
         c = self._deps.get_superset(db)
         base = str(c.get("base_url") or "").rstrip("/")
-        database_id = c.get("database_id")
-        try:
-            database_id = int(database_id) if database_id not in (None, "") else None
-        except (TypeError, ValueError):
-            database_id = None
         return SupersetRuntimeConfig(
             base_url=base,
             username=c.get("username") or None,
             password=c.get("password") or None,
-            database_id=database_id,
             public_base_url=str(c.get("public_base_url") or "").rstrip("/") or base,
             enabled=bool(c.get("enabled")),
         )

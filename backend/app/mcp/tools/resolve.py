@@ -114,6 +114,8 @@ class ResolveSubjectTool:
     """词 → 真实主体"""
 
     name = "resolve_subject"
+    display_name = "主体解析"
+    category = "ontology"
     required_role = "reader"
     description = (
         "把用户说的词（「客户」「销售订单」「公司」）解析成真实主体，一次给全下一步要的信息："

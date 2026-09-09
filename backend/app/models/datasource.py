@@ -64,6 +64,11 @@ class DataSource(Base):
     mapping_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # StarRocks 多目录架构：NULL/"internal"=warehouse，其他值=源库 catalog 名（如"erp"/"crm"）
     catalog_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 这个数据源在 Superset 里对应的 database（连接）编号。首次建数据集时由
+    # ``services/superset_database.resolve_database_id`` 按 host/port 比对写入并缓存；
+    # 也可以直接 PATCH 覆盖，作为自动匹配认不出来时的人工兜底。
+    # 是「连接」不是「库」——库由落点的 ``库.表`` 拆出来单独传给 Superset。
+    superset_database_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="untested")
     tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

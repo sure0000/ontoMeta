@@ -60,6 +60,10 @@ class ObjectLanding:
     queryable: bool = False
     last_success_at: datetime | None = None
     materialization_artifact_id: str | None = None
+    # 这张表**建在哪个数据源上**。库名只说得清「哪个库」，说不清「哪台机器、哪种引擎」——
+    # 下游（如 Superset 建数据集）要选连接，就必须知道后者。值来自契约/部署已经记好的
+    # 绑定关系，不在这里推导。
+    datasource_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ class LogicLanding:
     status: str | None = None
     queryable: bool = False
     last_success_at: datetime | None = None
+    datasource_id: str | None = None
 
 
 def qualified_table(database: str | None, table: str | None) -> str | None:
@@ -239,6 +244,13 @@ def bulk_object_landings(
             materialization_artifact_id=(
                 deployment.materialization_artifact_id if deployment else None
             ),
+            # 与 ods_table 同一优先级：契约优先、Projection 补位。两个来源列都是 NOT NULL，
+            # 所以只要这个对象登记过，这里就一定有值。
+            datasource_id=(
+                contract.doris_datasource_id
+                if contract is not None
+                else (deployment.doris_datasource_id if deployment else None)
+            ),
         )
     return landings
 
@@ -287,8 +299,9 @@ def bulk_logic_landings(db: Session, logic_ids: list[str]) -> dict[str, LogicLan
             status=projection.status,
             queryable=bool(projection.queryable),
             last_success_at=projection.last_success_at,
+            datasource_id=deployment.doris_datasource_id,
         )
-        for logic_id, (projection, _deployment) in latest.items()
+        for logic_id, (projection, deployment) in latest.items()
     }
 
 

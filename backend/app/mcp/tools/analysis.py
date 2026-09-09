@@ -14,6 +14,8 @@ class AnalyzeQueryTool:
     """Run a governed query and summarize its returned rows."""
 
     name = "analyze_query"
+    display_name = "查询统计分析"
+    category = "query"
     # Analysis reads real warehouse data just like execute_sql.  Keep the same
     # configured minimum so this cannot become a lower-privilege SQL side door.
     required_role = settings.agent_run_sql_min_role

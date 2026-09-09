@@ -144,6 +144,8 @@ def _task_id(arguments: dict) -> str:
 @register_tool
 class DraftTaskTool:
     name = "draft_task"
+    display_name = "落成任务草稿"
+    category = "task_run"
     required_role = "editor"
     description = (
         "把 propose_* 返回的 draft_payload 落成治理任务并立即校验。"
@@ -265,6 +267,8 @@ class DraftTaskTool:
 @register_tool
 class ValidateTaskTool:
     name = "validate_task"
+    display_name = "任务校验"
+    category = "task_run"
     required_role = "editor"
     description = "重跑治理任务的校验闸门与 dry-run；不确认、不执行。"
     input_schema = {
@@ -292,6 +296,8 @@ class ValidateTaskTool:
 @register_tool
 class ConfirmTaskTool:
     name = "confirm_task"
+    display_name = "确认任务"
+    category = "task_run"
     required_role = "publisher"
     description = (
         "确认一个已通过校验的治理任务。本工具只确认，不触发执行。\n"
@@ -369,6 +375,8 @@ class ConfirmTaskTool:
 @register_tool
 class ExecuteTaskTool:
     name = "execute_task"
+    display_name = "执行任务"
+    category = "task_run"
     required_role = "publisher"
     description = (
         "异步执行一个已确认的治理任务并立即返回。返回成功只表示已受理；"
@@ -445,6 +453,8 @@ class ExecuteTaskTool:
 @register_tool
 class ConfirmTaskResultTool:
     name = "confirm_task_result"
+    display_name = "记录结果判断"
+    category = "task_run"
     # 记的是人的判断，不是一次执行——它不推任何东西到远端，故不走代执行授权闸，
     # 角色也停在 editor（与 draft_task 同级），不必要 publisher。
     required_role = "editor"

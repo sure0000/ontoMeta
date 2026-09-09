@@ -20,6 +20,8 @@ class ListAuditLogsTool:
     # 审计含每一次调用的主体与入参，只有 publisher 能看。
     required_role = "publisher"
     name = "list_audit_logs"
+    display_name = "审计日志"
+    category = "service"
     description = (
         "回读 MCP 工具调用审计日志（谁、什么身份、调了哪个工具、成没成、是否被授权拦下）。"
         "按时间倒序，可按工具名、是否成功、是否被拒过滤。仅 publisher。"

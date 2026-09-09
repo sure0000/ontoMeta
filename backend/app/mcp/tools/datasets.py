@@ -25,6 +25,8 @@ class ListDatasetsTool:
     """列出本体在数仓里的物理落点"""
 
     name = "list_datasets"
+    display_name = "落点目录"
+    category = "landing"
     required_role = "reader"
     description = (
         "列出一个本体在数仓里的**物理落点目录**：哪个对象/口径落到了哪张表、在哪一层、"

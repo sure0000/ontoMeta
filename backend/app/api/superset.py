@@ -1,16 +1,15 @@
 """Superset 资产的管理 REST（供前端「数据应用」页用）。
 
-前端不直接说 MCP 协议，故把「列资产 / 对账 / 取嵌入令牌 / 解除登记」用普通 REST 暴露，
+前端不直接说 MCP 协议，故把「列资产 / 对账 / 解除登记」用普通 REST 暴露，
 走主后端的 AdminAuthMiddleware。
 
-**guest token 只能在这里签发**：它要用 Superset 的服务账号换取，凭据绝不能下发到浏览器。
+图表与看板一律走**跳转链接**在 Superset 里打开，ontoMeta 不做内嵌、不签 guest token。
 数据逻辑一律走 ``app.services.superset_service``（与 MCP 工具共用同一份），REST 只是薄壳。
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.auth import require_role
@@ -18,19 +17,6 @@ from app.database import get_db
 from app.services import superset_service as svc
 
 router = APIRouter()
-
-
-class GuestTokenPayload(BaseModel):
-    """嵌入预览要的允许来源。留空表示沿用 Superset 侧已配置的允许域名。"""
-
-    allowed_domains: list[str] = Field(default_factory=list)
-
-
-def _actor(request: Request) -> str:
-    name = getattr(request.state, "principal_name", None) or getattr(
-        request.state, "principal_id", None
-    )
-    return str(name or "ontometa")
 
 
 @router.get("/superset/status")
@@ -48,7 +34,6 @@ def superset_status(db: Session = Depends(get_db)):
         "configured": True,
         "reason": None,
         "base_url": cfg.public_base_url,
-        "database_id": cfg.database_id,
     }
 
 
@@ -68,7 +53,7 @@ def list_superset_assets(
     rows = svc.list_assets(
         db, asset_type=asset_type, ontology_id=ontology_id, keyword=q, limit=limit
     )
-    return {"items": [svc.serialize_asset(r, cfg) for r in rows]}
+    return {"items": svc.serialize_assets(db, rows, cfg)}
 
 
 @router.post("/superset/assets/reconcile", dependencies=[Depends(require_role("editor"))])
@@ -83,37 +68,6 @@ def reconcile_superset_assets(db: Session = Depends(get_db)):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Superset 调用失败：{exc}") from exc
     return counts
-
-
-@router.post(
-    "/superset/assets/{asset_id}/guest-token",
-    dependencies=[Depends(require_role("reader"))],
-)
-def superset_guest_token(
-    asset_id: str,
-    payload: GuestTokenPayload | None = None,
-    request: Request = None,  # type: ignore[assignment]
-    db: Session = Depends(get_db),
-):
-    """签发看板嵌入用的 guest token（短时效，由 Superset 侧控制）。"""
-    try:
-        cfg = svc.runtime(db)
-        with svc.client(cfg) as sc:
-            token = svc.guest_token(
-                db,
-                cfg,
-                sc,
-                asset_id,
-                username=_actor(request),
-                allowed_domains=(payload.allowed_domains if payload else []),
-            )
-    except svc.SupersetNotConfigured as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Superset 调用失败：{exc}") from exc
-    return {"token": token, "superset_domain": cfg.public_base_url}
 
 
 @router.delete(

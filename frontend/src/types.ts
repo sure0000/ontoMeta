@@ -1081,15 +1081,12 @@ export interface SupersetStatus {
   reason: string | null;
   /** 用户浏览器可达的 Superset 地址；没配好时为 null。 */
   base_url: string | null;
-  database_id?: number | null;
 }
 
 export interface SupersetAsset {
   id: string;
   asset_type: "dataset" | "chart" | "dashboard";
   superset_id: number;
-  /** 看板开启嵌入后的 uuid，是 embedDashboard 的 id；没开嵌入时为 null。 */
-  embedded_uuid: string | null;
   title: string;
   /** 可直接打开的绝对地址（未配 Superset 时退化为相对路径）。 */
   url: string;
@@ -1097,6 +1094,18 @@ export interface SupersetAsset {
   viz_type: string | null;
   /** 建在哪个落点上，指回本体治理。 */
   dataset_ref: string | null;
+  /**
+   * `dataset_ref` 解析出来的落点。`null` 有两种含义，措辞要分开：
+   * `dataset_ref` 也是 null → 本来就没登记落点；`dataset_ref` 有值但这里 null →
+   * 引用解析不出来（实体被删/被降级），口径已经断了。
+   */
+  landing: {
+    entity_display_name: string;
+    entity_name: string;
+    entity_kind: "object_type" | "business_logic";
+    physical: string;
+    layer: string;
+  } | null;
   superset_dataset_id: number | null;
   ontology_id: string | null;
   domain_id: string | null;
@@ -1215,6 +1224,8 @@ export interface DataSource {
   tested_at?: string | null;
   created_at: string;
   updated_at: string;
+  /** 这个数据源在 Superset 里的 database（连接）编号；建数据集时自动解析并缓存。 */
+  superset_database_id?: number | null;
   // 连接信息回显：只返回 password_set/password_hint，不返回密码明文。
   dsn_set?: boolean;
   host?: string | null;
@@ -1810,8 +1821,18 @@ export interface CanvasSuggestReport {
 // ---- MCP 服务（Phase 5：远程传输 + 管理页）----
 export interface McpToolInfo {
   name: string;
+  /** 中文名，由工具自己声明（后端 register_tool 强制）。 */
+  display_name: string;
+  /** 分类键，取值见 McpServiceInfo.categories。 */
+  category: string;
+  category_label: string;
   description: string;
   required_role: string;
+}
+export interface McpToolCategory {
+  key: string;
+  label: string;
+  tool_count: number;
 }
 export interface McpServiceInfo {
   server: { name: string; version: string };
@@ -1820,6 +1841,8 @@ export interface McpServiceInfo {
   };
   rate_limit: { default_per_minute: number; execute_sql_per_minute: number; enabled: boolean };
   tool_count: number;
+  /** 分类目录，按后端声明顺序；工具列表也按同一顺序返回。 */
+  categories: McpToolCategory[];
   tools: McpToolInfo[];
   audit: { reachable: boolean; error: string | null };
 }

@@ -34,6 +34,7 @@ import type {
   McpServiceInfo,
   McpStats,
   McpSettings,
+  McpToolCategory,
   McpToolInfo,
   Principal,
 } from "../types";
@@ -415,7 +416,11 @@ export function McpToolsPanel() {
         </Button>
       }
     >
-      <ToolCatalog tools={info?.tools ?? []} loading={loading} />
+      <ToolCatalog
+        tools={info?.tools ?? []}
+        categories={info?.categories ?? []}
+        loading={loading}
+      />
     </SectionCard>
   );
 }
@@ -444,42 +449,120 @@ export function McpPanel() {
   );
 }
 
-function ToolCatalog({ tools, loading }: { tools: McpToolInfo[]; loading: boolean }) {
+/**
+ * 工具目录。73 个工具按分类分组：后端已按 `TOOL_CATEGORIES` 的声明顺序返回，
+ * 同类必然相邻，所以「分类」列用 rowSpan 合并成一格——一张表就能读出分组，
+ * 不必拆成 11 张表或逐行重复同一个栏目名。
+ *
+ * 筛选自己管（不用 antd 的列筛选）：rowSpan 必须按**筛后**的行重算，而列筛选
+ * 改的是表格内部的 dataSource，拿不到，合并格会错位。
+ */
+export function ToolCatalog({
+  tools,
+  categories,
+  loading,
+}: {
+  tools: McpToolInfo[];
+  categories: McpToolCategory[];
+  loading: boolean;
+}) {
+  const [category, setCategory] = useState("");
+  const [role, setRole] = useState("");
+
+  const rows = useMemo(
+    () =>
+      tools.filter(
+        (t) => (!category || t.category === category) && (!role || t.required_role === role),
+      ),
+    [tools, category, role],
+  );
+
+  /** 行号 → 该行「分类」格要跨几行；0 表示被上面那格吃掉了。 */
+  const spans = useMemo(() => {
+    const out = new Array<number>(rows.length).fill(0);
+    let head = 0;
+    rows.forEach((row, i) => {
+      if (i > 0 && rows[i - 1].category === row.category) {
+        out[head] += 1;
+      } else {
+        head = i;
+        out[i] = 1;
+      }
+    });
+    return out;
+  }, [rows]);
+
   return (
-    <Table<McpToolInfo>
-      rowKey="name"
-      size="small"
-      loading={loading}
-      dataSource={tools}
-      pagination={false}
-      scroll={{ x: 640 }}
-      columns={[
-        {
-          title: "工具",
-          dataIndex: "name",
-          width: 180,
-          render: (v: string) => <Text code>{v}</Text>,
-        },
-        {
-          title: "最低角色",
-          dataIndex: "required_role",
-          width: 110,
-          render: (v: string) => <RoleTag role={v} />,
-          filters: [
-            { text: "reader", value: "reader" },
-            { text: "editor", value: "editor" },
-            { text: "reviewer", value: "reviewer" },
-            { text: "publisher", value: "publisher" },
-          ],
-          onFilter: (val, r) => r.required_role === val,
-        },
-        {
-          title: "说明",
-          dataIndex: "description",
-          render: (v: string) => <ToolDescription text={v} />,
-        },
-      ]}
-    />
+    <>
+      <Space size={4} wrap style={{ marginBottom: 12 }}>
+        <Tag.CheckableTag checked={!category} onChange={() => setCategory("")}>
+          全部 {tools.length}
+        </Tag.CheckableTag>
+        {categories.map((c) => (
+          <Tag.CheckableTag
+            key={c.key}
+            checked={category === c.key}
+            onChange={(on) => setCategory(on ? c.key : "")}
+          >
+            {c.label} {c.tool_count}
+          </Tag.CheckableTag>
+        ))}
+        <Select
+          size="small"
+          value={role}
+          onChange={setRole}
+          style={{ width: 140, marginLeft: 8 }}
+          options={[
+            { value: "", label: "全部角色" },
+            { value: "reader", label: "reader" },
+            { value: "editor", label: "editor" },
+            { value: "reviewer", label: "reviewer" },
+            { value: "publisher", label: "publisher" },
+          ]}
+        />
+      </Space>
+      <Table<McpToolInfo>
+        rowKey="name"
+        size="small"
+        loading={loading}
+        dataSource={rows}
+        pagination={false}
+        scroll={{ x: 720 }}
+        columns={[
+          {
+            title: "分类",
+            dataIndex: "category_label",
+            width: 120,
+            onCell: (_row, index) => ({ rowSpan: spans[index ?? 0] ?? 1 }),
+            render: (v: string) => <Text type="secondary">{v}</Text>,
+          },
+          {
+            title: "工具",
+            dataIndex: "display_name",
+            width: 220,
+            render: (v: string, row) => (
+              <div>
+                <div>{v}</div>
+                <Text code style={{ fontSize: 11 }}>
+                  {row.name}
+                </Text>
+              </div>
+            ),
+          },
+          {
+            title: "最低角色",
+            dataIndex: "required_role",
+            width: 110,
+            render: (v: string) => <RoleTag role={v} />,
+          },
+          {
+            title: "说明",
+            dataIndex: "description",
+            render: (v: string) => <ToolDescription text={v} />,
+          },
+        ]}
+      />
+    </>
   );
 }
 
@@ -600,7 +683,10 @@ function AuditTable() {
             setToolName(value ?? "");
             setPage(1);
           }}
-          options={tools.map((tool) => ({ value: tool.name, label: tool.name }))}
+          options={tools.map((tool) => ({
+            value: tool.name,
+            label: `${tool.display_name}（${tool.name}）`,
+          }))}
           style={{ width: 190 }}
         />
         <Select

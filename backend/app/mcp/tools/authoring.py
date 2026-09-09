@@ -127,6 +127,8 @@ class CompileLogicExpressionTool:
     """把口径表达式编译成 SQL（只编不写）"""
 
     name = "compile_logic_expression"
+    display_name = "表达式编译"
+    category = "logic"
     required_role = "reader"
     description = (
         "把一条口径的表达式**编译成真 SQL** 并自证，不写库。\n"
@@ -233,6 +235,8 @@ class CreateLogicTool:
     """新建一条业务口径（指标 / 标签 / 规则）"""
 
     name = "create_logic"
+    display_name = "新建口径"
+    category = "logic"
     # 落库动作。editor 是「能改、不能发布」那一层——口径建出来是草稿，发布仍走既有闸门。
     required_role = "editor"
     description = (
@@ -362,6 +366,8 @@ class UpdateLogicExpressionTool:
     """给已有口径补全表达式"""
 
     name = "update_logic_expression"
+    display_name = "更新口径表达式"
+    category = "logic"
     required_role = "editor"
     description = (
         "为**已存在**的口径补全/替换表达式（search_logics 查得到、但还没形式化的那些）。"
@@ -441,6 +447,8 @@ class LintSpecTool:
     """用当前治理规约自检一份建数/建表规格"""
 
     name = "lint_spec"
+    display_name = "规格自检"
+    category = "task_flow"
     required_role = "reader"
     description = (
         "用**当前生效的数据治理规约**自检一份建数/建表规格：提任务前调，照返回的 `fix` 自己改，"

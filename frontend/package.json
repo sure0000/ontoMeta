@@ -19,7 +19,6 @@
     "@antv/g6": "^5.1.1",
     "@cosmograph/cosmograph": "^2.5.1",
     "@floating-ui/react": "^0.27.19",
-    "@superset-ui/embedded-sdk": "^0.4.0",
     "antd": "^6.5.0",
     "cronstrue": "^3.24.0",
     "react": "^19.0.0",

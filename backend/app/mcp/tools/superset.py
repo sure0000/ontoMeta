@@ -145,6 +145,8 @@ class ListSupersetDatasetsTool:
     """列出 Superset 里的数据集"""
 
     name = "list_superset_datasets"
+    display_name = "Superset 数据集列表"
+    category = "viz"
     required_role = "reader"
     description = (
         "列出 Superset 里已有的数据集，并标出哪些是由 ontoMeta 从落点登记过去的"
@@ -201,6 +203,8 @@ class EnsureSupersetDatasetTool:
     """把本体落点登记成 Superset 数据集"""
 
     name = "ensure_superset_dataset"
+    display_name = "登记 Superset 数据集"
+    category = "viz"
     required_role = "editor"
     description = (
         "把一个**已发布本体的落点**登记成 Superset 数据集（幂等：已存在就复用），"
@@ -245,6 +249,8 @@ class CreateSupersetChartTool:
     """在 Superset 里建图表"""
 
     name = "create_superset_chart"
+    display_name = "新建图表"
+    category = "viz"
     required_role = "editor"
     description = (
         "在 Superset 里建一张图，返回 chart_id 与可直接打开的链接。\n"
@@ -290,6 +296,8 @@ class UpdateSupersetChartTool:
     """改写已有图表的口径或形态"""
 
     name = "update_superset_chart"
+    display_name = "改写图表"
+    category = "viz"
     required_role = "editor"
     description = (
         "整体改写一张已有图表（换图形、换维度度量、改过滤）。\n"
@@ -325,12 +333,14 @@ class CreateSupersetDashboardTool:
     """把图表拼成看板"""
 
     name = "create_superset_dashboard"
+    display_name = "新建看板"
+    category = "viz"
     required_role = "editor"
     description = (
-        "把若干已建好的图表拼成一个 Superset 看板，返回链接与嵌入 uuid。\n"
+        "把若干已建好的图表拼成一个 Superset 看板，返回可直接打开的链接。\n"
         "图表按每行两张排布；顺序即 chart_ids 的顺序。\n"
-        "拿不到嵌入 uuid 不影响看板可用（多半是 Superset 没开 EMBEDDED_SUPERSET），"
-        "只是不能在 ontoMeta 里内嵌预览，回执里会说明。"
+        "有图没能挂上去时按失败回，但看板已经建出来了——回执里带着它的 id 与链接，"
+        "补挂即可，不要重建一个。"
     )
     input_schema = {
         "type": "object",
@@ -365,15 +375,20 @@ class CreateSupersetDashboardTool:
                         ontology_id=str(arguments.get("ontology_id") or "").strip() or None,
                         created_by=_actor(auth),
                     )
-                return ToolResult(
-                    success=True,
-                    data=result,
-                    metadata=(
-                        {"embed_unavailable": result["embed_error"]}
-                        if result.get("embed_error")
-                        else {}
-                    ),
-                )
+                # 挂不上图的看板打开是空白的。回执说"完成"、用户点开看到空页，
+                # 比直接报错更糟——那会让人以为是 Superset 坏了。
+                unlinked = result.get("unlinked_chart_ids") or []
+                if unlinked:
+                    return ToolResult(
+                        success=False,
+                        data=result,
+                        error=(
+                            f"看板已建出来（id {result['dashboard_id']}，{result['url']}），"
+                            f"但这些图没能关联上去：{unlinked}。现在打开会是空的。"
+                            "确认这些 chart_id 存在且可写，然后补挂，不要重建看板。"
+                        ),
+                    )
+                return ToolResult(success=True, data=result)
         except Exception as exc:  # noqa: BLE001
             return _failed(exc)
 
@@ -383,6 +398,8 @@ class ListSupersetAssetsTool:
     """列出 ontoMeta 建过的 Superset 资产"""
 
     name = "list_superset_assets"
+    display_name = "已建资产清单"
+    category = "viz"
     required_role = "reader"
     description = (
         "列出经 ontoMeta 建到 Superset 的数据集/图表/看板：叫什么、建在哪个落点上、"
@@ -431,7 +448,7 @@ class ListSupersetAssetsTool:
                     keyword=str(arguments.get("q") or "").strip() or None,
                     limit=limit,
                 )
-                items = [svc.serialize_asset(r, cfg) for r in rows]
+                items = svc.serialize_assets(db, rows, cfg)
                 return ToolResult(
                     success=True,
                     data={"items": items, "shown": len(items)},

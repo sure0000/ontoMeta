@@ -22,6 +22,10 @@ from app.connectors.superset import SupersetClient, SupersetError
 from app.models import ObjectType, Property, SupersetAsset
 from app.services import dataset_catalog
 from app.services.settings_service import SettingsService, SupersetRuntimeConfig
+from app.services.superset_database import (
+    SupersetDatabaseUnresolved,
+    resolve_database_id,
+)
 from app.services.superset_spec import ChartSpec, build_position_json, compile_chart
 
 _settings = SettingsService()
@@ -51,6 +55,32 @@ def public_url(cfg: SupersetRuntimeConfig, url_path: str) -> str:
     return f"{cfg.public_base_url}{url_path}" if url_path else cfg.public_base_url
 
 
+#: 跳转到 Superset 时的全屏参数。取值是 Superset 的 ``standalone`` 约定：
+#: ``1`` 去掉顶部导航，``2`` 再去掉标题栏，``3`` 连筛选栏一起去掉。
+#:
+#: ontoMeta 是入口，点过去是为了**看这一个东西**，不是为了进 Superset 逛，所以去掉它的
+#: 全局导航。两边都用 ``1``：看板要留标题栏（人得知道自己在看哪张看板），图表要留
+#: explore 的控制面板（那正是"打开这张图"要看的）。数据集指向的是管理页，不加。
+#:
+#: **"不可编辑"不靠这个参数**。标题栏与「编辑看板」按钮是同一行，``standalone`` 只能整行
+#: 留或整行去；而且它只隐藏 UI，把参数从地址栏删掉就全恢复。真正的只读靠角色——
+#: 用没有 ``can_write on Dashboard`` 的账号看，Superset 自己就不渲染编辑按钮。
+_STANDALONE_MODE = {"dashboard": "1", "chart": "1"}
+
+
+def open_url(cfg: SupersetRuntimeConfig, asset_type: str, url_path: str) -> str:
+    """用户点开时的地址：在 ``public_url`` 之上补全屏参数。
+
+    参数在**拼地址时**加，不写进 ``url_path``——后者是"这个对象在 Superset 里的位置"，
+    全屏与否是展示口径。分开之后，改口径不用回头 backfill 已登记的行。
+    """
+    mode = _STANDALONE_MODE.get(asset_type)
+    if not mode or not url_path:
+        return public_url(cfg, url_path)
+    separator = "&" if "?" in url_path else "?"
+    return public_url(cfg, f"{url_path}{separator}standalone={mode}")
+
+
 # ------------------------------------------------------------------ 登记簿
 
 
@@ -70,7 +100,6 @@ def register_asset(
     superset_dataset_id: int | None = None,
     ontology_id: str | None = None,
     domain_id: str | None = None,
-    embedded_uuid: str | None = None,
     created_by: str | None = None,
     created_via: str = "mcp",
     extra: dict[str, Any] | None = None,
@@ -96,8 +125,6 @@ def register_asset(
     row.superset_dataset_id = superset_dataset_id
     row.ontology_id = ontology_id
     row.domain_id = domain_id
-    if embedded_uuid:
-        row.embedded_uuid = embedded_uuid
     row.created_by = row.created_by or created_by
     row.created_via = created_via
     # 刚建出来的东西是确实存在的，这一条是"亲眼见过"，不是猜。
@@ -115,9 +142,8 @@ def serialize_asset(row: SupersetAsset, cfg: SupersetRuntimeConfig | None = None
         "id": row.id,
         "asset_type": row.asset_type,
         "superset_id": row.superset_id,
-        "embedded_uuid": row.embedded_uuid,
         "title": row.title,
-        "url": public_url(cfg, row.url_path) if cfg else row.url_path,
+        "url": open_url(cfg, row.asset_type, row.url_path) if cfg else row.url_path,
         "url_path": row.url_path,
         "viz_type": row.viz_type,
         "dataset_ref": row.dataset_ref,
@@ -131,6 +157,44 @@ def serialize_asset(row: SupersetAsset, cfg: SupersetRuntimeConfig | None = None
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+
+def serialize_assets(
+    db: Session, rows: list[SupersetAsset], cfg: SupersetRuntimeConfig | None = None
+) -> list[dict[str, Any]]:
+    """批量序列化，并把 ``dataset_ref`` 解析成人话。
+
+    列表里光摆一个 ``obj:068504b9-…@serving`` 等于没说：人看不出这张图建在「客户」上。
+    句柄该留在 Tooltip 里给任务配置和 Agent 用，表面上要给实体名与物理表。
+
+    按 ref 去重后再解析——同一个落点上通常挂着好几张图，逐行解析是白跑。
+    """
+    resolved: dict[str, dict[str, str] | None] = {}
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = serialize_asset(row, cfg)
+        ref = row.dataset_ref
+        if ref:
+            if ref not in resolved:
+                entry = dataset_catalog.resolve_dataset_ref(db, ref)
+                resolved[ref] = (
+                    {
+                        "entity_display_name": entry.entity_display_name,
+                        "entity_name": entry.entity_name,
+                        "entity_kind": entry.entity_kind,
+                        "physical": entry.physical,
+                        "layer": entry.layer,
+                    }
+                    if entry is not None
+                    else None
+                )
+            # 解析不出来是有意义的信息（实体被删/被降级），不能悄悄当成"没有落点"：
+            # 前者要提示口径已经断了，后者只是本来就没登记。
+            data["landing"] = resolved[ref]
+        else:
+            data["landing"] = None
+        out.append(data)
+    return out
 
 
 def list_assets(
@@ -277,11 +341,10 @@ def ensure_dataset(
 
     只接受目录里的引用（``obj:<id>@serving`` / ``obj:<id>@ods`` / ``logic:<id>@ads``）：
     数据集必须建在本体认领过的落点上，否则口径就脱离治理了。
+
+    挂哪条 Superset database（连接）由**落点自己的数据源**决定，不是全局配置——见
+    ``services/superset_database``。库则由 ``库.表`` 拆出来单独当 ``schema`` 传。
     """
-    if cfg.database_id is None:
-        raise SupersetNotConfigured(
-            "未配置 database_id：请在设置页填上 Superset 里指向数仓的 database 编号"
-        )
     entry = dataset_catalog.resolve_dataset_ref(db, dataset_ref)
     if entry is None:
         raise ValueError(
@@ -294,13 +357,19 @@ def ensure_dataset(
             "先把物化/同步任务跑通，再建数据集"
         )
 
+    try:
+        database_id = resolve_database_id(db, sc, entry.datasource_id)
+    except SupersetDatabaseUnresolved as exc:
+        # 对调用方来说这仍是"没配好"，不是"调用失败"：要把人指回去补连接，而不是查网络。
+        raise SupersetNotConfigured(str(exc)) from exc
+
     schema, table = _split_physical(entry.physical)
-    existing = sc.find_dataset(cfg.database_id, schema, table)
+    existing = sc.find_dataset(database_id, schema, table)
     if existing:
         dataset_id = int(existing["id"])
         created = False
     else:
-        result = sc.create_dataset(cfg.database_id, schema, table)
+        result = sc.create_dataset(database_id, schema, table)
         dataset_id = int(result.get("id") or (result.get("result") or {}).get("id"))
         created = True
         # 新建的数据集可能还没有列，不刷新的话后面建图选不到字段。
@@ -345,7 +414,7 @@ def ensure_dataset(
             for c in (detail.get("columns") or [])
         ],
         "metrics": [m.get("metric_name") for m in (detail.get("metrics") or [])],
-        "url": public_url(cfg, asset.url_path),
+        "url": open_url(cfg, "dataset", asset.url_path),
         "asset_id": asset.id,
     }
 
@@ -395,7 +464,7 @@ def create_chart(
     )
     return {
         "chart_id": chart_id,
-        "url": public_url(cfg, asset.url_path),
+        "url": open_url(cfg, "chart", asset.url_path),
         "viz": spec.viz,
         "asset_id": asset.id,
     }
@@ -429,12 +498,39 @@ def update_chart(
         db.commit()
     return {
         "chart_id": chart_id,
-        "url": public_url(cfg, f"/explore/?slice_id={chart_id}"),
+        "url": open_url(cfg, "chart", f"/explore/?slice_id={chart_id}"),
         "viz": spec.viz,
     }
 
 
 # ---------------------------------------------------------------- 看板
+
+
+def _attach_charts(sc: SupersetClient, dashboard_id: int, chart_ids: list[int]) -> list[int]:
+    """把图**关联**到看板上，返回没挂上的 chart id。
+
+    只写 ``position_json`` 建出来的是一张空看板：布局里确实有一格写着 chartId，但
+    Superset 的看板↔图关联（``dashboard_slices``）没建立，``/dashboard/{id}/charts``
+    与 ``/datasets`` 全空，前端没有东西可渲染。实测内置示例看板这两个端点都非空，
+    我们建的是 0/0——放置和关联两件事都得做，缺哪个都是打开空白。
+
+    关联只能从图这一侧写：看板的 POST/PUT schema 不收 ``slices``，而
+    ``PUT /api/v1/chart/{id}`` 收 ``dashboards``。那是**整体替换**，所以先读回这张图
+    现有的看板再追加——否则把图从它原来所在的看板上摘了下来。
+    """
+    failed: list[int] = []
+    for chart_id in chart_ids:
+        try:
+            body = sc.get_chart(chart_id).get("result") or {}
+            existing = {
+                int(d["id"])
+                for d in (body.get("dashboards") or [])
+                if isinstance(d, dict) and d.get("id") is not None
+            }
+            sc.update_chart(chart_id, {"dashboards": sorted(existing | {int(dashboard_id)})})
+        except (SupersetError, TypeError, ValueError):
+            failed.append(chart_id)
+    return failed
 
 
 def create_dashboard(
@@ -447,13 +543,13 @@ def create_dashboard(
     ontology_id: str | None = None,
     created_by: str | None = None,
     created_via: str = "mcp",
-    allowed_domains: list[str] | None = None,
 ) -> dict[str, Any]:
-    """建看板并把图**放进布局**。
+    """建看板、把图**放进布局**、再把图**关联**到看板。
 
-    只关联不放置，看板打开是空的（见 ``build_position_json`` 的说明）。
-    嵌入 uuid 顺手拿一次：拿不到不算失败——那通常只是 Superset 没开
-    ``EMBEDDED_SUPERSET``，跳转链接照样可用。
+    三件事缺一不可：只关联不放置，看板打开是空的（见 ``build_position_json``）；
+    只放置不关联，看板打开同样是空的（见 ``_attach_charts``）。
+
+    看板只给跳转链接，不做内嵌——ontoMeta 侧不签 guest token、不持有 embedded uuid。
     """
     if not chart_ids:
         raise ValueError("看板至少要放一张图")
@@ -465,13 +561,7 @@ def create_dashboard(
         "json_metadata": json.dumps({"chart_configuration": {}}, ensure_ascii=False),
     })
     dashboard_id = int(result.get("id") or (result.get("result") or {}).get("id"))
-
-    embedded_uuid: str | None = None
-    embed_error: str | None = None
-    try:
-        embedded_uuid = sc.enable_embedded(dashboard_id, allowed_domains or [])
-    except SupersetError as exc:
-        embed_error = str(exc)
+    unlinked = _attach_charts(sc, dashboard_id, chart_ids)
 
     asset = register_asset(
         db,
@@ -480,39 +570,16 @@ def create_dashboard(
         title=title,
         url_path=f"/superset/dashboard/{dashboard_id}/",
         ontology_id=ontology_id,
-        embedded_uuid=embedded_uuid,
         created_by=created_by,
         created_via=created_via,
         extra={"chart_ids": chart_ids},
     )
     return {
         "dashboard_id": dashboard_id,
-        "url": public_url(cfg, asset.url_path),
-        "embedded_uuid": embedded_uuid,
-        "embed_error": embed_error,
+        "url": open_url(cfg, "dashboard", asset.url_path),
         "chart_ids": chart_ids,
+        "unlinked_chart_ids": unlinked,
         "asset_id": asset.id,
     }
 
 
-def guest_token(
-    db: Session,
-    cfg: SupersetRuntimeConfig,
-    sc: SupersetClient,
-    asset_id: str,
-    *,
-    username: str,
-    allowed_domains: list[str] | None = None,
-) -> str:
-    """签发嵌入用的 guest token。**只能在后端调**，前端不得持 Superset 账密。"""
-    row = db.get(SupersetAsset, asset_id)
-    if row is None or row.asset_type != "dashboard":
-        raise ValueError("只有看板可以嵌入")
-    if not row.embedded_uuid:
-        # 建看板时没拿到（多半那会儿还没开特性开关），这里补一次。
-        row.embedded_uuid = sc.enable_embedded(row.superset_id, allowed_domains or [])
-        db.commit()
-    return sc.guest_token(
-        [{"type": "dashboard", "id": row.embedded_uuid}],
-        {"username": username, "first_name": username, "last_name": ""},
-    )

@@ -4,7 +4,7 @@
 
 1. ``/superset/status`` 与 ``/superset/assets`` 在**没配 Superset 时也要正常返回**——
    页面要能显示「还没接」，而不是弹一个红色报错让人以为坏了；
-2. 任何响应都不得带出账号密码；guest token 只能由后端换取，浏览器不持凭据；
+2. 任何响应都不得带出账号密码；
 3. ``DELETE`` 只解除登记，不删 Superset 里的图/看板。
 """
 
@@ -20,7 +20,6 @@ CFG = SupersetRuntimeConfig(
     base_url="http://superset:8088",
     username="admin",
     password="s3cret",
-    database_id=3,
     public_base_url="https://bi.example.com",
     enabled=True,
 )
@@ -34,7 +33,6 @@ def asset(db):
         superset_id=11,
         title="销售看板",
         url_path="/superset/dashboard/11/",
-        embedded_uuid="uuid-11",
     )
     yield row
     db.expire_all()
@@ -79,54 +77,10 @@ def test_assets_list_works_without_superset_configured(
 
 
 def test_assets_list_uses_the_public_address(client, admin_headers, monkeypatch, asset):
+    """对外地址 + 全屏参数：点过去直接看内容，不带 Superset 的全局导航。"""
     monkeypatch.setattr(svc, "runtime", lambda db: CFG)
     items = client.get("/api/superset/assets", headers=admin_headers).json()["items"]
-    assert items[0]["url"] == "https://bi.example.com/superset/dashboard/11/"
-
-
-def test_guest_token_is_minted_server_side(client, admin_headers, monkeypatch, asset):
-    """浏览器只拿到 token，拿不到换 token 的账号密码。"""
-    monkeypatch.setattr(svc, "runtime", lambda db: CFG)
-
-    class _C:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return None
-
-    monkeypatch.setattr(svc, "client", lambda cfg: _C())
-    monkeypatch.setattr(svc, "guest_token", lambda *a, **k: "guest-xyz")
-
-    resp = client.post(
-        f"/api/superset/assets/{asset.id}/guest-token", headers=admin_headers, json={}
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body == {"token": "guest-xyz", "superset_domain": "https://bi.example.com"}
-    assert "s3cret" not in str(body)
-
-
-def test_guest_token_on_a_chart_is_a_404(client, admin_headers, monkeypatch, db):
-    monkeypatch.setattr(svc, "runtime", lambda db: CFG)
-    chart = svc.register_asset(db, asset_type="chart", superset_id=99, title="图")
-    resp = client.post(
-        f"/api/superset/assets/{chart.id}/guest-token", headers=admin_headers, json={}
-    )
-    assert resp.status_code == 404
-
-
-def test_guest_token_without_superset_is_409_not_500(
-    client, admin_headers, monkeypatch, asset
-):
-    """没配好是冲突不是崩溃：前端据此提示去设置页，而不是显示"服务器错误"。"""
-    monkeypatch.setattr(
-        svc, "runtime", lambda db: (_ for _ in ()).throw(svc.SupersetNotConfigured("未启用"))
-    )
-    resp = client.post(
-        f"/api/superset/assets/{asset.id}/guest-token", headers=admin_headers, json={}
-    )
-    assert resp.status_code == 409
+    assert items[0]["url"] == "https://bi.example.com/superset/dashboard/11/?standalone=1"
 
 
 def test_unlink_removes_only_the_registration(client, admin_headers, asset, db):

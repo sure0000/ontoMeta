@@ -32,7 +32,6 @@ const BusinessLogicDetailPage = lazyPage(
 );
 const BusinessLogicPage = lazyPage(() => import("./pages/BusinessLogicPage"), "BusinessLogicPage");
 const VizAssetsPage = lazyPage(() => import("./pages/VizAssetsPage"), "VizAssetsPage");
-const VizAssetViewPage = lazyPage(() => import("./pages/VizAssetViewPage"), "VizAssetViewPage");
 const DomainDetailPage = lazyPage(() => import("./pages/DomainDetailPage"), "DomainDetailPage");
 const ExecutionRecordsPage = lazyPage(
   () => import("./pages/ExecutionRecordsPage"),
@@ -119,7 +118,6 @@ export default function App() {
           <Route path="/tasks/create" element={<TaskCreatePage />} />
           <Route path="/tasks/:id/edit" element={<TaskCreatePage />} />
           <Route path="/data-apps" element={<VizAssetsPage />} />
-          <Route path="/data-apps/:assetId" element={<VizAssetViewPage />} />
           <Route path="/agent-access" element={<Navigate to="/agent-access/service" replace />} />
           <Route path="/agent-access/service" element={<ServicePage />} />
           <Route path="/agent-access/tools" element={<ToolsPage />} />

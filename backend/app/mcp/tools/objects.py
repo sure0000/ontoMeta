@@ -115,6 +115,8 @@ class QueryObjectsTool:
     """查询业务对象列表"""
 
     name = "query_objects"
+    display_name = "业务对象查询"
+    category = "ontology"
     description = (
         "查询本体中的业务对象（表/实体）。可按角色、关键词过滤，或用 group_by=role/segment 只取分布统计。"
         "关键词同时匹配对象标识名、显示名、描述和物理源表名（source_ref）。\n"
@@ -283,6 +285,8 @@ class QueryObjectDetailTool:
     """查询对象详情"""
 
     name = "query_object_detail"
+    display_name = "对象详情"
+    category = "ontology"
     description = (
         "查询单个业务对象的详情：属性（字段）、进出关系、绑定的业务口径、物理落点。"
     )
@@ -339,6 +343,8 @@ class QueryRelationsTool:
     """查询关系列表"""
 
     name = "query_relations"
+    display_name = "对象关系查询"
+    category = "ontology"
     description = (
         "查询本体中的业务对象关系（外键/引用/包含/转化）。"
         "关系两端给的是对象名，写 JOIN 时的连接键在 source_evidence 里。"

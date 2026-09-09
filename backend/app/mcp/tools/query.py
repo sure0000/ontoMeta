@@ -12,6 +12,8 @@ class QueryOntologyTool:
     """查询本体列表"""
 
     name = "query_ontology"
+    display_name = "本体列表"
+    category = "ontology"
     description = "查询本体结构和业务对象列表。可以查询所有本体，或按 ID 查询特定本体。"
     input_schema = {
         "type": "object",

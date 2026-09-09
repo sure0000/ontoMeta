@@ -21,6 +21,8 @@ class ServerInfoTool:
 
     required_role = "reader"
     name = "server_info"
+    display_name = "服务自省"
+    category = "service"
     description = (
         "回读本 MCP 服务器状态：版本、传输方式、当前会话身份、限流配置、审计表可达性，"
         "以及**工具名 → 最低角色**的对照表。用于自查「我这条会话是什么权限、某工具为什么被拒」。\n"
@@ -82,6 +84,8 @@ class GetMcpStatsTool:
 
     required_role = "publisher"
     name = "get_mcp_stats"
+    display_name = "调用统计"
+    category = "service"
     description = (
         "基于审计表的 MCP 使用统计：总调用量、成功/失败/被拒/被限流数、按工具与角色分组。"
         "仅 publisher。"

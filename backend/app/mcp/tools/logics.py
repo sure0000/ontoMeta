@@ -91,6 +91,8 @@ class SearchLogicsTool:
     """检索业务口径"""
 
     name = "search_logics"
+    display_name = "口径检索"
+    category = "logic"
     required_role = "reader"
     description = (
         "按关键词检索业务口径：指标（GMV/客单价）、标签（客户分层）、规则（金额必须为正）。"
@@ -181,6 +183,8 @@ class GetLogicTool:
     """查询单个业务口径详情"""
 
     name = "get_logic"
+    display_name = "口径详情"
+    category = "logic"
     required_role = "reader"
     description = (
         "查询单个业务口径的完整定义：表达式（文字口径 + 形式化 AST）、"
@@ -238,6 +242,8 @@ class CompileMetricTool:
     """把已发布口径编译成 SQL"""
 
     name = "compile_metric"
+    display_name = "指标编译"
+    category = "logic"
     # 只编译、不执行：产物是一段 SQL 文本，没有任何数据暴露。要跑它得再过
     # execute_sql 那道 agent_run_sql_min_role 闸门。
     required_role = "reader"

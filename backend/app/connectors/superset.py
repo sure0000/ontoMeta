@@ -1,4 +1,4 @@
-"""Superset REST 客户端：登记数据集、建图表/看板、签发嵌入用 guest token。
+"""Superset REST 客户端：登记数据集、建图表/看板。
 
 **ontoMeta 不做 BI 呈现**：图表怎么画、怎么存、怎么分享全归 Superset，本模块只把
 ontoMeta 已经治理好的东西（落点物理表 + 本体语义 + 编译好的图表规格）推过去，
@@ -205,8 +205,44 @@ class SupersetClient:
     # ---------- 数据库连接（只读；ontoMeta 不建 database）----------
 
     def get_database(self, database_id: int) -> dict:
-        """读一条 database。用于校验设置页填的 ``database_id`` 真的存在。"""
+        """读一条 database。用于校验解析出来的 database 真的存在。"""
         return self._request("GET", f"/api/v1/database/{int(database_id)}", "get_database")
+
+    def get_database_connection(self, database_id: int) -> dict:
+        """读一条 database 的**连接信息**（含 ``sqlalchemy_uri``）。
+
+        为什么不用 ``get_database``：Superset 6.1 的 ``GET /api/v1/database/{id}`` 回包里
+        **根本没有 sqlalchemy_uri 这个键**（不是遮蔽，是压根不返回），只有
+        ``/connection`` 子资源才给——密码遮成 ``XXXXXXXXXX``，主机/端口/库名是真的，
+        够用来比对连接地址。读错端点的后果不是报错而是**恒空**：候选一条都匹配不上，
+        然后对着用户说「一条连接都没有」。
+        """
+        return self._request(
+            "GET",
+            f"/api/v1/database/{int(database_id)}/connection",
+            "get_database_connection",
+        )
+
+    def list_databases(self, *, page_size: int = 100) -> list[dict]:
+        """列出 Superset 里的 database（**连接**，不是库）。
+
+        列表接口的默认列里不一定有 ``sqlalchemy_uri``，所以这里只取身份信息；要按连接
+        地址比对的调用方自己再对候选打 ``get_database_connection``。宁可多一跳，也不依赖
+        某个版本恰好把 URI 放进列表列。
+        """
+        payload = self._request(
+            "GET",
+            "/api/v1/database/",
+            "list_databases",
+            params={
+                "q": rison_filters(
+                    [],
+                    page_size=page_size,
+                    columns=["id", "database_name", "backend"],
+                )
+            },
+        )
+        return list(payload.get("result", []) or [])
 
     # ---------- 数据集 ----------
 
@@ -307,31 +343,3 @@ class SupersetClient:
         )
         return list(payload.get("result", []) or [])
 
-    def enable_embedded(self, dashboard_id: int, allowed_domains: list[str]) -> str:
-        """开启嵌入并拿到 embedded uuid（``embedDashboard`` 的 ``id`` 就是它）。
-
-        需要 Superset 侧打开 ``EMBEDDED_SUPERSET`` 特性开关，否则这里 404。
-        ``allowed_domains`` 留空表示不限来源——生产上应当明确填 ontoMeta 前端的源。
-        """
-        payload = self._request(
-            "POST",
-            f"/api/v1/dashboard/{int(dashboard_id)}/embedded",
-            "enable_embedded",
-            json={"allowed_domains": allowed_domains},
-        )
-        uuid = (payload.get("result") or {}).get("uuid")
-        if not uuid:
-            raise SupersetError("enable_embedded", "响应缺少 uuid")
-        return str(uuid)
-
-    def guest_token(self, resources: list[dict[str, Any]], user: dict[str, Any]) -> str:
-        payload = self._request(
-            "POST",
-            "/api/v1/security/guest_token/",
-            "guest_token",
-            json={"user": user, "resources": resources, "rls": []},
-        )
-        token = payload.get("token")
-        if not token:
-            raise SupersetError("guest_token", "响应缺少 token")
-        return str(token)

@@ -6,9 +6,9 @@ Superset 接进来只做三件事——填连接、拨测、被上层按 ``get_s
 1. **拨测必须真打运行期用到的接口，并校验响应形状**。地址填成 Superset 前面的反代或
    静态页时，任意路径都可能回 200 + HTML；只看状态码的探测会给出"连接成功"的假绿灯，
    而真去建数据集时才发现根本不是 Superset（与 DataHub 那次假绿灯同款）。
-2. **``database_id`` 填错要当场暴露**。它是 Superset 侧那条指向数仓的 database 连接，
-   ontoMeta 不推导也不代建；填错的话，错误会推迟到 Agent 建数据集时才在另一个进程里炸。
-   没填则只提示、不算失败——先配通连接、回头再补 id 是合理次序。
+2. **连接形态里没有"挂哪条 database"**。数据集挂哪条 database（连接）由落点自己的
+   数据源解析（见 ``services/superset_database``）——本体绑定的数据源不止一个、将来还会
+   有别的引擎，一个全局编号说不清该用哪条。
 3. **密码是机密字段**，走 ``CONNECTION_SCHEMAS`` 才有掩码回显与「留空 = 保持原值」兜着。
 """
 
@@ -68,10 +68,11 @@ def test_password_is_a_secret_field(svc):
     fields = {f["name"]: f for f in svc.schema()["connection_schemas"]["superset"]}
     assert fields["password"]["secret"] is True
     assert fields["base_url"]["secret"] is False
-    # 地址与账号是必填；database_id / public_base_url 允许后补。
+    # 地址与账号是必填；public_base_url 允许后补。
     assert fields["base_url"]["required"] is True
-    assert fields["database_id"]["required"] is False
     assert fields["public_base_url"]["required"] is False
+    # 「挂哪条 database」不是连接字段：它由落点的数据源解析，不在这一页填。
+    assert "database_id" not in fields
 
 
 def test_seeded_disabled(svc, db):
@@ -129,9 +130,8 @@ def test_ping_also_calls_a_real_rest_endpoint():
 class _FakeClient:
     """替身：让拨测用例只关心「探针怎么判」，不关心 HTTP 细节。"""
 
-    def __init__(self, *, ping_error=None, database_error=None):
+    def __init__(self, *, ping_error=None):
         self._ping_error = ping_error
-        self._database_error = database_error
         self.databases_read: list[int] = []
 
     def ping(self):
@@ -141,8 +141,6 @@ class _FakeClient:
 
     def get_database(self, database_id: int):
         self.databases_read.append(database_id)
-        if self._database_error:
-            raise self._database_error
         return {"result": {"id": database_id}}
 
     def close(self):
@@ -166,35 +164,23 @@ def test_probe_surfaces_login_failure(monkeypatch):
     assert "login" in result.message
 
 
-def test_probe_passes_but_nags_when_database_id_is_missing(monkeypatch):
-    """没填 database_id 只提示：先配通连接、回头再补 id 是合理次序。"""
+def test_probe_passes_on_a_live_rest_call(monkeypatch):
+    """登录 + 一次真实 REST 打通即算配好——连接这一层能确认的就是这些。"""
     _patch_client(monkeypatch, _FakeClient())
     result = ds._probe_superset({"base_url": "http://superset:8088"}, {})
     assert result.ok is True
-    assert "database_id" in result.message
 
 
-def test_probe_verifies_the_configured_database_exists(monkeypatch):
+def test_probe_does_not_touch_databases(monkeypatch):
+    """拨测不再校验"挂哪条 database"：那由落点的数据源在建数据集时解析。
+
+    留着这条是因为反过来很容易退化——一旦有人为了"更早报错"把 database 校验加回
+    拨测，就等于把一个按落点变化的量重新钉成了全局配置。
+    """
     fake = _FakeClient()
     _patch_client(monkeypatch, fake)
-    result = ds._probe_superset(
-        {"base_url": "http://superset:8088", "database_id": 7}, {}
-    )
-    assert result.ok is True
-    assert fake.databases_read == [7]
-
-
-def test_probe_fails_when_the_configured_database_is_gone(monkeypatch):
-    """填了一个 Superset 里不存在的 database，要当场红，而不是等建数据集时才炸。"""
-    _patch_client(
-        monkeypatch,
-        _FakeClient(database_error=SupersetError("get_database", "HTTP 404")),
-    )
-    result = ds._probe_superset(
-        {"base_url": "http://superset:8088", "database_id": 999}, {}
-    )
-    assert result.ok is False
-    assert "999" in result.message
+    ds._probe_superset({"base_url": "http://superset:8088"}, {})
+    assert fake.databases_read == []
 
 
 def test_probe_is_registered_for_the_default_group():
@@ -243,14 +229,12 @@ def test_runtime_falls_back_to_base_url_for_the_public_address(svc, db):
                     "base_url": "http://internal:8088/",
                     "username": "u",
                     "password": "p",
-                    "database_id": 7,
                 }
             },
         )
         cfg = SettingsService().get_superset_runtime(db)
         assert cfg.base_url == "http://internal:8088"
         assert cfg.public_base_url == "http://internal:8088"
-        assert cfg.database_id == 7
         assert cfg.configured is True
     finally:
         db.expire_all()

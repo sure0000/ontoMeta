@@ -61,6 +61,8 @@ class CreateModelingCaseTool:
     """开一张建模工单"""
 
     name = "create_modeling_case"
+    display_name = "新建建模工单"
+    category = "modeling"
     required_role = "editor"
     description = (
         "为一次完整的分析/报表/数据应用需求开一张**建模工单**：需求 → 上下文 → 维度模型 → "
@@ -127,6 +129,8 @@ class GetModelingCaseTool:
     """读一张建模工单的当前状态与规格"""
 
     name = "get_modeling_case"
+    display_name = "建模工单详情"
+    category = "modeling"
     required_role = "reader"
     description = (
         "读建模工单：当前阶段、各类规格的最新版本与确认状态。\n"
@@ -188,6 +192,8 @@ class SaveModelingSpecTool:
     """写入一份规格草稿（新版本）"""
 
     name = "save_modeling_spec"
+    display_name = "保存建模规格"
+    category = "modeling"
     required_role = "editor"
     description = (
         "为建模工单写入一份规格草稿（自动开新 revision；内容没变则不新开）。\n"
@@ -280,6 +286,8 @@ class ConfirmModelingSpecTool:
     """确认一份规格，推进工单阶段"""
 
     name = "confirm_modeling_spec"
+    display_name = "确认建模规格"
+    category = "modeling"
     # 确认是「这一版被采纳了」的表态，与制品确认同价——reviewer。
     required_role = "reviewer"
     description = (
@@ -340,6 +348,8 @@ class CreateDimensionalModelTool:
     """设计一个维度模型（星型/雪花）"""
 
     name = "create_dimensional_model"
+    display_name = "设计维度模型"
+    category = "modeling"
     required_role = "editor"
     description = (
         "基于已确认的本体与数据，设计一个维度模型（星型/雪花）：事实表带度量与维度键，"

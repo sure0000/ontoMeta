@@ -1136,12 +1136,6 @@ export const api = {
     request<{ active: number; missing: number }>("/api/superset/assets/reconcile", {
       method: "POST",
     }),
-  /** 取看板嵌入用的 guest token。**只能由后端签发**，前端不持 Superset 凭据。 */
-  supersetGuestToken: (assetId: string) =>
-    request<{ token: string; superset_domain: string }>(
-      `/api/superset/assets/${assetId}/guest-token`,
-      { method: "POST", body: JSON.stringify({}) },
-    ),
   /** 只解除登记，不删 Superset 里的图或看板。 */
   unlinkSupersetAsset: (assetId: string) =>
     request<{ ok: boolean }>(`/api/superset/assets/${assetId}`, { method: "DELETE" }),

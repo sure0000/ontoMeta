@@ -23,6 +23,8 @@ class ListDatasourcesTool:
     """列出已配置的数据源"""
 
     name = "list_datasources"
+    display_name = "数据源列表"
+    category = "onboarding"
     description = (
         "列出已配置的数据源：业务源库（business_source）与数仓（warehouse）。"
         "建同步任务时源端取 business_source、目标端取默认 Doris 仓。不返回任何凭据。"

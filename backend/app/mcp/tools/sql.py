@@ -84,6 +84,8 @@ class ExecuteSqlTool:
     """在默认 Doris 数仓执行只读 SQL"""
 
     name = "execute_sql"
+    display_name = "执行只读 SQL"
+    category = "query"
     # 代跑 SQL 与其它 Agent SQL 入口同价：手动执行端点要 publisher，若 MCP 这条
     # 路只要 reader，就成了绕过权限模型的后门。取同一份配置项，别写死。
     required_role = settings.agent_run_sql_min_role
@@ -243,6 +245,8 @@ class ValidateSqlTool:
     """只读校验 SQL，不执行"""
 
     name = "validate_sql"
+    display_name = "SQL 校验"
+    category = "query"
     description = "校验 SQL 是否为合法的单条只读查询。不连数据库、不执行。"
     input_schema = {
         "type": "object",

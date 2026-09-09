@@ -247,6 +247,8 @@ class ProposeSyncTool:
     # 无副作用，真正落草稿/执行仍由人在 publisher 门控的 REST 端点完成。
     required_role = "editor"
     name = "propose_sync"
+    display_name = "同步任务提案"
+    category = "task_flow"
     description = (
         "生成数据同步任务提案：把源库表搬进数仓 ODS。"
         "落点恒为 ODS 库、表名 ods_{数据域}_{原表名}，不可指定。"
@@ -264,6 +266,8 @@ class ProposeTransformTool:
 
     required_role = "editor"
     name = "propose_transform"
+    display_name = "加工任务提案"
+    category = "task_flow"
     description = (
         "生成数据加工（清洗/转换）任务提案：读已同步就绪的 ODS，产出加工结果表。"
         "只出提案，不写库、不执行。"
@@ -280,6 +284,8 @@ class ProposeMaterializeTool:
 
     required_role = "editor"
     name = "propose_materialize"
+    display_name = "物化任务提案"
+    category = "task_flow"
     description = (
         "生成本体物化任务提案：把本体对象建成物理表（只出建表 DDL，不搬数据）。"
         "人工建模、没有物理源表的对象要先物化。只出提案，不写库、不执行。"
@@ -296,6 +302,8 @@ class ProposeMetricTool:
 
     required_role = "editor"
     name = "propose_metric"
+    display_name = "指标任务提案"
+    category = "task_flow"
     description = (
         "生成指标（聚合）任务提案：按已发布的业务口径产出 ADS 结果表。"
         "只出提案，不写库、不执行。"

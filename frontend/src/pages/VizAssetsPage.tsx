@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -12,12 +11,15 @@ import {
   Table,
   Tag,
   Tooltip,
+  Typography,
 } from "antd";
 import {
+  BarChartOutlined,
+  DashboardOutlined,
   ExportOutlined,
-  EyeOutlined,
   ReloadOutlined,
   SyncOutlined,
+  TableOutlined,
 } from "@ant-design/icons";
 import { api } from "../api";
 import { useApi } from "../hooks/useApi";
@@ -25,10 +27,12 @@ import { PageContainer } from "../components/PageContainer";
 import { PageHeader } from "../components/PageHeader";
 import type { SupersetAsset, SupersetStatus } from "../types";
 
-const TYPE_LABEL: Record<string, string> = {
-  dataset: "数据集",
-  chart: "图表",
-  dashboard: "看板",
+const { Text } = Typography;
+
+const TYPE_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+  dashboard: { label: "看板", icon: <DashboardOutlined />, color: "purple" },
+  chart: { label: "图表", icon: <BarChartOutlined />, color: "blue" },
+  dataset: { label: "数据集", icon: <TableOutlined />, color: "default" },
 };
 
 /** 对账状态。`unknown` 是「还没对过账」——它**不等于**不存在，措辞不能含糊。 */
@@ -49,7 +53,6 @@ const STATE_META: Record<string, { color: string; label: string; hint: string }>
 const VIA_LABEL: Record<string, string> = { mcp: "Agent", web: "手工" };
 
 export function VizAssetsPage() {
-  const navigate = useNavigate();
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [keyword, setKeyword] = useState("");
   const [reconciling, setReconciling] = useState(false);
@@ -64,14 +67,32 @@ export function VizAssetsPage() {
     [],
   );
 
-  const rows = useMemo(() => {
+  // 关键词先筛，类型后筛：这样分段控件上的计数与「切过去能看到几条」始终一致。
+  const matched = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
+    if (!needle) return assets ?? [];
     return (assets ?? []).filter(
       (a) =>
-        (typeFilter === "all" || a.asset_type === typeFilter) &&
-        (!needle || a.title.toLowerCase().includes(needle)),
+        a.title.toLowerCase().includes(needle) ||
+        (a.landing?.entity_display_name ?? "").toLowerCase().includes(needle) ||
+        (a.landing?.physical ?? "").toLowerCase().includes(needle),
     );
-  }, [assets, typeFilter, keyword]);
+  }, [assets, keyword]);
+
+  const rows = useMemo(
+    () => (typeFilter === "all" ? matched : matched.filter((a) => a.asset_type === typeFilter)),
+    [matched, typeFilter],
+  );
+
+  const typeOptions = useMemo(() => {
+    const count = (t: string) => matched.filter((a) => a.asset_type === t).length;
+    return [
+      { label: `全部 ${matched.length}`, value: "all" },
+      { label: `看板 ${count("dashboard")}`, value: "dashboard" },
+      { label: `图表 ${count("chart")}`, value: "chart" },
+      { label: `数据集 ${count("dataset")}`, value: "dataset" },
+    ];
+  }, [matched]);
 
   const handleReconcile = async () => {
     setReconciling(true);
@@ -100,93 +121,115 @@ export function VizAssetsPage() {
     {
       title: "名称",
       dataIndex: "title",
-      render: (title: string, row: SupersetAsset) =>
-        row.asset_type === "dashboard" && row.embedded_uuid ? (
-          <Link to={`/data-apps/${row.id}`}>{title}</Link>
-        ) : (
-          <span>{title}</span>
-        ),
-    },
-    {
-      title: "类型",
-      dataIndex: "asset_type",
-      width: 110,
-      render: (t: string, row: SupersetAsset) => (
-        <Space size={4}>
-          <Tag>{TYPE_LABEL[t] ?? t}</Tag>
-          {row.viz_type ? <Tag color="blue">{row.viz_type}</Tag> : null}
-        </Space>
-      ),
+      width: "38%",
+      // 主操作绑在主信息上：点名字就是打开它。这样操作列不必再摆一个长按钮。
+      render: (title: string, row: SupersetAsset) => {
+        const meta = TYPE_META[row.asset_type];
+        return (
+          <Space size={8} align="start">
+            <span style={{ color: "var(--om-text-tertiary)", lineHeight: "22px" }}>
+              {meta?.icon}
+            </span>
+            <Space orientation="vertical" size={0}>
+              <a href={row.url} target="_blank" rel="noreferrer">
+                {title}
+                <ExportOutlined style={{ marginInlineStart: 6, fontSize: 11 }} />
+              </a>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {meta?.label ?? row.asset_type}
+                {row.viz_type ? ` · ${row.viz_type}` : ""}
+              </Text>
+            </Space>
+          </Space>
+        );
+      },
     },
     {
       title: "落点",
       dataIndex: "dataset_ref",
-      render: (ref: string | null) =>
-        ref ? (
-          <code>{ref}</code>
-        ) : (
+      // 三态要分开说：有落点 / 引用断了 / 本来就没登记。合成一个「—」会把
+      // 「口径断了」说成「本来就没有」。
+      render: (ref: string | null, row: SupersetAsset) => {
+        if (row.landing) {
+          return (
+            <Tooltip title={`引用：${ref}`}>
+              <Space orientation="vertical" size={0}>
+                <span>{row.landing.entity_display_name}</span>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {row.landing.physical}
+                </Text>
+              </Space>
+            </Tooltip>
+          );
+        }
+        if (ref) {
+          return (
+            <Tooltip title={`引用 ${ref} 解析不到实体：可能已被删除或降级，这张图的口径已经断了`}>
+              <Tag color="warning">落点已失效</Tag>
+            </Tooltip>
+          );
+        }
+        return (
           <Tooltip title="没有记录落点引用，口径无法回溯到本体">
-            <span style={{ color: "var(--om-text-tertiary)" }}>—</span>
+            <Text type="secondary">—</Text>
           </Tooltip>
-        ),
+        );
+      },
     },
     {
       title: "建者",
       dataIndex: "created_by",
-      width: 150,
+      width: 170,
+      // 令牌主体名可以很长（`dsh-publisher-acceptance-20260904`）。不截断的话
+      // 一行名字会把整行撑成三行高，列表就没法扫了。
       render: (by: string | null, row: SupersetAsset) => (
-        <Space size={4}>
-          <span>{by ?? "—"}</span>
-          <Tag>{VIA_LABEL[row.created_via] ?? row.created_via}</Tag>
+        <Space orientation="vertical" size={0} style={{ maxWidth: 154 }}>
+          <Tooltip title={by ?? undefined}>
+            <Text ellipsis style={{ maxWidth: 154 }}>
+              {by ?? "—"}
+            </Text>
+          </Tooltip>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {VIA_LABEL[row.created_via] ?? row.created_via}
+          </Text>
         </Space>
       ),
     },
     {
       title: "状态",
       dataIndex: "state",
-      width: 110,
-      render: (state: string) => {
+      width: 100,
+      render: (state: string, row: SupersetAsset) => {
         const meta = STATE_META[state] ?? STATE_META.unknown;
+        // 「上次对账」是什么时候，得说出来——只说"在"而不说何时看过，等于没说时效。
+        const when = row.last_seen_at
+          ? `（${new Date(row.last_seen_at).toLocaleString()}）`
+          : "";
         return (
-          <Tooltip title={meta.hint}>
+          <Tooltip title={`${meta.hint}${when}`}>
             <Tag color={meta.color}>{meta.label}</Tag>
           </Tooltip>
         );
       },
     },
     {
-      title: "操作",
-      width: 210,
+      title: "",
+      width: 64,
+      align: "right" as const,
+      // 解除是次要操作，不该比它旁边的资产名还显眼。危险性由 Popconfirm 承担，
+      // 不必再用红色抢一遍注意力。
       render: (_: unknown, row: SupersetAsset) => (
-        <Space size={4}>
-          {row.asset_type === "dashboard" && row.embedded_uuid ? (
-            <Button
-              size="small"
-              icon={<EyeOutlined />}
-              onClick={() => navigate(`/data-apps/${row.id}`)}
-            >
-              预览
-            </Button>
-          ) : null}
-          <Button
-            size="small"
-            icon={<ExportOutlined />}
-            href={row.url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            在 Superset 打开
+        <Popconfirm
+          title="解除登记"
+          description="只从这里移除，不会删除 Superset 里的内容。"
+          okText="解除"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => handleUnlink(row)}
+        >
+          <Button size="small" type="text" style={{ color: "var(--om-text-tertiary)" }}>
+            解除
           </Button>
-          <Popconfirm
-            title="解除登记"
-            description="只从这里移除，不会删除 Superset 里的内容。"
-            onConfirm={() => handleUnlink(row)}
-          >
-            <Button size="small" danger type="text">
-              解除
-            </Button>
-          </Popconfirm>
-        </Space>
+        </Popconfirm>
       ),
     },
   ];
@@ -233,8 +276,8 @@ export function VizAssetsPage() {
           description={
             <>
               {status.reason}
-              ：请到「设置 → 基础设施」填写 Superset 的地址、账号密码与数仓 database
-              编号，拨测通过后启用。ontoMeta 不部署 Superset，只连接已经跑着的实例。
+              ：请到「设置 → 基础设施」填写 Superset 的地址与账号密码，拨测通过后启用。
+              ontoMeta 不部署 Superset，只连接已经跑着的实例。
             </>
           }
         />
@@ -244,17 +287,12 @@ export function VizAssetsPage() {
         <Segmented
           value={typeFilter}
           onChange={(v) => setTypeFilter(String(v))}
-          options={[
-            { label: "全部", value: "all" },
-            { label: "看板", value: "dashboard" },
-            { label: "图表", value: "chart" },
-            { label: "数据集", value: "dataset" },
-          ]}
+          options={typeOptions}
         />
         <Input.Search
           allowClear
-          placeholder="按名称过滤"
-          style={{ width: 240 }}
+          placeholder="按名称、落点实体或物理表过滤"
+          style={{ width: 280 }}
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />

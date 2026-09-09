@@ -66,7 +66,6 @@ const FIELD_LABEL: Record<string, string> = {
   password: "密码",
   base_url: "服务地址（后端访问）",
   public_base_url: "对外地址（浏览器访问）",
-  database_id: "数仓 database ID",
 };
 
 // 由组件专有分节自己渲染的连接分组：airflow 的 SSH 密码要和 SSH 主机/端口/目录放在

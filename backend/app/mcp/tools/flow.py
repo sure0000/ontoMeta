@@ -771,6 +771,8 @@ class OpenTaskFormTool:
     """把当前这一环变成控制台上的一张网页表单。"""
 
     name = "open_task_form"
+    display_name = "开控制台表单"
+    category = "task_flow"
     required_role = "editor"
     description = (
         "**客户端没有原生问答工具时用它**：把当前这一环变成 ontoMeta 控制台上的一张真表单，"
@@ -860,6 +862,8 @@ class WaitTaskFormTool:
     """等用户把网页表单填完提交。"""
 
     name = "wait_task_form"
+    display_name = "等待表单提交"
+    category = "task_flow"
     required_role = "editor"
     description = (
         "等 open_task_form 发出去的那张表单被提交，再把填好的 answers 和下一环一起回给你。"
@@ -965,6 +969,8 @@ class StartTaskFlowTool:
     """开一条交互式建数流程。"""
 
     name = "start_task_flow"
+    display_name = "启动建数流程"
+    category = "task_flow"
     # 与 propose_* 同级：它只读候选、不写库，但它是写侧的入口，reader 走到头也提不了案。
     required_role = "editor"
     description = (
@@ -1022,6 +1028,8 @@ class AdvanceTaskFlowTool:
     """带着用户填好的这一环推进流程。"""
 
     name = "advance_task_flow"
+    display_name = "推进建数流程"
+    category = "task_flow"
     required_role = "editor"
     description = (
         "把用户在表单里填的值写进 answers 后调它，拿下一环的表单；"

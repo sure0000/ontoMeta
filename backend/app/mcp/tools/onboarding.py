@@ -40,6 +40,8 @@ class ListOnboardingTargetsTool:
     """接数据时可选什么：域、数据源、DataHub 状态"""
 
     name = "list_onboarding_targets"
+    display_name = "接入目标清单"
+    category = "onboarding"
     required_role = "reader"
     description = (
         "读取接数据时**可选什么**：DataHub 配没配、已同步的数据域（各自草稿/发布状态与对象数）、"
@@ -122,6 +124,8 @@ class CreateDatasourceTool:
     """登记一个数据源连接骨架（不含凭据）"""
 
     name = "create_datasource"
+    display_name = "登记数据源"
+    category = "onboarding"
     # 建连接是运维动作，且建完要有人去填凭据——publisher。
     required_role = "publisher"
     description = (
@@ -211,6 +215,8 @@ class StartOntologyDraftTool:
     """为某个数据域启动本体草稿生成"""
 
     name = "start_ontology_draft"
+    display_name = "启动本体草稿"
+    category = "onboarding"
     # 一次生成要烧几十万 token 并会把 needs_review 重新灌满——publisher。
     required_role = "publisher"
     description = (

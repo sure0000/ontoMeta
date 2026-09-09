@@ -176,6 +176,8 @@ def _package_payload(package: LineagePackage, *, include_edges: bool = False, li
 @register_tool
 class GetLineageInventoryTool:
     name = "get_lineage_inventory"
+    display_name = "血缘家底"
+    category = "lineage"
     required_role = "reader"
     description = "读取数据域的 DataHub 血缘家底：表、上下游计数、孤岛表和覆盖率。只读。"
     input_schema = {
@@ -237,6 +239,8 @@ class GetLineageInventoryTool:
 @register_tool
 class GetLineageColumnsTool:
     name = "get_lineage_columns"
+    display_name = "血缘字段读取"
+    category = "lineage"
     required_role = "reader"
     description = "读取血缘补录用的真实表字段和主键信息；表必须来自 get_lineage_inventory，不猜字段。"
     input_schema = {
@@ -273,6 +277,8 @@ class GetLineageColumnsTool:
 @register_tool
 class PreviewLineageSupplementTool:
     name = "preview_lineage_supplement"
+    display_name = "补录血缘预览"
+    category = "lineage"
     required_role = "editor"
     description = "预览人工补录的表级血缘和关联键。只校验 DataHub 表/字段并返回 digest，不写本地库、不写 DataHub。"
     input_schema = {
@@ -312,6 +318,8 @@ class PreviewLineageSupplementTool:
 @register_tool
 class PreviewSqlLineageTool:
     name = "preview_sql_lineage"
+    display_name = "SQL 血缘解析"
+    category = "lineage"
     required_role = "editor"
     description = "解析一段 SQL 代码中的 INSERT/CTAS/VIEW 血缘，映射到当前域 DataHub URN，返回可上报边和 digest；不写库。"
     input_schema = {
@@ -353,6 +361,8 @@ class PreviewSqlLineageTool:
 @register_tool
 class ListLineagePackagesTool:
     name = "list_lineage_packages"
+    display_name = "血缘包历史"
+    category = "lineage"
     required_role = "reader"
     description = "列出某数据域的血缘代码包/画布补录历史和边统计。只读。"
     input_schema = {
@@ -382,6 +392,8 @@ class ListLineagePackagesTool:
 @register_tool
 class GetLineagePackageTool:
     name = "get_lineage_package"
+    display_name = "血缘包详情"
+    category = "lineage"
     required_role = "reader"
     description = "读取单个血缘代码包/画布补录的解析失败、边映射和上报状态。只读。"
     input_schema = {"type": "object", "properties": {"package_id": {"type": "string"}, "edge_limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}}, "required": ["package_id"]}
@@ -401,6 +413,8 @@ class GetLineagePackageTool:
 @register_tool
 class ApplyLineagePackageTool:
     name = "apply_lineage_package"
+    display_name = "代码包血缘上报"
+    category = "lineage"
     required_role = "publisher"
     description = "把已扫描代码包中选定的可映射边上报 DataHub。必须先展示摘要并取得宿主确认；重复上报幂等。"
     input_schema = {"type": "object", "properties": {"package_id": {"type": "string"}, "targets": {"type": "array", "items": {"type": "string"}}, "host_confirmation": {"type": "object"}}, "required": ["package_id"]}
@@ -441,6 +455,8 @@ class ApplyLineagePackageTool:
 @register_tool
 class ApplyLineageSupplementTool:
     name = "apply_lineage_supplement"
+    display_name = "补录血缘上报"
+    category = "lineage"
     required_role = "publisher"
     description = "把人工预览通过的血缘边上报 DataHub并留本地 manual 包。必须回传同一 preview_digest 的宿主确认，不能由 Agent 自己批准。"
     input_schema = {"type": "object", "properties": {"domain_id": {"type": "string"}, "edges": {"type": "array", "items": {"type": "object"}}, "label": {"type": "string"}, "preview_digest": {"type": "string"}, "host_confirmation": {"type": "object"}}, "required": ["domain_id", "edges", "preview_digest"]}

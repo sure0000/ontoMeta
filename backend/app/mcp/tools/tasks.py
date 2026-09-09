@@ -181,6 +181,8 @@ class ListTasksTool:
     """列出数据任务"""
 
     name = "list_tasks"
+    display_name = "任务列表"
+    category = "task_run"
     description = (
         "列出数据治理任务（同步 sync / 加工 transform / 聚合 metric / 物化 materialize）。"
         "可按类型、状态、本体过滤。只读，不触发执行。\n"
@@ -275,6 +277,8 @@ class GetTaskStatusTool:
     """查询单个任务状态"""
 
     name = "get_task_status"
+    display_name = "任务状态"
+    category = "task_run"
     description = (
         "回读单个数据任务的状态、Spec、校验报告与执行回执，"
         "并尽力回读 Airflow DagRun 的实时状态（读不到就退回制品态）。只读，不触发执行。"
@@ -310,6 +314,8 @@ class WaitTaskStatusTool:
     """服务端长轮询任务状态，避免客户端高频重复调用。"""
 
     name = "wait_task_status"
+    display_name = "等待任务终态"
+    category = "task_run"
     description = (
         "在服务端等待一个任务的远端状态变化或终态，再返回与 get_task_status 相同的真实回执。"
         "只读、不触发执行；适合异步 execute_task 后追踪，避免客户端用 Bash/sleep 高频轮询。"

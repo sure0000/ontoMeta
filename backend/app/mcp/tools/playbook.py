@@ -41,6 +41,8 @@ class GetPlaybookTool:
     """按主题取回 ontoMeta 的操作指引正文。"""
 
     name = "get_playbook"
+    display_name = "操作指引"
+    category = "service"
     required_role = "reader"
     description = (
         "取回 ontoMeta 的操作指引（playbook）正文：某类问题该按什么顺序调哪些工具、"

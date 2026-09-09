@@ -73,6 +73,8 @@ def _counts(
 @register_tool
 class GetOntologyOverviewTool:
     name = "get_ontology_overview"
+    display_name = "本体总览"
+    category = "ontology"
     required_role = "reader"
     description = (
         "一次返回本体元信息、对象角色/板块分布和业务对象精简清单。"

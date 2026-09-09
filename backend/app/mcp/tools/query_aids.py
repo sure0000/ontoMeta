@@ -55,6 +55,8 @@ class FindJoinPathTool:
     """两个对象之间的关联路径"""
 
     name = "find_join_path"
+    display_name = "关联路径"
+    category = "query"
     required_role = "reader"
     description = (
         "查两个业务对象之间**本体认可的**关联路径：每一跳的关系、ON 连接键、基数链，"
@@ -190,6 +192,8 @@ class ProfileValuesTool:
     """字段取值画像"""
 
     name = "profile_values"
+    display_name = "字段取值分布"
+    category = "query"
     # 读真实数据，与 execute_sql 同价。写死 reader 就等于开了一个绕过 SQL 权限的后门：
     # 一次画像等于一句 SELECT DISTINCT。
     required_role = settings.agent_run_sql_min_role
