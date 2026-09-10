@@ -145,6 +145,11 @@
   min-width: 0;
   width: 100%;
 }
+/* full 模式页面自己管高度——上下 padding 收窄到 12px，保留一点呼吸感。 */
+.app-content:has(> .page-container--full) {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
 .app-content--flush {
   padding: 0;
   background: var(--om-surface);
@@ -266,10 +271,8 @@
   flex-wrap: wrap;
 }
 
-/* 事实条独占页头的第二行：标题与动作区因此挤在同一行，省下一整行；
-   同时事实条不再受 .page-header-description 的 720px 限宽，能一行放完。 */
+/* 事实条紧跟在标题/描述下方，与动作按钮区同行，不再单独占一整行。 */
 .page-header-meta {
-  flex: 1 0 100%;
   min-width: 0;
 }
 
@@ -343,6 +346,10 @@ a.page-meta-item:hover strong {
 .page-header--with-border {
   padding-bottom: 18px;
   border-bottom: 1px solid var(--om-border);
+}
+/* 无分割线，但上下两块仍需一点呼吸空间——用于 gap:0 的 full 容器页头 */
+.page-header--gap-only {
+  margin-bottom: 10px;
 }
 
 /* ---------- Section card ---------- */
@@ -1384,9 +1391,11 @@ a.page-meta-item:hover strong {
 .review-workbench {
   display: flex;
   flex-direction: column;
-  gap: var(--om-space-3);
-  height: calc(100vh - var(--om-header-h) - 48px);
-  min-height: 520px;
+  gap: 8px;
+  /* 父容器（page-container--full）是 flex column，这里用 flex:1 填满剩余空间。
+     height:100% 在没有显式高度的 flex 父容器里不可靠，min-height:0 防止内容撑破。 */
+  flex: 1;
+  min-height: 0;
 }
 
 /* ---------- 顶栏：进度 + 全局动作 ---------- */
@@ -1394,10 +1403,10 @@ a.page-meta-item:hover strong {
 .review-topbar {
   display: flex;
   align-items: center;
-  gap: var(--om-space-4);
+  gap: var(--om-space-3);
   flex-wrap: wrap;
-  min-height: 58px;
-  padding: 8px 12px;
+  min-height: 48px;
+  padding: 6px 10px;
   background: var(--om-surface);
   border: 1px solid var(--om-border-strong);
   border-radius: var(--om-radius-lg);
@@ -1470,8 +1479,8 @@ a.page-meta-item:hover strong {
   min-height: 0;
   display: grid;
   /* 左栏是进度地形，宽度固定；右栏是工作面，吃掉全部余量。 */
-  grid-template-columns: minmax(180px, 196px) minmax(0, 1fr);
-  gap: var(--om-space-3);
+  grid-template-columns: minmax(168px, 184px) minmax(0, 1fr);
+  gap: 8px;
   align-items: stretch;
 }
 
@@ -1487,7 +1496,7 @@ a.page-meta-item:hover strong {
 
 .review-pane--queue {
   overflow-y: auto;
-  padding: var(--om-space-4);
+  padding: 10px 10px 8px;
   box-shadow: var(--om-shadow-sm);
 }
 
@@ -1502,8 +1511,8 @@ a.page-meta-item:hover strong {
   letter-spacing: 0.06em;
   color: var(--om-text-tertiary);
   text-transform: uppercase;
-  padding-bottom: var(--om-space-2);
-  margin-bottom: var(--om-space-2);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
   border-bottom: 1px solid var(--om-border);
   flex: none;
 }
@@ -1710,7 +1719,7 @@ a.page-meta-item:hover strong {
   justify-content: space-between;
   align-items: center;
   gap: var(--om-space-3);
-  padding: 9px var(--om-space-5);
+  padding: 6px var(--om-space-5);
   border-bottom: 1px solid var(--om-border);
   background: var(--om-surface);
   flex: none;
@@ -1757,7 +1766,7 @@ a.page-meta-item:hover strong {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0 var(--om-space-3);
+  padding: 0 8px;
 }
 
 .review-group-table .ant-table-cell {
@@ -1930,7 +1939,7 @@ a.page-meta-item:hover strong {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--om-space-2);
-  padding: 10px var(--om-space-5);
+  padding: 7px var(--om-space-5);
   border-top: 1px solid var(--om-border);
   background: #fbfcfe;
   box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.025);

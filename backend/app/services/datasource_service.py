@@ -182,11 +182,14 @@ class DataSourceService:
 
     @staticmethod
     def _dsn_components(kind: str, dsn: str | None) -> dict:
-        """把存量 DSN 拆成可安全回显的非机密字段，密码只返回是否已设置。
+        """把存量 DSN 拆成可回显的连接字段。
 
-        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号
+        - host 类（postgres/mysql/hive/doris/starrocks/clickhouse）：解析主机/端口/库/账号/密码
         - 文件类（sqlite/duckdb）：取文件路径
         解析失败时静默降级为空，不影响其它字段返回。
+
+        密码明文回显（见下），与设置页「基础设施」的连接表单同一套约定；
+        清空提交则由 ``_merge_dsn_password`` 沿用旧密码。
         """
         out: dict[str, Any] = {
             "dsn_set": bool(dsn),
@@ -210,10 +213,13 @@ class DataSourceService:
             out["port"] = u.port
             out["database"] = u.database
             out["username"] = u.username
-            # Password is a secret: only expose the presence hint.  The UI must
-            # ask the user to re-enter it; PATCH with an empty password keeps the
-            # managed value via _merge_dsn_password.
-            out["password"] = None
+            # 密码明文回显，前端预填进 Input.Password（眼睛图标控显隐）——与设置页
+            # 「基础设施」连接表单同一套约定（见 dependency_service._mask_connection）。
+            # 此前这里返回 None，而表单上却写着「已回显，清空将保持原密码不变」：
+            # 承诺回显、框里是空的，用户没法确认自己配的是哪一个密码。
+            # 威胁模型没变——拿得到管理令牌的人本来就能从设置页读到全部机密。
+            # ``_set``/``_hint`` 保留，向前兼容。
+            out["password"] = u.password
             out["password_set"] = bool(u.password)
             out["password_hint"] = "已配置" if u.password else None
         elif kind in _FILE_DSN_KINDS:

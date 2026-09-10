@@ -1,5 +1,4 @@
 import {
-  ArrowRightOutlined,
   CloudUploadOutlined,
   LeftOutlined,
   NodeIndexOutlined,
@@ -395,10 +394,13 @@ export function LineageSupplementPage() {
           ? Math.min(6, Math.max(3, Math.ceil(Math.sqrt(total))))
           : 3;
         const rowH = collapsed ? CANVAS_ROW_H_COLLAPSED : CANVAS_ROW_H;
-        const baseY = 16 + Math.ceil(prev.length / 3) * CANVAS_ROW_H;
+        // 从现有节点的实际底部算起，而不是按列数乘以 CANVAS_ROW_H——
+        // 前一批如果是折叠放的，实际只占 76px，用 250 会留出 174px 的空白。
+        const baseY =
+          prev.length > 0
+            ? Math.max(...prev.map((n) => n.y)) + (collapsed ? CANVAS_ROW_H_COLLAPSED : CANVAS_ROW_H)
+            : 16;
 
-        // 折叠着放就先不取字段：一张表一次 DataHub 往返（实测数秒），138 张要几分钟，
-        // 而折叠状态下这些字段一个都不显示。展开哪张再取哪张（见 LineageCanvas）。
         if (!collapsed) void loadColumnsFor(fresh);
 
         return [
@@ -836,16 +838,13 @@ export function LineageSupplementPage() {
     <PageContainer full>
       <div className="lin-workbench">
         <header className="lin-topbar">
-          <span className="lin-topbar-title">
-            <NodeIndexOutlined />
-            血缘补录
-          </span>
+          <NodeIndexOutlined className="lin-topbar-icon" />
 
           <Select
             size="small"
-            style={{ width: 168 }}
+            style={{ width: 152 }}
             value={selectedDomainKnown ? domainId : undefined}
-            placeholder={domains.loading ? "正在加载数据域…" : "选择数据域"}
+            placeholder={domains.loading ? "加载中…" : "选择数据域"}
             onChange={(value) => setDomainId(value)}
             options={(domains.data ?? []).map((domain) => ({
               value: domain.id,
@@ -854,55 +853,39 @@ export function LineageSupplementPage() {
           />
 
           <div className="lin-stats">
-            <div className="lin-stat lin-stat--iso">
-              <span className="lin-stat-label">无血缘表</span>
-              <span className="lin-stat-value">
+            <Tooltip
+              title={
+                inventoryLoading
+                  ? undefined
+                  : `无任何关系 ${noAnyRelationTotal} 张`
+              }
+            >
+              <span className="lin-stat-pill lin-stat-pill--iso">
+                <span className="lin-stat-pill-lbl">无血缘</span>
                 <b>{inventoryLoading ? "…" : noLineageTotal}</b>
                 {!inventoryLoading && pending.resolved > 0 && (
-                  <>
-                    <ArrowRightOutlined className="lin-stat-arrow" />
-                    <b className="lin-stat-next">{isolatedNext}</b>
-                    <em>预计</em>
-                  </>
+                  <span className="lin-stat-pill-next">→ {isolatedNext}</span>
                 )}
               </span>
-              <span className="lin-stat-note">
-                无任何关系 {inventoryLoading ? "…" : noAnyRelationTotal}
-              </span>
-            </div>
+            </Tooltip>
 
-            <div className="lin-stat">
-              <span className="lin-stat-label">血缘覆盖率</span>
-              <span className="lin-stat-value">
+            <Tooltip
+              title={
+                overview.data
+                  ? `${overview.data.domain_name} · ${overview.data.platform ?? "—"} · ${readableDatabaseList(overview.data.databases)}`
+                  : undefined
+              }
+            >
+              <span className="lin-stat-pill">
+                <span className="lin-stat-pill-lbl">覆盖率</span>
                 <b>{inventoryLoading ? "—" : `${coveragePct.toFixed(1)}%`}</b>
               </span>
-              <div className={`lin-meter${inventoryLoading ? " lin-meter--loading" : ""}`}>
-                <i className="lin-meter-have" style={{ width: `${coveragePct}%` }} />
-              </div>
-            </div>
+            </Tooltip>
 
-            <div className="lin-stat">
-              <span className="lin-stat-label">域内表</span>
-              <span className="lin-stat-value">
-                <b>{inventoryLoading ? "…" : total}</b>
-              </span>
-            </div>
-
-            <div className="lin-stat lin-stat--src">
-              <span className="lin-stat-label">目标域</span>
-              <span
-                className="lin-stat-src"
-                title={overview.data?.databases.join(" / ") || undefined}
-              >
-                {overview.data
-                  ? inventoryLoading
-                    ? `${overview.data.domain_name} · 正在同步 DataHub 血缘…`
-                    : `${overview.data.domain_name} · ${overview.data.platform ?? "—"} · ${readableDatabaseList(
-                        overview.data.databases,
-                      )}`
-                  : "—"}
-              </span>
-            </div>
+            <span className="lin-stat-pill">
+              <span className="lin-stat-pill-lbl">域内表</span>
+              <b>{inventoryLoading ? "…" : total}</b>
+            </span>
           </div>
 
           <div className="lin-topbar-tools">
@@ -911,8 +894,8 @@ export function LineageSupplementPage() {
               value={mode}
               onChange={(value) => setMode(value as Mode)}
               options={[
-                { label: "代码包扫描", value: "scan" },
-                { label: "画布补录", value: "canvas" },
+                { label: "代码包", value: "scan" },
+                { label: "画布", value: "canvas" },
               ]}
             />
 
@@ -990,8 +973,10 @@ export function LineageSupplementPage() {
           <Alert type="error" showIcon title={`读取域血缘失败：${overview.error}`} />
         )}
 
-        <div className={`lin-body${railOpen ? "" : " lin-body--rail-closed"}`}>
-          <aside className="lin-rail">
+        <div className={`lin-body${mode === "canvas" ? " lin-body--canvas" : ""}${railOpen ? "" : " lin-body--rail-closed"}`}>
+          {/* 扫描模式：常规侧边栏。画布模式：绝对定位悬浮面板。 */}
+          <aside className={`lin-rail${mode === "canvas" ? " lin-rail--float" : ""}`}>
+            {/* 画布模式下折叠按钮始终可见，不受 railOpen 控制 */}
             <div className="lin-rail-head">
               {railOpen &&
                 (mode === "scan" ? (
@@ -1000,9 +985,6 @@ export function LineageSupplementPage() {
                     <span className="section-card-count">{packages.length}</span>
                   </>
                 ) : (
-                  /* 左栏两副面孔：往画布上放表，或按连通分量逐组审。分组审核走左栏
-                     而不是画布上的浮层——它是个队列（还剩几组没审），而且这样一点
-                     画布空间都不占。 */
                   <Segmented
                     size="small"
                     className="lin-rail-view"
@@ -1014,7 +996,7 @@ export function LineageSupplementPage() {
                     ]}
                   />
                 ))}
-              <Tooltip title={railOpen ? "收起" : "展开"} placement="right">
+              <Tooltip title={railOpen ? "收起" : (mode === "canvas" ? "展开表清单" : "展开")} placement="right">
                 <button
                   type="button"
                   className="lin-rail-toggle"
@@ -1054,13 +1036,12 @@ export function LineageSupplementPage() {
                 <>
                   <div className="lin-rail-controls">
                     <Segmented
-                      block
                       size="small"
                       value={railFilter}
                       onChange={(value) => setRailFilter(value as RailFilter)}
                       options={[
                         {
-                          label: `仅孤岛 ${inventoryLoading ? "…" : isolatedTotal}`,
+                          label: `孤岛 ${inventoryLoading ? "…" : isolatedTotal}`,
                           value: "isolated",
                         },
                         { label: `全部 ${inventoryLoading ? "…" : total}`, value: "all" },
@@ -1109,15 +1090,15 @@ export function LineageSupplementPage() {
                             disabled={already}
                             onChange={() => toggleChecked(row.name)}
                           />
-                          <span className="lin-rail-main">
+                          <Tooltip
+                            title={`上游 ${row.upstream} · 下游 ${row.downstream}${row.isolated ? " · 孤岛" : ""}`}
+                            placement="right"
+                          >
                             <span className="lin-rail-name" title={row.name}>
-                              {row.isolated && <i className="lin-iso-dot" title="孤岛表" />}
+                              {row.isolated && <i className="lin-iso-dot" />}
                               <LineageTableName name={row.name} />
                             </span>
-                            <span className="lin-rail-meta">
-                              上游 {row.upstream} · 下游 {row.downstream}
-                            </span>
-                          </span>
+                          </Tooltip>
                           <Tooltip title={already ? "已在画布上" : "放到画布"}>
                             <Button
                               size="small"

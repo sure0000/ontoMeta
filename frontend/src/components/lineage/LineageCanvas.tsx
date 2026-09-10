@@ -313,14 +313,6 @@ export function LineageCanvas({
   const nodeHeight = (node: CanvasNode) =>
     node.collapsed ? HEADER_H : HEADER_H + BODY_PAD * 2 + columnsOf(node.table).length * ROW_H;
 
-  /** 字段行的中心 y；折叠或找不到字段时落到表头中心。 */
-  const portY = (node: CanvasNode, col: string | null) => {
-    if (node.collapsed || !col) return node.y + HEADER_H / 2;
-    const index = columnsOf(node.table).findIndex((c) => c.name === col);
-    if (index < 0) return node.y + HEADER_H / 2;
-    return node.y + HEADER_H + BODY_PAD + index * ROW_H + ROW_H / 2;
-  };
-
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 24, y: 16, k: 1 });
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -341,11 +333,27 @@ export function LineageCanvas({
   );
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.table, n])), [nodes]);
+  // 声明顺序刻意在 portY 前面——portY 的 useCallback 需要把它列为依赖，
+  // 否则 TypeScript 会报「使用前未声明」。
   const columnsByTable = useMemo(
     () => new Map(nodes.map((node) => [node.table, columnsOf(node.table)])),
     [columnsOf, nodes],
   );
-  const selectedEdge = edges.find((e) => e.id === selected) ?? null;
+
+  /** 字段行的中心 y；折叠或找不到字段时落到表头中心。
+   * 用 columnsByTable（已 memo）而不是 columnsOf 闭包，这样 links 的 useMemo
+   * 依赖可以精确跟踪——pan 时 view 变但节点坐标和字段都不变，links 不需要重算。 */
+  const portY = useCallback((node: CanvasNode, col: string | null) => {
+    if (node.collapsed || !col) return node.y + HEADER_H / 2;
+    const cols = columnsByTable.get(node.table) ?? [];
+    const index = cols.findIndex((c) => c.name === col);
+    if (index < 0) return node.y + HEADER_H / 2;
+    return node.y + HEADER_H + BODY_PAD + index * ROW_H + ROW_H / 2;
+  }, [columnsByTable]);
+  const selectedEdge = useMemo(
+    () => edges.find((e) => e.id === selected) ?? null,
+    [edges, selected],
+  );
 
   const toWorld = useCallback(
     (clientX: number, clientY: number) => {
@@ -777,21 +785,27 @@ export function LineageCanvas({
     return { seeds, neighbours };
   }, [shownEdges, picked, selected]);
 
-  const links = shownEdges.flatMap((edge) => {
-    const a = nodeMap.get(edge.from);
-    const b = nodeMap.get(edge.to);
-    if (!a || !b) return [];
-    const rows = edge.keys.length > 0 ? edge.keys : [null];
-    return rows.map((key, index) => ({
-      id: `${edge.id}#${index}`,
-      edgeId: edge.id,
-      keyless: key === null,
-      machine: Boolean(edge.machine),
-      // 与选中的表直接相连 = 相关；其余的压暗，但不隐藏——藏起来人会以为线没了。
-      dim: Boolean(focus) && !focus?.seeds.has(edge.from) && !focus?.seeds.has(edge.to),
-      d: curve(a.x + NODE_W, portY(a, key ? key.src : null), b.x, portY(b, key ? key.dst : null)),
-    }));
-  });
+  // pan 只改 view，节点坐标/字段/边都不变，所以 links 不应该因 pan 重算。
+  // 依赖列表里没有 view，portY 已经是 useCallback(deps=[columnsByTable])，
+  // focus 引用变更才会重触发。
+  const links = useMemo(
+    () =>
+      shownEdges.flatMap((edge) => {
+        const a = nodeMap.get(edge.from);
+        const b = nodeMap.get(edge.to);
+        if (!a || !b) return [];
+        const rows = edge.keys.length > 0 ? edge.keys : [null];
+        return rows.map((key, index) => ({
+          id: `${edge.id}#${index}`,
+          edgeId: edge.id,
+          keyless: key === null,
+          machine: Boolean(edge.machine),
+          dim: Boolean(focus) && !focus?.seeds.has(edge.from) && !focus?.seeds.has(edge.to),
+          d: curve(a.x + NODE_W, portY(a, key ? key.src : null), b.x, portY(b, key ? key.dst : null)),
+        }));
+      }),
+    [shownEdges, nodeMap, portY, focus],
+  );
 
   const ghost =
     drag?.kind === "link"

@@ -10,6 +10,7 @@ interface Props {
    *  这一项 flex-basis:100% 必然换行）。不传则页头形状与从前完全一致。 */
   meta?: ReactNode;
   withBorder?: boolean;
+  className?: string;
 }
 
 export function PageHeader({
@@ -20,18 +21,21 @@ export function PageHeader({
   extra,
   meta,
   withBorder = true,
+  className,
 }: Props) {
   return (
-    <div className={`page-header${withBorder ? " page-header--with-border" : ""}`}>
+    <div
+      className={`page-header${withBorder ? " page-header--with-border" : ""}${className ? ` ${className}` : ""}`}
+    >
       <div className="page-header-main">
         {icon && <div className={`page-header-icon page-header-icon--${iconTone}`}>{icon}</div>}
         <div className="page-header-text">
           <div className="page-header-title">{title}</div>
           {description && <div className="page-header-description">{description}</div>}
+          {meta && <div className="page-header-meta">{meta}</div>}
         </div>
       </div>
       {extra && <div className="page-header-extra">{extra}</div>}
-      {meta && <div className="page-header-meta">{meta}</div>}
     </div>
   );
 }

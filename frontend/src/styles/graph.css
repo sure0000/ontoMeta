@@ -165,15 +165,6 @@
   color: var(--om-text);
   white-space: nowrap;
 }
-.business-map-head-meta {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--om-text-sm);
-  color: var(--om-text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .business-map-head-controls {
   display: inline-flex;
   align-items: center;

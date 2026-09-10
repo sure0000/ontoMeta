@@ -1,4 +1,5 @@
 import {
+  ClearOutlined,
   CompressOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
@@ -104,7 +105,7 @@ const LOD_OPEN_ZOOM = 0.42;
 // 同时展开的版块数上限：增量渲染虽稳，但节点过多仍会拖慢；放大后视口本就只覆盖少数版块，取其中最大的若干个。
 const LOD_MAX_OPEN_CLUSTERS = 12;
 // 缩放/平移后延迟重算 LoD，避免连续滚轮/拖拽期间频繁增删节点。
-const LOD_DEBOUNCE_MS = 200;
+const LOD_DEBOUNCE_MS = 450;
 
 // 使用 React.memo 包裹，避免父组件渲染但 props 引用稳定时，整个 G6 画布被无谓地重新创建。
 function OntologyGraphViewInner({
@@ -260,15 +261,21 @@ function OntologyGraphViewInner({
       // 力导向：连在一起的对象自然靠拢、被多方引用的对象自然居中，长度接近的边比
       // dagre 的长距离跨 rank 连线好追。y 向心力比 x 强，把结果压成宽幅，贴合画布长宽比。
       // 力的尺度跟紧凑卡片走（碰撞半径略大于卡片对角），卡片小了图就密，缩放才留得住。
+      //
+      // 规模缩放：节点越多越要快速收敛。alphaDecay 越大模拟 tick 越少；
+      // manyBody.distanceMax 越小跳过远距排斥，把 O(N²) 的实际 N 降下来。
+      const n = graph.nodes.length;
+      const alphaDecay = n > 80 ? 0.06 : n > 40 ? 0.042 : 0.028;
+      const distanceMax = n > 80 ? 500 : n > 40 ? 750 : 1100;
       options.layout = {
         type: "d3-force",
         randomSource: seededRandom(),
         link: { distance: 170, strength: 0.45 },
-        manyBody: { strength: -820, distanceMax: 1100 },
+        manyBody: { strength: -820, distanceMax },
         collide: { radius: 78, strength: 1 },
         x: { strength: 0.03 },
         y: { strength: 0.11 },
-        alphaDecay: 0.028,
+        alphaDecay,
       };
     } else {
       // 小邻域图：层级布局按关系方向分层，左→右直接读作「谁引用谁」。
@@ -317,7 +324,11 @@ function OntologyGraphViewInner({
 
     // 力导向是异步收敛的：render() 的 promise 先于布局落定 resolve，那一刻的包围盒还很小，
     // fitView 得到的缩放没有意义。等 afterlayout 再适配一次，这才是用户看到的第一屏。
-    if (!isOverview) g.on("afterlayout", () => void readableFit());
+    // once 而非 on：力导向多轮 tick 都会触发 afterlayout，用 on 会在收敛过程中反复 fitView。
+    if (!isOverview) g.once("afterlayout", () => void readableFit());
+
+    // 邻接索引：render 后填充，供详情图 hover 事件 O(1) 查邻居/边，避免每次 pointerenter 全量扫 getEdgeData()。
+    const adjIndex = new Map<string, { neighbors: Set<string>; edges: Set<string> }>();
 
     void g.render().then(async () => {
       if (disposed) return;
@@ -326,6 +337,19 @@ function OntologyGraphViewInner({
       // ResizeObserver 的那一次因此丢掉，且不会重试——画布就此卡在初始高度，底部空出
       // 一大片白（容器 656 / 画布 509）。渲染完成后重放一次即可，尺寸没变则内部直接返回。
       g.resize();
+      // 详情图 hover 用邻接索引 O(1) 查邻居；render 完成后此刻节点/边已全部就绪。
+      if (!isOverview) {
+        g.getNodeData().forEach((n) => {
+          adjIndex.set(String(n.id), { neighbors: new Set(), edges: new Set() });
+        });
+        g.getEdgeData().forEach((e) => {
+          const src = String(e.source), tgt = String(e.target), eid = String(e.id);
+          adjIndex.get(src)?.neighbors.add(tgt);
+          adjIndex.get(src)?.edges.add(eid);
+          adjIndex.get(tgt)?.neighbors.add(src);
+          adjIndex.get(tgt)?.edges.add(eid);
+        });
+      }
       const camera = pendingCameraRef.current;
       pendingCameraRef.current = null;
       if (isOverview && camera) {
@@ -376,81 +400,78 @@ function OntologyGraphViewInner({
         if (relationDetailPath) navigate(relationDetailPath(resolveRelationId(graphEdge)));
       });
 
-      // 邻域聚焦：悬浮一个对象 → 只留它和它的直接关系，其余压暗。
-      // 30+ 节点的板块图里，这是「这个对象连着谁」唯一读得出来的方式；
-      // 状态一次性批量下发（单次 setElementState → 单次重绘），避免连环重绘卡顿。
-      let focusedId: string | null = null;
-      // 刚看过的那一组节点。鼠标一移开就全清的话，刚读出来的东西也跟着没了——想再确认
-      // 一眼只能重新找到那个节点再悬浮一次。留个痕，视线可以离开画布去看别处，回头还
-      // 认得住。只留**最后一组**，不累积，否则翻十个节点整张图就黄了。
-      //
-      // **连线不留痕**：边一亮就是一张黄网铺在图上，盖过底下真正要读的结构；
-      // 节点标住就够找回来了。所以移开时边一律复位。
-      let recentNodes = new Set<string>();
-      const clearFocus = () => {
-        if (focusedId === null) return; // 没在聚焦就别白白重绘
-        focusedId = null;
+      // 邻域聚焦：hover 节点时节点变蓝、连接的边变蓝；鼠标离开时只清边，节点保持蓝色。
+      // 不压暗其他节点，画布保持整体可读。拖拽期间完全屏蔽，节点移动过程中零额外渲染。
+      let hoveredId: string | null = null;
+      // 记录上一次离开的节点 ID：再次进入同一节点时，该节点已处于 ["selected"] 态，
+      // G6 可能把整批 setElementState 判为无变化而跳过，导致边不重新激活。
+      // 先把节点复位到 [] 再应用完整状态，强制 G6 处理这次变化。
+      let lastLeftId: string | null = null;
+      let isDragging = false;
+
+      const resetAllStates = () => {
+        hoveredId = null;
         const states: Record<string, string[]> = {};
-        g.getNodeData().forEach((n) => {
-          const nid = String(n.id);
-          states[nid] = recentNodes.has(nid) ? ["recent"] : [];
-        });
-        g.getEdgeData().forEach((e) => {
-          if (e.id != null) states[String(e.id)] = [];
-        });
+        g.getNodeData().forEach((n) => { states[String(n.id)] = []; });
+        g.getEdgeData().forEach((e) => { if (e.id != null) states[String(e.id)] = []; });
         void g.setElementState(states, false);
       };
+      (g as unknown as { __resetHighlight?: () => void }).__resetHighlight = resetAllStates;
+      cleanups.push(() => {
+        delete (g as unknown as { __resetHighlight?: () => void }).__resetHighlight;
+      });
+
+      g.on<IElementEvent>("node:dragstart", () => { isDragging = true; });
+      g.on<IElementEvent>("node:dragend", () => { isDragging = false; });
+
+      // 进入节点：悬浮节点变蓝（selected），直接邻居浅蓝（active），其余压暗，连接的边高亮。
+      // 若再次进入上一次离开的同一节点，该节点仍处于 ["selected"] 态，G6 会把整批
+      // setElementState 判为无变化而跳过，边就不会重新激活。先强制复位再应用完整状态。
       g.on<IElementEvent>("node:pointerenter", (evt) => {
-        const focusId = String(evt.target.id);
-        focusedId = focusId;
-        const neighbors = new Set<string>([focusId]);
-        const activeEdges = new Set<string>();
-        g.getEdgeData().forEach((e) => {
-          const [src, tgt] = [String(e.source), String(e.target)];
-          if (src !== focusId && tgt !== focusId) return;
-          neighbors.add(src);
-          neighbors.add(tgt);
-          if (e.id != null) activeEdges.add(String(e.id));
-        });
+        if (isDragging) return;
+        const nodeId = String(evt.target.id);
+        if (nodeId === lastLeftId) {
+          void g.setElementState(nodeId, [], false);
+        }
+        hoveredId = nodeId;
+        lastLeftId = null;
+        const entry = adjIndex.get(nodeId);
+        const neighbors = entry?.neighbors ?? new Set<string>();
+        const activeEdges = entry?.edges ?? new Set<string>();
         const states: Record<string, string[]> = {};
         g.getNodeData().forEach((n) => {
           const nid = String(n.id);
-          // 指着的那个单独一档：邻居也用 active 的话，「我点的是哪个」就读不出来了。
-          states[nid] =
-            nid === focusId ? ["selected"] : neighbors.has(nid) ? ["active"] : ["dimmed"];
+          states[nid] = nid === nodeId ? ["selected"] : neighbors.has(nid) ? ["active"] : ["dimmed"];
         });
         g.getEdgeData().forEach((e) => {
-          if (e.id == null) return;
-          states[String(e.id)] = activeEdges.has(String(e.id)) ? ["active"] : ["dimmed"];
+          if (e.id != null) states[String(e.id)] = activeEdges.has(String(e.id)) ? ["active"] : [];
         });
-        // 这一组就是「刚看过的」——移开时由 clearFocus 把这些节点留成痕迹。
-        recentNodes = neighbors;
         void g.setElementState(states, false);
       });
-      g.on<IElementEvent>("node:pointerleave", clearFocus);
-      // 关键补漏：指针从一个节点上**直接滑出画布**时，G6 不发 node:pointerleave，
-      // 聚焦态就永久卡在压暗上。用容器自己的原生 pointerleave 收尾——它只在指针
-      // 真的离开容器时触发，语义明确。
-      //
-      // 别用 G6 的 canvas:pointerenter/canvas:pointerleave 代替：canvas 事件会从
-      // 节点冒上来，实测顺序是 node:pointerenter → canvas:pointerenter，
-      // 拿它清理会把刚设好的聚焦立刻擦掉。
-      container.addEventListener("pointerleave", clearFocus);
-      cleanups.push(() => container.removeEventListener("pointerleave", clearFocus));
 
-      // 悬停高亮可点击的关系边（描边加粗 + 标签链接色），配合 cursor:pointer 让边的
-      // 可点击性可见。仅当边确实可跳转时才亮，避免误导。
-      // 处于邻域聚焦时不接管边的状态：否则扫过一条边会在压暗层上戳个洞。
+      // 离开节点：只清边，节点保持 selected 蓝色不变。记录离开的节点 ID 供下次进入判断。
+      g.on<IElementEvent>("node:pointerleave", (evt) => {
+        if (isDragging) return;
+        const nodeId = String(evt.target.id);
+        if (hoveredId !== nodeId) return;
+        hoveredId = null;
+        lastLeftId = nodeId;
+        const states: Record<string, string[]> = {};
+        g.getEdgeData().forEach((e) => { if (e.id != null) states[String(e.id)] = []; });
+        void g.setElementState(states, false);
+      });
+
+      // 悬停高亮可跳转的边：无节点被 hover 时才亮，避免与节点高亮状态冲突。
       const edgeNavigable = () => {
         const { onEdgeClick, relationDetailPath } = latest.current;
         return Boolean(onEdgeClick || relationDetailPath);
       };
       g.on<IElementEvent>("edge:pointerenter", (evt) => {
-        if (!edgeNavigable() || focusedId !== null) return;
+        if (!edgeNavigable() || hoveredId !== null) return;
         void g.setElementState(String(evt.target.id), ["hover"], false);
       });
       g.on<IElementEvent>("edge:pointerleave", (evt) => {
-        if (focusedId !== null) return;
+        if (hoveredId !== null) return;
         void g.setElementState(String(evt.target.id), [], false);
       });
     }
@@ -614,6 +635,12 @@ function OntologyGraphViewInner({
     void graphRef.current?.layout();
   }, []);
 
+  const handleResetHighlight = useCallback(() => {
+    const g = graphRef.current;
+    if (!g) return;
+    (g as unknown as { __resetHighlight?: () => void }).__resetHighlight?.();
+  }, []);
+
   const handleFitView = useCallback(() => {
     void graphRef.current?.fitView();
   }, []);
@@ -770,6 +797,9 @@ function OntologyGraphViewInner({
       </AntTooltip>
       <AntTooltip title="适应画布">
         <Button size="small" type="text" icon={<CompressOutlined />} onClick={handleFitView} />
+      </AntTooltip>
+      <AntTooltip title="还原高亮">
+        <Button size="small" type="text" icon={<ClearOutlined />} onClick={handleResetHighlight} />
       </AntTooltip>
     </Space>
   );

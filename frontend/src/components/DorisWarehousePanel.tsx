@@ -83,7 +83,9 @@ export function useDorisWarehouseController() {
         default_catalog: dorisConfig?.default_catalog ?? "internal",
         default_database: dorisConfig?.default_database ?? currentSource?.database ?? "",
         username: currentSource?.username ?? "",
-        password: "",
+        // 密码明文回显（后端 _dsn_components 下发），预填进 Input.Password，
+        // 眼睛图标控显隐——与设置页其它连接表单同一套约定。清空提交仍保持原密码。
+        password: currentSource?.password ?? "",
         fenodes: dorisConfig?.fenodes?.join("\n") ?? "",
         benodes: dorisConfig?.benodes?.join("\n") ?? "",
         connect_timeout_seconds: dorisConfig?.connect_timeout_seconds ?? 10,
@@ -311,12 +313,13 @@ export function DorisWarehouseDrawer({ controller }: { controller: DorisWarehous
               label="查询密码"
               tooltip={
                 source?.password_set
-                  ? "该 Doris 查询账号的密码已设置；不修改时请留空，系统会保留原密码。"
-                  : "该 Doris 查询账号的密码。密码只写入后端受管配置，保存后不会回显。"
+                  ? "该 Doris 查询账号的密码，已回显；清空提交则保留原密码。"
+                  : "该 Doris 查询账号的密码。当前这个数据源的连接串里没有密码段——"
+                    + "留空表示该账号本来就不需要密码。"
               }
             >
               <Input.Password
-                placeholder={source?.password_set ? "已设置，留空保持不变" : "数据库密码"}
+                placeholder={source?.password_set ? "已配置" : "数据库密码（可留空）"}
                 autoComplete="new-password"
               />
             </Form.Item>

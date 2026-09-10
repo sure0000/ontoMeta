@@ -95,33 +95,16 @@ type PaneMode = "graph" | "list";
 const OVERVIEW_KEY = "__overview__";
 
 /**
- * 兜底板块的展示口径。它们不是业务子域，所以在目录里固定排在业务模块之后，
- * 并且各自写清「为什么在这」——这一栏的价值就是让人知道下一步该动哪里。
+ * 兜底板块的展示口径。它们不是业务子域，所以在目录里固定排在业务模块之后。
  */
 const FALLBACK_KINDS: SegmentKind[] = ["shared", "system"];
 
-const KIND_META: Record<
-  Exclude<SegmentKind, "business">,
-  { icon: React.ReactNode; why: string }
-> = {
-  shared: {
-    icon: <ClusterOutlined />,
-    why: "被多个模块共同引用的枢纽对象，刻意不并入任何单个模块",
-  },
-  system: {
-    icon: <DatabaseOutlined />,
-    why: "不是业务对象也不是业务关系表的一切：框架管道表、数据库自带 schema——分错的可在审核台移到业务板块",
-  },
+const KIND_META: Record<Exclude<SegmentKind, "business">, { icon: React.ReactNode }> = {
+  shared: { icon: <ClusterOutlined /> },
+  system: { icon: <DatabaseOutlined /> },
 };
 
 const EMPTY_GRAPH: OntologyGraph = { nodes: [], edges: [] };
-
-/**
- * 单个模块的关系图规模上限。超过就退回关系清单——句子在稠密块里比图好读，
- * 图硬画只会得到毛线球。阈值取自实测：ERP 最大模块 58 成员 / 116 条内部关系仍可读。
- */
-const GRAPH_NODE_LIMIT = 120;
-const GRAPH_EDGE_LIMIT = 280;
 
 /** 落库板块的 id 是 uuid；无板块时 grouped-graph 回退算法给的是 `cluster-N`。 */
 function isLegacyClusterId(id: string): boolean {
@@ -261,10 +244,7 @@ export function OntologyOverviewPanel({
   const neighborCount = segmentDetail?.neighbors?.length ?? 0;
   const crossRelationCount = segmentDetail?.cross_relation_count ?? 0;
 
-  // 超过规模上限就不画图了——毛线球比没有图更糟。直接落到关系清单并说明原因。
-  const graphTooDense =
-    moduleGraph.nodes.length > GRAPH_NODE_LIMIT || moduleGraph.edges.length > GRAPH_EDGE_LIMIT;
-  const effectivePane: PaneMode = graphTooDense ? "list" : paneMode;
+  const effectivePane: PaneMode = paneMode;
 
   // 关系清单：后端句子已经把「主语 谓语 宾语 · 基数 · 外键证据」拼成人话，
   // 直接用；回退聚类没有句子，就地按边拼一份。
@@ -342,25 +322,7 @@ export function OntologyOverviewPanel({
   const stageTitle =
     selectedId === OVERVIEW_KEY ? "全域概览" : (selectedCluster?.name ?? "模块关系图");
 
-  const stageMeta = (): string => {
-    if (selectedId === OVERVIEW_KEY) {
-      return `${businessClusters.length} 业务模块 · ${groupedGraph.hub_nodes.length} 枢纽 · 只画骨架，要读关系请在左侧选模块`;
-    }
-    const parts = [
-      `${moduleGraph.nodes.length} 对象`,
-      `${moduleGraph.edges.length} 关系`,
-      `${crossRelationCount} 跨模块`,
-    ];
-    // 兜底板块最该说清的是「为什么在这」，而不是交互提示。
-    if (selectedKind !== "business") {
-      parts.push(KIND_META[selectedKind].why);
-    } else if (effectivePane === "graph") {
-      parts.push("悬浮对象只看它的关系");
-    }
-    return parts.join(" · ");
-  };
-
-  // 舞台标题行：标题 + 计数 + 控件全部一行。图的这一行由 OntologyGraphView 的工具条承载
+  // 舞台标题行：标题 + 控件全部一行。图的这一行由 OntologyGraphView 的工具条承载
   // （右侧还有它自己的适配/全屏按钮），非图面板则由 .business-map-head 自己撑起同样一行。
   const stageHead = (
     <div className="business-map-head">
@@ -374,7 +336,6 @@ export function OntologyOverviewPanel({
         )}
         {stageTitle}
       </span>
-      <span className="business-map-head-meta">{stageMeta()}</span>
       {isModule && (
         <span className="business-map-head-controls">
           {neighborCount > 0 && (
@@ -390,7 +351,6 @@ export function OntologyOverviewPanel({
           <Segmented
             size="small"
             value={effectivePane}
-            disabled={graphTooDense}
             onChange={(value) => setPaneMode(value as PaneMode)}
             options={[
               { label: "关系图", value: "graph", icon: <PartitionOutlined /> },
@@ -463,14 +423,6 @@ export function OntologyOverviewPanel({
     }
     return staticPane(
       <>
-        {graphTooDense && (
-          <Alert
-            type="info"
-            showIcon
-            message="该模块过于稠密，关系图会糊成一团，已改为逐条列出"
-            style={{ marginBottom: 12 }}
-          />
-        )}
         {relationSentences.length === 0 ? (
           <Empty description="暂无模块内关系" />
         ) : (

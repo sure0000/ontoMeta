@@ -413,16 +413,45 @@ def test_dataset_links_stay_plain(db):
 def test_asset_list_resolves_refs_into_readable_landings(db, monkeypatch):
     """列表里摆一个 `obj:068504b9-…@serving` 等于没说。
 
-    句柄留给任务配置和 Agent，人要看的是实体名与物理表。
+    句柄留给任务配置和 Agent，人要看的是实体名与所属本体，并且点得进本地详情页。
     """
     monkeypatch.setattr(dataset_catalog, "resolve_dataset_ref", lambda *a: _entry())
     row = svc.register_asset(
         db, asset_type="chart", superset_id=31, title="订单量",
         dataset_ref="obj:obj-1@serving",
     )
-    landing = svc.serialize_assets(db, [row], CFG)[0]["landing"]
-    assert landing["entity_display_name"] == "订单"
-    assert landing["physical"] == "dws.ods_erp_order"
+    landings = svc.serialize_assets(db, [row], CFG)[0]["landings"]
+    assert len(landings) == 1
+    assert landings[0]["entity_display_name"] == "订单"
+    assert landings[0]["entity_id"] == "obj-1"      # 前端据此跳对象详情页
+    assert landings[0]["physical"] == "dws.ods_erp_order"
+
+
+def test_dashboard_landings_come_from_its_charts(db, monkeypatch):
+    """看板自己没有 dataset_ref——它是多张图的集合，落点得从成员图表推导。
+
+    「这个看板的数字来自哪几张表」是治理上最该回答的问题；不推导的话这一格
+    对看板**永远**是空的，那一列对看板就是死的。
+    """
+    monkeypatch.setattr(dataset_catalog, "resolve_dataset_ref", lambda *a: _entry())
+    svc.register_asset(
+        db, asset_type="chart", superset_id=51, title="图A", dataset_ref="obj:obj-1@serving",
+    )
+    dash = svc.register_asset(
+        db, asset_type="dashboard", superset_id=52, title="看板",
+        extra={"chart_ids": [51]},
+    )
+    landings = svc.serialize_assets(db, [dash], CFG)[0]["landings"]
+    assert [l["entity_display_name"] for l in landings] == ["订单"]
+
+
+def test_dashboard_with_unregistered_charts_has_no_landings(db):
+    """成员图表没在 ontoMeta 登记过就查不到落点——不能凭空编一个。"""
+    dash = svc.register_asset(
+        db, asset_type="dashboard", superset_id=53, title="外部拼的看板",
+        extra={"chart_ids": [999]},
+    )
+    assert svc.serialize_assets(db, [dash], CFG)[0]["landings"] == []
 
 
 def test_unresolvable_ref_is_not_silently_flattened_to_no_landing(db, monkeypatch):
@@ -436,8 +465,8 @@ def test_unresolvable_ref_is_not_silently_flattened_to_no_landing(db, monkeypatc
     )
     plain = svc.register_asset(db, asset_type="chart", superset_id=33, title="没落点")
     items = svc.serialize_assets(db, [broken, plain], CFG)
-    assert items[0]["dataset_ref"] and items[0]["landing"] is None  # 断了
-    assert items[1]["dataset_ref"] is None and items[1]["landing"] is None  # 本来就没有
+    assert items[0]["dataset_ref"] and items[0]["landings"] == []   # 断了
+    assert items[1]["dataset_ref"] is None and items[1]["landings"] == []  # 本来就没有
 
 
 def test_same_ref_is_resolved_once(db, monkeypatch):

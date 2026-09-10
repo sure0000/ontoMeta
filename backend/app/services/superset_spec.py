@@ -149,13 +149,26 @@ def validate_chart_spec(spec: ChartSpec) -> None:
 
 def _metric(metric: MetricSpec) -> dict[str, Any]:
     """Superset 的 adhoc 度量。``column`` 只放 ``column_name``——多余的字段会被
-    Superset 忽略，但写错的字段名会让它当成保存过的度量去找，然后找不到。"""
+    Superset 忽略，但写错的字段名会让它当成保存过的度量去找，然后找不到。
+
+    ``COUNT(*)`` 必须走 SQL 表达式，不能用 ``SIMPLE`` + ``column: null``：后者 Superset
+    会拿它去构造 ``COUNT(<无名列>)``，取数时 500 报
+    ``Cannot compile Column object until its 'name' is assigned``。
+    这条最容易踩——「数一数有多少条」是最自然的度量，而图**建得出来**，只有打开时才失败。
+    """
+    if metric.aggregate == "COUNT" and not metric.column:
+        return {
+            "expressionType": "SQL",
+            "sqlExpression": "COUNT(*)",
+            "label": metric.resolved_label(),
+            "optionName": "metric_count_star",
+        }
     return {
         "expressionType": "SIMPLE",
-        "column": {"column_name": metric.column} if metric.column else None,
+        "column": {"column_name": metric.column},
         "aggregate": metric.aggregate,
         "label": metric.resolved_label(),
-        "optionName": f"metric_{metric.aggregate.lower()}_{metric.column or 'star'}",
+        "optionName": f"metric_{metric.aggregate.lower()}_{metric.column}",
     }
 
 

@@ -45,36 +45,31 @@
 
 .lin-topbar {
   flex: none;
-  display: grid;
-  grid-template-columns: auto 168px minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: 8px 14px;
-  padding: 5px var(--om-space-3);
+  gap: 8px;
+  padding: 4px var(--om-space-3);
   background: var(--om-surface);
   border: 1px solid var(--om-border);
   border-radius: var(--om-radius-lg);
   box-shadow: var(--om-shadow-sm);
+  min-height: 0;
 }
 
-.lin-topbar-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: var(--om-text-md);
-  font-weight: 600;
-  white-space: nowrap;
+.lin-topbar-icon {
+  flex: none;
+  color: var(--om-text-secondary);
+  font-size: 14px;
 }
 
 .lin-topbar-tools {
-  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: var(--om-space-2);
+  margin-inline-start: auto;
 }
 
 .lin-submit-tools {
-  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--om-space-2);
@@ -83,13 +78,12 @@
 }
 
 .lin-submit-summary {
-  min-width: 0;
-  max-width: 250px;
   display: flex;
   align-items: center;
   gap: 5px;
   overflow: hidden;
   white-space: nowrap;
+  max-width: 220px;
 }
 
 .lin-submit-count {
@@ -104,7 +98,7 @@
 
 .lin-submit-count b {
   font-family: var(--om-font-mono);
-  font-size: var(--om-text-lg);
+  font-size: var(--om-text-base);
   font-weight: 600;
   color: var(--om-text);
   font-variant-numeric: tabular-nums;
@@ -117,7 +111,6 @@
 }
 
 .lin-submit-acts {
-  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -137,122 +130,53 @@
   font-weight: 500;
 }
 
+/* 统计 pill：单行紧凑，次要信息放 tooltip */
 .lin-stats {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(3, max-content) minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  gap: var(--om-space-3) var(--om-space-5);
-}
-
-.lin-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  gap: 4px;
   min-width: 0;
 }
 
-/* 孤岛数是这屏的主角，用左侧红条把它从其余事实里拎出来 */
-.lin-stat--iso {
-  padding-left: 10px;
-  border-left: 3px solid var(--om-error);
-}
-
-.lin-stat--src {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.lin-stat-label {
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-  white-space: nowrap;
-}
-
-.lin-stat-value {
-  display: flex;
+.lin-stat-pill {
+  display: inline-flex;
   align-items: baseline;
   gap: 5px;
-  font-family: var(--om-font-mono);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.lin-stat-value b {
-  font-size: var(--om-text-xl);
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  line-height: 1.2;
-}
-
-.lin-stat--iso .lin-stat-value b {
-  font-size: 22px;
-}
-
-.lin-stat-value em {
-  font-family: var(--om-font-mono);
-  font-style: normal;
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-}
-
-.lin-stat-note {
-  color: var(--om-text-tertiary);
-  font-size: var(--om-text-2xs);
-  white-space: nowrap;
-}
-
-.lin-stat-arrow {
-  font-size: 10px;
-  color: var(--om-text-tertiary);
-}
-
-.lin-stat-next {
-  color: var(--om-success);
-}
-
-.lin-stat-src {
-  font-family: var(--om-font-mono);
-  font-size: var(--om-code-sm);
-  color: var(--om-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.lin-meter {
-  margin-top: 4px;
-  width: 132px;
-  height: 5px;
-  display: flex;
+  padding: 2px 8px;
   border-radius: var(--om-radius-full);
-  background: var(--om-bg-soft);
-  overflow: hidden;
+  border: 1px solid var(--om-border);
+  background: var(--om-surface-muted);
+  font-size: var(--om-text-xs);
+  color: var(--om-text-secondary);
+  white-space: nowrap;
+  cursor: default;
 }
 
-.lin-meter i {
-  display: block;
-  height: 100%;
-  transition: width 0.4s ease;
+.lin-stat-pill--iso {
+  border-color: color-mix(in oklch, var(--om-error) 40%, var(--om-border));
 }
 
-.lin-meter-have {
-  background: var(--om-machine);
+.lin-stat-pill-lbl {
+  color: var(--om-text-tertiary);
 }
 
-.lin-meter--loading {
-  background: linear-gradient(
-    90deg,
-    var(--om-bg-soft) 25%,
-    var(--om-border) 50%,
-    var(--om-bg-soft) 75%
-  );
-  background-size: 200% 100%;
-  animation: lin-loading 1.2s ease-in-out infinite;
+.lin-stat-pill b {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-sm);
+  font-weight: 600;
+  color: var(--om-text);
+  font-variant-numeric: tabular-nums;
 }
 
-.lin-meter-gain {
-  background: var(--om-success);
+.lin-stat-pill--iso b {
+  color: var(--om-error);
+}
+
+.lin-stat-pill-next {
+  font-family: var(--om-font-mono);
+  font-size: var(--om-text-xs);
+  color: var(--om-success);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- 主体 ---------- */
@@ -260,16 +184,27 @@
 .lin-body {
   flex: 1;
   min-height: 0;
+  position: relative;
+}
+
+/* 扫描模式保持旧的 grid 侧边栏布局 */
+.lin-body:not(.lin-body--canvas) {
   display: grid;
-  /* 300px 够放两行表名 + 勾选框 + 「＋」，再宽就是白给的——那 60px 归画布。 */
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
   gap: 6px;
 }
 
-/* 收起后只留一条可点的窄边——画布铺满时这 300px 很值钱 */
-.lin-body--rail-closed {
+.lin-body:not(.lin-body--canvas).lin-body--rail-closed {
   grid-template-columns: 38px minmax(0, 1fr);
 }
+
+/* 画布模式：main 铺满整个 lin-body */
+.lin-body--canvas > .lin-main {
+  position: absolute;
+  inset: 0;
+}
+
+/* ---------- 左栏 ---------- */
 
 .lin-rail,
 .lin-main {
@@ -281,6 +216,28 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 扫描模式下左栏正常流 */
+.lin-body:not(.lin-body--canvas) .lin-rail {
+  position: static;
+}
+
+/* 画布模式：左栏绝对定位悬浮在画布左上角 */
+.lin-rail--float {
+  position: absolute;
+  top: var(--om-space-2);
+  left: var(--om-space-2);
+  z-index: 10;
+  width: 272px;
+  max-height: 480px;
+  box-shadow: var(--om-shadow-lg);
+  transition: width 0.18s ease;
+}
+
+/* 收起时：只显示折叠按钮的头部，不占宽 */
+.lin-body--rail-closed .lin-rail--float {
+  width: auto;
 }
 
 .lin-rail-head {
@@ -322,23 +279,76 @@
 .lin-rail-controls {
   flex: none;
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: var(--om-space-2);
-  padding: var(--om-space-3);
+  padding: 6px var(--om-space-3);
   border-bottom: 1px solid var(--om-border);
 }
 
-.lin-rail-foot {
+/* 全选条 */
+.lin-rail-select {
   flex: none;
-  margin: 0;
-  padding: 9px var(--om-space-4);
-  border-top: 1px solid var(--om-border);
+  display: flex;
+  align-items: center;
+  gap: var(--om-space-2);
+  padding: 4px var(--om-space-3);
+  border-bottom: 1px solid var(--om-border);
   font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-  line-height: 1.6;
 }
 
-/* ---------- 左栏：代码包历史 ---------- */
+.lin-rail-select .ant-checkbox-wrapper {
+  font-size: var(--om-text-xs);
+}
+
+.lin-rail-select-count {
+  margin-inline-start: auto;
+  color: var(--om-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.lin-rail-select .ant-btn-link {
+  padding: 0;
+  height: auto;
+}
+
+.lin-rail-list {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-anchor: none;
+  list-style: none;
+  margin: 0;
+  padding: 4px var(--om-space-2);
+}
+
+.lin-rail-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 6px;
+  border-radius: var(--om-radius-sm);
+}
+
+.lin-rail-row:hover {
+  background: var(--om-surface-muted);
+}
+
+/* 已经在画布上的表压暗 */
+.lin-rail-row--on {
+  opacity: 0.45;
+}
+
+/* 表名占满剩余宽度，截断不换行 */
+.lin-rail-row .lin-rail-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: default;
+}
 
 .lin-pkg-list {
   flex: 1;
@@ -451,65 +461,6 @@
 .lin-pkg-list li:hover .lin-pkg-acts,
 .lin-pkg-acts:focus-within {
   opacity: 1;
-}
-
-/* ---------- 左栏：表清单 ---------- */
-
-/* 全选条：口径是「当前筛选出的全部」，所以它跟在筛选器下面、列表上面——
-   人先定范围，再一次勾中。 */
-.lin-rail-select {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--om-space-2);
-  padding: 6px var(--om-space-3);
-  border-bottom: 1px solid var(--om-border);
-  font-size: var(--om-text-sm);
-}
-
-.lin-rail-select .ant-checkbox-wrapper {
-  font-size: var(--om-text-sm);
-}
-
-.lin-rail-select-count {
-  margin-inline-start: auto;
-  color: var(--om-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-.lin-rail-select .ant-btn-link {
-  padding: 0;
-  height: auto;
-}
-
-.lin-rail-list {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-anchor: none;
-  list-style: none;
-  margin: 0;
-  padding: var(--om-space-2);
-}
-
-.lin-rail-row {
-  box-sizing: border-box;
-  min-height: 56px;
-  display: flex;
-  align-items: center;
-  gap: var(--om-space-2);
-  padding: 5px 6px 5px 8px;
-  border-radius: var(--om-radius-sm);
-}
-
-.lin-rail-row:hover {
-  background: var(--om-surface-muted);
-}
-
-/* 已经在画布上的表压暗：它勾不动也加不了，留在原位是为了让人看见「这张已经放过了」。 */
-.lin-rail-row--on {
-  opacity: 0.5;
 }
 
 /* 取字段失败时节点里那一行：按钮长得跟字段行一样宽，点哪都能重试。 */
@@ -650,58 +601,6 @@
   padding: var(--om-space-2) var(--om-space-3);
   border-top: 1px solid var(--om-border);
   background: var(--om-surface-muted);
-}
-
-.lin-rail-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.lin-rail-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--om-code-sm);
-  color: var(--om-text);
-  overflow: hidden;
-}
-
-.lin-rail-name > .lin-table-name {
-  flex: 1;
-  min-width: 0;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 2px 6px;
-}
-
-.lin-rail-name .lin-table-name-main {
-  flex: 1 1 100%;
-  min-width: 0;
-  line-height: 1.25;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-}
-
-.lin-rail-name .lin-table-name-db {
-  flex: 0 0 100%;
-  max-width: 100%;
-  line-height: 1.15;
-}
-
-.lin-rail-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--om-text-xs);
-  color: var(--om-text-tertiary);
-  font-variant-numeric: tabular-nums;
 }
 
 .lin-rail-empty {
@@ -1788,42 +1687,31 @@
 
 @media (max-width: 1100px) {
   .lin-topbar {
-    grid-template-columns: auto minmax(150px, 1fr) auto;
+    flex-wrap: wrap;
+  }
+
+  .lin-topbar-tools {
+    order: 3;
+    width: 100%;
+    justify-content: flex-end;
+    padding-top: 2px;
   }
 
   .lin-stats {
-    grid-column: 1 / -1;
-    grid-template-columns: repeat(3, max-content) minmax(0, 1fr);
-    grid-row: 2;
-  }
-
-  .lin-topbar-tools {
-    gap: 6px;
-  }
-
-  .lin-body,
-  .lin-body--rail-closed {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(160px, 240px) minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 720px) {
-  .lin-topbar {
-    grid-template-columns: auto minmax(120px, 1fr);
-  }
-
-  .lin-topbar-tools {
-    grid-column: 1 / -1;
-    grid-row: 3;
-    justify-content: flex-end;
-    padding-top: 2px;
+    flex-wrap: wrap;
   }
 
   .lin-submit-summary {
     max-width: 180px;
   }
 
+  .lin-body:not(.lin-body--canvas) {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(160px, 240px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
   .lin-submit-dialect {
     width: 88px;
   }

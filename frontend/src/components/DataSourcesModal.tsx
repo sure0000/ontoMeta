@@ -215,7 +215,8 @@ export function DataSourcesPanel({
     setEditingId(row.id);
     setEditingPwSet(Boolean(row.password_set));
     setRawMode(false);
-    // 回显连接字段；密码不回传，清空时后端沿用旧密码。
+    // 回显连接字段，含密码明文（预填进 Input.Password，眼睛图标控显隐）；
+    // 清空提交则后端沿用旧密码。
     setInitialVals({
       name: row.name,
       kind: row.kind,

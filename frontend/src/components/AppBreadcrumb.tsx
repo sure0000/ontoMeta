@@ -38,6 +38,12 @@ async function resolveBreadcrumbs(
       return [{ label: "本体建模" }];
     }
 
+    // 域详情页自带完整页头与事实条，面包屑冗余且浪费空间
+    const domainRoot = `/workspace/${params.domainId}`;
+    if (pathname === domainRoot || pathname === `${domainRoot}/`) {
+      return [{ label: "本体建模" }];
+    }
+
     if (pathname.endsWith("/executions")) {
       return [...crumbs, { label: domain.name, path: domainPath }, { label: "执行记录" }];
     }

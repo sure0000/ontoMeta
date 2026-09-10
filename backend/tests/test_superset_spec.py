@@ -79,10 +79,31 @@ def test_sum_without_a_column_is_rejected():
         compile_chart(_spec(metrics=[MetricSpec(aggregate="SUM")]))
 
 
-def test_count_star_needs_no_column():
+def test_count_star_compiles_to_a_sql_expression():
+    """``COUNT(*)`` 必须编译成 SQL 表达式，不能是 SIMPLE + column=None。
+
+    真机实测：后者 Superset 会拿它去构造 ``COUNT(<无名列>)``，取数时 500 报
+    ``Cannot compile Column object until its 'name' is assigned``。图**建得出来**，
+    只有打开时才失败——而「数一数有多少条」正是最常用的度量。
+    这条用例此前钉的就是那个坏形状：单测全绿，真机全挂。
+    """
     params, _ = compile_chart(_spec(metrics=[MetricSpec(aggregate="COUNT")]))
-    assert params["metrics"][0]["label"] == "COUNT(*)"
-    assert params["metrics"][0]["column"] is None
+    metric = params["metrics"][0]
+    assert metric["expressionType"] == "SQL"
+    assert metric["sqlExpression"] == "COUNT(*)"
+    assert metric["label"] == "COUNT(*)"
+    assert "column" not in metric
+
+
+def test_aggregate_with_a_column_stays_simple():
+    """带字段的聚合仍走 SIMPLE——只有 COUNT(*) 那一种情况需要绕开。"""
+    params, _ = compile_chart(
+        _spec(metrics=[MetricSpec(aggregate="SUM", column="amount", label="金额")])
+    )
+    metric = params["metrics"][0]
+    assert metric["expressionType"] == "SIMPLE"
+    assert metric["column"] == {"column_name": "amount"}
+    assert metric["aggregate"] == "SUM"
 
 
 def test_in_operator_requires_a_list():
@@ -156,7 +177,7 @@ def test_kpi_uses_the_singular_metric_key():
     )
     assert params["viz_type"] == "big_number_total"
     assert "metrics" not in params
-    assert params["metric"]["aggregate"] == "COUNT"
+    assert params["metric"]["sqlExpression"] == "COUNT(*)"
     assert ctx["queries"][0]["metrics"] == [params["metric"]]
 
 

@@ -90,8 +90,16 @@ def test_api_rejects_source_without_connection(client, admin_headers):
     assert "Mock" in r.json()["detail"]
 
 
-def test_dsn_components_does_not_echo_password():
-    """连接密码只返回 presence hint，不进入 API/前端回显。"""
+def test_dsn_components_echoes_the_password():
+    """连接密码明文回显，供表单预填进 Input.Password（眼睛图标控显隐）。
+
+    与设置页「基础设施」的连接表单同一套约定（dependency_service._mask_connection）。
+    此前这里返回 None，而数据源表单上写着「已回显，清空将保持原密码不变」——
+    承诺回显、框里却是空的，用户没法确认自己配的是哪一个密码。
+
+    威胁模型没有因此变化：拿得到管理令牌的人本来就能从设置页读到全部机密。
+    ``password_set``/``password_hint`` 保留，向前兼容。
+    """
     from app.services.datasource_service import DataSourceService
 
     dsn = "postgresql+psycopg://alice:s3cr3t@db.example.com:5432/erp"
@@ -101,14 +109,14 @@ def test_dsn_components_does_not_echo_password():
     assert comps["port"] == 5432
     assert comps["database"] == "erp"
     assert comps["username"] == "alice"
-    # 密码不得明文回显，只返回已配置标志
-    assert comps["password"] is None
+    # 密码明文回显，同时保留 presence 标志
+    assert comps["password"] == "s3cr3t"
     assert comps["password_set"] is True
     assert comps["password_hint"] == "已配置"
 
 
 def test_dsn_components_no_password_when_absent():
-    """密码段缺失时 password 为 None、password_set=False（不发明文也不假报已设）。"""
+    """密码段缺失时 password 为 None、password_set=False（没有就是没有，不假报已设）。"""
     from app.services.datasource_service import DataSourceService
 
     comps = DataSourceService._dsn_components("postgres", "postgresql+psycopg://alice@db:5432/erp")

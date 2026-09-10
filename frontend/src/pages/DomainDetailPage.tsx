@@ -15,6 +15,7 @@ import {
 } from "@ant-design/icons";
 import {
   Alert,
+  Badge,
   Button,
   Drawer,
   Dropdown,
@@ -223,64 +224,27 @@ function PublishPreflightSummary({ preflight }: { preflight: PublishPreflight })
 function DomainMetaStrip({
   domain,
   domainId,
-  segmentCount,
-  reviewTotal,
-  reviewDone,
 }: {
   domain: DomainContextDetail;
   domainId: string;
-  segmentCount: number;
-  reviewTotal: number;
-  reviewDone: number;
 }) {
-  const pendingPublish = domain.pending_publish_count ?? 0;
   const changed = domain.unpublished_change_count ?? 0;
   const needsReview = domain.needs_review_count ?? 0;
   const publishedAt = formatDateTime(domain.latest_published_at);
-  const reviewPct = reviewTotal > 0 ? Math.round((reviewDone / reviewTotal) * 100) : 100;
+
+  if (!domain.published_ontology_version && changed === 0 && needsReview === 0) {
+    return null;
+  }
 
   return (
     <div className="page-meta-strip">
-      <span className="page-meta-item">
-        <strong>{domain.object_type_count}</strong> 对象
-      </span>
-      <span className="page-meta-item">
-        <strong>{domain.relation_type_count}</strong> 关系
-      </span>
-      {segmentCount > 0 && (
-        <Link className="page-meta-item" to={`/workspace/${domainId}/segments`}>
-          <strong>{segmentCount}</strong> 业务板块
-        </Link>
-      )}
-      {reviewTotal > 0 && <span className="page-meta-sep" />}
-      {reviewTotal > 0 && (
-        <Tooltip title="已判定 / 全部对象（含关系表与技术表）">
-          <Link className="page-meta-item" to={`/workspace/${domainId}/review`}>
-            复核&nbsp;
-            <strong>
-              {reviewDone}/{reviewTotal}
-            </strong>
-            <span className="om-muted">（{reviewPct}%）</span>
-          </Link>
-        </Tooltip>
-      )}
-      <span className="page-meta-sep" />
-      {domain.published_ontology_version ? (
+      {domain.published_ontology_version && (
         <span className="page-meta-item">
           已发布&nbsp;<strong>v{domain.published_ontology_version}</strong>
           <span className="om-muted">
             · {domain.published_object_type_count} 对象{publishedAt ? ` · ${publishedAt}` : ""}
           </span>
         </span>
-      ) : (
-        <span className="page-meta-item om-muted">尚未发布</span>
-      )}
-      {pendingPublish > 0 && (
-        <Tooltip title="本次发布会新提升的对象与关系">
-          <span className="page-meta-chip page-meta-chip--info">
-            <strong>{pendingPublish}</strong> 待提升
-          </span>
-        </Tooltip>
       )}
       {changed > 0 && (
         <Tooltip title="已发布内容被人工改过，尚未固化为新版本">
@@ -806,6 +770,7 @@ export function DomainDetailPage() {
   const needsReviewCount = domain.needs_review_count ?? 0;
   // 域上的计数只算业务对象（发布门禁口径）；审核队列覆盖全部角色，用它当入口数字。
   const pendingReviewAll = reviewStats.data?.needs_review_count ?? 0;
+  const reviewPending = pendingReviewAll || needsReviewCount;
   // 发布按钮上的待办数 = 新提升的 + 已发布内容里被改动的（都靠这次发布固化）。
   const publishPendingTotal = pendingPublish + pendingCount;
   const publishHint =
@@ -818,6 +783,8 @@ export function DomainDetailPage() {
     <PageContainer full>
       <PageHeader
         icon={<DeploymentUnitOutlined />}
+        withBorder={false}
+        className="page-header--gap-only"
         title={
           <Space size={10}>
             <span>{domain.name}</span>
@@ -827,15 +794,7 @@ export function DomainDetailPage() {
           </Space>
         }
         description={domain.description || undefined}
-        meta={
-          <DomainMetaStrip
-            domain={domain}
-            domainId={domainId!}
-            segmentCount={reviewStats.data?.segment_progress.length ?? 0}
-            reviewTotal={reviewStats.data?.total_objects ?? 0}
-            reviewDone={reviewStats.data?.reviewed_count ?? 0}
-          />
-        }
+        meta={<DomainMetaStrip domain={domain} domainId={domainId!} />}
         extra={
           <Space wrap size={8}>
             {/* 视图切换是「看哪一屏」，属于页头的动作区。它原先独占一整行，
@@ -850,6 +809,22 @@ export function DomainDetailPage() {
                 ]}
               />
             )}
+            {/* 复核是常驻入口：清零了也要能进去回看、改判，不能因为没积压就消失。
+                不跟视图切换挤在一个 Space.Compact 里——图标按钮硬拼段控件的直角边，
+                看着像个孤零零截断的图标；单独一个按钮 + 角标数字才是它本来的分量。 */}
+            {domain.working_ontology_id && (
+              <Link to={`/workspace/${domainId}/review`}>
+                <Button icon={<AuditOutlined />}>
+                  复核
+                  <Badge
+                    count={reviewPending}
+                    overflowCount={999}
+                    color="red"
+                    style={{ marginInlineStart: 4 }}
+                  />
+                </Button>
+              </Link>
+            )}
             {domain.datahub_url && (
               <Tooltip title="在 DataHub 中打开">
                 <Button
@@ -860,13 +835,6 @@ export function DomainDetailPage() {
                   aria-label="在 DataHub 中打开"
                 />
               </Tooltip>
-            )}
-            {domain.working_ontology_id && (needsReviewCount > 0 || pendingReviewAll > 0) && (
-              <Link to={`/workspace/${domainId}/review`}>
-                <Button type="primary" ghost icon={<AuditOutlined />}>
-                  审核 {pendingReviewAll || needsReviewCount} 个
-                </Button>
-              </Link>
             )}
             <Link to={`/workspace/${domainId}/executions`}>
               <Tooltip title="执行记录">

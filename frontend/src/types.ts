@@ -1083,6 +1083,25 @@ export interface SupersetStatus {
   base_url: string | null;
 }
 
+/** 资产建在哪个本体落点上。`entity_id` 用于跳 ontoMeta 本地的对象详情页。 */
+export interface SupersetLanding {
+  /** 稳定引用（`obj:<id>@serving`）。给任务配置与 Agent 用，界面上只放进悬浮提示。 */
+  ref: string;
+  entity_id: string;
+  entity_kind: "object_type" | "business_logic";
+  entity_name: string;
+  entity_display_name: string;
+  /** 库.表 */
+  physical: string;
+  layer: string;
+  ontology_id: string | null;
+  /** 本体展示名（本体行自己没有名字，名字在它挂的数据域上）。 */
+  ontology_name: string | null;
+  /** 数据域 id。详情页链接要走 `/workspace/{domain_id}/objects/{entity_id}`——
+   *  `/ontology/{id}` 只对**已发布**对象成立，草稿对象点过去是 Object type not found。 */
+  domain_id: string | null;
+}
+
 export interface SupersetAsset {
   id: string;
   asset_type: "dataset" | "chart" | "dashboard";
@@ -1092,20 +1111,17 @@ export interface SupersetAsset {
   url: string;
   url_path: string;
   viz_type: string | null;
-  /** 建在哪个落点上，指回本体治理。 */
+  /** 建在哪个落点上，指回本体治理。看板自己没有，由成员图表推导（见 landings）。 */
   dataset_ref: string | null;
   /**
-   * `dataset_ref` 解析出来的落点。`null` 有两种含义，措辞要分开：
-   * `dataset_ref` 也是 null → 本来就没登记落点；`dataset_ref` 有值但这里 null →
-   * 引用解析不出来（实体被删/被降级），口径已经断了。
+   * 解析出来的落点。图表恒为 0 或 1 个；看板可能跨多个（由成员图表推导）。
+   *
+   * 空列表有三种含义，靠 `dataset_ref` 与 `asset_type` 分辨，措辞不能合并：
+   * 有 ref 却空 = 引用解析不出来（实体被删/降级，口径已断）；
+   * 无 ref 的图 = 本来就没接治理；
+   * 看板为空 = 成员图表没有一张在 ontoMeta 登记过落点。
    */
-  landing: {
-    entity_display_name: string;
-    entity_name: string;
-    entity_kind: "object_type" | "business_logic";
-    physical: string;
-    layer: string;
-  } | null;
+  landings: SupersetLanding[];
   superset_dataset_id: number | null;
   ontology_id: string | null;
   domain_id: string | null;
@@ -1226,7 +1242,7 @@ export interface DataSource {
   updated_at: string;
   /** 这个数据源在 Superset 里的 database（连接）编号；建数据集时自动解析并缓存。 */
   superset_database_id?: number | null;
-  // 连接信息回显：只返回 password_set/password_hint，不返回密码明文。
+  // 连接信息回显：密码明文回显（供 Input.Password 预填），password_set/hint 向前兼容。
   dsn_set?: boolean;
   host?: string | null;
   port?: number | null;

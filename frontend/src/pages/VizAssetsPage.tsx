@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -50,8 +51,6 @@ const STATE_META: Record<string, { color: string; label: string; hint: string }>
   },
 };
 
-const VIA_LABEL: Record<string, string> = { mcp: "Agent", web: "手工" };
-
 export function VizAssetsPage() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [keyword, setKeyword] = useState("");
@@ -74,8 +73,12 @@ export function VizAssetsPage() {
     return (assets ?? []).filter(
       (a) =>
         a.title.toLowerCase().includes(needle) ||
-        (a.landing?.entity_display_name ?? "").toLowerCase().includes(needle) ||
-        (a.landing?.physical ?? "").toLowerCase().includes(needle),
+        a.landings.some(
+          (l) =>
+            l.entity_display_name.toLowerCase().includes(needle) ||
+            l.physical.toLowerCase().includes(needle) ||
+            (l.ontology_name ?? "").toLowerCase().includes(needle),
+        ),
     );
   }, [assets, keyword]);
 
@@ -146,54 +149,68 @@ export function VizAssetsPage() {
     },
     {
       title: "落点",
-      dataIndex: "dataset_ref",
+      dataIndex: "landings",
       // 三态要分开说：有落点 / 引用断了 / 本来就没登记。合成一个「—」会把
-      // 「口径断了」说成「本来就没有」。
-      render: (ref: string | null, row: SupersetAsset) => {
-        if (row.landing) {
+      // 「口径断了」说成「本来就没有」。看板还有第四种：成员图表没在这儿登记过。
+      render: (_: unknown, row: SupersetAsset) => {
+        const [first, ...rest] = row.landings;
+        if (first) {
+          const tip = (
+            <div style={{ fontSize: 12 }}>
+              {row.landings.map((l) => (
+                <div key={l.ref}>
+                  {l.entity_display_name} · {l.physical}
+                  <br />
+                  <span style={{ opacity: 0.75 }}>{l.ref}</span>
+                </div>
+              ))}
+            </div>
+          );
           return (
-            <Tooltip title={`引用：${ref}`}>
+            <Tooltip title={tip}>
               <Space orientation="vertical" size={0}>
-                <span>{row.landing.entity_display_name}</span>
+                <span>
+                  {first.entity_kind === "object_type" && first.domain_id ? (
+                    <Link to={`/workspace/${first.domain_id}/objects/${first.entity_id}`}>
+                      {first.entity_display_name}
+                    </Link>
+                  ) : (
+                    first.entity_display_name
+                  )}
+                  {rest.length ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {` 等 ${row.landings.length} 个`}
+                    </Text>
+                  ) : null}
+                </span>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {row.landing.physical}
+                  {first.ontology_name ?? "（本体未知）"}
                 </Text>
               </Space>
             </Tooltip>
           );
         }
-        if (ref) {
+        if (row.dataset_ref) {
           return (
-            <Tooltip title={`引用 ${ref} 解析不到实体：可能已被删除或降级，这张图的口径已经断了`}>
+            <Tooltip
+              title={`引用 ${row.dataset_ref} 解析不到实体：可能已被删除或降级，这张图的口径已经断了`}
+            >
               <Tag color="warning">落点已失效</Tag>
             </Tooltip>
           );
         }
         return (
-          <Tooltip title="没有记录落点引用，口径无法回溯到本体">
+          <Tooltip
+            title={
+              row.asset_type === "dashboard"
+                ? "看板的落点由成员图表推导；这些图表没有一张在 ontoMeta 登记过落点"
+                : "没有记录落点引用，口径无法回溯到本体"
+            }
+          >
             <Text type="secondary">—</Text>
           </Tooltip>
         );
       },
-    },
-    {
-      title: "建者",
-      dataIndex: "created_by",
-      width: 170,
-      // 令牌主体名可以很长（`dsh-publisher-acceptance-20260904`）。不截断的话
-      // 一行名字会把整行撑成三行高，列表就没法扫了。
-      render: (by: string | null, row: SupersetAsset) => (
-        <Space orientation="vertical" size={0} style={{ maxWidth: 154 }}>
-          <Tooltip title={by ?? undefined}>
-            <Text ellipsis style={{ maxWidth: 154 }}>
-              {by ?? "—"}
-            </Text>
-          </Tooltip>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {VIA_LABEL[row.created_via] ?? row.created_via}
-          </Text>
-        </Space>
-      ),
     },
     {
       title: "状态",
@@ -291,7 +308,7 @@ export function VizAssetsPage() {
         />
         <Input.Search
           allowClear
-          placeholder="按名称、落点实体或物理表过滤"
+          placeholder="按名称、落点实体、本体或物理表过滤"
           style={{ width: 280 }}
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}

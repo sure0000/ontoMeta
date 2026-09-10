@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors.superset import SupersetClient, SupersetError
-from app.models import ObjectType, Property, SupersetAsset
+from app.models import BusinessLogic, ObjectType, Ontology, Property, SupersetAsset
 from app.services import dataset_catalog
 from app.services.settings_service import SettingsService, SupersetRuntimeConfig
 from app.services.superset_database import (
@@ -159,40 +159,120 @@ def serialize_asset(row: SupersetAsset, cfg: SupersetRuntimeConfig | None = None
     }
 
 
+def _ontology_info(
+    db: Session, ontology_id: str | None, cache: dict[str, tuple[str | None, str | None]]
+) -> tuple[str | None, str | None]:
+    """本体 id → ``(展示名, 数据域 id)``。
+
+    本体行自己没有名字，名字在它挂的数据域上；数据域 id 前端还要用来拼工作台里的
+    对象详情路径（``/workspace/{domain_id}/objects/{object_id}``）。
+    """
+    if not ontology_id:
+        return None, None
+    if ontology_id not in cache:
+        row = db.get(Ontology, ontology_id)
+        domain = row.domain_context if row is not None else None
+        cache[ontology_id] = (getattr(domain, "name", None), getattr(domain, "id", None))
+    return cache[ontology_id]
+
+
+def _landing_view(
+    db: Session, entry: Any, cache: dict[str, tuple[str | None, str | None]]
+) -> dict[str, Any]:
+    """目录项 → 列表要展示的落点。带上实体 id、本体名与数据域 id，前端据此跳本地详情页。"""
+    owner = (
+        db.get(ObjectType, entry.entity_id)
+        if entry.entity_kind == dataset_catalog.KIND_OBJECT
+        else db.get(BusinessLogic, entry.entity_id)
+    )
+    ontology_id = getattr(owner, "ontology_id", None)
+    ontology_name, domain_id = _ontology_info(db, ontology_id, cache)
+    return {
+        "ref": entry.ref,
+        "entity_id": entry.entity_id,
+        "entity_kind": entry.entity_kind,
+        "entity_name": entry.entity_name,
+        "entity_display_name": entry.entity_display_name,
+        "physical": entry.physical,
+        "layer": entry.layer,
+        "ontology_id": ontology_id,
+        "ontology_name": ontology_name,
+        # 详情页链接要走工作台路由——``/ontology/{id}`` 只对**已发布**对象成立，
+        # 草稿/已编辑的对象点过去是「Object type not found」。
+        "domain_id": domain_id,
+    }
+
+
+def _member_chart_refs(db: Session, rows: list[SupersetAsset]) -> dict[int, str]:
+    """看板成员图表 → 它们各自的落点引用。
+
+    看板自己没有 ``dataset_ref``（它是多张图的集合，可能跨落点），但「这个看板的数字
+    来自哪几张表」正是治理上最该回答的问题，而答案在成员图表的登记行里。
+    只有**经 ontoMeta 建的**图表才有登记行；用户直接在 Superset 里拼进去的查不到。
+    """
+    wanted: set[int] = set()
+    for row in rows:
+        if row.asset_type != "dashboard":
+            continue
+        wanted.update(_dashboard_chart_ids(row))
+    if not wanted:
+        return {}
+    charts = db.execute(
+        select(SupersetAsset).where(
+            SupersetAsset.asset_type == "chart",
+            SupersetAsset.superset_id.in_(wanted),
+        )
+    ).scalars().all()
+    return {c.superset_id: c.dataset_ref for c in charts if c.dataset_ref}
+
+
+def _dashboard_chart_ids(row: SupersetAsset) -> list[int]:
+    try:
+        extra = json.loads(row.extra_json) if row.extra_json else {}
+    except ValueError:
+        return []
+    ids = extra.get("chart_ids") if isinstance(extra, dict) else None
+    return [int(c) for c in ids if isinstance(c, int | str) and str(c).isdigit()] if ids else []
+
+
 def serialize_assets(
     db: Session, rows: list[SupersetAsset], cfg: SupersetRuntimeConfig | None = None
 ) -> list[dict[str, Any]]:
-    """批量序列化，并把 ``dataset_ref`` 解析成人话。
+    """批量序列化，并把落点解析成人话。
 
     列表里光摆一个 ``obj:068504b9-…@serving`` 等于没说：人看不出这张图建在「客户」上。
-    句柄该留在 Tooltip 里给任务配置和 Agent 用，表面上要给实体名与物理表。
+    句柄该留在 Tooltip 里给任务配置和 Agent 用，表面上要给实体名与所属本体。
+
+    ``landings`` 是**列表**：图表恒为 0 或 1 个，看板可能跨多个落点（由成员图表推导）。
+    空列表有三种含义，靠 ``dataset_ref`` 与 ``asset_type`` 分辨，前端据此措辞：
+    有 ref 却空 = 引用解析不出来（口径断了）；无 ref 的图 = 本来就没接治理；
+    看板为空 = 成员图表没有一张在 ontoMeta 登记过。
 
     按 ref 去重后再解析——同一个落点上通常挂着好几张图，逐行解析是白跑。
     """
-    resolved: dict[str, dict[str, str] | None] = {}
+    resolved: dict[str, dict[str, Any] | None] = {}
+    onto_cache: dict[str, tuple[str | None, str | None]] = {}
+    member_refs = _member_chart_refs(db, rows)
+
+    def _resolve(ref: str) -> dict[str, Any] | None:
+        if ref not in resolved:
+            entry = dataset_catalog.resolve_dataset_ref(db, ref)
+            resolved[ref] = _landing_view(db, entry, onto_cache) if entry is not None else None
+        return resolved[ref]
+
     out: list[dict[str, Any]] = []
     for row in rows:
         data = serialize_asset(row, cfg)
-        ref = row.dataset_ref
-        if ref:
-            if ref not in resolved:
-                entry = dataset_catalog.resolve_dataset_ref(db, ref)
-                resolved[ref] = (
-                    {
-                        "entity_display_name": entry.entity_display_name,
-                        "entity_name": entry.entity_name,
-                        "entity_kind": entry.entity_kind,
-                        "physical": entry.physical,
-                        "layer": entry.layer,
-                    }
-                    if entry is not None
-                    else None
-                )
-            # 解析不出来是有意义的信息（实体被删/被降级），不能悄悄当成"没有落点"：
-            # 前者要提示口径已经断了，后者只是本来就没登记。
-            data["landing"] = resolved[ref]
+        if row.dataset_ref:
+            refs = [row.dataset_ref]
+        elif row.asset_type == "dashboard":
+            refs = [member_refs[c] for c in _dashboard_chart_ids(row) if c in member_refs]
         else:
-            data["landing"] = None
+            refs = []
+        # dict.fromkeys 保序去重：看板里同一个落点挂着多张图是常态。
+        data["landings"] = [
+            view for view in (_resolve(r) for r in dict.fromkeys(refs)) if view is not None
+        ]
         out.append(data)
     return out
 
